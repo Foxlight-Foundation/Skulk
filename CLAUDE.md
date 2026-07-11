@@ -133,8 +133,11 @@ A model card's `placement.compatible_backends` selects which engine serves it
   `REALTIME_AUDIO` packets over Zenoh and is not advertised when Zenoh is
   unavailable. PCM never enters State or the event log. It advertises only with
   experimental mode, `experiments.stt_realtime`, and a card declaring both
-  streaming and realtime support. The WebSocket edge and speech translation
-  remain later phases.
+  streaming and realtime support. `WS /v1/realtime` is a transcription-only,
+  one-utterance OpenAI-compatible adapter over this provider: base64 24 kHz
+  PCM16 at the API edge becomes raw Fabric media, and disconnect cancels the
+  provider. VAD, conversation/full-duplex speech, dashboard live microphone
+  wiring, and speech translation remain later phases.
 - **`llama_cpp`** (`worker/runner/llama_cpp/`): in-process `llama-cpp-python` for
   GGUF on GPU/Linux nodes (Vulkan/ROCm/CUDA). Single-node.
 - **`llama_server`** (`worker/runner/llama_server/`): served-backend engine; the
@@ -243,7 +246,7 @@ These rules apply to every change. No exceptions.
 
 - **Every API endpoint must be documented** in `website/docs/api-guide.md` with method, path, parameters, and behavior. If you add or modify an endpoint, update the docs in the same commit or PR.
 - **Every release cut must update release notes** in both `CHANGELOG.md` and the public docs under `website/docs/`. One exception: the post-promotion bump of dev's `pyproject.toml` to the next version is not a release. Dev always carries the next version after a promotion merges to main, and that version's release notes are written at its actual cut, when `[Unreleased]` rolls over.
-- **Every API endpoint must appear in the OpenAPI spec.** FastAPI auto-generates this from route decorators — ensure every route has `tags`, `summary`, and `description` set. Verify with `uv run python scripts/export_openapi.py` (output is gitignored but CI regenerates it). The Docusaurus build runs `gen-api-docs` to produce interactive per-endpoint pages from that spec.
+- **Every HTTP API endpoint must appear in the OpenAPI spec.** FastAPI auto-generates this from route decorators — ensure every HTTP route has `tags`, `summary`, and `description` set. Verify with `uv run python scripts/export_openapi.py` (output is gitignored but CI regenerates it). The Docusaurus build runs `gen-api-docs` to produce interactive per-endpoint pages from that spec. OpenAPI 3.x cannot describe WebSocket operations; every WebSocket endpoint must instead have a normative manual contract in `website/docs/api-guide.md` covering its path, handshake, client and server events, limits, close codes, and authentication or origin policy.
 - **All public Python functions, classes, and methods must have docstrings** that are clear enough for generative documentation tools (docusaurus, pdoc, sphinx) to produce useful output. Describe what it does, parameters, return value, and any side effects.
 - **All Pydantic models and their fields must have descriptions** via docstrings or `Field(description=...)` for anything non-obvious. These flow into the OpenAPI spec.
 - **TypeScript components and hooks must have JSDoc comments** on exported interfaces, props, and non-trivial functions.

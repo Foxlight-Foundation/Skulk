@@ -37,7 +37,16 @@ from anyio import (
     WouldBlock,
     to_thread,
 )
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    WebSocket,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -81,6 +90,10 @@ from skulk.api.keepalive import with_sse_keepalive
 from skulk.api.model_search import search_hugging_face_models
 from skulk.api.node_health import compute_node_health
 from skulk.api.provider_diagnostics import ProviderObserver
+from skulk.api.realtime import (
+    REALTIME_WEBSOCKET_MAX_MESSAGE_BYTES,
+    RealtimeTranscriptionBridge,
+)
 from skulk.api.types import (
     AddCustomModelParams,
     AdvancedImageParams,
@@ -1568,6 +1581,7 @@ class API:
                 "must already be placed and running as a speech-to-text model."
             ),
         )(self.audio_transcriptions)
+        self.app.websocket("/v1/realtime")(self.realtime_transcription)
         self.app.post(
             "/bench/chat/completions",
             tags=["Compatibility APIs"],
@@ -5873,6 +5887,8 @@ class API:
         cfg.accesslog = None
         cfg.errorlog = "-"
         cfg.logger_class = InterceptLogger
+        cfg.websocket_max_message_size = REALTIME_WEBSOCKET_MAX_MESSAGE_BYTES
+        cfg.websocket_ping_interval = 20.0
         with anyio.CancelScope(shield=True):
             await serve(
                 cast(ASGIFramework, self.app),
@@ -9453,6 +9469,52 @@ class API:
                         self._audio_transcription_queues,
                     ),
                 )
+
+    async def _open_realtime_transcription_session(
+        self,
+        model: str,
+        sample_rate: int,
+    ) -> CapabilityStreamSession:
+        """Open the built-in realtime STT provider for one WebSocket owner.
+
+        Args:
+            model: Mounted model selected by the compatibility client.
+            sample_rate: Negotiated PCM16 sample rate.
+
+        Returns:
+            Generic Fabric provider session owned by this API node.
+        """
+
+        return await self._stream_capability(
+            self.node_id,
+            REALTIME_STT_CAPABILITY_DESCRIPTOR.id,
+            REALTIME_STT_CAPABILITY_DESCRIPTOR.version,
+            descriptor_revision(REALTIME_STT_CAPABILITY_DESCRIPTOR),
+            {"model": model, "sample_rate": sample_rate},
+            timeout_seconds=MAX_CALL_TIMEOUT_SECONDS,
+        )
+
+    async def realtime_transcription(
+        self,
+        websocket: WebSocket,
+        model: Annotated[str, Query(min_length=1, max_length=512)],
+    ) -> None:
+        """Serve one OpenAI-compatible realtime transcription WebSocket.
+
+        Args:
+            websocket: Client WebSocket owned by this API node.
+            model: Mounted realtime STT model selected in the URL query.
+
+        Side effects:
+            Opens one experimental ``stt.realtime`` provider session and
+            cancels it when the socket disconnects or reaches a terminal event.
+        """
+
+        await RealtimeTranscriptionBridge(
+            websocket=websocket,
+            model=model,
+            open_session=self._open_realtime_transcription_session,
+        ).serve()
 
     async def audio_speech(self, request: AudioSpeechRequest) -> Response:
         """OpenAI-compatible text-to-speech endpoint."""

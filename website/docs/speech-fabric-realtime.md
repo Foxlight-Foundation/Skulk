@@ -120,6 +120,12 @@ sequenceDiagram
   bounded; the worker also caps pre-dispatch input at 256 frames or 16 MiB and
   cancels overflow. Transport rejection is source-routed to fail only the
   affected provider call. Audio-duration diagnostics remain a follow-up.
+- **WebSocket edge:** the first `WS /v1/realtime` compatibility slice is now
+  implemented as a one-utterance transcription adapter over
+  `stt.realtime@1.0.0`. It accepts OpenAI-style base64 PCM16 append/commit
+  events, emits transcript delta/final/failure events, and cancels the provider
+  on disconnect. It deliberately does not claim full Realtime conversation or
+  speech-to-speech compatibility.
 - **VAD ownership:** decide whether voice activity detection lives inside the STT
   model session, a dedicated VAD runner, or an API-side preprocessor.
 - **Cancellation:** a WebSocket close must release the runner session and any
@@ -267,8 +273,9 @@ caller-provided filesystem paths.
    no-event-retention semantics, a same-node short circuit, Zenoh-only remote
    delivery, source-routed transport failure, and master-side instance
    reservation.
-7. Add `WS /v1/realtime` as a compatibility edge over the provider contract,
-   behind capability checks and feature flags.
+7. **Complete:** add a bounded, transcription-only `WS /v1/realtime`
+   compatibility edge over the provider contract, behind the existing
+   capability and experiment gates.
 8. Add dashboard and SDK smoke tests with synthetic microphone input.
 9. Add result-ledger speech metrics once the ledger schema can represent audio
    and transcript artifacts safely.
