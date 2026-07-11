@@ -108,6 +108,7 @@ export interface RawStateResponse {
   nodeThunderboltBridge?: Record<string, RawThunderboltBridge>;
   nodeRdmaCtl?: Record<string, RawRdmaCtl>;
   nodeHealth?: Record<string, RawNodeHealth>;
+  nodeCapabilities?: Record<string, string[]>;
   thunderboltBridgeCycles?: string[][];
 }
 

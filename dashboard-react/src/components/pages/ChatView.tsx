@@ -22,6 +22,8 @@ import { useSkulkTranslation } from '../../i18n/tolgee';
 export interface ChatViewProps {
   /** Ready instances the user can chat with. */
   readyInstances: InstanceCardData[];
+  /** Whether this API node currently advertises the realtime STT provider. */
+  realtimeTranscriptionAvailable?: boolean;
   className?: string;
 }
 
@@ -217,6 +219,11 @@ function speechModelOption(modelId: string, model: ModelInfo | undefined): ChatS
     defaultResponseFormat,
     responseFormats: formats,
     supportsVoiceListing: model?.audio?.supports_voice_listing ?? false,
+    supportsRealtime: Boolean(
+      resolved?.supports_realtime_audio
+        && model?.audio?.supports_streaming
+        && model.audio.supports_realtime,
+    ),
   };
 }
 
@@ -556,7 +563,11 @@ async function readUploadedImageAsDataUrl(file: ChatUploadedFile): Promise<strin
 
 /* ── Component ────────────────────────────────────────── */
 
-export function ChatView({ readyInstances, className }: ChatViewProps) {
+export function ChatView({
+  readyInstances,
+  realtimeTranscriptionAvailable = false,
+  className,
+}: ChatViewProps) {
   const { t } = useSkulkTranslation();
   // Store state
   const selectedModelId = useAppSelector((s) => s.chat.selectedModelId);
@@ -1316,6 +1327,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
           supportsImageAttachments={canSendMessages && supportsImageAttachments}
           canSendMessages={canSendMessages}
           transcriptionModels={readyTranscriptionModels}
+          realtimeTranscriptionAvailable={realtimeTranscriptionAvailable}
           speechModels={readySpeechModels}
           selectedTranscriptionModelId={selectedTranscriptionModelId}
           selectedSpeechModelId={selectedSpeechModelId}
