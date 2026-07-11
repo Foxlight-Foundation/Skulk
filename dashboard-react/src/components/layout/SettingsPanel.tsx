@@ -269,7 +269,16 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
       enabled: fullConfig?.logging?.enabled ?? false,
       ingest_url: fullConfig?.logging?.ingest_url ?? '',
     });
-    setTelemetryDraft(fullConfig?.telemetry ?? null);
+    setTelemetryDraft(
+      fullConfig?.telemetry ?? {
+        consent: 'unasked',
+        diagnostics_consent: 'unasked',
+        install_id: '',
+        consented_at: '',
+        consented_version: '',
+        ingest_url: 'https://skulk-ledger-ingest.thomastupper92618.workers.dev',
+      },
+    );
     setExperimentsDraft(fullConfig?.experiments ? { ...fullConfig.experiments } : defaultExperimentsConfig());
   }, [fullConfig, effective]);
 
@@ -300,7 +309,17 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     updated.inference = { kv_cache_backend: kvBackend };
     // Include logging config
     updated.logging = { ...loggingDraft };
-    if (telemetryDraft) updated.telemetry = { ...telemetryDraft };
+    // Persist only once the operator has interacted (an untouched unasked
+    // draft must not overwrite the "never asked" state that gates the modal).
+    if (telemetryDraft && (telemetryDraft.consent !== 'unasked' || telemetryDraft.diagnostics_consent !== 'unasked')) {
+      updated.telemetry = {
+        ...telemetryDraft,
+        consent: telemetryDraft.consent === 'unasked' ? 'disabled' : telemetryDraft.consent,
+        diagnostics_consent:
+          telemetryDraft.diagnostics_consent === 'unasked' ? 'disabled' : telemetryDraft.diagnostics_consent,
+        consented_at: telemetryDraft.consented_at || new Date().toISOString(),
+      };
+    }
     if (effective?.experimental_mode_enabled) {
       updated.experiments = { ...experimentsDraft };
     }
@@ -627,7 +646,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               synced like other settings). Both switches stay permanently
               available here; the first-run modal only acquires the initial
               choice. */}
-          {telemetryDraft && telemetryDraft.consent !== 'unasked' && (
+          {telemetryDraft && (
             <Fieldset>
               <Legend>{t('settings.telemetry.legend', 'Telemetry')}</Legend>
               <Row>

@@ -353,6 +353,7 @@ async def tap_generation_stream(
     prompt_tokens: int | None = None
     output_tokens: int | None = None
     error = False
+    completed = False
     try:
         async for chunk in stream:
             if ttft_s is None and getattr(chunk, "text", None):
@@ -370,19 +371,26 @@ async def tap_generation_stream(
                     int(cast(int, getattr(stats, "generation_tokens", 0)))
                     or output_tokens
                 )
-            if getattr(chunk, "finish_reason", None) == "error":
+            finish = cast("str | None", getattr(chunk, "finish_reason", None))
+            if finish is not None:
+                completed = True
+            if finish == "error":
                 error = True
             yield chunk
     finally:
         try:
-            collector.record_generation(
-                model_id,
-                ttft_s=ttft_s,
-                decode_tps=decode_tps,
-                prompt_tokens=prompt_tokens,
-                output_tokens=output_tokens,
-                node_count=node_count,
-                error_class="generation-error" if error else None,
-            )
+            # An aborted stream (client disconnect: no terminal chunk, no
+            # error) is neither a clean sample nor a failure; recording it
+            # would pollute both speed and reliability distributions.
+            if completed or error:
+                collector.record_generation(
+                    model_id,
+                    ttft_s=ttft_s,
+                    decode_tps=decode_tps,
+                    prompt_tokens=prompt_tokens,
+                    output_tokens=output_tokens,
+                    node_count=node_count,
+                    error_class="generation-error" if error else None,
+                )
         except Exception as exc:  # noqa: BLE001 - telemetry must never propagate
             logger.debug(f"telemetry generation record failed: {exc}")

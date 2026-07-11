@@ -287,6 +287,19 @@ async def test_tap_records_error_class_on_error_stream() -> None:
     assert sample["error_class"] == "generation-error"
 
 
+async def test_tap_skips_aborted_streams() -> None:
+    collector, _ = _collector(_consented(), {})
+
+    async def stream():  # noqa: ANN202
+        yield _Chunk(text="par")
+        yield _Chunk(text="tial")  # no terminal finish_reason ever arrives
+
+    agen = tap_generation_stream(collector, "org/model", None, stream())
+    _ = await agen.__anext__()
+    await agen.aclose()  # client disconnect
+    assert collector.preview()["pending"] == []
+
+
 def test_sample_model_is_frozen() -> None:
     sample = TelemetrySample(kind="generation", at="2026-07-11T00:00:00Z")
     with pytest.raises(Exception):  # noqa: B017 - pydantic frozen raises ValidationError

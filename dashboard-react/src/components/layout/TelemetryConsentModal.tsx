@@ -136,9 +136,13 @@ export function TelemetryConsentModal() {
   const [telemetryOn, setTelemetryOn] = useState(false);
   const [diagnosticsOn, setDiagnosticsOn] = useState(false);
   const [dismissed, setDismissed] = useState(false);
+  // Decided ONCE at mount: re-deriving from the marker after the effect
+  // below stamps it would unmount the dialog on the next re-render (a
+  // checkbox click) before the operator can save.
+  const [eligible] = useState(() => !hasSeen());
 
   const consent = fullConfig?.telemetry?.consent ?? 'unasked';
-  const visible = !loading && !dismissed && consent === 'unasked' && !hasSeen();
+  const visible = !loading && !dismissed && consent === 'unasked' && eligible;
 
   // Showing the modal is what stamps the no-nag marker: even a hard refresh
   // mid-decision never asks this browser twice.
