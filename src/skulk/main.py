@@ -578,6 +578,11 @@ class Node:
         else:
             api = None
 
+        if download_coordinator is not None and api is not None:
+            download_coordinator.config_applied_callback = (
+                api.refresh_config_dependent_capabilities
+            )
+
         if not args.no_worker:
             worker_store_client: ModelStoreClient | None = store_client
             if (
@@ -955,6 +960,11 @@ class Node:
                             ),
                             offline=self.offline,
                             staging_cache_path=elect_staging_path,
+                            config_applied_callback=(
+                                self.api.refresh_config_dependent_capabilities
+                                if self.api is not None
+                                else None
+                            ),
                         )
                         self._tg.start_soon(self.download_coordinator.run)
                     if self.worker:

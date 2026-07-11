@@ -3184,6 +3184,11 @@ class API:
         else:
             self._withdraw_capability(REALTIME_STT_CAPABILITY_DESCRIPTOR.id)
 
+    def refresh_config_dependent_capabilities(self) -> None:
+        """Refresh capability advertisements after local config application."""
+
+        self._sync_builtin_speech_capability()
+
     async def _validate_audio_transcription_model(self, model_id: ModelId) -> ModelId:
         """Validate a mounted speech-to-text model exists and is servable."""
 
