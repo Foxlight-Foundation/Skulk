@@ -27,7 +27,7 @@ import os
 import time
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable
-from typing import TYPE_CHECKING, Literal, TypedDict, TypeVar, cast, final
+from typing import Literal, TypedDict, TypeVar, cast, final
 from uuid import uuid4
 
 import anyio
@@ -36,10 +36,8 @@ from loguru import logger
 
 from skulk.shared.types.profiling import SystemPerformanceProfile
 from skulk.shared.version import get_skulk_version
+from skulk.store.config import TelemetryConfig
 from skulk.utils.pydantic_ext import FrozenModel
-
-if TYPE_CHECKING:
-    from skulk.store.config import TelemetryConfig
 
 TELEMETRY_KILL_SWITCH = "SKULK_TELEMETRY_DISABLE"
 
@@ -323,16 +321,18 @@ class FieldTelemetryCollector:
 
     def preview(self) -> "TelemetryPreview":
         """The exact next batch, for the dashboard's what-would-be-sent pane."""
-        config = self._config_provider()
+        # An absent section previews as the defaults, so operators can see
+        # where telemetry WOULD go before ever opting in.
+        config = self._config_provider() or TelemetryConfig()
         return TelemetryPreview(
             enabled=self.enabled,
-            consent=config.consent if config is not None else "unasked",
+            consent=config.consent,
             # Snapshot before iterating: harmless today (asyncio, no await
             # inside), cheap insurance against future threaded callers.
             pending=[_sample_json(s) for s in tuple(self._pending)],
             dropped_since_start=self._dropped,
-            install_id=config.install_id if config is not None else "",
-            ingest_url=config.ingest_url if config is not None else "",
+            install_id=config.install_id,
+            ingest_url=config.ingest_url,
         )
 
     async def _default_post(self, url: str, payload: dict[str, object]) -> int:
