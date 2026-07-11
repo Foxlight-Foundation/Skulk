@@ -1,5 +1,6 @@
 """Provider-stream contract, framing, and receive-state coverage."""
 
+import anyio
 import pytest
 
 from skulk.extensions.streams import (
@@ -7,11 +8,45 @@ from skulk.extensions.streams import (
     BlobMediaAttachment,
     CapabilityStreamError,
     CapabilityStreamFrame,
+    CapabilityStreamInput,
     CapabilityStreamReceiver,
     InlineMediaAttachment,
     decode_capability_stream_frame,
     encode_capability_stream_frame,
 )
+
+
+@pytest.mark.asyncio
+async def test_input_sink_owns_sequence_and_half_close() -> None:
+    sent: list[CapabilityStreamFrame] = []
+
+    async def send(frame: CapabilityStreamFrame) -> None:
+        sent.append(frame)
+
+    stream = CapabilityStreamInput(
+        call_id="stt-call",
+        deadline_at=anyio.current_time() + 1.0,
+        send_frame=send,
+    )
+    await stream.start()
+    await stream.send_chunk(
+        payload={"duration_ms": 20},
+        media=InlineMediaAttachment(
+            data=b"\x00\x01",
+            media_type="audio/pcm",
+            codec="pcm_s16le",
+            sample_rate=16000,
+            channels=1,
+        ),
+    )
+    await stream.complete()
+
+    assert stream.closed is True
+    assert [frame.direction for frame in sent] == ["caller_to_provider"] * 3
+    assert [frame.sequence for frame in sent] == [0, 1, 2]
+    assert [frame.kind for frame in sent] == ["started", "chunk", "completed"]
+    with pytest.raises(RuntimeError, match="closed"):
+        await stream.send_chunk(payload={"late": True})
 
 
 def _started(call_id: str = "call-1") -> CapabilityStreamFrame:

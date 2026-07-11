@@ -52,12 +52,38 @@ _TTS_REVISION = descriptor_revision(_TTS)
 _BIDIRECTIONAL = CapabilityDescriptor(
     id="realtime-stt",
     version="1.0.0",
-    title="Future realtime STT",
-    description="Discovery-only until caller input frames are implemented.",
+    title="Realtime STT",
+    description="Consumes audio frames and emits progressive transcripts.",
     input_schema={"type": "object"},
     io_mode="bidirectional",
+    input_chunk_schema={
+        "type": "object",
+        "properties": {"format": {"const": "pcm_s16le"}},
+        "required": ["format"],
+        "additionalProperties": False,
+    },
+    output_chunk_schema={
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+        "additionalProperties": False,
+    },
+)
+
+_CLIENT_STREAMING = CapabilityDescriptor(
+    id="buffered-stt",
+    version="1.0.0",
+    title="Buffered STT",
+    description="Consumes audio frames and returns one final transcript.",
+    input_schema={"type": "object"},
+    output_schema={
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+        "additionalProperties": False,
+    },
+    io_mode="client_streaming",
     input_chunk_schema={"type": "object"},
-    output_chunk_schema={"type": "object"},
 )
 
 
@@ -227,8 +253,58 @@ class _FloodProvider(_TtsProvider):
 
 
 class _BidirectionalProvider(_TtsProvider):
+    def __init__(self) -> None:
+        self.input_frames: list[CapabilityStreamFrame] = []
+
     def capabilities(self) -> list[CapabilityDescriptor]:
         return [_BIDIRECTIONAL]
+
+    async def handle_input_stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+        input_frames: AsyncIterator[CapabilityStreamFrame],
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        async for frame in input_frames:
+            self.input_frames.append(frame)
+            if frame.is_terminal:
+                break
+        yield CapabilityStreamFrame(
+            call_id=call.call_id,
+            direction="provider_to_caller",
+            sequence=1,
+            kind="chunk",
+            payload={"text": "heard"},
+        )
+        yield CapabilityStreamFrame(
+            call_id=call.call_id,
+            direction="provider_to_caller",
+            sequence=2,
+            kind="completed",
+        )
+
+
+class _ClientStreamingProvider(_BidirectionalProvider):
+    def capabilities(self) -> list[CapabilityDescriptor]:
+        return [_CLIENT_STREAMING]
+
+    async def handle_input_stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+        input_frames: AsyncIterator[CapabilityStreamFrame],
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        async for frame in input_frames:
+            self.input_frames.append(frame)
+            if frame.is_terminal:
+                break
+        yield CapabilityStreamFrame(
+            call_id=call.call_id,
+            direction="provider_to_caller",
+            sequence=1,
+            kind="completed",
+            payload={"text": "buffered transcript"},
+        )
 
 
 def _build_api(provider: object) -> API:
@@ -272,6 +348,7 @@ async def _collect_local_stream(
             timeout_seconds=2.0,
         )
         opened = session.open_result.ok
+        assert session.input is None
         frames = [frame async for frame in session.frames]
         task_group.cancel_scope.cancel()
     return opened, frames
@@ -285,6 +362,134 @@ async def test_local_provider_stream_preserves_lifecycle_and_binary_media() -> N
     assert [frame.sequence for frame in frames] == [0, 1, 2]
     assert isinstance(frames[1].media, InlineMediaAttachment)
     assert frames[1].media.data == b"\x00\xff\x80\x7f"
+
+
+async def test_local_bidirectional_media_half_close_keeps_output_active() -> None:
+    provider = _BidirectionalProvider()
+    api = _build_api(provider)
+    frames: list[CapabilityStreamFrame] = []
+
+    async with api._tg as task_group:  # pyright: ignore[reportPrivateUsage]
+        task_group.start_soon(
+            api._apply_provider_data  # pyright: ignore[reportPrivateUsage]
+        )
+        session = await api._extension_context.stream_capability(  # pyright: ignore[reportPrivateUsage]
+            NodeId("api-node"),
+            "realtime-stt",
+            "1.0.0",
+            descriptor_revision(_BIDIRECTIONAL),
+            {},
+            timeout_seconds=2.0,
+        )
+        assert session.open_result.ok is True
+        assert session.input is not None
+        await session.input.send_chunk(
+            payload={"format": "pcm_s16le"},
+            media=InlineMediaAttachment(
+                data=b"\x00\x01\x02\x03",
+                media_type="audio/pcm",
+                codec="pcm_s16le",
+                sample_rate=16000,
+                channels=1,
+            ),
+        )
+        await session.input.complete()
+        frames = [frame async for frame in session.frames]
+        task_group.cancel_scope.cancel()
+
+    assert [frame.kind for frame in provider.input_frames] == [
+        "started",
+        "chunk",
+        "completed",
+    ]
+    assert [frame.sequence for frame in provider.input_frames] == [0, 1, 2]
+    input_media = provider.input_frames[1].media
+    assert isinstance(input_media, InlineMediaAttachment)
+    assert input_media.data == b"\x00\x01\x02\x03"
+    assert [frame.kind for frame in frames] == ["started", "chunk", "completed"]
+    assert frames[1].payload == {"text": "heard"}
+
+
+async def test_invalid_input_chunk_fails_provider_output() -> None:
+    provider = _BidirectionalProvider()
+    api = _build_api(provider)
+    frames: list[CapabilityStreamFrame] = []
+
+    async with api._tg as task_group:  # pyright: ignore[reportPrivateUsage]
+        task_group.start_soon(
+            api._apply_provider_data  # pyright: ignore[reportPrivateUsage]
+        )
+        session = await api._extension_context.stream_capability(  # pyright: ignore[reportPrivateUsage]
+            NodeId("api-node"),
+            "realtime-stt",
+            "1.0.0",
+            descriptor_revision(_BIDIRECTIONAL),
+            {},
+            timeout_seconds=2.0,
+        )
+        assert session.input is not None
+        await session.input.send_chunk(payload={"format": "not-pcm"})
+        frames = [frame async for frame in session.frames]
+        task_group.cancel_scope.cancel()
+
+    assert [frame.kind for frame in frames] == ["started", "failed"]
+    assert frames[-1].error is not None
+    assert frames[-1].error.code == "invalid_frame"
+    assert [frame.kind for frame in provider.input_frames] == ["started"]
+
+
+async def test_client_streaming_half_close_returns_structured_final_result() -> None:
+    provider = _ClientStreamingProvider()
+    api = _build_api(provider)
+    frames: list[CapabilityStreamFrame] = []
+
+    async with api._tg as task_group:  # pyright: ignore[reportPrivateUsage]
+        task_group.start_soon(
+            api._apply_provider_data  # pyright: ignore[reportPrivateUsage]
+        )
+        session = await api._extension_context.stream_capability(  # pyright: ignore[reportPrivateUsage]
+            NodeId("api-node"),
+            "buffered-stt",
+            "1.0.0",
+            descriptor_revision(_CLIENT_STREAMING),
+            {},
+            timeout_seconds=2.0,
+        )
+        assert session.input is not None
+        await session.input.send_chunk(payload={"frame": 1})
+        await session.input.complete()
+        frames = [frame async for frame in session.frames]
+        task_group.cancel_scope.cancel()
+
+    assert [frame.kind for frame in frames] == ["started", "completed"]
+    assert frames[-1].payload == {"text": "buffered transcript"}
+
+
+async def test_caller_input_cancellation_terminates_provider_output() -> None:
+    api = _build_api(_BidirectionalProvider())
+    frames: list[CapabilityStreamFrame] = []
+
+    async with api._tg as task_group:  # pyright: ignore[reportPrivateUsage]
+        task_group.start_soon(
+            api._apply_provider_data  # pyright: ignore[reportPrivateUsage]
+        )
+        session = await api._extension_context.stream_capability(  # pyright: ignore[reportPrivateUsage]
+            NodeId("api-node"),
+            "realtime-stt",
+            "1.0.0",
+            descriptor_revision(_BIDIRECTIONAL),
+            {},
+            timeout_seconds=2.0,
+        )
+        assert session.input is not None
+        await session.input.cancel("microphone disconnected")
+        frames = [frame async for frame in session.frames]
+        task_group.cancel_scope.cancel()
+
+    assert [frame.kind for frame in frames] == ["started", "cancelled"]
+    assert frames[-1].error is not None
+    assert frames[-1].error.code == "cancelled"
+    assert frames[-1].error.message == "microphone disconnected"
 
 
 async def test_remote_open_uses_peer_api_but_media_uses_provider_data(
@@ -386,6 +591,7 @@ async def test_remote_open_uses_peer_api_but_media_uses_provider_data(
             timeout_seconds=2.0,
         )
         opened = session.open_result.ok
+        assert session.input is None
         frames = [frame async for frame in session.frames]
         caller_tasks.cancel_scope.cancel()
         provider_tasks.cancel_scope.cancel()
@@ -394,6 +600,138 @@ async def test_remote_open_uses_peer_api_but_media_uses_provider_data(
     assert [frame.kind for frame in frames] == ["started", "chunk", "completed"]
     assert isinstance(frames[1].media, InlineMediaAttachment)
     assert frames[1].media.data == b"\x00\xff\x80\x7f"
+
+
+async def test_remote_bidirectional_input_and_output_use_provider_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caller_send, provider_receive = channel[ProviderStreamPacket](256)
+    provider_send, caller_receive = channel[ProviderStreamPacket](256)
+    provider = _BidirectionalProvider()
+
+    def build_node(
+        node_id: str,
+        *,
+        extension: object | None,
+        sender: object,
+        receiver: object,
+    ) -> API:
+        command_sender, _ = channel[ForwarderCommand]()
+        download_sender, _ = channel[ForwarderDownloadCommand]()
+        _, event_receiver = channel[IndexedEvent]()
+        _, election_receiver = channel[ElectionMessage]()
+        return API(
+            NodeId(node_id),
+            port=52415,
+            event_receiver=event_receiver,
+            command_sender=command_sender,
+            download_command_sender=download_sender,
+            election_receiver=election_receiver,
+            enable_event_log=False,
+            mount_dashboard=False,
+            telemetry_view=TelemetryView(),
+            provider_stream_sender=sender,  # type: ignore[arg-type]
+            provider_stream_receiver=receiver,  # type: ignore[arg-type]
+            extensions=(
+                LoadedExtensions([extension])  # pyright: ignore[reportArgumentType]
+                if extension is not None
+                else None
+            ),
+        )
+
+    provider_api = build_node(
+        "provider-node",
+        extension=provider,
+        sender=provider_send,
+        receiver=provider_receive,
+    )
+    caller_api = build_node(
+        "caller-node",
+        extension=None,
+        sender=caller_send,
+        receiver=caller_receive,
+    )
+
+    async def peer_url(node_id: NodeId) -> str | None:
+        return "http://provider.test" if node_id == NodeId("provider-node") else None
+
+    monkeypatch.setattr(caller_api, "_peer_api_url_for", peer_url)
+
+    class _Response:
+        def __init__(self, result: CapabilityResult) -> None:
+            self._result = result
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self._result.model_dump(mode="json")
+
+    class _PeerClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> "_PeerClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, url: str, *, json: object) -> _Response:
+            assert url.endswith("/v1/capabilities/stream")
+            return _Response(
+                await provider_api.serve_capability_stream(
+                    CapabilityCall.model_validate(json)
+                )
+            )
+
+    monkeypatch.setattr("skulk.api.main.httpx.AsyncClient", _PeerClient)
+    output: list[CapabilityStreamFrame] = []
+
+    async with (
+        provider_api._tg as provider_tasks,  # pyright: ignore[reportPrivateUsage]
+        caller_api._tg as caller_tasks,  # pyright: ignore[reportPrivateUsage]
+    ):
+        provider_tasks.start_soon(
+            provider_api._apply_provider_data  # pyright: ignore[reportPrivateUsage]
+        )
+        caller_tasks.start_soon(
+            caller_api._apply_provider_data  # pyright: ignore[reportPrivateUsage]
+        )
+        session = await caller_api._extension_context.stream_capability(  # pyright: ignore[reportPrivateUsage]
+            NodeId("provider-node"),
+            "realtime-stt",
+            "1.0.0",
+            descriptor_revision(_BIDIRECTIONAL),
+            {},
+            timeout_seconds=2.0,
+        )
+        assert session.open_result.ok is True
+        assert session.input is not None
+        await session.input.send_chunk(
+            payload={"format": "pcm_s16le"},
+            media=InlineMediaAttachment(
+                data=b"remote-audio",
+                media_type="audio/pcm",
+                codec="pcm_s16le",
+                sample_rate=16000,
+                channels=1,
+            ),
+        )
+        await session.input.complete()
+        output = [frame async for frame in session.frames]
+        caller_tasks.cancel_scope.cancel()
+        provider_tasks.cancel_scope.cancel()
+
+    assert [frame.kind for frame in provider.input_frames] == [
+        "started",
+        "chunk",
+        "completed",
+    ]
+    media = provider.input_frames[1].media
+    assert isinstance(media, InlineMediaAttachment)
+    assert media.data == b"remote-audio"
+    assert [frame.kind for frame in output] == ["started", "chunk", "completed"]
 
 
 async def test_invalid_provider_chunk_becomes_typed_failed_terminal() -> None:
@@ -474,11 +812,11 @@ async def test_dynamic_admission_reserves_concurrency_slot_before_await(
         task_group.cancel_scope.cancel()
 
 
-def test_bidirectional_descriptor_remains_discoverable_but_not_executable() -> None:
+def test_bidirectional_descriptor_registers_input_stream_handler() -> None:
     loaded = LoadedExtensions([_BidirectionalProvider()])
 
     assert loaded.capability_descriptors == (_BIDIRECTIONAL,)
-    assert loaded.stream_handler(_BIDIRECTIONAL.qualified_id) is None
+    assert loaded.stream_handler(_BIDIRECTIONAL.qualified_id) is not None
 
 
 async def test_early_caller_close_cancels_only_its_provider_stream() -> None:
@@ -557,6 +895,7 @@ async def test_cancel_racing_admission_still_emits_started_first() -> None:
     active = _ActiveProviderStream(
         caller_node="api-node",
         cancel_requested=cancel_requested,
+        descriptor=_TTS,
     )
 
     await api._run_capability_stream(  # pyright: ignore[reportPrivateUsage]

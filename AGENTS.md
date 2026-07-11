@@ -117,6 +117,9 @@ A model card's `placement.compatible_backends` selects which engine serves it
   support. Production nodes also expose the built-in `tts@1.0.0` provider
   facade over that same core command/runner path, with raw MP3 media on
   `PROVIDER_DATA` and dynamic telemetry/admission tied to mounted capacity.
+  The provider topic also carries negotiated caller media for client-streaming
+  and bidirectional capabilities, isolated by owner/call/direction; caller
+  `complete()` half-closes input without ending provider output.
   Mounted STT models serve non-streaming `/v1/audio/transcriptions`;
   translation and realtime/streaming STT remain later phases.
 - **`llama_cpp`**: in-process `llama-cpp-python` for GGUF on GPU/Linux nodes.

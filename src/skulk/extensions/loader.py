@@ -19,6 +19,7 @@ from packaging.version import InvalidVersion, Version
 from skulk.extensions.capabilities import CapabilityDescriptor
 from skulk.extensions.types import (
     CapabilityCallHandler,
+    CapabilityInputStreamHandler,
     CapabilityProvider,
     CapabilityStreamHandler,
     ChatMiddleware,
@@ -82,7 +83,12 @@ class LoadedExtensions:
             str, tuple[str, CapabilityCallHandler, CapabilityDescriptor]
         ] = {}
         self._stream_handlers: dict[
-            str, tuple[str, CapabilityStreamHandler, CapabilityDescriptor]
+            str,
+            tuple[
+                str,
+                CapabilityStreamHandler | CapabilityInputStreamHandler,
+                CapabilityDescriptor,
+            ],
         ] = {}
         seen_qualified_ids: set[str] = set()
         for extension in extensions:
@@ -149,13 +155,18 @@ class LoadedExtensions:
                             extension,
                             descriptor,
                         )
-                    # Phase 3's first executable mode is unary input with
-                    # server-streaming output (TTS). Bidirectional descriptors
-                    # remain discoverable but do not register until caller-side
-                    # input frames and half-close semantics land.
                     if descriptor.io_mode == "server_streaming" and isinstance(
                         extension, CapabilityStreamHandler
                     ):
+                        self._stream_handlers[descriptor.qualified_id] = (
+                            name,
+                            extension,
+                            descriptor,
+                        )
+                    if descriptor.io_mode in (
+                        "client_streaming",
+                        "bidirectional",
+                    ) and isinstance(extension, CapabilityInputStreamHandler):
                         self._stream_handlers[descriptor.qualified_id] = (
                             name,
                             extension,
@@ -241,13 +252,20 @@ class LoadedExtensions:
 
     def stream_handler(
         self, qualified_id: str
-    ) -> tuple[str, CapabilityStreamHandler, CapabilityDescriptor] | None:
+    ) -> (
+        tuple[
+            str,
+            CapabilityStreamHandler | CapabilityInputStreamHandler,
+            CapabilityDescriptor,
+        ]
+        | None
+    ):
         """Look up the streaming handler serving ``id@version`` on this node."""
 
         return self._stream_handlers.get(qualified_id)
 
     def handled_stream_capability_ids(self) -> frozenset[str]:
-        """Bare capability ids with a server-output stream handler."""
+        """Bare capability ids with an executable streaming handler."""
 
         return frozenset(
             entry[2].id for entry in self._stream_handlers.values()
