@@ -13,6 +13,7 @@ from loguru import logger
 from PIL import Image
 
 from skulk.download.download_utils import resolve_model_in_path
+from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
 from skulk.shared.models.memory_estimate import (
@@ -525,6 +526,7 @@ class Worker:
         telemetry_view: TelemetryView | None = None,
         data_sender: Sender[DataChunk] | None = None,
         realtime_audio_receiver: Receiver[RealtimeAudioInputFrame] | None = None,
+        realtime_audio_packet_receiver: Receiver[RealtimeAudioPacket] | None = None,
         store_client: ModelStoreClient | None = None,
         staging_config: StagingNodeConfig | None = None,
     ):
@@ -540,6 +542,7 @@ class Worker:
         # event path (no DATA topic wired / tests).
         self._data_sender = data_sender
         self._realtime_audio_receiver = realtime_audio_receiver
+        self._realtime_audio_packet_receiver = realtime_audio_packet_receiver
         # Shared, Node-owned telemetry view (#279). The worker prunes a node's
         # telemetry here when it sees NodeTimedOut, because the worker runs on
         # EVERY node regardless of role - so a --no-api node (or a --no-api
@@ -751,6 +754,12 @@ class Worker:
                 tg.start_soon(self._poll_connection_updates)
                 if self._realtime_audio_receiver is not None:
                     tg.start_soon(self._realtime_audio_ingress)
+                if self._realtime_audio_packet_receiver is not None:
+                    tg.start_soon(self._realtime_audio_packet_ingress)
+                if (
+                    self._realtime_audio_receiver is not None
+                    or self._realtime_audio_packet_receiver is not None
+                ):
                     tg.start_soon(self._realtime_audio_janitor)
         finally:
             # Actual shutdown code - waits for all tasks to complete before executing.
@@ -768,49 +777,59 @@ class Worker:
         assert self._realtime_audio_receiver is not None
         with self._realtime_audio_receiver as frames:
             async for frame in frames:
-                if frame.command_id in self._realtime_finished_commands:
+                await self._route_realtime_audio_frame(frame)
+
+    async def _realtime_audio_packet_ingress(self) -> None:
+        """Consume node-addressed remote PCM packets without event persistence."""
+
+        assert self._realtime_audio_packet_receiver is not None
+        with self._realtime_audio_packet_receiver as packets:
+            async for packet in packets:
+                if packet.target_node != self.node_id or packet.kind == "transport_failed":
                     continue
-                runner = self._realtime_runner_by_command.get(frame.command_id)
-                if runner is not None:
-                    await runner.send_realtime_audio(frame)
-                    if frame.kind != "chunk":
-                        self._finish_realtime_command(frame.command_id)
-                    continue
-                pending = self._realtime_audio_pending.setdefault(
-                    frame.command_id, []
+                await self._route_realtime_audio_frame(packet.to_input_frame())
+
+    async def _route_realtime_audio_frame(
+        self, frame: RealtimeAudioInputFrame
+    ) -> None:
+        """Route one local or remote frame through shared bounded worker state."""
+
+        if frame.command_id in self._realtime_finished_commands:
+            return
+        runner = self._realtime_runner_by_command.get(frame.command_id)
+        if runner is not None:
+            await runner.send_realtime_audio(frame)
+            if frame.kind != "chunk":
+                self._finish_realtime_command(frame.command_id)
+            return
+        pending = self._realtime_audio_pending.setdefault(frame.command_id, [])
+        self._realtime_audio_pending_since.setdefault(
+            frame.command_id, time.monotonic()
+        )
+        pending_bytes = self._realtime_audio_pending_bytes.get(frame.command_id, 0)
+        if (
+            len(pending) >= _REALTIME_AUDIO_PENDING_FRAMES
+            or pending_bytes + len(frame.data) > _REALTIME_AUDIO_PENDING_BYTES
+        ):
+            self._realtime_audio_pending.pop(frame.command_id, None)
+            self._realtime_audio_pending_bytes.pop(frame.command_id, None)
+            self._realtime_audio_pending_since.pop(frame.command_id, None)
+            logger.warning(
+                "Realtime STT input exceeded the pre-dispatch bound "
+                f"for command {frame.command_id}; cancelling"
+            )
+            await self.command_sender.send(
+                ForwarderCommand(
+                    origin=self._system_id,
+                    command=TaskCancelled(cancelled_command_id=frame.command_id),
                 )
-                self._realtime_audio_pending_since.setdefault(
-                    frame.command_id, time.monotonic()
-                )
-                pending_bytes = self._realtime_audio_pending_bytes.get(
-                    frame.command_id, 0
-                )
-                if (
-                    len(pending) >= _REALTIME_AUDIO_PENDING_FRAMES
-                    or pending_bytes + len(frame.data)
-                    > _REALTIME_AUDIO_PENDING_BYTES
-                ):
-                    self._realtime_audio_pending.pop(frame.command_id, None)
-                    self._realtime_audio_pending_bytes.pop(frame.command_id, None)
-                    self._realtime_audio_pending_since.pop(frame.command_id, None)
-                    logger.warning(
-                        "Realtime STT input exceeded the pre-dispatch bound "
-                        f"for command {frame.command_id}; cancelling"
-                    )
-                    await self.command_sender.send(
-                        ForwarderCommand(
-                            origin=self._system_id,
-                            command=TaskCancelled(
-                                cancelled_command_id=frame.command_id
-                            ),
-                        )
-                    )
-                    self._mark_realtime_command_finished(frame.command_id)
-                    continue
-                pending.append(frame)
-                self._realtime_audio_pending_bytes[frame.command_id] = (
-                    pending_bytes + len(frame.data)
-                )
+            )
+            self._mark_realtime_command_finished(frame.command_id)
+            return
+        pending.append(frame)
+        self._realtime_audio_pending_bytes[frame.command_id] = pending_bytes + len(
+            frame.data
+        )
 
     async def _realtime_audio_janitor(self) -> None:
         """Cancel and release pre-dispatch audio that never acquires a task."""

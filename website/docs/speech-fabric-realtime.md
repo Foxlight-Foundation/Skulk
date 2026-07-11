@@ -28,8 +28,8 @@ transforms, not dashboard-only helpers.
 
 The shipped speech runner is single-node. TTS cards can opt in to streamed MP3
 output chunks. Batch STT remains bounded and non-streaming, while the first
-experimental realtime STT path now uses an upstream incremental session. Its
-current local-only scope is intentional:
+experimental realtime STT path now uses an upstream incremental session with
+node-addressed ingress:
 
 - speech model placement is capability-gated by `mlx_audio` backend tags;
 - the API owns request validation, upload caps, and response formatting;
@@ -40,10 +40,12 @@ current local-only scope is intentional:
   facade over that same core TTS path. It emits raw MP3 media over
   `PROVIDER_DATA`, advertises liveness only while eligible mounted capacity is
   available, and propagates provider cancellation to the core command;
-- eligible local nodes expose a built-in `stt.realtime@1.0.0` bidirectional
-  provider. It pins one realtime task to the selected local instance and moves
-  ordered PCM frames through bounded API-worker-runner channels without putting
-  audio in State or the event log;
+- eligible API nodes expose a built-in `stt.realtime@1.0.0` bidirectional
+  provider. It pins one realtime task to a selected single-host instance and
+  moves ordered PCM frames through a same-node short circuit or bounded
+  node-addressed Zenoh ingress, then bounded worker-runner IPC, without putting
+  audio in State or the event log. Remote capacity is not advertised when Zenoh
+  is unavailable;
 - browser microphone capture and playback stay in the dashboard layer.
 
 Realtime should not bypass those contracts. It adds session lifetime and partial
@@ -112,9 +114,10 @@ sequenceDiagram
 - **Audio format negotiation:** version 1 accepts mono signed little-endian
   PCM16 at 8-96 kHz and resamples to the upstream session rate. Browser encoded
   formats and codec negotiation remain follow-ups.
-- **Backpressure:** local API and worker/runner channels are bounded; the worker
-  also caps pre-dispatch input at 256 frames or 16 MiB and cancels overflow.
-  Audio-duration diagnostics and remote pressure behavior remain follow-ups.
+- **Backpressure:** API-to-worker Zenoh streams and worker/runner channels are
+  bounded; the worker also caps pre-dispatch input at 256 frames or 16 MiB and
+  cancels overflow. Transport rejection is source-routed to fail only the
+  affected provider call. Audio-duration diagnostics remain a follow-up.
 - **VAD ownership:** decide whether voice activity detection lives inside the STT
   model session, a dedicated VAD runner, or an API-side preprocessor.
 - **Cancellation:** a WebSocket close must release the runner session and any
@@ -175,6 +178,8 @@ Realtime/fabric speech must preserve the existing plane split:
   the control plane;
 - provider opening is node-addressed and direct; provider lifecycle/media uses
   `PROVIDER_DATA`, never event-sourced State;
+- built-in realtime STT PCM ingress uses node-addressed `REALTIME_AUDIO`, never
+  event-sourced State, and requires Zenoh for a remote serving worker;
 - generated audio, partial transcripts, and final transcript chunks stay off the
   event log;
 - binary audio payloads must not be logged;
@@ -237,12 +242,14 @@ caller-provided filesystem paths.
    for `client_streaming` / `bidirectional` descriptors.
 3. **Complete:** add a built-in realtime STT facade only for models whose runner
    can open a true streaming session; batch-backed models do not advertise
-   progressive output. The first implementation is same-node only.
+   progressive output.
 4. Add a batch STT unary facade using bounded inline media or staged blobs.
 5. Add speech-specific diagnostics for active requests/sessions, queue depth,
    first audio/transcript latency, and cancellation reason.
-6. Add remote serving-node realtime audio ingress with the same bounded,
-   no-event-retention semantics as the local path.
+6. **Complete:** add remote serving-node realtime audio ingress with bounded,
+   no-event-retention semantics, a same-node short circuit, Zenoh-only remote
+   delivery, source-routed transport failure, and master-side instance
+   reservation.
 7. Add `WS /v1/realtime` as a compatibility edge over the provider contract,
    behind capability checks and feature flags.
 8. Add dashboard and SDK smoke tests with synthetic microphone input.

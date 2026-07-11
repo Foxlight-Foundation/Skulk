@@ -135,7 +135,7 @@ class AudioTranscription(BaseTask):  # emitted by Master
 
 
 class RealtimeAudioTranscription(BaseTask):  # emitted by Master
-    """True incremental STT task fed through local non-event media ingress."""
+    """True incremental STT task fed through node-addressed non-event ingress."""
 
     command_id: CommandId
     owner_node: NodeId

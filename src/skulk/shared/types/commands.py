@@ -67,7 +67,7 @@ class AudioTranscription(BaseCommand):
 
 
 class RealtimeAudioTranscription(BaseCommand):
-    """Open a true incremental STT session on one mounted local instance."""
+    """Open a true incremental STT session on one mounted instance."""
 
     task_params: RealtimeAudioTranscriptionTaskParams
     target_instance_id: InstanceId

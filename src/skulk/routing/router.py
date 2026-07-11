@@ -1,6 +1,6 @@
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from copy import copy
 from dataclasses import dataclass
 from itertools import count
@@ -46,10 +46,12 @@ from .provider_streams import (
     ProviderStreamPacket,
     provider_stream_rejection_packets,
 )
+from .realtime_audio import RealtimeAudioPacket
 from .topics import (
     CONNECTION_MESSAGES,
     DATA,
     PROVIDER_DATA,
+    REALTIME_AUDIO,
     PublishPolicy,
     TypedTopic,
 )
@@ -327,6 +329,7 @@ class Router:
         return self._zenoh is not None and topic in (
             DATA.topic,
             PROVIDER_DATA.topic,
+            REALTIME_AUDIO.topic,
         )
 
     async def register_topic[T: CamelCaseModel](self, topic: TypedTopic[T]):
@@ -556,6 +559,16 @@ class Router:
         rejected_streams: set[tuple[str, str, str]] = set()
         rejected_stream_order: deque[tuple[str, str, str]] = deque()
         rejection_slots = Semaphore(_ZENOH_DATA_MAX_REJECTION_TASKS)
+
+        def reject_stream(stream: tuple[str, str, str]) -> None:
+            rejected_streams.add(stream)
+            rejected_stream_order.append(stream)
+            while (
+                len(rejected_stream_order)
+                > _ZENOH_DATA_REJECTED_STREAM_TOMBSTONES
+            ):
+                rejected_streams.discard(rejected_stream_order.popleft())
+
         async with TaskGroup() as task_group:
             with self._zenoh_out_recv as items:
                 async for packet in items:
@@ -578,7 +591,7 @@ class Router:
                         )
                         self._data_plane_egress_observer.record_dropped(owner)
                         continue
-                    # DATA and PROVIDER_DATA share this bounded dispatcher, but
+                    # Data-plane topics share this bounded dispatcher, but
                     # their independently generated ids occupy separate
                     # protocol namespaces. Topic identity must therefore be
                     # part of every queue and rejection key.
@@ -596,15 +609,7 @@ class Router:
                             >= _ZENOH_DATA_MAX_STREAMS_PER_OWNER
                         ):
                             self._data_plane_egress_observer.record_dropped(owner)
-                            rejected_streams.add(stream)
-                            rejected_stream_order.append(stream)
-                            while (
-                                len(rejected_stream_order)
-                                > _ZENOH_DATA_REJECTED_STREAM_TOMBSTONES
-                            ):
-                                rejected_streams.discard(
-                                    rejected_stream_order.popleft()
-                                )
+                            reject_stream(stream)
                             logger.warning(
                                 "Zenoh DATA stream admission full for owner; "
                                 "rejecting the affected command"
@@ -639,6 +644,7 @@ class Router:
                             receiver,
                             stream_senders,
                             owner_stream_counts,
+                            reject_stream,
                         )
                     try:
                         sender.send_nowait(packet)
@@ -648,8 +654,9 @@ class Router:
                             "Zenoh DATA command queue full; dropping frame so "
                             "unrelated streams remain progressive"
                         )
-                        if packet.is_terminal:
+                        if packet.is_terminal or packet.topic == REALTIME_AUDIO.topic:
                             sender.close()
+                            reject_stream(stream)
                             try:
                                 rejection_slots.acquire_nowait()
                             except WouldBlock:
@@ -686,6 +693,8 @@ class Router:
                 rejection_topic = cast(TypedTopic[CamelCaseModel], DATA)
             elif packet.topic == PROVIDER_DATA.topic:
                 rejection_topic = cast(TypedTopic[CamelCaseModel], PROVIDER_DATA)
+            elif packet.topic == REALTIME_AUDIO.topic:
+                rejection_topic = cast(TypedTopic[CamelCaseModel], REALTIME_AUDIO)
             else:
                 return
             original = rejection_topic.deserialize(packet.data)
@@ -723,16 +732,37 @@ class Router:
                         include_started=include_started,
                     )
                 )
+            elif isinstance(original, RealtimeAudioPacket):
+                rejection_frames = [
+                    original.transport_failure(
+                        "realtime audio transport rejected the command because "
+                        "remote stream capacity is exhausted"
+                    )
+                ]
             else:
                 return
             for frame in rejection_frames:
                 data = rejection_topic.serialize(frame)
+                rejection_owner = (
+                    rejection_topic.routing_key(frame)
+                    if rejection_topic.routing_key is not None
+                    else owner
+                )
+                if rejection_owner is None:
+                    continue
                 started_at = time.monotonic()
                 try:
-                    with fail_after(_ZENOH_DATA_PUBLISH_TIMEOUT_SECONDS):
-                        await self._zenoh.zenoh_publish(
-                            f"{packet.topic}/{owner}", data
-                        )
+                    rejection_router = self.topic_routers.get(packet.topic)
+                    if (
+                        rejection_owner == self._node_id
+                        and rejection_router is not None
+                    ):
+                        await rejection_router.publish_bytes(data, None)
+                    else:
+                        with fail_after(_ZENOH_DATA_PUBLISH_TIMEOUT_SECONDS):
+                            await self._zenoh.zenoh_publish(
+                                f"{packet.topic}/{rejection_owner}", data
+                            )
                 except get_cancelled_exc_class():
                     raise
                 except Exception as exception:
@@ -764,6 +794,7 @@ class Router:
         receiver: Receiver[OutboundPacket],
         stream_senders: dict[tuple[str, str, str], Sender[OutboundPacket]],
         owner_stream_counts: dict[str, int],
+        reject_stream: Callable[[tuple[str, str, str]], None],
     ) -> None:
         """Publish one command independently so blocked owners cannot stall peers."""
 
@@ -789,6 +820,17 @@ class Router:
                             "Zenoh DATA command publish failed; dropping frame "
                             "without blocking unrelated streams"
                         )
+                        if packet.topic == REALTIME_AUDIO.topic:
+                            reject_stream(stream)
+                            rejection_slot = Semaphore(1)
+                            rejection_slot.acquire_nowait()
+                            await self._publish_zenoh_data_rejection(
+                                packet,
+                                owner,
+                                rejection_slot,
+                                False,
+                            )
+                            return
                     else:
                         self._data_plane_egress_observer.record_published(
                             owner,

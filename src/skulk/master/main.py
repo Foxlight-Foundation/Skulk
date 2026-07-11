@@ -373,6 +373,7 @@ class Master:
         self._started_monotonic = time.monotonic()
         self._tg: TaskGroup = TaskGroup()
         self.command_task_mapping: dict[CommandId, TaskId] = {}
+        self._realtime_instance_by_command: dict[CommandId, InstanceId] = {}
         self.command_receiver = command_receiver
         self.local_event_receiver = local_event_receiver
         self.global_event_sender = global_event_sender
@@ -928,14 +929,19 @@ class Master:
                                     "Realtime STT target instance model does not "
                                     f"match {command.task_params.model}"
                                 )
-                            if (
-                                command.owner_node
-                                not in instance.shard_assignments.node_to_runner
-                            ):
+                            if len(instance.shard_assignments.node_to_runner) != 1:
                                 raise ValueError(
-                                    "Realtime STT owner node does not host the "
-                                    f"target instance {command.target_instance_id}"
+                                    "Realtime STT requires a single-host target "
+                                    f"instance, got {command.target_instance_id}"
                                 )
+                            instance_busy = command.target_instance_id in (
+                                self._realtime_instance_by_command.values()
+                            ) or any(
+                                task.instance_id == command.target_instance_id
+                                and task.task_status
+                                in (TaskStatus.Pending, TaskStatus.Running)
+                                for task in self.state.tasks.values()
+                            )
 
                             task_id = TaskId()
                             generated_events.append(
@@ -946,7 +952,11 @@ class Master:
                                         command_id=command.command_id,
                                         owner_node=command.owner_node,
                                         instance_id=command.target_instance_id,
-                                        task_status=TaskStatus.Pending,
+                                        task_status=(
+                                            TaskStatus.Failed
+                                            if instance_busy
+                                            else TaskStatus.Pending
+                                        ),
                                         task_params=command.task_params,
                                         # Realtime STT does not emit trace
                                         # sessions yet. Do not register ranks
@@ -956,6 +966,21 @@ class Master:
                                 )
                             )
                             self.command_task_mapping[command.command_id] = task_id
+                            if instance_busy:
+                                generated_events.append(
+                                    TaskFailed(
+                                        task_id=task_id,
+                                        error_type="instance_busy",
+                                        error_message=(
+                                            "Realtime STT target instance is already "
+                                            "reserved"
+                                        ),
+                                    )
+                                )
+                            else:
+                                self._realtime_instance_by_command[
+                                    command.command_id
+                                ] = command.target_instance_id
                         case SetTracingEnabled():
                             generated_events.append(
                                 TracingStateChanged(enabled=command.enabled)
@@ -1212,6 +1237,9 @@ class Master:
                                 )
                             )
                         case TaskCancelled():
+                            self._realtime_instance_by_command.pop(
+                                command.cancelled_command_id, None
+                            )
                             if (
                                 task_id := self.command_task_mapping.get(
                                     command.cancelled_command_id
@@ -1228,6 +1256,9 @@ class Master:
                                     f"Nonexistent command {command.cancelled_command_id} cancelled"
                                 )
                         case TaskFinished():
+                            self._realtime_instance_by_command.pop(
+                                command.finished_command_id, None
+                            )
                             if (
                                 task_id := self.command_task_mapping.pop(
                                     command.finished_command_id, None
@@ -1499,6 +1530,23 @@ class Master:
                         ):
                             if task_id == event.task_id:
                                 self.command_task_mapping.pop(command_id, None)
+                                self._realtime_instance_by_command.pop(
+                                    command_id, None
+                                )
+
+                    if isinstance(event, TaskFailed) or (
+                        isinstance(event, TaskStatusUpdated)
+                        and event.task_status
+                        not in (TaskStatus.Pending, TaskStatus.Running)
+                    ):
+                        for command_id, task_id in self.command_task_mapping.items():
+                            if task_id == event.task_id:
+                                # Terminal task state is authoritative even if
+                                # the owning API disappears before TaskFinished.
+                                # Preserve command mapping for eventual deletion.
+                                self._realtime_instance_by_command.pop(
+                                    command_id, None
+                                )
 
                     # Refuse to index task-lifecycle events that are state
                     # no-ops (the task is already gone). Without this cap a

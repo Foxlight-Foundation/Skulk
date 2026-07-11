@@ -373,9 +373,10 @@ class Node:
         keypair = get_node_id_keypair()
         node_id = NodeId(keypair.to_node_id())
         session_id = SessionId(master_node_id=node_id, election_clock=0)
-        # Zenoh data plane (#279 follow-on). The DATA topic (per-token output)
-        # rides a Zenoh peer session instead of gossipsub; all other planes stay
-        # on libp2p. Endpoints are per-node (multicast off), so they come from
+        # Zenoh data plane (#279 follow-on). Node-addressed model output,
+        # provider media, and realtime PCM ingress ride a Zenoh peer session;
+        # all other planes stay on libp2p. Endpoints are per-node (multicast
+        # off), so they come from
         # the environment, not the gossip-synced config. Soft default-on (#315):
         # Zenoh is the default WHEN configured (SKULK_ZENOH_LISTEN set) and a bare
         # node with no Zenoh config falls back to gossipsub rather than crashing
@@ -432,8 +433,8 @@ class Node:
                     f"prefer a specific private IP on a shared network (#308)."
                 )
             logger.warning(
-                f"Zenoh DATA plane ENABLED: generation "
-                f"output is served over Zenoh on {_zenoh_listen}, namespace"
+                f"Zenoh DATA plane ENABLED: model and provider media "
+                f"use Zenoh on {_zenoh_listen}, namespace"
                 f"-isolated (fingerprint {_namespace_fingerprint(_zenoh_namespace)}; "
                 f"{_LIBP2P_NAMESPACE_ENV_VAR} "
                 f"{'set' if _ns_override_set else 'unset, using default'}). There "
@@ -459,6 +460,7 @@ class Node:
         await router.register_topic(topics.TELEMETRY)
         await router.register_topic(topics.DATA)
         await router.register_topic(topics.PROVIDER_DATA)
+        await router.register_topic(topics.REALTIME_AUDIO)
         telemetry_view = TelemetryView()
         realtime_audio_sender, realtime_audio_receiver = channel[
             RealtimeAudioInputFrame
@@ -564,6 +566,10 @@ class Node:
                 data_receiver=router.receiver(topics.DATA),
                 provider_stream_sender=router.sender(topics.PROVIDER_DATA),
                 provider_stream_receiver=router.receiver(topics.PROVIDER_DATA),
+                realtime_audio_packet_sender=router.sender(topics.REALTIME_AUDIO),
+                realtime_audio_packet_receiver=router.receiver(
+                    topics.REALTIME_AUDIO
+                ),
                 realtime_audio_sender=(
                     None if args.no_worker else realtime_audio_sender
                 ),
@@ -605,6 +611,9 @@ class Node:
                 telemetry_view=telemetry_view,
                 data_sender=router.sender(topics.DATA),
                 realtime_audio_receiver=realtime_audio_receiver,
+                realtime_audio_packet_receiver=router.receiver(
+                    topics.REALTIME_AUDIO
+                ),
                 store_client=worker_store_client,
                 staging_config=worker_staging_cfg,
             )
@@ -1004,6 +1013,9 @@ class Node:
                             # plane — which the API no longer routes (#279 Phase
                             # 2a) — and every completion stream hangs forever.
                             data_sender=self.router.sender(topics.DATA),
+                            realtime_audio_packet_receiver=self.router.receiver(
+                                topics.REALTIME_AUDIO
+                            ),
                         )
                         self._tg.start_soon(self.worker.run)
                         if self.api is not None:

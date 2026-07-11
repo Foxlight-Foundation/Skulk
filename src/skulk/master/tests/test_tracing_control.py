@@ -25,6 +25,8 @@ from skulk.shared.types.commands import (
     RealtimeAudioTranscription,
     SetTracingEnabled,
     SpeechSynthesis,
+    TaskCancelled,
+    TaskFinished,
     TextGeneration,
 )
 from skulk.shared.types.common import CommandId, Host, NodeId, SessionId, SystemId
@@ -33,6 +35,9 @@ from skulk.shared.types.events import (
     GlobalForwarderEvent,
     LocalForwarderEvent,
     TaskCreated,
+    TaskDeleted,
+    TaskFailed,
+    TaskStatusUpdated,
     TracingStateChanged,
 )
 from skulk.shared.types.memory import Memory
@@ -42,6 +47,7 @@ from skulk.shared.types.tasks import (
     RealtimeAudioTranscription as RealtimeAudioTranscriptionTask,
 )
 from skulk.shared.types.tasks import SpeechSynthesis as SpeechSynthesisTask
+from skulk.shared.types.tasks import TaskStatus
 from skulk.shared.types.tasks import TextGeneration as TextGenerationTask
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
@@ -365,8 +371,8 @@ async def test_master_pins_realtime_transcription_without_trace_expectation() ->
 
 
 @pytest.mark.asyncio
-async def test_realtime_stt_rejects_target_not_hosted_by_owner_node() -> None:
-    """Realtime PCM ingress cannot target a runner on a different node."""
+async def test_realtime_stt_accepts_remote_owner_for_single_host_target() -> None:
+    """The owning API may differ from the node hosting the speech runner."""
 
     master, node_id, command_sender, event_receiver = _build_master()
     instance = _single_node_transcription_instance(node_id)
@@ -390,9 +396,161 @@ async def test_realtime_stt_rejects_target_not_hosted_by_owner_node() -> None:
         await command_sender.send(
             ForwarderCommand(origin=SystemId("API"), command=command)
         )
-        with anyio.move_on_after(0.1):
-            event = await event_receiver.receive()
+        event = await event_receiver.receive()
         task_group.cancel_scope.cancel()
 
-    assert event is None
-    assert command.command_id not in master.command_task_mapping
+    assert isinstance(event, TaskCreated)
+    assert isinstance(event.task, RealtimeAudioTranscriptionTask)
+    assert event.task.owner_node == NodeId("different-api-node")
+    assert event.task.instance_id == instance.instance_id
+
+
+@pytest.mark.asyncio
+async def test_realtime_stt_master_reserves_before_task_event_round_trip() -> None:
+    """Two API nodes cannot race onto one runner before State applies TaskCreated."""
+
+    master, node_id, command_sender, event_receiver = _build_master()
+    instance = _single_node_transcription_instance(node_id)
+    master.state = master.state.model_copy(
+        update={"instances": {instance.instance_id: instance}}
+    )
+
+    def command(command_id: str, owner: str) -> RealtimeAudioTranscription:
+        return RealtimeAudioTranscription(
+            command_id=CommandId(command_id),
+            owner_node=NodeId(owner),
+            target_instance_id=instance.instance_id,
+            task_params=RealtimeAudioTranscriptionTaskParams(
+                model=instance.shard_assignments.model_id,
+                input_sample_rate=16000,
+                transcription_delay_ms=480,
+            ),
+        )
+
+    first = command("first-realtime", "api-one")
+    second = command("second-realtime", "api-two")
+    first_event: Event | None = None
+    second_created: Event | None = None
+    second_failed: Event | None = None
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(master._command_processor)  # pyright: ignore[reportPrivateUsage]
+        await command_sender.send(ForwarderCommand(origin=SystemId("API"), command=first))
+        first_event = await event_receiver.receive()
+        await command_sender.send(
+            ForwarderCommand(origin=SystemId("API"), command=second)
+        )
+        second_created = await event_receiver.receive()
+        second_failed = await event_receiver.receive()
+        task_group.cancel_scope.cancel()
+
+    assert isinstance(first_event, TaskCreated)
+    assert isinstance(second_created, TaskCreated)
+    assert second_created.task.task_status is TaskStatus.Failed
+    assert isinstance(second_failed, TaskFailed)
+    assert second_failed.task_id == second_created.task_id
+    assert second_failed.error_type == "instance_busy"
+    assert first.command_id in master.command_task_mapping
+    assert second.command_id in master.command_task_mapping
+
+
+@pytest.mark.asyncio
+async def test_realtime_stt_reservation_releases_on_task_finished() -> None:
+    """Natural completion allows the next command to reserve the runner."""
+
+    master, node_id, command_sender, event_receiver = _build_master()
+    instance = _single_node_transcription_instance(node_id)
+    master.state = master.state.model_copy(
+        update={"instances": {instance.instance_id: instance}}
+    )
+
+    def command(command_id: str) -> RealtimeAudioTranscription:
+        return RealtimeAudioTranscription(
+            command_id=CommandId(command_id),
+            owner_node=NodeId("remote-api"),
+            target_instance_id=instance.instance_id,
+            task_params=RealtimeAudioTranscriptionTaskParams(
+                model=instance.shard_assignments.model_id,
+                input_sample_rate=16000,
+                transcription_delay_ms=480,
+            ),
+        )
+
+    first = command("first-finished-realtime")
+    second = command("second-after-finish")
+    first_created: Event | None = None
+    first_deleted: Event | None = None
+    second_created: Event | None = None
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(master._command_processor)  # pyright: ignore[reportPrivateUsage]
+        await command_sender.send(ForwarderCommand(origin=SystemId("API"), command=first))
+        first_created = await event_receiver.receive()
+        await command_sender.send(
+            ForwarderCommand(
+                origin=SystemId("API"),
+                command=TaskFinished(finished_command_id=first.command_id),
+            )
+        )
+        first_deleted = await event_receiver.receive()
+        await command_sender.send(
+            ForwarderCommand(origin=SystemId("API"), command=second)
+        )
+        second_created = await event_receiver.receive()
+        task_group.cancel_scope.cancel()
+
+    assert isinstance(first_created, TaskCreated)
+    assert isinstance(first_deleted, TaskDeleted)
+    assert isinstance(second_created, TaskCreated)
+    assert isinstance(second_created.task, RealtimeAudioTranscriptionTask)
+    assert second_created.task.command_id == second.command_id
+
+
+@pytest.mark.asyncio
+async def test_realtime_stt_reservation_releases_on_task_cancelled() -> None:
+    """Cancellation before runner dispatch must release master admission."""
+
+    master, node_id, command_sender, event_receiver = _build_master()
+    instance = _single_node_transcription_instance(node_id)
+    master.state = master.state.model_copy(
+        update={"instances": {instance.instance_id: instance}}
+    )
+
+    def command(command_id: str) -> RealtimeAudioTranscription:
+        return RealtimeAudioTranscription(
+            command_id=CommandId(command_id),
+            owner_node=NodeId("remote-api"),
+            target_instance_id=instance.instance_id,
+            task_params=RealtimeAudioTranscriptionTaskParams(
+                model=instance.shard_assignments.model_id,
+                input_sample_rate=16000,
+                transcription_delay_ms=480,
+            ),
+        )
+
+    first = command("first-cancelled-realtime")
+    second = command("second-after-cancel")
+    first_created: Event | None = None
+    first_cancelled: Event | None = None
+    second_created: Event | None = None
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(master._command_processor)  # pyright: ignore[reportPrivateUsage]
+        await command_sender.send(ForwarderCommand(origin=SystemId("API"), command=first))
+        first_created = await event_receiver.receive()
+        await command_sender.send(
+            ForwarderCommand(
+                origin=SystemId("API"),
+                command=TaskCancelled(cancelled_command_id=first.command_id),
+            )
+        )
+        first_cancelled = await event_receiver.receive()
+        await command_sender.send(
+            ForwarderCommand(origin=SystemId("API"), command=second)
+        )
+        second_created = await event_receiver.receive()
+        task_group.cancel_scope.cancel()
+
+    assert isinstance(first_created, TaskCreated)
+    assert isinstance(first_cancelled, TaskStatusUpdated)
+    assert first_cancelled.task_status is TaskStatus.Cancelled
+    assert isinstance(second_created, TaskCreated)
+    assert isinstance(second_created.task, RealtimeAudioTranscriptionTask)
+    assert second_created.task.command_id == second.command_id
