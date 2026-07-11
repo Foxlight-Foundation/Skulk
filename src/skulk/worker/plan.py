@@ -14,6 +14,7 @@ from skulk.shared.types.tasks import (
     ImageEdits,
     ImageGeneration,
     LoadModel,
+    RealtimeAudioTranscription,
     Shutdown,
     SpeechSynthesis,
     StartWarmup,
@@ -387,6 +388,7 @@ def _pending_tasks(
                 TextEmbedding,
                 SpeechSynthesis,
                 AudioTranscription,
+                RealtimeAudioTranscription,
             ),
         ):
             continue

@@ -770,6 +770,8 @@ class Worker:
                 runner = self._realtime_runner_by_command.get(frame.command_id)
                 if runner is not None:
                     await runner.send_realtime_audio(frame)
+                    if frame.kind != "chunk":
+                        self._finish_realtime_command(frame.command_id)
                     continue
                 pending = self._realtime_audio_pending.setdefault(
                     frame.command_id, []
@@ -1381,13 +1383,28 @@ class Worker:
             runner = self.runners[runner_id]
             if isinstance(task, RealtimeAudioTranscription):
                 command_id = task.command_id
-                self._realtime_runner_by_command[command_id] = runner
-                pending = self._realtime_audio_pending.pop(command_id, [])
-                self._realtime_audio_pending_bytes.pop(command_id, None)
                 try:
-                    for frame in pending:
-                        await runner.send_realtime_audio(frame)
                     await runner.start_task(task)
+                    # The runner acknowledges before entering its receive loop.
+                    # Flush while ingress still buffers, then publish the direct
+                    # route only once no older frame remains. This preserves
+                    # order and prevents a full IPC queue from blocking task
+                    # dispatch before the runner can drain it.
+                    while command_id not in self._realtime_finished_commands:
+                        pending = self._realtime_audio_pending.pop(command_id, [])
+                        self._realtime_audio_pending_bytes.pop(command_id, None)
+                        if not pending:
+                            self._realtime_runner_by_command[command_id] = runner
+                            break
+                        terminal_forwarded = False
+                        for frame in pending:
+                            await runner.send_realtime_audio(frame)
+                            if frame.kind != "chunk":
+                                terminal_forwarded = True
+                                break
+                        if terminal_forwarded:
+                            self._finish_realtime_command(command_id)
+                            break
                 except BaseException:
                     self._finish_realtime_command(command_id)
                     raise

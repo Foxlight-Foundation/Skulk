@@ -598,6 +598,7 @@ class RunnerSupervisor:
                                 TextEmbedding,
                                 SpeechSynthesis,
                                 AudioTranscription,
+                                RealtimeAudioTranscription,
                             ),
                         ):
                             await self._finish_data_stream(
