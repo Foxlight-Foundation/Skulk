@@ -17,6 +17,7 @@ small :class:`NvmlLike` surface so tests inject a fake and never need a GPU.
 
 from __future__ import annotations
 
+from functools import cache
 from typing import Protocol, cast, final
 
 from loguru import logger
@@ -52,8 +53,14 @@ def _as_nvml(module: object) -> NvmlLike:
     return cast(NvmlLike, module)
 
 
+@cache
 def load_nvml() -> NvmlLike | None:
     """Import and initialize NVML; ``None`` when absent or driverless.
+
+    Memoized (including the ``None`` case): callers like the worker shard-fit
+    guard run per runner spawn, and NVML should initialize at most once per
+    process. Installing pynvml later requires a process restart to notice,
+    the same contract as any import-time capability.
 
     Absence is the normal case on every non-NVIDIA node and is logged at
     debug only; an installed-but-failing NVML (driver mismatch) logs a
