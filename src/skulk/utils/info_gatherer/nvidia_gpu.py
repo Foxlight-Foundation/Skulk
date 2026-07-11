@@ -103,9 +103,15 @@ def read_accelerator_metrics(nvml: NvmlLike) -> AcceleratorMetrics:
     Every field degrades independently to its unmeasured form: one failing
     query (common across driver generations) must not blank the rest.
     Multi-GPU pods report device 0 for now, matching the single-accelerator
-    shape of the AMD collector.
+    shape of the AMD collector. A failing handle acquisition degrades to a
+    vendor-stamped all-unmeasured profile instead of raising, keeping the
+    per-field promise at the device level too.
     """
-    handle = nvml.nvmlDeviceGetHandleByIndex(0)
+    try:
+        handle = nvml.nvmlDeviceGetHandleByIndex(0)
+    except Exception as exc:  # noqa: BLE001 - device-level degradation
+        logger.debug(f"NVML handle acquisition failed: {exc}")
+        return AcceleratorMetrics(vendor="nvidia")
 
     name = "Unknown"
     try:

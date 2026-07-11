@@ -261,6 +261,8 @@ def _local_usable_vram() -> Memory | None:
       GPU's GTT-mapped system RAM counts toward the pool. The live GPU-wireable
       snapshot matches the ceiling the master derives from gossiped telemetry.
 
+    NVIDIA nodes (no amdgpu sysfs, NVML present) take the same discrete-GPU
+    path from NVML readings; NVIDIA exposes no UMA/GTT signature here.
     Returns ``None`` on Apple unified-memory nodes (no amdgpu device), which keep
     the system-RAM path. The master is the backend authority that decides a shard
     belongs on this GPU node in the first place.
@@ -269,10 +271,30 @@ def _local_usable_vram() -> Memory | None:
         find_amd_gpu_device,
         read_accelerator_metrics,
     )
+    from skulk.utils.info_gatherer.nvidia_gpu import (
+        has_nvidia_gpu,
+        load_nvml,
+    )
+    from skulk.utils.info_gatherer.nvidia_gpu import (
+        read_accelerator_metrics as read_nvidia_accelerator_metrics,
+    )
 
     device = find_amd_gpu_device()
     if device is None:
-        return None
+        # NVIDIA fallthrough (rented CUDA nodes): same discrete-VRAM sizing so
+        # the worker's last-minute guard agrees with the master's admission.
+        # NVIDIA reports no UMA/GTT signature, so the discrete path applies.
+        nvml = load_nvml()
+        if nvml is None or not has_nvidia_gpu(nvml):
+            return None
+        nvidia = read_nvidia_accelerator_metrics(nvml)
+        if not nvidia.vram_total_bytes or nvidia.vram_total_bytes <= 0:
+            return None
+        nvidia_available = max(
+            0, nvidia.vram_total_bytes - (nvidia.vram_used_bytes or 0)
+        )
+        nvidia_ceiling = int(nvidia.vram_total_bytes * GPU_VRAM_WORKING_SET_FRACTION)
+        return Memory.from_bytes(min(nvidia_available, nvidia_ceiling))
     accelerator = read_accelerator_metrics(device)
     total = accelerator.vram_total_bytes
     if not total or total <= 0:

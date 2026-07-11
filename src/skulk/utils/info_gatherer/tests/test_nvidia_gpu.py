@@ -42,6 +42,7 @@ class _FakeNvml:
         return 1
 
     def nvmlDeviceGetHandleByIndex(self, index: int) -> object:  # noqa: N802
+        self._maybe_break("handle")
         return object()
 
     def nvmlDeviceGetName(self, handle: object) -> str | bytes:  # noqa: N802
@@ -123,6 +124,13 @@ def test_system_profile_fills_legacy_scalars_in_codebase_units() -> None:
     assert degraded.gpu_usage == 0.0
     assert degraded.temp == 0.0
     assert degraded.sys_power == 0.0
+
+
+def test_handle_failure_degrades_to_vendor_stamped_profile() -> None:
+    metrics = read_accelerator_metrics(_FakeNvml(broken={"handle"}))
+    assert metrics.vendor == "nvidia"
+    assert metrics.name == "Unknown"
+    assert metrics.vram_total_bytes is None
 
 
 def test_has_nvidia_gpu() -> None:

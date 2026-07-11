@@ -80,7 +80,14 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   command -v uv >/dev/null 2>&1 && log "uv: $(uv --version)" || { warn "uv missing"; MISSING=1; }
   python3 -c "import pynvml, sys; pynvml.nvmlInit(); print('NVML OK')" 2>/dev/null \
     && log "NVML binding OK" || { warn "pynvml missing or NVML init failed"; MISSING=1; }
-  python3 -c "import llama_cpp; print('llama_cpp', llama_cpp.__version__)" 2>/dev/null \
+  # The documented install puts llama-cpp-python in the Skulk venv; check
+  # there when run from a checkout, falling back to the system python.
+  if [ -f "pyproject.toml" ] && command -v uv >/dev/null 2>&1; then
+    LLAMA_CHECK_CMD=(uv run python -c "import llama_cpp; print(llama_cpp.__version__)")
+  else
+    LLAMA_CHECK_CMD=(python3 -c "import llama_cpp; print(llama_cpp.__version__)")
+  fi
+  "${LLAMA_CHECK_CMD[@]}" >/dev/null 2>&1 \
     && log "llama-cpp-python present" || { warn "llama-cpp-python missing"; MISSING=1; }
   [ -x "${LLAMA_CPP_DIR}/build/bin/llama-server" ] \
     && log "llama-server present at ${LLAMA_CPP_DIR}/build/bin/llama-server" \
@@ -120,8 +127,9 @@ if [ "$WITH_LLAMA_SERVER" -eq 1 ]; then
   fi
   cmake -S "$LLAMA_CPP_DIR" -B "$LLAMA_CPP_DIR/build" \
     -DGGML_CUDA=ON -DGGML_RPC=ON -DCMAKE_BUILD_TYPE=Release >/dev/null
-  cmake --build "$LLAMA_CPP_DIR/build" --target llama-server rpc-server -j"$(nproc)" >/dev/null
+  cmake --build "$LLAMA_CPP_DIR/build" --target llama-server ggml-rpc-server -j"$(nproc)" >/dev/null
   log "llama-server: ${LLAMA_CPP_DIR}/build/bin/llama-server"
+  log "ggml-rpc-server (pooling donor): ${LLAMA_CPP_DIR}/build/bin/ggml-rpc-server"
   log "set in the node env: SKULK_LLAMA_SERVER_BIN=${LLAMA_CPP_DIR}/build/bin/llama-server"
 fi
 
