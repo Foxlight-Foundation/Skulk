@@ -6,6 +6,12 @@ import type { ChatSpeechModelOption, ChatUploadedFile } from '../../types/chat';
 import { ChatAttachments } from './ChatAttachments';
 import { Button } from '../common/Button';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import {
+  finalizeRealtimeCaptureStartup,
+  RealtimePcmCapture,
+  RealtimeTranscriptionSocket,
+  selectTranscriptionCaptureMode,
+} from '../../audio/realtimeTranscription';
 
 export interface ChatFormProps {
   onSend: (message: string, files: ChatUploadedFile[]) => void;
@@ -34,6 +40,8 @@ export interface ChatFormProps {
   canSendMessages?: boolean;
   /** Mounted STT models available for browser microphone transcription. */
   transcriptionModels?: ChatSpeechModelOption[];
+  /** Whether the local API node currently advertises realtime STT service. */
+  realtimeTranscriptionAvailable?: boolean;
   /** Mounted TTS models available for browser playback. */
   speechModels?: ChatSpeechModelOption[];
   /** Selected STT model id, persisted by the chat slice. */
@@ -376,6 +384,7 @@ export function ChatForm({
   supportsImageAttachments = false,
   canSendMessages = true,
   transcriptionModels = [],
+  realtimeTranscriptionAvailable = false,
   speechModels = [],
   selectedTranscriptionModelId = null,
   selectedSpeechModelId = null,
@@ -396,6 +405,7 @@ export function ChatForm({
   const [message, setMessage] = useState('');
   const [files, setFiles] = useState<ChatUploadedFile[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [isStartingRecording, setIsStartingRecording] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
@@ -405,33 +415,61 @@ export function ChatForm({
   const filesRef = useRef<ChatUploadedFile[]>([]);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const realtimeSocketRef = useRef<RealtimeTranscriptionSocket | null>(null);
+  const realtimeCommitSocketRef = useRef<RealtimeTranscriptionSocket | null>(null);
+  const realtimeCaptureRef = useRef<RealtimePcmCapture | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingCancelledRef = useRef(false);
+  const recordingStartingRef = useRef(false);
+  const componentMountedRef = useRef(true);
   const recordingStartedAtRef = useRef(0);
   const recordingTimerRef = useRef<number | null>(null);
 
   const canSend = canSendMessages && (message.trim().length > 0 || files.length > 0);
   const inputPlaceholder = placeholder ?? t('chat.form.placeholder', 'Type a message...');
   const selectedTranscriptionId = selectedTranscriptionModelId ?? transcriptionModels[0]?.modelId ?? null;
+  const selectedTranscriptionModel = transcriptionModels.find(
+    (model) => model.modelId === selectedTranscriptionId,
+  );
   const selectedSpeechId = selectedSpeechModelId ?? speechModels[0]?.modelId ?? null;
   const secureRecordingContext = typeof window === 'undefined'
     || window.isSecureContext
     || isLocalBrowserHostname(window.location.hostname);
-  const browserRecordingAvailable = secureRecordingContext
+  const microphoneAvailable = secureRecordingContext
     && typeof navigator !== 'undefined'
-    && Boolean(navigator.mediaDevices?.getUserMedia)
-    && typeof MediaRecorder !== 'undefined';
+    && Boolean(navigator.mediaDevices?.getUserMedia);
+  const useRealtimeTranscription = Boolean(
+    realtimeTranscriptionAvailable && selectedTranscriptionModel?.supportsRealtime,
+  );
+  const realtimeCaptureAvailable = microphoneAvailable
+    && typeof AudioContext !== 'undefined'
+    && typeof AudioWorkletNode !== 'undefined';
+  const batchCaptureAvailable = microphoneAvailable
+    && typeof MediaRecorder !== 'undefined'
+    && Boolean(onTranscribeAudio);
+  const captureMode = selectTranscriptionCaptureMode(
+    useRealtimeTranscription,
+    realtimeCaptureAvailable,
+    batchCaptureAvailable,
+  );
+  const browserRecordingAvailable = captureMode !== null;
+  const useRealtimeCapture = captureMode === 'realtime';
   const recordingUnavailableReason = !secureRecordingContext
     ? t('chat.form.voiceErrors.secureContextRequired', 'Microphone requires HTTPS or localhost.')
     : !browserRecordingAvailable
       ? t('chat.form.voiceErrors.unsupportedRecording', 'Browser audio recording is unavailable.')
       : null;
   const speechReady = Boolean(selectedSpeechId && onSpeakText);
-  const transcriptionReady = Boolean(selectedTranscriptionId && onTranscribeAudio);
-  const canSpeakDraft = speechReady && message.trim().length > 0 && !isRecording && !isTranscribing;
+  const transcriptionReady = Boolean(
+    selectedTranscriptionId && browserRecordingAvailable,
+  );
+  const canSpeakDraft = speechReady && message.trim().length > 0
+    && !isStartingRecording && !isRecording && !isTranscribing;
   const displayVoiceError = mediaError ?? voiceError;
   const showVoiceControls = transcriptionModels.length > 0 || speechModels.length > 0 || Boolean(displayVoiceError);
-  const startRecordingLabel = t('chat.form.startRecording', 'Start recording');
+  const startRecordingLabel = useRealtimeCapture
+    ? t('chat.form.startRealtimeTranscription', 'Start realtime transcription')
+    : t('chat.form.startRecording', 'Start recording');
   const recordingButtonLabel = transcriptionReady && recordingUnavailableReason
     ? `${startRecordingLabel}. ${recordingUnavailableReason}`
     : startRecordingLabel;
@@ -460,8 +498,10 @@ export function ChatForm({
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
     mediaRecorderRef.current = null;
-    setIsRecording(false);
-    setRecordingSeconds(0);
+    if (componentMountedRef.current) {
+      setIsRecording(false);
+      setRecordingSeconds(0);
+    }
   }, [stopRecordingTimer]);
 
   const appendTranscript = useCallback((transcript: string) => {
@@ -475,7 +515,12 @@ export function ChatForm({
   }, []);
 
   const startRecording = useCallback(async () => {
-    if (!transcriptionReady || isLoading || isTranscribing) return;
+    if (
+      !transcriptionReady
+      || isLoading
+      || isTranscribing
+      || recordingStartingRef.current
+    ) return;
     if (!secureRecordingContext) {
       setMediaError(t('chat.form.voiceErrors.secureContextRequired', 'Microphone requires HTTPS or localhost.'));
       return;
@@ -483,15 +528,91 @@ export function ChatForm({
     if (
       typeof navigator === 'undefined'
       || !navigator.mediaDevices?.getUserMedia
-      || typeof MediaRecorder === 'undefined'
+      || captureMode === null
     ) {
       setMediaError(t('chat.form.voiceErrors.unsupportedRecording', 'Browser audio recording is unavailable.'));
       return;
     }
 
+    recordingStartingRef.current = true;
+    setIsStartingRecording(true);
     try {
       setMediaError(null);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!componentMountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      mediaStreamRef.current = stream;
+      if (useRealtimeCapture && selectedTranscriptionId) {
+        let capture: RealtimePcmCapture | null = null;
+        const socket = new RealtimeTranscriptionSocket({
+          modelId: selectedTranscriptionId,
+          onError: (error) => {
+            if (realtimeSocketRef.current !== socket) return;
+            realtimeSocketRef.current = null;
+            realtimeCaptureRef.current = null;
+            mediaStreamRef.current = null;
+            stopRecordingTimer();
+            setIsRecording(false);
+            setRecordingSeconds(0);
+            setMediaError(error.message);
+            stream.getTracks().forEach((track) => track.stop());
+            void capture?.stop();
+          },
+        });
+        realtimeSocketRef.current = socket;
+        try {
+          await socket.connect();
+          capture = await RealtimePcmCapture.start(stream, (samples, sampleRate) => {
+            try {
+              socket.append(samples, sampleRate);
+            } catch (error) {
+              const messageText = error instanceof Error
+                ? error.message
+                : t('chat.form.voiceErrors.recordingFailed', 'Recording failed.');
+              if (
+                componentMountedRef.current
+                && realtimeSocketRef.current === socket
+              ) {
+                realtimeSocketRef.current = null;
+                realtimeCaptureRef.current = null;
+                mediaStreamRef.current = null;
+                stopRecordingTimer();
+                setIsRecording(false);
+                setRecordingSeconds(0);
+                stream.getTracks().forEach((track) => track.stop());
+                void capture?.stop();
+                setMediaError(messageText);
+              }
+              socket.cancel();
+            }
+          });
+          if (!await finalizeRealtimeCaptureStartup(
+            capture,
+            componentMountedRef.current,
+            realtimeSocketRef.current === socket,
+          )) {
+            return;
+          }
+        } catch (error) {
+          realtimeSocketRef.current = null;
+          mediaStreamRef.current = null;
+          socket.cancel();
+          stream.getTracks().forEach((track) => track.stop());
+          throw error;
+        }
+        realtimeCaptureRef.current = capture;
+        recordingStartedAtRef.current = Date.now();
+        setIsRecording(true);
+        setRecordingSeconds(0);
+        stopRecordingTimer();
+        recordingTimerRef.current = window.setInterval(() => {
+          setRecordingSeconds(Math.floor((Date.now() - recordingStartedAtRef.current) / 1000));
+        }, 250);
+        return;
+      }
+
       const recorder = new MediaRecorder(stream);
       mediaStreamRef.current = stream;
       mediaRecorderRef.current = recorder;
@@ -551,10 +672,16 @@ export function ChatForm({
       }, 250);
     } catch (error) {
       cleanupRecordingResources();
+      if (!componentMountedRef.current) return;
       const messageText = error instanceof DOMException && error.name === 'NotAllowedError'
         ? t('chat.form.voiceErrors.microphoneDenied', 'Microphone permission denied.')
-        : t('chat.form.voiceErrors.microphoneUnavailable', 'Microphone unavailable.');
+        : error instanceof Error
+          ? error.message
+          : t('chat.form.voiceErrors.microphoneUnavailable', 'Microphone unavailable.');
       setMediaError(messageText);
+    } finally {
+      recordingStartingRef.current = false;
+      if (componentMountedRef.current) setIsStartingRecording(false);
     }
   }, [
     appendTranscript,
@@ -563,12 +690,55 @@ export function ChatForm({
     isTranscribing,
     onTranscribeAudio,
     secureRecordingContext,
+    selectedTranscriptionId,
     stopRecordingTimer,
     t,
     transcriptionReady,
+    captureMode,
+    useRealtimeCapture,
   ]);
 
   const stopRecording = useCallback((cancelled: boolean) => {
+    const realtimeSocket = realtimeSocketRef.current;
+    if (realtimeSocket) {
+      const realtimeCapture = realtimeCaptureRef.current;
+      realtimeSocketRef.current = null;
+      realtimeCaptureRef.current = null;
+      mediaStreamRef.current = null;
+      stopRecordingTimer();
+      setIsRecording(false);
+      setRecordingSeconds(0);
+      if (!cancelled) realtimeCommitSocketRef.current = realtimeSocket;
+      void (async () => {
+        await realtimeCapture?.stop();
+        if (cancelled) {
+          realtimeSocket.cancel();
+          return;
+        }
+        if (!componentMountedRef.current) {
+          realtimeCommitSocketRef.current = null;
+          realtimeSocket.cancel();
+          return;
+        }
+        setIsTranscribing(true);
+        try {
+          const transcript = await realtimeSocket.commit();
+          if (componentMountedRef.current) appendTranscript(transcript);
+        } catch (error) {
+          const messageText = error instanceof Error
+            ? error.message
+            : t('chat.form.voiceErrors.transcriptionFailed', 'Transcription failed.');
+          if (componentMountedRef.current) setMediaError(messageText);
+        } finally {
+          if (realtimeCommitSocketRef.current === realtimeSocket) {
+            realtimeCommitSocketRef.current = null;
+          }
+          if (componentMountedRef.current) setIsTranscribing(false);
+        }
+      })();
+      return;
+    }
+
     const recorder = mediaRecorderRef.current;
     if (!recorder) return;
     recordingCancelledRef.current = cancelled;
@@ -577,12 +747,26 @@ export function ChatForm({
       return;
     }
     recorder.stop();
-  }, [cleanupRecordingResources]);
+  }, [appendTranscript, cleanupRecordingResources, stopRecordingTimer, t]);
 
   useEffect(() => {
+    componentMountedRef.current = true;
     return () => {
+      componentMountedRef.current = false;
       stopRecordingTimer();
-      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+      recordingStartingRef.current = false;
+      const mediaStream = mediaStreamRef.current;
+      const realtimeSocket = realtimeSocketRef.current;
+      const realtimeCommitSocket = realtimeCommitSocketRef.current;
+      const realtimeCapture = realtimeCaptureRef.current;
+      mediaStreamRef.current = null;
+      realtimeSocketRef.current = null;
+      realtimeCommitSocketRef.current = null;
+      realtimeCaptureRef.current = null;
+      mediaStream?.getTracks().forEach((track) => track.stop());
+      realtimeSocket?.cancel();
+      realtimeCommitSocket?.cancel();
+      void realtimeCapture?.stop();
     };
   }, [stopRecordingTimer]);
 
@@ -751,7 +935,7 @@ export function ChatForm({
             <VoiceLabel>{t('chat.form.sttLabel', 'STT')}</VoiceLabel>
             <VoiceSelect
               value={selectedTranscriptionId ?? ''}
-              disabled={transcriptionModels.length === 0 || isRecording || isTranscribing}
+              disabled={transcriptionModels.length === 0 || isStartingRecording || isRecording || isTranscribing}
               onChange={(event) => onSelectTranscriptionModel?.(event.target.value || null)}
               aria-label={t('chat.form.selectTranscriptionModel', 'Select transcription model')}
             >
@@ -798,8 +982,8 @@ export function ChatForm({
                 size="sm"
                 icon
                 type="button"
-                loading={isTranscribing}
-                disabled={!transcriptionReady || isLoading}
+                loading={isStartingRecording || isTranscribing}
+                disabled={!transcriptionReady || isLoading || isStartingRecording}
                 onClick={startRecording}
                 aria-label={recordingButtonLabel}
                 title={recordingButtonLabel}

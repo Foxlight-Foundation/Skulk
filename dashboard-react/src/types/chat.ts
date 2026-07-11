@@ -25,6 +25,8 @@ export interface ChatSpeechModelOption {
   defaultResponseFormat?: AudioResponseFormat | null;
   responseFormats: AudioResponseFormat[];
   supportsVoiceListing?: boolean;
+  /** Whether the model truthfully supports progressive realtime transcription. */
+  supportsRealtime?: boolean;
 }
 
 /** Attachment persisted on an individual chat message. */

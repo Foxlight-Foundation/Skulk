@@ -337,8 +337,12 @@ the card declares both streaming and realtime support. The transcription-only
 append/commit events onto this same binary provider path, emits transcript
 delta/final events, enforces same-origin browsers and bounded messages, and
 cancels the provider on disconnect. It is one utterance per socket and does not
-claim VAD, conversation, or speech-to-speech behavior. Dashboard live microphone streaming,
-voice/reference-audio management, and speech translation remain later phases.
+claim VAD, conversation, or speech-to-speech behavior. Dashboard chat selects
+this path only when both the model card and local provider advertisement say it
+is available; its AudioWorklet resamples microphone Float32 frames to the edge's
+24 kHz PCM16 contract, while non-realtime models retain batch MediaRecorder
+transcription. Voice/reference-audio management and speech translation remain
+later phases.
 See [Speech Fabric and Realtime Design](speech-fabric-realtime).
 The dashboard composes the shipped REST endpoints in chat: mounted TTS models
 can speak draft text, replay assistant messages, or auto-speak final assistant

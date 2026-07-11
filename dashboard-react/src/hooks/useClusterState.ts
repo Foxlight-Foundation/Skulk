@@ -275,6 +275,7 @@ export type RawRunners = Record<string, Record<string, unknown>>;
 
 export interface ClusterState {
   topology: TopologyData | null;
+  localNodeId: string | null;
   connected: boolean;
   lastUpdate: number | null;
   downloads: RawDownloads;
@@ -284,6 +285,7 @@ export interface ClusterState {
   nodeThunderbolt: Record<string, RawThunderboltInfo>;
   nodeThunderboltBridge: Record<string, RawThunderboltBridge>;
   nodeRdmaCtl: Record<string, RawRdmaCtl>;
+  nodeCapabilities: Record<string, string[]>;
   thunderboltBridgeCycles: string[][];
 }
 
@@ -359,6 +361,7 @@ export function useClusterState(): ClusterState {
 
   return {
     topology,
+    localNodeId: resolvedLocalNodeId,
     connected,
     lastUpdate,
     downloads: (data?.downloads ?? {}) as RawDownloads,
@@ -368,6 +371,7 @@ export function useClusterState(): ClusterState {
     nodeThunderbolt: data?.nodeThunderbolt ?? {},
     nodeThunderboltBridge: data?.nodeThunderboltBridge ?? {},
     nodeRdmaCtl: data?.nodeRdmaCtl ?? {},
+    nodeCapabilities: data?.nodeCapabilities ?? {},
     thunderboltBridgeCycles: data?.thunderboltBridgeCycles ?? [],
   };
 }

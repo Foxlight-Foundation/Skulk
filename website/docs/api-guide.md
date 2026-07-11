@@ -1486,6 +1486,15 @@ forwards audio incrementally and retains no replay buffer that could safely
 retract already-delivered media. Browser connections must be same-origin; SDK
 clients without an `Origin` header remain supported.
 
+The dashboard chat microphone uses this edge only when both the selected model
+declares streaming/realtime audio and the API node currently advertises the
+experimental `stt.realtime` provider. An `AudioWorklet` captures mono browser
+samples, the dashboard continuously resamples them to 24 kHz PCM16, and the
+client aggregates worklet callbacks into 100 ms transport frames before the
+existing mic control commits the socket when recording stops. If either truth
+is absent, chat retains the batch `MediaRecorder` plus
+`POST /v1/audio/transcriptions` path.
+
 The first version is one committed utterance per socket. It does not implement
 server VAD, noise reduction, G.711, multi-turn conversation state, ephemeral
 session-token creation, response generation, or full-duplex speech-to-speech.

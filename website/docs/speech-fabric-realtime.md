@@ -126,6 +126,12 @@ sequenceDiagram
   events, emits transcript delta/final/failure events, and cancels the provider
   on disconnect. It deliberately does not claim full Realtime conversation or
   speech-to-speech compatibility.
+- **Dashboard microphone:** chat now chooses the WebSocket path only when the
+  selected card declares streaming/realtime support and the local API's live
+  telemetry advertises `stt.realtime`. An AudioWorklet captures mono Float32
+  frames, a stateful browser resampler produces 24 kHz PCM16, callbacks are
+  aggregated into 100 ms transport frames, and socket backpressure is bounded.
+  Batch cards retain the existing MediaRecorder flow.
 - **VAD ownership:** decide whether voice activity detection lives inside the STT
   model session, a dedicated VAD runner, or an API-side preprocessor.
 - **Cancellation:** a WebSocket close must release the runner session and any
@@ -276,7 +282,8 @@ caller-provided filesystem paths.
 7. **Complete:** add a bounded, transcription-only `WS /v1/realtime`
    compatibility edge over the provider contract, behind the existing
    capability and experiment gates.
-8. Add dashboard and SDK smoke tests with synthetic microphone input.
+8. **Complete:** add dashboard capability-gated microphone capture plus
+   synthetic browser and SDK protocol coverage.
 9. Add result-ledger speech metrics once the ledger schema can represent audio
    and transcript artifacts safely.
 
