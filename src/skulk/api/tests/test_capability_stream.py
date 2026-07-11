@@ -286,6 +286,11 @@ class _BidirectionalProvider(_TtsProvider):
         )
 
 
+class _MixedStreamingProvider(_BidirectionalProvider):
+    def capabilities(self) -> list[CapabilityDescriptor]:
+        return [_TTS, _BIDIRECTIONAL]
+
+
 class _ClientStreamingProvider(_BidirectionalProvider):
     def capabilities(self) -> list[CapabilityDescriptor]:
         return [_CLIENT_STREAMING]
@@ -401,6 +406,14 @@ async def test_local_provider_stream_preserves_lifecycle_and_binary_media() -> N
     assert [frame.sequence for frame in frames] == [0, 1, 2]
     assert isinstance(frames[1].media, InlineMediaAttachment)
     assert frames[1].media.data == b"\x00\xff\x80\x7f"
+
+
+async def test_mixed_provider_uses_descriptor_io_mode_for_handler() -> None:
+    opened, frames = await _collect_local_stream(_build_api(_MixedStreamingProvider()))
+
+    assert opened is True
+    assert [frame.kind for frame in frames] == ["started", "chunk", "completed"]
+    assert isinstance(frames[1].media, InlineMediaAttachment)
 
 
 async def test_local_bidirectional_media_half_close_keeps_output_active() -> None:

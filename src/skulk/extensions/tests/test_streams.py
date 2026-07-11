@@ -69,6 +69,28 @@ async def test_input_start_is_noop_when_terminal_output_closed_sink() -> None:
     assert sent == []
 
 
+@pytest.mark.asyncio
+async def test_local_close_publishes_terminal_after_started_input() -> None:
+    sent: list[CapabilityStreamFrame] = []
+
+    async def send(frame: CapabilityStreamFrame) -> None:
+        sent.append(frame)
+
+    stream = CapabilityStreamInput(
+        call_id="provider-ended",
+        deadline_at=anyio.current_time() + 1.0,
+        send_frame=send,
+    )
+    await stream.start()
+
+    stream.close_locally()
+    await stream.finish_local_close()
+
+    assert stream.closed is True
+    assert [frame.kind for frame in sent] == ["started", "cancelled"]
+    assert [frame.sequence for frame in sent] == [0, 1]
+
+
 def _started(call_id: str = "call-1") -> CapabilityStreamFrame:
     return CapabilityStreamFrame(
         call_id=call_id,

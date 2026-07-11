@@ -3716,7 +3716,13 @@ class API:
                             cancel_scope.cancel()
                         stream: AsyncIterator[CapabilityStreamFrame] | None = None
                         if not cancel_scope.cancel_called:
-                            if isinstance(handler, CapabilityInputStreamHandler):
+                            if descriptor.io_mode in (
+                                "client_streaming",
+                                "bidirectional",
+                            ):
+                                assert isinstance(
+                                    handler, CapabilityInputStreamHandler
+                                )
                                 assert active.input_receiver is not None
                                 stream = handler.handle_input_stream(
                                     self._extension_context,
@@ -3724,6 +3730,7 @@ class API:
                                     self._consume_provider_input(active),
                                 )
                             else:
+                                assert isinstance(handler, CapabilityStreamHandler)
                                 stream = handler.handle_stream(
                                     self._extension_context, call
                                 )
@@ -4199,7 +4206,7 @@ class API:
                 yield terminal
         finally:
             if state.input_stream is not None:
-                state.input_stream.close_locally()
+                self._schedule_provider_input_close(state.input_stream)
             self._provider_stream_receivers.pop(call.call_id, None)
             state.output_sender.close()
             output_receiver.close()
@@ -4225,6 +4232,18 @@ class API:
         except RuntimeError:
             # API teardown may close the task group while DATA is draining.
             state.cancellation_scheduled = False
+
+    def _schedule_provider_input_close(
+        self, input_stream: CapabilityStreamInput
+    ) -> None:
+        """Close caller input immediately and retire its DATA stream safely."""
+
+        input_stream.close_locally()
+        try:
+            self._tg.start_soon(input_stream.finish_local_close)
+        except RuntimeError:
+            # API teardown may close the task group while DATA is draining.
+            return
 
     async def _cancel_remote_capability_stream(self, call: CapabilityCall) -> None:
         """Best-effort explicit cancellation for an early-closing caller."""
@@ -5776,7 +5795,7 @@ class API:
                         self._schedule_provider_stream_cancellation(state)
                     self._provider_stream_receivers.pop(call_id, None)
                     if state.input_stream is not None:
-                        state.input_stream.close_locally()
+                        self._schedule_provider_input_close(state.input_stream)
                     state.output_sender.close()
 
     def _apply_provider_input_frame(self, frame: CapabilityStreamFrame) -> None:
@@ -5939,7 +5958,7 @@ class API:
                     state.output_sender.send_nowait(terminal)
                 self._provider_stream_receivers.pop(call_id, None)
                 if state.input_stream is not None:
-                    state.input_stream.close_locally()
+                    self._schedule_provider_input_close(state.input_stream)
                 state.output_sender.close()
             for active in list(self._active_capability_streams.values()):
                 if active.input_lifecycle is None:

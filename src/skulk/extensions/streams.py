@@ -182,11 +182,12 @@ class CapabilityStreamInput:
         self._send_frame = send_frame
         self._next_sequence = 0
         self._closed = False
+        self._terminal_sent = False
         self._lock = anyio.Lock()
 
     @property
     def closed(self) -> bool:
-        """Whether this input direction has emitted a terminal frame."""
+        """Whether this input direction rejects further caller sends."""
 
         return self._closed
 
@@ -235,6 +236,7 @@ class CapabilityStreamInput:
         async with self._lock:
             self._require_open()
             await self._emit("completed")
+            self._terminal_sent = True
             self._closed = True
 
     async def cancel(
@@ -252,6 +254,7 @@ class CapabilityStreamInput:
                 "cancelled",
                 error=CapabilityStreamError(code="cancelled", message=message),
             )
+            self._terminal_sent = True
             self._closed = True
 
     def close_locally(self) -> None:
@@ -262,6 +265,32 @@ class CapabilityStreamInput:
         # closing this stream. One already in-flight frame may finish and will
         # be dropped as late by the removed provider state.
         self._closed = True
+
+    async def finish_local_close(self) -> None:
+        """Best-effort publish cancellation after synchronous local closure.
+
+        The API schedules this in a separate task so waiting for an in-flight
+        send cannot block the DATA consumer responsible for draining that send.
+        """
+
+        async with self._lock:
+            if self._next_sequence == 0 or self._terminal_sent:
+                return
+            try:
+                await self._emit(
+                    "cancelled",
+                    error=CapabilityStreamError(
+                        code="cancelled",
+                        message="provider output closed the caller input stream",
+                    ),
+                )
+            except (
+                TimeoutError,
+                anyio.BrokenResourceError,
+                anyio.ClosedResourceError,
+            ):
+                return
+            self._terminal_sent = True
 
     def _require_open(self) -> None:
         if self._closed:
