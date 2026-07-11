@@ -280,7 +280,7 @@ Lives in `src/skulk/api/main.py` (route registration in `API.__init__`).
   capability; `consented_at` / `consented_version` stamps; `ingest_url`).
   Persisted in the file so it survives restarts (State is rebuilt per
   session); edited via the dashboard (first-run consent modal, then
-  Settings). Nothing is collected while `unasked` or `disabled`.
+  Settings). Nothing is queued or sent while `unasked` or `disabled`.
 - Collector: `src/skulk/api/field_telemetry.py` on the API node. Taps the
   chat-completions chunk stream (innermost wrap, before the extensions tap),
   records one sample per generation (model id, canonical hardware classes

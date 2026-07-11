@@ -370,8 +370,10 @@ class TelemetryConfig(FrozenModel):
 
     Consent is acquired through the dashboard's first-run modal and persists
     here (in ``skulk.yaml``) so it survives restarts; cluster ``State`` is
-    rebuilt per session and would forget it. Nothing is ever collected while
-    ``consent`` is ``unasked`` or ``disabled``, and the node-local
+    rebuilt per session and would forget it. Nothing is ever queued or sent
+    while ``consent`` is ``unasked`` or ``disabled`` (the collector keeps
+    only an in-process node-set baseline for death diffing, which never
+    leaves the process), and the node-local
     ``SKULK_TELEMETRY_DISABLE=1`` kill switch overrides everything.
 
     Attributes:

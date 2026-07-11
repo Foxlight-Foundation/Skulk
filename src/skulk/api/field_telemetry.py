@@ -27,7 +27,7 @@ import os
 import time
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable
-from typing import TYPE_CHECKING, TypedDict, TypeVar, cast, final
+from typing import TYPE_CHECKING, Literal, TypedDict, TypeVar, cast, final
 from uuid import uuid4
 
 import anyio
@@ -43,8 +43,16 @@ if TYPE_CHECKING:
 
 TELEMETRY_KILL_SWITCH = "SKULK_TELEMETRY_DISABLE"
 
-#: Wire-contract error classes (mirrored by the ingest allowlist).
-ErrorClass = str
+#: Wire-contract enums (mirrored by the ingest allowlist).
+SampleKind = Literal["generation", "node-death", "runner-restart"]
+ErrorClass = Literal[
+    "placement-failed",
+    "runner-died",
+    "timeout",
+    "wedge-detected",
+    "oom",
+    "generation-error",
+]
 
 _MAX_PENDING_SAMPLES = 1000
 _FLUSH_INTERVAL_S = 60.0
@@ -112,7 +120,7 @@ class TelemetrySample(FrozenModel):
         error_class: Failure class enum; ``None`` for a clean sample.
     """
 
-    kind: str
+    kind: SampleKind
     at: str
     model_id: str | None = None
     engine: str | None = None
