@@ -336,7 +336,7 @@ async def test_master_pins_realtime_transcription_without_trace_expectation() ->
     )
     command = RealtimeAudioTranscription(
         command_id=CommandId("realtime-transcription-cmd-1"),
-        owner_node=NodeId("api-node"),
+        owner_node=node_id,
         target_instance_id=instance.instance_id,
         task_params=RealtimeAudioTranscriptionTaskParams(
             model=instance.shard_assignments.model_id,
@@ -357,8 +357,42 @@ async def test_master_pins_realtime_transcription_without_trace_expectation() ->
     assert isinstance(event, TaskCreated)
     assert isinstance(event.task, RealtimeAudioTranscriptionTask)
     assert event.task.instance_id == instance.instance_id
-    assert event.task.owner_node == NodeId("api-node")
+    assert event.task.owner_node == node_id
     assert event.task.task_params == command.task_params
     assert event.task.trace_enabled is False
     assert master.command_task_mapping[command.command_id] == event.task_id
     assert event.task_id not in master._expected_ranks  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_realtime_stt_rejects_target_not_hosted_by_owner_node() -> None:
+    """Realtime PCM ingress cannot target a runner on a different node."""
+
+    master, node_id, command_sender, event_receiver = _build_master()
+    instance = _single_node_transcription_instance(node_id)
+    master.state = master.state.model_copy(
+        update={"instances": {instance.instance_id: instance}}
+    )
+    command = RealtimeAudioTranscription(
+        command_id=CommandId("remote-realtime-transcription"),
+        owner_node=NodeId("different-api-node"),
+        target_instance_id=instance.instance_id,
+        task_params=RealtimeAudioTranscriptionTaskParams(
+            model=instance.shard_assignments.model_id,
+            input_sample_rate=16000,
+            transcription_delay_ms=480,
+        ),
+    )
+    event: Event | None = None
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(master._command_processor)  # pyright: ignore[reportPrivateUsage]
+        await command_sender.send(
+            ForwarderCommand(origin=SystemId("API"), command=command)
+        )
+        with anyio.move_on_after(0.1):
+            event = await event_receiver.receive()
+        task_group.cancel_scope.cancel()
+
+    assert event is None
+    assert command.command_id not in master.command_task_mapping

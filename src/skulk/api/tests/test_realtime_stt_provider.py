@@ -4,6 +4,7 @@
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import anyio
 import pytest
 
 from skulk.api.main import API
@@ -37,7 +38,7 @@ from skulk.shared.types.commands import (
     TaskFinished,
 )
 from skulk.shared.types.common import CommandId, NodeId
-from skulk.shared.types.events import IndexedEvent
+from skulk.shared.types.events import IndexedEvent, RunnerStatusUpdated
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.telemetry import TelemetryView
@@ -50,7 +51,7 @@ from skulk.shared.types.worker.runners import (
     ShardAssignments,
 )
 from skulk.shared.types.worker.shards import PipelineShardMetadata
-from skulk.utils.channels import Receiver, channel
+from skulk.utils.channels import Receiver, Sender, channel
 
 
 def _realtime_card(*, supports_realtime: bool = True) -> ModelCard:
@@ -104,10 +105,12 @@ def _local_state(
     )
 
 
-def _build_api() -> tuple[API, Receiver[RealtimeAudioInputFrame]]:
+def _build_api() -> tuple[
+    API, Receiver[RealtimeAudioInputFrame], Sender[IndexedEvent]
+]:
     command_sender, _ = channel[ForwarderCommand]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
-    _, event_receiver = channel[IndexedEvent]()
+    event_sender, event_receiver = channel[IndexedEvent]()
     _, election_receiver = channel[ElectionMessage]()
     provider_sender, provider_receiver = channel[ProviderStreamPacket](256)
     realtime_sender, realtime_receiver = channel[RealtimeAudioInputFrame](64)
@@ -128,6 +131,7 @@ def _build_api() -> tuple[API, Receiver[RealtimeAudioInputFrame]]:
             enable_builtin_providers=True,
         ),
         realtime_receiver,
+        event_sender,
     )
 
 
@@ -140,7 +144,7 @@ def test_realtime_stt_discovery_requires_truthful_local_capacity(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    api, _ = _build_api()
+    api, _, _ = _build_api()
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
     _enable_realtime(api, tmp_path)
     api.state = _local_state(_realtime_card())
@@ -166,10 +170,47 @@ def test_realtime_stt_discovery_requires_truthful_local_capacity(
 
 
 @pytest.mark.anyio
+async def test_runner_ready_event_resynchronizes_realtime_stt_advertisement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Normal loading-to-ready transition must advertise realtime capacity."""
+
+    api, _, event_sender = _build_api()
+    card = _realtime_card()
+    state = _local_state(
+        card, runner_status=RunnerLoading(layers_loaded=0, total_layers=1)
+    )
+    api.state = state
+    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
+    _enable_realtime(api, tmp_path)
+    api._sync_builtin_speech_capability()
+    assert api._telemetry_view.local_advertised_capabilities == set()
+    runner_id = next(iter(state.runners))
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(api._apply_state)
+        await event_sender.send(
+            IndexedEvent(
+                idx=0,
+                event=RunnerStatusUpdated(
+                    runner_id=runner_id,
+                    runner_status=RunnerReady(),
+                ),
+            )
+        )
+        while not api._telemetry_view.local_advertised_capabilities:
+            await anyio.sleep(0)
+        task_group.cancel_scope.cancel()
+
+    assert api._telemetry_view.local_advertised_capabilities == {"stt.realtime"}
+
+
+@pytest.mark.anyio
 async def test_realtime_stt_failed_input_preserves_failure_semantics() -> None:
     """A failed caller stream must not be rewritten as normal cancellation."""
 
-    api, realtime_receiver = _build_api()
+    api, realtime_receiver, _ = _build_api()
     command_id = CommandId("failed-input")
 
     async def input_frames() -> AsyncIterator[CapabilityStreamFrame]:
@@ -205,7 +246,7 @@ async def test_realtime_stt_provider_forwards_pcm_and_streams_transcript(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    api, realtime_receiver = _build_api()
+    api, realtime_receiver, _ = _build_api()
     card = _realtime_card()
     api.state = _local_state(card)
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
@@ -306,7 +347,7 @@ async def test_realtime_stt_admission_reserves_local_instance(
 ) -> None:
     """Concurrent opens cannot race before TaskCreated reaches API state."""
 
-    api, _ = _build_api()
+    api, _, _ = _build_api()
     card = _realtime_card()
     api.state = _local_state(card)
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
@@ -353,7 +394,7 @@ async def test_realtime_stt_runner_error_finishes_command_without_cancelling(
 ) -> None:
     """A terminal runner error must use natural command finalization."""
 
-    api, realtime_receiver = _build_api()
+    api, realtime_receiver, _ = _build_api()
     card = _realtime_card()
     api.state = _local_state(card)
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
@@ -408,7 +449,7 @@ async def test_realtime_stt_output_overflow_cancels_only_its_command(
 ) -> None:
     """A slow realtime consumer cannot block DATA or grow without bound."""
 
-    api, _ = _build_api()
+    api, _, _ = _build_api()
     command_id = CommandId("realtime-output-overflow")
     sender, _ = channel[TranscriptionChunk | ErrorChunk](1)
     api._audio_transcription_queues[command_id] = sender

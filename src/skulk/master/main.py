@@ -928,6 +928,14 @@ class Master:
                                     "Realtime STT target instance model does not "
                                     f"match {command.task_params.model}"
                                 )
+                            if (
+                                command.owner_node
+                                not in instance.shard_assignments.node_to_runner
+                            ):
+                                raise ValueError(
+                                    "Realtime STT owner node does not host the "
+                                    f"target instance {command.target_instance_id}"
+                                )
 
                             task_id = TaskId()
                             generated_events.append(

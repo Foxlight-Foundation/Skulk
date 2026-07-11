@@ -319,6 +319,7 @@ from skulk.shared.types.events import (
     IndexedEvent,
     InstanceCreated,
     InstanceDeleted,
+    RunnerStatusUpdated,
     StateSnapshotHydrated,
     TaskFailed,
     TaskStatusUpdated,
@@ -5738,7 +5739,12 @@ class API:
 
                 if isinstance(
                     event,
-                    (InstanceCreated, InstanceDeleted, StateSnapshotHydrated),
+                    (
+                        InstanceCreated,
+                        InstanceDeleted,
+                        RunnerStatusUpdated,
+                        StateSnapshotHydrated,
+                    ),
                 ):
                     self._sync_builtin_speech_capability()
 
