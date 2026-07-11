@@ -487,6 +487,10 @@ _AUDIO_UPLOAD_CONTENT_TYPES: Final[set[str]] = {
 }
 
 
+class _BuiltinSttInputCancelledError(Exception):
+    """Signal caller input cancellation without converting it to provider failure."""
+
+
 def _normalize_upload_content_type(content_type: str | None) -> str | None:
     """Return the lowercase media type without parameters."""
     if content_type is None:
@@ -3270,13 +3274,18 @@ class API:
 
         return self._realtime_stt_instance() is not None
 
-    def _has_mounted_stt_model(self) -> bool:
-        """Return whether a ready mounted runner can serve batch STT."""
+    def _has_mounted_stt_model(self, model_id: ModelId | None = None) -> bool:
+        """Return whether a ready mounted runner can serve the requested STT."""
 
         if not self._builtin_speech_provider_enabled:
             return False
         for instance in self.state.instances.values():
             if len(instance.shard_assignments.node_to_runner) != 1:
+                continue
+            if (
+                model_id is not None
+                and instance.shard_assignments.model_id != model_id
+            ):
                 continue
             card = self._model_card_for_instance(instance)
             if card is None:
@@ -8889,7 +8898,7 @@ class API:
                 message="no batch STT capacity is currently advertised",
             )
         try:
-            await self._prepare_builtin_stt_task(call)
+            task_params = await self._prepare_builtin_stt_task(call)
         except ValidationError as exc:
             return CapabilityError(code="invalid_payload", message=str(exc))
         except HTTPException as exc:
@@ -8900,6 +8909,14 @@ class API:
             else:
                 code = "provider_error"
             return CapabilityError(code=code, message=str(exc.detail))
+        if not self._has_mounted_stt_model(task_params.model):
+            return CapabilityError(
+                code="overloaded",
+                message=(
+                    f"no ready batch STT runner for requested model "
+                    f"{task_params.model}"
+                ),
+            )
         return None
 
     async def _collect_builtin_stt_audio(
@@ -8930,6 +8947,13 @@ class API:
             if frame.kind == "completed":
                 completed = True
                 break
+            if frame.kind == "cancelled":
+                detail = (
+                    frame.error.message
+                    if frame.error is not None
+                    else "caller cancelled batch STT input"
+                )
+                raise _BuiltinSttInputCancelledError(detail)
             detail = frame.error.message if frame.error is not None else frame.kind
             raise RuntimeError(f"batch STT input terminated: {detail}")
         if not completed:
@@ -8952,7 +8976,17 @@ class API:
             raise RuntimeError(
                 f"batch STT availability changed after admission: {exc}"
             ) from exc
-        audio_bytes = await self._collect_builtin_stt_audio(input_frames)
+        try:
+            audio_bytes = await self._collect_builtin_stt_audio(input_frames)
+        except _BuiltinSttInputCancelledError as exc:
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="cancelled",
+                error=CapabilityStreamError(code="cancelled", message=str(exc)),
+            )
+            return
         chunks = await self._execute_audio_transcription(task_params, audio_bytes)
         text = "".join(chunk.text for chunk in chunks).strip()
         language = next(

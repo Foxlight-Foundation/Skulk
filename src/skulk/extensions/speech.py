@@ -243,7 +243,7 @@ class BuiltinSpeechProvider:
         return None
 
     def capabilities(self) -> Sequence[CapabilityDescriptor]:
-        """Describe the first-party server-streaming TTS capability."""
+        """Describe the first-party TTS, batch STT, and realtime STT services."""
 
         return (
             TTS_CAPABILITY_DESCRIPTOR,
@@ -293,7 +293,7 @@ class BuiltinSpeechProvider:
         call: CapabilityCall,
         input_frames: AsyncIterator[CapabilityStreamFrame],
     ) -> AsyncIterator[CapabilityStreamFrame]:
-        """Translate provider PCM frames into a core realtime STT session."""
+        """Translate provider audio input into batch or realtime core STT."""
 
         del context
         if call.capability_id == STT_CAPABILITY_DESCRIPTOR.id:

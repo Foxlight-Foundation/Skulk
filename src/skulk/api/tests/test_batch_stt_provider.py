@@ -35,14 +35,20 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.telemetry import TelemetryView
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
-from skulk.shared.types.worker.runners import RunnerId, RunnerReady, ShardAssignments
+from skulk.shared.types.worker.runners import (
+    RunnerId,
+    RunnerLoading,
+    RunnerReady,
+    RunnerStatus,
+    ShardAssignments,
+)
 from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.channels import channel
 
 
-def _stt_card() -> ModelCard:
+def _stt_card(model_id: str = "mlx-community/parakeet-test") -> ModelCard:
     return ModelCard(
-        model_id=ModelId("mlx-community/parakeet-test"),
+        model_id=ModelId(model_id),
         storage_size=Memory.from_mb(100),
         n_layers=1,
         hidden_size=1024,
@@ -54,13 +60,18 @@ def _stt_card() -> ModelCard:
     )
 
 
-def _state(card: ModelCard) -> State:
-    runner_id = RunnerId("speech-runner")
+def _state(
+    card: ModelCard,
+    *,
+    runner_status: RunnerStatus | None = None,
+    suffix: str = "",
+) -> State:
+    runner_id = RunnerId(f"speech-runner{suffix}")
     node_id = NodeId("api-node")
     return State(
         instances={
-            InstanceId("speech-instance"): MlxRingInstance(
-                instance_id=InstanceId("speech-instance"),
+            InstanceId(f"speech-instance{suffix}"): MlxRingInstance(
+                instance_id=InstanceId(f"speech-instance{suffix}"),
                 shard_assignments=ShardAssignments(
                     model_id=card.model_id,
                     runner_to_shard={
@@ -79,7 +90,7 @@ def _state(card: ModelCard) -> State:
                 ephemeral_port=52415,
             )
         },
-        runners={runner_id: RunnerReady()},
+        runners={runner_id: runner_status or RunnerReady()},
     )
 
 
@@ -184,6 +195,67 @@ async def test_batch_stt_provider_transcribes_binary_input_after_half_close(
         "language": "en",
         "segments": [{"id": 0, "text": "hello world"}],
     }
+
+
+@pytest.mark.anyio
+async def test_batch_stt_admission_requires_requested_model_runner_ready() -> None:
+    api = _build_api()
+    ready = _state(_stt_card())
+    loading = _state(
+        _stt_card("mlx-community/parakeet-loading"),
+        runner_status=RunnerLoading(layers_loaded=0, total_layers=1),
+        suffix="-loading",
+    )
+    api.state = State(
+        instances={**ready.instances, **loading.instances},
+        runners={**ready.runners, **loading.runners},
+    )
+    api._sync_builtin_speech_capability()
+
+    async with api._tg as task_group:
+        session = await api._extension_context.stream_capability(
+            NodeId("api-node"),
+            STT_CAPABILITY_DESCRIPTOR.id,
+            STT_CAPABILITY_DESCRIPTOR.version,
+            descriptor_revision(STT_CAPABILITY_DESCRIPTOR),
+            {"model": "mlx-community/parakeet-loading"},
+            timeout_seconds=2.0,
+        )
+        assert session.open_result.ok is False
+        assert session.open_result.error is not None
+        assert session.open_result.error.code == "overloaded"
+        assert session.input is None
+        task_group.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_batch_stt_input_cancel_emits_cancelled_terminal() -> None:
+    api = _build_api()
+    card = _stt_card()
+    api.state = _state(card)
+    api._sync_builtin_speech_capability()
+    frames: list[CapabilityStreamFrame] = []
+
+    async with api._tg as task_group:
+        task_group.start_soon(api._apply_provider_data)
+        session = await api._extension_context.stream_capability(
+            NodeId("api-node"),
+            STT_CAPABILITY_DESCRIPTOR.id,
+            STT_CAPABILITY_DESCRIPTOR.version,
+            descriptor_revision(STT_CAPABILITY_DESCRIPTOR),
+            {"model": str(card.model_id)},
+            timeout_seconds=2.0,
+        )
+        assert session.open_result.ok is True
+        assert session.input is not None
+        await session.input.cancel("caller stopped recording")
+        frames = [frame async for frame in session.frames]
+        task_group.cancel_scope.cancel()
+
+    assert [frame.kind for frame in frames] == ["started", "cancelled"]
+    assert frames[-1].error is not None
+    assert frames[-1].error.code == "cancelled"
+    assert frames[-1].error.message == "caller stopped recording"
 
 
 @pytest.mark.anyio
