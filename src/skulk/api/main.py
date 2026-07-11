@@ -80,6 +80,7 @@ from skulk.api.field_telemetry import (
 from skulk.api.keepalive import with_sse_keepalive
 from skulk.api.model_search import search_hugging_face_models
 from skulk.api.node_health import compute_node_health
+from skulk.api.provider_diagnostics import ProviderObserver
 from skulk.api.types import (
     AddCustomModelParams,
     AdvancedImageParams,
@@ -1314,6 +1315,7 @@ class API:
             transport=data_plane_transport,
             reorder_buffer_enabled=self._reorder_buffer_enabled,
         )
+        self._provider_observer = ProviderObserver()
         self._data_plane_egress_provider = data_plane_egress_provider
         self._image_store = ImageStore(SKULK_IMAGE_CACHE_DIR)
         self._tg: TaskGroup = TaskGroup()
@@ -3665,6 +3667,7 @@ class API:
                 "only the caller that opened a provider stream may cancel it",
             )
         active.cancel_message = request.message
+        self._provider_observer.record_cancellation_request(request.call_id)
         active.cancel_requested.set()
         if active.cancel_scope is not None:
             active.cancel_scope.cancel()
@@ -3707,6 +3710,7 @@ class API:
         extension_name, handler, descriptor = entry
         current_revision = descriptor_revision(descriptor)
         if call.descriptor_revision != current_revision:
+            self._provider_observer.record_rejected(qualified_id)
             return call_failure(
                 call.call_id,
                 "revision_mismatch",
@@ -3714,12 +3718,14 @@ class API:
                 f"{call.descriptor_revision}; re-discover before streaming",
             )
         if self._provider_stream_sender is None or not self._tg.is_running():
+            self._provider_observer.record_rejected(qualified_id)
             return call_failure(
                 call.call_id,
                 "unreachable",
                 "provider DATA transport is not running on this node",
             )
         if call.call_id in self._active_capability_streams:
+            self._provider_observer.record_rejected(qualified_id)
             return call_failure(
                 call.call_id,
                 "invalid_payload",
@@ -3729,6 +3735,7 @@ class API:
             len(self._active_capability_streams)
             >= _MAX_CONCURRENT_CAPABILITY_STREAMS
         ):
+            self._provider_observer.record_rejected(qualified_id, overloaded=True)
             return call_failure(
                 call.call_id,
                 "overloaded",
@@ -3752,12 +3759,14 @@ class API:
                     RecursionError,
                     OverflowError,
                 ) as exc:
+                    self._provider_observer.record_rejected(qualified_id)
                     return call_failure(
                         call.call_id,
                         "invalid_payload",
                         f"payload is not JSON-serializable: {exc}",
                     )
                 if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
+                    self._provider_observer.record_rejected(qualified_id)
                     return call_failure(
                         call.call_id,
                         "payload_too_large",
@@ -3768,6 +3777,7 @@ class API:
                     call.payload, descriptor.input_schema, what="payload"
                 )
                 if schema_error is not None:
+                    self._provider_observer.record_rejected(qualified_id)
                     return call_failure(
                         call.call_id, "invalid_payload", schema_error
                     )
@@ -3777,6 +3787,7 @@ class API:
                 input_lifecycle: CapabilityStreamReceiver | None = None
                 if descriptor.io_mode in ("client_streaming", "bidirectional"):
                     if self._provider_stream_receiver is None:
+                        self._provider_observer.record_rejected(qualified_id)
                         return call_failure(
                             call.call_id,
                             "unreachable",
@@ -3816,6 +3827,7 @@ class API:
                         )
                         self._active_capability_streams.pop(call.call_id, None)
                         self._close_active_provider_input(active)
+                        self._provider_observer.record_rejected(qualified_id)
                         return call_failure(
                             call.call_id,
                             "provider_error",
@@ -3824,6 +3836,10 @@ class API:
                     if admission_error is not None:
                         self._active_capability_streams.pop(call.call_id, None)
                         self._close_active_provider_input(active)
+                        self._provider_observer.record_rejected(
+                            qualified_id,
+                            overloaded=admission_error.code == "overloaded",
+                        )
                         if not isinstance(admission_error, CapabilityError):  # pyright: ignore[reportUnnecessaryIsInstance]
                             return call_failure(
                                 call.call_id,
@@ -3844,6 +3860,7 @@ class API:
             active = self._active_capability_streams.pop(call.call_id, None)
             if active is not None:
                 self._close_active_provider_input(active)
+            self._provider_observer.record_rejected(qualified_id)
             return call_failure(
                 call.call_id,
                 "timeout",
@@ -3855,6 +3872,7 @@ class API:
             active = self._active_capability_streams.pop(call.call_id, None)
             if active is not None:
                 self._close_active_provider_input(active)
+            self._provider_observer.record_rejected(qualified_id)
             return call_failure(
                 call.call_id,
                 "timeout",
@@ -3873,11 +3891,13 @@ class API:
         except RuntimeError as exc:
             self._active_capability_streams.pop(call.call_id, None)
             self._close_active_provider_input(active)
+            self._provider_observer.record_rejected(qualified_id)
             return call_failure(
                 call.call_id,
                 "unreachable",
                 f"provider stream runtime could not start: {exc}",
             )
+        self._provider_observer.record_admitted(call.call_id, qualified_id)
         return CapabilityResult(
             call_id=call.call_id,
             ok=True,
@@ -3906,6 +3926,7 @@ class API:
                     frame=frame,
                 )
             )
+            self._provider_observer.record_output(call.call_id, frame)
 
         async def fail(code: CapabilityStreamErrorCode, message: str) -> None:
             nonlocal next_sequence, terminal_sent
@@ -4128,6 +4149,7 @@ class API:
                                 f"{type(exc).__name__}: {exc}",
                             )
         finally:
+            self._provider_observer.finalize(call.call_id)
             self._close_active_provider_input(active)
             current = self._active_capability_streams.get(call.call_id)
             if current is active:
@@ -4145,6 +4167,10 @@ class API:
         terminal_yielded = False
         with active.input_receiver as frames:
             async for frame in frames:
+                self._provider_observer.record_input_queue_depth(
+                    active.input_lifecycle.call_id,
+                    active.input_receiver.statistics().current_buffer_used,
+                )
                 last_sequence = frame.sequence
                 terminal_yielded = frame.is_terminal
                 yield frame
@@ -6173,6 +6199,12 @@ class API:
                 )
                 return
 
+            self._provider_observer.record_input(
+                frame.call_id,
+                ready,
+                queue_depth=active.input_sender.statistics().current_buffer_used,
+            )
+
             if ready.kind == "completed":
                 active.input_sender.close()
             elif ready.kind == "cancelled":
@@ -7457,6 +7489,12 @@ class API:
                 self._data_plane_egress_provider()
                 if self._data_plane_egress_provider is not None
                 else None
+            ),
+            provider=self._provider_observer.snapshot(
+                active_unary_calls=self._active_capability_calls,
+                stream_slots_in_use=len(self._active_capability_streams),
+                unary_concurrency_limit=_MAX_CONCURRENT_CAPABILITY_CALLS,
+                stream_concurrency_limit=_MAX_CONCURRENT_CAPABILITY_STREAMS,
             ),
             warnings=sorted(warnings),
             tailscale=tailscale,

@@ -1058,13 +1058,19 @@ Behavior notes:
 
 - `GET /v1/diagnostics/node` returns the local node's runtime/config facts,
   resources, process tree, live runner-supervisor state, flight-recorder phase
-  state, placement analysis, and a `dataPlane` block. DATA diagnostics include
+  state, placement analysis, and `dataPlane` plus `provider` blocks. DATA diagnostics include
   transport/reorder mode; active and terminal lifecycle counts; first-byte and
   stream-span timing; duplicate, reordered, skipped, late, idle-timeout,
   transport-failure, and missing-lifecycle counters; plus router egress queue
   depth, independent command-queue count, per-owner pressure, drops, publish
   failures, byte volume, and enqueue/publish latency. The dashboard Node tab
   renders the operational subset and highlights non-zero failure counters.
+  Provider diagnostics report active unary calls and streams, concurrency
+  limits and high-water marks, admissions and overload rejections, caller input
+  queue depth, input/output frame and inline-media byte volume, first-output and
+  total stream latency, terminal outcomes, cancellation requests, and
+  missing-terminal streams. The same counters are grouped by qualified
+  capability ID without retaining call IDs, audio, transcripts, or payloads.
 - `POST /v1/diagnostics/node/capture` collects an on-demand local diagnostic
   bundle. Body fields are `runnerId`, `taskId`, `includeProcessSamples`, and
   `sampleDurationSeconds`; all are optional. When a runner/task is provided,

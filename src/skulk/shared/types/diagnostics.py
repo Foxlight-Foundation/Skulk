@@ -753,6 +753,125 @@ class DataPlaneEgressDiagnostics(CamelCaseModel):
 DataPlaneDiagnostics.model_rebuild()
 
 
+class ProviderCapabilityDiagnostics(CamelCaseModel):
+    """Bounded lifecycle and media metrics for one served capability."""
+
+    active_streams: int = Field(description="Currently admitted provider streams.")
+    max_active_streams: int = Field(
+        description="Highest concurrent admitted stream count observed."
+    )
+    admitted_streams: int = Field(description="Provider streams admitted for execution.")
+    rejected_streams: int = Field(
+        description="Provider stream opens rejected after capability resolution."
+    )
+    overloaded_rejections: int = Field(
+        description="Rejected opens caused by the provider concurrency bound."
+    )
+    input_queue_depth: int = Field(
+        description="Caller input frames currently buffered before provider handling."
+    )
+    max_input_queue_depth: int = Field(
+        description="Highest caller input queue depth observed."
+    )
+    input_frames: int = Field(
+        description="Caller-to-provider lifecycle frames delivered to the handler."
+    )
+    input_media_bytes: int = Field(
+        description="Inline media bytes delivered from callers to the handler."
+    )
+    output_frames: int = Field(
+        description="Provider-to-caller lifecycle frames accepted for DATA egress."
+    )
+    output_media_bytes: int = Field(
+        description="Inline media bytes accepted from the provider for DATA egress."
+    )
+    completed_streams: int = Field(description="Streams ending with completed.")
+    failed_streams: int = Field(description="Streams ending with failed.")
+    cancelled_streams: int = Field(description="Streams ending with cancelled.")
+    missing_terminal_streams: int = Field(
+        description="Admitted streams removed without an observable terminal frame."
+    )
+    cancellation_requests: int = Field(
+        description="Valid cancellation requests received for active streams."
+    )
+    first_output_samples: int = Field(
+        description="Streams with a measured admission-to-first-output interval."
+    )
+    first_output_seconds_average: float | None = Field(
+        default=None,
+        description="Average admission-to-first-output latency.",
+    )
+    first_output_seconds_max: float | None = Field(
+        default=None,
+        description="Maximum admission-to-first-output latency.",
+    )
+    duration_samples: int = Field(
+        description="Terminal streams with a measured admitted lifetime."
+    )
+    duration_seconds_average: float | None = Field(
+        default=None,
+        description="Average admitted stream lifetime.",
+    )
+    duration_seconds_max: float | None = Field(
+        default=None,
+        description="Maximum admitted stream lifetime.",
+    )
+
+
+class ProviderDiagnostics(ProviderCapabilityDiagnostics):
+    """Process-local provider pressure metrics and per-capability evidence."""
+
+    active_unary_calls: int = Field(
+        description="Generic unary provider calls currently executing."
+    )
+    stream_slots_in_use: int = Field(
+        description="Provider stream slots reserved by admission or execution."
+    )
+    unary_concurrency_limit: int = Field(
+        description="Configured process-wide unary provider concurrency bound."
+    )
+    stream_concurrency_limit: int = Field(
+        description="Configured process-wide streaming provider concurrency bound."
+    )
+    capabilities: dict[str, ProviderCapabilityDiagnostics] = Field(
+        default_factory=dict,
+        description="Metrics keyed by stable qualified capability id.",
+    )
+
+    @classmethod
+    def empty(cls) -> "ProviderDiagnostics":
+        """Return a zeroed snapshot for older or unwired diagnostics producers."""
+
+        return cls(
+            active_streams=0,
+            max_active_streams=0,
+            admitted_streams=0,
+            rejected_streams=0,
+            overloaded_rejections=0,
+            input_queue_depth=0,
+            max_input_queue_depth=0,
+            input_frames=0,
+            input_media_bytes=0,
+            output_frames=0,
+            output_media_bytes=0,
+            completed_streams=0,
+            failed_streams=0,
+            cancelled_streams=0,
+            missing_terminal_streams=0,
+            cancellation_requests=0,
+            first_output_samples=0,
+            first_output_seconds_average=None,
+            first_output_seconds_max=None,
+            duration_samples=0,
+            duration_seconds_average=None,
+            duration_seconds_max=None,
+            active_unary_calls=0,
+            stream_slots_in_use=0,
+            unary_concurrency_limit=0,
+            stream_concurrency_limit=0,
+        )
+
+
 class NodeDiagnostics(CamelCaseModel):
     """Read-only diagnostic bundle for one Skulk node."""
 
@@ -777,6 +896,10 @@ class NodeDiagnostics(CamelCaseModel):
     )
     data_plane: DataPlaneDiagnostics = Field(
         description="Local DATA stream lifecycle, ordering, and timing metrics."
+    )
+    provider: ProviderDiagnostics = Field(
+        default_factory=ProviderDiagnostics.empty,
+        description="Local provider admission, lifecycle, media, and pressure metrics."
     )
     warnings: list[str] = Field(
         default_factory=list,

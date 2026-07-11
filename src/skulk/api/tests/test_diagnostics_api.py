@@ -146,6 +146,13 @@ def test_node_diagnostics_marks_master_outside_placement() -> None:
     runtime = _json_mapping(body["runtime"])
     assert runtime["masterNodeId"] == "master-node"
     assert runtime["isMaster"] is False
+    provider = _json_mapping(body["provider"])
+    assert provider["activeStreams"] == 0
+    assert provider["activeUnaryCalls"] == 0
+    assert provider["streamSlotsInUse"] == 0
+    assert provider["unaryConcurrencyLimit"] == 8
+    assert provider["streamConcurrencyLimit"] == 8
+    assert provider["capabilities"] == {}
     placements = _json_list(body["placements"])
     placement = _json_mapping(placements[0])
     assert placement["masterIsPlacementNode"] is False
