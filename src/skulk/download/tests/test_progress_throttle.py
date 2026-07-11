@@ -11,6 +11,7 @@ wedged in RunnerLoading. The fraction-delta gate caps a download to roughly
 ``1 / _PROGRESS_STEP`` in_progress events regardless of size or duration.
 """
 
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -36,6 +37,30 @@ def _make_coordinator() -> DownloadCoordinator:
         download_command_receiver=cast("object", cmd_recv),  # pyright: ignore[reportArgumentType]
         event_sender=cast("object", event_send),  # pyright: ignore[reportArgumentType]
     )
+
+
+@pytest.mark.asyncio
+async def test_synced_config_notifies_config_dependent_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Runtime config sync must refresh API capability advertisements."""
+
+    config_path = tmp_path / "skulk.yaml"
+    callbacks = 0
+
+    def applied() -> None:
+        nonlocal callbacks
+        callbacks += 1
+
+    coordinator = _make_coordinator()
+    coordinator.config_applied_callback = applied
+    monkeypatch.setattr(coordinator_mod, "resolve_config_path", lambda: config_path)
+
+    await coordinator._sync_config("experiments:\n  stt_realtime: true\n")
+
+    assert config_path.read_text() == "experiments:\n  stt_realtime: true\n"
+    assert callbacks == 1
 
 
 def test_in_progress_throttle_gates_by_fraction_rate_and_heartbeat(

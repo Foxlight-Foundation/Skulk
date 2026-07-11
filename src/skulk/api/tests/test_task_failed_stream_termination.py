@@ -12,10 +12,11 @@ from typing import Any
 import pytest
 
 from skulk.api.main import API
+from skulk.shared.types.audio import RealtimeAudioTranscriptionTaskParams
 from skulk.shared.types.chunks import ErrorChunk
-from skulk.shared.types.common import CommandId, ModelId
+from skulk.shared.types.common import CommandId, ModelId, NodeId
 from skulk.shared.types.state import State
-from skulk.shared.types.tasks import TaskId, TaskStatus
+from skulk.shared.types.tasks import RealtimeAudioTranscription, TaskId, TaskStatus
 from skulk.shared.types.tasks import TextGeneration as TextGenerationTask
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.shared.types.worker.instances import InstanceId
@@ -109,6 +110,39 @@ async def test_task_failed_with_closed_queue_drops_entry() -> None:
 
     await api._terminate_command_stream(task.task_id, "y")
     assert command_id not in api._text_generation_queues
+
+
+async def test_realtime_task_failure_does_not_block_on_full_queue() -> None:
+    """A stalled realtime consumer cannot block the API event apply loop."""
+
+    api = _make_api()
+    command_id = CommandId("realtime-failure-full")
+    task = RealtimeAudioTranscription(
+        task_id=TaskId("realtime-task"),
+        instance_id=InstanceId(),
+        command_id=command_id,
+        owner_node=NodeId("api-node"),
+        task_params=RealtimeAudioTranscriptionTaskParams(
+            model=ModelId("mlx-community/voxtral-realtime-test"),
+            input_sample_rate=16000,
+        ),
+    )
+    api.state = State().model_copy(update={"tasks": {task.task_id: task}})
+    sender, receiver = channel[Any](1)
+    sender.send_nowait(object())
+    api._audio_transcription_queues[command_id] = sender
+    cancelled: list[CommandId] = []
+
+    async def cancel(target: CommandId) -> None:
+        cancelled.append(target)
+
+    api._cancel_audio_transcription_command = cancel
+
+    await api._terminate_command_stream(task.task_id, "runner exited")
+
+    assert cancelled == [command_id]
+    assert command_id not in api._audio_transcription_queues
+    receiver.close()
 
 
 async def test_session_reset_fails_open_streams() -> None:

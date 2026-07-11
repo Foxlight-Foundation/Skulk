@@ -120,8 +120,14 @@ A model card's `placement.compatible_backends` selects which engine serves it
   support. Production nodes also expose the built-in `tts@1.0.0` provider
   facade over that same core command/runner path, with raw MP3 media on
   `PROVIDER_DATA` and dynamic telemetry/admission tied to mounted capacity.
-  Mounted STT models serve non-streaming `/v1/audio/transcriptions`;
-  translation and realtime/streaming STT remain later phases.
+  Mounted STT models serve non-streaming `/v1/audio/transcriptions`. The
+  experimental `stt.realtime@1.0.0` bidirectional provider accepts mono PCM16
+  frames only on an API node that also owns the mounted runner, pins a
+  `RealtimeAudioTranscription` task to that instance, and feeds a true upstream
+  streaming session over bounded local API-worker-runner IPC. It advertises
+  only with experimental mode, `experiments.stt_realtime`, and a card declaring
+  both streaming and realtime support. Remote runner ingress, WebSocket edge,
+  and speech translation remain later phases.
 - **`llama_cpp`** (`worker/runner/llama_cpp/`): in-process `llama-cpp-python` for
   GGUF on GPU/Linux nodes (Vulkan/ROCm/CUDA). Single-node.
 - **`llama_server`** (`worker/runner/llama_server/`): served-backend engine; the

@@ -1,6 +1,7 @@
 import asyncio
 import os
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar, cast
@@ -65,6 +66,7 @@ class DownloadCoordinator:
     event_sender: Sender[Event]
     offline: bool = False
     staging_cache_path: Path | None = None
+    config_applied_callback: Callable[[], None] | None = None
 
     # Local state
     download_status: dict[ModelId, DownloadProgress] = field(default_factory=dict)
@@ -296,6 +298,8 @@ class DownloadCoordinator:
                     bool(logging_cfg.get("enabled", False)) and bool(ingest_url_str)
                 )
                 set_structured_stdout(log_enabled, ingest_url=ingest_url_str)
+            if self.config_applied_callback is not None:
+                self.config_applied_callback()
         except Exception as exc:
             logger.warning(f"DownloadCoordinator: failed to sync config: {exc}")
 

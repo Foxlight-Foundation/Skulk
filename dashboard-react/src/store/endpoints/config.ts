@@ -28,6 +28,7 @@ export interface LoggingConfig {
 
 export interface ExperimentsConfig {
   tts_streaming: boolean;
+  stt_realtime: boolean;
 }
 
 export interface FullConfig {

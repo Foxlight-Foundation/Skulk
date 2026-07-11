@@ -33,6 +33,7 @@ const defaultStoreConfig = (): StoreConfig => ({
 
 const defaultExperimentsConfig = (): ExperimentsConfig => ({
   tts_streaming: false,
+  stt_realtime: false,
 });
 
 /* ---- animations ---- */
@@ -451,6 +452,29 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                 <Toggle
                   $on={modelStoreDraft.download.allow_hf_fallback}
                   onClick={() => updateDownload({ allow_hf_fallback: !modelStoreDraft.download.allow_hf_fallback })}
+                />
+              </Row>
+              <Row>
+                <FieldLabel>
+                  {t('settings.experiments.sttRealtime', 'Realtime STT')}
+                  <InfoTooltip
+                    content={t(
+                      'settings.experiments.sttRealtimeTooltip',
+                      'Enables the experimental realtime STT provider for mounted models with validated streaming-session support.',
+                    )}
+                  />
+                </FieldLabel>
+                <Toggle
+                  type="button"
+                  $on={experimentsDraft.stt_realtime}
+                  aria-pressed={experimentsDraft.stt_realtime}
+                  aria-label={t('settings.experiments.sttRealtime', 'Realtime STT')}
+                  onClick={() =>
+                    setExperimentsDraft((prev) => ({
+                      ...prev,
+                      stt_realtime: !prev.stt_realtime,
+                    }))
+                  }
                 />
               </Row>
             </Fieldset>
