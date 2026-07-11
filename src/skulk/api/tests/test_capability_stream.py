@@ -14,7 +14,9 @@ from skulk.extensions import (
     CapabilityDescriptor,
     CapabilityError,
     CapabilityResult,
+    CapabilityStreamError,
     CapabilityStreamFrame,
+    CapabilityStreamInput,
     ExtensionContext,
     InlineMediaAttachment,
     LoadedExtensions,
@@ -307,6 +309,43 @@ class _ClientStreamingProvider(_BidirectionalProvider):
         )
 
 
+class _EmptyClientStreamingProvider(_ClientStreamingProvider):
+    async def handle_input_stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+        input_frames: AsyncIterator[CapabilityStreamFrame],
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        async for frame in input_frames:
+            if frame.is_terminal:
+                break
+        yield CapabilityStreamFrame(
+            call_id=call.call_id,
+            direction="provider_to_caller",
+            sequence=1,
+            kind="completed",
+        )
+
+
+class _ImmediateFailureInputProvider(_BidirectionalProvider):
+    async def handle_input_stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+        input_frames: AsyncIterator[CapabilityStreamFrame],
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        yield CapabilityStreamFrame(
+            call_id=call.call_id,
+            direction="provider_to_caller",
+            sequence=1,
+            kind="failed",
+            error=CapabilityStreamError(
+                code="provider_error",
+                message="provider failed before reading input",
+            ),
+        )
+
+
 def _build_api(provider: object) -> API:
     command_sender, _ = channel[ForwarderCommand]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
@@ -435,7 +474,12 @@ async def test_invalid_input_chunk_fails_provider_output() -> None:
     assert [frame.kind for frame in frames] == ["started", "failed"]
     assert frames[-1].error is not None
     assert frames[-1].error.code == "invalid_frame"
-    assert [frame.kind for frame in provider.input_frames] == ["started"]
+    assert [frame.kind for frame in provider.input_frames] == [
+        "started",
+        "failed",
+    ]
+    assert provider.input_frames[-1].error is not None
+    assert provider.input_frames[-1].error.code == "invalid_frame"
 
 
 async def test_client_streaming_half_close_returns_structured_final_result() -> None:
@@ -465,6 +509,32 @@ async def test_client_streaming_half_close_returns_structured_final_result() -> 
     assert frames[-1].payload == {"text": "buffered transcript"}
 
 
+async def test_client_streaming_rejects_empty_required_final_result() -> None:
+    api = _build_api(_EmptyClientStreamingProvider())
+    frames: list[CapabilityStreamFrame] = []
+
+    async with api._tg as task_group:  # pyright: ignore[reportPrivateUsage]
+        task_group.start_soon(
+            api._apply_provider_data  # pyright: ignore[reportPrivateUsage]
+        )
+        session = await api._extension_context.stream_capability(  # pyright: ignore[reportPrivateUsage]
+            NodeId("api-node"),
+            "buffered-stt",
+            "1.0.0",
+            descriptor_revision(_CLIENT_STREAMING),
+            {},
+            timeout_seconds=2.0,
+        )
+        assert session.input is not None
+        await session.input.complete()
+        frames = [frame async for frame in session.frames]
+        task_group.cancel_scope.cancel()
+
+    assert [frame.kind for frame in frames] == ["started", "failed"]
+    assert frames[-1].error is not None
+    assert frames[-1].error.code == "invalid_frame"
+
+
 async def test_caller_input_cancellation_terminates_provider_output() -> None:
     api = _build_api(_BidirectionalProvider())
     frames: list[CapabilityStreamFrame] = []
@@ -490,6 +560,42 @@ async def test_caller_input_cancellation_terminates_provider_output() -> None:
     assert frames[-1].error is not None
     assert frames[-1].error.code == "cancelled"
     assert frames[-1].error.message == "microphone disconnected"
+
+
+async def test_terminal_output_racing_input_start_returns_typed_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_start = CapabilityStreamInput.start
+
+    async def delayed_start(stream: CapabilityStreamInput) -> None:
+        await anyio.sleep(0.05)
+        await original_start(stream)
+
+    monkeypatch.setattr(CapabilityStreamInput, "start", delayed_start)
+    api = _build_api(_ImmediateFailureInputProvider())
+    frames: list[CapabilityStreamFrame] = []
+
+    async with api._tg as task_group:  # pyright: ignore[reportPrivateUsage]
+        task_group.start_soon(
+            api._apply_provider_data  # pyright: ignore[reportPrivateUsage]
+        )
+        session = await api._extension_context.stream_capability(  # pyright: ignore[reportPrivateUsage]
+            NodeId("api-node"),
+            "realtime-stt",
+            "1.0.0",
+            descriptor_revision(_BIDIRECTIONAL),
+            {},
+            timeout_seconds=2.0,
+        )
+        assert session.open_result.ok is True
+        assert session.input is not None
+        assert session.input.closed is True
+        frames = [frame async for frame in session.frames]
+        task_group.cancel_scope.cancel()
+
+    assert [frame.kind for frame in frames] == ["started", "failed"]
+    assert frames[-1].error is not None
+    assert frames[-1].error.code == "provider_error"
 
 
 async def test_remote_open_uses_peer_api_but_media_uses_provider_data(

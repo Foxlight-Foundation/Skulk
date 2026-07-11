@@ -3712,10 +3712,7 @@ class API:
                         # request racing admission is recorded on the event and
                         # applied only after sequence zero is on the DATA plane.
                         active.cancel_scope = cancel_scope
-                        if (
-                            active.cancel_requested.is_set()
-                            or active.input_failure is not None
-                        ):
+                        if active.cancel_requested.is_set():
                             cancel_scope.cancel()
                         stream: AsyncIterator[CapabilityStreamFrame] | None = None
                         if not cancel_scope.cancel_called:
@@ -3733,6 +3730,12 @@ class API:
                         if stream is None:
                             stream = self._empty_capability_stream()
                         async for frame in stream:
+                            if active.input_failure is not None:
+                                await fail(
+                                    active.input_failure.code,
+                                    active.input_failure.message,
+                                )
+                                break
                             if not isinstance(frame, CapabilityStreamFrame):  # pyright: ignore[reportUnnecessaryIsInstance]
                                 await fail(
                                     "invalid_frame",
@@ -3755,7 +3758,8 @@ class API:
                             if frame.kind == "chunk" or (
                                 frame.kind == "completed"
                                 and (
-                                    frame.payload is not None
+                                    descriptor.output_schema is not None
+                                    or frame.payload is not None
                                     or frame.media is not None
                                 )
                             ):
@@ -3825,15 +3829,18 @@ class API:
                             )
                 except TimeoutError:
                     with anyio.CancelScope(shield=True):
-                        await fail(
-                            "timeout",
-                            "provider stream exceeded its single deadline budget",
-                        )
+                        if active.input_failure is not None:
+                            await fail(
+                                active.input_failure.code,
+                                active.input_failure.message,
+                            )
+                        else:
+                            await fail(
+                                "timeout",
+                                "provider stream exceeded its single deadline budget",
+                            )
                 except anyio.get_cancelled_exc_class():
-                    if (
-                        not active.cancel_requested.is_set()
-                        and active.input_failure is None
-                    ):
+                    if not active.cancel_requested.is_set():
                         raise
             if active.input_failure is not None and not terminal_sent:
                 with anyio.CancelScope(shield=True):
@@ -3871,10 +3878,16 @@ class API:
                     with contextlib.suppress(
                         BrokenResourceError, ClosedResourceError
                     ):
-                        await fail(
-                            "provider_error",
-                            f"{type(exc).__name__}: {exc}",
-                        )
+                        if active.input_failure is not None:
+                            await fail(
+                                active.input_failure.code,
+                                active.input_failure.message,
+                            )
+                        else:
+                            await fail(
+                                "provider_error",
+                                f"{type(exc).__name__}: {exc}",
+                            )
         finally:
             self._close_active_provider_input(active)
             current = self._active_capability_streams.get(call.call_id)
@@ -3888,11 +3901,25 @@ class API:
         """Yield one bounded caller input direction through its terminal."""
 
         assert active.input_receiver is not None
+        assert active.input_lifecycle is not None
+        last_sequence = -1
+        terminal_yielded = False
         with active.input_receiver as frames:
             async for frame in frames:
+                last_sequence = frame.sequence
+                terminal_yielded = frame.is_terminal
                 yield frame
                 if frame.is_terminal:
                     return
+        if not terminal_yielded and active.input_failure is not None:
+            yield CapabilityStreamFrame(
+                call_id=active.input_lifecycle.call_id,
+                direction="caller_to_provider",
+                sequence=last_sequence + 1,
+                kind="failed",
+                synthetic=True,
+                error=active.input_failure,
+            )
 
     @staticmethod
     def _close_active_provider_input(active: _ActiveProviderStream) -> None:
@@ -5893,8 +5920,6 @@ class API:
             active.input_failure = error
         if active.input_sender is not None:
             active.input_sender.close()
-        if active.cancel_scope is not None:
-            active.cancel_scope.cancel()
 
     async def _sweep_provider_stream_receivers(self) -> None:
         """Expire provider sequence gaps without waiting for the call deadline."""

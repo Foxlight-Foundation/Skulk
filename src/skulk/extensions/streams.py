@@ -194,7 +194,13 @@ class CapabilityStreamInput:
         """Emit the caller direction's required sequence-zero opener."""
 
         async with self._lock:
-            if self._next_sequence != 0 or self._closed:
+            # Provider output may fail and close the sink while this task waits
+            # to acquire the lock. That terminal output is authoritative; an
+            # input opener is no longer needed and must not escape as a caller
+            # exception instead of letting the queued terminal be consumed.
+            if self._closed:
+                return
+            if self._next_sequence != 0:
                 raise RuntimeError("provider input direction is already started")
             await self._emit("started")
 
