@@ -1366,6 +1366,11 @@ async def test_audio_speech_streaming_accepts_pcm_only_card() -> None:
         stream=True,
     ) == (card.model_id, AudioResponseFormat.Pcm)
 
+    provider_api, _ = _build_builtin_provider_api()
+    provider_api.state = _state_with_running_card(card)
+    provider_api._sync_builtin_speech_capability()
+    assert provider_api._telemetry_view.local_advertised_capabilities == {"vad"}
+
 
 @pytest.mark.anyio
 async def test_audio_speech_streaming_rejects_unready_routable_replica() -> None:
@@ -1919,6 +1924,51 @@ async def test_audio_speech_collect_cancels_on_sample_rate_change(
 
     with pytest.raises(HTTPException, match="changed sample rate"):
         await api._collect_audio_speech_chunks(command_id, receiver)
+
+    assert cancelled == [command_id]
+
+
+@pytest.mark.anyio
+async def test_audio_speech_stream_cancels_on_sample_rate_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming PCM must preserve the framing declared by its first chunk."""
+
+    api = _build_api()
+    command_id = CommandId("speech-stream-sample-rate-change")
+    sender, receiver = channel[AudioChunk | ErrorChunk]()
+    api._audio_speech_queues[command_id] = sender
+    model_id = ModelId("mlx-community/qwen3-tts-test")
+    first_chunk = AudioChunk(
+        model=model_id,
+        data=base64.b64encode(b"\x00\x00").decode("ascii"),
+        chunk_index=0,
+        total_chunks=None,
+        format=AudioResponseFormat.Pcm,
+        sample_rate=24000,
+    )
+    await sender.send(
+        AudioChunk(
+            model=model_id,
+            data=base64.b64encode(b"\x00\x00").decode("ascii"),
+            chunk_index=1,
+            total_chunks=None,
+            format=AudioResponseFormat.Pcm,
+            sample_rate=48000,
+            finish_reason="stop",
+        )
+    )
+    cancelled: list[CommandId] = []
+
+    async def _cancel(self: API, cancelled_id: CommandId) -> None:
+        assert self is api
+        cancelled.append(cancelled_id)
+
+    monkeypatch.setattr(API, "_cancel_audio_speech_command", _cancel)
+    stream = api._stream_audio_speech_chunks(command_id, receiver, first_chunk)
+    assert await anext(stream) == b"\x00\x00"
+    with pytest.raises(RuntimeError, match="changed sample rate"):
+        await anext(stream)
 
     assert cancelled == [command_id]
 
