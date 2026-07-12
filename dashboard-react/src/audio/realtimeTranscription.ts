@@ -515,7 +515,7 @@ export class RealtimeConversationSocket {
       payload.type === 'conversation.item.input_audio_transcription.completed'
       && typeof payload.transcript === 'string'
     ) {
-      if (itemId) this.transcripts.delete(itemId);
+      this.transcripts.delete(itemId ?? 'current');
       this.acceptingAudio = true;
       this.turnHasAudio = false;
       this.options.onTranscript?.(payload.transcript, true, itemId);
@@ -533,7 +533,7 @@ export class RealtimeConversationSocket {
       return;
     }
     if (payload.type === 'response.output_text.done' && typeof payload.text === 'string') {
-      if (itemId) this.responses.delete(itemId);
+      this.responses.delete(itemId ?? 'current');
       this.options.onAssistantText?.(payload.text, true, itemId);
       return;
     }
