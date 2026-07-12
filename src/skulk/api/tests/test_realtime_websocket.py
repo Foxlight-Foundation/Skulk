@@ -105,6 +105,7 @@ def _install_waiting_session(
     input_frames: list[CapabilityStreamFrame],
     *,
     call_id: str,
+    fail_on_complete: bool = False,
 ) -> None:
     """Install a provider session that remains live until the bridge cancels it."""
 
@@ -113,6 +114,8 @@ def _install_waiting_session(
 
         async def send_input(frame: CapabilityStreamFrame) -> None:
             input_frames.append(frame)
+            if fail_on_complete and frame.kind == "completed":
+                raise RuntimeError("provider commit failed")
 
         input_stream = CapabilityStreamInput(
             call_id=call_id,
@@ -840,6 +843,78 @@ def test_realtime_websocket_manual_flush_does_not_double_commit_vad(
         "started",
         "chunk",
         "completed",
+    ]
+
+
+def test_realtime_websocket_manual_flush_stops_after_vad_commit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed VAD auto-commit closes without continuing the manual commit path."""
+
+    api = _build_api()
+    input_frames: list[CapabilityStreamFrame] = []
+
+    class FlushBoundaryDetector:
+        frame_bytes = 320
+
+        def __init__(self, config: object) -> None:
+            del config
+
+        def process(self, frame: bytes) -> tuple[VadTurnEvent, ...]:
+            assert len(frame) == self.frame_bytes
+            return (VadTurnEvent("speech_stopped", 10, "silence"),)
+
+        def finish(self) -> tuple[VadTurnEvent, ...]:
+            return ()
+
+    monkeypatch.setattr(realtime_api, "VoiceActivityDetector", FlushBoundaryDetector)
+    _install_waiting_session(
+        api,
+        input_frames,
+        call_id="flush-vad-commit-failure",
+        fail_on_complete=True,
+    )
+    audio = _pcm16_bytes([1000] * 240)
+
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt"
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {
+                            "transcription": {"model": "org/realtime-stt"},
+                            "turn_detection": {"type": "server_vad"},
+                        }
+                    },
+                },
+            }
+        )
+        assert _receive_json(websocket)["type"] == "session.updated"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(audio).decode("ascii"),
+            }
+        )
+        websocket.send_json({"type": "input_audio_buffer.commit", "event_id": "commit"})
+        assert _receive_json(websocket)["type"] == "input_audio_buffer.speech_stopped"
+        error = _receive_json(websocket)
+        assert error["type"] == "error"
+        assert _mapping(error["error"])["code"] == "input_transport_error"
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            _receive_json(websocket)
+        assert exc_info.value.code == 1011
+
+    assert [frame.kind for frame in input_frames] == [
+        "started",
+        "chunk",
+        "completed",
+        "cancelled",
     ]
 
 
