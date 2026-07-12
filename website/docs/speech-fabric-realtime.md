@@ -24,7 +24,9 @@ Skulk currently exposes:
 `/v1/audio/speech` returns an encoded audio response. Its stable `stream=true`
 path is available when the mounted TTS card declares
 `audio.supports_streaming = true`, every routable instance is ready, and the
-request format resolves to MP3. Other encoded formats remain batch-only.
+request format resolves to MP3 or raw PCM. PCM responses declare sample rate,
+channel count, and sample format in HTTP headers. Other encoded formats remain
+batch-only.
 
 `/v1/audio/transcriptions` accepts a bounded multipart upload and returns one
 completed transcription. It does not provide progressive REST transcription.
@@ -101,8 +103,10 @@ model and local node advertise the required capabilities.
 - Capture callbacks are aggregated into bounded 100 ms transport frames.
 - Batch-only models retain the `MediaRecorder` upload flow.
 - Transcription results populate the chat draft for review or submission.
-- TTS playback uses `/v1/audio/speech` and currently begins after the complete
-  encoded response is available.
+- Streaming-capable TTS models use sentence-sized raw PCM requests and a bounded
+  AudioWorklet playback queue. The dashboard pauses HTTP reads under pressure,
+  preserves sentence order, and propagates stop to queued and active requests.
+- Batch-only TTS models retain complete-response encoded playback.
 
 The dashboard falls back to batch transcription when realtime model or node
 capabilities are absent. Speech controls remain hidden when no suitable mounted

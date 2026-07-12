@@ -134,13 +134,14 @@ class AudioCardKind(str, Enum):
 
 
 class AudioResponseFormat(str, Enum):
-    """Encoded audio response formats supported by the speech serving API."""
+    """Audio response formats supported by the speech serving API."""
 
     Mp3 = "mp3"
     Wav = "wav"
     Flac = "flac"
     Ogg = "ogg"
     Opus = "opus"
+    Pcm = "pcm"
 
 
 def card_serves_speech(card: "ModelCard") -> bool:

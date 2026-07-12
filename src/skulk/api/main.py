@@ -466,9 +466,10 @@ _AUDIO_CONTENT_TYPES: Final[dict[AudioResponseFormat, str]] = {
     AudioResponseFormat.Flac: "audio/flac",
     AudioResponseFormat.Ogg: "audio/ogg",
     AudioResponseFormat.Opus: "audio/opus",
+    AudioResponseFormat.Pcm: "audio/L16",
 }
 _STREAMABLE_AUDIO_RESPONSE_FORMATS: Final[frozenset[AudioResponseFormat]] = frozenset(
-    {AudioResponseFormat.Mp3}
+    {AudioResponseFormat.Mp3, AudioResponseFormat.Pcm}
 )
 _MAX_AUDIO_UPLOAD_BYTES: Final[int] = 25 * 1024 * 1024
 _SPEECH_MEDIA_CHUNK_BYTES: Final[int] = 1024 * 1024
@@ -10014,7 +10015,17 @@ class API:
                 headers={
                     "Content-Disposition": (
                         f"attachment; filename=speech.{response_format.value}"
-                    )
+                    ),
+                    **(
+                        {
+                            "X-Audio-Sample-Rate": str(first_chunk.sample_rate),
+                            "X-Audio-Channels": "1",
+                            "X-Audio-Sample-Format": "s16le",
+                        }
+                        if response_format == AudioResponseFormat.Pcm
+                        and first_chunk.sample_rate is not None
+                        else {}
+                    ),
                 },
             )
 

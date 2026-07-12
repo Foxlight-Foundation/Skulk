@@ -1104,6 +1104,63 @@ async def test_audio_speech_streams_audio_chunks_and_sends_command(
 
 
 @pytest.mark.anyio
+async def test_audio_speech_streams_pcm_with_playback_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raw PCM streaming should expose the framing metadata browsers require."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/qwen3-tts-test")
+
+    async def _validate_model(
+        self: API,
+        requested_model: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        assert self is api
+        assert requested_model == model_id
+        assert response_format == AudioResponseFormat.Pcm
+        assert stream is True
+        return model_id, AudioResponseFormat.Pcm
+
+    async def _send(command: object) -> None:
+        if isinstance(command, SpeechSynthesis):
+            await api._audio_speech_queues[command.command_id].send(
+                AudioChunk(
+                    model=model_id,
+                    data=base64.b64encode(b"\x00\x00\xff\x7f").decode("ascii"),
+                    chunk_index=0,
+                    total_chunks=None,
+                    format=AudioResponseFormat.Pcm,
+                    sample_rate=24000,
+                    finish_reason="stop",
+                )
+            )
+
+    monkeypatch.setattr(API, "_validate_speech_synthesis_model", _validate_model)
+    monkeypatch.setattr(api, "_send", _send)
+
+    response = await api.audio_speech(
+        AudioSpeechRequest(
+            model=str(model_id),
+            input="hello",
+            response_format=AudioResponseFormat.Pcm,
+            stream=True,
+        )
+    )
+
+    assert isinstance(response, StreamingResponse)
+    assert response.media_type == "audio/L16"
+    assert response.headers["x-audio-sample-rate"] == "24000"
+    assert response.headers["x-audio-channels"] == "1"
+    assert response.headers["x-audio-sample-format"] == "s16le"
+    body_iterator = cast(AsyncIterator[bytes], response.body_iterator)
+    assert b"".join([chunk async for chunk in body_iterator]) == b"\x00\x00\xff\x7f"
+
+
+@pytest.mark.anyio
 async def test_audio_speech_streaming_defaults_to_mp3(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -44,6 +44,7 @@ from skulk.shared.types.worker.runners import (
 from skulk.worker.runner.speech import runner as speech_runner
 from skulk.worker.runner.speech.runner import (
     Runner,
+    _encode_audio,
     _filter_kwargs,
     _install_attention_mask_dtype_compat,
     _install_canary_compatibility,
@@ -51,6 +52,24 @@ from skulk.worker.runner.speech.runner import (
     _resolve_staged_voice_path,
     _stt_generate_kwargs,
 )
+
+
+def test_encode_audio_emits_little_endian_pcm16() -> None:
+    """Raw PCM responses should be headerless, clipped signed 16-bit samples."""
+
+    encoded = _encode_audio(
+        np.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=np.float32),
+        24000,
+        AudioResponseFormat.Pcm,
+    )
+
+    assert np.frombuffer(encoded, dtype="<i2").tolist() == [
+        -32767,
+        -32767,
+        0,
+        32767,
+        32767,
+    ]
 
 
 class _CaptureSender:
