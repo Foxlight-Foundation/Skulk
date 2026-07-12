@@ -202,6 +202,7 @@ export class StreamingSpeechPlayback {
         );
         for (const frame of splitPlaybackSamples(samples, maximumFrameSamples)) {
           await this.waitForCapacity(playbackSampleRate, frame.length, signal);
+          if (this.stopped || signal?.aborted) return;
           this.bufferedSamples += frame.length;
           node.port.postMessage({ type: 'audio', samples: frame.buffer }, [frame.buffer]);
         }
@@ -309,6 +310,9 @@ export class SpeechSentenceQueue {
         } catch (error) {
           if (!(error instanceof DOMException && error.name === 'AbortError')) {
             this.onError(error);
+            this.stop();
+            this.onIdle();
+            return;
           }
           this.stop();
         } finally {

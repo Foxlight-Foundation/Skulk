@@ -100,4 +100,18 @@ describe('SpeechSentenceQueue', () => {
     await vi.waitFor(() => expect(aborted).toBe(true));
     expect(calls).toEqual(['First.']);
   });
+
+  it('returns to idle after a playback error', async () => {
+    const errors: unknown[] = [];
+    let idle = false;
+    const queue = new SpeechSentenceQueue(
+      async () => { throw new Error('playback failed'); },
+      (error) => errors.push(error),
+      () => { idle = true; },
+    );
+
+    queue.enqueue(['First.']);
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    await vi.waitFor(() => expect(idle).toBe(true));
+  });
 });
