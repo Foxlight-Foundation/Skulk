@@ -15,17 +15,19 @@ SKULK_DIR="${SKULK_DIR:-/root/skulk}"
 
 log() { printf '[bootstrap] %s\n' "$*"; }
 
+# One ref-resolution path for fresh and reused checkouts: clone the default
+# branch shallow, then fetch/checkout the requested ref. `git clone --branch`
+# cannot take a commit SHA, and pinning a session to an exact commit (a PR
+# head, a workflow SHA) is a primary use of this script.
 if [ ! -d "${SKULK_DIR}/.git" ]; then
-  log "cloning Skulk (${REF})"
-  git clone --branch "${REF}" --depth 1 \
-    https://github.com/Foxlight-Foundation/Skulk "${SKULK_DIR}"
-else
-  log "reusing checkout at ${SKULK_DIR} (fetching ${REF})"
-  # Branches and SHAs fetch bare; tags need the qualified refspec on re-runs.
-  git -C "${SKULK_DIR}" fetch --depth 1 origin "${REF}" \
-    || git -C "${SKULK_DIR}" fetch --depth 1 origin "refs/tags/${REF}:refs/tags/${REF}"
-  git -C "${SKULK_DIR}" checkout FETCH_HEAD
+  log "cloning Skulk"
+  git clone --depth 1 https://github.com/Foxlight-Foundation/Skulk "${SKULK_DIR}"
 fi
+log "fetching ${REF}"
+# Branches and SHAs fetch bare; tags need the qualified refspec.
+git -C "${SKULK_DIR}" fetch --depth 1 origin "${REF}" \
+  || git -C "${SKULK_DIR}" fetch --depth 1 origin "refs/tags/${REF}:refs/tags/${REF}"
+git -C "${SKULK_DIR}" checkout FETCH_HEAD
 
 cd "${SKULK_DIR}"
 log "uv sync (builds the Rust bindings)"

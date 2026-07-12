@@ -18,6 +18,9 @@ ARG UBUNTU_VERSION=22.04
 # ---- build stage: the two expensive CUDA compiles ---------------------------
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS build
 ARG CUDA_ARCHS="86;89"
+# pipefail: a curl|sh installer whose download dies must fail the build, not
+# publish an image that is missing its toolchain.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake git curl pkg-config python3-dev python3-pip \
@@ -50,6 +53,9 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
 
 # ---- runtime stage: everything a session needs except Skulk itself ----------
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
+# SHELL does not survive FROM; re-assert pipefail for this stage's curl|sh
+# installers (rustup, uv).
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # build-essential + cmake stay: `uv sync` compiles Skulk's Rust bindings at
 # session time (the Skulk checkout is per-session, so it cannot be prebaked).
