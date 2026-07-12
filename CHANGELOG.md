@@ -87,6 +87,10 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Text-generation compatibility endpoints now reject mounted TTS-only and
+  STT-only model cards before command dispatch, preventing modality mistakes
+  from reaching or restarting speech runners.
+
 - **Pooled (multi-node) GGUF placement no longer caps unified-memory nodes at
   their BIOS VRAM carve.** Admission for RPC placements previously sized each
   node against a VRAM-carve-only figure, which falsely refused pooled models
