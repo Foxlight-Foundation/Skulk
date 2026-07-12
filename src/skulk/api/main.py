@@ -8816,6 +8816,28 @@ class API:
             streaming_interval=request.streaming_interval,
         )
 
+    def _apply_default_speech_voice(
+        self,
+        request: AudioSpeechRequest,
+        model_id: ModelId,
+    ) -> AudioSpeechRequest:
+        """Apply a card-declared default only when the caller omits a voice."""
+
+        if request.voice is not None:
+            return request
+        card = next(
+            (
+                candidate
+                for instance in self.state.instances.values()
+                if instance.shard_assignments.model_id == model_id
+                and (candidate := self._model_card_for_instance(instance)) is not None
+            ),
+            None,
+        )
+        if card is None or card.audio is None or card.audio.default_voice is None:
+            return request
+        return request.model_copy(update={"voice": card.audio.default_voice})
+
     async def _start_speech_synthesis(
         self,
         task_params: SpeechSynthesisTaskParams,
@@ -8863,6 +8885,7 @@ class API:
             request.response_format,
             stream=True,
         )
+        request = self._apply_default_speech_voice(request, model_id)
         if response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
             raise HTTPException(
                 status_code=400,
@@ -9628,6 +9651,7 @@ class API:
         model_id, response_format = await self._validate_speech_synthesis_model(
             ModelId(request.model), requested_response_format, stream=request.stream
         )
+        request = self._apply_default_speech_voice(request, model_id)
         if request.stream and response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
             supported = ", ".join(
                 audio_format.value

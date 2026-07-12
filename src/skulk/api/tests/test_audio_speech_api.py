@@ -281,6 +281,35 @@ async def test_audio_voices_returns_static_mounted_catalog(
 
 
 @pytest.mark.anyio
+async def test_audio_speech_applies_card_default_voice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A multi-speaker model remains usable when the caller omits voice."""
+
+    api = _build_api()
+    card = _tts_card()
+    assert card.audio is not None
+    card = card.model_copy(
+        update={
+            "audio": card.audio.model_copy(
+                update={
+                    "supports_voice_listing": True,
+                    "voices": ("ryan", "aiden"),
+                    "default_voice": "ryan",
+                }
+            )
+        }
+    )
+
+    api.state = _state_with_running_card(card)
+    request = AudioSpeechRequest(model=str(card.model_id), input="hello")
+
+    resolved = api._apply_default_speech_voice(request, card.model_id)
+
+    assert resolved.voice == "ryan"
+
+
+@pytest.mark.anyio
 async def test_audio_voices_rejects_unmounted_catalog_card(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

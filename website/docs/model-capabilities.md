@@ -140,6 +140,9 @@ These fields are now runtime-facing metadata. They let placement route speech
 cards to the `mlx_audio` runner, let `/v1/models` identify mounted TTS/STT
 models, and let the dashboard expose voice controls without guessing from model
 names. Mounted `supports_speech_synthesis` models serve `/v1/audio/speech`.
+Cards with a fixed speaker inventory may declare `default_voice`; Skulk applies
+it only when the caller omits `voice`, and schema validation requires it to be
+one of the card's `voices`.
 When the node is running with `SKULK_ENABLE_EXPERIMENTAL_MODE`, the cluster
 config enables `experiments.tts_streaming`, and the card also declares
 `audio.supports_streaming = true`, clients can pass `stream=true` for chunked

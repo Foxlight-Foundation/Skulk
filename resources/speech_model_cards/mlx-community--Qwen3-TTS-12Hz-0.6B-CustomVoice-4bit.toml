@@ -17,6 +17,7 @@ supports_streaming = false
 supports_realtime = false
 supports_voice_listing = true
 voices = ["serena", "vivian", "uncle_fu", "ryan", "aiden", "ono_anna", "sohee", "eric", "dylan"]
+default_voice = "ryan"
 supports_reference_audio = false
 sample_rates = [24000]
 

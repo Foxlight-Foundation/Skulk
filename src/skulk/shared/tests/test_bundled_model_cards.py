@@ -193,6 +193,7 @@ def test_qwen_custom_voice_card_exposes_upstream_speaker_inventory() -> None:
 
     assert card.audio is not None
     assert card.audio.supports_voice_listing is True
+    assert card.audio.default_voice == "ryan"
     assert card.audio.voices == (
         "serena",
         "vivian",
