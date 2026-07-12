@@ -46,6 +46,8 @@ export interface ChatState {
   selectedSpeechModelId: string | null;
   selectedVoice: string | null;
   autoSpeakAssistant: boolean;
+  realtimeVoiceEnabled: boolean;
+  autoSubmitVoice: boolean;
   modelToConversationId: Record<string, string>;
 }
 
@@ -54,6 +56,8 @@ interface PersistedDurable {
   modelToConversationId?: Record<string, string>;
   selectedVoice?: string | null;
   autoSpeakAssistant?: boolean;
+  realtimeVoiceEnabled?: boolean;
+  autoSubmitVoice?: boolean;
 }
 
 interface PersistedSession {
@@ -99,6 +103,8 @@ function initialState(): ChatState {
     selectedSpeechModelId: session.selectedSpeechModelId ?? null,
     selectedVoice: durable.selectedVoice ?? null,
     autoSpeakAssistant: durable.autoSpeakAssistant ?? false,
+    realtimeVoiceEnabled: durable.realtimeVoiceEnabled ?? true,
+    autoSubmitVoice: durable.autoSubmitVoice ?? false,
   };
 }
 
@@ -172,6 +178,14 @@ const slice = createSlice({
 
     setAutoSpeakAssistant(state, action: PayloadAction<boolean>) {
       state.autoSpeakAssistant = action.payload;
+    },
+
+    setRealtimeVoiceEnabled(state, action: PayloadAction<boolean>) {
+      state.realtimeVoiceEnabled = action.payload;
+    },
+
+    setAutoSubmitVoice(state, action: PayloadAction<boolean>) {
+      state.autoSubmitVoice = action.payload;
     },
 
     addMessage(state, action: PayloadAction<ChatMessage>) {
@@ -336,6 +350,8 @@ export function subscribeChatPersistence(
         modelToConversationId: chat.modelToConversationId,
         selectedVoice: chat.selectedVoice,
         autoSpeakAssistant: chat.autoSpeakAssistant,
+        realtimeVoiceEnabled: chat.realtimeVoiceEnabled,
+        autoSubmitVoice: chat.autoSubmitVoice,
       },
       version: 1,
     };

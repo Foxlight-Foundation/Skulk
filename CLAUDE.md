@@ -115,9 +115,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
 - **`mlx_audio`**: single-node speech backend vocabulary for upstream
   `mlx-audio` TTS/STT models. Skulk probes and advertises `mlx_audio` /
   `mlx_audio-metal` when `mlx_audio` imports on macOS. Mounted TTS models serve
-  `/v1/audio/speech` through the speech runner; MP3 `stream=true` remains behind
-  experimental mode, `experiments.tts_streaming`, and card-level streaming
-  support. Production nodes also expose the built-in `tts@1.0.0` provider
+  `/v1/audio/speech` through the speech runner; stable MP3/raw-PCM `stream=true` requires
+  card-level streaming support. Mounted STT models serve batch transcription;
+  cards with proven streaming support additionally expose typed SSE or
+  progressive NDJSON from their actual model deltas. Production nodes also expose the built-in `tts@1.0.0` provider
   facade over that same core command/runner path, with raw MP3 media on
   `PROVIDER_DATA` and dynamic telemetry/admission tied to mounted capacity.
   Mounted STT models serve non-streaming `/v1/audio/transcriptions`. Ready
@@ -125,24 +126,39 @@ A model card's `placement.compatible_backends` selects which engine serves it
   callers send bounded encoded audio as binary provider frames, half-close
   input, and receive one final transcript. Its core command path is shared
   with the REST endpoint. The
-  experimental `stt.realtime@1.0.0` bidirectional provider accepts mono PCM16
+  stable `stt.realtime@1.0.0` bidirectional provider accepts mono PCM16
   frames on any API node with reachable mounted capacity, pins a
   `RealtimeAudioTranscription` task to one single-host instance, and feeds a
   true upstream streaming session through bounded ingress. Same-node input
   short-circuits locally; remote input uses node-addressed binary
   `REALTIME_AUDIO` packets over Zenoh and is not advertised when Zenoh is
   unavailable. PCM never enters State or the event log. It advertises only with
-  experimental mode, `experiments.stt_realtime`, and a card declaring both
-  streaming and realtime support. `WS /v1/realtime` is a transcription-only,
-  one-utterance OpenAI-compatible adapter over this provider: base64 24 kHz
+  reachable ready capacity and a card declaring both streaming and realtime
+  support. `WS /v1/realtime` is a multi-turn OpenAI-compatible adapter over
+  this provider: base64 24 kHz
   PCM16 at the API edge becomes raw Fabric media, and disconnect cancels the
-  provider. Dashboard chat uses this path only when card truth and the local
+  provider. `WS /v1/fabric/chains/speech` exposes the same hardened bridge as
+  an explicit typed STT-to-chat-to-TTS composition surface; its session update
+  selects optional mounted chat, TTS, and voice participants. Dashboard chat
+  uses this path only when card truth and the local
   live provider tag agree, resampling AudioWorklet microphone frames to 24 kHz
-  PCM16; batch cards keep MediaRecorder upload. Translation-capable STT cards
+  PCM16; batch cards keep MediaRecorder upload. Every production API also
+  advertises `vad@1.0.0`, a stable bidirectional WebRTC VAD provider for
+  8/16/32/48 kHz mono PCM16. It emits typed turn boundaries with bounded
+  minimum speech, silence hangover, preroll, and maximum utterance duration;
+  media is processed per call and never retained. Translation-capable STT cards
   serve experimental `/v1/audio/translations` only with global experimental
   mode and `experiments.speech_translation`; TTS cards may expose static voices
-  through the Skulk `/v1/audio/voices` extension. VAD, conversation/full-duplex
-  speech, and managed reference audio remain later phases.
+  through the Skulk `/v1/audio/voices` extension. The realtime transcription
+  WebSocket accepts bounded server VAD and serializes utterances as distinct
+  provider calls. Optional response configuration routes final transcripts
+  through a mounted chat model and mounted `tts@1.0.0` provider; explicit
+  cancellation and VAD barge-in cancel underlying model/TTS commands.
+  Managed reference audio is accepted only as a
+  bounded multipart upload for supporting TTS cards. Its bytes use the
+  node-addressed `SPEECH_MEDIA` Zenoh data path, never State or the event log;
+  the worker assembles them in bounded process-local memory and the runner
+  removes its request-scoped temporary file after generation.
 - **`llama_cpp`** (`worker/runner/llama_cpp/`): in-process `llama-cpp-python` for
   GGUF on GPU/Linux nodes (Vulkan/ROCm/CUDA). Single-node.
 - **`llama_server`** (`worker/runner/llama_server/`): served-backend engine; the
@@ -164,6 +180,7 @@ Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `REALTIME_AUDIO`: Built-in realtime STT PCM ingress, off the event log/master/State. `RealtimeAudioPacket` carries a bounded JSON lifecycle header plus raw PCM bytes from the owning API node to the selected single-host speech worker. It shares the Zenoh scheduler's bounded independent command queues and same-node short circuit; transport rejection is source-routed so only the affected provider call fails. Remote capability is unavailable without Zenoh. Same-version fleet required.
 - `ELECTION_MESSAGES`: Election protocol messages
 - `CONNECTION_MESSAGES`: libp2p connection updates
+- `SPEECH_MEDIA`: node-addressed ephemeral TTS reference audio over Zenoh
 - `TELEMETRY`: Workers gossip `NodeTelemetry` (last-write-wins node readings — `NodeResources`: participation role + backends; `node_memory` + `node_system` since slice 2; `node_identities` + `node_disk` + `node_rdma_ctl` since slice 3) into an in-memory `TelemetryView`, NOT the event log. Control/telemetry/data plane separation (#279); read by the planner for placement and merged into `GET /state` for the dashboard. Those maps live here, not in `State`. The context-admission ceiling is stamped onto the instance at placement time (`context_token_limit`) since telemetry is unordered. NOTE: the **connectivity** readings (`node_network`, `node_thunderbolt`, `node_thunderbolt_bridge`, and the derived `thunderbolt_bridge_cycles`) deliberately STAY on the control plane: `apply()` builds the RDMA topology graph and TB-bridge cycles from them and the planner reads `node_network` for host selection, so they must be ordered, not LWW telemetry (#279 slice 3 scoping). `TELEMETRY_PLANE_INFO` in `telemetry.py` is the source of truth for which `GatheredInfo` variants ride telemetry. `node_system` (`SystemPerformanceProfile`) carries a collector-agnostic `accelerator` block (`AcceleratorMetrics`: vendor/name/utilization_ratio/vram/power/temp/clock, `None` when unmeasured) filled at the collector boundary: mactop on Apple, and a new AMD/Linux passive-sysfs collector (`LinuxGpuMetrics`, `utils/info_gatherer/linux_gpu.py`) so non-Mac GPU nodes are not a telemetry blind spot.
 
 ### Event Sourcing
@@ -221,6 +238,8 @@ Skulk now treats model capability handling as two layers:
 - **Resolved capability profiles**: normalized runtime behavior contracts derived from the card plus conservative family defaults
 
 This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, speech/TTS/STT metadata, and additive `/v1/models` metadata consumed by the dashboard.
+TTS cards with fixed speakers may declare `audio.voices` plus a validated
+`audio.default_voice`, which the API applies only when callers omit `voice`.
 
 **Model truth vs platform truth:** a card's `compatible_backends` declares which engines the model's artifacts run on (MODEL truth) and must never encode a gap in Skulk's own runners (PLATFORM truth). Platform limitations live in code: `platform_compatible_backends` in `src/skulk/shared/backends.py` (currently: the served `llama_server` runner cannot load a vision card's mmproj projector, so vision cards are gated off served engines there; TTS/STT cards are gated to `mlx_audio`). Placement (`_card_platform_backends`) and the worker's fallback probe both apply the filter. When a runner gains a capability, flip the code table; do NOT sweep cards.
 

@@ -492,29 +492,6 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                   onClick={() => updateDownload({ allow_hf_fallback: !modelStoreDraft.download.allow_hf_fallback })}
                 />
               </Row>
-              <Row>
-                <FieldLabel>
-                  {t('settings.experiments.sttRealtime', 'Realtime STT')}
-                  <InfoTooltip
-                    content={t(
-                      'settings.experiments.sttRealtimeTooltip',
-                      'Enables the experimental realtime STT provider for mounted models with validated streaming-session support.',
-                    )}
-                  />
-                </FieldLabel>
-                <Toggle
-                  type="button"
-                  $on={experimentsDraft.stt_realtime}
-                  aria-pressed={experimentsDraft.stt_realtime}
-                  aria-label={t('settings.experiments.sttRealtime', 'Realtime STT')}
-                  onClick={() =>
-                    setExperimentsDraft((prev) => ({
-                      ...prev,
-                      stt_realtime: !prev.stt_realtime,
-                    }))
-                  }
-                />
-              </Row>
             </Fieldset>
 
             {/* Staging */}
@@ -793,29 +770,6 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                   )}
                 />
               </Legend>
-              <Row>
-                <FieldLabel>
-                  {t('settings.experiments.ttsStreaming', 'TTS streaming')}
-                  <InfoTooltip
-                    content={t(
-                      'settings.experiments.ttsStreamingTooltip',
-                      'Enables the experimental stream=true path for /v1/audio/speech. Leave off until a mounted TTS model has passed streaming validation.',
-                    )}
-                  />
-                </FieldLabel>
-                <Toggle
-                  type="button"
-                  $on={experimentsDraft.tts_streaming}
-                  aria-pressed={experimentsDraft.tts_streaming}
-                  aria-label={t('settings.experiments.ttsStreaming', 'TTS streaming')}
-                  onClick={() =>
-                    setExperimentsDraft((prev) => ({
-                      ...prev,
-                      tts_streaming: !prev.tts_streaming,
-                    }))
-                  }
-                />
-              </Row>
               <Row>
                 <FieldLabel>
                   {t('settings.experiments.speechTranslation', 'Speech translation')}

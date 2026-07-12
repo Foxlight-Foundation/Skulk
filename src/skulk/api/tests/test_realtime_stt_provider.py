@@ -177,9 +177,11 @@ def _build_remote_api(
     )
 
 
-def _enable_realtime(api: API, tmp_path: Path) -> None:
+def _write_legacy_disabled_realtime_config(api: API, tmp_path: Path) -> None:
+    """Write the old disabled toggle to prove it no longer gates capacity."""
+
     api._config_path = tmp_path / "skulk.yaml"
-    api._config_path.write_text("experiments:\n  stt_realtime: true\n")
+    api._config_path.write_text("experiments:\n  stt_realtime: false\n")
 
 
 def test_realtime_stt_discovery_requires_truthful_local_capacity(
@@ -187,8 +189,8 @@ def test_realtime_stt_discovery_requires_truthful_local_capacity(
     tmp_path: Path,
 ) -> None:
     api, _, _ = _build_api()
-    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
-    _enable_realtime(api, tmp_path)
+    monkeypatch.delenv(EXPERIMENTAL_MODE_ENV_VAR, raising=False)
+    _write_legacy_disabled_realtime_config(api, tmp_path)
     api.state = _local_state(_realtime_card())
 
     api._sync_builtin_speech_capability()
@@ -196,6 +198,7 @@ def test_realtime_stt_discovery_requires_truthful_local_capacity(
     assert api._telemetry_view.local_advertised_capabilities == {
         "stt",
         "stt.realtime",
+        "vad",
     }
     assert api._extensions is not None
     assert (
@@ -205,13 +208,13 @@ def test_realtime_stt_discovery_requires_truthful_local_capacity(
 
     api.state = _local_state(_realtime_card(supports_realtime=False))
     api._sync_builtin_speech_capability()
-    assert api._telemetry_view.local_advertised_capabilities == {"stt"}
+    assert api._telemetry_view.local_advertised_capabilities == {"stt", "vad"}
 
     api.state = _local_state(
         _realtime_card(), runner_status=RunnerLoading(layers_loaded=0, total_layers=1)
     )
     api._sync_builtin_speech_capability()
-    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._telemetry_view.local_advertised_capabilities == {"vad"}
 
 
 def test_remote_realtime_stt_requires_private_unicast_transport(
@@ -225,11 +228,11 @@ def test_remote_realtime_stt_requires_private_unicast_transport(
         _realtime_card(), hosting_node=NodeId("worker-node")
     )
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
-    _enable_realtime(api, tmp_path)
+    _write_legacy_disabled_realtime_config(api, tmp_path)
 
     api._sync_builtin_speech_capability()
 
-    assert api._telemetry_view.local_advertised_capabilities == {"stt"}
+    assert api._telemetry_view.local_advertised_capabilities == {"stt", "vad"}
 
 @pytest.mark.anyio
 async def test_runner_ready_event_resynchronizes_realtime_stt_advertisement(
@@ -245,9 +248,9 @@ async def test_runner_ready_event_resynchronizes_realtime_stt_advertisement(
     )
     api.state = state
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
-    _enable_realtime(api, tmp_path)
+    _write_legacy_disabled_realtime_config(api, tmp_path)
     api._sync_builtin_speech_capability()
-    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._telemetry_view.local_advertised_capabilities == {"vad"}
 
     runner_id = next(iter(state.runners))
 
@@ -262,13 +265,14 @@ async def test_runner_ready_event_resynchronizes_realtime_stt_advertisement(
                 ),
             )
         )
-        while not api._telemetry_view.local_advertised_capabilities:
+        while "stt.realtime" not in api._telemetry_view.local_advertised_capabilities:
             await anyio.sleep(0)
         task_group.cancel_scope.cancel()
 
     assert api._telemetry_view.local_advertised_capabilities == {
         "stt",
         "stt.realtime",
+        "vad",
     }
 
 
@@ -311,11 +315,11 @@ def test_realtime_stt_discovery_rejects_multi_host_instance(
         }
     )
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
-    _enable_realtime(api, tmp_path)
+    _write_legacy_disabled_realtime_config(api, tmp_path)
 
     api._sync_builtin_speech_capability()
 
-    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._telemetry_view.local_advertised_capabilities == {"vad"}
 
 
 @pytest.mark.anyio
@@ -329,11 +333,12 @@ async def test_node_timeout_withdraws_remote_realtime_stt_advertisement(
     remote_node = NodeId("worker-node")
     api.state = _local_state(_realtime_card(), hosting_node=remote_node)
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
-    _enable_realtime(api, tmp_path)
+    _write_legacy_disabled_realtime_config(api, tmp_path)
     api._sync_builtin_speech_capability()
     assert api._telemetry_view.local_advertised_capabilities == {
         "stt",
         "stt.realtime",
+        "vad",
     }
     event_sender = api.event_receiver.clone_sender()
 
@@ -343,12 +348,12 @@ async def test_node_timeout_withdraws_remote_realtime_stt_advertisement(
             IndexedEvent(idx=0, event=NodeTimedOut(node_id=remote_node))
         )
         with anyio.fail_after(1):
-            while api._telemetry_view.local_advertised_capabilities:
+            while "stt" in api._telemetry_view.local_advertised_capabilities:
                 await anyio.sleep(0)
         task_group.cancel_scope.cancel()
 
     assert api.state.instances == {}
-    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._telemetry_view.local_advertised_capabilities == {"vad"}
 
 
 @pytest.mark.anyio
@@ -438,7 +443,7 @@ async def test_realtime_stt_provider_forwards_pcm_and_streams_transcript(
     card = _realtime_card()
     api.state = _local_state(card)
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
-    _enable_realtime(api, tmp_path)
+    _write_legacy_disabled_realtime_config(api, tmp_path)
     api._sync_builtin_speech_capability()
     commands: list[RealtimeAudioTranscription] = []
     input_frames: list[RealtimeAudioInputFrame] = []
@@ -539,7 +544,7 @@ async def test_realtime_stt_provider_routes_pcm_to_remote_serving_node(
     card = _realtime_card()
     api.state = _local_state(card, hosting_node=NodeId("worker-node"))
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
-    _enable_realtime(api, tmp_path)
+    _write_legacy_disabled_realtime_config(api, tmp_path)
     api._sync_builtin_speech_capability()
     commands: list[RealtimeAudioTranscription] = []
     packets: list[RealtimeAudioPacket] = []
@@ -621,7 +626,7 @@ async def test_realtime_stt_admission_reserves_local_instance(
     card = _realtime_card()
     api.state = _local_state(card)
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
-    _enable_realtime(api, tmp_path)
+    _write_legacy_disabled_realtime_config(api, tmp_path)
     api._sync_builtin_speech_capability()
 
     async def send(_command: object) -> None:
@@ -689,7 +694,7 @@ async def test_realtime_stt_admission_skips_busy_instance(
         tasks={busy_task.task_id: busy_task},
     )
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
-    _enable_realtime(api, tmp_path)
+    _write_legacy_disabled_realtime_config(api, tmp_path)
     api._sync_builtin_speech_capability()
     commands: list[RealtimeAudioTranscription] = []
 
@@ -728,7 +733,7 @@ async def test_realtime_stt_runner_error_finishes_command_without_cancelling(
     card = _realtime_card()
     api.state = _local_state(card)
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
-    _enable_realtime(api, tmp_path)
+    _write_legacy_disabled_realtime_config(api, tmp_path)
     api._sync_builtin_speech_capability()
     commands: list[object] = []
 

@@ -122,13 +122,13 @@ def test_batch_stt_discovery_tracks_ready_mounted_capacity() -> None:
 
     api._sync_builtin_speech_capability()
 
-    assert api._telemetry_view.local_advertised_capabilities == {"stt"}
+    assert api._telemetry_view.local_advertised_capabilities == {"stt", "vad"}
     assert api._extensions is not None
     assert STT_CAPABILITY_DESCRIPTOR in api._extensions.capability_descriptors
 
     api.state = State()
     api._sync_builtin_speech_capability()
-    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._telemetry_view.local_advertised_capabilities == {"vad"}
 
 
 @pytest.mark.anyio

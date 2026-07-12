@@ -9,6 +9,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Prebaked CUDA pod image (`deployment/cuda/Dockerfile`, published to GHCR as
+  `skulk-cuda-pod` by the `cuda-image` workflow): carries the CUDA
+  llama-cpp-python wheel, `llama-server` + `ggml-rpc-server` binaries, uv,
+  and the Rust toolchain, so a rented GPU pod goes from create to serving in
+  minutes (`/opt/skulk/pod-bootstrap.sh <ref>`) instead of the ~1 hour
+  install recipe. The recipe (`install-deps.sh`) remains the from-scratch
+  path for arbitrary driver-equipped machines.
+
 - NVIDIA / CUDA node support (platform plumbing): a passive NVML telemetry
   collector (`utils/info_gatherer/nvidia_gpu.py`) fills the normalized
   accelerator profile on NVIDIA nodes (the Linux GPU monitor tries AMD
@@ -97,6 +105,14 @@ This project records release notes here and mirrors public-facing notes in
   stream. Previously every request from these engines carried
   `stats=None`, leaving the dashboard, field telemetry, and harness
   `skulk_*_tps` metrics blind on GPU/Linux nodes (#532).
+
+- **Store-host staging no longer doubles disk usage.** Staging a model from a
+  local store into the worker staging directory hardlinks each file instead
+  of copying when both live on the same filesystem (store files are immutable
+  once registered and staged files are never mutated in place), falling back
+  to a copy across filesystems. Previously a 26GB GGUF needed 52GB of free
+  disk to stage on a store-host node, and the staging copy could fail with
+  ENOSPC after a successful store download (#533).
 
 - **Pooled (multi-node) GGUF placement no longer caps unified-memory nodes at
   their BIOS VRAM carve.** Admission for RPC placements previously sized each

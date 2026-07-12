@@ -23,6 +23,74 @@ AudioTranscriptionResponseFormat = Literal[
 ]
 
 
+class AudioTranscriptionDeltaEvent(BaseModel):
+    """One progressive text delta from streaming speech transcription."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    type: Literal["transcription.delta"] = "transcription.delta"
+    model: str = Field(description="Mounted STT model serving the request.")
+    sequence: int = Field(ge=0, description="Zero-based stream event sequence.")
+    delta: str = Field(description="New transcript text not emitted previously.")
+    language: str | None = Field(
+        default=None, description="Detected or requested language when available."
+    )
+    segment_index: int | None = Field(
+        default=None, description="Model-provided segment index when available."
+    )
+
+
+class AudioTranscriptionCompletedEvent(BaseModel):
+    """Terminal successful transcript event for streaming STT."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    type: Literal["transcription.completed"] = "transcription.completed"
+    model: str = Field(description="Mounted STT model serving the request.")
+    sequence: int = Field(ge=0, description="Zero-based stream event sequence.")
+    text: str = Field(description="Complete transcript assembled from emitted deltas.")
+    language: str | None = Field(
+        default=None, description="Detected or requested language when available."
+    )
+    segments: tuple[dict[str, str | int | float | bool | None], ...] = Field(
+        default=(), description="Normalized model-provided segment metadata."
+    )
+
+
+class AudioTranscriptionUsageEvent(BaseModel):
+    """Terminal request-size usage event for streaming STT."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    type: Literal["transcription.usage"] = "transcription.usage"
+    model: str = Field(description="Mounted STT model serving the request.")
+    sequence: int = Field(ge=0, description="Zero-based stream event sequence.")
+    input_bytes: int = Field(ge=0, description="Accepted encoded upload byte count.")
+    output_characters: int = Field(
+        ge=0, description="Number of transcript characters emitted."
+    )
+
+
+class AudioTranscriptionErrorEvent(BaseModel):
+    """Terminal typed failure event after streaming response admission."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    type: Literal["transcription.error"] = "transcription.error"
+    model: str = Field(description="Mounted STT model serving the request.")
+    sequence: int = Field(ge=0, description="Zero-based stream event sequence.")
+    code: str = Field(description="Stable machine-readable stream failure code.")
+    message: str = Field(description="Human-readable failure detail.")
+
+
+AudioTranscriptionStreamEvent = (
+    AudioTranscriptionDeltaEvent
+    | AudioTranscriptionCompletedEvent
+    | AudioTranscriptionUsageEvent
+    | AudioTranscriptionErrorEvent
+)
+
+
 class ErrorInfo(BaseModel):
     message: str
     type: str
@@ -284,6 +352,14 @@ class AudioCapabilitySection(BaseModel):
         default=None,
         description="Whether the model declares voice-listing support.",
     )
+    default_voice: str | None = Field(
+        default=None,
+        description="Built-in voice used when a request omits an explicit voice.",
+    )
+    voices: list[str] = Field(
+        default_factory=list,
+        description="Stable built-in voice identifiers declared by the model card.",
+    )
     supports_reference_audio: bool | None = Field(
         default=None,
         description="Whether the model accepts managed reference audio.",
@@ -313,6 +389,8 @@ class AudioCapabilitySection(BaseModel):
             supports_streaming=config.supports_streaming,
             supports_realtime=config.supports_realtime,
             supports_voice_listing=config.supports_voice_listing,
+            default_voice=config.default_voice,
+            voices=list(config.voices),
             supports_reference_audio=config.supports_reference_audio,
             supports_translation=config.supports_translation,
             sample_rates=list(config.sample_rates),
@@ -894,18 +972,18 @@ class AudioSpeechRequest(BaseModel):
     response_format: AudioResponseFormat | None = Field(
         default=None,
         description=(
-            "Encoded audio format to return. When omitted, Skulk uses the mounted "
-            "model card default when declared and otherwise falls back to mp3."
+            "Audio format to return, including raw PCM when supported. When "
+            "omitted, Skulk uses the mounted model card default when declared "
+            "and otherwise falls back to mp3."
         ),
     )
     stream: bool = Field(
         default=False,
         description=(
-            "Whether to stream encoded MP3 bytes as they are produced by the "
-            "mounted text-to-speech model. This experimental path is accepted "
-            "only when SKULK_ENABLE_EXPERIMENTAL_MODE is enabled, "
-            "experiments.tts_streaming=true is configured, and the mounted "
-            "model card declares audio.supports_streaming=true."
+            "Whether to stream MP3 or raw PCM bytes as they are produced by the "
+            "mounted text-to-speech model. The selected response_format must be "
+            "declared by the model card, and the card must declare "
+            "audio.supports_streaming=true."
         ),
     )
     streaming_interval: float | None = Field(

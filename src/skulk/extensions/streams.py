@@ -334,11 +334,16 @@ class CapabilityStreamInput:
 @final
 @dataclass(frozen=True)
 class CapabilityStreamSession:
-    """Opening result, optional input sink, and one-shot output iterator."""
+    """Opening result, one-shot output, optional input, and explicit cancellation.
+
+    ``cancel_output`` lets consumers stop provider work even when their own task
+    is already cancelled and cannot rely on async-generator finalization.
+    """
 
     open_result: CapabilityResult
     frames: AsyncIterator[CapabilityStreamFrame]
     input: CapabilityStreamInput | None = None
+    cancel_output: Callable[[], Awaitable[None]] | None = None
 
 
 def encode_capability_stream_frame(

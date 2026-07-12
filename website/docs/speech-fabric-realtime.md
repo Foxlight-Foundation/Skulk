@@ -19,23 +19,42 @@ Skulk currently exposes:
 - `POST /v1/audio/transcriptions` for bounded uploaded audio clips;
 - experimental `POST /v1/audio/translations` for speech-to-English translation;
 - `GET /v1/audio/voices` for a mounted model's static built-in voice catalog;
-- `WS /v1/realtime?model=<model-id>` for one-utterance realtime transcription.
+- `WS /v1/realtime?model=<model-id>` for serialized multi-turn realtime
+  transcription, including optional bounded server VAD and automatic commit.
+- `WS /v1/fabric/chains/speech?stt_model=<model-id>` for the same typed
+  STT-to-chat-to-TTS composition under an explicit Fabric endpoint.
 
-`/v1/audio/speech` returns an encoded audio response. Its `stream=true` path is
-experimental and is available only when all of these conditions are true:
+`/v1/audio/speech` returns an encoded audio response. Its stable `stream=true`
+path is available when the mounted TTS card declares
+`audio.supports_streaming = true`, every routable instance is ready, and the
+request format resolves to MP3 or raw PCM. PCM responses declare sample rate,
+channel count, and sample format in HTTP headers. Other encoded formats remain
+batch-only.
 
-- the node runs with `SKULK_ENABLE_EXPERIMENTAL_MODE`;
-- cluster settings enable `experiments.tts_streaming`;
-- the mounted TTS card declares `audio.supports_streaming = true`;
-- the serving runner is ready and advertises the required capability.
+`/v1/audio/transcriptions` accepts a bounded multipart upload. Its stable
+`stream=true` path is available when the mounted STT card declares
+`audio.supports_streaming = true` and every routable instance is ready. It
+returns typed SSE delta/completed/usage/error events, while explicit
+`response_format=ndjson` preserves progressive NDJSON chunk framing. Batch
+cards and non-streaming requests retain the completed-response formats.
 
-`/v1/audio/transcriptions` accepts a bounded multipart upload and returns one
-completed transcription. It does not provide progressive REST transcription.
+`/v1/audio/speech` also accepts bounded multipart reference audio for mounted
+cards declaring `audio.supports_reference_audio = true`. The upload is
+request-scoped: it travels over node-addressed Zenoh `SPEECH_MEDIA`, stays out
+of State and the event log, and is deleted from the runner's temporary storage
+after generation. The API rejects reference uploads when Zenoh is unavailable
+instead of broadcasting private media through gossipsub.
 
 `WS /v1/realtime?model=<model-id>` accepts OpenAI-style base64 PCM16 append and
 commit events over a WebSocket. It emits transcript delta, final, and failure
-events from the mounted realtime STT model. The route is a transcription
-compatibility surface, not a full speech-to-speech conversation API.
+events from the mounted realtime STT model. An optional response configuration
+routes final transcripts through a mounted chat model and can stream the visible
+answer through a mounted TTS participant.
+
+The Fabric chain endpoint deliberately reuses this contract and implementation.
+Clients select optional chat/TTS participants through `session.update`; normal
+capability discovery, health, locality, cancellation, and data-plane rules stay
+authoritative instead of being duplicated in a second orchestration runtime.
 
 See [API Guide](api-guide.md) for request fields, response formats, limits, and
 errors.
@@ -81,6 +100,12 @@ Binary audio remains on the data path. It is not included in State, the event
 log, or structured logs. Batch REST transcription uses a separate bounded
 upload path and does not claim the same no-retention property.
 
+Reference-audio TTS uses a separate `SPEECH_MEDIA` data family. The API selects
+and pins one ready single-host TTS instance, chunks the upload with a terminal
+digest, and the target worker assembles it only in bounded process-local memory.
+Cancellation, transport failure, checksum failure, dispatch, and expiry clear
+the worker buffer. Only the worker-local runner task receives the bytes.
+
 ## Dashboard Behavior
 
 The dashboard exposes microphone controls only when the selected transcription
@@ -89,10 +114,17 @@ model and local node advertise the required capabilities.
 - Realtime models use an `AudioWorklet` to capture mono Float32 browser audio.
 - A stateful browser resampler produces 24 kHz PCM16.
 - Capture callbacks are aggregated into bounded 100 ms transport frames.
+- Realtime mode keeps one multi-turn socket open, uses server VAD for automatic
+  turn boundaries, and shows partial transcripts in the editable chat draft.
+- Auto-send optionally routes final transcripts to the selected chat model;
+  assistant text remains visible while it streams and barge-in cancels active
+  response playback.
 - Batch-only models retain the `MediaRecorder` upload flow.
 - Transcription results populate the chat draft for review or submission.
-- TTS playback uses `/v1/audio/speech` and currently begins after the complete
-  encoded response is available.
+- Streaming-capable TTS models use sentence-sized raw PCM requests and a bounded
+  AudioWorklet playback queue. The dashboard pauses HTTP reads under pressure,
+  preserves sentence order, and propagates stop to queued and active requests.
+- Batch-only TTS models retain complete-response encoded playback.
 
 The dashboard falls back to batch transcription when realtime model or node
 capabilities are absent. Speech controls remain hidden when no suitable mounted

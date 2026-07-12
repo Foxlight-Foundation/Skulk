@@ -2,9 +2,14 @@ from .api import AddCustomModelParams as AddCustomModelParams
 from .api import AdvancedImageParams as AdvancedImageParams
 from .api import AudioCapabilitySection as AudioCapabilitySection
 from .api import AudioSpeechRequest as AudioSpeechRequest
+from .api import AudioTranscriptionCompletedEvent as AudioTranscriptionCompletedEvent
+from .api import AudioTranscriptionDeltaEvent as AudioTranscriptionDeltaEvent
+from .api import AudioTranscriptionErrorEvent as AudioTranscriptionErrorEvent
 from .api import (
     AudioTranscriptionResponseFormat as AudioTranscriptionResponseFormat,
 )
+from .api import AudioTranscriptionStreamEvent as AudioTranscriptionStreamEvent
+from .api import AudioTranscriptionUsageEvent as AudioTranscriptionUsageEvent
 from .api import AudioVoice as AudioVoice
 from .api import AudioVoiceList as AudioVoiceList
 from .api import BenchChatCompletionRequest as BenchChatCompletionRequest

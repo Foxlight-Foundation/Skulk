@@ -5,17 +5,25 @@ import base64
 import hashlib
 import io
 import json
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Never, cast
 
 import pytest
 from fastapi import HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from starlette.datastructures import Headers
 
 import skulk.api.main as api_main
 from skulk.api.main import API
 from skulk.shared.election import ElectionMessage
 from skulk.shared.experimental import EXPERIMENTAL_MODE_ENV_VAR
-from skulk.shared.models.model_cards import ModelId
+from skulk.shared.models.model_cards import (
+    AudioCardConfig,
+    AudioCardKind,
+    ModelCard,
+    ModelId,
+    ModelTask,
+)
 from skulk.shared.types.chunks import AudioInputChunk, TranscriptionChunk
 from skulk.shared.types.commands import (
     AudioTranscription,
@@ -25,6 +33,7 @@ from skulk.shared.types.commands import (
 )
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import IndexedEvent
+from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import AudioTranscription as AudioTranscriptionTask
 from skulk.shared.types.tasks import TaskId, TaskStatus
@@ -301,26 +310,212 @@ async def test_canary_translation_requires_source_language(
 
 
 @pytest.mark.anyio
-async def test_audio_transcriptions_rejects_streaming_before_model_validation(
+async def test_audio_transcriptions_streams_typed_sse_events(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phase 2 is explicitly non-streaming and should fail before card lookup."""
+    """Card-qualified model deltas should reach clients before completion."""
 
-    async def _fail_if_called(*_args: object, **_kwargs: object) -> Never:
-        raise AssertionError("transcription model validation should not run")
-
-    monkeypatch.setattr(API, "_validate_audio_transcription_model", _fail_if_called)
     api = _build_api()
+    model_id = ModelId("mlx-community/voxtral-realtime-test")
+
+    async def _validate_model(
+        self: API,
+        requested_model: ModelId,
+        *,
+        stream: bool = False,
+    ) -> ModelId:
+        assert self is api
+        assert requested_model == model_id
+        assert stream is True
+        return model_id
+
+    async def _send(command: object) -> None:
+        if not isinstance(command, AudioTranscription):
+            return
+        sender = api._audio_transcription_queues[command.command_id]
+        await sender.send(
+            TranscriptionChunk(model=model_id, text="hello ", is_partial=True)
+        )
+        await sender.send(
+            TranscriptionChunk(model=model_id, text="world", is_partial=True)
+        )
+        await sender.send(
+            TranscriptionChunk(
+                model=model_id,
+                text="",
+                language="en",
+                finish_reason="stop",
+            )
+        )
+
+    monkeypatch.setattr(API, "_validate_audio_transcription_model", _validate_model)
+    monkeypatch.setattr(api, "_send", _send)
+
+    response = await api.audio_transcriptions(
+        file=_upload(b"RIFFtestWAVE"),
+        model=str(model_id),
+        stream=True,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    assert response.media_type == "text/event-stream"
+    body_iterator = cast(AsyncIterator[str], response.body_iterator)
+    body = "".join([chunk async for chunk in body_iterator])
+    assert body.index('"delta":"hello "') < body.index('"delta":"world"')
+    assert 'event: transcription.completed' in body
+    assert '"text":"hello world"' in body
+    assert 'event: transcription.usage' in body
+
+
+@pytest.mark.anyio
+async def test_audio_transcriptions_streaming_requires_card_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsupported cards must reject streaming before response admission."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/parakeet-test")
+    card = ModelCard(
+        model_id=model_id,
+        storage_size=Memory.from_mb(100),
+        n_layers=1,
+        hidden_size=1024,
+        supports_tensor=False,
+        tasks=[ModelTask.SpeechToText],
+        family="parakeet",
+        capabilities=["stt"],
+        audio=AudioCardConfig(
+            kind=AudioCardKind.SpeechToText,
+            supports_streaming=False,
+        ),
+    )
+
+    async def _card(self: API, requested: ModelId) -> ModelCard:
+        assert self is api
+        assert requested == model_id
+        return card
+
+    monkeypatch.setattr(API, "_get_running_model_card", _card)
 
     with pytest.raises(HTTPException) as exc_info:
         await api.audio_transcriptions(
             file=_upload(b"RIFFtestWAVE"),
-            model="mlx-community/whisper-test",
+            model=str(model_id),
             stream=True,
         )
 
     assert exc_info.value.status_code == 400
-    assert "stream" in str(exc_info.value.detail)
+    assert "does not declare streaming" in str(exc_info.value.detail)
+
+
+@pytest.mark.anyio
+async def test_audio_transcriptions_streams_progressive_ndjson(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit NDJSON retains one legacy payload per model output chunk."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/voxtral-realtime-test")
+
+    async def _validate_model(
+        self: API,
+        requested_model: ModelId,
+        *,
+        stream: bool = False,
+    ) -> ModelId:
+        assert self is api
+        assert requested_model == model_id
+        assert stream is True
+        return model_id
+
+    async def _send(command: object) -> None:
+        if not isinstance(command, AudioTranscription):
+            return
+        sender = api._audio_transcription_queues[command.command_id]
+        await sender.send(
+            TranscriptionChunk(model=model_id, text="first", is_partial=True)
+        )
+        await sender.send(
+            TranscriptionChunk(
+                model=model_id,
+                text="second",
+                finish_reason="stop",
+            )
+        )
+
+    monkeypatch.setattr(API, "_validate_audio_transcription_model", _validate_model)
+    monkeypatch.setattr(api, "_send", _send)
+
+    response = await api.audio_transcriptions(
+        file=_upload(b"RIFFtestWAVE"),
+        model=str(model_id),
+        stream=True,
+        response_format="ndjson",
+    )
+
+    assert isinstance(response, StreamingResponse)
+    assert response.media_type == "application/x-ndjson"
+    body_iterator = cast(AsyncIterator[str], response.body_iterator)
+    lines = [
+        cast(dict[str, object], json.loads(line))
+        for line in [item async for item in body_iterator]
+    ]
+    assert [line["text"] for line in lines] == ["first", "second"]
+    assert lines[-1]["finish_reason"] == "stop"
+
+
+@pytest.mark.anyio
+async def test_audio_transcription_stream_close_cancels_core_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing a response before its terminal must cancel serving work."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/voxtral-realtime-test")
+    cancelled: list[object] = []
+
+    async def _validate_model(
+        self: API,
+        requested_model: ModelId,
+        *,
+        stream: bool = False,
+    ) -> ModelId:
+        assert self is api
+        assert requested_model == model_id
+        assert stream is True
+        return model_id
+
+    async def _send(command: object) -> None:
+        if isinstance(command, AudioTranscription):
+            await api._audio_transcription_queues[command.command_id].send(
+                TranscriptionChunk(
+                    model=model_id,
+                    text="partial",
+                    is_partial=True,
+                )
+            )
+
+    async def _cancel(self: API, command_id: object) -> None:
+        assert self is api
+        cancelled.append(command_id)
+
+    monkeypatch.setattr(API, "_validate_audio_transcription_model", _validate_model)
+    monkeypatch.setattr(API, "_cancel_audio_transcription_command", _cancel)
+    monkeypatch.setattr(api, "_send", _send)
+
+    response = await api.audio_transcriptions(
+        file=_upload(b"RIFFtestWAVE"),
+        model=str(model_id),
+        stream=True,
+        response_format="ndjson",
+    )
+    assert isinstance(response, StreamingResponse)
+    body_iterator = cast(AsyncGenerator[str, None], response.body_iterator)
+    assert json.loads(await anext(body_iterator))["text"] == "partial"
+    await body_iterator.aclose()
+
+    assert len(cancelled) == 1
+    assert not api._audio_transcription_queues
 
 
 @pytest.mark.anyio

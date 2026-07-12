@@ -4,6 +4,7 @@
 import base64
 import hashlib
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -44,6 +45,7 @@ from skulk.shared.types.worker.runners import (
 from skulk.worker.runner.speech import runner as speech_runner
 from skulk.worker.runner.speech.runner import (
     Runner,
+    _encode_audio,
     _filter_kwargs,
     _install_attention_mask_dtype_compat,
     _install_canary_compatibility,
@@ -51,6 +53,35 @@ from skulk.worker.runner.speech.runner import (
     _resolve_staged_voice_path,
     _stt_generate_kwargs,
 )
+
+
+def test_encode_audio_emits_little_endian_pcm16() -> None:
+    """Raw PCM responses should be headerless, clipped signed 16-bit samples."""
+
+    encoded = _encode_audio(
+        np.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=np.float32),
+        24000,
+        AudioResponseFormat.Pcm,
+    )
+
+    assert np.frombuffer(encoded, dtype="<i2").tolist() == [
+        -32767,
+        -32767,
+        0,
+        32767,
+        32767,
+    ]
+
+
+def test_encode_audio_rejects_multi_channel_pcm() -> None:
+    """Raw PCM must not silently interleave channels under a mono contract."""
+
+    with pytest.raises(ValueError, match="must be mono"):
+        _encode_audio(
+            np.array([[0.1, -0.1], [0.2, -0.2]], dtype=np.float32),
+            24000,
+            AudioResponseFormat.Pcm,
+        )
 
 
 class _CaptureSender:
@@ -184,6 +215,20 @@ class _FakeTranscriptionModel:
                 {"id": 0, "text": "hello world", "start": 0.0, "end": 1.2}
             ],
         }
+
+
+class _FakeStreamingTranscriptionModel:
+    """STT fake that exposes model-generated text deltas."""
+
+    def __init__(self, expected_audio: bytes) -> None:
+        self.expected_audio = expected_audio
+        self.stream_values: list[bool] = []
+
+    def generate(self, audio_path: str, *, stream: bool = False) -> Iterator[str]:
+        assert Path(audio_path).read_bytes() == self.expected_audio
+        self.stream_values.append(stream)
+        yield "hello "
+        yield "world"
 
 
 class _FakeWhisperTranscriptionModel:
@@ -681,6 +726,73 @@ def test_streaming_speech_synthesis_emits_partial_and_terminal_chunks(
     assert generated[2].finish_reason == "stop"
 
 
+def test_tts_reference_audio_temp_file_is_request_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runner reference files exist during generation and are deleted afterward."""
+
+    class _ReferenceSpeechModel:
+        sample_rate = 24000
+
+        def __init__(self) -> None:
+            self.reference_path: Path | None = None
+
+        def generate(
+            self,
+            text: str,
+            *,
+            ref_audio: str | None = None,
+            ref_text: str | None = None,
+        ) -> list[_FakeSpeechResult]:
+            assert text == "hello"
+            assert ref_text == "reference transcript"
+            assert ref_audio is not None
+            self.reference_path = Path(ref_audio)
+            assert self.reference_path.read_bytes() == b"RIFF-reference"
+            return [_FakeSpeechResult()]
+
+    runner, _ = _make_runner()
+    model = _ReferenceSpeechModel()
+    runner.model = model
+
+    def _fake_encode(
+        audio: np.ndarray,
+        sample_rate: int,
+        response_format: AudioResponseFormat,
+    ) -> bytes:
+        assert audio.size > 0
+        assert sample_rate == 24000
+        assert response_format == AudioResponseFormat.Wav
+        return b"WAV"
+
+    monkeypatch.setattr(speech_runner, "_encode_audio", _fake_encode)
+
+    encoded, sample_rate = runner._run_tts(
+        SpeechSynthesis(
+            instance_id=InstanceId("speech-instance-1"),
+            command_id=CommandId("reference-command"),
+            task_params=SpeechSynthesisTaskParams(
+                model=ModelId("org/reference-tts"),
+                input_text="hello",
+                response_format=AudioResponseFormat.Wav,
+                reference_text="reference transcript",
+                reference_audio_present=True,
+                reference_audio_filename="sample.wav",
+                reference_audio_content_type="audio/wav",
+                reference_audio_sha256=hashlib.sha256(
+                    b"RIFF-reference"
+                ).hexdigest(),
+                reference_audio_data=b"RIFF-reference",
+            ),
+        )
+    )
+
+    assert encoded == b"WAV"
+    assert sample_rate == 24000
+    assert model.reference_path is not None
+    assert not model.reference_path.exists()
+
+
 def test_speech_synthesis_handles_single_tuple_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -854,6 +966,45 @@ def test_audio_transcription_emits_terminal_transcription_chunk() -> None:
     assert chunk.language == "en"
     assert chunk.segments[0]["start"] == 0.0
     assert chunk.finish_reason == "stop"
+
+
+def test_audio_transcription_emits_model_stream_deltas() -> None:
+    """Uploaded streaming STT should preserve upstream delta boundaries."""
+
+    runner, sender = _make_runner()
+    audio_bytes = b"RIFFstreamWAVE"
+    model = _FakeStreamingTranscriptionModel(audio_bytes)
+    runner.model = model
+    runner.current_status = RunnerReady()
+
+    command_id = CommandId("transcription-command-stream")
+    task = AudioTranscription(
+        instance_id=InstanceId("speech-instance-1"),
+        command_id=command_id,
+        task_params=AudioTranscriptionTaskParams(
+            model=ModelId("mlx-community/voxtral-realtime-test"),
+            filename="sample.wav",
+            content_type="audio/wav",
+            total_input_chunks=1,
+            audio_sha256=hashlib.sha256(audio_bytes).hexdigest(),
+            audio_data=base64.b64encode(audio_bytes).decode("ascii"),
+            stream=True,
+        ),
+    )
+    runner.task_receiver = cast("object", _OneShotReceiver([task]))  # pyright: ignore[reportAttributeAccessIssue]
+
+    runner.main()
+
+    assert model.stream_values == [True]
+    generated = [
+        event.chunk
+        for event in sender.events
+        if isinstance(event, ChunkGenerated)
+        and isinstance(event.chunk, TranscriptionChunk)
+    ]
+    assert [chunk.text for chunk in generated] == ["hello ", "world", ""]
+    assert [chunk.is_partial for chunk in generated] == [True, True, False]
+    assert generated[-1].finish_reason == "stop"
 
 
 def test_realtime_transcription_emits_partial_and_final_chunks() -> None:

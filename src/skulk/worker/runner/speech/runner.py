@@ -216,7 +216,7 @@ def _stt_generate_kwargs(
             "temperature": params.temperature,
             "sample_len": params.max_tokens,
             "chunk_duration": params.chunk_duration,
-            "stream": False,
+            "stream": params.stream,
             "return_timestamps": return_timestamps,
             "word_timestamps": word_timestamps,
             "verbose": True,
@@ -237,7 +237,7 @@ def _stt_generate_kwargs(
         "max_tokens": params.max_tokens,
         "chunk_duration": params.chunk_duration,
         "frame_threshold": params.frame_threshold,
-        "stream": False,
+        "stream": params.stream,
         "context": params.context,
         "prefill_step_size": params.prefill_step_size,
         "text": params.text or params.prompt,
@@ -276,6 +276,15 @@ def _encode_audio(
     audio: np.ndarray, sample_rate: int, response_format: AudioResponseFormat
 ) -> bytes:
     """Encode PCM audio into the requested response format."""
+    if response_format == AudioResponseFormat.Pcm:
+        normalized = np.squeeze(np.asarray(audio, dtype=np.float32))
+        if normalized.ndim != 1:
+            raise ValueError(
+                "Raw PCM speech output must be mono; multi-channel audio is unsupported"
+            )
+        clipped = np.clip(normalized, -1.0, 1.0)
+        return (clipped * 32767.0).astype("<i2").tobytes()
+
     from mlx_audio.audio_io import write as audio_write
 
     buffer = io.BytesIO()
@@ -925,7 +934,15 @@ class Runner:
             with bind_trace_session(task.task_id), trace(
                 "stt_generate", self.shard_metadata.device_rank, "speech"
             ):
-                text, language, segments = self._run_stt(task)
+                if task.task_params.stream:
+                    self._stream_stt(task)
+                    text = ""
+                    language = None
+                    segments: list[
+                        dict[str, str | int | float | bool | None]
+                    ] = []
+                else:
+                    text, language, segments = self._run_stt(task)
             if self._is_cancelled(task.task_id):
                 return
             if task.trace_enabled:
@@ -1168,37 +1185,104 @@ class Runner:
                 except OSError:
                     logger.warning(f"Failed to remove temporary speech upload {tmp_path}")
 
+    def _stream_stt(self, task: AudioTranscription) -> None:
+        """Emit true model-provided deltas for one uploaded audio request."""
+
+        assert self.model is not None
+        params = task.task_params
+        if params.audio_data is None:
+            raise ValueError("No audio payload received")
+        try:
+            audio_bytes = base64.b64decode(
+                params.audio_data.encode("ascii"), validate=True
+            )
+        except binascii.Error as exc:
+            raise ValueError("Invalid base64 audio payload") from exc
+        if hashlib.sha256(audio_bytes).hexdigest() != params.audio_sha256:
+            raise ValueError("Audio payload checksum mismatch")
+
+        tmp_path: str | None = None
+        try:
+            suffix = _audio_upload_suffix(params.filename, params.content_type)
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_file:
+                tmp_file.write(audio_bytes)
+                tmp_path = tmp_file.name
+            generate = self.model.generate
+            generated = generate(
+                tmp_path,
+                **_filter_kwargs(generate, _stt_generate_kwargs(generate, params)),
+            )
+            if isinstance(generated, (str, bytes, dict)) or not isinstance(
+                generated, Iterable
+            ):
+                raise RuntimeError(
+                    "mounted STT model did not return a streaming transcript iterator"
+                )
+            for result in generated:
+                if self._is_cancelled(task.task_id):
+                    return
+                delta = _transcription_text(result)
+                if not delta:
+                    continue
+                _emit_partial_transcription_chunk(
+                    event_sender=self.event_sender,
+                    command_id=task.command_id,
+                    model_id=self.shard_metadata.model_card.model_id,
+                    text=delta,
+                )
+        finally:
+            if tmp_path is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_path)
+
     def _iter_tts_results(self, task: SpeechSynthesis, *, stream: bool) -> Iterable[Any]:
         """Call the TTS model and normalize its result into an iterable."""
         assert self.model is not None
         params = task.task_params
-        generate_kwargs = {
-            "voice": _resolve_staged_voice_path(
-                self.local_model_path, params.voice
-            ),
-            "speed": params.speed,
-            "instruct": params.instruct,
-            "lang_code": params.lang_code,
-            "ref_audio": params.reference_audio,
-            "ref_text": params.reference_text,
-            "temperature": params.temperature,
-            "top_p": params.top_p,
-            "top_k": params.top_k,
-            "repetition_penalty": params.repetition_penalty,
-            "stream": stream,
-            "streaming_interval": params.streaming_interval if stream else None,
-            "max_tokens": params.max_tokens,
-        }
-        generate = self.model.generate
-        filtered_kwargs = _filter_kwargs(generate, generate_kwargs)
+        reference_path: str | None = None
+        try:
+            if params.reference_audio_data is not None:
+                suffix = _audio_upload_suffix(
+                    params.reference_audio_filename,
+                    params.reference_audio_content_type,
+                )
+                with tempfile.NamedTemporaryFile(
+                    suffix=suffix,
+                    delete=False,
+                ) as reference_file:
+                    reference_file.write(params.reference_audio_data)
+                    reference_path = reference_file.name
+            generate_kwargs = {
+                "voice": _resolve_staged_voice_path(
+                    self.local_model_path, params.voice
+                ),
+                "speed": params.speed,
+                "instruct": params.instruct,
+                "lang_code": params.lang_code,
+                "ref_audio": reference_path or params.reference_audio,
+                "ref_text": params.reference_text,
+                "temperature": params.temperature,
+                "top_p": params.top_p,
+                "top_k": params.top_k,
+                "repetition_penalty": params.repetition_penalty,
+                "stream": stream,
+                "streaming_interval": params.streaming_interval if stream else None,
+                "max_tokens": params.max_tokens,
+            }
+            generate = self.model.generate
+            filtered_kwargs = _filter_kwargs(generate, generate_kwargs)
 
-        generated = generate(params.input_text, **filtered_kwargs)
-        if (
-            isinstance(generated, (str, bytes, dict, tuple, np.ndarray))
-            or not isinstance(generated, Iterable)
-        ):
-            generated = (generated,)
-        return generated
+            generated = generate(params.input_text, **filtered_kwargs)
+            if (
+                isinstance(generated, (str, bytes, dict, tuple, np.ndarray))
+                or not isinstance(generated, Iterable)
+            ):
+                generated = (generated,)
+            yield from generated
+        finally:
+            if reference_path is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(reference_path)
 
     def _run_tts(self, task: SpeechSynthesis) -> tuple[bytes, int]:
         """Generate and encode the complete TTS response."""

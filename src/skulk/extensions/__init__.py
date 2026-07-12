@@ -72,6 +72,14 @@ from skulk.extensions.types import (
     SupportsExtensionStartup,
     WithdrawCapability,
 )
+from skulk.extensions.vad import (
+    VAD_CAPABILITY_DESCRIPTOR,
+    BuiltinVadProvider,
+    StreamingPcm16Resampler,
+    VadConfig,
+    VadTurnEvent,
+    VoiceActivityDetector,
+)
 from skulk.extensions.validation import validate_against_schema
 
 __all__ = [
@@ -84,6 +92,7 @@ __all__ = [
     "BaseChatMiddleware",
     "BlobMediaAttachment",
     "BuiltinSpeechProvider",
+    "BuiltinVadProvider",
     "CallCapability",
     "CapabilityCall",
     "CapabilityCallHandler",
@@ -116,9 +125,14 @@ __all__ = [
     "ReadClusterTelemetry",
     "REALTIME_STT_CAPABILITY_DESCRIPTOR",
     "STT_CAPABILITY_DESCRIPTOR",
+    "StreamingPcm16Resampler",
     "SkulkExtension",
     "SupportsExtensionStartup",
     "TTS_CAPABILITY_DESCRIPTOR",
+    "VAD_CAPABILITY_DESCRIPTOR",
+    "VadConfig",
+    "VadTurnEvent",
+    "VoiceActivityDetector",
     "StreamDirection",
     "StreamCapability",
     "WithdrawCapability",

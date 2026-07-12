@@ -1,0 +1,64 @@
+# Builds and publishes the prebaked CUDA pod image (deployment/cuda/Dockerfile)
+# to GHCR. Standard amd64 runners suffice: nvcc compiles CUDA kernels without a
+# GPU present. Triggered manually, and on dev pushes that touch the image
+# inputs, so the published image tracks the recipe.
+name: cuda-pod-image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev]
+    paths:
+      - 'deployment/cuda/Dockerfile'
+      - 'deployment/cuda/pod-start.sh'
+      - 'deployment/cuda/pod-bootstrap.sh'
+      - '.github/workflows/cuda-image.yml'
+      # Image inputs that live outside deployment/: the prebaked wheel is
+      # version-pinned from uv.lock and built for .python-version, so a bump
+      # to either must republish the image or bootstrap installs a stale tag.
+      - 'uv.lock'
+      - '.python-version'
+
+# One build at a time, newest wins: without this, two quick dev pushes can
+# race and leave :latest pointing at the older commit if its build finishes
+# last.
+concurrency:
+  group: cuda-pod-image
+  cancel-in-progress: true
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # The CUDA devel base plus two CUDA compiles overflow the runner's free
+      # disk; drop the preinstalled toolchains we never touch.
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deployment/cuda/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/foxlight-foundation/skulk-cuda-pod:latest
+            ghcr.io/foxlight-foundation/skulk-cuda-pod:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

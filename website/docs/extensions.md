@@ -363,12 +363,9 @@ the schema-validated payload, while the encoded MP3 bytes travel as a raw
 `InlineMediaAttachment` rather than base64 JSON.
 
 The descriptor is available through `GET /v1/capabilities`, but its telemetry
-tag is advertised only when all three runtime requirements are true:
-
-- `SKULK_ENABLE_EXPERIMENTAL_MODE` is enabled;
-- `experiments.tts_streaming: true` is configured; and
-- at least one mounted TTS card declares `audio.supports_streaming = true` and
-  MP3 output.
+tag is advertised only when at least one mounted TTS card declares
+`audio.supports_streaming = true` and MP3 output and every routable instance
+of an eligible model has a ready runner.
 
 The same requirements are rechecked during dynamic admission for the requested
 model. A failure returns a typed opening error before `started`; caller close,
@@ -376,6 +373,16 @@ timeout, or transport failure cancels the underlying core synthesis command.
 An external extension cannot replace the reserved built-in `tts@1.0.0`
 contract; first-party providers take deterministic precedence when extension
 registries are combined.
+
+### Built-in voice activity detector
+
+Every production API advertises the stable `vad@1.0.0` bidirectional provider.
+It accepts ordered mono PCM16 at 8, 16, 32, or 48 kHz and emits typed
+`speech_started` and `speech_stopped` chunks. Callers may configure WebRTC VAD
+aggressiveness, 10/20/30 ms classifier frames, minimum speech, silence
+hangover, preroll, and maximum utterance duration within bounded schema limits.
+The provider processes media per call, retains no completed audio, and has no
+mounted-model dependency.
 
 ### Built-in mounted-model batch STT provider
 
