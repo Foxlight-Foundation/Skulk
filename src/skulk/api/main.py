@@ -100,6 +100,8 @@ from skulk.api.types import (
     AudioCapabilitySection,
     AudioSpeechRequest,
     AudioTranscriptionResponseFormat,
+    AudioVoice,
+    AudioVoiceList,
     BenchChatCompletionRequest,
     BenchChatCompletionResponse,
     BenchImageGenerationResponse,
@@ -1581,6 +1583,27 @@ class API:
                 "must already be placed and running as a speech-to-text model."
             ),
         )(self.audio_transcriptions)
+        self.app.post(
+            "/v1/audio/translations",
+            response_model=None,
+            tags=["Audio"],
+            summary="Translate speech audio to English",
+            description=(
+                "Experimental OpenAI-compatible speech translation endpoint. "
+                "The requested mounted model must explicitly support translation, "
+                "and speech_translation must be enabled in experiment settings."
+            ),
+        )(self.audio_translations)
+        self.app.get(
+            "/v1/audio/voices",
+            response_model=AudioVoiceList,
+            tags=["Audio"],
+            summary="List voices for a mounted speech model",
+            description=(
+                "Skulk extension that returns stable built-in voice identifiers "
+                "declared by a mounted text-to-speech model."
+            ),
+        )(self.audio_voices)
         self.app.websocket("/v1/realtime")(self.realtime_transcription)
         self.app.post(
             "/bench/chat/completions",
@@ -3169,6 +3192,23 @@ class API:
             and config.experiments.stt_realtime
         )
 
+    def _speech_translation_experiment_enabled(self) -> bool:
+        """Return whether config opts into experimental speech translation."""
+
+        try:
+            config = load_skulk_config(self._config_path)
+        except Exception as exc:
+            logger.warning(
+                "Failed to load config while checking speech translation "
+                f"experiment toggle; treating it as disabled: {exc}"
+            )
+            return False
+        return bool(
+            config is not None
+            and config.experiments is not None
+            and config.experiments.speech_translation
+        )
+
     def _has_mounted_streaming_tts_model(self) -> bool:
         """Return whether core serving currently exposes eligible TTS capacity."""
 
@@ -3371,6 +3411,28 @@ class API:
             raise HTTPException(
                 status_code=404,
                 detail=f"No instance found for model {resolved}",
+            )
+        return resolved
+
+    async def _validate_audio_translation_model(self, model_id: ModelId) -> ModelId:
+        """Validate an experimentally enabled mounted translation model."""
+
+        if not experimental_mode_enabled() or not self._speech_translation_experiment_enabled():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Speech translation is experimental and requires "
+                    f"{EXPERIMENTAL_MODE_ENV_VAR}=1 and "
+                    "experiments.speech_translation=true"
+                ),
+            )
+        model_card = await self._get_running_model_card(model_id)
+        resolved = model_card.model_id
+        profile = resolve_model_capability_profile(resolved, model_card=model_card)
+        if not profile.supports_speech_translation:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {resolved} does not support speech translation",
             )
         return resolved
 
@@ -9975,6 +10037,94 @@ class API:
             audio_bytes,
         )
         return _build_audio_transcription_response(response_format, transcript_chunks)
+
+    async def audio_translations(
+        self,
+        file: Annotated[
+            UploadFile,
+            File(description="Audio file to translate to English."),
+        ],
+        model: Annotated[
+            str,
+            Form(description="Mounted translation-capable speech model id."),
+        ],
+        language: Annotated[
+            str | None,
+            Form(description="Required model-specific source language code."),
+        ] = None,
+        prompt: Annotated[
+            str | None,
+            Form(description="Optional translation prompt or context."),
+        ] = None,
+        response_format: Annotated[
+            AudioTranscriptionResponseFormat,
+            Form(description="Translation response format."),
+        ] = "json",
+        temperature: Annotated[
+            float | None,
+            Form(description="Optional model-specific sampling temperature."),
+        ] = None,
+    ) -> Response:
+        """Translate uploaded speech into English with a mounted STT model."""
+
+        if not model.strip():
+            raise HTTPException(status_code=400, detail="`model` must not be empty")
+        if response_format not in _AUDIO_TRANSCRIPTION_FORMATS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported translation response_format: {response_format}",
+            )
+        _validate_audio_upload_metadata(file)
+        audio_bytes = await _read_audio_upload(file)
+        model_id = await self._validate_audio_translation_model(ModelId(model))
+        transcript_chunks = await self._execute_audio_transcription(
+            AudioTranscriptionTaskParams(
+                model=model_id,
+                filename=file.filename,
+                content_type=_normalize_upload_content_type(file.content_type),
+                audio_sha256=hashlib.sha256(audio_bytes).hexdigest(),
+                language=language,
+                prompt=prompt,
+                temperature=temperature,
+                translate_to_english=True,
+            ),
+            audio_bytes,
+        )
+        return _build_audio_transcription_response(response_format, transcript_chunks)
+
+    async def audio_voices(
+        self,
+        model: Annotated[
+            str,
+            Query(description="Mounted text-to-speech model id."),
+        ],
+    ) -> AudioVoiceList:
+        """Return built-in voices declared by one mounted TTS model."""
+
+        if not model.strip():
+            raise HTTPException(status_code=400, detail="`model` must not be empty")
+        model_card = await self._get_running_model_card(ModelId(model))
+        resolved = model_card.model_id
+        profile = resolve_model_capability_profile(resolved, model_card=model_card)
+        if not profile.supports_speech_synthesis:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {resolved} is not a text-to-speech model",
+            )
+        if (
+            model_card.audio is None
+            or model_card.audio.supports_voice_listing is not True
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {resolved} does not support voice listing",
+            )
+        return AudioVoiceList(
+            data=tuple(
+                AudioVoice(id=voice, name=voice, model=str(resolved))
+                for voice in model_card.audio.voices
+            )
+        )
 
     async def _execute_audio_transcription(
         self,

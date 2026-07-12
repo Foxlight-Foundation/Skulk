@@ -217,6 +217,52 @@ def test_audio_speech_route_is_documented_in_openapi() -> None:
     assert operation["summary"] == "Generate speech audio"
 
 
+def test_audio_voices_route_is_documented_in_openapi() -> None:
+    """The Skulk voice-catalog extension must appear in OpenAPI."""
+
+    api = _build_api()
+    schema = cast(dict[str, object], api.app.openapi())
+    paths = cast(dict[str, object], schema["paths"])
+    voices_path = cast(dict[str, object], paths["/v1/audio/voices"])
+    operation = cast(dict[str, object], voices_path["get"])
+
+    assert operation["tags"] == ["Audio"]
+    assert operation["summary"] == "List voices for a mounted speech model"
+
+
+@pytest.mark.anyio
+async def test_audio_voices_returns_static_mounted_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Voice listing should return only identifiers declared by the card."""
+
+    api = _build_api()
+    card = _tts_card()
+    assert card.audio is not None
+    card = card.model_copy(
+        update={
+            "audio": card.audio.model_copy(
+                update={
+                    "supports_voice_listing": True,
+                    "voices": ("alloy", "coral"),
+                }
+            )
+        }
+    )
+
+    async def _running_card(self: API, requested: ModelId) -> ModelCard:
+        assert self is api
+        assert requested == card.model_id
+        return card
+
+    monkeypatch.setattr(API, "_get_running_model_card", _running_card)
+
+    response = await api.audio_voices(str(card.model_id))
+
+    assert [voice.id for voice in response.data] == ["alloy", "coral"]
+    assert all(voice.model == str(card.model_id) for voice in response.data)
+
+
 def test_builtin_tts_capability_tracks_live_experimental_capacity(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

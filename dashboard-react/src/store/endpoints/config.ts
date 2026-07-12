@@ -29,6 +29,7 @@ export interface LoggingConfig {
 export interface ExperimentsConfig {
   tts_streaming: boolean;
   stt_realtime: boolean;
+  speech_translation: boolean;
 }
 
 /** Consent state for opt-in field telemetry (persisted in skulk.yaml). */

@@ -47,6 +47,7 @@ from skulk.worker.runner.speech.runner import (
     _filter_kwargs,
     _load_speech_model,
     _resolve_staged_voice_path,
+    _stt_generate_kwargs,
 )
 
 
@@ -260,6 +261,36 @@ def test_filter_kwargs_drops_unsupported_and_none_values() -> None:
             "reference_audio": None,
         },
     ) == {"voice": "af_heart", "stream": False}
+
+
+def test_translation_kwargs_support_canary_contract() -> None:
+    """Canary translation should receive explicit source and English target."""
+
+    def generate(
+        _path: str,
+        *,
+        source_lang: str,
+        target_lang: str,
+        use_pnc: bool,
+        no_repeat_ngram_size: int,
+    ) -> object:
+        return object()
+
+    params = AudioTranscriptionTaskParams(
+        model=ModelId("mlx-community/canary-test"),
+        audio_sha256="0" * 64,
+        language="fr",
+        translate_to_english=True,
+    )
+
+    kwargs = _filter_kwargs(generate, _stt_generate_kwargs(generate, params))
+
+    assert kwargs == {
+        "source_lang": "fr",
+        "target_lang": "en",
+        "use_pnc": True,
+        "no_repeat_ngram_size": 3,
+    }
 
 
 def _stub_mlx_audio_loader(

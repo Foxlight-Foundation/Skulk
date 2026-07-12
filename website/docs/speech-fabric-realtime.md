@@ -15,6 +15,11 @@ Skulk's first speech serving path is deliberately REST-shaped:
   `audio.supports_streaming = true`.
 - `POST /v1/audio/transcriptions` turns an uploaded audio clip into text or
   transcript metadata.
+- Experimental `POST /v1/audio/translations` translates an uploaded clip to
+  English when global experimental mode, `experiments.speech_translation`, and
+  a translation-capable mounted card all agree.
+- `GET /v1/audio/voices` is a Skulk extension that returns static built-in
+  voices declared by a mounted TTS card.
 - `stt@1.0.0` accepts bounded encoded-audio provider frames, begins batch
   transcription on input half-close, and returns one final transcript.
 - `stt.realtime@1.0.0` is an experimental bidirectional provider for truthful

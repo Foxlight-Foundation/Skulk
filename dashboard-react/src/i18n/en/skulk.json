@@ -576,6 +576,8 @@
   "settings.experiments.none": "No experimental features are available in this release.",
   "settings.experiments.ttsStreaming": "TTS streaming",
   "settings.experiments.ttsStreamingTooltip": "Enables the experimental stream=true path for /v1/audio/speech. Leave off until a mounted TTS model has passed streaming validation.",
+  "settings.experiments.speechTranslation": "Speech translation",
+  "settings.experiments.speechTranslationTooltip": "Enables /v1/audio/translations for mounted models with validated speech translation support.",
   "settings.huggingFace.apiToken": "API Token",
   "settings.huggingFace.apiTokenTooltip": "Your HuggingFace API token enables faster downloads, higher rate limits, and access to gated models. Get one at huggingface.co/settings/tokens",
   "settings.huggingFace.legend": "HuggingFace",

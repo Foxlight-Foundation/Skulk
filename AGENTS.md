@@ -141,8 +141,11 @@ A model card's `placement.compatible_backends` selects which engine serves it
   PCM16 at the API edge becomes raw Fabric media, and disconnect cancels the
   provider. Dashboard chat uses this path only when card truth and the local
   live provider tag agree, resampling AudioWorklet microphone frames to 24 kHz
-  PCM16; batch cards keep MediaRecorder upload. VAD, conversation/full-duplex
-  speech, and speech translation remain later phases.
+  PCM16; batch cards keep MediaRecorder upload. Translation-capable STT cards
+  serve experimental `/v1/audio/translations` only with global experimental
+  mode and `experiments.speech_translation`; TTS cards may expose static voices
+  through the Skulk `/v1/audio/voices` extension. VAD, conversation/full-duplex
+  speech, and managed reference audio remain later phases.
 - **`llama_cpp`**: in-process `llama-cpp-python` for GGUF on GPU/Linux nodes.
   Single-node.
 - **`llama_server`**: served-backend engine; the worker launches an external

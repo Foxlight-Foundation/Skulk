@@ -5,6 +5,8 @@ from .api import AudioSpeechRequest as AudioSpeechRequest
 from .api import (
     AudioTranscriptionResponseFormat as AudioTranscriptionResponseFormat,
 )
+from .api import AudioVoice as AudioVoice
+from .api import AudioVoiceList as AudioVoiceList
 from .api import BenchChatCompletionRequest as BenchChatCompletionRequest
 from .api import BenchChatCompletionResponse as BenchChatCompletionResponse
 from .api import BenchImageGenerationResponse as BenchImageGenerationResponse
