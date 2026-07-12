@@ -309,4 +309,37 @@ describe('RealtimeConversationSocket', () => {
     expect(transcripts.at(-1)).toEqual(['second', false]);
     expect(responses.at(-1)).toEqual(['two', false]);
   });
+
+  it('keeps the conversation open after a late-frame turn error', async () => {
+    const socket = new FakeWebSocket();
+    const errors: Error[] = [];
+    const transcripts: string[] = [];
+    const client = new RealtimeConversationSocket({
+      transcriptionModelId: 'org/stt',
+      location: { protocol: 'https:', host: 'skulk.example' },
+      socketFactory: () => socket as unknown as WebSocket,
+      onTranscript: (text, final) => {
+        if (final) transcripts.push(text);
+      },
+      onError: (error) => errors.push(error),
+    });
+
+    const connected = client.connect();
+    socket.serverEvent({ type: 'session.created' });
+    await connected;
+    socket.serverEvent({
+      type: 'error',
+      error: {
+        code: 'turn_in_progress',
+        message: 'audio cannot be appended until the committed turn completes',
+      },
+    });
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      transcript: 'still connected',
+    });
+
+    expect(errors).toEqual([]);
+    expect(transcripts).toEqual(['still connected']);
+  });
 });

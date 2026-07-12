@@ -477,7 +477,9 @@ export function ChatForm({
   const browserRecordingAvailable = captureMode !== null;
   const useRealtimeCapture = captureMode === 'realtime';
   const useRealtimeConversation = useRealtimeCapture && realtimeVoiceEnabled;
-  const submitRealtimeTranscript = autoSubmitVoice && realtimeResponseModelId !== null;
+  const submitRealtimeTranscript = autoSubmitVoice
+    && canSendMessages
+    && realtimeResponseModelId !== null;
   const recordingUnavailableReason = !secureRecordingContext
     ? t('chat.form.voiceErrors.secureContextRequired', 'Microphone requires HTTPS or localhost.')
     : !browserRecordingAvailable
