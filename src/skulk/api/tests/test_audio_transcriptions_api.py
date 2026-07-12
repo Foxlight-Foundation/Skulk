@@ -14,6 +14,7 @@ from starlette.datastructures import Headers
 import skulk.api.main as api_main
 from skulk.api.main import API
 from skulk.shared.election import ElectionMessage
+from skulk.shared.experimental import EXPERIMENTAL_MODE_ENV_VAR
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.chunks import AudioInputChunk, TranscriptionChunk
 from skulk.shared.types.commands import (
@@ -74,6 +75,229 @@ def test_audio_transcriptions_route_is_documented_in_openapi() -> None:
 
     assert operation["tags"] == ["Audio"]
     assert operation["summary"] == "Transcribe speech audio"
+
+
+def test_audio_translations_route_is_documented_in_openapi() -> None:
+    """The experimental translation endpoint must appear in OpenAPI."""
+
+    api = _build_api()
+    schema = cast(dict[str, object], api.app.openapi())
+    paths = cast(dict[str, object], schema["paths"])
+    translation_path = cast(dict[str, object], paths["/v1/audio/translations"])
+    operation = cast(dict[str, object], translation_path["post"])
+
+    assert operation["tags"] == ["Audio"]
+    assert operation["summary"] == "Translate speech audio to English"
+
+
+@pytest.mark.anyio
+async def test_audio_translations_marks_shared_stt_task_for_english(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Translation should reuse batch STT while setting explicit task intent."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/canary-test")
+    captured_params: list[object] = []
+
+    async def _validate_model(
+        self: API,
+        requested_model: ModelId,
+        source_language: str | None,
+    ) -> ModelId:
+        assert self is api
+        assert requested_model == model_id
+        assert source_language == "fr"
+        return model_id
+
+    async def _execute(
+        self: API,
+        params: object,
+        audio_bytes: bytes,
+    ) -> list[TranscriptionChunk]:
+        assert self is api
+        assert audio_bytes == b"RIFFtestWAVE"
+        captured_params.append(params)
+        return [
+            TranscriptionChunk(
+                model=model_id,
+                text="hello world",
+                language="en",
+                segments=[],
+                finish_reason="stop",
+            )
+        ]
+
+    monkeypatch.setattr(API, "_validate_audio_translation_model", _validate_model)
+    monkeypatch.setattr(API, "_execute_audio_transcription", _execute)
+
+    response = await api.audio_translations(
+        file=_upload(b"RIFFtestWAVE"),
+        model=str(model_id),
+        language="fr",
+    )
+
+    assert response.media_type == "application/json"
+    assert len(captured_params) == 1
+    params = cast(api_main.AudioTranscriptionTaskParams, captured_params[0])
+    assert params.translate_to_english is True
+    assert params.language == "fr"
+
+
+@pytest.mark.anyio
+async def test_audio_translations_rejects_before_reading_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disabled or ineligible translation must not consume the request body."""
+
+    api = _build_api()
+    upload = _upload(b"RIFFtestWAVE")
+
+    async def _reject(
+        self: API,
+        requested_model: ModelId,
+        source_language: str | None,
+    ) -> Never:
+        del requested_model, source_language
+        raise HTTPException(status_code=404, detail="not mounted")
+
+    monkeypatch.setattr(API, "_validate_audio_translation_model", _reject)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.audio_translations(file=upload, model="org/not-mounted")
+
+    assert exc_info.value.status_code == 404
+    assert upload.file.tell() == 0
+
+
+@pytest.mark.anyio
+async def test_audio_translations_requires_experiment_before_reading_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The feature gate must reject translation before consuming media."""
+
+    api = _build_api()
+    upload = _upload(b"RIFFtestWAVE")
+    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
+    monkeypatch.setattr(api, "_speech_translation_experiment_enabled", lambda: False)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.audio_translations(file=upload, model="org/canary")
+
+    assert exc_info.value.status_code == 400
+    assert upload.file.tell() == 0
+
+
+@pytest.mark.anyio
+async def test_audio_translation_validation_rejects_unsupported_mounted_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mounted transcription capacity must not imply translation support."""
+
+    api = _build_api()
+    model_id = ModelId("org/transcription-only")
+    api.state = cast(
+        State,
+        cast(
+            object,
+            type(
+                "_State",
+                (),
+                {
+                    "instances": {
+                        "instance": type(
+                            "_Instance",
+                            (),
+                            {
+                                "shard_assignments": type(
+                                    "_Assignments", (), {"model_id": model_id}
+                                )()
+                            },
+                        )()
+                    }
+                },
+            )(),
+        ),
+    )
+
+    async def _running_card(self: API, requested: ModelId) -> object:
+        assert self is api
+        assert requested == model_id
+        return type("_Card", (), {"model_id": model_id})()
+
+    def _unsupported_profile(*_args: object, **_kwargs: object) -> object:
+        return type("_Profile", (), {"supports_speech_translation": False})()
+
+    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
+    monkeypatch.setattr(api, "_speech_translation_experiment_enabled", lambda: True)
+    monkeypatch.setattr(API, "_get_running_model_card", _running_card)
+    monkeypatch.setattr(
+        api_main,
+        "resolve_model_capability_profile",
+        _unsupported_profile,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api._validate_audio_translation_model(model_id, "fr")
+
+    assert exc_info.value.status_code == 400
+    assert "does not support" in str(exc_info.value.detail)
+
+
+@pytest.mark.anyio
+async def test_canary_translation_requires_source_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Canary must not silently default non-English input to English source."""
+
+    api = _build_api()
+    model_id = ModelId("org/canary")
+    api.state = cast(
+        State,
+        cast(
+            object,
+            type(
+                "_State",
+                (),
+                {
+                    "instances": {
+                        "instance": type(
+                            "_Instance",
+                            (),
+                            {
+                                "shard_assignments": type(
+                                    "_Assignments", (), {"model_id": model_id}
+                                )()
+                            },
+                        )()
+                    }
+                },
+            )(),
+        ),
+    )
+
+    async def _running_card(self: API, requested: ModelId) -> object:
+        assert self is api
+        assert requested == model_id
+        return type("_Card", (), {"model_id": model_id, "family": "canary"})()
+
+    def _translation_profile(*_args: object, **_kwargs: object) -> object:
+        return type("_Profile", (), {"supports_speech_translation": True})()
+
+    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
+    monkeypatch.setattr(api, "_speech_translation_experiment_enabled", lambda: True)
+    monkeypatch.setattr(API, "_get_running_model_card", _running_card)
+    monkeypatch.setattr(
+        api_main,
+        "resolve_model_capability_profile",
+        _translation_profile,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api._validate_audio_translation_model(model_id, None)
+
+    assert exc_info.value.status_code == 400
+    assert "source `language`" in str(exc_info.value.detail)
 
 
 @pytest.mark.anyio

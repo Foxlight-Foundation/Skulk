@@ -181,6 +181,26 @@ def test_audio_card_config_requires_stt_kind_for_translation() -> None:
         )
 
 
+def test_audio_card_config_validates_static_voice_catalog() -> None:
+    config = AudioCardConfig(
+        kind=AudioCardKind.TextToSpeech,
+        supports_voice_listing=True,
+        voices=("alloy", "coral"),
+    )
+
+    assert config.voices == ("alloy", "coral")
+
+    with pytest.raises(ValidationError, match="supports_voice_listing"):
+        AudioCardConfig(kind=AudioCardKind.TextToSpeech, voices=("alloy",))
+
+    with pytest.raises(ValidationError, match="duplicates"):
+        AudioCardConfig(
+            kind=AudioCardKind.TextToSpeech,
+            supports_voice_listing=True,
+            voices=("alloy", "alloy"),
+        )
+
+
 def test_resolve_model_capability_profile_treats_translation_as_transcription() -> None:
     card = ModelCard(
         model_id=ModelId("mlx-community/whisper-translate-test"),

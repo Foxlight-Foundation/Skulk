@@ -968,6 +968,25 @@ class AudioSpeechRequest(BaseModel):
         return AudioResponseFormat(value)
 
 
+class AudioVoice(BaseModel, frozen=True):
+    """One stable voice identifier exposed by a mounted TTS model."""
+
+    id: str = Field(description="Model-specific voice identifier.")
+    name: str = Field(description="Human-readable voice name.")
+    model: str = Field(description="Mounted text-to-speech model id.")
+    kind: Literal["builtin"] = Field(
+        default="builtin",
+        description="Voice source. Version 1 exposes built-in voices only.",
+    )
+
+
+class AudioVoiceList(BaseModel, frozen=True):
+    """Voice catalog for one mounted text-to-speech model."""
+
+    object: Literal["list"] = "list"
+    data: tuple[AudioVoice, ...] = ()
+
+
 ImageSize = Literal[
     "auto",
     "512x512",

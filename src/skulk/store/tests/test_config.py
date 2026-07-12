@@ -125,6 +125,7 @@ def test_experiments_config_defaults_speech_streaming_off() -> None:
     assert config.experiments is not None
     assert config.experiments.tts_streaming is False
     assert config.experiments.stt_realtime is False
+    assert config.experiments.speech_translation is False
 
 
 def test_load_skulk_config_parses_speech_streaming_experiments(
@@ -135,6 +136,7 @@ def test_load_skulk_config_parses_speech_streaming_experiments(
     target = tmp_path / "skulk.yaml"
     target.write_text(
         "experiments:\n  tts_streaming: true\n  stt_realtime: true\n"
+        "  speech_translation: true\n"
     )
 
     config = load_skulk_config(target)
@@ -143,3 +145,4 @@ def test_load_skulk_config_parses_speech_streaming_experiments(
     assert config.experiments is not None
     assert config.experiments.tts_streaming is True
     assert config.experiments.stt_realtime is True
+    assert config.experiments.speech_translation is True

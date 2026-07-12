@@ -68,6 +68,7 @@ from skulk.worker.runner.bootstrap import logger
 
 _DEFAULT_STAGED_TTS_VOICE = "af_heart"
 _AUDIO_BINARY_CHUNK_SIZE = max(1, (SKULK_MAX_CHUNK_SIZE // 4) * 3)
+_CANARY_MASK_COMPAT_MARKER = "_skulk_mask_dtype_compat"
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,89 @@ def _filter_kwargs(fn: Callable[..., Any], kwargs: dict[str, Any]) -> dict[str, 
     return {k: v for k, v in kwargs.items() if v is not None and k in accepted.params}
 
 
+def _install_attention_mask_dtype_compat(attention_type: type[Any]) -> None:
+    """Cast additive masks to the attention input dtype for one upstream class."""
+
+    if getattr(attention_type, _CANARY_MASK_COMPAT_MARKER, False):
+        return
+    original_call = cast(Callable[..., Any], attention_type.__call__)
+
+    def _compatible_call(
+        self: Any,
+        x: Any,
+        mask: Any | None = None,
+        cache: Any | None = None,
+    ) -> Any:
+        projection_dtype = self.q_proj.weight.dtype
+        if mask is not None and mask.dtype != projection_dtype:
+            mask = mask.astype(projection_dtype)
+        return original_call(self, x, mask=mask, cache=cache)
+
+    attention_type.__call__ = _compatible_call
+    setattr(attention_type, _CANARY_MASK_COMPAT_MARKER, True)
+
+
+def _install_canary_compatibility() -> None:
+    """Install runtime compatibility required by upstream bfloat16 Canary."""
+
+    import mlx.core as mx
+    from mlx_audio.stt.models.canary.decoder import (
+        MultiHeadCrossAttention,
+        MultiHeadSelfAttention,
+    )
+
+    _install_attention_mask_dtype_compat(MultiHeadSelfAttention)
+    if getattr(MultiHeadCrossAttention, _CANARY_MASK_COMPAT_MARKER, False):
+        return
+
+    def _compatible_cross_attention(
+        self: Any,
+        x: Any,
+        encoder_output: Any,
+        encoder_mask: Any | None = None,
+        cache: Any | None = None,
+    ) -> Any:
+        batch_size, target_length, _ = x.shape
+        query = self.q_proj(x).reshape(
+            batch_size, target_length, self.n_heads, self.head_dim
+        )
+        query = query.transpose(0, 2, 1, 3)
+        if cache is not None:
+            key, value = cache
+        else:
+            source_length = encoder_output.shape[1]
+            key = self.k_proj(encoder_output).reshape(
+                batch_size, source_length, self.n_heads, self.head_dim
+            )
+            value = self.v_proj(encoder_output).reshape(
+                batch_size, source_length, self.n_heads, self.head_dim
+            )
+            key = key.transpose(0, 2, 1, 3)
+            value = value.transpose(0, 2, 1, 3)
+        attention_mask = None
+        if encoder_mask is not None:
+            attention_mask = encoder_mask[:, None, None, :].astype(query.dtype)
+            attention_mask = mx.where(
+                attention_mask == 0,
+                mx.array(-1e9, dtype=query.dtype),
+                mx.array(0.0, dtype=query.dtype),
+            )
+        output = cast(Any, mx).fast.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            scale=self.scale,
+            mask=attention_mask,
+        )
+        output = output.transpose(0, 2, 1, 3).reshape(
+            batch_size, target_length, -1
+        )
+        return self.out_proj(output), (key, value)
+
+    MultiHeadCrossAttention.__call__ = _compatible_cross_attention
+    setattr(MultiHeadCrossAttention, _CANARY_MASK_COMPAT_MARKER, True)
+
+
 def _first_non_empty_text(*values: str | None) -> str | None:
     """Return the first non-empty text value from OpenAI-style STT aliases."""
     for value in values:
@@ -125,6 +209,7 @@ def _stt_generate_kwargs(
         return_timestamps = bool(granularities) if granularities else None
         return {
             "language": params.language,
+            "task": "translate" if params.translate_to_english else None,
             "initial_prompt": _first_non_empty_text(
                 params.prompt, params.context, params.text
             ),
@@ -137,7 +222,16 @@ def _stt_generate_kwargs(
             "verbose": True,
         }
     return {
-        "language": params.language,
+        # Canary treats ``language`` as both source and target, so emitting the
+        # generic alias here would overwrite the explicit English target.
+        "language": None if params.translate_to_english else params.language,
+        "task": "translate" if params.translate_to_english else None,
+        "source_lang": params.language,
+        "target_lang": "en" if params.translate_to_english else params.language,
+        "source_language": params.language,
+        "target_language": "en" if params.translate_to_english else None,
+        "use_pnc": True if params.translate_to_english else None,
+        "no_repeat_ngram_size": 3 if params.translate_to_english else None,
         "prompt": params.prompt,
         "temperature": params.temperature,
         "max_tokens": params.max_tokens,
@@ -704,6 +798,8 @@ class Runner:
         audio_config = self.shard_metadata.model_card.audio
         audio_kind = audio_config.kind if audio_config is not None else None
         self.model = _load_speech_model(local_path, audio_kind)
+        if self.shard_metadata.model_card.family == "canary":
+            _install_canary_compatibility()
         self.current_status = RunnerReady()
         logger.info(
             f"speech runner ready in {time.time() - self.setup_start_time:.1f}s"

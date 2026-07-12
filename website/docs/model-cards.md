@@ -188,10 +188,14 @@ Declares speech serving metadata for TTS and STT models:
   - whether the model exposes a realtime audio session interface
 - `supports_voice_listing`
   - whether voices can be enumerated by the serving API
+- `voices`
+  - stable built-in voice identifiers returned by `GET /v1/audio/voices`; this
+    requires `kind = "tts"` and `supports_voice_listing = true`
 - `supports_reference_audio`
   - whether managed reference audio can condition the voice
 - `supports_translation`
-  - whether speech translation is supported
+  - whether speech-to-English translation is supported through the
+    experimental `/v1/audio/translations` route
 - `sample_rates`
   - supported input or output sample rates in hertz
 

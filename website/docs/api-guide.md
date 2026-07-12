@@ -80,6 +80,8 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `POST /v1/responses`
 - `POST /v1/audio/speech`
 - `POST /v1/audio/transcriptions`
+- `POST /v1/audio/translations`
+- `GET /v1/audio/voices`
 - `WS /v1/realtime`
 - `POST /v1/messages`
 - `POST /ollama/api/chat`
@@ -548,8 +550,24 @@ validation.
 
 The speech endpoint is still text-only. `streaming_interval` without
 `stream=true`, `reference_audio`, and `reference_text` return **400 Bad
-Request**. Speech translation, realtime sessions, voice listing, and managed
-reference-audio uploads are later phases.
+Request**. Managed reference-audio uploads are a later phase.
+
+## Skulk Audio Voices API
+
+**GET** `/v1/audio/voices?model=<model-id>`
+
+Returns stable built-in voice identifiers declared by one mounted TTS model.
+This is a Skulk extension, not an OpenAI compatibility route. The model must
+declare `audio.supports_voice_listing = true`; otherwise Skulk returns **400 Bad
+Request**.
+
+```bash
+curl 'http://localhost:52415/v1/audio/voices?model=org/tts-model'
+```
+
+The response is `{ "object": "list", "data": [...] }`. Each item contains the
+voice `id`, display `name`, mounted `model`, and `kind = "builtin"`. Version 1
+does not create or persist voice profiles.
 
 ## OpenAI Audio Transcriptions API
 
@@ -595,6 +613,39 @@ upload, chunks the base64 payload through Skulk's command/input-chunk pipeline,
 and the worker writes a temporary local audio file only inside the serving
 runner process. `stream=true` returns **400 Bad Request** until streaming STT
 lands through the realtime session path.
+
+## OpenAI Audio Translations API
+
+**POST** `/v1/audio/translations`
+
+Experimentally translates a multipart speech upload into English. The request
+uses the same 25 MiB bounded upload path and response formats as transcription.
+The mounted card must declare `audio.supports_translation = true`.
+
+```bash
+curl -X POST http://localhost:52415/v1/audio/translations \
+  -F model=org/canary-model \
+  -F file=@sample-fr.wav \
+  -F language=fr \
+  -F response_format=json
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `file` | file | Required bounded audio upload |
+| `model` | string | Required mounted translation-capable STT model id |
+| `language` | string or null | Optional source-language hint; required by the bundled Canary model |
+| `prompt` | string or null | Optional model-specific translation context |
+| `response_format` | string | `json`, `text`, `verbose_json`, `srt`, `vtt`, or `ndjson`; default `json` |
+| `temperature` | number or null | Optional model-specific sampling temperature |
+
+The route is inert unless the node runs with
+`SKULK_ENABLE_EXPERIMENTAL_MODE=1` and cluster settings enable
+`experiments.speech_translation`. Translation target is English. Skulk maps the
+generic request to model-family arguments inside the speech runner. The bundled
+`CogniSoftOrg/canary-1b-v2-mlx-bf16` card is the initial experimental candidate;
+requests for that model return **400 Bad Request** when `language` is omitted.
+Its upstream CC-BY-4.0 terms and NVIDIA attribution continue to apply.
 
 ## Claude Messages API
 
@@ -968,6 +1019,10 @@ gated dashboard section. Current fields:
   `SKULK_ENABLE_EXPERIMENTAL_MODE`. The node must locally host an eligible STT
   runner whose card declares both `audio.supports_streaming = true` and
   `audio.supports_realtime = true`.
+- `experiments.speech_translation`: enables experimental
+  `/v1/audio/translations` on nodes that also run with
+  `SKULK_ENABLE_EXPERIMENTAL_MODE`. The mounted card must declare
+  `audio.supports_translation = true`.
 
 ### Update config
 

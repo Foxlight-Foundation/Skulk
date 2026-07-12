@@ -127,6 +127,22 @@ def _tts_card(*, supports_streaming: bool = True) -> ModelCard:
     )
 
 
+def _stt_card() -> ModelCard:
+    """Create a minimal mounted STT card for negative voice-catalog tests."""
+
+    return ModelCard(
+        model_id=ModelId("mlx-community/stt-test"),
+        storage_size=Memory.from_mb(100),
+        n_layers=1,
+        hidden_size=1024,
+        supports_tensor=False,
+        tasks=[ModelTask.SpeechToText],
+        family="parakeet",
+        capabilities=["stt"],
+        audio=AudioCardConfig(kind=AudioCardKind.SpeechToText),
+    )
+
+
 def _state_with_running_card(card: ModelCard) -> State:
     """Build a minimal state containing one mounted speech model instance."""
 
@@ -215,6 +231,129 @@ def test_audio_speech_route_is_documented_in_openapi() -> None:
 
     assert operation["tags"] == ["Audio"]
     assert operation["summary"] == "Generate speech audio"
+
+
+def test_audio_voices_route_is_documented_in_openapi() -> None:
+    """The Skulk voice-catalog extension must appear in OpenAPI."""
+
+    api = _build_api()
+    schema = cast(dict[str, object], api.app.openapi())
+    paths = cast(dict[str, object], schema["paths"])
+    voices_path = cast(dict[str, object], paths["/v1/audio/voices"])
+    operation = cast(dict[str, object], voices_path["get"])
+
+    assert operation["tags"] == ["Audio"]
+    assert operation["summary"] == "List voices for a mounted speech model"
+
+
+@pytest.mark.anyio
+async def test_audio_voices_returns_static_mounted_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Voice listing should return only identifiers declared by the card."""
+
+    api = _build_api()
+    card = _tts_card()
+    assert card.audio is not None
+    card = card.model_copy(
+        update={
+            "audio": card.audio.model_copy(
+                update={
+                    "supports_voice_listing": True,
+                    "voices": ("alloy", "coral"),
+                }
+            )
+        }
+    )
+
+    async def _running_card(self: API, requested: ModelId) -> ModelCard:
+        assert self is api
+        assert requested == card.model_id
+        return card
+
+    monkeypatch.setattr(API, "_get_running_model_card", _running_card)
+    api.state = _state_with_running_card(card)
+
+    response = await api.audio_voices(str(card.model_id))
+
+    assert [voice.id for voice in response.data] == ["alloy", "coral"]
+    assert all(voice.model == str(card.model_id) for voice in response.data)
+
+
+@pytest.mark.anyio
+async def test_audio_voices_rejects_unmounted_catalog_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Voice discovery must not advertise unavailable model capacity."""
+
+    api = _build_api()
+    card = _tts_card()
+    assert card.audio is not None
+    card = card.model_copy(
+        update={
+            "audio": card.audio.model_copy(
+                update={"supports_voice_listing": True, "voices": ("alloy",)}
+            )
+        }
+    )
+
+    async def _catalog_card(self: API, requested: ModelId) -> ModelCard:
+        raise AssertionError("unmounted voice discovery must not load a card")
+
+    monkeypatch.setattr(API, "_get_running_model_card", _catalog_card)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.audio_voices(str(card.model_id))
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_audio_voices_rejects_mounted_non_tts_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mounted STT capacity should return 400 rather than a voice catalog."""
+
+    api = _build_api()
+    card = _stt_card()
+
+    async def _running_card(self: API, requested: ModelId) -> ModelCard:
+        assert self is api
+        assert requested == card.model_id
+        return card
+
+    monkeypatch.setattr(API, "_get_running_model_card", _running_card)
+    api.state = _state_with_running_card(card)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.audio_voices(str(card.model_id))
+
+    assert exc_info.value.status_code == 400
+    assert "not a text-to-speech model" in str(exc_info.value.detail)
+
+
+@pytest.mark.anyio
+async def test_audio_voices_rejects_tts_without_voice_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mounted TTS card must explicitly opt into voice discovery."""
+
+    api = _build_api()
+    card = _tts_card()
+
+    async def _running_card(self: API, requested: ModelId) -> ModelCard:
+        assert self is api
+        assert requested == card.model_id
+        return card
+
+    monkeypatch.setattr(API, "_get_running_model_card", _running_card)
+    api.state = _state_with_running_card(card)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.audio_voices(str(card.model_id))
+
+    assert exc_info.value.status_code == 400
+    assert "does not support voice listing" in str(exc_info.value.detail)
 
 
 def test_builtin_tts_capability_tracks_live_experimental_capacity(
