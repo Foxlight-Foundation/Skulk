@@ -1563,7 +1563,7 @@ The wire contract implements a bounded subset of OpenAI Realtime transcription:
 | server to client | `response.output_text.delta` / `response.output_text.done` | Streams visible assistant text and its bounded final value. Reasoning tokens and tool calls are not exposed or synthesized. |
 | server to client | `response.audio.delta` / `response.audio.done` | Streams base64 MP3 chunks from the selected mounted `tts_model`. |
 | client to server | `response.cancel` | Cancels active model generation or TTS. New speech detected by server VAD performs the same cancellation before starting the next turn. |
-| server to client | `response.done` | Terminates one assistant response with `completed` or `cancelled` status. |
+| server to client | `response.done` | Terminates one assistant response with `completed`, `cancelled`, or `failed` status. |
 | server to client | `error` | Reports invalid or unsupported client events before a policy/error close. |
 
 Version 1 accepts JSON text WebSocket messages and base64-encoded mono,

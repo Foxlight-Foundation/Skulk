@@ -528,6 +528,16 @@ class RealtimeTranscriptionBridge:
                         client_event_id=event.event_id,
                     )
                     continue
+                if (
+                    self._turn_audio_bytes > 0
+                    and requested_response != self._response_config
+                ):
+                    await self._send_error(
+                        code="response_config_locked",
+                        message="response configuration cannot change after audio is appended",
+                        client_event_id=event.event_id,
+                    )
+                    continue
                 if self._turn_audio_bytes == 0:
                     self._configure_turn_detection(requested_turn_detection)
                     self._response_config = requested_response

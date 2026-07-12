@@ -524,6 +524,60 @@ def test_realtime_websocket_cancels_active_assistant_response() -> None:
         assert _mapping(done["response"])["status"] == "cancelled"
 
 
+def test_realtime_websocket_locks_response_config_after_audio() -> None:
+    """A raced response update cannot be acknowledged without taking effect."""
+
+    api = _build_api()
+    input_frames: list[CapabilityStreamFrame] = []
+    _install_waiting_session(api, input_frames, call_id="locked-response-config")
+
+    async def generate_assistant(
+        model: str,
+        messages: tuple[ConversationMessage, ...],
+    ) -> AsyncIterator[str]:
+        del model, messages
+        yield "unused"
+
+    async def validate_response(config: RealtimeResponseConfig) -> None:
+        del config
+
+    api._generate_realtime_assistant = generate_assistant
+    api._validate_realtime_response_config = validate_response
+    client = TestClient(api.app)
+    with client.websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt",
+        headers={"origin": "http://testserver"},
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+
+        def update(model: str) -> dict[str, object]:
+            return {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {
+                            "transcription": {"model": "org/realtime-stt"},
+                        }
+                    },
+                    "response": {"model": model},
+                },
+            }
+
+        websocket.send_json(update("org/chat-a"))
+        assert _receive_json(websocket)["type"] == "session.updated"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
+            }
+        )
+        websocket.send_json(update("org/chat-b"))
+        error = _receive_json(websocket)
+        assert error["type"] == "error"
+        assert _mapping(error["error"])["code"] == "response_config_locked"
+
+
 def test_realtime_websocket_server_vad_auto_commits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
