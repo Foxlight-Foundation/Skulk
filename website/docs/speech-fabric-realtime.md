@@ -30,7 +30,7 @@ experimental and is available only when all of these conditions are true:
 `/v1/audio/transcriptions` accepts a bounded multipart upload and returns one
 completed transcription. It does not provide progressive REST transcription.
 
-`/v1/realtime` accepts OpenAI-style base64 PCM16 append and commit events over a
+`WS /v1/realtime` accepts OpenAI-style base64 PCM16 append and commit events over a
 WebSocket. It emits transcript delta, final, and failure events from the mounted
 realtime STT model. The route is a transcription compatibility surface, not a
 full speech-to-speech conversation API.
@@ -46,7 +46,7 @@ mounted capacity is healthy:
 | Capability | I/O mode | Behavior |
 | --- | --- | --- |
 | `tts@1.0.0` | `server_streaming` | Accepts text controls and emits raw MP3 media frames. |
-| `stt@1.0.0` | `client_streaming` input, batch result | Accepts bounded encoded audio, starts inference on input half-close, and emits one final transcript. |
+| `stt@1.0.0` | `client_streaming` | Accepts bounded encoded audio, starts inference on input half-close, and emits one final transcript. |
 | `stt.realtime@1.0.0` | `bidirectional` | Accepts mono PCM16 frames and emits model-provided partial and final transcripts. |
 
 The provider descriptor is the public interface contract. Model cards remain
