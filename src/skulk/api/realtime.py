@@ -428,7 +428,7 @@ class RealtimeTranscriptionBridge:
                             "optional supported "
                             "server VAD, "
                             "no noise reduction, "
-                            "and no additional fields"
+                            "and no unsupported fields"
                         ),
                         client_event_id=event.event_id,
                     )
