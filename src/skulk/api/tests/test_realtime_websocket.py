@@ -438,6 +438,164 @@ def test_realtime_websocket_manual_commit_finishes_locked_vad(
     assert [frame.kind for frame in input_frames] == ["started", "chunk", "completed"]
 
 
+def test_realtime_websocket_rotates_provider_calls_across_turns() -> None:
+    """One socket should serialize distinct bounded provider calls per utterance."""
+
+    api = _build_api()
+    turns: list[list[CapabilityStreamFrame]] = []
+
+    async def open_session(model: str, sample_rate: int) -> CapabilityStreamSession:
+        assert model == "org/realtime-stt"
+        assert sample_rate == 24_000
+        turn_number = len(turns) + 1
+        input_frames: list[CapabilityStreamFrame] = []
+        turns.append(input_frames)
+        completed = anyio.Event()
+
+        async def send_input(frame: CapabilityStreamFrame) -> None:
+            input_frames.append(frame)
+            if frame.kind == "completed":
+                completed.set()
+
+        input_stream = CapabilityStreamInput(
+            call_id=f"turn-{turn_number}",
+            deadline_at=anyio.current_time() + 10.0,
+            send_frame=send_input,
+        )
+        await input_stream.start()
+
+        async def output_frames() -> AsyncIterator[CapabilityStreamFrame]:
+            yield CapabilityStreamFrame(
+                call_id=f"turn-{turn_number}",
+                direction="provider_to_caller",
+                sequence=0,
+                kind="started",
+            )
+            await completed.wait()
+            yield CapabilityStreamFrame(
+                call_id=f"turn-{turn_number}",
+                direction="provider_to_caller",
+                sequence=1,
+                kind="completed",
+                payload={"text": f"turn {turn_number}"},
+            )
+
+        return CapabilityStreamSession(
+            open_result=CapabilityResult(
+                call_id=f"turn-{turn_number}",
+                ok=True,
+                result={"admitted": True},
+            ),
+            frames=output_frames(),
+            input=input_stream,
+        )
+
+    api._open_realtime_transcription_session = open_session
+    encoded_audio = base64.b64encode(b"\x01\x00\x02\x00").decode("ascii")
+
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt"
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        item_ids: list[str] = []
+        previous_item_ids: list[object] = []
+        for turn_number in (1, 2):
+            websocket.send_json(
+                {"type": "input_audio_buffer.append", "audio": encoded_audio}
+            )
+            websocket.send_json({"type": "input_audio_buffer.commit"})
+            committed = _receive_json(websocket)
+            assert committed["type"] == "input_audio_buffer.committed"
+            item_ids.append(cast(str, committed["item_id"]))
+            previous_item_ids.append(committed["previous_item_id"])
+            completed = _receive_json(websocket)
+            assert completed["type"] == (
+                "conversation.item.input_audio_transcription.completed"
+            )
+            assert completed["item_id"] == item_ids[-1]
+            assert completed["transcript"] == f"turn {turn_number}"
+
+    assert item_ids[0] != item_ids[1]
+    assert previous_item_ids == [None, item_ids[0]]
+    assert len(turns) == 2
+    assert [[frame.kind for frame in turn] for turn in turns] == [
+        ["started", "chunk", "completed"],
+        ["started", "chunk", "completed"],
+    ]
+
+
+def test_realtime_websocket_rejects_overlapping_turn_audio() -> None:
+    """A committed turn must release its provider before another turn starts."""
+
+    api = _build_api()
+    release_output = Event()
+
+    async def open_session(model: str, sample_rate: int) -> CapabilityStreamSession:
+        del model, sample_rate
+        completed = anyio.Event()
+
+        async def send_input(frame: CapabilityStreamFrame) -> None:
+            if frame.kind == "completed":
+                completed.set()
+
+        input_stream = CapabilityStreamInput(
+            call_id="overlap-turn",
+            deadline_at=anyio.current_time() + 10.0,
+            send_frame=send_input,
+        )
+        await input_stream.start()
+
+        async def output_frames() -> AsyncIterator[CapabilityStreamFrame]:
+            yield CapabilityStreamFrame(
+                call_id="overlap-turn",
+                direction="provider_to_caller",
+                sequence=0,
+                kind="started",
+            )
+            await completed.wait()
+            while not release_output.is_set():
+                await anyio.sleep(0.001)
+            yield CapabilityStreamFrame(
+                call_id="overlap-turn",
+                direction="provider_to_caller",
+                sequence=1,
+                kind="completed",
+                payload={"text": "first"},
+            )
+
+        return CapabilityStreamSession(
+            open_result=CapabilityResult(
+                call_id="overlap-turn",
+                ok=True,
+                result={"admitted": True},
+            ),
+            frames=output_frames(),
+            input=input_stream,
+        )
+
+    api._open_realtime_transcription_session = open_session
+    encoded_audio = base64.b64encode(b"\x01\x00").decode("ascii")
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt"
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {"type": "input_audio_buffer.append", "audio": encoded_audio}
+        )
+        websocket.send_json({"type": "input_audio_buffer.commit"})
+        assert _receive_json(websocket)["type"] == "input_audio_buffer.committed"
+        websocket.send_json(
+            {"type": "input_audio_buffer.append", "audio": encoded_audio}
+        )
+        error = _receive_json(websocket)
+        assert error["type"] == "error"
+        assert _mapping(error["error"])["code"] == "turn_in_progress"
+        release_output.set()
+        assert _receive_json(websocket)["type"] == (
+            "conversation.item.input_audio_transcription.completed"
+        )
+
+
 def test_realtime_websocket_rejects_invalid_audio_without_forwarding() -> None:
     """Malformed base64 terminates only the socket and never reaches the provider."""
 
