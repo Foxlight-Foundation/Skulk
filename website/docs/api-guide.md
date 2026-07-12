@@ -634,7 +634,7 @@ curl -X POST http://localhost:52415/v1/audio/translations \
 |-------|------|-------|
 | `file` | file | Required bounded audio upload |
 | `model` | string | Required mounted translation-capable STT model id |
-| `language` | string or null | Optional source-language hint; models may require it |
+| `language` | string or null | Optional source-language hint; required by the bundled Canary model |
 | `prompt` | string or null | Optional model-specific translation context |
 | `response_format` | string | `json`, `text`, `verbose_json`, `srt`, `vtt`, or `ndjson`; default `json` |
 | `temperature` | number or null | Optional model-specific sampling temperature |
@@ -644,7 +644,8 @@ The route is inert unless the node runs with
 `experiments.speech_translation`. Translation target is English. Skulk maps the
 generic request to model-family arguments inside the speech runner. The bundled
 `CogniSoftOrg/canary-1b-v2-mlx-bf16` card is the initial experimental candidate;
-its upstream CC-BY-4.0 terms and NVIDIA attribution continue to apply.
+requests for that model return **400 Bad Request** when `language` is omitted.
+Its upstream CC-BY-4.0 terms and NVIDIA attribution continue to apply.
 
 ## Claude Messages API
 

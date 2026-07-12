@@ -3414,7 +3414,11 @@ class API:
             )
         return resolved
 
-    async def _validate_audio_translation_model(self, model_id: ModelId) -> ModelId:
+    async def _validate_audio_translation_model(
+        self,
+        model_id: ModelId,
+        source_language: str | None,
+    ) -> ModelId:
         """Validate an experimentally enabled mounted translation model."""
 
         if not experimental_mode_enabled() or not self._speech_translation_experiment_enabled():
@@ -3442,6 +3446,11 @@ class API:
             raise HTTPException(
                 status_code=400,
                 detail=f"Model {resolved} does not support speech translation",
+            )
+        if model_card.family == "canary" and not source_language:
+            raise HTTPException(
+                status_code=400,
+                detail="Canary translation requires a source `language` code",
             )
         return resolved
 
@@ -10083,7 +10092,9 @@ class API:
                 status_code=400,
                 detail=f"Unsupported translation response_format: {response_format}",
             )
-        model_id = await self._validate_audio_translation_model(ModelId(model))
+        model_id = await self._validate_audio_translation_model(
+            ModelId(model), language
+        )
         _validate_audio_upload_metadata(file)
         audio_bytes = await _read_audio_upload(file)
         transcript_chunks = await self._execute_audio_transcription(
