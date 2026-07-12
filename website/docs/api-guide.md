@@ -1348,8 +1348,9 @@ descriptor carries the capability `id`, semantic `version`, a human/LLM-readable
 description, JSON Schemas for input and output, the call's I/O mode, and the
 response maps each `id@version` to a content revision digest so callers can pin
 the exact shape they discovered. Production nodes also include first-party
-provider descriptors, including the mounted-model `tts@1.0.0`
-facade, so descriptor presence alone is not a liveness claim. Extensions consume this through
+provider descriptors, including the mounted-model speech providers and stable
+`vad@1.0.0`, so descriptor presence alone is not always a liveness claim.
+Extensions consume this through
 `describe_node`; the light discovery layer (which nodes offer which capability
 tag) rides the telemetry plane and appears as `nodeCapabilities` in
 `GET /state`.
@@ -1511,6 +1512,18 @@ PCM packets to the serving worker plus a bounded worker-to-runner channel; only
 transcript output uses the existing core DATA lifecycle. The mounted upstream
 model must expose a true `create_streaming_session` interface. Batch STT cards
 are never promoted to realtime by buffering a complete recording.
+
+### Detect speech turns through the built-in VAD provider
+
+Every production API advertises `vad@1.0.0`. Open a bidirectional capability
+stream with `sample_rate` set to 8000, 16000, 32000, or 48000 and send ordered
+mono `pcm_s16le` inline media. Optional settings are `aggressiveness` (0-3),
+`frame_ms` (10, 20, or 30), `minimum_speech_ms`, `silence_hangover_ms`,
+`preroll_ms`, and `maximum_utterance_ms`; the descriptor publishes their exact
+bounds. Output chunks contain `event` (`speech_started` or `speech_stopped`),
+`timestamp_ms`, `reason`, and `preroll_ms`. The completed payload reports the
+turn count. Input must end on an exact classifier-frame boundary. Media is
+processed within the call and is not retained.
 
 ### Realtime transcription WebSocket compatibility edge
 

@@ -788,27 +788,27 @@ def test_builtin_tts_capability_tracks_live_streaming_capacity() -> None:
 
     api, _ = _build_builtin_provider_api()
     card = _tts_card(supports_streaming=True)
-    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._telemetry_view.local_advertised_capabilities == {"vad"}
     assert api._extensions is not None
     assert TTS_CAPABILITY_DESCRIPTOR in api._extensions.capability_descriptors
 
     api.state = _state_with_running_card(card)
     api._sync_builtin_speech_capability()
-    assert api._telemetry_view.local_advertised_capabilities == {"tts"}
+    assert api._telemetry_view.local_advertised_capabilities == {"tts", "vad"}
 
     api.state = api.state.model_copy(
         update={"runners": {RunnerId("speech-runner"): RunnerIdle()}}
     )
     api._sync_builtin_speech_capability()
-    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._telemetry_view.local_advertised_capabilities == {"vad"}
 
     api.state = _with_unready_replica(_state_with_running_card(card))
     api._sync_builtin_speech_capability()
-    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._telemetry_view.local_advertised_capabilities == {"vad"}
 
     api.state = State()
     api._sync_builtin_speech_capability()
-    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._telemetry_view.local_advertised_capabilities == {"vad"}
 
 
 @pytest.mark.anyio
@@ -956,7 +956,7 @@ async def test_builtin_tts_provider_ignores_deprecated_experiment_toggle(
 
     api._sync_builtin_speech_capability()
 
-    assert api._telemetry_view.local_advertised_capabilities == {"tts"}
+    assert api._telemetry_view.local_advertised_capabilities == {"tts", "vad"}
 
 
 @pytest.mark.anyio

@@ -207,6 +207,7 @@ from skulk.extensions import (
     STT_CAPABILITY_DESCRIPTOR,
     TTS_CAPABILITY_DESCRIPTOR,
     BuiltinSpeechProvider,
+    BuiltinVadProvider,
     CapabilityCall,
     CapabilityDescriptor,
     CapabilityError,
@@ -1150,6 +1151,7 @@ class API:
                             ),
                             stream_realtime_stt=self._stream_builtin_realtime_stt,
                         ),
+                        BuiltinVadProvider(),
                     )
                 )
             )

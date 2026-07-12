@@ -198,6 +198,7 @@ def test_realtime_stt_discovery_requires_truthful_local_capacity(
     assert api._telemetry_view.local_advertised_capabilities == {
         "stt",
         "stt.realtime",
+        "vad",
     }
     assert api._extensions is not None
     assert (
@@ -207,13 +208,13 @@ def test_realtime_stt_discovery_requires_truthful_local_capacity(
 
     api.state = _local_state(_realtime_card(supports_realtime=False))
     api._sync_builtin_speech_capability()
-    assert api._telemetry_view.local_advertised_capabilities == {"stt"}
+    assert api._telemetry_view.local_advertised_capabilities == {"stt", "vad"}
 
     api.state = _local_state(
         _realtime_card(), runner_status=RunnerLoading(layers_loaded=0, total_layers=1)
     )
     api._sync_builtin_speech_capability()
-    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._telemetry_view.local_advertised_capabilities == {"vad"}
 
 
 def test_remote_realtime_stt_requires_private_unicast_transport(
@@ -231,7 +232,7 @@ def test_remote_realtime_stt_requires_private_unicast_transport(
 
     api._sync_builtin_speech_capability()
 
-    assert api._telemetry_view.local_advertised_capabilities == {"stt"}
+    assert api._telemetry_view.local_advertised_capabilities == {"stt", "vad"}
 
 @pytest.mark.anyio
 async def test_runner_ready_event_resynchronizes_realtime_stt_advertisement(
@@ -249,7 +250,7 @@ async def test_runner_ready_event_resynchronizes_realtime_stt_advertisement(
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
     _write_legacy_disabled_realtime_config(api, tmp_path)
     api._sync_builtin_speech_capability()
-    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._telemetry_view.local_advertised_capabilities == {"vad"}
 
     runner_id = next(iter(state.runners))
 
@@ -264,13 +265,14 @@ async def test_runner_ready_event_resynchronizes_realtime_stt_advertisement(
                 ),
             )
         )
-        while not api._telemetry_view.local_advertised_capabilities:
+        while "stt.realtime" not in api._telemetry_view.local_advertised_capabilities:
             await anyio.sleep(0)
         task_group.cancel_scope.cancel()
 
     assert api._telemetry_view.local_advertised_capabilities == {
         "stt",
         "stt.realtime",
+        "vad",
     }
 
 
@@ -317,7 +319,7 @@ def test_realtime_stt_discovery_rejects_multi_host_instance(
 
     api._sync_builtin_speech_capability()
 
-    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._telemetry_view.local_advertised_capabilities == {"vad"}
 
 
 @pytest.mark.anyio
@@ -336,6 +338,7 @@ async def test_node_timeout_withdraws_remote_realtime_stt_advertisement(
     assert api._telemetry_view.local_advertised_capabilities == {
         "stt",
         "stt.realtime",
+        "vad",
     }
     event_sender = api.event_receiver.clone_sender()
 
@@ -345,12 +348,12 @@ async def test_node_timeout_withdraws_remote_realtime_stt_advertisement(
             IndexedEvent(idx=0, event=NodeTimedOut(node_id=remote_node))
         )
         with anyio.fail_after(1):
-            while api._telemetry_view.local_advertised_capabilities:
+            while "stt" in api._telemetry_view.local_advertised_capabilities:
                 await anyio.sleep(0)
         task_group.cancel_scope.cancel()
 
     assert api.state.instances == {}
-    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._telemetry_view.local_advertised_capabilities == {"vad"}
 
 
 @pytest.mark.anyio

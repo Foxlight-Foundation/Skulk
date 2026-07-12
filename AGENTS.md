@@ -142,7 +142,11 @@ A model card's `placement.compatible_backends` selects which engine serves it
   PCM16 at the API edge becomes raw Fabric media, and disconnect cancels the
   provider. Dashboard chat uses this path only when card truth and the local
   live provider tag agree, resampling AudioWorklet microphone frames to 24 kHz
-  PCM16; batch cards keep MediaRecorder upload. Translation-capable STT cards
+  PCM16; batch cards keep MediaRecorder upload. Every production API also
+  advertises `vad@1.0.0`, a stable bidirectional WebRTC VAD provider for
+  8/16/32/48 kHz mono PCM16. It emits typed turn boundaries with bounded
+  minimum speech, silence hangover, preroll, and maximum utterance duration;
+  media is processed per call and never retained. Translation-capable STT cards
   serve experimental `/v1/audio/translations` only with global experimental
   mode and `experiments.speech_translation`; TTS cards may expose static voices
   through the Skulk `/v1/audio/voices` extension. VAD, conversation/full-duplex
