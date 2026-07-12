@@ -716,8 +716,17 @@ def test_realtime_websocket_rejects_invalid_audio_without_forwarding() -> None:
 
     api = _build_api()
     input_frames: list[CapabilityStreamFrame] = []
+    provider_opened = False
 
-    _install_waiting_session(api, input_frames, call_id="invalid-audio")
+    async def open_session(
+        model: str, sample_rate: int
+    ) -> CapabilityStreamSession:
+        nonlocal provider_opened
+        provider_opened = True
+        del model, sample_rate
+        raise AssertionError("invalid audio must not open a provider session")
+
+    api._open_realtime_transcription_session = open_session
     client = TestClient(api.app)
 
     with client.websocket_connect("/v1/realtime?model=org%2Frealtime-stt") as websocket:
@@ -735,7 +744,8 @@ def test_realtime_websocket_rejects_invalid_audio_without_forwarding() -> None:
         except WebSocketDisconnect as exc:
             assert exc.code == 1008
 
-    assert [frame.kind for frame in input_frames] == ["started", "cancelled"]
+    assert not provider_opened
+    assert input_frames == []
 
 
 def test_realtime_websocket_rejects_binary_compatibility_events() -> None:
@@ -1053,7 +1063,7 @@ def test_realtime_websocket_rejects_oversized_final_transcript() -> None:
                 kind="started",
             )
             while not input_completed.is_set():
-                await anyio.sleep(0)
+                await anyio.sleep(0.001)
             yield CapabilityStreamFrame(
                 call_id="oversized-output",
                 direction="provider_to_caller",

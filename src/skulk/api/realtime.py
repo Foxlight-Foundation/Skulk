@@ -439,12 +439,6 @@ class RealtimeTranscriptionBridge:
                         client_event_id=event.event_id,
                     )
                     continue
-                session = self._current_session
-                if session is None:
-                    session = await self._open_next_turn(task_group)
-                    if session is None:
-                        return
-                assert session.input is not None
                 try:
                     audio = base64.b64decode(event.audio, validate=True)
                 except (binascii.Error, ValueError):
@@ -471,6 +465,12 @@ class RealtimeTranscriptionBridge:
                     )
                     await self._close(1009)
                     return
+                session = self._current_session
+                if session is None:
+                    session = await self._open_next_turn(task_group)
+                    if session is None:
+                        return
+                assert session.input is not None
                 self._session_audio_bytes += len(audio)
                 self._turn_audio_bytes += len(audio)
                 if self._session_audio_bytes > _MAX_SESSION_AUDIO_BYTES:
