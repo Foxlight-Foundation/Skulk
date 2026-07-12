@@ -471,7 +471,7 @@ _AUDIO_CONTENT_TYPES: Final[dict[AudioResponseFormat, str]] = {
     AudioResponseFormat.Flac: "audio/flac",
     AudioResponseFormat.Ogg: "audio/ogg",
     AudioResponseFormat.Opus: "audio/opus",
-    AudioResponseFormat.Pcm: "audio/L16",
+    AudioResponseFormat.Pcm: "audio/pcm",
 }
 _STREAMABLE_AUDIO_RESPONSE_FORMATS: Final[frozenset[AudioResponseFormat]] = frozenset(
     {AudioResponseFormat.Mp3, AudioResponseFormat.Pcm}
