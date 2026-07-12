@@ -587,6 +587,7 @@ class RealtimeTranscriptionBridge:
                     self._cancel_assistant_response()
                 session = self._current_session
                 if session is None:
+                    self._vad_auto_committed = False
                     session = await self._open_next_turn(task_group)
                     if session is None:
                         return
@@ -623,6 +624,8 @@ class RealtimeTranscriptionBridge:
                 continue
 
             assert isinstance(event, InputAudioBufferCommit)
+            if self._vad_auto_committed and self._turn_audio_bytes == 0:
+                continue
             if self._committed:
                 if self._vad_auto_committed:
                     continue
@@ -790,12 +793,12 @@ class RealtimeTranscriptionBridge:
             client_event_id=client_event_id,
         ):
             return False
-        await self._process_vad_audio(
+        handled_boundary = await self._process_vad_audio(
             session,
             segment,
             client_event_id=client_event_id,
         )
-        return True
+        return self._committed or not handled_boundary
 
     def _configure_turn_detection(
         self,
@@ -1247,7 +1250,6 @@ class RealtimeTranscriptionBridge:
         self._current_session = None
         self._turn_audio_bytes = 0
         self._committed = False
-        self._vad_auto_committed = False
         self._commit_announced = anyio.Event()
         self._configure_turn_detection(self._turn_detection)
 

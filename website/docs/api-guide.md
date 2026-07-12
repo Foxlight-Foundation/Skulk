@@ -1552,7 +1552,7 @@ The wire contract implements a bounded subset of OpenAI Realtime transcription:
 | client to server | `session.update` | Confirms the current nested `audio.input` configuration. `turn_detection` may be null or a bounded `server_vad` configuration. Optional `response` selects a mounted chat `model`, optional mounted `tts_model`, and optional `voice`; attempts to change the input model/codec, enable noise reduction/language hints, or add unsupported fields are rejected. |
 | server to client | `session.updated` | Confirms an accepted current session update. |
 | client to server | `input_audio_buffer.append` | Appends one base64 PCM16 frame and immediately forwards its decoded bytes as binary Fabric media. |
-| client to server | `input_audio_buffer.commit` | Half-closes the current utterance and triggers final provider drain. Empty or duplicate commits are rejected. The next turn may begin after its completed event. |
+| client to server | `input_audio_buffer.commit` | Half-closes the current utterance and triggers final provider drain. Empty commits and duplicate manual commits are rejected. A manual commit racing after server VAD has already auto-committed the same utterance is an idempotent no-op. The next turn may begin after its completed event. |
 | server to client | `input_audio_buffer.speech_started` | Reports the detected start timestamp and current item when server VAD is enabled. |
 | server to client | `input_audio_buffer.speech_stopped` | Reports the detected end timestamp immediately before server VAD commits the utterance. |
 | server to client | `input_audio_buffer.committed` | Confirms the input half-close. |
