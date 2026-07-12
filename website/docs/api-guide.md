@@ -1579,8 +1579,8 @@ Optional settings are `aggressiveness` (0-3), `prefix_padding_ms` (0-2000),
 boundaries, and commits on silence or the maximum utterance duration. The
 edge forwards VAD-enabled input in 20 ms source-rate slices and stops at the
 detected boundary, so the unprocessed remainder of a large append cannot leak
-into the committed utterance. The
-socket still owns one utterance in this release; a completed transcript closes
+into the committed utterance. The socket still owns one utterance in this
+release; a completed transcript closes
 it normally.
 
 The dashboard chat microphone uses this edge only when both the selected model
