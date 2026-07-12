@@ -455,6 +455,7 @@ export class RealtimeConversationSocket {
   }
 
   private handleMessage(event: MessageEvent): void {
+    if (this.terminal) return;
     if (typeof event.data !== 'string') {
       this.fail(new Error('Realtime conversation returned a non-JSON event.'));
       return;
@@ -554,7 +555,7 @@ export class RealtimeConversationSocket {
       const message = typeof payload.error?.message === 'string'
         ? payload.error.message
         : 'Realtime conversation failed.';
-      this.options.onError?.(new Error(message));
+      this.fail(new Error(message));
     }
   }
 

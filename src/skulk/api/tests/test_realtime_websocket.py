@@ -10,6 +10,7 @@ from typing import cast
 
 import anyio
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from starlette.testclient import WebSocketTestSession
@@ -110,6 +111,7 @@ def _install_waiting_session(
     input_frames: list[CapabilityStreamFrame],
     *,
     call_id: str,
+    fail_on_complete: bool = False,
 ) -> None:
     """Install a provider session that remains live until the bridge cancels it."""
 
@@ -118,6 +120,8 @@ def _install_waiting_session(
 
         async def send_input(frame: CapabilityStreamFrame) -> None:
             input_frames.append(frame)
+            if fail_on_complete and frame.kind == "completed":
+                raise RuntimeError("provider commit failed")
 
         input_stream = CapabilityStreamInput(
             call_id=call_id,
@@ -677,13 +681,18 @@ def test_realtime_websocket_reports_assistant_text_limit_as_failed() -> None:
 
     api = _build_api()
     _install_completed_session(api, transcript="overflow", call_id="overflow-stt")
+    generation_closed = Event()
 
     async def generate_assistant(
         model: str,
         messages: tuple[ConversationMessage, ...],
     ) -> AsyncIterator[str]:
         del model, messages
-        yield "x" * (_MAX_TRANSCRIPT_TEXT_BYTES + 1)
+        try:
+            yield "x" * (_MAX_TRANSCRIPT_TEXT_BYTES + 1)
+            await anyio.sleep_forever()
+        finally:
+            generation_closed.set()
 
     async def validate_response(config: RealtimeResponseConfig) -> None:
         del config
@@ -728,6 +737,8 @@ def test_realtime_websocket_reports_assistant_text_limit_as_failed() -> None:
         done = _receive_json(websocket)
         assert done["type"] == "response.done"
         assert _mapping(done["response"])["status"] == "failed"
+
+    assert generation_closed.is_set()
 
 
 def test_realtime_websocket_cancels_tts_provider_on_response_abort() -> None:
@@ -774,6 +785,7 @@ def test_realtime_websocket_cancels_tts_provider_on_response_abort() -> None:
             with anyio.CancelScope(shield=True):
                 await anyio.sleep(0.001)
                 provider_cancelled.set()
+                raise RuntimeError("provider cancellation transport failed")
 
         return CapabilityStreamSession(
             open_result=CapabilityResult(
@@ -824,6 +836,53 @@ def test_realtime_websocket_cancels_tts_provider_on_response_abort() -> None:
         assert _mapping(done["response"])["status"] == "cancelled"
 
     assert provider_cancelled.is_set()
+
+
+def test_realtime_websocket_preserves_response_validation_detail() -> None:
+    """Participant admission failures retain an actionable HTTP detail."""
+
+    api = _build_api()
+
+    async def generate_assistant(
+        model: str,
+        messages: tuple[ConversationMessage, ...],
+    ) -> AsyncIterator[str]:
+        del model, messages
+        yield "unused"
+
+    async def validate_response(config: RealtimeResponseConfig) -> None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No instance found for model {config.model}",
+        )
+
+    api._generate_realtime_assistant = generate_assistant
+    api._validate_realtime_response_config = validate_response
+
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt",
+        headers={"origin": "http://testserver"},
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "session.update",
+                "event_id": "response-validation",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {"transcription": {"model": "org/realtime-stt"}}
+                    },
+                    "response": {"model": "org/missing-chat"},
+                },
+            }
+        )
+        error = _receive_json(websocket)
+        assert error["type"] == "error"
+        detail = _mapping(error["error"])
+        assert detail["code"] == "unsupported_session_update"
+        assert detail["message"] == "No instance found for model org/missing-chat"
+        assert detail["event_id"] == "response-validation"
 
 
 def test_realtime_websocket_locks_response_config_after_audio() -> None:
@@ -994,6 +1053,14 @@ def test_realtime_websocket_server_vad_auto_commits(
         completed = _receive_json(websocket)
         assert completed["type"] == "conversation.item.input_audio_transcription.completed"
         assert completed["transcript"] == "hello"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.commit",
+                "event_id": "duplicate-after-vad-completion",
+            }
+        )
+        websocket.send_json({"type": "session.update", "session": vad_session})
+        assert _receive_json(websocket)["type"] == "session.updated"
 
     assert [frame.kind for frame in input_frames] == [
         "started",
@@ -1456,6 +1523,78 @@ def test_realtime_websocket_manual_flush_does_not_double_commit_vad(
         "started",
         "chunk",
         "completed",
+    ]
+
+
+def test_realtime_websocket_manual_flush_stops_after_vad_commit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed VAD auto-commit closes without continuing the manual commit path."""
+
+    api = _build_api()
+    input_frames: list[CapabilityStreamFrame] = []
+
+    class FlushBoundaryDetector:
+        frame_bytes = 320
+
+        def __init__(self, config: object) -> None:
+            del config
+
+        def process(self, frame: bytes) -> tuple[VadTurnEvent, ...]:
+            assert len(frame) == self.frame_bytes
+            return (VadTurnEvent("speech_stopped", 10, "silence"),)
+
+        def finish(self) -> tuple[VadTurnEvent, ...]:
+            return ()
+
+    monkeypatch.setattr(realtime_api, "VoiceActivityDetector", FlushBoundaryDetector)
+    _install_waiting_session(
+        api,
+        input_frames,
+        call_id="flush-vad-commit-failure",
+        fail_on_complete=True,
+    )
+    audio = _pcm16_bytes([1000] * 240)
+
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt"
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {
+                            "transcription": {"model": "org/realtime-stt"},
+                            "turn_detection": {"type": "server_vad"},
+                        }
+                    },
+                },
+            }
+        )
+        assert _receive_json(websocket)["type"] == "session.updated"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(audio).decode("ascii"),
+            }
+        )
+        websocket.send_json({"type": "input_audio_buffer.commit", "event_id": "commit"})
+        assert _receive_json(websocket)["type"] == "input_audio_buffer.speech_stopped"
+        error = _receive_json(websocket)
+        assert error["type"] == "error"
+        assert _mapping(error["error"])["code"] == "input_transport_error"
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            _receive_json(websocket)
+        assert exc_info.value.code == 1011
+
+    assert [frame.kind for frame in input_frames] == [
+        "started",
+        "chunk",
+        "completed",
+        "cancelled",
     ]
 
 
