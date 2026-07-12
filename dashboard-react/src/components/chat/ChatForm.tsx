@@ -8,6 +8,7 @@ import { Button } from '../common/Button';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
   finalizeRealtimeCaptureStartup,
+  RealtimeConversationSocket,
   RealtimePcmCapture,
   RealtimeTranscriptionSocket,
   selectTranscriptionCaptureMode,
@@ -52,6 +53,12 @@ export interface ChatFormProps {
   selectedVoice?: string | null;
   /** Whether final assistant messages should be spoken automatically. */
   autoSpeakAssistant?: boolean;
+  /** Enable a persistent server-VAD conversation instead of push-to-transcribe. */
+  realtimeVoiceEnabled?: boolean;
+  /** Route final realtime transcripts directly to the selected chat model. */
+  autoSubmitVoice?: boolean;
+  /** Mounted chat model used for automatic realtime responses. */
+  realtimeResponseModelId?: string | null;
   /** Whether a dashboard-managed audio playback is active. */
   isSpeaking?: boolean;
   /** Speech-related API error surfaced from the page container. */
@@ -64,6 +71,11 @@ export interface ChatFormProps {
   onSelectedVoiceChange?: (voice: string | null) => void;
   /** Toggle automatic TTS playback for final assistant messages. */
   onAutoSpeakAssistantChange?: (enabled: boolean) => void;
+  onRealtimeVoiceEnabledChange?: (enabled: boolean) => void;
+  onAutoSubmitVoiceChange?: (enabled: boolean) => void;
+  onRealtimeTranscript?: (text: string, final: boolean) => void;
+  onRealtimeAssistantText?: (text: string, final: boolean) => void;
+  onRealtimeResponseDone?: (status: string) => void;
   /** Transcribe a browser-recorded audio blob and return transcript text. */
   onTranscribeAudio?: (audio: Blob) => Promise<string>;
   /** Speak the current draft text with the selected TTS model. */
@@ -390,12 +402,20 @@ export function ChatForm({
   selectedSpeechModelId = null,
   selectedVoice = null,
   autoSpeakAssistant = false,
+  realtimeVoiceEnabled = true,
+  autoSubmitVoice = false,
+  realtimeResponseModelId = null,
   isSpeaking = false,
   voiceError = null,
   onSelectTranscriptionModel,
   onSelectSpeechModel,
   onSelectedVoiceChange,
   onAutoSpeakAssistantChange,
+  onRealtimeVoiceEnabledChange,
+  onAutoSubmitVoiceChange,
+  onRealtimeTranscript,
+  onRealtimeAssistantText,
+  onRealtimeResponseDone,
   onTranscribeAudio,
   onSpeakText,
   onStopSpeaking,
@@ -416,11 +436,13 @@ export function ChatForm({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const realtimeSocketRef = useRef<RealtimeTranscriptionSocket | null>(null);
+  const realtimeConversationRef = useRef<RealtimeConversationSocket | null>(null);
   const realtimeCommitSocketRef = useRef<RealtimeTranscriptionSocket | null>(null);
   const realtimeCaptureRef = useRef<RealtimePcmCapture | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingCancelledRef = useRef(false);
   const recordingStartingRef = useRef(false);
+  const conversationStoppingRef = useRef(false);
   const componentMountedRef = useRef(true);
   const recordingStartedAtRef = useRef(0);
   const recordingTimerRef = useRef<number | null>(null);
@@ -454,6 +476,10 @@ export function ChatForm({
   );
   const browserRecordingAvailable = captureMode !== null;
   const useRealtimeCapture = captureMode === 'realtime';
+  const useRealtimeConversation = useRealtimeCapture && realtimeVoiceEnabled;
+  const submitRealtimeTranscript = autoSubmitVoice
+    && canSendMessages
+    && realtimeResponseModelId !== null;
   const recordingUnavailableReason = !secureRecordingContext
     ? t('chat.form.voiceErrors.secureContextRequired', 'Microphone requires HTTPS or localhost.')
     : !browserRecordingAvailable
@@ -544,6 +570,88 @@ export function ChatForm({
         return;
       }
       mediaStreamRef.current = stream;
+      if (useRealtimeConversation && selectedTranscriptionId) {
+        let capture: RealtimePcmCapture | null = null;
+        const socket = new RealtimeConversationSocket({
+          transcriptionModelId: selectedTranscriptionId,
+          responseModelId: submitRealtimeTranscript ? realtimeResponseModelId : null,
+          onSpeechStarted: onStopSpeaking,
+          onTranscript: (text, final) => {
+            if (realtimeConversationRef.current !== socket) return;
+            setMessage(final && submitRealtimeTranscript ? '' : text);
+            onRealtimeTranscript?.(text, final);
+            if (final && conversationStoppingRef.current && !submitRealtimeTranscript) {
+              finishConversation();
+            }
+          },
+          onAssistantText: (text, final) => {
+            if (realtimeConversationRef.current === socket) {
+              onRealtimeAssistantText?.(text, final);
+            }
+          },
+          onResponseDone: (status) => {
+            if (realtimeConversationRef.current !== socket) return;
+            onRealtimeResponseDone?.(status);
+            if (conversationStoppingRef.current) finishConversation();
+          },
+          onError: (error) => {
+            if (realtimeConversationRef.current !== socket) return;
+            setMediaError(error.message);
+            finishConversation();
+            stream.getTracks().forEach((track) => track.stop());
+            void capture?.stop();
+          },
+        });
+        const finishConversation = () => {
+          if (realtimeConversationRef.current !== socket) return;
+          realtimeConversationRef.current = null;
+          mediaStreamRef.current = null;
+          conversationStoppingRef.current = false;
+          socket.close();
+          stopRecordingTimer();
+          setIsRecording(false);
+          setIsTranscribing(false);
+          setRecordingSeconds(0);
+        };
+        realtimeConversationRef.current = socket;
+        conversationStoppingRef.current = false;
+        try {
+          await socket.connect();
+          capture = await RealtimePcmCapture.start(stream, (samples, sampleRate) => {
+            try {
+              socket.append(samples, sampleRate);
+            } catch (error) {
+              if (realtimeConversationRef.current !== socket) return;
+              const messageText = error instanceof Error
+                ? error.message
+                : t('chat.form.voiceErrors.recordingFailed', 'Recording failed.');
+              setMediaError(messageText);
+              finishConversation();
+              void capture?.stop();
+            }
+          });
+          if (!await finalizeRealtimeCaptureStartup(
+            capture,
+            componentMountedRef.current,
+            realtimeConversationRef.current === socket,
+          )) return;
+        } catch (error) {
+          realtimeConversationRef.current = null;
+          mediaStreamRef.current = null;
+          socket.close();
+          stream.getTracks().forEach((track) => track.stop());
+          throw error;
+        }
+        realtimeCaptureRef.current = capture;
+        recordingStartedAtRef.current = Date.now();
+        setIsRecording(true);
+        setRecordingSeconds(0);
+        stopRecordingTimer();
+        recordingTimerRef.current = window.setInterval(() => {
+          setRecordingSeconds(Math.floor((Date.now() - recordingStartedAtRef.current) / 1000));
+        }, 250);
+        return;
+      }
       if (useRealtimeCapture && selectedTranscriptionId) {
         let capture: RealtimePcmCapture | null = null;
         const socket = new RealtimeTranscriptionSocket({
@@ -695,10 +803,43 @@ export function ChatForm({
     t,
     transcriptionReady,
     captureMode,
+    submitRealtimeTranscript,
+    onRealtimeAssistantText,
+    onRealtimeResponseDone,
+    onRealtimeTranscript,
+    onStopSpeaking,
+    realtimeResponseModelId,
+    useRealtimeConversation,
     useRealtimeCapture,
   ]);
 
   const stopRecording = useCallback((cancelled: boolean) => {
+    const conversationSocket = realtimeConversationRef.current;
+    if (conversationSocket) {
+      const realtimeCapture = realtimeCaptureRef.current;
+      realtimeCaptureRef.current = null;
+      mediaStreamRef.current = null;
+      stopRecordingTimer();
+      setIsRecording(false);
+      setRecordingSeconds(0);
+      void realtimeCapture?.stop();
+      if (cancelled) {
+        realtimeConversationRef.current = null;
+        conversationStoppingRef.current = false;
+        conversationSocket.close();
+        return;
+      }
+      conversationStoppingRef.current = true;
+      setIsTranscribing(true);
+      const committed = conversationSocket.commitTurn();
+      if (!committed && !conversationSocket.hasActiveResponse()) {
+        realtimeConversationRef.current = null;
+        conversationStoppingRef.current = false;
+        conversationSocket.close();
+        setIsTranscribing(false);
+      }
+      return;
+    }
     const realtimeSocket = realtimeSocketRef.current;
     if (realtimeSocket) {
       const realtimeCapture = realtimeCaptureRef.current;
@@ -758,14 +899,17 @@ export function ChatForm({
       const mediaStream = mediaStreamRef.current;
       const realtimeSocket = realtimeSocketRef.current;
       const realtimeCommitSocket = realtimeCommitSocketRef.current;
+      const realtimeConversation = realtimeConversationRef.current;
       const realtimeCapture = realtimeCaptureRef.current;
       mediaStreamRef.current = null;
       realtimeSocketRef.current = null;
       realtimeCommitSocketRef.current = null;
+      realtimeConversationRef.current = null;
       realtimeCaptureRef.current = null;
       mediaStream?.getTracks().forEach((track) => track.stop());
       realtimeSocket?.cancel();
       realtimeCommitSocket?.cancel();
+      realtimeConversation?.close();
       void realtimeCapture?.stop();
     };
   }, [stopRecordingTimer]);
@@ -991,6 +1135,28 @@ export function ChatForm({
                 <FiMic size={16} />
               </VoiceIconBtn>
             )}
+            {selectedTranscriptionModel?.supportsRealtime && realtimeTranscriptionAvailable && (
+              <VoiceToggle
+                type="button"
+                disabled={isStartingRecording || isRecording || isTranscribing}
+                $active={realtimeVoiceEnabled}
+                aria-pressed={realtimeVoiceEnabled}
+                onClick={() => onRealtimeVoiceEnabledChange?.(!realtimeVoiceEnabled)}
+              >
+                {t('chat.form.realtime', 'Realtime')}
+              </VoiceToggle>
+            )}
+            {useRealtimeConversation && canSendMessages && (
+              <VoiceToggle
+                type="button"
+                disabled={isStartingRecording || isRecording || isTranscribing}
+                $active={autoSubmitVoice}
+                aria-pressed={autoSubmitVoice}
+                onClick={() => onAutoSubmitVoiceChange?.(!autoSubmitVoice)}
+              >
+                {t('chat.form.autoSubmit', 'Auto-send')}
+              </VoiceToggle>
+            )}
           </VoiceGroup>
 
           <VoiceGroup>
@@ -1023,6 +1189,7 @@ export function ChatForm({
               type="button"
               disabled={!speechReady}
               $active={autoSpeakAssistant}
+              aria-pressed={autoSpeakAssistant}
               onClick={() => onAutoSpeakAssistantChange?.(!autoSpeakAssistant)}
             >
               {t('chat.form.autoSpeak', 'Auto')}

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   finalizeRealtimeCaptureStartup,
+  RealtimeConversationSocket,
   RealtimeTranscriptionSocket,
   StreamingLinearResampler,
   realtimeTranscriptionUrl,
@@ -199,5 +200,217 @@ describe('RealtimeTranscriptionSocket', () => {
 
     await expect(result).rejects.toThrow('Realtime transcription was cancelled.');
     expect(socket.closeCode).toBe(1000);
+  });
+});
+
+describe('RealtimeConversationSocket', () => {
+  it('maps server VAD transcript and assistant events across multiple turns', async () => {
+    const socket = new FakeWebSocket();
+    const transcripts: Array<[string, boolean]> = [];
+    const responses: Array<[string, boolean]> = [];
+    const statuses: string[] = [];
+    const client = new RealtimeConversationSocket({
+      transcriptionModelId: 'org/stt',
+      responseModelId: 'org/chat',
+      location: { protocol: 'https:', host: 'skulk.example' },
+      socketFactory: () => socket as unknown as WebSocket,
+      onTranscript: (text, final) => transcripts.push([text, final]),
+      onAssistantText: (text, final) => responses.push([text, final]),
+      onResponseDone: (status) => statuses.push(status),
+    });
+
+    const connected = client.connect();
+    socket.serverEvent({ type: 'session.created' });
+    await connected;
+    expect(JSON.parse(socket.sent[0])).toMatchObject({
+      type: 'session.update',
+      session: {
+        audio: { input: { turn_detection: { type: 'server_vad' } } },
+        response: { model: 'org/chat' },
+      },
+    });
+
+    client.append(Float32Array.from([0, 0.25, 0.5, 0.75, 1]), 48_000);
+    client.commitTurn();
+    expect(JSON.parse(socket.sent.at(-1)!)).toEqual({ type: 'input_audio_buffer.commit' });
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.delta',
+      item_id: 'input-1',
+      delta: 'hello ',
+    });
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.delta',
+      item_id: 'input-1',
+      delta: 'world',
+    });
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'input-1',
+      transcript: 'hello world',
+    });
+    socket.serverEvent({
+      type: 'response.output_text.delta',
+      item_id: 'output-1',
+      delta: 'hi ',
+    });
+    socket.serverEvent({
+      type: 'response.output_text.done',
+      item_id: 'output-1',
+      text: 'hi there',
+    });
+    socket.serverEvent({ type: 'response.done', response: { status: 'completed' } });
+
+    expect(transcripts).toEqual([
+      ['hello ', false],
+      ['hello world', false],
+      ['hello world', true],
+    ]);
+    expect(responses).toEqual([['hi ', false], ['hi there', true]]);
+    expect(statuses).toEqual(['completed']);
+    client.cancelResponse();
+    expect(JSON.parse(socket.sent.at(-1)!)).toEqual({ type: 'response.cancel' });
+    client.close();
+    expect(socket.closeCode).toBe(1000);
+  });
+
+  it('clears fallback accumulators between events without item IDs', async () => {
+    const socket = new FakeWebSocket();
+    const transcripts: Array<[string, boolean]> = [];
+    const responses: Array<[string, boolean]> = [];
+    const client = new RealtimeConversationSocket({
+      transcriptionModelId: 'org/stt',
+      responseModelId: 'org/chat',
+      location: { protocol: 'https:', host: 'skulk.example' },
+      socketFactory: () => socket as unknown as WebSocket,
+      onTranscript: (text, final) => transcripts.push([text, final]),
+      onAssistantText: (text, final) => responses.push([text, final]),
+    });
+
+    const connected = client.connect();
+    socket.serverEvent({ type: 'session.created' });
+    await connected;
+
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.delta',
+      delta: 'first',
+    });
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      transcript: 'first',
+    });
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.delta',
+      delta: 'second',
+    });
+    socket.serverEvent({ type: 'response.output_text.delta', delta: 'one' });
+    socket.serverEvent({ type: 'response.output_text.done', text: 'one' });
+    socket.serverEvent({ type: 'response.output_text.delta', delta: 'two' });
+
+    expect(transcripts.at(-1)).toEqual(['second', false]);
+    expect(responses.at(-1)).toEqual(['two', false]);
+  });
+
+  it('keeps the conversation open after a late-frame turn error', async () => {
+    const socket = new FakeWebSocket();
+    const errors: Error[] = [];
+    const transcripts: string[] = [];
+    const client = new RealtimeConversationSocket({
+      transcriptionModelId: 'org/stt',
+      location: { protocol: 'https:', host: 'skulk.example' },
+      socketFactory: () => socket as unknown as WebSocket,
+      onTranscript: (text, final) => {
+        if (final) transcripts.push(text);
+      },
+      onError: (error) => errors.push(error),
+    });
+
+    const connected = client.connect();
+    socket.serverEvent({ type: 'session.created' });
+    await connected;
+    socket.serverEvent({
+      type: 'error',
+      error: {
+        code: 'turn_in_progress',
+        message: 'audio cannot be appended until the committed turn completes',
+      },
+    });
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      transcript: 'still connected',
+    });
+
+    expect(errors).toEqual([]);
+    expect(transcripts).toEqual(['still connected']);
+  });
+
+  it('rejects connection immediately when the server returns an error', async () => {
+    const socket = new FakeWebSocket();
+    const errors: Error[] = [];
+    const client = new RealtimeConversationSocket({
+      transcriptionModelId: 'org/stt',
+      location: { protocol: 'https:', host: 'skulk.example' },
+      socketFactory: () => socket as unknown as WebSocket,
+      onError: (error) => errors.push(error),
+    });
+
+    const connected = client.connect();
+    socket.serverEvent({
+      type: 'error',
+      error: { code: 'provider_error', message: 'provider admission failed' },
+    });
+
+    await expect(connected).rejects.toThrow('provider admission failed');
+    expect(errors.map((error) => error.message)).toEqual(['provider admission failed']);
+    expect(socket.closeCode).toBe(1011);
+  });
+
+  it('ignores server events after the conversation is closed', async () => {
+    const socket = new FakeWebSocket();
+    const transcripts: string[] = [];
+    const client = new RealtimeConversationSocket({
+      transcriptionModelId: 'org/stt',
+      location: { protocol: 'https:', host: 'skulk.example' },
+      socketFactory: () => socket as unknown as WebSocket,
+      onTranscript: (text) => transcripts.push(text),
+    });
+
+    const connected = client.connect();
+    socket.serverEvent({ type: 'session.created' });
+    await connected;
+    client.close();
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      transcript: 'late transcript',
+    });
+
+    expect(transcripts).toEqual([]);
+  });
+
+  it('drops a partial microphone frame at a server VAD turn boundary', async () => {
+    const socket = new FakeWebSocket();
+    const client = new RealtimeConversationSocket({
+      transcriptionModelId: 'org/stt',
+      location: { protocol: 'https:', host: 'skulk.example' },
+      socketFactory: () => socket as unknown as WebSocket,
+    });
+
+    const connected = client.connect();
+    socket.serverEvent({ type: 'session.created' });
+    await connected;
+    client.append(new Float32Array(1_000).fill(1), 24_000);
+    socket.serverEvent({ type: 'input_audio_buffer.speech_stopped' });
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      transcript: 'first turn',
+    });
+    client.append(new Float32Array(2_401), 24_000);
+
+    const append = socket.sent
+      .map((message) => JSON.parse(message))
+      .find((message) => message.type === 'input_audio_buffer.append');
+    expect(append).toBeDefined();
+    expect(Array.from(atob(append.audio), (char) => char.charCodeAt(0))).toEqual(
+      new Array(4_800).fill(0),
+    );
   });
 });

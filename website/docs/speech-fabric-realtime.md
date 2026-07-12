@@ -45,8 +45,9 @@ instead of broadcasting private media through gossipsub.
 
 `WS /v1/realtime?model=<model-id>` accepts OpenAI-style base64 PCM16 append and
 commit events over a WebSocket. It emits transcript delta, final, and failure
-events from the mounted realtime STT model. The route is a transcription
-compatibility surface, not a full speech-to-speech conversation API.
+events from the mounted realtime STT model. An optional response configuration
+routes final transcripts through a mounted chat model and can stream the visible
+answer through a mounted TTS participant.
 
 See [API Guide](api-guide.md) for request fields, response formats, limits, and
 errors.
@@ -106,6 +107,11 @@ model and local node advertise the required capabilities.
 - Realtime models use an `AudioWorklet` to capture mono Float32 browser audio.
 - A stateful browser resampler produces 24 kHz PCM16.
 - Capture callbacks are aggregated into bounded 100 ms transport frames.
+- Realtime mode keeps one multi-turn socket open, uses server VAD for automatic
+  turn boundaries, and shows partial transcripts in the editable chat draft.
+- Auto-send optionally routes final transcripts to the selected chat model;
+  assistant text remains visible while it streams and barge-in cancels active
+  response playback.
 - Batch-only models retain the `MediaRecorder` upload flow.
 - Transcription results populate the chat draft for review or submission.
 - Streaming-capable TTS models use sentence-sized raw PCM requests and a bounded
