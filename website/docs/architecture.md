@@ -351,7 +351,7 @@ eligible mounted capacity is ready and reachable. The
 `WS /v1/realtime` compatibility edge and the explicit
 `WS /v1/fabric/chains/speech` composition surface adapt base64 24 kHz PCM16
 append/commit events onto this same binary provider path and emit transcript
-delta/final events, enforces same-origin browsers and bounded messages, and
+delta/final events, enforce same-origin browsers and bounded messages, and
 cancels the provider on disconnect. Optional bounded server VAD incrementally
 resamples input for WebRTC classification, emits start/stop events, and commits
 the utterance on silence or maximum duration. VAD-enabled appends are forwarded

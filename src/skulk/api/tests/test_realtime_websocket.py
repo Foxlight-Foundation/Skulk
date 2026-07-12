@@ -366,6 +366,36 @@ def test_fabric_speech_chain_uses_typed_realtime_session_contract() -> None:
         }
 
 
+def test_fabric_speech_chain_denies_cross_origin_browser_connection() -> None:
+    """The composition surface enforces the shared browser-origin policy."""
+
+    api = _build_api()
+    opened = Event()
+
+    async def open_session(model: str, sample_rate: int) -> CapabilityStreamSession:
+        del model, sample_rate
+        opened.set()
+        return CapabilityStreamSession(
+            open_result=call_failure("unexpected", "provider_error", "unexpected"),
+            frames=_empty_frames(),
+        )
+
+    api._open_realtime_transcription_session = open_session
+    client = TestClient(api.app)
+
+    with (
+        pytest.raises(WebSocketDisconnect) as disconnect,
+        client.websocket_connect(
+            "/v1/fabric/chains/speech?stt_model=org%2Frealtime-stt",
+            headers={"origin": "https://untrusted.example"},
+        ),
+    ):
+        pass
+
+    assert disconnect.value.code == 1008
+    assert not opened.is_set()
+
+
 def test_realtime_websocket_generates_text_and_streams_tts_audio() -> None:
     """A completed transcript routes through mounted chat and TTS participants."""
 
