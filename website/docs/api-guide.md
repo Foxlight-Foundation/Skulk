@@ -526,7 +526,7 @@ Request fields:
 | `voice` | string or null | Optional model-specific voice name. When omitted, Skulk applies the mounted model card's `audio.default_voice` when declared. |
 | `speed` | number or null | Optional positive speaking speed multiplier |
 | `response_format` | string or null | Optional encoded output format. When omitted or set to `null`, Skulk uses `mp3` for `stream=true`; otherwise it uses the mounted model card default when declared and falls back to `mp3`; supported values are constrained by the model card when declared |
-| `stream` | boolean | Optional. When `true`, Skulk returns a chunked HTTP response and yields encoded MP3 bytes as the speech runner emits them; accepted only when the mounted TTS card explicitly declares `audio.supports_streaming = true` |
+| `stream` | boolean | Optional. When `true`, Skulk returns a chunked HTTP response and yields encoded MP3 bytes as the speech runner emits them; accepted only when the mounted TTS card explicitly declares `audio.supports_streaming = true` and every routable instance of the requested model has a ready runner |
 | `streaming_interval` | number or null | Optional positive model-specific streaming cadence hint, accepted only with `stream=true` |
 | `instruct`, `lang_code` | string or null | Optional model-specific generation hints |
 | `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number or integer | Optional model-specific sampling controls |
@@ -539,7 +539,8 @@ For `stream=true`, the mounted TTS card must explicitly declare
 `audio.supports_streaming = true`. The response format must currently
 resolve to `mp3`; when a streaming request omits `response_format`, Skulk
 requests `mp3` instead of the model card's non-streaming default. Skulk returns
-`audio/mpeg` with chunked HTTP bytes. This is TTS output streaming, not a
+`audio/mpeg` with chunked HTTP bytes. Admission returns `503` if any routable
+instance of the requested model lacks a ready runner. This is TTS output streaming, not a
 realtime session: the request text is still a complete bounded input,
 cancellation closes the command stream, and each chunk follows the mounted
 model's generation cadence. The bundled Qwen3 TTS card declares MP3 streaming
@@ -1444,7 +1445,8 @@ Each `chunk` payload reports `model`, `format: "mp3"`, `chunk_index`,
 as an `InlineMediaAttachment` with `media_type: "audio/mpeg"`.
 
 The descriptor is always available for contract discovery, while the `tts`
-telemetry tag is advertised when at least one eligible mounted model is active.
+telemetry tag is advertised when at least one eligible model is mounted and
+every routable instance of an eligible model has a ready runner.
 Dynamic admission rechecks the requested model before `started`. A
 caller cancellation propagates to the underlying synthesis command.
 

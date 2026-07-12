@@ -3162,14 +3162,6 @@ class API:
                 status_code=404,
                 detail=f"No instance found for model {resolved}",
             )
-        if stream and not self._streaming_tts_model_is_ready(resolved):
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    f"All mounted instances of streaming speech model {resolved} "
-                    "must have a ready runner"
-                ),
-            )
         resolved_response_format = (
             response_format
             or profile.default_audio_response_format
@@ -3187,6 +3179,29 @@ class API:
                 detail=(
                     f"Model {resolved} does not support audio response format "
                     f"{resolved_response_format.value}; supported formats: {supported}"
+                ),
+            )
+        if stream and resolved_response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
+            supported = ", ".join(
+                audio_format.value
+                for audio_format in sorted(
+                    _STREAMABLE_AUDIO_RESPONSE_FORMATS,
+                    key=lambda audio_format: audio_format.value,
+                )
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"`stream=true` supports only {supported} responses for now; "
+                    f"requested {resolved_response_format.value}"
+                ),
+            )
+        if stream and not self._streaming_tts_model_is_ready(resolved):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"All mounted instances of streaming speech model {resolved} "
+                    "must have a ready runner"
                 ),
             )
         return resolved, resolved_response_format

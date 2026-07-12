@@ -1195,6 +1195,25 @@ async def test_audio_speech_streaming_rejects_unready_routable_replica() -> None
 
 
 @pytest.mark.anyio
+async def test_audio_speech_streaming_validates_format_before_readiness() -> None:
+    """An invalid stream format remains a client error when capacity is unready."""
+
+    api = _build_api()
+    card = _tts_card(supports_streaming=True)
+    api.state = _with_unready_replica(_state_with_running_card(card))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api._validate_speech_synthesis_model(
+            card.model_id,
+            AudioResponseFormat.Wav,
+            stream=True,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "supports only mp3" in str(exc_info.value.detail).lower()
+
+
+@pytest.mark.anyio
 async def test_audio_speech_streaming_preserves_unmounted_404(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

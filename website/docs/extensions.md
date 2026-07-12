@@ -364,7 +364,8 @@ the schema-validated payload, while the encoded MP3 bytes travel as a raw
 
 The descriptor is available through `GET /v1/capabilities`, but its telemetry
 tag is advertised only when at least one mounted TTS card declares
-`audio.supports_streaming = true` and MP3 output.
+`audio.supports_streaming = true` and MP3 output and every routable instance
+of an eligible model has a ready runner.
 
 The same requirements are rechecked during dynamic admission for the requested
 model. A failure returns a typed opening error before `started`; caller close,
