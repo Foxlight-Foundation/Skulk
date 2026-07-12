@@ -299,9 +299,9 @@ class ExperimentsConfig(FrozenModel):
             ``POST /v1/audio/speech``. The request path still requires a mounted
             TTS model card that explicitly declares
             ``audio.supports_streaming = true``.
-        stt_realtime: Enables the experimental bidirectional provider facade
-            for mounted STT cards that explicitly declare both
-            ``audio.supports_streaming`` and ``audio.supports_realtime``.
+        stt_realtime: Deprecated compatibility field. Realtime STT is a stable
+            capability selected from mounted model truth and runner readiness;
+            this value is accepted but ignored.
         speech_translation: Enables the experimental speech-to-English
             translation endpoint for mounted cards that explicitly declare
             ``audio.supports_translation``.

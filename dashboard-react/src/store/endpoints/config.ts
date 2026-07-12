@@ -28,6 +28,7 @@ export interface LoggingConfig {
 
 export interface ExperimentsConfig {
   tts_streaming: boolean;
+  /** Deprecated compatibility field; realtime STT is capability-gated. */
   stt_realtime: boolean;
   speech_translation: boolean;
 }

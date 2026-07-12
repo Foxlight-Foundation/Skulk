@@ -3175,23 +3175,6 @@ class API:
             and config.experiments.tts_streaming
         )
 
-    def _stt_realtime_experiment_enabled(self) -> bool:
-        """Return whether config opts into true realtime STT sessions."""
-
-        try:
-            config = load_skulk_config(self._config_path)
-        except Exception as exc:
-            logger.warning(
-                "Failed to load config while checking realtime STT experiment "
-                f"toggle; treating it as disabled: {exc}"
-            )
-            return False
-        return bool(
-            config is not None
-            and config.experiments is not None
-            and config.experiments.stt_realtime
-        )
-
     def _speech_translation_experiment_enabled(self) -> bool:
         """Return whether config opts into experimental speech translation."""
 
@@ -3252,8 +3235,6 @@ class API:
                 self._realtime_audio_sender is None
                 and self._realtime_audio_packet_sender is None
             )
-            or not experimental_mode_enabled()
-            or not self._stt_realtime_experiment_enabled()
         ):
             return None
         candidates: list[tuple[bool, str, str, InstanceId, ModelCard, NodeId]] = []
@@ -9586,7 +9567,7 @@ class API:
             model: Mounted realtime STT model selected in the URL query.
 
         Side effects:
-            Opens one experimental ``stt.realtime`` provider session and
+            Opens one stable ``stt.realtime`` provider session and
             cancels it when the socket disconnects or reaches a terminal event.
         """
 

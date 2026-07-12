@@ -1014,11 +1014,9 @@ gated dashboard section. Current fields:
   `stream=true` transport on nodes that also run with
   `SKULK_ENABLE_EXPERIMENTAL_MODE`; keep this off until a mounted TTS model has
   passed streaming validation.
-- `experiments.stt_realtime`: enables the experimental `stt.realtime@1.0.0`
-  bidirectional provider on nodes that also run with
-  `SKULK_ENABLE_EXPERIMENTAL_MODE`. The node must locally host an eligible STT
-  runner whose card declares both `audio.supports_streaming = true` and
-  `audio.supports_realtime = true`.
+- `experiments.stt_realtime`: deprecated compatibility field. It remains
+  accepted in existing configuration but is ignored; realtime STT is selected
+  from card truth, reachable transport, and ready mounted capacity.
 - `experiments.speech_translation`: enables experimental
   `/v1/audio/translations` on nodes that also run with
   `SKULK_ENABLE_EXPERIMENTAL_MODE`. The mounted card must declare
@@ -1468,9 +1466,8 @@ general immutable blob service.
 ### Transcribe realtime PCM through the built-in STT provider
 
 Production nodes also describe a first-party `stt.realtime@1.0.0`
-bidirectional capability. The capability is experimental and is advertised
-only when experimental mode, `experiments.stt_realtime`, and eligible mounted
-capacity are all active. The owning API may differ from the speech runner node:
+bidirectional capability. It is advertised only when eligible mounted capacity
+is ready and reachable. The owning API may differ from the speech runner node:
 same-node input short-circuits locally, while remote input requires the
 node-addressed Zenoh data plane. Remote capacity is not advertised when Zenoh
 is unavailable.
@@ -1510,9 +1507,9 @@ This transcription-only WebSocket is an API-edge adapter over the same
 `stt.realtime@1.0.0` provider described above. It does not own model placement,
 runner sessions, or a second speech implementation. The API node accepting the
 socket owns the provider call, which may select a speech runner on another node.
-The same experimental-mode, `experiments.stt_realtime`, truthful-card, runner
-readiness, and Zenoh remote-capacity gates apply. OpenAPI does not model
-WebSocket operations, so this manual section is the normative edge contract;
+The same truthful-card, runner-readiness, and Zenoh remote-capacity gates apply.
+OpenAPI does not model WebSocket operations, so this manual section is the
+normative edge contract;
 the underlying provider opening remains represented by the documented HTTP
 capability endpoints.
 
@@ -1543,7 +1540,7 @@ clients without an `Origin` header remain supported.
 
 The dashboard chat microphone uses this edge only when both the selected model
 declares streaming/realtime audio and the API node currently advertises the
-experimental `stt.realtime` provider. An `AudioWorklet` captures mono browser
+stable `stt.realtime` provider. An `AudioWorklet` captures mono browser
 samples, the dashboard continuously resamples them to 24 kHz PCM16, and the
 client aggregates worklet callbacks into 100 ms transport frames before the
 existing mic control commits the socket when recording stops. If either truth

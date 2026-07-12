@@ -322,7 +322,7 @@ frame returns the final transcript. It advertises only with ready mounted STT
 capacity and does not claim progressive output. The legacy core hop from the
 owning API to the selected worker still uses bounded event-sourced
 `AudioInputChunk` values; replacing that hop is required before batch uploads
-can claim no-retention semantics. The experimental `stt.realtime@1.0.0`
+can claim no-retention semantics. The stable `stt.realtime@1.0.0`
 provider adds a truthful
 bidirectional path for cards backed by an upstream incremental session.
 Admission pins `RealtimeAudioTranscription` to one ready single-host instance.
@@ -331,8 +331,8 @@ worker, using a same-node short circuit or node-addressed Zenoh delivery, and a
 bounded local channel completes the worker-to-runner hop. PCM is never event
 sourced; partial plus final `TranscriptionChunk` output returns through DATA.
 Remote capacity is not advertised when Zenoh is unavailable. The provider is
-inert unless global experimental mode and `experiments.stt_realtime` are on and
-the card declares both streaming and realtime support. The transcription-only
+available only when the card declares both streaming and realtime support and
+eligible mounted capacity is ready and reachable. The transcription-only
 `WS /v1/realtime` compatibility edge adapts OpenAI-style base64 24 kHz PCM16
 append/commit events onto this same binary provider path, emits transcript
 delta/final events, enforces same-origin browsers and bounded messages, and

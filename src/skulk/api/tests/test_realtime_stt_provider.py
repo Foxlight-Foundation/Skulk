@@ -178,8 +178,10 @@ def _build_remote_api(
 
 
 def _enable_realtime(api: API, tmp_path: Path) -> None:
+    """Write the old disabled toggle to prove it no longer gates capacity."""
+
     api._config_path = tmp_path / "skulk.yaml"
-    api._config_path.write_text("experiments:\n  stt_realtime: true\n")
+    api._config_path.write_text("experiments:\n  stt_realtime: false\n")
 
 
 def test_realtime_stt_discovery_requires_truthful_local_capacity(
@@ -187,7 +189,7 @@ def test_realtime_stt_discovery_requires_truthful_local_capacity(
     tmp_path: Path,
 ) -> None:
     api, _, _ = _build_api()
-    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
+    monkeypatch.delenv(EXPERIMENTAL_MODE_ENV_VAR, raising=False)
     _enable_realtime(api, tmp_path)
     api.state = _local_state(_realtime_card())
 
