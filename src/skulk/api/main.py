@@ -3426,6 +3426,15 @@ class API:
                     "experiments.speech_translation=true"
                 ),
             )
+        if not any(
+            instance.shard_assignments.model_id == model_id
+            for instance in self.state.instances.values()
+        ):
+            await self._trigger_notify_user_to_download_model(model_id)
+            raise HTTPException(
+                status_code=404,
+                detail=f"No instance found for model {model_id}",
+            )
         model_card = await self._get_running_model_card(model_id)
         resolved = model_card.model_id
         profile = resolve_model_capability_profile(resolved, model_card=model_card)
@@ -3433,15 +3442,6 @@ class API:
             raise HTTPException(
                 status_code=400,
                 detail=f"Model {resolved} does not support speech translation",
-            )
-        if not any(
-            instance.shard_assignments.model_id == resolved
-            for instance in self.state.instances.values()
-        ):
-            await self._trigger_notify_user_to_download_model(resolved)
-            raise HTTPException(
-                status_code=404,
-                detail=f"No instance found for model {resolved}",
             )
         return resolved
 
@@ -10112,7 +10112,16 @@ class API:
 
         if not model.strip():
             raise HTTPException(status_code=400, detail="`model` must not be empty")
-        model_card = await self._get_running_model_card(ModelId(model))
+        requested_model = ModelId(model)
+        if not any(
+            instance.shard_assignments.model_id == requested_model
+            for instance in self.state.instances.values()
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail=f"No instance found for model {requested_model}",
+            )
+        model_card = await self._get_running_model_card(requested_model)
         resolved = model_card.model_id
         profile = resolve_model_capability_profile(resolved, model_card=model_card)
         if not profile.supports_speech_synthesis:
@@ -10127,15 +10136,6 @@ class API:
             raise HTTPException(
                 status_code=400,
                 detail=f"Model {resolved} does not support voice listing",
-            )
-        if not any(
-            instance.shard_assignments.model_id == resolved
-            for instance in self.state.instances.values()
-        ):
-            await self._trigger_notify_user_to_download_model(resolved)
-            raise HTTPException(
-                status_code=404,
-                detail=f"No instance found for model {resolved}",
             )
         return AudioVoiceList(
             data=tuple(

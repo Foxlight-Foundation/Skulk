@@ -282,14 +282,9 @@ async def test_audio_voices_rejects_unmounted_catalog_card(
     )
 
     async def _catalog_card(self: API, requested: ModelId) -> ModelCard:
-        assert requested == card.model_id
-        return card
-
-    async def _ignore_notification(self: API, model: ModelId) -> None:
-        assert model == card.model_id
+        raise AssertionError("unmounted voice discovery must not load a card")
 
     monkeypatch.setattr(API, "_get_running_model_card", _catalog_card)
-    monkeypatch.setattr(API, "_trigger_notify_user_to_download_model", _ignore_notification)
 
     with pytest.raises(HTTPException) as exc_info:
         await api.audio_voices(str(card.model_id))
