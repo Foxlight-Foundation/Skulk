@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   pcm16LeToFloat32,
+  completePcm16Samples,
   canUseStreamingSpeechPlayback,
   SpeechSentenceQueue,
+  splitPlaybackSamples,
   splitCompleteSpeechSentences,
 } from './streamingSpeechPlayback';
 
@@ -24,6 +26,25 @@ describe('pcm16LeToFloat32', () => {
 
   it('rejects partial samples', () => {
     expect(() => pcm16LeToFloat32(new Uint8Array([1]))).toThrow('incomplete sample');
+  });
+});
+
+describe('completePcm16Samples', () => {
+  it('carries an odd trailing byte into the next network chunk', () => {
+    const first = completePcm16Samples(new Uint8Array([0x00, 0x80, 0x34]), null);
+    expect(Array.from(first.complete)).toEqual([0x00, 0x80]);
+    expect(first.pendingByte).toBe(0x34);
+
+    const second = completePcm16Samples(new Uint8Array([0x12, 0xff, 0x7f]), first.pendingByte);
+    expect(Array.from(second.complete)).toEqual([0x34, 0x12, 0xff, 0x7f]);
+    expect(second.pendingByte).toBeNull();
+  });
+});
+
+describe('splitPlaybackSamples', () => {
+  it('splits a resampled backend chunk at the bounded queue capacity', () => {
+    const frames = splitPlaybackSamples(new Float32Array(9), 4);
+    expect(frames.map((frame) => frame.length)).toEqual([4, 4, 1]);
   });
 });
 

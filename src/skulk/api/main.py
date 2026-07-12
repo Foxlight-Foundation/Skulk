@@ -10033,6 +10033,15 @@ class API:
                 first_chunk = await self._receive_initial_audio_speech_chunk(
                     command_id, recv
                 )
+                if (
+                    response_format == AudioResponseFormat.Pcm
+                    and first_chunk.sample_rate is None
+                ):
+                    await self._cancel_audio_speech_command(command_id)
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Raw PCM speech response did not declare a sample rate",
+                    )
             except anyio.get_cancelled_exc_class():
                 await self._cancel_audio_speech_command(command_id)
                 await self._finalize_command_stream(
@@ -10073,12 +10082,26 @@ class API:
             )
 
         try:
-            audio_bytes, response_format = await self._collect_audio_speech_chunks(
+            audio_bytes, response_format, sample_rate = await self._collect_audio_speech_chunks(
                 command_id, recv
             )
+            if response_format == AudioResponseFormat.Pcm and sample_rate is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Raw PCM speech response did not declare a sample rate",
+                )
             return Response(
                 content=audio_bytes,
                 media_type=_AUDIO_CONTENT_TYPES[response_format],
+                headers=(
+                    {
+                        "X-Audio-Sample-Rate": str(sample_rate),
+                        "X-Audio-Channels": "1",
+                        "X-Audio-Sample-Format": "s16le",
+                    }
+                    if response_format == AudioResponseFormat.Pcm
+                    else {}
+                ),
             )
 
         except anyio.get_cancelled_exc_class():
@@ -10097,10 +10120,11 @@ class API:
         self,
         command_id: CommandId,
         recv: Receiver[AudioChunk | ErrorChunk],
-    ) -> tuple[bytes, AudioResponseFormat]:
+    ) -> tuple[bytes, AudioResponseFormat, int | None]:
         """Collect a non-streaming TTS response with a terminal-task backstop."""
         audio_parts: list[bytes] = []
         response_format: AudioResponseFormat | None = None
+        sample_rate: int | None = None
         with recv as chunks:
             while True:
                 chunk: AudioChunk | ErrorChunk | None = None
@@ -10143,13 +10167,20 @@ class API:
                     )
                 audio_parts.append(_decode_audio_chunk_data(chunk))
                 response_format = chunk.format
+                if chunk.sample_rate is not None:
+                    if sample_rate is not None and sample_rate != chunk.sample_rate:
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Speech synthesis changed sample rate mid-response",
+                        )
+                    sample_rate = chunk.sample_rate
                 if chunk.finish_reason is not None:
                     break
         if not audio_parts:
             raise HTTPException(
                 status_code=500, detail="No speech audio response received"
             )
-        return b"".join(audio_parts), response_format
+        return b"".join(audio_parts), response_format, sample_rate
 
     async def _cancel_audio_speech_command(self, command_id: CommandId) -> None:
         """Cancel a speech synthesis command that cannot finish cleanly."""
