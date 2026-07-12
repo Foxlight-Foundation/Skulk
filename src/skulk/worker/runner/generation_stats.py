@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 from typing import Callable, cast, final
 
-from skulk.api.types.api import GenerationStats
+from skulk.api.types import GenerationStats
 from skulk.shared.types.memory import Memory
 
 
