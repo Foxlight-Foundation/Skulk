@@ -624,6 +624,8 @@ class RealtimeTranscriptionBridge:
 
             assert isinstance(event, InputAudioBufferCommit)
             if self._committed:
+                if self._vad_auto_committed:
+                    continue
                 await self._send_error(
                     code="input_closed",
                     message="input_audio_buffer.commit may be sent only once",
@@ -652,6 +654,8 @@ class RealtimeTranscriptionBridge:
                 client_event_id=event.event_id,
             ):
                 return
+            if self._committed:
+                continue
             await self._finish_vad_on_manual_commit()
             if not await self._commit_input(
                 session,
@@ -685,7 +689,7 @@ class RealtimeTranscriptionBridge:
             session = await self._open_session(self._model, _PCM_SAMPLE_RATE)
         except Exception as exc:
             logger.opt(exception=exc).warning(
-                "Realtime transcription provider session failed to reopen"
+                "Realtime transcription provider session failed to open"
             )
             await self._send_internal_error(
                 code="provider_open_error",
