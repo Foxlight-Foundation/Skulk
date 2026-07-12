@@ -23,6 +23,74 @@ AudioTranscriptionResponseFormat = Literal[
 ]
 
 
+class AudioTranscriptionDeltaEvent(BaseModel):
+    """One progressive text delta from streaming speech transcription."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    type: Literal["transcription.delta"] = "transcription.delta"
+    model: str = Field(description="Mounted STT model serving the request.")
+    sequence: int = Field(ge=0, description="Zero-based stream event sequence.")
+    delta: str = Field(description="New transcript text not emitted previously.")
+    language: str | None = Field(
+        default=None, description="Detected or requested language when available."
+    )
+    segment_index: int | None = Field(
+        default=None, description="Model-provided segment index when available."
+    )
+
+
+class AudioTranscriptionCompletedEvent(BaseModel):
+    """Terminal successful transcript event for streaming STT."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    type: Literal["transcription.completed"] = "transcription.completed"
+    model: str = Field(description="Mounted STT model serving the request.")
+    sequence: int = Field(ge=0, description="Zero-based stream event sequence.")
+    text: str = Field(description="Complete transcript assembled from emitted deltas.")
+    language: str | None = Field(
+        default=None, description="Detected or requested language when available."
+    )
+    segments: tuple[dict[str, str | int | float | bool | None], ...] = Field(
+        default=(), description="Normalized model-provided segment metadata."
+    )
+
+
+class AudioTranscriptionUsageEvent(BaseModel):
+    """Terminal request-size usage event for streaming STT."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    type: Literal["transcription.usage"] = "transcription.usage"
+    model: str = Field(description="Mounted STT model serving the request.")
+    sequence: int = Field(ge=0, description="Zero-based stream event sequence.")
+    input_bytes: int = Field(ge=0, description="Accepted encoded upload byte count.")
+    output_characters: int = Field(
+        ge=0, description="Number of transcript characters emitted."
+    )
+
+
+class AudioTranscriptionErrorEvent(BaseModel):
+    """Terminal typed failure event after streaming response admission."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    type: Literal["transcription.error"] = "transcription.error"
+    model: str = Field(description="Mounted STT model serving the request.")
+    sequence: int = Field(ge=0, description="Zero-based stream event sequence.")
+    code: str = Field(description="Stable machine-readable stream failure code.")
+    message: str = Field(description="Human-readable failure detail.")
+
+
+AudioTranscriptionStreamEvent = (
+    AudioTranscriptionDeltaEvent
+    | AudioTranscriptionCompletedEvent
+    | AudioTranscriptionUsageEvent
+    | AudioTranscriptionErrorEvent
+)
+
+
 class ErrorInfo(BaseModel):
     message: str
     type: str

@@ -4,6 +4,7 @@
 import base64
 import hashlib
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -203,6 +204,20 @@ class _FakeTranscriptionModel:
                 {"id": 0, "text": "hello world", "start": 0.0, "end": 1.2}
             ],
         }
+
+
+class _FakeStreamingTranscriptionModel:
+    """STT fake that exposes model-generated text deltas."""
+
+    def __init__(self, expected_audio: bytes) -> None:
+        self.expected_audio = expected_audio
+        self.stream_values: list[bool] = []
+
+    def generate(self, audio_path: str, *, stream: bool = False) -> Iterator[str]:
+        assert Path(audio_path).read_bytes() == self.expected_audio
+        self.stream_values.append(stream)
+        yield "hello "
+        yield "world"
 
 
 class _FakeWhisperTranscriptionModel:
@@ -940,6 +955,45 @@ def test_audio_transcription_emits_terminal_transcription_chunk() -> None:
     assert chunk.language == "en"
     assert chunk.segments[0]["start"] == 0.0
     assert chunk.finish_reason == "stop"
+
+
+def test_audio_transcription_emits_model_stream_deltas() -> None:
+    """Uploaded streaming STT should preserve upstream delta boundaries."""
+
+    runner, sender = _make_runner()
+    audio_bytes = b"RIFFstreamWAVE"
+    model = _FakeStreamingTranscriptionModel(audio_bytes)
+    runner.model = model
+    runner.current_status = RunnerReady()
+
+    command_id = CommandId("transcription-command-stream")
+    task = AudioTranscription(
+        instance_id=InstanceId("speech-instance-1"),
+        command_id=command_id,
+        task_params=AudioTranscriptionTaskParams(
+            model=ModelId("mlx-community/voxtral-realtime-test"),
+            filename="sample.wav",
+            content_type="audio/wav",
+            total_input_chunks=1,
+            audio_sha256=hashlib.sha256(audio_bytes).hexdigest(),
+            audio_data=base64.b64encode(audio_bytes).decode("ascii"),
+            stream=True,
+        ),
+    )
+    runner.task_receiver = cast("object", _OneShotReceiver([task]))  # pyright: ignore[reportAttributeAccessIssue]
+
+    runner.main()
+
+    assert model.stream_values == [True]
+    generated = [
+        event.chunk
+        for event in sender.events
+        if isinstance(event, ChunkGenerated)
+        and isinstance(event.chunk, TranscriptionChunk)
+    ]
+    assert [chunk.text for chunk in generated] == ["hello ", "world", ""]
+    assert [chunk.is_partial for chunk in generated] == [True, True, False]
+    assert generated[-1].finish_reason == "stop"
 
 
 def test_realtime_transcription_emits_partial_and_final_chunks() -> None:

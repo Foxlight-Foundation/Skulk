@@ -28,8 +28,12 @@ request format resolves to MP3 or raw PCM. PCM responses declare sample rate,
 channel count, and sample format in HTTP headers. Other encoded formats remain
 batch-only.
 
-`/v1/audio/transcriptions` accepts a bounded multipart upload and returns one
-completed transcription. It does not provide progressive REST transcription.
+`/v1/audio/transcriptions` accepts a bounded multipart upload. Its stable
+`stream=true` path is available when the mounted STT card declares
+`audio.supports_streaming = true` and every routable instance is ready. It
+returns typed SSE delta/completed/usage/error events, while explicit
+`response_format=ndjson` preserves progressive NDJSON chunk framing. Batch
+cards and non-streaming requests retain the completed-response formats.
 
 `/v1/audio/speech` also accepts bounded multipart reference audio for mounted
 cards declaring `audio.supports_reference_audio = true`. The upload is
