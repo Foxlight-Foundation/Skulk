@@ -853,6 +853,36 @@ async def test_builtin_tts_admission_rejects_unmounted_model_without_lookup(
 
 
 @pytest.mark.anyio
+async def test_builtin_tts_provider_rejects_pcm_outside_its_mp3_contract() -> None:
+    """The generic provider must remain MP3-only even when REST can stream PCM."""
+
+    api, _ = _build_builtin_provider_api()
+    card = _tts_card(
+        response_formats=(AudioResponseFormat.Pcm,),
+        default_response_format=AudioResponseFormat.Pcm,
+    )
+    api.state = _state_with_running_card(card)
+
+    with pytest.raises(HTTPException, match="only mp3"):
+        await api._prepare_builtin_tts_task(
+            CapabilityCall(
+                call_id="pcm-provider",
+                capability_id="tts",
+                version="1.0.0",
+                descriptor_revision=descriptor_revision(TTS_CAPABILITY_DESCRIPTOR),
+                caller_node="api-node",
+                target_node="api-node",
+                timeout_seconds=2.0,
+                payload={
+                    "model": str(card.model_id),
+                    "text": "hello",
+                    "response_format": "pcm",
+                },
+            )
+        )
+
+
+@pytest.mark.anyio
 async def test_builtin_tts_provider_streams_core_audio_over_provider_data(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
