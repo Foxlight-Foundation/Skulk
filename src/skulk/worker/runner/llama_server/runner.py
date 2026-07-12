@@ -273,8 +273,12 @@ def _parse_sse_line(line: str) -> _StreamDelta | None:
         return None
     if not isinstance(chunk, dict):
         return None
-    choices = chunk.get("choices") or []
-    if not choices or not isinstance(choices[0], dict):
+    choices = chunk.get("choices")
+    if (
+        not isinstance(choices, list)
+        or not choices
+        or not isinstance(choices[0], dict)
+    ):
         return None
     choice = choices[0]
     raw_delta = choice.get("delta")

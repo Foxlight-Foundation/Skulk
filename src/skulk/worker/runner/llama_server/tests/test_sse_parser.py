@@ -207,3 +207,8 @@ def test_parse_sse_line_skips_non_dict_choice_and_delta_shapes() -> None:
     assert listy_delta is not None
     assert listy_delta.content == ""
     assert listy_delta.reasoning == ""
+
+
+def test_parse_sse_line_skips_non_list_choices() -> None:
+    assert _parse_sse_line('data: {"choices": {"0": {}}}') is None
+    assert _parse_sse_line('data: [1, 2, 3]') is None
