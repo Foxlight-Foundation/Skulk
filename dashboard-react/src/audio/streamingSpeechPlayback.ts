@@ -78,6 +78,24 @@ export function pcm16LeToFloat32(bytes: Uint8Array): Float32Array {
   return samples;
 }
 
+/** Reassemble arbitrary network chunks into complete PCM16 samples. */
+export function completePcm16Samples(
+  bytes: Uint8Array,
+  pendingByte: number | null,
+): { complete: Uint8Array; pendingByte: number | null } {
+  let joined = bytes;
+  if (pendingByte !== null) {
+    joined = new Uint8Array(bytes.byteLength + 1);
+    joined[0] = pendingByte;
+    joined.set(bytes, 1);
+  }
+  const completeLength = joined.byteLength - (joined.byteLength % 2);
+  return {
+    complete: joined.subarray(0, completeLength),
+    pendingByte: completeLength === joined.byteLength ? null : joined[completeLength],
+  };
+}
+
 /** Split visible text into complete synthesis sentences and one retained tail. */
 export function splitCompleteSpeechSentences(text: string): {
   sentences: string[];
@@ -143,7 +161,7 @@ export class StreamingSpeechPlayback {
       node.port.onmessage = (event: MessageEvent<{ type: string; samples?: number }>) => {
         if (event.data.type === 'consumed') {
           this.bufferedSamples = Math.max(0, this.bufferedSamples - (event.data.samples ?? 0));
-          if (this.bufferedSamples <= sampleRate * this.resumeBufferedSeconds) {
+          if (this.bufferedSamples <= playbackSampleRate * this.resumeBufferedSeconds) {
             this.releaseWaiters();
           }
         } else if (event.data.type === 'drained') {
@@ -154,11 +172,15 @@ export class StreamingSpeechPlayback {
     const stopOnAbort = () => this.stop();
     signal?.addEventListener('abort', stopOnAbort, { once: true });
     const reader = response.body.getReader();
+    let pendingPcmByte: number | null = null;
     try {
       while (!this.stopped) {
         const { done, value } = await reader.read();
         if (done) break;
-        const decodedSamples = pcm16LeToFloat32(value);
+        const framed = completePcm16Samples(value, pendingPcmByte);
+        pendingPcmByte = framed.pendingByte;
+        if (framed.complete.byteLength === 0) continue;
+        const decodedSamples = pcm16LeToFloat32(framed.complete);
         const samples = resampler?.process(decodedSamples) ?? decodedSamples;
         if (samples.length > playbackSampleRate * this.maximumBufferedSeconds) {
           throw new Error('One streaming speech frame exceeds the playback buffer limit.');
@@ -168,6 +190,9 @@ export class StreamingSpeechPlayback {
         node.port.postMessage({ type: 'audio', samples: samples.buffer }, [samples.buffer]);
       }
       if (!this.stopped) {
+        if (pendingPcmByte !== null) {
+          throw new Error('Streaming PCM response ended on an incomplete sample.');
+        }
         node.port.postMessage({ type: 'end' });
         await drained;
       }

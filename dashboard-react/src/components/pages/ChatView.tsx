@@ -1039,6 +1039,7 @@ export function ChatView({
       && selectedSpeechModelId
       && selectedSpeechOption?.supportsStreaming
       && selectedSpeechOption.responseFormats.includes('pcm')
+      && canUseStreamingSpeechPlayback()
     )
       ? new SpeechSentenceQueue(
           (sentence, signal) => playSpeechSegment(sentence, 'streaming', signal),
