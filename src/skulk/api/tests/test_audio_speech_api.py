@@ -1195,6 +1195,31 @@ async def test_audio_speech_streaming_rejects_unready_routable_replica() -> None
 
 
 @pytest.mark.anyio
+async def test_audio_speech_streaming_preserves_unmounted_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catalog fallback must not turn an unmounted model into unavailable capacity."""
+
+    api = _build_api()
+    card = _tts_card(supports_streaming=True)
+
+    async def _catalog_card(self: API, requested: ModelId) -> ModelCard:
+        return card
+
+    monkeypatch.setattr(API, "_get_running_model_card", _catalog_card)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api._validate_speech_synthesis_model(
+            card.model_id,
+            AudioResponseFormat.Mp3,
+            stream=True,
+        )
+
+    assert exc_info.value.status_code == 404
+    assert "no instance found" in str(exc_info.value.detail).lower()
+
+
+@pytest.mark.anyio
 async def test_audio_speech_legacy_true_toggle_remains_compatible(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -3153,6 +3153,15 @@ class API:
                     f"Model {resolved} does not declare streaming speech support"
                 ),
             )
+        if not any(
+            instance.shard_assignments.model_id == resolved
+            for instance in self.state.instances.values()
+        ):
+            await self._trigger_notify_user_to_download_model(resolved)
+            raise HTTPException(
+                status_code=404,
+                detail=f"No instance found for model {resolved}",
+            )
         if stream and not self._streaming_tts_model_is_ready(resolved):
             raise HTTPException(
                 status_code=503,
@@ -3179,15 +3188,6 @@ class API:
                     f"Model {resolved} does not support audio response format "
                     f"{resolved_response_format.value}; supported formats: {supported}"
                 ),
-            )
-        if not any(
-            instance.shard_assignments.model_id == resolved
-            for instance in self.state.instances.values()
-        ):
-            await self._trigger_notify_user_to_download_model(resolved)
-            raise HTTPException(
-                status_code=404,
-                detail=f"No instance found for model {resolved}",
             )
         return resolved, resolved_response_format
 
