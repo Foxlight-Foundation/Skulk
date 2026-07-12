@@ -36,8 +36,17 @@ RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp /opt/llama.cpp \
 # CUDA llama-cpp-python wheel for the in-process llama_cpp engine. Built as a
 # wheel (not installed) so the session's `uv sync`-managed venv can install it
 # after syncing, which is what defeats the uv-sync-restores-CPU-wheel trap.
-RUN CMAKE_ARGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}" \
-      python3 -m pip wheel --no-cache-dir --wheel-dir /opt/wheels llama-cpp-python
+# Built with uv-provisioned Python 3.13 to match Skulk's .python-version:
+# Ubuntu 22.04's system python is 3.10, and a cp310 wheel would be rejected by
+# the 3.13 environment pod-bootstrap.sh syncs (PR #538 review, P1).
+# --no-binary pins the CUDA source build even if PyPI ever starts shipping
+# prebuilt (CPU-only) wheels for this package.
+ARG PYTHON_VERSION=3.13
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && /root/.local/bin/uv venv --seed --python "${PYTHON_VERSION}" /opt/wheelbuild \
+    && CMAKE_ARGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}" \
+      /opt/wheelbuild/bin/python -m pip wheel --no-cache-dir \
+        --no-binary llama-cpp-python --wheel-dir /opt/wheels llama-cpp-python
 
 # ---- runtime stage: everything a session needs except Skulk itself ----------
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}

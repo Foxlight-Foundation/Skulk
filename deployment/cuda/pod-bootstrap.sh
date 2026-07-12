@@ -21,7 +21,9 @@ if [ ! -d "${SKULK_DIR}/.git" ]; then
     https://github.com/Foxlight-Foundation/Skulk "${SKULK_DIR}"
 else
   log "reusing checkout at ${SKULK_DIR} (fetching ${REF})"
-  git -C "${SKULK_DIR}" fetch --depth 1 origin "${REF}"
+  # Branches and SHAs fetch bare; tags need the qualified refspec on re-runs.
+  git -C "${SKULK_DIR}" fetch --depth 1 origin "${REF}" \
+    || git -C "${SKULK_DIR}" fetch --depth 1 origin "refs/tags/${REF}:refs/tags/${REF}"
   git -C "${SKULK_DIR}" checkout FETCH_HEAD
 fi
 
@@ -33,7 +35,14 @@ uv sync
 # wheel, so the CUDA wheel must be (re)installed last, exactly like
 # install-deps.sh --with-skulk-env does.
 log "installing prebaked CUDA llama-cpp-python wheel"
-uv pip install --force-reinstall /opt/wheels/llama_cpp_python-*.whl
+# Exactly one wheel must match: zero means the image build silently failed,
+# more than one means an ambiguous install; both should stop the session here.
+WHEELS=(/opt/wheels/llama_cpp_python-*.whl)
+if [ "${#WHEELS[@]}" -ne 1 ] || [ ! -f "${WHEELS[0]}" ]; then
+  echo "[bootstrap] ERROR: expected exactly one prebaked wheel, found: ${WHEELS[*]}" >&2
+  exit 1
+fi
+uv pip install --force-reinstall "${WHEELS[0]}"
 uv pip install --quiet nvidia-ml-py
 
 log "verifying GPU offload support in the installed binding"
