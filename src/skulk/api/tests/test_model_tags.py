@@ -114,6 +114,8 @@ def test_model_list_entry_exposes_audio_capabilities() -> None:
             supports_streaming=True,
             supports_realtime=False,
             supports_voice_listing=True,
+            default_voice="ryan",
+            voices=("ryan", "serena"),
             supports_reference_audio=False,
             sample_rates=(24000,),
         ),
@@ -127,6 +129,8 @@ def test_model_list_entry_exposes_audio_capabilities() -> None:
     assert entry.audio.response_formats == ["mp3", "wav"]
     assert entry.audio.supports_streaming is True
     assert entry.audio.supports_voice_listing is True
+    assert entry.audio.default_voice == "ryan"
+    assert entry.audio.voices == ["ryan", "serena"]
     assert entry.resolved_capabilities is not None
     assert entry.resolved_capabilities.supports_speech_synthesis is True
     assert entry.resolved_capabilities.supports_audio_output is True
