@@ -2,9 +2,19 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   pcm16LeToFloat32,
+  canUseStreamingSpeechPlayback,
   SpeechSentenceQueue,
   splitCompleteSpeechSentences,
 } from './streamingSpeechPlayback';
+
+describe('canUseStreamingSpeechPlayback', () => {
+  it('requires a secure origin and both Web Audio worklet constructors', () => {
+    const constructors = { AudioContext: class {}, AudioWorkletNode: class {} };
+    expect(canUseStreamingSpeechPlayback({ isSecureContext: true, ...constructors })).toBe(true);
+    expect(canUseStreamingSpeechPlayback({ isSecureContext: false, ...constructors })).toBe(false);
+    expect(canUseStreamingSpeechPlayback({ isSecureContext: true })).toBe(false);
+  });
+});
 
 describe('pcm16LeToFloat32', () => {
   it('decodes signed little-endian samples', () => {

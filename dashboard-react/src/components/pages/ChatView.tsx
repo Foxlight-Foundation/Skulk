@@ -17,6 +17,7 @@ import { chatActions } from '../../store/slices/chatSlice';
 import { store } from '../../store';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
+  canUseStreamingSpeechPlayback,
   SpeechSentenceQueue,
   splitCompleteSpeechSentences,
   StreamingSpeechPlayback,
@@ -850,7 +851,7 @@ export function ChatView({
     const useStreamingPcm = Boolean(
       selectedSpeechOption?.supportsStreaming
       && selectedSpeechOption.responseFormats.includes('pcm')
-      && typeof AudioWorkletNode !== 'undefined'
+      && canUseStreamingSpeechPlayback()
     );
     const response = await fetch('/v1/audio/speech', {
       method: 'POST',

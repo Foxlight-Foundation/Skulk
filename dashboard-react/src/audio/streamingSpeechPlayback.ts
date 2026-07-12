@@ -3,6 +3,21 @@ import { StreamingLinearResampler } from './realtimeTranscription';
 const DEFAULT_MAX_BUFFERED_SECONDS = 8;
 const DEFAULT_RESUME_BUFFERED_SECONDS = 4;
 
+/** Return whether the current origin exposes the secure AudioWorklet surface. */
+export function canUseStreamingSpeechPlayback(
+  environment: {
+    isSecureContext: boolean;
+    AudioContext?: unknown;
+    AudioWorkletNode?: unknown;
+  } = window,
+): boolean {
+  return Boolean(
+    environment.isSecureContext
+    && environment.AudioContext
+    && environment.AudioWorkletNode
+  );
+}
+
 const WORKLET_SOURCE = `
 class SkulkPcmQueueProcessor extends AudioWorkletProcessor {
   constructor() {
