@@ -315,6 +315,19 @@ def test_audio_speech_http_rejects_invalid_multipart_scalars(
     assert response.status_code == 422
 
 
+def test_audio_speech_http_rejects_non_file_reference_audio() -> None:
+    """A named reference field must not silently degrade to ordinary TTS."""
+
+    api = _build_api()
+    response = TestClient(api.app).post(
+        "/v1/audio/speech",
+        data={"model": "org/voice-model", "input": "hello"},
+        files={"reference_audio": (None, "not-an-upload")},
+    )
+
+    assert response.status_code == 422
+
+
 def test_audio_speech_http_rejects_invalid_json_payload() -> None:
     """Strict JSON validation failures are exposed as 422 responses."""
 

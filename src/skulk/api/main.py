@@ -9793,6 +9793,13 @@ class API:
             )
         form = await http_request.form()
         reference_value = form.get("reference_audio")
+        if reference_value is not None and not isinstance(
+            reference_value, StarletteUploadFile
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Multipart `reference_audio` must be a file upload",
+            )
         reference_audio = (
             reference_value
             if isinstance(reference_value, StarletteUploadFile)
