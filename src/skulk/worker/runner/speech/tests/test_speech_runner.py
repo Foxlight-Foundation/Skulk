@@ -293,6 +293,26 @@ def test_translation_kwargs_support_canary_contract() -> None:
     }
 
 
+def test_translation_kwargs_omit_ambiguous_language_alias() -> None:
+    """Canary-style variadic APIs must not receive a target-overriding alias."""
+
+    def generate(_path: str, **_kwargs: object) -> object:
+        return object()
+
+    params = AudioTranscriptionTaskParams(
+        model=ModelId("mlx-community/canary-test"),
+        audio_sha256="0" * 64,
+        language="fr",
+        translate_to_english=True,
+    )
+
+    kwargs = _filter_kwargs(generate, _stt_generate_kwargs(generate, params))
+
+    assert "language" not in kwargs
+    assert kwargs["source_lang"] == "fr"
+    assert kwargs["target_lang"] == "en"
+
+
 def _stub_mlx_audio_loader(
     monkeypatch: pytest.MonkeyPatch,
     category: str,

@@ -138,7 +138,9 @@ def _stt_generate_kwargs(
             "verbose": True,
         }
     return {
-        "language": params.language,
+        # Canary treats ``language`` as both source and target, so emitting the
+        # generic alias here would overwrite the explicit English target.
+        "language": None if params.translate_to_english else params.language,
         "task": "translate" if params.translate_to_english else None,
         "source_lang": params.language,
         "target_lang": "en" if params.translate_to_english else params.language,
