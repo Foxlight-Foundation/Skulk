@@ -855,6 +855,19 @@ export function ChatView({
       && selectedSpeechOption.responseFormats.includes('pcm')
       && canUseStreamingSpeechPlayback()
     );
+    const encodedFallbackFormat = responseFormat !== 'pcm'
+      ? responseFormat
+      : (
+          selectedSpeechOption?.responseFormats.includes('mp3')
+            ? 'mp3'
+            : selectedSpeechOption?.responseFormats.find((format) => format !== 'pcm')
+        );
+    if (!useStreamingPcm && !encodedFallbackFormat) {
+      throw new Error(t(
+        'chat.view.errors.pcmStreamingRequired',
+        'This speech model requires secure streaming audio playback in this browser.',
+      ));
+    }
     const response = await fetch('/v1/audio/speech', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -862,7 +875,7 @@ export function ChatView({
       body: JSON.stringify({
         model: selectedSpeechModelId,
         input,
-        response_format: useStreamingPcm ? 'pcm' : responseFormat,
+        response_format: useStreamingPcm ? 'pcm' : encodedFallbackFormat,
         ...(useStreamingPcm ? { stream: true } : {}),
         ...(selectedVoice ? { voice: selectedVoice } : {}),
       }),
