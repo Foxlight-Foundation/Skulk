@@ -1,0 +1,24 @@
+model_id = "CogniSoftOrg/canary-1b-v2-mlx-bf16"
+n_layers = 40
+hidden_size = 1024
+supports_tensor = false
+tasks = ["SpeechToText", "SpeechTranslation"]
+family = "canary"
+quantization = "bf16"
+base_model = "nvidia/canary-1b-v2"
+capabilities = ["stt"]
+context_length = 0
+
+[audio]
+kind = "stt"
+supports_streaming = false
+supports_realtime = false
+supports_translation = true
+sample_rates = [16000]
+
+[placement]
+compatible_backends = ["mlx_audio", "mlx_audio-metal"]
+backend_preference = ["mlx_audio-metal", "mlx_audio"]
+
+[storage_size]
+in_bytes = 3279477614

@@ -642,7 +642,9 @@ curl -X POST http://localhost:52415/v1/audio/translations \
 The route is inert unless the node runs with
 `SKULK_ENABLE_EXPERIMENTAL_MODE=1` and cluster settings enable
 `experiments.speech_translation`. Translation target is English. Skulk maps the
-generic request to model-family arguments inside the speech runner.
+generic request to model-family arguments inside the speech runner. The bundled
+`CogniSoftOrg/canary-1b-v2-mlx-bf16` card is the initial experimental candidate;
+its upstream CC-BY-4.0 terms and NVIDIA attribution continue to apply.
 
 ## Claude Messages API
 
