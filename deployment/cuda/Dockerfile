@@ -21,6 +21,12 @@ ARG CUDA_ARCHS="86;89"
 # pipefail: a curl|sh installer whose download dies must fail the build, not
 # publish an image that is missing its toolchain.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# The CUDA Driver API library (libcuda.so: cuMemMap, cuGetErrorString, ...)
+# ships with the DRIVER, which a GPU-less CI runner does not have; the devel
+# image provides link-time stubs for exactly this case. Without this, the
+# llama.cpp link fails with undefined cu* references (maiden build). Runtime
+# resolution uses the pod's real driver; the stub never leaves this stage.
+ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake git curl pkg-config python3-dev python3-pip \
