@@ -167,3 +167,48 @@ def test_gpu_layers_match_vram_admission(resolved: str | None, expected: str) ->
     # The runner's -ngl decision must mirror placement_utils._has_gpu_offload_backend
     # so a RAM-admitted placement never grabs an unbudgeted GPU.
     assert _gpu_layers_for_backend(resolved) == expected
+
+
+def test_parse_sse_line_extracts_final_chunk_timings() -> None:
+    # llama-server attaches its native timings to the final streamed chunk
+    # when the request set timings_per_token; they become GenerationStats.
+    line = (
+        'data: {"choices": [{"delta": {}, "finish_reason": "stop"}], '
+        '"timings": {"prompt_n": 50, "prompt_ms": 250.0, '
+        '"predicted_n": 128, "predicted_ms": 4000.0}}'
+    )
+    delta = _parse_sse_line(line)
+    assert delta is not None
+    assert delta.finish == "stop"
+    assert delta.timings == {
+        "prompt_n": 50,
+        "prompt_ms": 250.0,
+        "predicted_n": 128,
+        "predicted_ms": 4000.0,
+    }
+
+
+def test_parse_sse_line_timings_absent_or_malformed_is_none() -> None:
+    plain = _parse_sse_line('data: {"choices": [{"delta": {"content": "hi"}}]}')
+    assert plain is not None
+    assert plain.timings is None
+    wrong_shape = _parse_sse_line(
+        'data: {"choices": [{"delta": {}}], "timings": [1, 2]}'
+    )
+    assert wrong_shape is not None
+    assert wrong_shape.timings is None
+
+
+def test_parse_sse_line_skips_non_dict_choice_and_delta_shapes() -> None:
+    # A malformed payload is skipped (or treated as empty), never raised: one
+    # stray line must not break the whole stream.
+    assert _parse_sse_line('data: {"choices": ["garbage"]}') is None
+    listy_delta = _parse_sse_line('data: {"choices": [{"delta": []}]}')
+    assert listy_delta is not None
+    assert listy_delta.content == ""
+    assert listy_delta.reasoning == ""
+
+
+def test_parse_sse_line_skips_non_list_choices() -> None:
+    assert _parse_sse_line('data: {"choices": {"0": {}}}') is None
+    assert _parse_sse_line('data: [1, 2, 3]') is None

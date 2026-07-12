@@ -95,6 +95,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **llama.cpp engines now report generation statistics.** Chat completions
+  served by the in-process `llama_cpp` engine and the served `llama_server`
+  proxy attach real `generation_stats` (prompt/generation token counts and
+  tokens-per-second) to the terminal chunk, as the MLX engine always has.
+  `llama_server` uses the server's own engine-side timings when available
+  (requested via `timings_per_token`), falling back to proxy-side wall-clock
+  phases; the in-process engine measures prefill/decode phases around its
+  stream. Previously every request from these engines carried
+  `stats=None`, leaving the dashboard, field telemetry, and harness
+  `skulk_*_tps` metrics blind on GPU/Linux nodes (#532).
+
 - **Store-host staging no longer doubles disk usage.** Staging a model from a
   local store into the worker staging directory hardlinks each file instead
   of copying when both live on the same filesystem (store files are immutable
