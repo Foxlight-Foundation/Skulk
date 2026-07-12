@@ -8939,25 +8939,46 @@ class API:
             reference_audio_sha256=reference_audio_sha256,
         )
 
-    def _apply_default_speech_voice(
+    async def _apply_default_speech_voice(
         self,
         request: AudioSpeechRequest,
         model_id: ModelId,
     ) -> AudioSpeechRequest:
-        """Apply a card-declared default only when the caller omits a voice."""
+        """Validate explicit voices and apply the card default when omitted."""
 
-        if request.voice is not None:
+        matching_instances = tuple(
+            instance
+            for instance in self.state.instances.values()
+            if instance.shard_assignments.model_id == model_id
+        )
+        # Normal callers reach this only after mounted-model validation. Keep
+        # the helper inert for isolated adapters/tests that intentionally
+        # replace that validator without constructing replicated state.
+        if not matching_instances:
             return request
         card = next(
             (
                 candidate
-                for instance in self.state.instances.values()
-                if instance.shard_assignments.model_id == model_id
-                and (candidate := self._model_card_for_instance(instance)) is not None
+                for instance in matching_instances
+                if (candidate := self._model_card_for_instance(instance)) is not None
             ),
             None,
         )
-        if card is None or card.audio is None or card.audio.default_voice is None:
+        if card is None:
+            card = await self._get_running_model_card(model_id)
+        if card.audio is None:
+            return request
+        if request.voice is not None:
+            if card.audio.voices and request.voice not in card.audio.voices:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Voice {request.voice!r} is not available for model "
+                        f"{model_id}; use GET /v1/audio/voices"
+                    ),
+                )
+            return request
+        if card.audio.default_voice is None:
             return request
         return request.model_copy(update={"voice": card.audio.default_voice})
 
@@ -9070,7 +9091,7 @@ class API:
             request.response_format,
             stream=True,
         )
-        request = self._apply_default_speech_voice(request, model_id)
+        request = await self._apply_default_speech_voice(request, model_id)
         if response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
             raise HTTPException(
                 status_code=400,
@@ -9920,7 +9941,7 @@ class API:
         model_id, response_format = await self._validate_speech_synthesis_model(
             ModelId(request.model), requested_response_format, stream=request.stream
         )
-        request = self._apply_default_speech_voice(request, model_id)
+        request = await self._apply_default_speech_voice(request, model_id)
         if request.stream and response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
             supported = ", ".join(
                 audio_format.value
