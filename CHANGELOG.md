@@ -87,6 +87,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Store-host staging no longer doubles disk usage.** Staging a model from a
+  local store into the worker staging directory hardlinks each file instead
+  of copying when both live on the same filesystem (store files are immutable
+  once registered and staged files are never mutated in place), falling back
+  to a copy across filesystems. Previously a 26GB GGUF needed 52GB of free
+  disk to stage on a store-host node, and the staging copy could fail with
+  ENOSPC after a successful store download (#533).
+
 - **Pooled (multi-node) GGUF placement no longer caps unified-memory nodes at
   their BIOS VRAM carve.** Admission for RPC placements previously sized each
   node against a VRAM-carve-only figure, which falsely refused pooled models
