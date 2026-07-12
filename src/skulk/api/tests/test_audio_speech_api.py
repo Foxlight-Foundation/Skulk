@@ -1959,6 +1959,41 @@ async def test_audio_speech_collect_cancels_on_sample_rate_change(
 
 
 @pytest.mark.anyio
+async def test_audio_speech_collect_cancels_on_format_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A collected response cannot concatenate different audio encodings."""
+
+    api = _build_api()
+    command_id = CommandId("speech-format-change")
+    sender, receiver = channel[AudioChunk | ErrorChunk]()
+    model_id = ModelId("mlx-community/qwen3-tts-test")
+    for index, response_format in enumerate(
+        (AudioResponseFormat.Mp3, AudioResponseFormat.Wav)
+    ):
+        await sender.send(
+            AudioChunk(
+                model=model_id,
+                data=base64.b64encode(b"audio").decode("ascii"),
+                chunk_index=index,
+                total_chunks=2,
+                format=response_format,
+                finish_reason="stop" if index == 1 else None,
+            )
+        )
+    cancelled: list[CommandId] = []
+
+    async def _cancel(self: API, cancelled_id: CommandId) -> None:
+        assert self is api
+        cancelled.append(cancelled_id)
+
+    monkeypatch.setattr(API, "_cancel_audio_speech_command", _cancel)
+    with pytest.raises(HTTPException, match="changed format"):
+        await api._collect_audio_speech_chunks(command_id, receiver)
+    assert cancelled == [command_id]
+
+
+@pytest.mark.anyio
 async def test_audio_speech_stream_cancels_on_sample_rate_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2000,6 +2035,46 @@ async def test_audio_speech_stream_cancels_on_sample_rate_change(
     with pytest.raises(RuntimeError, match="changed sample rate"):
         await anext(stream)
 
+    assert cancelled == [command_id]
+
+
+@pytest.mark.anyio
+async def test_audio_speech_stream_cancels_on_format_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A streamed response must retain the first chunk's audio encoding."""
+
+    api = _build_api()
+    command_id = CommandId("speech-stream-format-change")
+    sender, receiver = channel[AudioChunk | ErrorChunk]()
+    api._audio_speech_queues[command_id] = sender
+    model_id = ModelId("mlx-community/qwen3-tts-test")
+    first_chunk = AudioChunk(
+        model=model_id,
+        data=base64.b64encode(b"mp3").decode("ascii"),
+        chunk_index=0,
+        format=AudioResponseFormat.Mp3,
+    )
+    await sender.send(
+        AudioChunk(
+            model=model_id,
+            data=base64.b64encode(b"wav").decode("ascii"),
+            chunk_index=1,
+            format=AudioResponseFormat.Wav,
+            finish_reason="stop",
+        )
+    )
+    cancelled: list[CommandId] = []
+
+    async def _cancel(self: API, cancelled_id: CommandId) -> None:
+        assert self is api
+        cancelled.append(cancelled_id)
+
+    monkeypatch.setattr(API, "_cancel_audio_speech_command", _cancel)
+    stream = api._stream_audio_speech_chunks(command_id, receiver, first_chunk)
+    assert await anext(stream) == b"mp3"
+    with pytest.raises(RuntimeError, match="changed format"):
+        await anext(stream)
     assert cancelled == [command_id]
 
 
