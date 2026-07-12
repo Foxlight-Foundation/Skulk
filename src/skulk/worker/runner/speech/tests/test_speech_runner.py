@@ -1,4 +1,4 @@
-# pyright: reportPrivateUsage=false, reportMissingParameterType=false
+# pyright: reportPrivateUsage=false, reportMissingParameterType=false, reportAny=false, reportUnknownArgumentType=false, reportUnknownLambdaType=false, reportUnknownMemberType=false
 """Unit coverage for the single-node speech runner."""
 
 import base64
@@ -45,6 +45,8 @@ from skulk.worker.runner.speech import runner as speech_runner
 from skulk.worker.runner.speech.runner import (
     Runner,
     _filter_kwargs,
+    _install_attention_mask_dtype_compat,
+    _install_canary_compatibility,
     _load_speech_model,
     _resolve_staged_voice_path,
     _stt_generate_kwargs,
@@ -263,6 +265,80 @@ def test_filter_kwargs_drops_unsupported_and_none_values() -> None:
     ) == {"voice": "af_heart", "stream": False}
 
 
+def test_attention_mask_compat_casts_mask_to_input_dtype() -> None:
+    """The Canary adapter should cast only mismatched masks before attention."""
+
+    class _Array:
+        def __init__(self, dtype: str) -> None:
+            self.dtype = dtype
+
+        def astype(self, dtype: str) -> "_Array":
+            return _Array(dtype)
+
+    class _Attention:
+        seen_mask: _Array | None = None
+
+        def __init__(self) -> None:
+            self.q_proj = type(
+                "_Projection",
+                (),
+                {"weight": _Array("bfloat16")},
+            )()
+
+        def __call__(
+            self,
+            x: _Array,
+            mask: _Array | None = None,
+            cache: object | None = None,
+        ) -> tuple[_Array, object | None]:
+            del x
+            type(self).seen_mask = mask
+            return _Array("bfloat16"), cache
+
+    _install_attention_mask_dtype_compat(_Attention)
+    result, cache = _Attention()(
+        _Array("float32"),
+        mask=_Array("float32"),
+        cache="cache",
+    )
+
+    assert result.dtype == "bfloat16"
+    assert cache == "cache"
+    assert _Attention.seen_mask is not None
+    assert _Attention.seen_mask.dtype == "bfloat16"
+
+
+def test_canary_cross_attention_accepts_bfloat16_with_encoder_mask() -> None:
+    """Canary cross-attention must keep its internally built mask in query dtype."""
+
+    pytest.importorskip("mlx.core")
+    pytest.importorskip("mlx_audio.stt.models.canary.decoder")
+    import mlx.core as mx
+    from mlx.utils import tree_map
+    from mlx_audio.stt.models.canary.decoder import (  # pyright: ignore[reportMissingTypeStubs]
+        MultiHeadCrossAttention,
+    )
+
+    _install_canary_compatibility()
+    attention = MultiHeadCrossAttention(d_model=8, n_heads=2)
+    attention.update(
+        tree_map(
+            lambda value: value.astype(mx.bfloat16),
+            attention.parameters(),
+        )
+    )
+
+    output, cache = attention(
+        mx.zeros((1, 2, 8), dtype=mx.bfloat16),
+        mx.zeros((1, 3, 8), dtype=mx.bfloat16),
+        encoder_mask=mx.ones((1, 3), dtype=mx.float32),
+    )
+    mx.eval(output)
+
+    assert output.dtype == mx.bfloat16
+    assert cache is not None
+
+
 def test_translation_kwargs_support_canary_contract() -> None:
     """Canary translation should receive explicit source and English target."""
 
@@ -291,6 +367,26 @@ def test_translation_kwargs_support_canary_contract() -> None:
         "use_pnc": True,
         "no_repeat_ngram_size": 3,
     }
+
+
+def test_translation_kwargs_omit_ambiguous_language_alias() -> None:
+    """Canary-style variadic APIs must not receive a target-overriding alias."""
+
+    def generate(_path: str, **_kwargs: object) -> object:
+        return object()
+
+    params = AudioTranscriptionTaskParams(
+        model=ModelId("mlx-community/canary-test"),
+        audio_sha256="0" * 64,
+        language="fr",
+        translate_to_english=True,
+    )
+
+    kwargs = _filter_kwargs(generate, _stt_generate_kwargs(generate, params))
+
+    assert "language" not in kwargs
+    assert kwargs["source_lang"] == "fr"
+    assert kwargs["target_lang"] == "en"
 
 
 def _stub_mlx_audio_loader(
