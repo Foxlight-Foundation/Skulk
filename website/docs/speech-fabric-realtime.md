@@ -17,7 +17,7 @@ Skulk currently exposes:
 
 - `POST /v1/audio/speech` for text-to-speech synthesis;
 - `POST /v1/audio/transcriptions` for bounded uploaded audio clips;
-- `WS /v1/realtime` for one-utterance realtime transcription.
+- `WS /v1/realtime?model=<model-id>` for one-utterance realtime transcription.
 
 `/v1/audio/speech` returns an encoded audio response. Its `stream=true` path is
 experimental and is available only when all of these conditions are true:
@@ -30,7 +30,7 @@ experimental and is available only when all of these conditions are true:
 `/v1/audio/transcriptions` accepts a bounded multipart upload and returns one
 completed transcription. It does not provide progressive REST transcription.
 
-`WS /v1/realtime` accepts OpenAI-style base64 PCM16 append and commit events over a
+`WS /v1/realtime?model=<model-id>` accepts OpenAI-style base64 PCM16 append and commit events over a
 WebSocket. It emits transcript delta, final, and failure events from the mounted
 realtime STT model. The route is a transcription compatibility surface, not a
 full speech-to-speech conversation API.
