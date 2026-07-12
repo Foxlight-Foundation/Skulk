@@ -2,7 +2,7 @@
 
 import base64
 import binascii
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Annotated, Literal, Self, cast, final
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -34,6 +34,8 @@ _PCM_SAMPLE_RATE = 24_000
 _VAD_SOURCE_FRAME_BYTES = _PCM_SAMPLE_RATE * 20 // 1000 * 2
 _MAX_SESSION_AUDIO_BYTES = 64 * 1024 * 1024
 _MAX_TRANSCRIPT_TEXT_BYTES = 1024 * 1024
+_MAX_CONVERSATION_TEXT_BYTES = 4 * 1024 * 1024
+_MAX_RESPONSE_AUDIO_BYTES = 64 * 1024 * 1024
 REALTIME_WEBSOCKET_MAX_MESSAGE_BYTES = 2 * MAX_INLINE_MEDIA_BYTES
 """Maximum encoded JSON event size accepted by the WebSocket edge."""
 
@@ -130,6 +132,18 @@ class TranscriptionSessionConfig(_RealtimeModel):
         default=(),
         description="Additional transcription fields are not implemented.",
     )
+    response: "RealtimeResponseConfig | None" = Field(
+        default=None,
+        description="Optional mounted chat and TTS participants for automatic replies.",
+    )
+
+
+class RealtimeResponseConfig(_RealtimeModel):
+    """Mounted participants used to answer completed realtime transcripts."""
+
+    model: str = Field(min_length=1, max_length=512)
+    tts_model: str | None = Field(default=None, min_length=1, max_length=512)
+    voice: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 class TranscriptionSessionUpdate(_RealtimeModel):
@@ -176,6 +190,7 @@ class RealtimeTranscriptionSessionConfig(_RealtimeModel):
     type: Literal["transcription"]
     audio: RealtimeAudioConfig
     include: tuple[()] = ()
+    response: RealtimeResponseConfig | None = None
 
 
 class RealtimeSessionUpdate(_RealtimeModel):
@@ -208,12 +223,20 @@ class InputAudioBufferClear(_RealtimeModel):
     event_id: str | None = Field(default=None, max_length=256)
 
 
+class ResponseCancel(_RealtimeModel):
+    """Cancel the active assistant generation or speech stream."""
+
+    type: Literal["response.cancel"]
+    event_id: str | None = Field(default=None, max_length=256)
+
+
 RealtimeClientEvent = Annotated[
     TranscriptionSessionUpdate
     | RealtimeSessionUpdate
     | InputAudioBufferAppend
     | InputAudioBufferCommit
-    | InputAudioBufferClear,
+    | InputAudioBufferClear
+    | ResponseCancel,
     Field(discriminator="type"),
 ]
 _CLIENT_EVENT_ADAPTER: TypeAdapter[RealtimeClientEvent] = TypeAdapter(
@@ -221,6 +244,14 @@ _CLIENT_EVENT_ADAPTER: TypeAdapter[RealtimeClientEvent] = TypeAdapter(
 )
 
 OpenRealtimeSession = Callable[[str, int], Awaitable[CapabilityStreamSession]]
+ConversationMessage = tuple[Literal["user", "assistant"], str]
+GenerateAssistant = Callable[
+    [str, tuple[ConversationMessage, ...]], AsyncIterator[str]
+]
+OpenSpeechSession = Callable[
+    [str, str, str | None], Awaitable[CapabilityStreamSession]
+]
+ValidateResponseConfig = Callable[[RealtimeResponseConfig], Awaitable[None]]
 
 
 def websocket_origin_allowed(websocket: WebSocket) -> bool:
@@ -260,6 +291,9 @@ class RealtimeTranscriptionBridge:
         websocket: WebSocket,
         model: str,
         open_session: OpenRealtimeSession,
+        generate_assistant: GenerateAssistant | None = None,
+        open_speech_session: OpenSpeechSession | None = None,
+        validate_response_config: ValidateResponseConfig | None = None,
     ) -> None:
         """Create a bridge for one pending WebSocket connection.
 
@@ -267,11 +301,17 @@ class RealtimeTranscriptionBridge:
             websocket: FastAPI WebSocket accepted and owned by this bridge.
             model: Mounted realtime STT model selected by the URL query.
             open_session: Fabric-provider session opener.
+            generate_assistant: Optional mounted text-model stream opener.
+            open_speech_session: Optional mounted TTS provider stream opener.
+            validate_response_config: Optional participant admission validator.
         """
 
         self._websocket = websocket
         self._model = model
         self._open_session = open_session
+        self._generate_assistant = generate_assistant
+        self._open_speech_session = open_speech_session
+        self._validate_response_config = validate_response_config
         self._session_id = f"sess_{uuid4().hex}"
         self._item_id = f"item_{uuid4().hex}"
         self._previous_item_id: str | None = None
@@ -285,6 +325,9 @@ class RealtimeTranscriptionBridge:
         self._vad_detector: VoiceActivityDetector | None = None
         self._vad_resampler: StreamingPcm16Resampler | None = None
         self._vad_pcm = bytearray()
+        self._response_config: RealtimeResponseConfig | None = None
+        self._conversation: list[ConversationMessage] = []
+        self._response_cancel_scope: anyio.CancelScope | None = None
 
     async def serve(self) -> None:
         """Accept, run, and clean up one transcription WebSocket session."""
@@ -341,6 +384,7 @@ class RealtimeTranscriptionBridge:
                 task_group.start_soon(
                     self._send_provider_output,
                     session,
+                    task_group,
                     task_group.cancel_scope,
                     self._item_id,
                     self._commit_announced,
@@ -433,6 +477,44 @@ class RealtimeTranscriptionBridge:
                     if isinstance(event, TranscriptionSessionUpdate)
                     else event.session.audio.input.turn_detection
                 )
+                requested_response = event.session.response
+                if requested_response is not None and self._generate_assistant is None:
+                    await self._send_error(
+                        code="unsupported_session_update",
+                        message="automatic realtime responses are unavailable",
+                        client_event_id=event.event_id,
+                    )
+                    continue
+                if (
+                    requested_response is not None
+                    and requested_response.tts_model is not None
+                    and self._open_speech_session is None
+                ):
+                    await self._send_error(
+                        code="unsupported_session_update",
+                        message="realtime speech synthesis is unavailable",
+                        client_event_id=event.event_id,
+                    )
+                    continue
+                if (
+                    requested_response is not None
+                    and self._validate_response_config is not None
+                ):
+                    try:
+                        await self._validate_response_config(requested_response)
+                    except Exception as exc:
+                        logger.opt(exception=exc).warning(
+                            "Realtime response participant validation failed"
+                        )
+                        await self._send_error(
+                            code="unsupported_session_update",
+                            message=(
+                                "selected realtime response participants are not "
+                                "ready"
+                            ),
+                            client_event_id=event.event_id,
+                        )
+                        continue
                 if (
                     self._turn_audio_bytes > 0
                     and requested_turn_detection != self._turn_detection
@@ -445,6 +527,7 @@ class RealtimeTranscriptionBridge:
                     continue
                 if self._turn_audio_bytes == 0:
                     self._configure_turn_detection(requested_turn_detection)
+                    self._response_config = requested_response
                 await self._send_json(
                     {
                         "event_id": self._event_id(),
@@ -470,6 +553,17 @@ class RealtimeTranscriptionBridge:
                 await self._close(1008)
                 return
 
+            if isinstance(event, ResponseCancel):
+                if self._response_cancel_scope is None:
+                    await self._send_error(
+                        code="response_not_active",
+                        message="there is no active realtime response to cancel",
+                        client_event_id=event.event_id,
+                    )
+                else:
+                    self._cancel_assistant_response()
+                continue
+
             if isinstance(event, InputAudioBufferAppend):
                 if self._committed:
                     await self._send_error(
@@ -478,6 +572,11 @@ class RealtimeTranscriptionBridge:
                         client_event_id=event.event_id,
                     )
                     continue
+                if (
+                    self._response_cancel_scope is not None
+                    and self._vad_detector is None
+                ):
+                    self._cancel_assistant_response()
                 session = self._current_session
                 if session is None:
                     session = await self._open_next_turn(task_group)
@@ -662,6 +761,7 @@ class RealtimeTranscriptionBridge:
         task_group.start_soon(
             self._send_provider_output,
             session,
+            task_group,
             task_group.cancel_scope,
             item_id,
             commit_announced,
@@ -713,6 +813,7 @@ class RealtimeTranscriptionBridge:
             del self._vad_pcm[:frame_bytes]
             for event in detector.process(frame):
                 if event.kind == "speech_started":
+                    self._cancel_assistant_response()
                     await self._send_json(
                         {
                             "event_id": self._event_id(),
@@ -776,6 +877,7 @@ class RealtimeTranscriptionBridge:
     async def _send_provider_output(
         self,
         session: CapabilityStreamSession,
+        task_group: TaskGroup,
         cancel_scope: anyio.CancelScope,
         item_id: str,
         commit_announced: anyio.Event,
@@ -834,6 +936,14 @@ class RealtimeTranscriptionBridge:
                         }
                     )
                     self._finish_turn(session, item_id)
+                    response_config = self._response_config
+                    if response_config is not None:
+                        task_group.start_soon(
+                            self._run_assistant_response,
+                            transcript,
+                            item_id,
+                            response_config,
+                        )
                 else:
                     error = frame.error
                     await self._send_transcription_failed(
@@ -868,6 +978,199 @@ class RealtimeTranscriptionBridge:
             )
             await self._close(1011)
             cancel_scope.cancel()
+
+    def _cancel_assistant_response(self) -> None:
+        """Cancel active model/TTS work when a new VAD turn starts."""
+
+        if self._response_cancel_scope is not None:
+            self._response_cancel_scope.cancel()
+
+    async def _run_assistant_response(
+        self,
+        transcript: str,
+        input_item_id: str,
+        config: RealtimeResponseConfig,
+    ) -> None:
+        """Generate visible assistant text and optional streamed speech audio."""
+
+        generate = self._generate_assistant
+        if generate is None:
+            return
+        response_id = f"resp_{uuid4().hex}"
+        output_item_id = f"item_{uuid4().hex}"
+        user_message: ConversationMessage = ("user", transcript)
+        messages = (*self._conversation, user_message)
+        await self._send_json(
+            {
+                "event_id": self._event_id(),
+                "type": "response.created",
+                "response": {"id": response_id, "status": "in_progress"},
+            }
+        )
+        completed = False
+        failed = False
+        text_parts: list[str] = []
+        text_bytes = 0
+        cancel_scope = anyio.CancelScope()
+        self._response_cancel_scope = cancel_scope
+        try:
+            with cancel_scope:
+                async for delta in generate(config.model, messages):
+                    text_bytes += len(delta.encode("utf-8"))
+                    if text_bytes > _MAX_TRANSCRIPT_TEXT_BYTES:
+                        raise RuntimeError("assistant response exceeds the bounded text limit")
+                    text_parts.append(delta)
+                    await self._send_json(
+                        {
+                            "event_id": self._event_id(),
+                            "type": "response.output_text.delta",
+                            "response_id": response_id,
+                            "item_id": output_item_id,
+                            "output_index": 0,
+                            "content_index": 0,
+                            "delta": delta,
+                        }
+                    )
+                text = "".join(text_parts)
+                if not text:
+                    raise RuntimeError("assistant model produced no visible text")
+                await self._send_json(
+                    {
+                        "event_id": self._event_id(),
+                        "type": "response.output_text.done",
+                        "response_id": response_id,
+                        "item_id": output_item_id,
+                        "output_index": 0,
+                        "content_index": 0,
+                        "text": text,
+                    }
+                )
+                self._append_conversation(transcript, text)
+                if config.tts_model is not None:
+                    await self._stream_assistant_audio(
+                        response_id=response_id,
+                        item_id=output_item_id,
+                        model=config.tts_model,
+                        text=text,
+                        voice=config.voice,
+                    )
+                completed = True
+        except WebSocketDisconnect:
+            cancel_scope.cancel()
+            return
+        except Exception as exc:
+            logger.opt(exception=exc).warning("Realtime assistant response failed")
+            failed = True
+            await self._send_error(
+                code="response_error",
+                message="realtime assistant response failed",
+            )
+        finally:
+            if self._response_cancel_scope is cancel_scope:
+                self._response_cancel_scope = None
+        await self._send_json(
+            {
+                "event_id": self._event_id(),
+                "type": "response.done",
+                "response": {
+                    "id": response_id,
+                    "status": (
+                        "completed"
+                        if completed
+                        else ("failed" if failed else "cancelled")
+                    ),
+                    "input_item_id": input_item_id,
+                    "output": (
+                        [{"id": output_item_id, "text": "".join(text_parts)}]
+                        if text_parts
+                        else []
+                    ),
+                },
+            }
+        )
+
+    def _append_conversation(self, transcript: str, response: str) -> None:
+        """Append one text turn while evicting oldest complete turns by bytes."""
+
+        self._conversation.extend((("user", transcript), ("assistant", response)))
+        conversation_bytes = sum(
+            len(content.encode("utf-8")) for _, content in self._conversation
+        )
+        while conversation_bytes > _MAX_CONVERSATION_TEXT_BYTES:
+            if len(self._conversation) <= 2:
+                raise RuntimeError("conversation turn exceeds the bounded text limit")
+            removed = self._conversation[:2]
+            del self._conversation[:2]
+            conversation_bytes -= sum(
+                len(content.encode("utf-8")) for _, content in removed
+            )
+
+    async def _stream_assistant_audio(
+        self,
+        *,
+        response_id: str,
+        item_id: str,
+        model: str,
+        text: str,
+        voice: str | None,
+    ) -> None:
+        """Forward one mounted TTS provider stream as realtime audio events."""
+
+        open_speech = self._open_speech_session
+        if open_speech is None:
+            raise RuntimeError("realtime speech synthesis is unavailable")
+        session = await open_speech(model, text, voice)
+        if not session.open_result.ok:
+            error = session.open_result.error
+            raise RuntimeError(
+                error.message if error is not None else "TTS provider rejected response"
+            )
+        audio_bytes = 0
+        terminal = False
+        async for frame in session.frames:
+            if frame.kind == "started":
+                continue
+            if frame.kind == "completed":
+                terminal = True
+                break
+            if (
+                frame.kind != "chunk"
+                or not isinstance(frame.media, InlineMediaAttachment)
+            ):
+                error = frame.error
+                raise RuntimeError(
+                    error.message if error is not None else "TTS stream failed"
+                )
+            audio_bytes += len(frame.media.data)
+            if audio_bytes > _MAX_RESPONSE_AUDIO_BYTES:
+                raise RuntimeError("TTS response exceeds the bounded audio limit")
+            payload = frame.payload or {}
+            await self._send_json(
+                {
+                    "event_id": self._event_id(),
+                    "type": "response.audio.delta",
+                    "response_id": response_id,
+                    "item_id": item_id,
+                    "output_index": 0,
+                    "content_index": 1,
+                    "delta": base64.b64encode(frame.media.data).decode("ascii"),
+                    "format": payload.get("format", "mp3"),
+                }
+            )
+        if not terminal:
+            raise RuntimeError("TTS provider ended without a terminal frame")
+        if audio_bytes == 0:
+            raise RuntimeError("TTS provider produced no audio")
+        await self._send_json(
+            {
+                "event_id": self._event_id(),
+                "type": "response.audio.done",
+                "response_id": response_id,
+                "item_id": item_id,
+                "output_index": 0,
+                "content_index": 1,
+            }
+        )
 
     def _finish_turn(
         self,
@@ -956,6 +1259,11 @@ class RealtimeTranscriptionBridge:
                     "noise_reduction": None,
                 },
             },
+            "response": (
+                None
+                if self._response_config is None
+                else self._response_config.model_dump(mode="json")
+            ),
             "include": [],
         }
 

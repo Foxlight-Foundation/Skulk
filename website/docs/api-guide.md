@@ -1549,7 +1549,7 @@ The wire contract implements a bounded subset of OpenAI Realtime transcription:
 | Direction | Event | Behavior |
 |---|---|---|
 | server to client | `session.created` | Reports a `type: transcription` session with the selected model and fixed PCM input configuration. |
-| client to server | `session.update` | Confirms the current nested `audio.input` configuration. `turn_detection` may be null or a bounded `server_vad` configuration; attempts to change model/codec, enable noise reduction/language hints, or add unsupported fields are rejected. |
+| client to server | `session.update` | Confirms the current nested `audio.input` configuration. `turn_detection` may be null or a bounded `server_vad` configuration. Optional `response` selects a mounted chat `model`, optional mounted `tts_model`, and optional `voice`; attempts to change the input model/codec, enable noise reduction/language hints, or add unsupported fields are rejected. |
 | server to client | `session.updated` | Confirms an accepted current session update. |
 | client to server | `input_audio_buffer.append` | Appends one base64 PCM16 frame and immediately forwards its decoded bytes as binary Fabric media. |
 | client to server | `input_audio_buffer.commit` | Half-closes the current utterance and triggers final provider drain. Empty or duplicate commits are rejected. The next turn may begin after its completed event. |
@@ -1559,6 +1559,11 @@ The wire contract implements a bounded subset of OpenAI Realtime transcription:
 | server to client | `conversation.item.input_audio_transcription.delta` | Carries one provider transcript delta after commit. |
 | server to client | `conversation.item.input_audio_transcription.completed` | Carries the accumulated final transcript, completes the current item, and leaves the socket ready for another turn. |
 | server to client | `conversation.item.input_audio_transcription.failed` | Carries a provider/transport/cancellation terminal failure. |
+| server to client | `response.created` | Announces automatic assistant work after a final transcript when `session.response` is configured. |
+| server to client | `response.output_text.delta` / `response.output_text.done` | Streams visible assistant text and its bounded final value. Reasoning tokens and tool calls are not exposed or synthesized. |
+| server to client | `response.audio.delta` / `response.audio.done` | Streams base64 MP3 chunks from the selected mounted `tts_model`. |
+| client to server | `response.cancel` | Cancels active model generation or TTS. New speech detected by server VAD performs the same cancellation before starting the next turn. |
+| server to client | `response.done` | Terminates one assistant response with `completed` or `cancelled` status. |
 | server to client | `error` | Reports invalid or unsupported client events before a policy/error close. |
 
 Version 1 accepts JSON text WebSocket messages and base64-encoded mono,
@@ -1596,8 +1601,16 @@ existing mic control commits the socket when recording stops. If either truth
 is absent, chat retains the batch `MediaRecorder` plus
 `POST /v1/audio/transcriptions` path.
 
+When `response` is configured, the API node that owns the WebSocket retains the
+bounded text-only conversation history for that socket, routes each final
+transcript through the selected mounted chat model, and optionally opens a
+normal `tts@1.0.0` Fabric provider stream for the visible final answer. Explicit
+`response.cancel`, a new non-VAD audio turn, or VAD speech detection cancels the
+active model/TTS command before the replacement turn proceeds. Media bytes are
+not added to conversation history or State.
+
 The edge does not implement noise reduction, G.711, ephemeral session-token
-creation, response generation, or full-duplex speech-to-speech.
+creation, client-created conversation items, or tool execution.
 Provider capacity failures close with retryable WebSocket code `1013`; client
 protocol/policy violations use `1003`, `1008`, or `1009`; internal provider
 failures use `1011`. Disconnecting before a terminal event cancels the provider
