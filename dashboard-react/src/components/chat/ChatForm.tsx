@@ -1140,6 +1140,7 @@ export function ChatForm({
                 type="button"
                 disabled={isStartingRecording || isRecording || isTranscribing}
                 $active={realtimeVoiceEnabled}
+                aria-pressed={realtimeVoiceEnabled}
                 onClick={() => onRealtimeVoiceEnabledChange?.(!realtimeVoiceEnabled)}
               >
                 {t('chat.form.realtime', 'Realtime')}
@@ -1150,6 +1151,7 @@ export function ChatForm({
                 type="button"
                 disabled={isStartingRecording || isRecording || isTranscribing}
                 $active={autoSubmitVoice}
+                aria-pressed={autoSubmitVoice}
                 onClick={() => onAutoSubmitVoiceChange?.(!autoSubmitVoice)}
               >
                 {t('chat.form.autoSubmit', 'Auto-send')}
@@ -1187,6 +1189,7 @@ export function ChatForm({
               type="button"
               disabled={!speechReady}
               $active={autoSpeakAssistant}
+              aria-pressed={autoSpeakAssistant}
               onClick={() => onAutoSpeakAssistantChange?.(!autoSpeakAssistant)}
             >
               {t('chat.form.autoSpeak', 'Auto')}

@@ -343,6 +343,49 @@ describe('RealtimeConversationSocket', () => {
     expect(transcripts).toEqual(['still connected']);
   });
 
+  it('rejects connection immediately when the server returns an error', async () => {
+    const socket = new FakeWebSocket();
+    const errors: Error[] = [];
+    const client = new RealtimeConversationSocket({
+      transcriptionModelId: 'org/stt',
+      location: { protocol: 'https:', host: 'skulk.example' },
+      socketFactory: () => socket as unknown as WebSocket,
+      onError: (error) => errors.push(error),
+    });
+
+    const connected = client.connect();
+    socket.serverEvent({
+      type: 'error',
+      error: { code: 'provider_error', message: 'provider admission failed' },
+    });
+
+    await expect(connected).rejects.toThrow('provider admission failed');
+    expect(errors.map((error) => error.message)).toEqual(['provider admission failed']);
+    expect(socket.closeCode).toBe(1011);
+  });
+
+  it('ignores server events after the conversation is closed', async () => {
+    const socket = new FakeWebSocket();
+    const transcripts: string[] = [];
+    const client = new RealtimeConversationSocket({
+      transcriptionModelId: 'org/stt',
+      location: { protocol: 'https:', host: 'skulk.example' },
+      socketFactory: () => socket as unknown as WebSocket,
+      onTranscript: (text) => transcripts.push(text),
+    });
+
+    const connected = client.connect();
+    socket.serverEvent({ type: 'session.created' });
+    await connected;
+    client.close();
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      transcript: 'late transcript',
+    });
+
+    expect(transcripts).toEqual([]);
+  });
+
   it('drops a partial microphone frame at a server VAD turn boundary', async () => {
     const socket = new FakeWebSocket();
     const client = new RealtimeConversationSocket({
