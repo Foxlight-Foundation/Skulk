@@ -342,4 +342,32 @@ describe('RealtimeConversationSocket', () => {
     expect(errors).toEqual([]);
     expect(transcripts).toEqual(['still connected']);
   });
+
+  it('drops a partial microphone frame at a server VAD turn boundary', async () => {
+    const socket = new FakeWebSocket();
+    const client = new RealtimeConversationSocket({
+      transcriptionModelId: 'org/stt',
+      location: { protocol: 'https:', host: 'skulk.example' },
+      socketFactory: () => socket as unknown as WebSocket,
+    });
+
+    const connected = client.connect();
+    socket.serverEvent({ type: 'session.created' });
+    await connected;
+    client.append(new Float32Array(1_000).fill(1), 24_000);
+    socket.serverEvent({ type: 'input_audio_buffer.speech_stopped' });
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      transcript: 'first turn',
+    });
+    client.append(new Float32Array(2_401), 24_000);
+
+    const append = socket.sent
+      .map((message) => JSON.parse(message))
+      .find((message) => message.type === 'input_audio_buffer.append');
+    expect(append).toBeDefined();
+    expect(Array.from(atob(append.audio), (char) => char.charCodeAt(0))).toEqual(
+      new Array(4_800).fill(0),
+    );
+  });
 });

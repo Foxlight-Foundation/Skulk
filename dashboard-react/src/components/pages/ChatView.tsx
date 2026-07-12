@@ -851,6 +851,10 @@ export function ChatView({
     setIsAutoSpeaking(false);
   }, []);
 
+  useEffect(() => {
+    if (!autoSpeakAssistant) stopSpeechPlayback();
+  }, [autoSpeakAssistant, stopSpeechPlayback]);
+
   const playSpeechSegment = useCallback(async (
     text: string,
     messageId: string | null,
@@ -1499,7 +1503,7 @@ export function ChatView({
     };
     addMessage(assistantMessage);
     const queue = speechSentenceQueueRef.current;
-    if (queue && realtimeSpeechTailRef.current.trim()) {
+    if (autoSpeakAssistant && queue && realtimeSpeechTailRef.current.trim()) {
       setIsAutoSpeaking(true);
       queue.enqueue([realtimeSpeechTailRef.current.trim()]);
     } else if (autoSpeakAssistant && selectedSpeechModelId && !queue) {

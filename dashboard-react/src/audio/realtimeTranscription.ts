@@ -499,6 +499,9 @@ export class RealtimeConversationSocket {
     }
     if (payload.type === 'input_audio_buffer.speech_stopped') {
       this.acceptingAudio = false;
+      this.pendingSamples.length = 0;
+      this.resampler = null;
+      this.inputSampleRate = null;
       this.options.onSpeechStopped?.();
       return;
     }
