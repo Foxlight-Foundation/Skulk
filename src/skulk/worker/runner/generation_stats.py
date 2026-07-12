@@ -27,6 +27,7 @@ from __future__ import annotations
 import resource
 import sys
 import time
+from pathlib import Path
 from typing import Callable, cast, final
 
 from skulk.api.types.api import GenerationStats
@@ -38,12 +39,46 @@ def process_peak_memory() -> Memory:
 
     ``ru_maxrss`` is reported in bytes on macOS and kilobytes on Linux; the
     llama.cpp engines run on both (CPU on macOS in tests, GPU on Linux in
-    production), so normalize here.
+    production), so normalize here. Correct for the in-process ``llama_cpp``
+    engine only; the served ``llama_server`` proxy must measure its child
+    instead (:func:`subprocess_peak_memory`), because the model and KV cache
+    live there, not in the proxy.
     """
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     if sys.platform != "darwin":
         peak *= 1024
     return Memory.from_bytes(peak)
+
+
+def parse_vm_hwm(status_text: str) -> Memory | None:
+    """Extract the ``VmHWM`` (peak RSS) line from a ``/proc/<pid>/status`` body.
+
+    Split out from :func:`subprocess_peak_memory` so the parse is testable
+    off-Linux. Returns ``None`` when the field is absent or malformed.
+    """
+    for line in status_text.splitlines():
+        if line.startswith("VmHWM:"):
+            parts = line.split()
+            if len(parts) >= 2 and parts[1].isdigit():
+                return Memory.from_bytes(int(parts[1]) * 1024)
+            return None
+    return None
+
+
+def subprocess_peak_memory(pid: int) -> Memory | None:
+    """Peak RSS of another process via ``/proc/<pid>/status`` (Linux only).
+
+    The served ``llama_server`` engine holds its weights and KV cache in an
+    external subprocess, so the proxy's own RSS would misattribute memory in
+    telemetry (PR #536 review). Returns ``None`` off-Linux or when the proc
+    entry is unreadable (process exited); callers report unmeasured (zero)
+    rather than a misleading proxy figure.
+    """
+    try:
+        status_text = Path(f"/proc/{pid}/status").read_text()
+    except OSError:
+        return None
+    return parse_vm_hwm(status_text)
 
 
 @final

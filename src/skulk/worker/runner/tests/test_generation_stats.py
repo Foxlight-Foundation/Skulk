@@ -9,8 +9,10 @@ runner wiring is exercised live on a GPU node.
 from skulk.worker.runner.generation_stats import (
     StreamStatsClock,
     blocking_call_stats,
+    parse_vm_hwm,
     process_peak_memory,
     stats_from_llama_server_timings,
+    subprocess_peak_memory,
 )
 
 
@@ -110,3 +112,21 @@ def test_blocking_call_stats_rejects_missing_or_non_dict_usage() -> None:
 def test_process_peak_memory_reports_a_positive_reading() -> None:
     # The exact value is process-dependent; it just must be a real measurement.
     assert process_peak_memory().in_bytes > 0
+
+
+def test_parse_vm_hwm_reads_peak_rss_in_kilobytes() -> None:
+    status = "Name:\tllama-server\nVmPeak:\t  999 kB\nVmHWM:\t  204800 kB\n"
+    peak = parse_vm_hwm(status)
+    assert peak is not None
+    assert peak.in_bytes == 204800 * 1024
+
+
+def test_parse_vm_hwm_absent_or_malformed_is_none() -> None:
+    assert parse_vm_hwm("Name:\tx\n") is None
+    assert parse_vm_hwm("VmHWM:\tnot-a-number kB\n") is None
+
+
+def test_subprocess_peak_memory_unreadable_proc_is_none() -> None:
+    # PID -1 never has a /proc entry (and macOS has no /proc at all); the
+    # served runner then reports zero rather than its own misleading RSS.
+    assert subprocess_peak_memory(-1) is None

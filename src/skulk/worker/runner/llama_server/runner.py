@@ -51,6 +51,7 @@ from skulk.shared.types.events import (
     TaskAcknowledged,
     TaskStatusUpdated,
 )
+from skulk.shared.types.memory import Memory
 from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
     LoadModel,
@@ -77,6 +78,7 @@ from skulk.worker.runner.generation_stats import (
     StreamStatsClock,
     blocking_call_stats,
     stats_from_llama_server_timings,
+    subprocess_peak_memory,
 )
 from skulk.worker.runner.llama_cpp.runner import (
     generation_kwargs,
@@ -818,11 +820,16 @@ class Runner:
         def final_stats() -> GenerationStats:
             # Prefer the engine's own measurements; fall back to proxy-side
             # wall clocks (prompt count unknowable from here, reported as 0).
+            # Peak memory always comes from the server child, never this proxy.
             if last_timings is not None:
                 from_timings = stats_from_llama_server_timings(last_timings)
                 if from_timings is not None:
-                    return from_timings
-            return clock.stats(prompt_tokens=0, generation_tokens=clock.pieces)
+                    return from_timings.model_copy(
+                        update={"peak_memory_usage": self._server_peak_memory()}
+                    )
+            return clock.stats(
+                prompt_tokens=0, generation_tokens=clock.pieces
+            ).model_copy(update={"peak_memory_usage": self._server_peak_memory()})
 
         emitted_finish = False
         # Gemma 4 emits its reasoning as literal <|channel> markers in content;
@@ -932,6 +939,11 @@ class Runner:
             if isinstance(raw_timings, dict)
             else None
         ) or blocking_call_stats(result.get("usage"), request_seconds)
+        if stats is not None:
+            # The model lives in the server child; never report proxy RSS.
+            stats = stats.model_copy(
+                update={"peak_memory_usage": self._server_peak_memory()}
+            )
         tool_calls = tool_calls_from_message(message)
         if tool_calls:
             self.event_sender.send(
@@ -963,6 +975,19 @@ class Runner:
                 self._send_token(command_id, model_id, content)
         finish = map_finish_reason(choice.get("finish_reason")) or "stop"
         self._send_token(command_id, model_id, "", finish_reason=finish, stats=stats)
+
+    def _server_peak_memory(self) -> Memory:
+        """Peak RSS of the llama-server child, or zero when unmeasurable.
+
+        The weights and KV cache live in the external server process, so the
+        proxy's own RSS would misattribute memory in telemetry (#536 review).
+        Zero means "unmeasured" (non-Linux, or the child already exited);
+        a fabricated proxy-side figure would be worse than none.
+        """
+        proc = self.server_proc
+        if proc is None:
+            return Memory.from_bytes(0)
+        return subprocess_peak_memory(proc.pid) or Memory.from_bytes(0)
 
     def _send_token(
         self,
