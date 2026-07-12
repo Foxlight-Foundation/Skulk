@@ -216,7 +216,7 @@ def _stt_generate_kwargs(
             "temperature": params.temperature,
             "sample_len": params.max_tokens,
             "chunk_duration": params.chunk_duration,
-            "stream": False,
+            "stream": params.stream,
             "return_timestamps": return_timestamps,
             "word_timestamps": word_timestamps,
             "verbose": True,
@@ -237,7 +237,7 @@ def _stt_generate_kwargs(
         "max_tokens": params.max_tokens,
         "chunk_duration": params.chunk_duration,
         "frame_threshold": params.frame_threshold,
-        "stream": False,
+        "stream": params.stream,
         "context": params.context,
         "prefill_step_size": params.prefill_step_size,
         "text": params.text or params.prompt,
@@ -925,7 +925,15 @@ class Runner:
             with bind_trace_session(task.task_id), trace(
                 "stt_generate", self.shard_metadata.device_rank, "speech"
             ):
-                text, language, segments = self._run_stt(task)
+                if task.task_params.stream:
+                    self._stream_stt(task)
+                    text = ""
+                    language = None
+                    segments: list[
+                        dict[str, str | int | float | bool | None]
+                    ] = []
+                else:
+                    text, language, segments = self._run_stt(task)
             if self._is_cancelled(task.task_id):
                 return
             if task.trace_enabled:
@@ -1167,6 +1175,56 @@ class Runner:
                     os.unlink(tmp_path)
                 except OSError:
                     logger.warning(f"Failed to remove temporary speech upload {tmp_path}")
+
+    def _stream_stt(self, task: AudioTranscription) -> None:
+        """Emit true model-provided deltas for one uploaded audio request."""
+
+        assert self.model is not None
+        params = task.task_params
+        if params.audio_data is None:
+            raise ValueError("No audio payload received")
+        try:
+            audio_bytes = base64.b64decode(
+                params.audio_data.encode("ascii"), validate=True
+            )
+        except binascii.Error as exc:
+            raise ValueError("Invalid base64 audio payload") from exc
+        if hashlib.sha256(audio_bytes).hexdigest() != params.audio_sha256:
+            raise ValueError("Audio payload checksum mismatch")
+
+        tmp_path: str | None = None
+        try:
+            suffix = _audio_upload_suffix(params.filename, params.content_type)
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_file:
+                tmp_file.write(audio_bytes)
+                tmp_path = tmp_file.name
+            generate = self.model.generate
+            generated = generate(
+                tmp_path,
+                **_filter_kwargs(generate, _stt_generate_kwargs(generate, params)),
+            )
+            if isinstance(generated, (str, bytes, dict)) or not isinstance(
+                generated, Iterable
+            ):
+                raise RuntimeError(
+                    "mounted STT model did not return a streaming transcript iterator"
+                )
+            for result in generated:
+                if self._is_cancelled(task.task_id):
+                    return
+                delta = _transcription_text(result)
+                if not delta:
+                    continue
+                _emit_partial_transcription_chunk(
+                    event_sender=self.event_sender,
+                    command_id=task.command_id,
+                    model_id=self.shard_metadata.model_card.model_id,
+                    text=delta,
+                )
+        finally:
+            if tmp_path is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_path)
 
     def _iter_tts_results(self, task: SpeechSynthesis, *, stream: bool) -> Iterable[Any]:
         """Call the TTS model and normalize its result into an iterable."""
