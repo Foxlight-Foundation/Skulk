@@ -28,10 +28,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # llama-server + ggml-rpc-server: the served-backend engine binaries (native
-# MTP via --spec-type, RPC pooling). Mirrors install-deps.sh's cmake flags.
-RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp /opt/llama.cpp \
+# MTP via --spec-type, RPC pooling). Mirrors install-deps.sh's cmake flags,
+# plus two portability requirements of a prebuilt image:
+# - LLAMA_CPP_REF pins the upstream revision so re-running the workflow for
+#   the same Skulk commit republishes identical engine behavior; bump
+#   deliberately.
+# - GGML_NATIVE=OFF: default builds tune for the connected (builder) CPU, and
+#   AVX-512/AMX code from a GitHub runner would die with illegal-instruction
+#   on a rented pod with a different CPU.
+ARG LLAMA_CPP_REF=b9969
+RUN git clone --branch "${LLAMA_CPP_REF}" --depth 1 \
+         https://github.com/ggml-org/llama.cpp /opt/llama.cpp \
     && cmake -S /opt/llama.cpp -B /opt/llama.cpp/build \
-         -DGGML_CUDA=ON -DGGML_RPC=ON -DCMAKE_BUILD_TYPE=Release \
+         -DGGML_CUDA=ON -DGGML_RPC=ON -DGGML_NATIVE=OFF \
+         -DCMAKE_BUILD_TYPE=Release \
          -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
     && cmake --build /opt/llama.cpp/build \
          --target llama-server ggml-rpc-server -j"$(nproc)"
@@ -59,7 +69,7 @@ RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh \
     && test -n "${PYTHON_VERSION}" \
     && echo "building llama-cpp-python==${LLAMA_CPP_PYTHON_VERSION} for python ${PYTHON_VERSION}" \
     && /root/.local/bin/uv venv --seed --python "${PYTHON_VERSION}" /opt/wheelbuild \
-    && CMAKE_ARGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}" \
+    && CMAKE_ARGS="-DGGML_CUDA=ON -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}" \
       /opt/wheelbuild/bin/python -m pip wheel --no-cache-dir --no-deps \
         --no-binary llama-cpp-python --wheel-dir /opt/wheels \
         "llama-cpp-python==${LLAMA_CPP_PYTHON_VERSION}"

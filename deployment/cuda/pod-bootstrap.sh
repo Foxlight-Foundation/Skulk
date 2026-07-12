@@ -71,20 +71,25 @@ fi
 
 # ---- sync and swap ----------------------------------------------------------
 # --locked: the sync must install the ref's committed lock verbatim, never
-# re-resolve it on the pod. --extra llama-cpp: llama-cpp-python lives in an
-# optional extra, so a plain sync would install neither it nor its locked
-# dependencies (diskcache and friends), and the --no-deps CUDA wheel swap
-# below would leave the import broken.
-log "uv sync --locked --extra llama-cpp (builds the Rust bindings)"
-uv sync --locked --extra llama-cpp
+# re-resolve it on the pod. The llama-cpp extra is NOT synced: its
+# llama-cpp-python entry is sdist-only, so syncing it would compile a CPU
+# build on the pod - the exact rental-time cost this image exists to avoid.
+# Instead the extra's locked DEPENDENCIES (diskcache and friends) install
+# from an export below, and the prebaked CUDA wheel supplies the package.
+log "uv sync --locked (builds the Rust bindings)"
+uv sync --locked
 
-# AFTER uv sync: a plain sync restores the CPU-only PyPI llama-cpp-python
-# wheel, so the CUDA wheel must be (re)installed last, exactly like
-# install-deps.sh --with-skulk-env does.
+log "installing the llama-cpp extra's locked dependencies (without the sdist)"
+uv export --frozen --extra llama-cpp --no-hashes --no-emit-project --no-emit-workspace \
+  --no-emit-package llama-cpp-python -o /tmp/llama-extra-deps.txt
+uv pip install --requirement /tmp/llama-extra-deps.txt
+
 log "installing prebaked CUDA llama-cpp-python wheel"
 # --no-deps: uv sync already installed llama-cpp-python's dependencies at
 # their locked versions; this step only swaps the wheel artifact and must
 # not let pip drift the rest of the environment away from uv.lock.
+# --force-reinstall keeps re-runs honest; --no-deps because the locked
+# dependency set was installed above and must not drift.
 uv pip install --force-reinstall --no-deps "${WHEELS[0]}"
 # Optional NVML telemetry binding: best-effort, because a transient PyPI
 # failure must not abort a session Skulk can run without it.
