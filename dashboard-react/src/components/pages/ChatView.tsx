@@ -1443,14 +1443,14 @@ export function ChatView({
   }, [activeConversationId, expandedThinkingMap, setExpandedThinking]);
 
   const handleRealtimeTranscript = useCallback((text: string, final: boolean) => {
-    if (!final || !autoSubmitVoice || !text.trim()) return;
+    if (!final || !autoSubmitVoice || !canSendMessages || !text.trim()) return;
     addMessage({
       id: uuidv4(),
       role: 'user',
       content: text.trim(),
       timestamp: Date.now(),
     });
-  }, [addMessage, autoSubmitVoice]);
+  }, [addMessage, autoSubmitVoice, canSendMessages]);
 
   const handleRealtimeAssistantText = useCallback((text: string, final: boolean) => {
     const visibleText = text.trimStart();

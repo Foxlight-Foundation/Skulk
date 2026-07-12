@@ -8,6 +8,7 @@ type WebSocketFactory = (url: string) => WebSocket;
 export type TranscriptionCaptureMode = 'realtime' | 'batch' | null;
 
 interface RealtimeServerError {
+  code?: unknown;
   message?: unknown;
 }
 
@@ -546,6 +547,7 @@ export class RealtimeConversationSocket {
       return;
     }
     if (payload.type === 'error') {
+      if (payload.error?.code === 'turn_in_progress') return;
       const message = typeof payload.error?.message === 'string'
         ? payload.error.message
         : 'Realtime conversation failed.';
