@@ -5,6 +5,7 @@ import {
   completePcm16Samples,
   canUseStreamingSpeechPlayback,
   SpeechSentenceQueue,
+  resyncVisibleSpeech,
   splitPlaybackSamples,
   splitCompleteSpeechSentences,
   validatePcmResponseHeaders,
@@ -84,6 +85,22 @@ describe('splitCompleteSpeechSentences', () => {
     expect(splitCompleteSpeechSentences('Version 1.2 is ready')).toEqual({
       sentences: [],
       remainder: 'Version 1.2 is ready',
+    });
+  });
+});
+
+describe('resyncVisibleSpeech', () => {
+  it('reprocesses answer text revealed when a split reasoning marker closes', () => {
+    expect(resyncVisibleSpeech('</think', '</think', 'Hello. Next')).toEqual({
+      sentences: ['Hello.'],
+      remainder: 'Next',
+    });
+  });
+
+  it('does not replay a complete sentence that was processed before a rewrite', () => {
+    expect(resyncVisibleSpeech('Done. </think', '</think', 'Done. Answer. Tail')).toEqual({
+      sentences: ['Answer.'],
+      remainder: 'Tail',
     });
   });
 });

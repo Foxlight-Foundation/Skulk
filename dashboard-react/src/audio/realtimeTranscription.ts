@@ -270,6 +270,7 @@ export class RealtimeTranscriptionSocket {
       this.resultResolve?.(payload.transcript);
       this.resultResolve = null;
       this.resultReject = null;
+      this.socket?.close(1000, 'client completed transcription');
       return;
     }
     if (

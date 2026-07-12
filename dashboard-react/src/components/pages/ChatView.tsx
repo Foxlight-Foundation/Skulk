@@ -18,6 +18,7 @@ import { store } from '../../store';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
   canUseStreamingSpeechPlayback,
+  resyncVisibleSpeech,
   SpeechSentenceQueue,
   splitCompleteSpeechSentences,
   StreamingSpeechPlayback,
@@ -1192,8 +1193,18 @@ export function ChatView({
                     sentenceQueue.enqueue(split.sentences);
                   }
                 } else if (sentenceQueue) {
+                  const split = resyncVisibleSpeech(
+                    speechVisibleContent,
+                    speechTail,
+                    separated.content,
+                  );
                   speechVisibleContent = separated.content;
-                  speechTail = '';
+                  speechTail = split.remainder;
+                  if (requestTools) {
+                    roundSpeechSentences.push(...split.sentences);
+                  } else {
+                    sentenceQueue.enqueue(split.sentences);
+                  }
                 }
               }
 
