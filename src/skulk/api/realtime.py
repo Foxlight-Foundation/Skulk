@@ -2,7 +2,7 @@
 
 import base64
 import binascii
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from typing import Annotated, Literal, Self, cast, final
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -909,6 +909,7 @@ class RealtimeTranscriptionBridge:
                     self._finish_turn(session, item_id)
                     response_config = self._response_config
                     if response_config is not None:
+                        self._cancel_assistant_response()
                         task_group.start_soon(
                             self._run_assistant_response,
                             transcript,
@@ -1111,36 +1112,42 @@ class RealtimeTranscriptionBridge:
             )
         audio_bytes = 0
         terminal = False
-        async for frame in session.frames:
-            if frame.kind == "started":
-                continue
-            if frame.kind == "completed":
-                terminal = True
-                break
-            if (
-                frame.kind != "chunk"
-                or not isinstance(frame.media, InlineMediaAttachment)
-            ):
-                error = frame.error
-                raise RuntimeError(
-                    error.message if error is not None else "TTS stream failed"
+        frames = session.frames
+        try:
+            async for frame in frames:
+                if frame.kind == "started":
+                    continue
+                if frame.kind == "completed":
+                    terminal = True
+                    break
+                if (
+                    frame.kind != "chunk"
+                    or not isinstance(frame.media, InlineMediaAttachment)
+                ):
+                    error = frame.error
+                    raise RuntimeError(
+                        error.message if error is not None else "TTS stream failed"
+                    )
+                audio_bytes += len(frame.media.data)
+                if audio_bytes > _MAX_RESPONSE_AUDIO_BYTES:
+                    raise RuntimeError("TTS response exceeds the bounded audio limit")
+                payload = frame.payload or {}
+                await self._send_json(
+                    {
+                        "event_id": self._event_id(),
+                        "type": "response.audio.delta",
+                        "response_id": response_id,
+                        "item_id": item_id,
+                        "output_index": 0,
+                        "content_index": 1,
+                        "delta": base64.b64encode(frame.media.data).decode("ascii"),
+                        "format": payload.get("format", "mp3"),
+                    }
                 )
-            audio_bytes += len(frame.media.data)
-            if audio_bytes > _MAX_RESPONSE_AUDIO_BYTES:
-                raise RuntimeError("TTS response exceeds the bounded audio limit")
-            payload = frame.payload or {}
-            await self._send_json(
-                {
-                    "event_id": self._event_id(),
-                    "type": "response.audio.delta",
-                    "response_id": response_id,
-                    "item_id": item_id,
-                    "output_index": 0,
-                    "content_index": 1,
-                    "delta": base64.b64encode(frame.media.data).decode("ascii"),
-                    "format": payload.get("format", "mp3"),
-                }
-            )
+        finally:
+            if isinstance(frames, AsyncGenerator):
+                with anyio.CancelScope(shield=True):
+                    await frames.aclose()
         if not terminal:
             raise RuntimeError("TTS provider ended without a terminal frame")
         if audio_bytes == 0:
