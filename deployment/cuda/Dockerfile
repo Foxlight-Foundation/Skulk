@@ -43,13 +43,20 @@ RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp /opt/llama.cpp \
 # Ubuntu 22.04's system python is 3.10, and a cp310 wheel would be rejected by
 # the 3.13 environment pod-bootstrap.sh syncs (PR #538 review, P1).
 # --no-binary pins the CUDA source build even if PyPI ever starts shipping
-# prebuilt (CPU-only) wheels for this package.
+# prebuilt (CPU-only) wheels for this package. The version comes from the
+# repo's uv.lock so pod-bootstrap.sh reinstalls exactly the pinned release
+# with CUDA enabled, never a drifted newer one (PR #538 review round 3).
 ARG PYTHON_VERSION=3.13
+COPY uv.lock /tmp/uv.lock
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && LLAMA_CPP_PYTHON_VERSION="$(grep -A1 'name = "llama-cpp-python"' /tmp/uv.lock | sed -n 's/^version = "\(.*\)"$/\1/p')" \
+    && test -n "${LLAMA_CPP_PYTHON_VERSION}" \
+    && echo "building llama-cpp-python==${LLAMA_CPP_PYTHON_VERSION}" \
     && /root/.local/bin/uv venv --seed --python "${PYTHON_VERSION}" /opt/wheelbuild \
     && CMAKE_ARGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}" \
       /opt/wheelbuild/bin/python -m pip wheel --no-cache-dir \
-        --no-binary llama-cpp-python --wheel-dir /opt/wheels llama-cpp-python
+        --no-binary llama-cpp-python --wheel-dir /opt/wheels \
+        "llama-cpp-python==${LLAMA_CPP_PYTHON_VERSION}"
 
 # ---- runtime stage: everything a session needs except Skulk itself ----------
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
@@ -73,8 +80,11 @@ ENV PATH="/root/.cargo/bin:/root/.local/bin:/usr/local/cuda/bin:${PATH}"
 # uv: the canonical Skulk runtime path.
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
-COPY --from=build /opt/llama.cpp/build/bin/llama-server /opt/llama.cpp/build/bin/llama-server
-COPY --from=build /opt/llama.cpp/build/bin/ggml-rpc-server /opt/llama.cpp/build/bin/ggml-rpc-server
+# The whole bin directory, not just the two executables: upstream llama.cpp
+# builds shared on Linux (BUILD_SHARED_LIBS defaults on), so llama-server and
+# ggml-rpc-server need their sibling .so files or they die at loader time
+# (PR #538 review round 3, P1).
+COPY --from=build /opt/llama.cpp/build/bin /opt/llama.cpp/build/bin
 COPY --from=build /opt/wheels /opt/wheels
 
 COPY deployment/cuda/pod-bootstrap.sh /opt/skulk/pod-bootstrap.sh

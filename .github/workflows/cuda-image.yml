@@ -13,6 +13,11 @@ on:
       - 'deployment/cuda/pod-start.sh'
       - 'deployment/cuda/pod-bootstrap.sh'
       - '.github/workflows/cuda-image.yml'
+      # Image inputs that live outside deployment/: the prebaked wheel is
+      # version-pinned from uv.lock and built for .python-version, so a bump
+      # to either must republish the image or bootstrap installs a stale tag.
+      - 'uv.lock'
+      - '.python-version'
 
 jobs:
   build-and-push:
