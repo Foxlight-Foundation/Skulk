@@ -329,6 +329,7 @@ class RealtimeTranscriptionBridge:
         self._vad_detector: VoiceActivityDetector | None = None
         self._vad_resampler: StreamingPcm16Resampler | None = None
         self._vad_pcm = bytearray()
+        self._vad_source_pcm = bytearray()
         self._response_config: RealtimeResponseConfig | None = None
         self._conversation: list[ConversationMessage] = []
         self._response_cancel_scope: anyio.CancelScope | None = None
@@ -542,17 +543,6 @@ class RealtimeTranscriptionBridge:
                         client_event_id=event.event_id,
                     )
                     continue
-                if (
-                    self._response_cancel_scope is not None
-                    and self._vad_detector is None
-                ):
-                    self._cancel_assistant_response()
-                session = self._current_session
-                if session is None:
-                    session = await self._open_next_turn(task_group)
-                    if session is None:
-                        return
-                assert session.input is not None
                 try:
                     audio = base64.b64decode(event.audio, validate=True)
                 except (binascii.Error, ValueError):
@@ -579,9 +569,7 @@ class RealtimeTranscriptionBridge:
                     )
                     await self._close(1009)
                     return
-                self._session_audio_bytes += len(audio)
-                self._turn_audio_bytes += len(audio)
-                if self._session_audio_bytes > _MAX_SESSION_AUDIO_BYTES:
+                if self._session_audio_bytes + len(audio) > _MAX_SESSION_AUDIO_BYTES:
                     await self._send_error(
                         code="audio_session_too_large",
                         message=(
@@ -592,46 +580,43 @@ class RealtimeTranscriptionBridge:
                     )
                     await self._close(1009)
                     return
-                segment_size = (
-                    _VAD_SOURCE_FRAME_BYTES
-                    if self._vad_detector is not None
-                    else len(audio)
-                )
-                for offset in range(0, len(audio), segment_size):
-                    segment = audio[offset : offset + segment_size]
-                    try:
-                        await session.input.send_chunk(
-                            payload={
-                                "format": "pcm_s16le",
-                                "sample_rate": _PCM_SAMPLE_RATE,
-                                "channels": 1,
-                            },
-                            media=InlineMediaAttachment(
-                                data=segment,
-                                media_type="audio/pcm",
-                                codec="pcm_s16le",
-                                sample_rate=_PCM_SAMPLE_RATE,
-                                channels=1,
-                            ),
-                        )
-                    except (
-                        TimeoutError,
-                        anyio.BrokenResourceError,
-                        anyio.ClosedResourceError,
-                        RuntimeError,
-                    ) as exc:
-                        await self._send_error(
-                            code="input_transport_error",
-                            message=f"provider input transport rejected audio: {exc}",
-                            client_event_id=event.event_id,
-                        )
-                        await self._close(1011)
+                if (
+                    self._response_cancel_scope is not None
+                    and self._vad_detector is None
+                ):
+                    self._cancel_assistant_response()
+                session = self._current_session
+                if session is None:
+                    session = await self._open_next_turn(task_group)
+                    if session is None:
+                        return
+                assert session.input is not None
+                self._session_audio_bytes += len(audio)
+                self._turn_audio_bytes += len(audio)
+                if self._vad_detector is None:
+                    if not await self._forward_audio_segment(
+                        session,
+                        audio,
+                        client_event_id=event.event_id,
+                    ):
+                        return
+                    continue
+                self._vad_source_pcm.extend(audio)
+                while len(self._vad_source_pcm) >= _VAD_SOURCE_FRAME_BYTES:
+                    segment = bytes(self._vad_source_pcm[:_VAD_SOURCE_FRAME_BYTES])
+                    del self._vad_source_pcm[:_VAD_SOURCE_FRAME_BYTES]
+                    if not await self._forward_audio_segment(
+                        session,
+                        segment,
+                        client_event_id=event.event_id,
+                    ):
                         return
                     if await self._process_vad_audio(
                         session,
                         segment,
                         client_event_id=event.event_id,
                     ):
+                        self._vad_source_pcm.clear()
                         if not self._committed:
                             return
                         break
@@ -661,6 +646,11 @@ class RealtimeTranscriptionBridge:
                     client_event_id=event.event_id,
                 )
                 await self._close(1011)
+                return
+            if not await self._flush_vad_source_audio(
+                session,
+                client_event_id=event.event_id,
+            ):
                 return
             await self._finish_vad_on_manual_commit()
             if not await self._commit_input(
@@ -738,6 +728,71 @@ class RealtimeTranscriptionBridge:
         )
         return session
 
+    async def _forward_audio_segment(
+        self,
+        session: CapabilityStreamSession,
+        audio: bytes,
+        *,
+        client_event_id: str | None,
+    ) -> bool:
+        """Forward one validated source-rate PCM segment to the STT provider."""
+
+        assert session.input is not None
+        try:
+            await session.input.send_chunk(
+                payload={
+                    "format": "pcm_s16le",
+                    "sample_rate": _PCM_SAMPLE_RATE,
+                    "channels": 1,
+                },
+                media=InlineMediaAttachment(
+                    data=audio,
+                    media_type="audio/pcm",
+                    codec="pcm_s16le",
+                    sample_rate=_PCM_SAMPLE_RATE,
+                    channels=1,
+                ),
+            )
+        except (
+            TimeoutError,
+            anyio.BrokenResourceError,
+            anyio.ClosedResourceError,
+            RuntimeError,
+        ) as exc:
+            await self._send_error(
+                code="input_transport_error",
+                message=f"provider input transport rejected audio: {exc}",
+                client_event_id=client_event_id,
+            )
+            await self._close(1011)
+            return False
+        return True
+
+    async def _flush_vad_source_audio(
+        self,
+        session: CapabilityStreamSession,
+        *,
+        client_event_id: str | None,
+    ) -> bool:
+        """Forward a manual commit's final partial VAD source frame."""
+
+        if self._vad_detector is None or not self._vad_source_pcm:
+            return True
+        segment = bytes(self._vad_source_pcm)
+        self._vad_source_pcm.clear()
+        if not await self._forward_audio_segment(
+            session,
+            segment,
+            client_event_id=client_event_id,
+        ):
+            return False
+        await self._process_vad_audio(
+            session,
+            segment,
+            client_event_id=client_event_id,
+        )
+        return True
+
     def _configure_turn_detection(
         self,
         config: ServerVadConfig | None,
@@ -746,6 +801,7 @@ class RealtimeTranscriptionBridge:
 
         self._turn_detection = config
         self._vad_pcm.clear()
+        self._vad_source_pcm.clear()
         if config is None:
             self._vad_detector = None
             self._vad_resampler = None
