@@ -134,8 +134,8 @@ A model card's `placement.compatible_backends` selects which engine serves it
   `REALTIME_AUDIO` packets over Zenoh and is not advertised when Zenoh is
   unavailable. PCM never enters State or the event log. It advertises only with
   reachable ready capacity and a card declaring both streaming and realtime
-  support. `WS /v1/realtime` is a transcription-only,
-  multi-turn OpenAI-compatible adapter over this provider: base64 24 kHz
+  support. `WS /v1/realtime` is a multi-turn OpenAI-compatible adapter over
+  this provider: base64 24 kHz
   PCM16 at the API edge becomes raw Fabric media, and disconnect cancels the
   provider. Dashboard chat uses this path only when card truth and the local
   live provider tag agree, resampling AudioWorklet microphone frames to 24 kHz
@@ -148,7 +148,9 @@ A model card's `placement.compatible_backends` selects which engine serves it
   mode and `experiments.speech_translation`; TTS cards may expose static voices
   through the Skulk `/v1/audio/voices` extension. The realtime transcription
   WebSocket accepts bounded server VAD and serializes utterances as distinct
-  provider calls; response generation/full-duplex speech remains a later phase.
+  provider calls. Optional response configuration routes final transcripts
+  through a mounted chat model and mounted `tts@1.0.0` provider; explicit
+  cancellation and VAD barge-in cancel underlying model/TTS commands.
   Managed reference audio is accepted only as a
   bounded multipart upload for supporting TTS cards. Its bytes use the
   node-addressed `SPEECH_MEDIA` Zenoh data path, never State or the event log;

@@ -93,6 +93,8 @@ from skulk.api.node_health import compute_node_health
 from skulk.api.provider_diagnostics import ProviderObserver
 from skulk.api.realtime import (
     REALTIME_WEBSOCKET_MAX_MESSAGE_BYTES,
+    ConversationMessage,
+    RealtimeResponseConfig,
     RealtimeTranscriptionBridge,
 )
 from skulk.api.types import (
@@ -4611,6 +4613,18 @@ class API:
                     "unreachable",
                     f"provider input stream could not start: {exc}",
                 )
+        async def cancel_output() -> None:
+            if receive_state.cancellation_scheduled:
+                return
+            receive_state.cancel_provider = True
+            receive_state.cancellation_scheduled = True
+            try:
+                await self._cancel_remote_capability_stream(call)
+            except Exception as exc:
+                logger.opt(exception=exc).warning(
+                    "Best-effort provider stream cancellation failed"
+                )
+
         return CapabilityStreamSession(
             open_result=opened,
             frames=self._consume_capability_stream(
@@ -4619,6 +4633,7 @@ class API:
                 output_receiver,
             ),
             input=input_stream,
+            cancel_output=cancel_output,
         )
 
     async def _consume_capability_stream(
@@ -9846,6 +9861,124 @@ class API:
             timeout_seconds=MAX_CALL_TIMEOUT_SECONDS,
         )
 
+    async def _generate_realtime_assistant(
+        self,
+        model: str,
+        messages: tuple[ConversationMessage, ...],
+    ) -> AsyncIterator[str]:
+        """Stream visible assistant text for one realtime conversation turn."""
+
+        resolved_model = await self._resolve_and_validate_text_model(ModelId(model))
+        model_card = await self._get_running_model_card(resolved_model)
+        request = ChatCompletionRequest(
+            model=resolved_model,
+            messages=[
+                ChatCompletionMessage(role=role, content=content)
+                for role, content in messages
+            ],
+            stream=True,
+        )
+        task_params = await chat_request_to_text_generation(
+            request,
+            model_card=model_card,
+        )
+        if self._extensions is not None and self._extensions.has_chat_middleware:
+            task_params = await self._extensions.transform_chat_request(
+                self._extension_context,
+                task_params,
+            )
+        command = await self._send_text_generation_with_images(task_params)
+        chunk_stream = self._token_chunk_stream(command.command_id)
+        chunk_stream = tap_generation_stream(
+            self._field_telemetry,
+            str(task_params.model),
+            None,
+            chunk_stream,
+        )
+        if self._extensions is not None and self._extensions.has_chat_middleware:
+            chunk_stream = self._extensions.tap_chat_stream(
+                self._extension_context,
+                task_params,
+                chunk_stream,
+            )
+        async for chunk in chunk_stream:
+            if isinstance(chunk, PrefillProgressChunk):
+                continue
+            if isinstance(chunk, ErrorChunk):
+                raise RuntimeError(
+                    chunk.error_message or "assistant model generation failed"
+                )
+            if isinstance(chunk, ToolCallChunk):
+                raise RuntimeError(
+                    "realtime automatic responses do not support tool calls"
+                )
+            if not chunk.is_thinking and chunk.text:
+                yield chunk.text
+
+    async def _open_realtime_speech_session(
+        self,
+        model: str,
+        text: str,
+        voice: str | None,
+    ) -> CapabilityStreamSession:
+        """Open one mounted TTS provider stream for a realtime response."""
+
+        model_id, response_format = await self._validate_speech_synthesis_model(
+            ModelId(model),
+            AudioResponseFormat.Mp3,
+            stream=True,
+        )
+        request = await self._apply_default_speech_voice(
+            AudioSpeechRequest(
+                model=str(model_id),
+                input=text,
+                voice=voice,
+                response_format=response_format,
+                stream=True,
+            ),
+            model_id,
+        )
+        payload: dict[str, object] = {
+            "model": str(model_id),
+            "text": text,
+            "response_format": "mp3",
+        }
+        if request.voice is not None:
+            payload["voice"] = request.voice
+        return await self._stream_capability(
+            self.node_id,
+            TTS_CAPABILITY_DESCRIPTOR.id,
+            TTS_CAPABILITY_DESCRIPTOR.version,
+            descriptor_revision(TTS_CAPABILITY_DESCRIPTOR),
+            payload,
+            timeout_seconds=MAX_CALL_TIMEOUT_SECONDS,
+        )
+
+    async def _validate_realtime_response_config(
+        self,
+        config: RealtimeResponseConfig,
+    ) -> None:
+        """Validate mounted chat and TTS participants before accepting a session."""
+
+        await self._resolve_and_validate_text_model(ModelId(config.model))
+        if config.tts_model is None:
+            return
+        model_id, response_format = await self._validate_speech_synthesis_model(
+            ModelId(config.tts_model),
+            AudioResponseFormat.Mp3,
+            stream=True,
+        )
+        await self._apply_default_speech_voice(
+            AudioSpeechRequest(
+                model=str(model_id),
+                input="realtime participant readiness probe",
+                voice=config.voice,
+                response_format=response_format,
+                stream=True,
+            ),
+            model_id,
+        )
+
     async def realtime_transcription(
         self,
         websocket: WebSocket,
@@ -9866,6 +9999,9 @@ class API:
             websocket=websocket,
             model=model,
             open_session=self._open_realtime_transcription_session,
+            generate_assistant=self._generate_realtime_assistant,
+            open_speech_session=self._open_realtime_speech_session,
+            validate_response_config=self._validate_realtime_response_config,
         ).serve()
 
     async def audio_speech_http(self, http_request: Request) -> Response:

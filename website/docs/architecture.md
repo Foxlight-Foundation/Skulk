@@ -347,7 +347,7 @@ bounded local channel completes the worker-to-runner hop. PCM is never event
 sourced; partial plus final `TranscriptionChunk` output returns through DATA.
 Remote capacity is not advertised when Zenoh is unavailable. The provider is
 available only when the card declares both streaming and realtime support and
-eligible mounted capacity is ready and reachable. The transcription-only
+eligible mounted capacity is ready and reachable. The
 `WS /v1/realtime` compatibility edge adapts OpenAI-style base64 24 kHz PCM16
 append/commit events onto this same binary provider path, emits transcript
 delta/final events, enforces same-origin browsers and bounded messages, and
@@ -356,8 +356,11 @@ resamples input for WebRTC classification, emits start/stop events, and commits
 the utterance on silence or maximum duration. VAD-enabled appends are forwarded
 in classifier-sized source slices and stop at the detected boundary. The socket
 serializes multiple utterances as distinct provider calls with linked item IDs,
-per-turn VAD reset, and no overlapping provider ownership. It does not generate
-model responses or claim speech-to-speech orchestration. Every API
+per-turn VAD reset, and no overlapping STT provider ownership. Optional typed
+response configuration routes final transcripts through the selected mounted
+chat model and then through a normal mounted `tts@1.0.0` provider, emitting
+assistant text and MP3 audio events. Explicit cancellation and VAD barge-in
+cancel active model/TTS work. Every API
 also registers stable `vad@1.0.0` through `BuiltinVadProvider`. This reusable
 bidirectional provider frames mono PCM16 for WebRTC VAD and emits typed turn
 boundaries with bounded minimum-speech, hangover, preroll, and maximum-duration

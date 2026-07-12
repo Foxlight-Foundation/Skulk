@@ -10,6 +10,7 @@ from typing import cast
 
 import anyio
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from starlette.testclient import WebSocketTestSession
@@ -17,7 +18,12 @@ from starlette.websockets import WebSocketDisconnect
 
 from skulk.api import realtime as realtime_api
 from skulk.api.main import API
-from skulk.api.realtime import _MAX_TRANSCRIPT_TEXT_BYTES, ServerVadConfig
+from skulk.api.realtime import (
+    _MAX_TRANSCRIPT_TEXT_BYTES,
+    ConversationMessage,
+    RealtimeResponseConfig,
+    ServerVadConfig,
+)
 from skulk.extensions import (
     CapabilityResult,
     CapabilityStreamError,
@@ -146,6 +152,51 @@ def _install_waiting_session(
     api._open_realtime_transcription_session = open_session
 
 
+def _install_completed_session(api: API, *, transcript: str, call_id: str) -> None:
+    """Install an STT session that completes after its input is committed."""
+
+    async def open_session(model: str, sample_rate: int) -> CapabilityStreamSession:
+        del sample_rate
+        committed = anyio.Event()
+
+        async def send_input(frame: CapabilityStreamFrame) -> None:
+            if frame.kind == "completed":
+                committed.set()
+
+        input_stream = CapabilityStreamInput(
+            call_id=call_id,
+            deadline_at=anyio.current_time() + 10.0,
+            send_frame=send_input,
+        )
+        await input_stream.start()
+
+        async def frames() -> AsyncIterator[CapabilityStreamFrame]:
+            yield CapabilityStreamFrame(
+                call_id=call_id,
+                direction="provider_to_caller",
+                sequence=0,
+                kind="started",
+            )
+            await committed.wait()
+            yield CapabilityStreamFrame(
+                call_id=call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="completed",
+                payload={"model": model, "text": transcript, "is_partial": False},
+            )
+
+        return CapabilityStreamSession(
+            open_result=CapabilityResult(
+                call_id=call_id, ok=True, result={"admitted": True}
+            ),
+            frames=frames(),
+            input=input_stream,
+        )
+
+    api._open_realtime_transcription_session = open_session
+
+
 def test_realtime_websocket_translates_pcm_and_transcript_lifecycle() -> None:
     """The compatibility edge maps one committed utterance onto provider frames."""
 
@@ -265,6 +316,579 @@ def test_realtime_websocket_translates_pcm_and_transcript_lifecycle() -> None:
     assert isinstance(media, InlineMediaAttachment)
     assert media.data == audio
     assert media.sample_rate == 24_000
+
+
+def test_realtime_websocket_generates_text_and_streams_tts_audio() -> None:
+    """A completed transcript routes through mounted chat and TTS participants."""
+
+    api = _build_api()
+
+    async def open_stt(model: str, sample_rate: int) -> CapabilityStreamSession:
+        assert (model, sample_rate) == ("org/realtime-stt", 24_000)
+        committed = anyio.Event()
+
+        async def send_input(frame: CapabilityStreamFrame) -> None:
+            if frame.kind == "completed":
+                committed.set()
+
+        input_stream = CapabilityStreamInput(
+            call_id="conversation-stt",
+            deadline_at=anyio.current_time() + 10.0,
+            send_frame=send_input,
+        )
+        await input_stream.start()
+
+        async def frames() -> AsyncIterator[CapabilityStreamFrame]:
+            yield CapabilityStreamFrame(
+                call_id="conversation-stt",
+                direction="provider_to_caller",
+                sequence=0,
+                kind="started",
+            )
+            await committed.wait()
+            yield CapabilityStreamFrame(
+                call_id="conversation-stt",
+                direction="provider_to_caller",
+                sequence=1,
+                kind="completed",
+                payload={"model": model, "text": "hello", "is_partial": False},
+            )
+
+        return CapabilityStreamSession(
+            open_result=CapabilityResult(
+                call_id="conversation-stt", ok=True, result={"admitted": True}
+            ),
+            frames=frames(),
+            input=input_stream,
+        )
+
+    generated_messages: list[tuple[ConversationMessage, ...]] = []
+
+    async def generate_assistant(
+        model: str,
+        messages: tuple[ConversationMessage, ...],
+    ) -> AsyncIterator[str]:
+        assert model == "org/chat"
+        generated_messages.append(messages)
+        yield "Hello "
+        yield "back"
+
+    speech_requests: list[tuple[str, str, str | None]] = []
+
+    async def open_speech(
+        model: str,
+        text: str,
+        voice: str | None,
+    ) -> CapabilityStreamSession:
+        speech_requests.append((model, text, voice))
+
+        async def frames() -> AsyncIterator[CapabilityStreamFrame]:
+            yield CapabilityStreamFrame(
+                call_id="conversation-tts",
+                direction="provider_to_caller",
+                sequence=0,
+                kind="started",
+            )
+            yield CapabilityStreamFrame(
+                call_id="conversation-tts",
+                direction="provider_to_caller",
+                sequence=1,
+                kind="chunk",
+                payload={"format": "mp3"},
+                media=InlineMediaAttachment(
+                    data=b"audio", media_type="audio/mpeg", codec="mp3"
+                ),
+            )
+            yield CapabilityStreamFrame(
+                call_id="conversation-tts",
+                direction="provider_to_caller",
+                sequence=2,
+                kind="completed",
+            )
+
+        return CapabilityStreamSession(
+            open_result=CapabilityResult(
+                call_id="conversation-tts", ok=True, result={"admitted": True}
+            ),
+            frames=frames(),
+        )
+
+    api._open_realtime_transcription_session = open_stt
+    api._generate_realtime_assistant = generate_assistant
+    api._open_realtime_speech_session = open_speech
+
+    async def validate_response(config: RealtimeResponseConfig) -> None:
+        assert config.model == "org/chat"
+
+    api._validate_realtime_response_config = validate_response
+    client = TestClient(api.app)
+
+    with client.websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt",
+        headers={"origin": "http://testserver"},
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {
+                            "transcription": {"model": "org/realtime-stt"},
+                        }
+                    },
+                    "response": {
+                        "model": "org/chat",
+                        "tts_model": "org/tts",
+                        "voice": "coral",
+                    },
+                },
+            }
+        )
+        assert _receive_json(websocket)["type"] == "session.updated"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
+            }
+        )
+        websocket.send_json({"type": "input_audio_buffer.commit"})
+        assert [_receive_json(websocket)["type"] for _ in range(9)] == [
+            "input_audio_buffer.committed",
+            "conversation.item.input_audio_transcription.completed",
+            "response.created",
+            "response.output_text.delta",
+            "response.output_text.delta",
+            "response.output_text.done",
+            "response.audio.delta",
+            "response.audio.done",
+            "response.done",
+        ]
+
+    assert generated_messages == [(('user', 'hello'),)]
+    assert speech_requests == [("org/tts", "Hello back", "coral")]
+
+
+def test_realtime_websocket_cancels_active_assistant_response() -> None:
+    """Explicit cancellation terminates generation and emits one terminal event."""
+
+    api = _build_api()
+    input_frames: list[CapabilityStreamFrame] = []
+    _install_waiting_session(api, input_frames, call_id="cancel-response-stt")
+
+    async def generate_assistant(
+        model: str,
+        messages: tuple[ConversationMessage, ...],
+    ) -> AsyncIterator[str]:
+        del model, messages
+        await anyio.sleep_forever()
+        yield "unreachable"
+
+    api._generate_realtime_assistant = generate_assistant
+
+    async def validate_response(config: RealtimeResponseConfig) -> None:
+        assert config.model == "org/chat"
+
+    api._validate_realtime_response_config = validate_response
+
+    async def completed_stt(model: str, sample_rate: int) -> CapabilityStreamSession:
+        del sample_rate
+        committed = anyio.Event()
+
+        async def send_input(frame: CapabilityStreamFrame) -> None:
+            if frame.kind == "completed":
+                committed.set()
+
+        input_stream = CapabilityStreamInput(
+            call_id="cancel-response-stt",
+            deadline_at=anyio.current_time() + 10.0,
+            send_frame=send_input,
+        )
+        await input_stream.start()
+
+        async def frames() -> AsyncIterator[CapabilityStreamFrame]:
+            yield CapabilityStreamFrame(
+                call_id="cancel-response-stt",
+                direction="provider_to_caller",
+                sequence=0,
+                kind="started",
+            )
+            await committed.wait()
+            yield CapabilityStreamFrame(
+                call_id="cancel-response-stt",
+                direction="provider_to_caller",
+                sequence=1,
+                kind="completed",
+                payload={"model": model, "text": "stop", "is_partial": False},
+            )
+
+        return CapabilityStreamSession(
+            open_result=CapabilityResult(
+                call_id="cancel-response-stt", ok=True, result={"admitted": True}
+            ),
+            frames=frames(),
+            input=input_stream,
+        )
+
+    api._open_realtime_transcription_session = completed_stt
+    client = TestClient(api.app)
+    with client.websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt",
+        headers={"origin": "http://testserver"},
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {
+                            "transcription": {"model": "org/realtime-stt"},
+                        }
+                    },
+                    "response": {"model": "org/chat"},
+                },
+            }
+        )
+        assert _receive_json(websocket)["type"] == "session.updated"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
+            }
+        )
+        websocket.send_json({"type": "input_audio_buffer.commit"})
+        for expected in (
+            "input_audio_buffer.committed",
+            "conversation.item.input_audio_transcription.completed",
+            "response.created",
+        ):
+            assert _receive_json(websocket)["type"] == expected
+        websocket.send_json({"type": "response.cancel"})
+        done = _receive_json(websocket)
+        assert done["type"] == "response.done"
+        assert _mapping(done["response"])["status"] == "cancelled"
+
+
+def test_realtime_websocket_barge_in_cancels_pending_assistant_response() -> None:
+    """Immediate next-turn audio cancels a response before its task can run."""
+
+    api = _build_api()
+    _install_completed_session(api, transcript="first", call_id="pending-response-stt")
+
+    async def generate_assistant(
+        model: str,
+        messages: tuple[ConversationMessage, ...],
+    ) -> AsyncIterator[str]:
+        del model, messages
+        await anyio.sleep_forever()
+        yield "unreachable"
+
+    async def validate_response(config: RealtimeResponseConfig) -> None:
+        del config
+
+    api._generate_realtime_assistant = generate_assistant
+    api._validate_realtime_response_config = validate_response
+
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt",
+        headers={"origin": "http://testserver"},
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {"transcription": {"model": "org/realtime-stt"}}
+                    },
+                    "response": {"model": "org/chat"},
+                },
+            }
+        )
+        assert _receive_json(websocket)["type"] == "session.updated"
+        encoded_audio = base64.b64encode(b"\x01\x00").decode("ascii")
+        websocket.send_json(
+            {"type": "input_audio_buffer.append", "audio": encoded_audio}
+        )
+        websocket.send_json({"type": "input_audio_buffer.commit"})
+        assert _receive_json(websocket)["type"] == "input_audio_buffer.committed"
+        assert _receive_json(websocket)["type"] == (
+            "conversation.item.input_audio_transcription.completed"
+        )
+        websocket.send_json(
+            {"type": "input_audio_buffer.append", "audio": encoded_audio}
+        )
+        assert _receive_json(websocket)["type"] == "response.created"
+        done = _receive_json(websocket)
+        assert done["type"] == "response.done"
+        assert _mapping(done["response"])["status"] == "cancelled"
+
+
+def test_realtime_websocket_reports_assistant_text_limit_as_failed() -> None:
+    """A server-enforced response limit is distinct from user cancellation."""
+
+    api = _build_api()
+    _install_completed_session(api, transcript="overflow", call_id="overflow-stt")
+    generation_closed = Event()
+
+    async def generate_assistant(
+        model: str,
+        messages: tuple[ConversationMessage, ...],
+    ) -> AsyncIterator[str]:
+        del model, messages
+        try:
+            yield "x" * (_MAX_TRANSCRIPT_TEXT_BYTES + 1)
+            await anyio.sleep_forever()
+        finally:
+            generation_closed.set()
+
+    async def validate_response(config: RealtimeResponseConfig) -> None:
+        del config
+
+    api._generate_realtime_assistant = generate_assistant
+    api._validate_realtime_response_config = validate_response
+
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt",
+        headers={"origin": "http://testserver"},
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {"transcription": {"model": "org/realtime-stt"}}
+                    },
+                    "response": {"model": "org/chat"},
+                },
+            }
+        )
+        assert _receive_json(websocket)["type"] == "session.updated"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
+            }
+        )
+        websocket.send_json({"type": "input_audio_buffer.commit"})
+        for expected in (
+            "input_audio_buffer.committed",
+            "conversation.item.input_audio_transcription.completed",
+            "response.created",
+        ):
+            assert _receive_json(websocket)["type"] == expected
+        error = _receive_json(websocket)
+        assert error["type"] == "error"
+        assert _mapping(error["error"])["code"] == "response_error"
+        done = _receive_json(websocket)
+        assert done["type"] == "response.done"
+        assert _mapping(done["response"])["status"] == "failed"
+
+    assert generation_closed.is_set()
+
+
+def test_realtime_websocket_cancels_tts_provider_on_response_abort() -> None:
+    """Response cancellation explicitly stops an active Fabric TTS provider."""
+
+    api = _build_api()
+    _install_completed_session(api, transcript="speak", call_id="cancel-tts-stt")
+    provider_cancelled = Event()
+
+    async def generate_assistant(
+        model: str,
+        messages: tuple[ConversationMessage, ...],
+    ) -> AsyncIterator[str]:
+        del model, messages
+        yield "hello"
+
+    async def open_speech(
+        model: str,
+        text: str,
+        voice: str | None,
+    ) -> CapabilityStreamSession:
+        del model, text, voice
+
+        async def frames() -> AsyncIterator[CapabilityStreamFrame]:
+            yield CapabilityStreamFrame(
+                call_id="cancel-tts",
+                direction="provider_to_caller",
+                sequence=0,
+                kind="started",
+            )
+            yield CapabilityStreamFrame(
+                call_id="cancel-tts",
+                direction="provider_to_caller",
+                sequence=1,
+                kind="chunk",
+                payload={"format": "mp3"},
+                media=InlineMediaAttachment(
+                    data=b"audio", media_type="audio/mpeg", codec="mp3"
+                ),
+            )
+            await anyio.sleep_forever()
+
+        async def cancel_output() -> None:
+            with anyio.CancelScope(shield=True):
+                await anyio.sleep(0.001)
+                provider_cancelled.set()
+                raise RuntimeError("provider cancellation transport failed")
+
+        return CapabilityStreamSession(
+            open_result=CapabilityResult(
+                call_id="cancel-tts", ok=True, result={"admitted": True}
+            ),
+            frames=frames(),
+            cancel_output=cancel_output,
+        )
+
+    async def validate_response(config: RealtimeResponseConfig) -> None:
+        del config
+
+    api._generate_realtime_assistant = generate_assistant
+    api._open_realtime_speech_session = open_speech
+    api._validate_realtime_response_config = validate_response
+
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt",
+        headers={"origin": "http://testserver"},
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {"transcription": {"model": "org/realtime-stt"}}
+                    },
+                    "response": {"model": "org/chat", "tts_model": "org/tts"},
+                },
+            }
+        )
+        assert _receive_json(websocket)["type"] == "session.updated"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
+            }
+        )
+        websocket.send_json({"type": "input_audio_buffer.commit"})
+        seen: list[str] = []
+        while "response.audio.delta" not in seen:
+            seen.append(cast(str, _receive_json(websocket)["type"]))
+        websocket.send_json({"type": "response.cancel"})
+        done = _receive_json(websocket)
+        assert done["type"] == "response.done"
+        assert _mapping(done["response"])["status"] == "cancelled"
+
+    assert provider_cancelled.is_set()
+
+
+def test_realtime_websocket_preserves_response_validation_detail() -> None:
+    """Participant admission failures retain an actionable HTTP detail."""
+
+    api = _build_api()
+
+    async def generate_assistant(
+        model: str,
+        messages: tuple[ConversationMessage, ...],
+    ) -> AsyncIterator[str]:
+        del model, messages
+        yield "unused"
+
+    async def validate_response(config: RealtimeResponseConfig) -> None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No instance found for model {config.model}",
+        )
+
+    api._generate_realtime_assistant = generate_assistant
+    api._validate_realtime_response_config = validate_response
+
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt",
+        headers={"origin": "http://testserver"},
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "session.update",
+                "event_id": "response-validation",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {"transcription": {"model": "org/realtime-stt"}}
+                    },
+                    "response": {"model": "org/missing-chat"},
+                },
+            }
+        )
+        error = _receive_json(websocket)
+        assert error["type"] == "error"
+        detail = _mapping(error["error"])
+        assert detail["code"] == "unsupported_session_update"
+        assert detail["message"] == "No instance found for model org/missing-chat"
+        assert detail["event_id"] == "response-validation"
+
+
+def test_realtime_websocket_locks_response_config_after_audio() -> None:
+    """A raced response update cannot be acknowledged without taking effect."""
+
+    api = _build_api()
+    input_frames: list[CapabilityStreamFrame] = []
+    _install_waiting_session(api, input_frames, call_id="locked-response-config")
+
+    async def generate_assistant(
+        model: str,
+        messages: tuple[ConversationMessage, ...],
+    ) -> AsyncIterator[str]:
+        del model, messages
+        yield "unused"
+
+    async def validate_response(config: RealtimeResponseConfig) -> None:
+        del config
+
+    api._generate_realtime_assistant = generate_assistant
+    api._validate_realtime_response_config = validate_response
+    client = TestClient(api.app)
+    with client.websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt",
+        headers={"origin": "http://testserver"},
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+
+        def update(model: str) -> dict[str, object]:
+            return {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {
+                            "transcription": {"model": "org/realtime-stt"},
+                        }
+                    },
+                    "response": {"model": model},
+                },
+            }
+
+        websocket.send_json(update("org/chat-a"))
+        assert _receive_json(websocket)["type"] == "session.updated"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
+            }
+        )
+        websocket.send_json(update("org/chat-b"))
+        error = _receive_json(websocket)
+        assert error["type"] == "error"
+        assert _mapping(error["error"])["code"] == "response_config_locked"
 
 
 def test_realtime_websocket_server_vad_auto_commits(
