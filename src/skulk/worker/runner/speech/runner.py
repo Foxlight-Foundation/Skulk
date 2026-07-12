@@ -130,13 +130,62 @@ def _install_attention_mask_dtype_compat(attention_type: type[Any]) -> None:
 def _install_canary_compatibility() -> None:
     """Install runtime compatibility required by upstream bfloat16 Canary."""
 
+    import mlx.core as mx
     from mlx_audio.stt.models.canary.decoder import (
         MultiHeadCrossAttention,
         MultiHeadSelfAttention,
     )
 
     _install_attention_mask_dtype_compat(MultiHeadSelfAttention)
-    _install_attention_mask_dtype_compat(MultiHeadCrossAttention)
+    if getattr(MultiHeadCrossAttention, _CANARY_MASK_COMPAT_MARKER, False):
+        return
+
+    def _compatible_cross_attention(
+        self: Any,
+        x: Any,
+        encoder_output: Any,
+        encoder_mask: Any | None = None,
+        cache: Any | None = None,
+    ) -> Any:
+        batch_size, target_length, _ = x.shape
+        query = self.q_proj(x).reshape(
+            batch_size, target_length, self.n_heads, self.head_dim
+        )
+        query = query.transpose(0, 2, 1, 3)
+        if cache is not None:
+            key, value = cache
+        else:
+            source_length = encoder_output.shape[1]
+            key = self.k_proj(encoder_output).reshape(
+                batch_size, source_length, self.n_heads, self.head_dim
+            )
+            value = self.v_proj(encoder_output).reshape(
+                batch_size, source_length, self.n_heads, self.head_dim
+            )
+            key = key.transpose(0, 2, 1, 3)
+            value = value.transpose(0, 2, 1, 3)
+        attention_mask = None
+        if encoder_mask is not None:
+            attention_mask = encoder_mask[:, None, None, :].astype(query.dtype)
+            attention_mask = mx.where(
+                attention_mask == 0,
+                mx.array(-1e9, dtype=query.dtype),
+                mx.array(0.0, dtype=query.dtype),
+            )
+        output = cast(Any, mx).fast.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            scale=self.scale,
+            mask=attention_mask,
+        )
+        output = output.transpose(0, 2, 1, 3).reshape(
+            batch_size, target_length, -1
+        )
+        return self.out_proj(output), (key, value)
+
+    MultiHeadCrossAttention.__call__ = _compatible_cross_attention
+    setattr(MultiHeadCrossAttention, _CANARY_MASK_COMPAT_MARKER, True)
 
 
 def _first_non_empty_text(*values: str | None) -> str | None:

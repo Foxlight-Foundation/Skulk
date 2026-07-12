@@ -1,4 +1,4 @@
-# pyright: reportPrivateUsage=false, reportMissingParameterType=false
+# pyright: reportPrivateUsage=false, reportMissingParameterType=false, reportAny=false, reportUnknownArgumentType=false, reportUnknownLambdaType=false, reportUnknownMemberType=false
 """Unit coverage for the single-node speech runner."""
 
 import base64
@@ -46,6 +46,7 @@ from skulk.worker.runner.speech.runner import (
     Runner,
     _filter_kwargs,
     _install_attention_mask_dtype_compat,
+    _install_canary_compatibility,
     _load_speech_model,
     _resolve_staged_voice_path,
     _stt_generate_kwargs,
@@ -305,6 +306,35 @@ def test_attention_mask_compat_casts_mask_to_input_dtype() -> None:
     assert cache == "cache"
     assert _Attention.seen_mask is not None
     assert _Attention.seen_mask.dtype == "bfloat16"
+
+
+def test_canary_cross_attention_accepts_bfloat16_with_encoder_mask() -> None:
+    """Canary cross-attention must keep its internally built mask in query dtype."""
+
+    import mlx.core as mx
+    from mlx.utils import tree_map
+    from mlx_audio.stt.models.canary.decoder import (  # pyright: ignore[reportMissingTypeStubs]
+        MultiHeadCrossAttention,
+    )
+
+    _install_canary_compatibility()
+    attention = MultiHeadCrossAttention(d_model=8, n_heads=2)
+    attention.update(
+        tree_map(
+            lambda value: value.astype(mx.bfloat16),
+            attention.parameters(),
+        )
+    )
+
+    output, cache = attention(
+        mx.zeros((1, 2, 8), dtype=mx.bfloat16),
+        mx.zeros((1, 3, 8), dtype=mx.bfloat16),
+        encoder_mask=mx.ones((1, 3), dtype=mx.float32),
+    )
+    mx.eval(output)
+
+    assert output.dtype == mx.bfloat16
+    assert cache is not None
 
 
 def test_translation_kwargs_support_canary_contract() -> None:
