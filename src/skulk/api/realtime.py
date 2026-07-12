@@ -423,8 +423,9 @@ class RealtimeTranscriptionBridge:
                     await self._send_error(
                         code="unsupported_session_update",
                         message=(
-                            "The Skulk speech WebSocket currently requires the URL "
-                            "model, pcm16, 24 kHz mono audio, optional supported "
+                            "The Skulk speech WebSocket currently requires the "
+                            "URL-selected STT model, pcm16, 24 kHz mono audio, "
+                            "optional supported "
                             "server VAD, "
                             "no noise reduction, "
                             "and no additional fields"
