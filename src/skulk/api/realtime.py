@@ -973,19 +973,24 @@ class RealtimeTranscriptionBridge:
         output_item_id = f"item_{uuid4().hex}"
         user_message: ConversationMessage = ("user", transcript)
         messages = (*self._conversation, user_message)
-        await self._send_json(
-            {
-                "event_id": self._event_id(),
-                "type": "response.created",
-                "response": {"id": response_id, "status": "in_progress"},
-            }
-        )
+        cancel_scope = anyio.CancelScope()
+        self._response_cancel_scope = cancel_scope
+        try:
+            await self._send_json(
+                {
+                    "event_id": self._event_id(),
+                    "type": "response.created",
+                    "response": {"id": response_id, "status": "in_progress"},
+                }
+            )
+        except BaseException:
+            if self._response_cancel_scope is cancel_scope:
+                self._response_cancel_scope = None
+            raise
         completed = False
         failed = False
         text_parts: list[str] = []
         text_bytes = 0
-        cancel_scope = anyio.CancelScope()
-        self._response_cancel_scope = cancel_scope
         try:
             with cancel_scope:
                 async for delta in generate(config.model, messages):
@@ -1031,6 +1036,9 @@ class RealtimeTranscriptionBridge:
         except WebSocketDisconnect:
             cancel_scope.cancel()
             return
+        except anyio.get_cancelled_exc_class():
+            if not cancel_scope.cancel_called:
+                raise
         except Exception as exc:
             logger.opt(exception=exc).warning("Realtime assistant response failed")
             failed = True

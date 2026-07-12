@@ -433,8 +433,8 @@ def test_realtime_websocket_cancels_active_assistant_response() -> None:
         messages: tuple[ConversationMessage, ...],
     ) -> AsyncIterator[str]:
         del model, messages
-        yield "partial"
         await anyio.sleep_forever()
+        yield "unreachable"
 
     api._generate_realtime_assistant = generate_assistant
 
@@ -515,7 +515,6 @@ def test_realtime_websocket_cancels_active_assistant_response() -> None:
             "input_audio_buffer.committed",
             "conversation.item.input_audio_transcription.completed",
             "response.created",
-            "response.output_text.delta",
         ):
             assert _receive_json(websocket)["type"] == expected
         websocket.send_json({"type": "response.cancel"})
