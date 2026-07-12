@@ -53,7 +53,7 @@ Each subsystem has its own concern:
 
 - **Router** wraps libp2p (via PyO3 Rust bindings) and exposes typed pub/sub topics: `GLOBAL_EVENTS`, `LOCAL_EVENTS`, `COMMANDS`, `DOWNLOAD_COMMANDS`, `STATE_SYNC_MESSAGES`, `ELECTION_MESSAGES`, `CONNECTION_MESSAGES`, `TELEMETRY`, `DATA`. Components subscribe by topic; payloads are validated Pydantic types.
 - **Telemetry plane** (`TELEMETRY` topic) carries last-write-wins node readings that are *not* decisions: each node's `participation` role and `backends`, its memory and system profile (the highest-volume readings), and the observational readings for node identity, disk, and rdma-ctl status. They are gossiped into an in-memory `TelemetryView` (read by the planner for placement and by the dashboard via `GET /state`) instead of being event-sourced into `State`, so routine readings don't bloat the event log. The system profile includes a collector-agnostic accelerator block (GPU utilization, VRAM used and total, power, temperature, clock) that every node fills the same way regardless of platform: macOS fills it from mactop, and an AMD/Linux node fills it from passive amdgpu sysfs reads, so the dashboard renders a heterogeneous fleet uniformly and reports "not measured" rather than a fake zero for anything a given node cannot read. Because the context-admission ceiling must be identical across ranks but telemetry is unordered, the master computes it once at placement time and stamps it onto the instance (`context_token_limit`). **Connectivity readings stay on the control plane**, though: `node_network`, the thunderbolt maps, and the derived `thunderbolt_bridge_cycles` define the topology graph (`apply()` builds RDMA edges and TB-bridge cycles from them, and the planner reads `node_network` for host selection), so they remain ordered event-sourced state rather than last-write-wins telemetry. This is the telemetry portion of separating the control plane (decisions, event-sourced) from the telemetry and data planes.
-- **Data plane** has three typed families. `DATA` carries generated token, image, embedding, transcription, and audio output; `PROVIDER_DATA` carries extension-provider stream frames without adding arbitrary provider payloads to `DataChunk`; `REALTIME_AUDIO` carries built-in realtime STT PCM from an owning API to the selected speech worker. All three use explicit per-stream lifecycles, node-addressed same-node short circuit/remote delivery, bounded independent Zenoh queues, and shared egress diagnostics. The master never indexes, persists, or relays payloads from these families. Existing OpenAI audio edges retain base64/JSON compatibility; provider and realtime audio framing use a length-prefixed JSON header plus raw inline media because measurements show base64 approaches 1.334x wire size for large audio while the binary shape approaches 1.001x. Inbound vision chunks (`InputChunkReceived`, low-volume) stay on the control plane for now. See [how the cluster communicates](cluster-communication) for transport and trust details.
+- **Data plane** has four typed families. `DATA` carries generated token, image, embedding, transcription, and audio output; `PROVIDER_DATA` carries extension-provider stream frames without adding arbitrary provider payloads to `DataChunk`; `REALTIME_AUDIO` carries built-in realtime STT PCM from an owning API to the selected speech worker; `SPEECH_MEDIA` carries bounded request-scoped TTS reference audio. All four use explicit per-stream lifecycles, node-addressed same-node short circuit/remote delivery, bounded independent Zenoh queues, and shared egress diagnostics. The master never indexes, persists, or relays payloads from these families. Existing OpenAI audio edges retain base64/JSON compatibility; provider, realtime audio, and speech media framing use a length-prefixed JSON header plus raw inline media because measurements show base64 approaches 1.334x wire size for large audio while the binary shape approaches 1.001x. Inbound vision chunks (`InputChunkReceived`, low-volume) stay on the control plane for now. See [how the cluster communicates](cluster-communication) for transport and trust details.
 - **Election** runs the bully algorithm and broadcasts `ELECTION_MESSAGES`. The winner takes the master role.
 - **Master** indexes incoming events into the event log (writing them to disk via `DiskEventLog`), publishes indexed events on `GLOBAL_EVENTS` for followers, and decides instance placements when a model is launched.
 - **Worker** receives indexed events, applies them to its local view of `State`, downloads model weights to disk when assigned a placement, and spawns / supervises runner subprocesses. Before spawning, it refuses a shard that won't fit local memory (a last-resort guard below the master's admission check, using the same shared estimator), and a crash circuit breaker gives up on a runner that keeps failing rather than relaunching it into another GPU-memory leak. When the give-up is driven by that *memory* guard (not a crash) the worker asks the master to re-place the model one node wider via `RefuseInstancePlacement` instead of letting the placement silently disappear (see "Placement memory admission" below).
@@ -294,12 +294,19 @@ Speech serving is in a staged rollout. Phase 0 added `TextToSpeech`,
 `POST /v1/audio/speech`: the API validates a mounted TTS model, sends a
 `SpeechSynthesis` command through the master, the worker dispatches it to the
 single-node `mlx_audio` speech runner, and the runner emits `AudioChunk` output
-on the data plane. TTS output streaming is still experimental: only nodes
-running with `SKULK_ENABLE_EXPERIMENTAL_MODE` and cluster config
-`experiments.tts_streaming: true` accept `stream=true`, and only for TTS cards
-that explicitly declare `audio.supports_streaming = true`. The bundled Qwen3
+on the data plane. TTS output streaming is stable for TTS cards that explicitly
+declare `audio.supports_streaming = true`; no experiment gate is required. The bundled Qwen3
 TTS card declares MP3 streaming support after live validation; Fish Audio and
 the remaining bundled speech cards stay batch-only.
+
+For cards declaring reference-audio support, the same route accepts a bounded
+multipart upload. The API pins the command to one ready instance and sends the
+raw file to its worker through `SPEECH_MEDIA`; only metadata enters the command.
+The worker verifies ordered chunks and the terminal digest in process-local
+memory, then injects bytes into the local runner task. The runner materializes a
+request-scoped temporary file for upstream `mlx_audio` and deletes it in a
+`finally` block. Cancellation, transport failure, malformed input, and expiry
+clear pending media. Reference bytes never enter State or the event log.
 Non-streaming requests use the default path where the API collects the chunks
 and returns one raw audio response. Production API nodes also expose the
 first-party `tts@1.0.0` provider facade over this same core path. Generic calls
@@ -654,11 +661,9 @@ with extensions: an out-of-tree capability can ride the fabric as a plugin and
 still surface a gated toggle here.
 
 Current built-in experiment toggles live under the persisted `experiments`
-config section. `experiments.tts_streaming` enables the experimental
-`/v1/audio/speech` `stream=true` transport only on nodes that also run with
-`SKULK_ENABLE_EXPERIMENTAL_MODE`; the request still requires a mounted TTS card
-whose `audio.supports_streaming` flag has been set after model/backend
-validation.
+config section. `experiments.tts_streaming` remains as a deprecated parsing
+compatibility field; stable `/v1/audio/speech` streaming ignores it and relies
+on the mounted card's validated `audio.supports_streaming` declaration.
 `experiments.speech_translation` enables `/v1/audio/translations` only on nodes
 running with experimental mode and only for mounted cards that explicitly
 declare `audio.supports_translation = true`.

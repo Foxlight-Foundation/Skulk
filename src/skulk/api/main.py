@@ -54,6 +54,7 @@ from hypercorn.config import Config
 from hypercorn.typing import ASGIFramework
 from loguru import logger
 from pydantic import ValidationError
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 import skulk.shared.types.tasks as task_types
 from skulk.api.adapters.chat_completions import (
@@ -232,6 +233,7 @@ from skulk.master.placement import place_instance as get_instance_placements
 from skulk.master.placement_utils import usable_vram_by_node
 from skulk.routing.provider_streams import ProviderStreamPacket
 from skulk.routing.realtime_audio import RealtimeAudioPacket
+from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.shared.apply import apply
 from skulk.shared.constants import (
     DASHBOARD_DIR,
@@ -469,6 +471,7 @@ _STREAMABLE_AUDIO_RESPONSE_FORMATS: Final[frozenset[AudioResponseFormat]] = froz
     {AudioResponseFormat.Mp3}
 )
 _MAX_AUDIO_UPLOAD_BYTES: Final[int] = 25 * 1024 * 1024
+_SPEECH_MEDIA_CHUNK_BYTES: Final[int] = 1024 * 1024
 _AUDIO_TRANSCRIPTION_FORMATS: Final[set[str]] = {
     "json",
     "text",
@@ -516,9 +519,13 @@ def _normalize_upload_content_type(content_type: str | None) -> str | None:
     return normalized or None
 
 
-def _validate_audio_upload_metadata(file: UploadFile) -> None:
+def _validate_audio_upload_metadata(file: StarletteUploadFile) -> None:
     """Reject uploads whose metadata is clearly not an audio container."""
     content_type = _normalize_upload_content_type(file.content_type)
+    if file.filename is not None and len(file.filename) > 255:
+        raise HTTPException(status_code=422, detail="Audio filename is too long")
+    if content_type is not None and len(content_type) > 255:
+        raise HTTPException(status_code=422, detail="Audio content type is too long")
     suffix = Path(file.filename or "").suffix.lower()
     if (
         content_type is not None
@@ -531,7 +538,7 @@ def _validate_audio_upload_metadata(file: UploadFile) -> None:
         )
 
 
-async def _read_audio_upload(file: UploadFile) -> bytes:
+async def _read_audio_upload(file: StarletteUploadFile) -> bytes:
     """Read an uploaded audio file with Skulk's non-streaming size cap."""
     audio_bytes = await file.read(_MAX_AUDIO_UPLOAD_BYTES + 1)
     if not audio_bytes:
@@ -1053,6 +1060,33 @@ def _json_request_body(schema: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _audio_speech_request_body() -> dict[str, object]:
+    """Describe the JSON and multipart forms accepted by the speech route."""
+
+    json_schema = cast(
+        dict[str, object], AudioSpeechRequest.model_json_schema()
+    )
+    multipart_schema = cast(
+        dict[str, object], json.loads(json.dumps(json_schema))
+    )
+    properties = cast(dict[str, object], multipart_schema.get("properties", {}))
+    properties["reference_audio"] = {
+        "type": "string",
+        "format": "binary",
+        "description": "Bounded request-scoped reference audio upload.",
+    }
+    multipart_schema["properties"] = properties
+    return {
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {"schema": json_schema},
+                "multipart/form-data": {"schema": multipart_schema},
+            },
+        }
+    }
+
+
 class API:
     def __init__(
         self,
@@ -1075,6 +1109,8 @@ class API:
         realtime_audio_sender: "Sender[RealtimeAudioInputFrame] | None" = None,
         realtime_audio_packet_sender: "Sender[RealtimeAudioPacket] | None" = None,
         realtime_audio_packet_receiver: "Receiver[RealtimeAudioPacket] | None" = None,
+        speech_media_packet_sender: "Sender[SpeechMediaPacket] | None" = None,
+        speech_media_packet_receiver: "Receiver[SpeechMediaPacket] | None" = None,
         data_plane_zenoh: bool = False,
         data_plane_egress_provider: (
             Callable[[], DataPlaneEgressDiagnostics] | None
@@ -1144,6 +1180,10 @@ class API:
         self._realtime_audio_sender = realtime_audio_sender
         self._realtime_audio_packet_sender = realtime_audio_packet_sender
         self._realtime_audio_packet_receiver = realtime_audio_packet_receiver
+        self._speech_media_packet_sender = speech_media_packet_sender
+        self._speech_media_packet_receiver = speech_media_packet_receiver
+        self._speech_media_commands: set[CommandId] = set()
+        self._speech_media_targets: dict[CommandId, NodeId] = {}
         self._data_plane_zenoh = data_plane_zenoh
         self._provider_stream_receivers: dict[
             str, _ProviderStreamReceiveState
@@ -1570,11 +1610,11 @@ class API:
             description=(
                 "OpenAI-compatible text-to-speech endpoint. The requested model "
                 "must already be placed and running as a text-to-speech model. "
-                "The experimental stream=true path requires "
-                "SKULK_ENABLE_EXPERIMENTAL_MODE, experiments.tts_streaming=true, "
-                "and a mounted card that declares audio.supports_streaming=true."
+                "The stream=true path requires a mounted card that declares "
+                "audio.supports_streaming=true."
             ),
-        )(self.audio_speech)
+            openapi_extra=_audio_speech_request_body(),
+        )(self.audio_speech_http)
         self.app.post(
             "/v1/audio/transcriptions",
             response_model=None,
@@ -2509,6 +2549,8 @@ class API:
         should_send_finished = command_id not in self._cancelled_command_ids
         self._cancelled_command_ids.discard(command_id)
         self._realtime_audio_transcription_commands.discard(command_id)
+        self._speech_media_commands.discard(command_id)
+        self._speech_media_targets.pop(command_id, None)
         if should_send_finished:
             await self._send(TaskFinished(finished_command_id=command_id))
         queue_map.pop(command_id, None)
@@ -3104,23 +3146,6 @@ class API:
                 status_code=400,
                 detail=f"Model {resolved} is not a text-to-speech model",
             )
-        if stream and not experimental_mode_enabled():
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Streaming text-to-speech is experimental and requires "
-                    f"{EXPERIMENTAL_MODE_ENV_VAR}=1 until a mounted MLX speech "
-                    "model has passed streaming validation"
-                ),
-            )
-        if stream and not self._tts_streaming_experiment_enabled():
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Streaming text-to-speech is experimental and requires "
-                    "experiments.tts_streaming=true in skulk.yaml"
-                ),
-            )
         if stream and (
             model_card.audio is None or model_card.audio.supports_streaming is not True
         ):
@@ -3129,6 +3154,15 @@ class API:
                 detail=(
                     f"Model {resolved} does not declare streaming speech support"
                 ),
+            )
+        if not any(
+            instance.shard_assignments.model_id == resolved
+            for instance in self.state.instances.values()
+        ):
+            await self._trigger_notify_user_to_download_model(resolved)
+            raise HTTPException(
+                status_code=404,
+                detail=f"No instance found for model {resolved}",
             )
         resolved_response_format = (
             response_format
@@ -3149,33 +3183,71 @@ class API:
                     f"{resolved_response_format.value}; supported formats: {supported}"
                 ),
             )
-        if not any(
-            instance.shard_assignments.model_id == resolved
-            for instance in self.state.instances.values()
-        ):
-            await self._trigger_notify_user_to_download_model(resolved)
+        if stream and resolved_response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
+            supported = ", ".join(
+                audio_format.value
+                for audio_format in sorted(
+                    _STREAMABLE_AUDIO_RESPONSE_FORMATS,
+                    key=lambda audio_format: audio_format.value,
+                )
+            )
             raise HTTPException(
-                status_code=404,
-                detail=f"No instance found for model {resolved}",
+                status_code=400,
+                detail=(
+                    f"`stream=true` supports only {supported} responses for now; "
+                    f"requested {resolved_response_format.value}"
+                ),
+            )
+        if stream and not self._streaming_tts_model_is_ready(resolved):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"All mounted instances of streaming speech model {resolved} "
+                    "must have a ready runner"
+                ),
             )
         return resolved, resolved_response_format
 
-    def _tts_streaming_experiment_enabled(self) -> bool:
-        """Return whether the current config opts into experimental TTS streaming."""
+    def _reference_tts_target(
+        self,
+        model_id: ModelId,
+    ) -> tuple[InstanceId, NodeId]:
+        """Select ready single-host TTS capacity supporting reference audio."""
 
-        try:
-            config = load_skulk_config(self._config_path)
-        except Exception as exc:
-            logger.warning(
-                "Failed to load config while checking TTS streaming experiment "
-                f"toggle; treating it as disabled: {exc}"
+        candidates: list[tuple[str, str, InstanceId, NodeId]] = []
+        for instance_id, instance in self.state.instances.items():
+            if instance.shard_assignments.model_id != model_id:
+                continue
+            if len(instance.shard_assignments.node_to_runner) != 1:
+                continue
+            card = self._model_card_for_instance(instance)
+            if (
+                card is None
+                or card.audio is None
+                or card.audio.supports_reference_audio is not True
+            ):
+                continue
+            target_node, runner_id = next(
+                iter(instance.shard_assignments.node_to_runner.items())
             )
-            return False
-        return bool(
-            config is not None
-            and config.experiments is not None
-            and config.experiments.tts_streaming
-        )
+            if not isinstance(
+                self.state.runners.get(runner_id),
+                (RunnerReady, RunnerRunning),
+            ):
+                continue
+            candidates.append(
+                (str(instance_id), str(target_node), instance_id, target_node)
+            )
+        if not candidates:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Model {model_id} has no ready mounted instance that "
+                    "supports reference audio"
+                ),
+            )
+        _, _, instance_id, target_node = min(candidates)
+        return instance_id, target_node
 
     def _speech_translation_experiment_enabled(self) -> bool:
         """Return whether config opts into experimental speech translation."""
@@ -3194,16 +3266,13 @@ class API:
             and config.experiments.speech_translation
         )
 
-    def _has_mounted_streaming_tts_model(self) -> bool:
-        """Return whether core serving currently exposes eligible TTS capacity."""
+    def _streaming_tts_model_is_ready(self, model_id: ModelId | None = None) -> bool:
+        """Return whether every routable instance of one streaming model is ready."""
 
-        if (
-            not self._builtin_speech_provider_enabled
-            or not experimental_mode_enabled()
-            or not self._tts_streaming_experiment_enabled()
-        ):
-            return False
+        eligible_by_model: dict[ModelId, list[Instance]] = {}
         for instance in self.state.instances.values():
+            if model_id is not None and instance.shard_assignments.model_id != model_id:
+                continue
             card = self._model_card_for_instance(instance)
             if card is None or card.audio is None:
                 continue
@@ -3219,8 +3288,27 @@ class API:
                     or AudioResponseFormat.Mp3 in profile.audio_response_formats
                 )
             ):
-                return True
-        return False
+                eligible_by_model.setdefault(card.model_id, []).append(instance)
+
+        def instance_is_ready(instance: Instance) -> bool:
+            runner_ids = tuple(instance.shard_assignments.node_to_runner.values())
+            return len(runner_ids) == 1 and all(
+                isinstance(
+                    self.state.runners.get(runner_id),
+                    (RunnerReady, RunnerRunning),
+                )
+                for runner_id in runner_ids
+            )
+
+        return any(
+            instances and all(instance_is_ready(instance) for instance in instances)
+            for instances in eligible_by_model.values()
+        )
+
+    def _has_mounted_streaming_tts_model(self) -> bool:
+        """Return whether core serving currently exposes eligible TTS capacity."""
+
+        return self._builtin_speech_provider_enabled and self._streaming_tts_model_is_ready()
 
     def _realtime_stt_instance(
         self,
@@ -5918,6 +6006,7 @@ class API:
                 tg.start_soon(self._apply_data)
                 tg.start_soon(self._apply_provider_data)
                 tg.start_soon(self._apply_realtime_audio_transport)
+                tg.start_soon(self._apply_speech_media_transport)
                 tg.start_soon(self._sweep_provider_stream_receivers)
                 # Releases reorder gaps stuck on a chunk dropped by the
                 # best-effort DATA topic (#279 Phase 2b); lifetime-scoped like
@@ -6169,6 +6258,35 @@ class API:
                     ),
                 )
                 await self._cancel_audio_transcription_command(packet.command_id)
+
+    async def _apply_speech_media_transport(self) -> None:
+        """Fail source commands when ephemeral media transport rejects input."""
+
+        if self._speech_media_packet_receiver is None:
+            return
+        with self._speech_media_packet_receiver as packets:
+            async for packet in packets:
+                if (
+                    packet.target_node != self.node_id
+                    or packet.kind != "transport_failed"
+                    or packet.command_id not in self._speech_media_commands
+                ):
+                    continue
+                await self._dispatch_generation_chunk(
+                    packet.command_id,
+                    ErrorChunk(
+                        model=ModelId("unknown"),
+                        error_message=(
+                            packet.error_message or "speech media transport failed"
+                        ),
+                    ),
+                )
+                await self._cancel_audio_speech_command(packet.command_id)
+                # Unlike a client disconnect, a transport rejection is already
+                # terminal from the caller's perspective. Allow finalization to
+                # notify the master after cancellation stops the runner, or the
+                # command-to-task mapping remains orphaned indefinitely.
+                self._cancelled_command_ids.discard(packet.command_id)
 
     def _apply_provider_input_frame(self, frame: CapabilityStreamFrame) -> None:
         """Validate and queue one caller frame for its active provider handler."""
@@ -8779,6 +8897,10 @@ class API:
         request: AudioSpeechRequest,
         model_id: ModelId,
         response_format: AudioResponseFormat,
+        *,
+        reference_audio_filename: str | None = None,
+        reference_audio_content_type: str | None = None,
+        reference_audio_sha256: str | None = None,
     ) -> SpeechSynthesisTaskParams:
         """Translate a validated API/facade request into the core task contract."""
 
@@ -8797,23 +8919,133 @@ class API:
             max_tokens=request.max_tokens,
             stream=request.stream,
             streaming_interval=request.streaming_interval,
+            reference_text=request.reference_text,
+            reference_audio_present=reference_audio_sha256 is not None,
+            reference_audio_filename=reference_audio_filename,
+            reference_audio_content_type=reference_audio_content_type,
+            reference_audio_sha256=reference_audio_sha256,
         )
+
+    async def _apply_default_speech_voice(
+        self,
+        request: AudioSpeechRequest,
+        model_id: ModelId,
+    ) -> AudioSpeechRequest:
+        """Validate explicit voices and apply the card default when omitted."""
+
+        matching_instances = tuple(
+            instance
+            for instance in self.state.instances.values()
+            if instance.shard_assignments.model_id == model_id
+        )
+        # Normal callers reach this only after mounted-model validation. Keep
+        # the helper inert for isolated adapters/tests that intentionally
+        # replace that validator without constructing replicated state.
+        if not matching_instances:
+            return request
+        card = next(
+            (
+                candidate
+                for instance in matching_instances
+                if (candidate := self._model_card_for_instance(instance)) is not None
+            ),
+            None,
+        )
+        if card is None:
+            card = await self._get_running_model_card(model_id)
+        if card.audio is None:
+            return request
+        if request.voice is not None:
+            if card.audio.voices and request.voice not in card.audio.voices:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Voice {request.voice!r} is not available for model "
+                        f"{model_id}; use GET /v1/audio/voices"
+                    ),
+                )
+            return request
+        if card.audio.default_voice is None:
+            return request
+        return request.model_copy(update={"voice": card.audio.default_voice})
 
     async def _start_speech_synthesis(
         self,
         task_params: SpeechSynthesisTaskParams,
+        *,
+        target_instance_id: InstanceId | None = None,
+        target_node: NodeId | None = None,
+        reference_audio: bytes | None = None,
     ) -> tuple[CommandId, Receiver[AudioChunk | ErrorChunk]]:
         """Submit one core TTS command and register its DATA receive queue."""
 
         command = SpeechSynthesis(
             owner_node=self.node_id,
             task_params=task_params,
+            target_instance_id=target_instance_id,
         )
         command_id = command.command_id
         self._audio_speech_queues[command_id], recv = channel[AudioChunk | ErrorChunk]()
+        if reference_audio is not None:
+            self._speech_media_commands.add(command_id)
+            assert target_node is not None
+            self._speech_media_targets[command_id] = target_node
         try:
             await self._send(command)
+            if reference_audio is not None:
+                if target_node is None or self._speech_media_packet_sender is None:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Ephemeral speech media transport is unavailable",
+                    )
+                for sequence, offset in enumerate(
+                    range(0, len(reference_audio), _SPEECH_MEDIA_CHUNK_BYTES)
+                ):
+                    await self._speech_media_packet_sender.send(
+                        SpeechMediaPacket(
+                            source_node=self.node_id,
+                            target_node=target_node,
+                            command_id=command_id,
+                            sequence=sequence,
+                            kind="chunk",
+                            filename=task_params.reference_audio_filename,
+                            content_type=task_params.reference_audio_content_type,
+                            data=reference_audio[
+                                offset : offset + _SPEECH_MEDIA_CHUNK_BYTES
+                            ],
+                        )
+                    )
+                await self._speech_media_packet_sender.send(
+                    SpeechMediaPacket(
+                        source_node=self.node_id,
+                        target_node=target_node,
+                        command_id=command_id,
+                        sequence=(
+                            len(reference_audio) + _SPEECH_MEDIA_CHUNK_BYTES - 1
+                        )
+                        // _SPEECH_MEDIA_CHUNK_BYTES,
+                        kind="completed",
+                        filename=task_params.reference_audio_filename,
+                        content_type=task_params.reference_audio_content_type,
+                        sha256=task_params.reference_audio_sha256,
+                    )
+                )
         except Exception:
+            if command_id not in self._cancelled_command_ids:
+                with anyio.CancelScope(shield=True):
+                    await self._cancel_audio_speech_command(command_id)
+            if reference_audio is not None and target_node is not None:
+                with contextlib.suppress(Exception):
+                    assert self._speech_media_packet_sender is not None
+                    await self._speech_media_packet_sender.send(
+                        SpeechMediaPacket(
+                            source_node=self.node_id,
+                            target_node=target_node,
+                            command_id=command_id,
+                            sequence=0,
+                            kind="cancelled",
+                        )
+                    )
             await self._finalize_command_stream(
                 command_id,
                 cast(
@@ -8846,6 +9078,7 @@ class API:
             request.response_format,
             stream=True,
         )
+        request = await self._apply_default_speech_voice(request, model_id)
         if response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
             raise HTTPException(
                 status_code=400,
@@ -9579,7 +9812,91 @@ class API:
             open_session=self._open_realtime_transcription_session,
         ).serve()
 
-    async def audio_speech(self, request: AudioSpeechRequest) -> Response:
+    async def audio_speech_http(self, http_request: Request) -> Response:
+        """Parse JSON or multipart speech requests into one strict core path."""
+
+        content_type = _normalize_upload_content_type(
+            http_request.headers.get("content-type")
+        )
+        if content_type == "application/json":
+            try:
+                request = AudioSpeechRequest.model_validate(await http_request.json())
+            except (json.JSONDecodeError, ValidationError) as exc:
+                detail = (
+                    json.dumps(exc.errors(include_context=False))
+                    if isinstance(exc, ValidationError)
+                    else "Malformed JSON request body"
+                )
+                raise HTTPException(status_code=422, detail=detail) from exc
+            return await self.audio_speech(request)
+        if content_type != "multipart/form-data":
+            raise HTTPException(
+                status_code=415,
+                detail="Speech requests require application/json or multipart/form-data",
+            )
+        form = await http_request.form()
+        reference_value = form.get("reference_audio")
+        if reference_value is not None and not isinstance(
+            reference_value, StarletteUploadFile
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Multipart `reference_audio` must be a file upload",
+            )
+        reference_audio = (
+            reference_value
+            if isinstance(reference_value, StarletteUploadFile)
+            else None
+        )
+        payload: dict[str, object] = {
+            key: value
+            for key, value in form.multi_items()
+            if key != "reference_audio" and isinstance(value, str)
+        }
+        try:
+            for key in (
+                "speed",
+                "streaming_interval",
+                "temperature",
+                "top_p",
+                "repetition_penalty",
+            ):
+                if key in payload:
+                    payload[key] = float(cast(str, payload[key]))
+            for key in ("top_k", "max_tokens"):
+                if key in payload:
+                    payload[key] = int(cast(str, payload[key]))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="Multipart numeric fields must contain valid numbers",
+            ) from exc
+        if "stream" in payload:
+            stream_value = cast(str, payload["stream"]).strip().lower()
+            if stream_value not in {"true", "false"}:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Multipart `stream` must be true or false",
+                )
+            payload["stream"] = stream_value == "true"
+        try:
+            request = AudioSpeechRequest.model_validate(payload)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=json.dumps(exc.errors(include_context=False)),
+            ) from exc
+        return await self.audio_speech(
+            request,
+            reference_audio_file=reference_audio,
+        )
+
+    async def audio_speech(
+        self,
+        request: AudioSpeechRequest,
+        *,
+        reference_audio_file: StarletteUploadFile | None = None,
+    ) -> Response:
         """OpenAI-compatible text-to-speech endpoint."""
 
         if request.streaming_interval is not None and not request.stream:
@@ -9597,7 +9914,7 @@ class API:
                     "server-local paths are never accepted"
                 ),
             )
-        if request.reference_text is not None:
+        if request.reference_text is not None and reference_audio_file is None:
             raise HTTPException(
                 status_code=400,
                 detail="`reference_text` is only supported with reference-audio TTS flows",
@@ -9611,6 +9928,7 @@ class API:
         model_id, response_format = await self._validate_speech_synthesis_model(
             ModelId(request.model), requested_response_format, stream=request.stream
         )
+        request = await self._apply_default_speech_voice(request, model_id)
         if request.stream and response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
             supported = ", ".join(
                 audio_format.value
@@ -9626,12 +9944,44 @@ class API:
                     f"requested {response_format.value}"
                 ),
             )
+        reference_audio: bytes | None = None
+        reference_filename: str | None = None
+        reference_content_type: str | None = None
+        reference_sha256: str | None = None
+        target_instance_id: InstanceId | None = None
+        target_node: NodeId | None = None
+        if reference_audio_file is not None:
+            if not self._data_plane_zenoh or self._speech_media_packet_sender is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Reference audio requires the node-addressed Zenoh data plane; "
+                        "broadcast fallback is not permitted for private media"
+                    ),
+                )
+            target_instance_id, target_node = self._reference_tts_target(model_id)
+            _validate_audio_upload_metadata(reference_audio_file)
+            try:
+                reference_audio = await _read_audio_upload(reference_audio_file)
+            finally:
+                await reference_audio_file.close()
+            reference_filename = reference_audio_file.filename
+            reference_content_type = _normalize_upload_content_type(
+                reference_audio_file.content_type
+            )
+            reference_sha256 = hashlib.sha256(reference_audio).hexdigest()
         command_id, recv = await self._start_speech_synthesis(
             self._speech_synthesis_task_params(
                 request,
                 model_id,
                 response_format,
-            )
+                reference_audio_filename=reference_filename,
+                reference_audio_content_type=reference_content_type,
+                reference_audio_sha256=reference_sha256,
+            ),
+            target_instance_id=target_instance_id,
+            target_node=target_node,
+            reference_audio=reference_audio,
         )
 
         if request.stream:
@@ -9640,14 +9990,7 @@ class API:
                     command_id, recv
                 )
             except anyio.get_cancelled_exc_class():
-                cancel_command = TaskCancelled(cancelled_command_id=command_id)
-                self._cancelled_command_ids.add(command_id)
-                with anyio.CancelScope(shield=True):
-                    await self.command_sender.send(
-                        ForwarderCommand(
-                            origin=self._system_id, command=cancel_command
-                        )
-                    )
+                await self._cancel_audio_speech_command(command_id)
                 await self._finalize_command_stream(
                     command_id,
                     cast(
@@ -9685,12 +10028,7 @@ class API:
             )
 
         except anyio.get_cancelled_exc_class():
-            cancel_command = TaskCancelled(cancelled_command_id=command_id)
-            self._cancelled_command_ids.add(command_id)
-            with anyio.CancelScope(shield=True):
-                await self.command_sender.send(
-                    ForwarderCommand(origin=self._system_id, command=cancel_command)
-                )
+            await self._cancel_audio_speech_command(command_id)
             raise
         finally:
             await self._finalize_command_stream(
@@ -9764,6 +10102,18 @@ class API:
 
         self._cancelled_command_ids.add(command_id)
         with anyio.CancelScope(shield=True):
+            target_node = self._speech_media_targets.get(command_id)
+            if target_node is not None and self._speech_media_packet_sender is not None:
+                with contextlib.suppress(Exception):
+                    await self._speech_media_packet_sender.send(
+                        SpeechMediaPacket(
+                            source_node=self.node_id,
+                            target_node=target_node,
+                            command_id=command_id,
+                            sequence=0,
+                            kind="cancelled",
+                        )
+                    )
             await self.command_sender.send(
                 ForwarderCommand(
                     origin=self._system_id,

@@ -269,7 +269,6 @@ async def test_master_new_speech_tasks_inherit_cluster_tracing_state() -> None:
             response_format=AudioResponseFormat.Wav,
         ),
     )
-
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(master._command_processor)  # pyright: ignore[reportPrivateUsage]
         await command_sender.send(
@@ -285,6 +284,41 @@ async def test_master_new_speech_tasks_inherit_cluster_tracing_state() -> None:
     assert event.task.trace_enabled is True
     assert master.command_task_mapping[command.command_id] == event.task_id
     assert master._expected_ranks[event.task_id] == {0}  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_stale_pinned_speech_instance_emits_terminal_failure() -> None:
+    """A placement race must terminate the owning API request immediately."""
+
+    master, node_id, command_sender, event_receiver = _build_master()
+    command = SpeechSynthesis(
+        command_id=CommandId("stale-pinned-speech"),
+        owner_node=node_id,
+        target_instance_id=InstanceId("removed-instance"),
+        task_params=SpeechSynthesisTaskParams(
+            model=ModelId("org/voice-model"),
+            input_text="hello",
+            response_format=AudioResponseFormat.Wav,
+        ),
+    )
+    created: Event | None = None
+    failed: Event | None = None
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(master._command_processor)  # pyright: ignore[reportPrivateUsage]
+        await command_sender.send(
+            ForwarderCommand(origin=SystemId("API"), command=command)
+        )
+        created = await event_receiver.receive()
+        failed = await event_receiver.receive()
+        task_group.cancel_scope.cancel()
+
+    assert isinstance(created, TaskCreated)
+    assert created.task.task_status is TaskStatus.Failed
+    assert isinstance(failed, TaskFailed)
+    assert failed.task_id == created.task_id
+    assert failed.error_type == "instance_unavailable"
+    assert master.command_task_mapping[command.command_id] == created.task_id
 
 
 @pytest.mark.asyncio

@@ -191,6 +191,9 @@ Declares speech serving metadata for TTS and STT models:
 - `voices`
   - stable built-in voice identifiers returned by `GET /v1/audio/voices`; this
     requires `kind = "tts"` and `supports_voice_listing = true`
+- `default_voice`
+  - built-in voice used when a TTS request omits `voice`; it must appear in
+    `voices`
 - `supports_reference_audio`
   - whether managed reference audio can condition the voice
 - `supports_translation`
@@ -199,9 +202,8 @@ Declares speech serving metadata for TTS and STT models:
 - `sample_rates`
   - supported input or output sample rates in hertz
 
-For TTS streaming, `supports_streaming = true` is necessary but not sufficient:
-the node must also run with `SKULK_ENABLE_EXPERIMENTAL_MODE`, and cluster config
-must set `experiments.tts_streaming: true`.
+For stable TTS streaming, `audio.supports_streaming = true` is the model-side
+eligibility gate; the model must also be mounted and ready.
 
 For realtime STT, both `supports_streaming = true` and
 `supports_realtime = true` are necessary but not sufficient. The API must have

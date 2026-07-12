@@ -21,16 +21,20 @@ Skulk currently exposes:
 - `GET /v1/audio/voices` for a mounted model's static built-in voice catalog;
 - `WS /v1/realtime?model=<model-id>` for one-utterance realtime transcription.
 
-`/v1/audio/speech` returns an encoded audio response. Its `stream=true` path is
-experimental and is available only when all of these conditions are true:
-
-- the node runs with `SKULK_ENABLE_EXPERIMENTAL_MODE`;
-- cluster settings enable `experiments.tts_streaming`;
-- the mounted TTS card declares `audio.supports_streaming = true`;
-- the serving runner is ready and advertises the required capability.
+`/v1/audio/speech` returns an encoded audio response. Its stable `stream=true`
+path is available when the mounted TTS card declares
+`audio.supports_streaming = true`, every routable instance is ready, and the
+request format resolves to MP3. Other encoded formats remain batch-only.
 
 `/v1/audio/transcriptions` accepts a bounded multipart upload and returns one
 completed transcription. It does not provide progressive REST transcription.
+
+`/v1/audio/speech` also accepts bounded multipart reference audio for mounted
+cards declaring `audio.supports_reference_audio = true`. The upload is
+request-scoped: it travels over node-addressed Zenoh `SPEECH_MEDIA`, stays out
+of State and the event log, and is deleted from the runner's temporary storage
+after generation. The API rejects reference uploads when Zenoh is unavailable
+instead of broadcasting private media through gossipsub.
 
 `WS /v1/realtime?model=<model-id>` accepts OpenAI-style base64 PCM16 append and
 commit events over a WebSocket. It emits transcript delta, final, and failure
@@ -80,6 +84,12 @@ call and release its reservation.
 Binary audio remains on the data path. It is not included in State, the event
 log, or structured logs. Batch REST transcription uses a separate bounded
 upload path and does not claim the same no-retention property.
+
+Reference-audio TTS uses a separate `SPEECH_MEDIA` data family. The API selects
+and pins one ready single-host TTS instance, chunks the upload with a terminal
+digest, and the target worker assembles it only in bounded process-local memory.
+Cancellation, transport failure, checksum failure, dispatch, and expiry clear
+the worker buffer. Only the worker-local runner task receives the bytes.
 
 ## Dashboard Behavior
 

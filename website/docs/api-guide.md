@@ -523,23 +523,24 @@ Request fields:
 |-------|------|-------|
 | `model` | string | Required mounted TTS model id |
 | `input` | string | Required text to synthesize |
-| `voice` | string or null | Optional model-specific voice name |
+| `voice` | string or null | Optional model-specific voice name. When omitted, Skulk applies the mounted model card's `audio.default_voice` when declared. |
 | `speed` | number or null | Optional positive speaking speed multiplier |
 | `response_format` | string or null | Optional encoded output format. When omitted or set to `null`, Skulk uses `mp3` for `stream=true`; otherwise it uses the mounted model card default when declared and falls back to `mp3`; supported values are constrained by the model card when declared |
-| `stream` | boolean | Optional. Experimental. When `true`, Skulk returns a chunked HTTP response and yields encoded MP3 bytes as the speech runner emits them; accepted only when `SKULK_ENABLE_EXPERIMENTAL_MODE` is enabled, `experiments.tts_streaming` is true, and the mounted TTS card explicitly declares `audio.supports_streaming = true` |
+| `stream` | boolean | Optional. When `true`, Skulk returns a chunked HTTP response and yields encoded MP3 bytes as the speech runner emits them; accepted only when the mounted TTS card explicitly declares `audio.supports_streaming = true` and every routable instance of the requested model has a ready runner |
 | `streaming_interval` | number or null | Optional positive model-specific streaming cadence hint, accepted only with `stream=true` |
 | `instruct`, `lang_code` | string or null | Optional model-specific generation hints |
 | `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number or integer | Optional model-specific sampling controls |
+| `reference_audio` | multipart file or null | Optional request-scoped voice-conditioning audio. Accepted only as a multipart upload for a mounted card declaring `audio.supports_reference_audio = true`; server-local paths are rejected |
+| `reference_text` | string or null | Optional transcript of `reference_audio`; accepted only when the multipart upload is present |
 
 The response body is raw audio bytes with a matching audio media type
 (`audio/mpeg`, `audio/wav`, `audio/flac`, `audio/ogg`, or `audio/opus`).
-For `stream=true`, the node must be running with
-`SKULK_ENABLE_EXPERIMENTAL_MODE`, the cluster config must set
-`experiments.tts_streaming: true`, and the mounted TTS card must explicitly
-declare `audio.supports_streaming = true`. The response format must currently
+For `stream=true`, the mounted TTS card must explicitly declare
+`audio.supports_streaming = true`. The response format must currently
 resolve to `mp3`; when a streaming request omits `response_format`, Skulk
 requests `mp3` instead of the model card's non-streaming default. Skulk returns
-`audio/mpeg` with chunked HTTP bytes. This is TTS output streaming, not a
+`audio/mpeg` with chunked HTTP bytes. Admission returns `503` if any routable
+instance of the requested model lacks a ready runner. This is TTS output streaming, not a
 realtime session: the request text is still a complete bounded input,
 cancellation closes the command stream, and each chunk follows the mounted
 model's generation cadence. The bundled Qwen3 TTS card declares MP3 streaming
@@ -548,9 +549,19 @@ remain non-streaming. MP3/streaming support is enabled card-by-card only when
 the runtime can provide the encoder and the model has passed streaming
 validation.
 
-The speech endpoint is still text-only. `streaming_interval` without
-`stream=true`, `reference_audio`, and `reference_text` return **400 Bad
-Request**. Managed reference-audio uploads are a later phase.
+JSON requests remain text-only. To condition a supporting model with reference
+audio, send the same scalar fields as multipart form values and include a
+`reference_audio` file of at most 25 MiB. Skulk validates the mounted model and
+audio metadata, pins the request to one ready single-host instance, and sends
+the bytes over the node-addressed Zenoh data plane. Reference media is never
+written to State or the event log, and the serving runner deletes its temporary
+file when generation ends or fails. Reference-audio requests return **503
+Service Unavailable** when the Zenoh data plane is unavailable; Skulk never
+broadcasts private reference media through the gossipsub fallback.
+
+`streaming_interval` without `stream=true`, `reference_text` without a
+multipart reference upload, and JSON `reference_audio` path strings return
+**400 Bad Request**.
 
 ## Skulk Audio Voices API
 
@@ -965,7 +976,7 @@ Important fields:
 | `tags` | array | UI-friendly derived labels such as `vision`, `thinking`, `embedding`, `tts`, `stt`, `tensor`, and `optiq` |
 | `supports_tensor` | boolean | Whether tensor parallel launch is supported |
 | `base_model` | string | Base family or upstream source model when known |
-| `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, voice/reference-audio flags, translation support, and sample rates |
+| `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
 | `resolved_capabilities.supports_speech_synthesis` | boolean | Whether clients should treat the model as a text-to-speech model |
 | `resolved_capabilities.supports_transcription` | boolean | Whether clients should treat the model as a speech-to-text model |
 | `resolved_capabilities.supports_speech_translation` | boolean | Whether clients should treat the model as supporting speech translation |
@@ -1010,10 +1021,8 @@ The response also carries an `effective` block describing runtime-resolved value
 The persisted `experiments` section holds per-feature opt-ins shown inside that
 gated dashboard section. Current fields:
 
-- `experiments.tts_streaming`: enables the experimental `/v1/audio/speech`
-  `stream=true` transport on nodes that also run with
-  `SKULK_ENABLE_EXPERIMENTAL_MODE`; keep this off until a mounted TTS model has
-  passed streaming validation.
+- `experiments.tts_streaming`: deprecated compatibility field. Stable TTS
+  streaming ignores this value and follows mounted model capability metadata.
 - `experiments.stt_realtime`: deprecated compatibility field. It remains
   accepted in existing configuration but is ignored; realtime STT is selected
   from card truth, reachable transport, and ready mounted capacity.
@@ -1333,7 +1342,7 @@ descriptor carries the capability `id`, semantic `version`, a human/LLM-readable
 description, JSON Schemas for input and output, the call's I/O mode, and the
 response maps each `id@version` to a content revision digest so callers can pin
 the exact shape they discovered. Production nodes also include first-party
-provider descriptors, including mounted-model speech providers and stable
+provider descriptors, including the mounted-model speech providers and stable
 `vad@1.0.0`, so descriptor presence alone is not always a liveness claim.
 Extensions consume this through
 `describe_node`; the light discovery layer (which nodes offer which capability
@@ -1437,9 +1446,9 @@ Each `chunk` payload reports `model`, `format: "mp3"`, `chunk_index`,
 as an `InlineMediaAttachment` with `media_type: "audio/mpeg"`.
 
 The descriptor is always available for contract discovery, while the `tts`
-telemetry tag is advertised only when experimental mode,
-`experiments.tts_streaming`, and at least one eligible mounted model are all
-active. Dynamic admission rechecks the requested model before `started`. A
+telemetry tag is advertised when at least one eligible model is mounted and
+every routable instance of an eligible model has a ready runner.
+Dynamic admission rechecks the requested model before `started`. A
 caller cancellation propagates to the underlying synthesis command.
 
 ### Transcribe a bounded clip through the built-in STT provider

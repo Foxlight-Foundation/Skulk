@@ -323,6 +323,8 @@ class AudioCardConfig(CamelCaseModel):
     """Whether the model can enumerate voices through a voice-listing API."""
     voices: tuple[str, ...] = ()
     """Stable built-in voice identifiers exposed by the model."""
+    default_voice: str | None = None
+    """Built-in voice used when a TTS request omits an explicit voice."""
     supports_reference_audio: bool | None = None
     """Whether the model accepts managed reference audio for voice conditioning."""
     supports_translation: bool | None = None
@@ -424,6 +426,8 @@ class AudioCardConfig(CamelCaseModel):
             raise ValueError("voices requires kind to be tts")
         if self.voices and self.supports_voice_listing is not True:
             raise ValueError("voices requires supports_voice_listing=true")
+        if self.default_voice is not None and self.default_voice not in self.voices:
+            raise ValueError("default_voice must be included in voices")
         return self
 
 
