@@ -7,14 +7,38 @@ import {
   SpeechSentenceQueue,
   splitPlaybackSamples,
   splitCompleteSpeechSentences,
+  validatePcmResponseHeaders,
 } from './streamingSpeechPlayback';
 
 describe('canUseStreamingSpeechPlayback', () => {
   it('requires a secure origin and both Web Audio worklet constructors', () => {
-    const constructors = { AudioContext: class {}, AudioWorkletNode: class {} };
+    class SupportedAudioContext {}
+    Object.defineProperty(SupportedAudioContext.prototype, 'audioWorklet', { value: {} });
+    const constructors = { AudioContext: SupportedAudioContext, AudioWorkletNode: class {} };
     expect(canUseStreamingSpeechPlayback({ isSecureContext: true, ...constructors })).toBe(true);
     expect(canUseStreamingSpeechPlayback({ isSecureContext: false, ...constructors })).toBe(false);
     expect(canUseStreamingSpeechPlayback({ isSecureContext: true })).toBe(false);
+    expect(canUseStreamingSpeechPlayback({
+      isSecureContext: true,
+      AudioContext: class {},
+      AudioWorkletNode: class {},
+    })).toBe(false);
+  });
+});
+
+describe('validatePcmResponseHeaders', () => {
+  it('requires sample rate, mono channels, and signed little-endian PCM16', () => {
+    const headers = new Headers({
+      'X-Audio-Sample-Rate': '24000',
+      'X-Audio-Channels': '1',
+      'X-Audio-Sample-Format': 's16le',
+    });
+    expect(validatePcmResponseHeaders(headers)).toBe(24000);
+    headers.set('X-Audio-Channels', '2');
+    expect(() => validatePcmResponseHeaders(headers)).toThrow('mono');
+    headers.set('X-Audio-Channels', '1');
+    headers.set('X-Audio-Sample-Format', 'f32le');
+    expect(() => validatePcmResponseHeaders(headers)).toThrow('PCM16');
   });
 });
 
@@ -99,5 +123,19 @@ describe('SpeechSentenceQueue', () => {
     queue.stop();
     await vi.waitFor(() => expect(aborted).toBe(true));
     expect(calls).toEqual(['First.']);
+  });
+
+  it('returns to idle after a playback error', async () => {
+    const errors: unknown[] = [];
+    let idle = false;
+    const queue = new SpeechSentenceQueue(
+      async () => { throw new Error('playback failed'); },
+      (error) => errors.push(error),
+      () => { idle = true; },
+    );
+
+    queue.enqueue(['First.']);
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    await vi.waitFor(() => expect(idle).toBe(true));
   });
 });

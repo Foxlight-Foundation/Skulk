@@ -120,6 +120,11 @@ def _tts_card(
     *,
     supports_streaming: bool = True,
     supports_reference_audio: bool = False,
+    response_formats: tuple[AudioResponseFormat, ...] = (
+        AudioResponseFormat.Mp3,
+        AudioResponseFormat.Wav,
+    ),
+    default_response_format: AudioResponseFormat = AudioResponseFormat.Wav,
 ) -> ModelCard:
     """Create a minimal TTS model card for speech API validation tests."""
 
@@ -134,8 +139,8 @@ def _tts_card(
         capabilities=["tts"],
         audio=AudioCardConfig(
             kind=AudioCardKind.TextToSpeech,
-            default_response_format=AudioResponseFormat.Wav,
-            response_formats=(AudioResponseFormat.Mp3, AudioResponseFormat.Wav),
+            default_response_format=default_response_format,
+            response_formats=response_formats,
             supports_streaming=supports_streaming,
             supports_reference_audio=supports_reference_audio,
         ),
@@ -1345,6 +1350,24 @@ async def test_audio_speech_streaming_is_stable_without_experimental_mode(
 
 
 @pytest.mark.anyio
+async def test_audio_speech_streaming_accepts_pcm_only_card() -> None:
+    """Ready streaming capacity may truthfully expose raw PCM without MP3."""
+
+    api = _build_api()
+    card = _tts_card(
+        response_formats=(AudioResponseFormat.Pcm,),
+        default_response_format=AudioResponseFormat.Pcm,
+    )
+    api.state = _state_with_running_card(card)
+
+    assert await api._validate_speech_synthesis_model(
+        card.model_id,
+        AudioResponseFormat.Pcm,
+        stream=True,
+    ) == (card.model_id, AudioResponseFormat.Pcm)
+
+
+@pytest.mark.anyio
 async def test_audio_speech_streaming_rejects_unready_routable_replica() -> None:
     """Admission fails fast when the master could choose an unready replica."""
 
@@ -1862,6 +1885,42 @@ async def test_audio_speech_collect_terminal_before_any_chunk_reports_no_audio(
 
     assert exc_info.value.status_code == 500
     assert "no audio response" in str(exc_info.value.detail)
+
+
+@pytest.mark.anyio
+async def test_audio_speech_collect_cancels_on_sample_rate_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mid-response framing violation must cancel abandoned generation."""
+
+    api = _build_api()
+    command_id = CommandId("speech-sample-rate-change")
+    sender, receiver = channel[AudioChunk | ErrorChunk]()
+    model_id = ModelId("mlx-community/qwen3-tts-test")
+    cancelled: list[CommandId] = []
+    for index, sample_rate in enumerate((24000, 48000)):
+        await sender.send(
+            AudioChunk(
+                model=model_id,
+                data=base64.b64encode(b"\x00\x00").decode("ascii"),
+                chunk_index=index,
+                total_chunks=2,
+                format=AudioResponseFormat.Pcm,
+                sample_rate=sample_rate,
+                finish_reason="stop" if index == 1 else None,
+            )
+        )
+
+    async def _cancel(self: API, cancelled_id: CommandId) -> None:
+        assert self is api
+        cancelled.append(cancelled_id)
+
+    monkeypatch.setattr(API, "_cancel_audio_speech_command", _cancel)
+
+    with pytest.raises(HTTPException, match="changed sample rate"):
+        await api._collect_audio_speech_chunks(command_id, receiver)
+
+    assert cancelled == [command_id]
 
 
 @pytest.mark.anyio

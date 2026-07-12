@@ -1067,6 +1067,7 @@ export function ChatView({
         resetStallTimer();
         speechVisibleContent = '';
         speechTail = '';
+        const roundSpeechSentences: string[] = [];
 
         let iterationRawContent = '';
         let iterationThinking = '';
@@ -1160,7 +1161,14 @@ export function ChatView({
                   speechVisibleContent = separated.content;
                   const split = splitCompleteSpeechSentences(speechTail + visibleDelta);
                   speechTail = split.remainder;
-                  sentenceQueue.enqueue(split.sentences);
+                  if (requestTools) {
+                    roundSpeechSentences.push(...split.sentences);
+                  } else {
+                    sentenceQueue.enqueue(split.sentences);
+                  }
+                } else if (sentenceQueue) {
+                  speechVisibleContent = separated.content;
+                  speechTail = '';
                 }
               }
 
@@ -1190,6 +1198,9 @@ export function ChatView({
         }
 
         if (iterationToolCalls.length === 0) {
+          if (sentenceQueue && requestTools) {
+            sentenceQueue.enqueue(roundSpeechSentences);
+          }
           fullThinking = mergeThinkingContent(fullThinking, iterationThinking);
           finalRawContent = separatedContent.content;
           break;

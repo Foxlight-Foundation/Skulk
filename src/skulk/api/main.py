@@ -3302,7 +3302,10 @@ class API:
                 and card.audio.supports_streaming is True
                 and (
                     not profile.audio_response_formats
-                    or AudioResponseFormat.Mp3 in profile.audio_response_formats
+                    or any(
+                        audio_format in _STREAMABLE_AUDIO_RESPONSE_FORMATS
+                        for audio_format in profile.audio_response_formats
+                    )
                 )
             ):
                 eligible_by_model.setdefault(card.model_id, []).append(instance)
@@ -10169,6 +10172,7 @@ class API:
                 response_format = chunk.format
                 if chunk.sample_rate is not None:
                     if sample_rate is not None and sample_rate != chunk.sample_rate:
+                        await self._cancel_audio_speech_command(command_id)
                         raise HTTPException(
                             status_code=500,
                             detail="Speech synthesis changed sample rate mid-response",
