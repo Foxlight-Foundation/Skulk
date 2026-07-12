@@ -1506,6 +1506,11 @@ class API:
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
+            expose_headers=[
+                "X-Audio-Sample-Rate",
+                "X-Audio-Channels",
+                "X-Audio-Sample-Format",
+            ],
         )
 
     def _setup_routes(self) -> None:

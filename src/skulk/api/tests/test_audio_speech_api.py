@@ -116,6 +116,26 @@ def _build_builtin_provider_api() -> tuple[API, Receiver[ForwarderCommand]]:
     )
 
 
+def test_audio_speech_exposes_pcm_framing_headers_to_cors_clients() -> None:
+    """Cross-origin browsers must be able to inspect raw PCM framing metadata."""
+
+    api = _build_api()
+    response = TestClient(api.app).get(
+        "/node_id",
+        headers={"Origin": "https://client.example"},
+    )
+
+    exposed = {
+        value.strip().casefold()
+        for value in response.headers["access-control-expose-headers"].split(",")
+    }
+    assert exposed == {
+        "x-audio-sample-rate",
+        "x-audio-channels",
+        "x-audio-sample-format",
+    }
+
+
 def _tts_card(
     *,
     supports_streaming: bool = True,
