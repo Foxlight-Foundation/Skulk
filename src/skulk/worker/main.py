@@ -483,6 +483,28 @@ def _realtime_input_cleanup_command_id(
     return None
 
 
+def _speech_media_cleanup_command_id(
+    event: Event,
+    previous_tasks: Mapping[TaskId, Task],
+    current_tasks: Mapping[TaskId, Task],
+) -> CommandId | None:
+    """Return the TTS command whose ephemeral reference media can be released."""
+
+    task: Task | None = None
+    if isinstance(event, TaskDeleted):
+        task = previous_tasks.get(event.task_id)
+    elif isinstance(event, TaskStatusUpdated) and event.task_status in {
+        TaskStatus.Cancelled,
+        TaskStatus.Complete,
+        TaskStatus.Failed,
+        TaskStatus.TimedOut,
+    }:
+        task = current_tasks.get(event.task_id) or previous_tasks.get(event.task_id)
+    if isinstance(task, SpeechSynthesis):
+        return task.command_id
+    return None
+
+
 def _log_image_transport(message: str) -> None:
     """Emit image transport logs only at INFO when explicitly requested.
 
@@ -1102,6 +1124,13 @@ class Worker:
                     )
                 ) is not None:
                     self._finish_realtime_command(realtime_cleanup_cmd_id)
+
+                if (
+                    speech_cleanup_cmd_id := _speech_media_cleanup_command_id(
+                        event, previous_tasks, self.state.tasks
+                    )
+                ) is not None:
+                    self._clear_speech_media(speech_cleanup_cmd_id)
 
                 if isinstance(event, CustomModelCardAdded):
                     try:

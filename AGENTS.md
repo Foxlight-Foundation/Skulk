@@ -145,7 +145,11 @@ A model card's `placement.compatible_backends` selects which engine serves it
   serve experimental `/v1/audio/translations` only with global experimental
   mode and `experiments.speech_translation`; TTS cards may expose static voices
   through the Skulk `/v1/audio/voices` extension. VAD, conversation/full-duplex
-  speech, and managed reference audio remain later phases.
+  speech remain later phases. Managed reference audio is accepted only as a
+  bounded multipart upload for supporting TTS cards. Its bytes use the
+  node-addressed `SPEECH_MEDIA` Zenoh data path, never State or the event log;
+  the worker assembles them in bounded process-local memory and the runner
+  removes its request-scoped temporary file after generation.
 - **`llama_cpp`**: in-process `llama-cpp-python` for GGUF on GPU/Linux nodes.
   Single-node.
 - **`llama_server`**: served-backend engine; the worker launches an external
@@ -158,6 +162,7 @@ Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `COMMANDS`: Workers/API send commands to master
 - `ELECTION_MESSAGES`: Election protocol messages
 - `CONNECTION_MESSAGES`: libp2p connection updates
+- `SPEECH_MEDIA`: node-addressed ephemeral TTS reference audio over Zenoh
 
 ### Event Sourcing
 The system uses event sourcing for state management:

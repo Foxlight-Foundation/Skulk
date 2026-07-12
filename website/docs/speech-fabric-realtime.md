@@ -32,6 +32,13 @@ experimental and is available only when all of these conditions are true:
 `/v1/audio/transcriptions` accepts a bounded multipart upload and returns one
 completed transcription. It does not provide progressive REST transcription.
 
+`/v1/audio/speech` also accepts bounded multipart reference audio for mounted
+cards declaring `audio.supports_reference_audio = true`. The upload is
+request-scoped: it travels over node-addressed Zenoh `SPEECH_MEDIA`, stays out
+of State and the event log, and is deleted from the runner's temporary storage
+after generation. The API rejects reference uploads when Zenoh is unavailable
+instead of broadcasting private media through gossipsub.
+
 `WS /v1/realtime?model=<model-id>` accepts OpenAI-style base64 PCM16 append and
 commit events over a WebSocket. It emits transcript delta, final, and failure
 events from the mounted realtime STT model. The route is a transcription
@@ -80,6 +87,12 @@ call and release its reservation.
 Binary audio remains on the data path. It is not included in State, the event
 log, or structured logs. Batch REST transcription uses a separate bounded
 upload path and does not claim the same no-retention property.
+
+Reference-audio TTS uses a separate `SPEECH_MEDIA` data family. The API selects
+and pins one ready single-host TTS instance, chunks the upload with a terminal
+digest, and the target worker assembles it only in bounded process-local memory.
+Cancellation, transport failure, checksum failure, dispatch, and expiry clear
+the worker buffer. Only the worker-local runner task receives the bytes.
 
 ## Dashboard Behavior
 

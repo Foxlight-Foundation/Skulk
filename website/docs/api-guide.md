@@ -530,6 +530,8 @@ Request fields:
 | `streaming_interval` | number or null | Optional positive model-specific streaming cadence hint, accepted only with `stream=true` |
 | `instruct`, `lang_code` | string or null | Optional model-specific generation hints |
 | `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number or integer | Optional model-specific sampling controls |
+| `reference_audio` | multipart file or null | Optional request-scoped voice-conditioning audio. Accepted only as a multipart upload for a mounted card declaring `audio.supports_reference_audio = true`; server-local paths are rejected |
+| `reference_text` | string or null | Optional transcript of `reference_audio`; accepted only when the multipart upload is present |
 
 The response body is raw audio bytes with a matching audio media type
 (`audio/mpeg`, `audio/wav`, `audio/flac`, `audio/ogg`, or `audio/opus`).
@@ -548,9 +550,19 @@ remain non-streaming. MP3/streaming support is enabled card-by-card only when
 the runtime can provide the encoder and the model has passed streaming
 validation.
 
-The speech endpoint is still text-only. `streaming_interval` without
-`stream=true`, `reference_audio`, and `reference_text` return **400 Bad
-Request**. Managed reference-audio uploads are a later phase.
+JSON requests remain text-only. To condition a supporting model with reference
+audio, send the same scalar fields as multipart form values and include a
+`reference_audio` file of at most 25 MiB. Skulk validates the mounted model and
+audio metadata, pins the request to one ready single-host instance, and sends
+the bytes over the node-addressed Zenoh data plane. Reference media is never
+written to State or the event log, and the serving runner deletes its temporary
+file when generation ends or fails. Reference-audio requests return **503
+Service Unavailable** when the Zenoh data plane is unavailable; Skulk never
+broadcasts private reference media through the gossipsub fallback.
+
+`streaming_interval` without `stream=true`, `reference_text` without a
+multipart reference upload, and JSON `reference_audio` path strings return
+**400 Bad Request**.
 
 ## Skulk Audio Voices API
 

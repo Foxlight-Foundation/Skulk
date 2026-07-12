@@ -811,6 +811,10 @@ class Master:
                                 trace_enabled=trace_enabled,
                             )
                         case SpeechSynthesis():
+                            if command.task_params.reference_audio_data is not None:
+                                raise ValueError(
+                                    "Reference audio bytes must not enter commands or State"
+                                )
                             for instance in self.state.instances.values():
                                 if (
                                     instance.shard_assignments.model_id

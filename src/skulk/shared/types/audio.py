@@ -41,6 +41,16 @@ class SpeechSynthesisTaskParams(BaseModel, frozen=True):
     stream: bool = False
     streaming_interval: float | None = Field(default=None, gt=0)
 
+    @model_validator(mode="after")
+    def _validate_reference_audio(self) -> "SpeechSynthesisTaskParams":
+        if self.reference_audio_present != (self.reference_audio_sha256 is not None):
+            raise ValueError(
+                "reference_audio_present and reference_audio_sha256 must agree"
+            )
+        if self.reference_audio_data is not None and not self.reference_audio_present:
+            raise ValueError("reference_audio_data requires reference_audio_present")
+        return self
+
 
 class AudioTranscriptionTaskParams(BaseModel, frozen=True):
     """Internal task params for speech-to-text inference.

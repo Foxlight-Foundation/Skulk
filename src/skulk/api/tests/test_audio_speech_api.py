@@ -2,15 +2,18 @@
 """API coverage for OpenAI-compatible text-to-speech serving."""
 
 import base64
+import io
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Never, cast
 
 import anyio
 import pytest
-from fastapi import HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import HTTPException, UploadFile
+from fastapi.responses import Response, StreamingResponse
 from pydantic import ValidationError
+from starlette.datastructures import Headers
+from starlette.testclient import TestClient
 
 from skulk.api import main as api_main
 from skulk.api.main import API
@@ -24,6 +27,7 @@ from skulk.extensions import (
     descriptor_revision,
 )
 from skulk.routing.provider_streams import ProviderStreamPacket
+from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.shared.election import ElectionMessage
 from skulk.shared.experimental import EXPERIMENTAL_MODE_ENV_VAR
 from skulk.shared.models.model_cards import (
@@ -55,7 +59,7 @@ from skulk.shared.types.tasks import (
 )
 from skulk.shared.types.telemetry import TelemetryView
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
-from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
+from skulk.shared.types.worker.runners import RunnerId, RunnerReady, ShardAssignments
 from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.channels import Receiver, channel
 
@@ -106,7 +110,11 @@ def _build_builtin_provider_api() -> tuple[API, Receiver[ForwarderCommand]]:
     )
 
 
-def _tts_card(*, supports_streaming: bool = True) -> ModelCard:
+def _tts_card(
+    *,
+    supports_streaming: bool = True,
+    supports_reference_audio: bool = False,
+) -> ModelCard:
     """Create a minimal TTS model card for speech API validation tests."""
 
     return ModelCard(
@@ -123,6 +131,7 @@ def _tts_card(*, supports_streaming: bool = True) -> ModelCard:
             default_response_format=AudioResponseFormat.Wav,
             response_formats=(AudioResponseFormat.Mp3, AudioResponseFormat.Wav),
             supports_streaming=supports_streaming,
+            supports_reference_audio=supports_reference_audio,
         ),
     )
 
@@ -215,6 +224,164 @@ def test_audio_speech_route_is_documented_in_openapi() -> None:
 
     assert operation["tags"] == ["Audio"]
     assert operation["summary"] == "Generate speech audio"
+    request_body = cast(dict[str, object], operation["requestBody"])
+    content = cast(dict[str, object], request_body["content"])
+    assert "application/json" in content
+    assert "multipart/form-data" in content
+
+
+def test_audio_speech_http_parses_multipart_reference_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multipart fields and upload should reach the strict core handler."""
+
+    api = _build_api()
+    captured: list[tuple[AudioSpeechRequest, str | None]] = []
+
+    async def _handle(
+        request: AudioSpeechRequest,
+        *,
+        reference_audio_file: UploadFile | None = None,
+    ) -> Response:
+        captured.append(
+            (
+                request,
+                None
+                if reference_audio_file is None
+                else reference_audio_file.filename,
+            )
+        )
+        return Response(content=b"audio", media_type="audio/wav")
+
+    monkeypatch.setattr(api, "audio_speech", _handle)
+    client = TestClient(api.app)
+
+    response = client.post(
+        "/v1/audio/speech",
+        data={
+            "model": "org/voice-model",
+            "input": "hello",
+            "response_format": "wav",
+            "speed": "1.25",
+            "stream": "false",
+            "reference_text": "sample transcript",
+        },
+        files={"reference_audio": ("sample.wav", b"RIFFsample", "audio/wav")},
+    )
+
+    assert response.status_code == 200
+    assert len(captured) == 1
+    request, filename = captured[0]
+    assert request.speed == 1.25
+    assert request.stream is False
+    assert request.reference_text == "sample transcript"
+    assert filename == "sample.wav"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("speed", "fast"), ("max_tokens", "many"), ("stream", "sometimes")),
+)
+def test_audio_speech_http_rejects_invalid_multipart_scalars(
+    field: str,
+    value: str,
+) -> None:
+    """Malformed multipart scalar fields produce client errors, not server errors."""
+
+    api = _build_api()
+    client = TestClient(api.app)
+    response = client.post(
+        "/v1/audio/speech",
+        data={"model": "org/voice-model", "input": "hello", field: value},
+        files={"reference_audio": ("sample.wav", b"RIFFsample", "audio/wav")},
+    )
+
+    assert response.status_code == 422
+
+
+def test_audio_speech_http_rejects_invalid_json_payload() -> None:
+    """Strict JSON validation failures are exposed as 422 responses."""
+
+    api = _build_api()
+    response = TestClient(api.app).post(
+        "/v1/audio/speech",
+        json={"model": "org/voice-model", "input": "hello", "speed": "fast"},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_audio_speech_routes_reference_audio_outside_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reference bytes travel as media packets while commands carry metadata."""
+
+    api = _build_api()
+    media_sender, media_receiver = channel[SpeechMediaPacket](8)
+    api._speech_media_packet_sender = media_sender
+    api._data_plane_zenoh = True
+    card = _tts_card(supports_reference_audio=True)
+    state = _state_with_running_card(card)
+    runner_id = RunnerId("speech-runner")
+    api.state = state.model_copy(update={"runners": {runner_id: RunnerReady()}})
+    sent_commands: list[SpeechSynthesis] = []
+
+    async def _validate_model(
+        self: API,
+        requested_model: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        assert requested_model == card.model_id
+        assert stream is False
+        return card.model_id, AudioResponseFormat.Wav
+
+    async def _send(command: object) -> None:
+        if isinstance(command, SpeechSynthesis):
+            sent_commands.append(command)
+            await api._audio_speech_queues[command.command_id].send(
+                AudioChunk(
+                    model=card.model_id,
+                    data=base64.b64encode(b"WAVE-output").decode("ascii"),
+                    chunk_index=0,
+                    total_chunks=1,
+                    format=AudioResponseFormat.Wav,
+                    sample_rate=24000,
+                    finish_reason="stop",
+                )
+            )
+
+    monkeypatch.setattr(API, "_validate_speech_synthesis_model", _validate_model)
+    monkeypatch.setattr(api, "_send", _send)
+    upload = UploadFile(
+        filename="sample.wav",
+        file=io.BytesIO(b"RIFF-reference"),
+        headers=Headers({"content-type": "audio/wav"}),
+    )
+
+    response = await api.audio_speech(
+        AudioSpeechRequest(
+            model=str(card.model_id),
+            input="hello",
+            response_format=AudioResponseFormat.Wav,
+            reference_text="reference transcript",
+        ),
+        reference_audio_file=upload,
+    )
+
+    assert bytes(response.body) == b"WAVE-output"
+    first = await media_receiver.receive()
+    terminal = await media_receiver.receive()
+    assert first.kind == "chunk"
+    assert first.data == b"RIFF-reference"
+    assert terminal.kind == "completed"
+    assert len(sent_commands) == 1
+    command = sent_commands[0]
+    assert command.target_instance_id == InstanceId("speech-instance")
+    assert command.task_params.reference_audio_present is True
+    assert command.task_params.reference_audio_data is None
 
 
 def test_audio_voices_route_is_documented_in_openapi() -> None:

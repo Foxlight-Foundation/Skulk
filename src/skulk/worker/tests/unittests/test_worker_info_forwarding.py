@@ -1,7 +1,10 @@
+import hashlib
+
 import anyio
 import pytest
 
 from skulk.routing.realtime_audio import RealtimeAudioPacket
+from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.commands import (
     ForwarderCommand,
@@ -182,6 +185,57 @@ async def test_remote_realtime_audio_packet_for_other_node_is_ignored() -> None:
         task_group.cancel_scope.cancel()
 
     assert worker._realtime_audio_pending == {}  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_speech_media_packet_is_bounded_and_completed_off_state() -> None:
+    """Reference media is retained only in worker-local request buffers."""
+
+    _, indexed_event_receiver = channel[IndexedEvent]()
+    event_sender, _ = channel[Event]()
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    packet_sender, packet_receiver = channel[SpeechMediaPacket](4)
+    worker = Worker(
+        node_id=NodeId("worker-node"),
+        event_receiver=indexed_event_receiver,
+        event_sender=event_sender,
+        command_sender=command_sender,
+        download_command_sender=download_sender,
+        speech_media_packet_receiver=packet_receiver,
+    )
+    command_id = CommandId("reference-command")
+    payload = b"RIFF-reference"
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(worker._speech_media_packet_ingress)  # pyright: ignore[reportPrivateUsage]
+        await packet_sender.send(
+            SpeechMediaPacket(
+                source_node=NodeId("api-node"),
+                target_node=NodeId("worker-node"),
+                command_id=command_id,
+                sequence=0,
+                kind="chunk",
+                data=payload,
+            )
+        )
+        await packet_sender.send(
+            SpeechMediaPacket(
+                source_node=NodeId("api-node"),
+                target_node=NodeId("worker-node"),
+                command_id=command_id,
+                sequence=1,
+                kind="completed",
+                sha256=hashlib.sha256(payload).hexdigest(),
+            )
+        )
+        while command_id not in worker._speech_media_completed:  # pyright: ignore[reportPrivateUsage]
+            await anyio.sleep(0)
+        task_group.cancel_scope.cancel()
+
+    assert worker._speech_media_chunks[command_id][0].data == payload  # pyright: ignore[reportPrivateUsage]
+    assert command_id in worker._speech_media_completed  # pyright: ignore[reportPrivateUsage]
+    assert worker.state.tasks == {}
 
 
 @pytest.mark.asyncio
