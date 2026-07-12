@@ -43,15 +43,18 @@ RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp /opt/llama.cpp \
 # Ubuntu 22.04's system python is 3.10, and a cp310 wheel would be rejected by
 # the 3.13 environment pod-bootstrap.sh syncs (PR #538 review, P1).
 # --no-binary pins the CUDA source build even if PyPI ever starts shipping
-# prebuilt (CPU-only) wheels for this package. The version comes from the
-# repo's uv.lock so pod-bootstrap.sh reinstalls exactly the pinned release
-# with CUDA enabled, never a drifted newer one (PR #538 review round 3).
-ARG PYTHON_VERSION=3.13
+# prebuilt (CPU-only) wheels for this package. Both the package version and
+# the Python version come from the repo's own pins (uv.lock and
+# .python-version), so the wheel can never drift from what pod-bootstrap.sh's
+# `uv sync` will demand (PR #538 review rounds 3-4).
 COPY uv.lock /tmp/uv.lock
+COPY .python-version /tmp/python-version
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && LLAMA_CPP_PYTHON_VERSION="$(grep -A1 'name = "llama-cpp-python"' /tmp/uv.lock | sed -n 's/^version = "\(.*\)"$/\1/p')" \
     && test -n "${LLAMA_CPP_PYTHON_VERSION}" \
-    && echo "building llama-cpp-python==${LLAMA_CPP_PYTHON_VERSION}" \
+    && PYTHON_VERSION="$(tr -d '[:space:]' < /tmp/python-version)" \
+    && test -n "${PYTHON_VERSION}" \
+    && echo "building llama-cpp-python==${LLAMA_CPP_PYTHON_VERSION} for python ${PYTHON_VERSION}" \
     && /root/.local/bin/uv venv --seed --python "${PYTHON_VERSION}" /opt/wheelbuild \
     && CMAKE_ARGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}" \
       /opt/wheelbuild/bin/python -m pip wheel --no-cache-dir \
