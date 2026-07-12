@@ -1166,6 +1166,9 @@ export function ChatView({
                   } else {
                     sentenceQueue.enqueue(split.sentences);
                   }
+                } else if (sentenceQueue) {
+                  speechVisibleContent = separated.content;
+                  speechTail = '';
                 }
               }
 

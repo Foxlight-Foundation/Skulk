@@ -73,6 +73,17 @@ def test_encode_audio_emits_little_endian_pcm16() -> None:
     ]
 
 
+def test_encode_audio_rejects_multi_channel_pcm() -> None:
+    """Raw PCM must not silently interleave channels under a mono contract."""
+
+    with pytest.raises(ValueError, match="must be mono"):
+        _encode_audio(
+            np.array([[0.1, -0.1], [0.2, -0.2]], dtype=np.float32),
+            24000,
+            AudioResponseFormat.Pcm,
+        )
+
+
 class _CaptureSender:
     """Stand-in for the runner's MpSender that records every emitted event."""
 

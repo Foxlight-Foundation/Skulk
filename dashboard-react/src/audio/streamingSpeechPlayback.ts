@@ -13,9 +13,25 @@ export function canUseStreamingSpeechPlayback(
 ): boolean {
   return Boolean(
     environment.isSecureContext
-    && environment.AudioContext
+    && typeof environment.AudioContext === 'function'
+    && 'audioWorklet' in (environment.AudioContext as { prototype: object }).prototype
     && environment.AudioWorkletNode
   );
+}
+
+/** Validate raw PCM response framing and return its sample rate. */
+export function validatePcmResponseHeaders(headers: Headers): number {
+  const sampleRate = Number(headers.get('X-Audio-Sample-Rate'));
+  if (!Number.isInteger(sampleRate) || sampleRate <= 0) {
+    throw new Error('Streaming PCM response did not include a valid sample rate.');
+  }
+  if (headers.get('X-Audio-Channels') !== '1') {
+    throw new Error('Streaming PCM response must contain mono audio.');
+  }
+  if (headers.get('X-Audio-Sample-Format') !== 's16le') {
+    throw new Error('Streaming PCM response must contain little-endian PCM16 audio.');
+  }
+  return sampleRate;
 }
 
 const WORKLET_SOURCE = `
@@ -143,10 +159,7 @@ export class StreamingSpeechPlayback {
 
   /** Stream a validated `audio/L16` response through a bounded AudioWorklet queue. */
   async play(response: Response, signal?: AbortSignal): Promise<void> {
-    const sampleRate = Number(response.headers.get('X-Audio-Sample-Rate'));
-    if (!Number.isInteger(sampleRate) || sampleRate <= 0) {
-      throw new Error('Streaming PCM response did not include a valid sample rate.');
-    }
+    const sampleRate = validatePcmResponseHeaders(response.headers);
     if (!response.body) throw new Error('Streaming speech response has no body.');
 
     this.stopped = false;
