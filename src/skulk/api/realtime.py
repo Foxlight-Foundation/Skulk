@@ -640,12 +640,12 @@ class RealtimeTranscriptionBridge:
             client_event_id=client_event_id,
         ):
             return False
-        await self._process_vad_audio(
+        handled_boundary = await self._process_vad_audio(
             session,
             segment,
             client_event_id=client_event_id,
         )
-        return True
+        return self._committed or not handled_boundary
 
     def _configure_turn_detection(
         self,
