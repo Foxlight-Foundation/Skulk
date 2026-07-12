@@ -87,6 +87,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **llama.cpp engines now report generation statistics.** Chat completions
+  served by the in-process `llama_cpp` engine and the served `llama_server`
+  proxy attach real `generation_stats` (prompt/generation token counts and
+  tokens-per-second) to the terminal chunk, as the MLX engine always has.
+  `llama_server` uses the server's own engine-side timings when available
+  (requested via `timings_per_token`), falling back to proxy-side wall-clock
+  phases; the in-process engine measures prefill/decode phases around its
+  stream. Previously every request from these engines carried
+  `stats=None`, leaving the dashboard, field telemetry, and harness
+  `skulk_*_tps` metrics blind on GPU/Linux nodes (#532).
+
 - **Pooled (multi-node) GGUF placement no longer caps unified-memory nodes at
   their BIOS VRAM carve.** Admission for RPC placements previously sized each
   node against a VRAM-carve-only figure, which falsely refused pooled models
