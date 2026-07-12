@@ -50,7 +50,7 @@ RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp /opt/llama.cpp \
 COPY uv.lock /tmp/uv.lock
 COPY .python-version /tmp/python-version
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
-    && LLAMA_CPP_PYTHON_VERSION="$(grep -A1 'name = "llama-cpp-python"' /tmp/uv.lock | sed -n 's/^version = "\(.*\)"$/\1/p')" \
+    && LLAMA_CPP_PYTHON_VERSION="$(sed -n '/^name = "llama-cpp-python"$/{n;s/^version = "\(.*\)"$/\1/p;}' /tmp/uv.lock | head -1)" \
     && test -n "${LLAMA_CPP_PYTHON_VERSION}" \
     && PYTHON_VERSION="$(tr -d '[:space:]' < /tmp/python-version)" \
     && test -n "${PYTHON_VERSION}" \

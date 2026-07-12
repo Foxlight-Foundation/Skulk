@@ -44,7 +44,10 @@ if [ "${#WHEELS[@]}" -ne 1 ] || [ ! -f "${WHEELS[0]}" ]; then
   echo "[bootstrap] ERROR: expected exactly one prebaked wheel, found: ${WHEELS[*]}" >&2
   exit 1
 fi
-uv pip install --force-reinstall "${WHEELS[0]}"
+# --no-deps: uv sync already installed llama-cpp-python's dependencies at
+# their locked versions; this step only swaps the wheel artifact and must
+# not let pip drift the rest of the environment away from uv.lock.
+uv pip install --force-reinstall --no-deps "${WHEELS[0]}"
 uv pip install --quiet nvidia-ml-py
 
 log "verifying GPU offload support in the installed binding"
