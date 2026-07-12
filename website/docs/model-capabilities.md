@@ -140,16 +140,19 @@ These fields are now runtime-facing metadata. They let placement route speech
 cards to the `mlx_audio` runner, let `/v1/models` identify mounted TTS/STT
 models, and let the dashboard expose voice controls without guessing from model
 names. Mounted `supports_speech_synthesis` models serve `/v1/audio/speech`.
+Cards with a fixed speaker inventory may declare `default_voice`; Skulk applies
+it only when the caller omits `voice`, and schema validation requires it to be
+one of the card's `voices`.
 When the card declares `audio.supports_streaming = true`, clients can pass
 `stream=true` for stable chunked HTTP MP3 output; bundled cards keep that flag
 off until a real MLX model has passed streaming validation. Mounted
 `supports_transcription` models serve
 non-streaming `/v1/audio/transcriptions`.
 Cards that additionally declare both streaming and realtime support can expose
-the experimental `stt.realtime@1.0.0` bidirectional provider when
-`experiments.stt_realtime` is enabled and the API node locally owns the mounted
-runner. The provider accepts mono PCM16, requires a true upstream incremental
-session, and does not infer realtime support from a batch transcription API.
+the stable `stt.realtime@1.0.0` bidirectional provider when the API can reach a
+ready single-host runner. The provider accepts mono PCM16, requires a true
+upstream incremental session, and does not infer realtime support from a batch
+transcription API.
 
 ## Fallback Behavior
 

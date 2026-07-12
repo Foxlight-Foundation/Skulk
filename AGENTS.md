@@ -127,15 +127,15 @@ A model card's `placement.compatible_backends` selects which engine serves it
   callers send bounded encoded audio as binary provider frames, half-close
   input, and receive one final transcript. Its core command path is shared
   with the REST endpoint. The
-  experimental `stt.realtime@1.0.0` bidirectional provider accepts mono PCM16
+  stable `stt.realtime@1.0.0` bidirectional provider accepts mono PCM16
   frames on any API node with reachable mounted capacity, pins a
   `RealtimeAudioTranscription` task to one single-host instance, and feeds a
   true upstream streaming session through bounded ingress. Same-node input
   short-circuits locally; remote input uses node-addressed binary
   `REALTIME_AUDIO` packets over Zenoh and is not advertised when Zenoh is
   unavailable. PCM never enters State or the event log. It advertises only with
-  experimental mode, `experiments.stt_realtime`, and a card declaring both
-  streaming and realtime support. `WS /v1/realtime` is a transcription-only,
+  reachable ready capacity and a card declaring both streaming and realtime
+  support. `WS /v1/realtime` is a transcription-only,
   one-utterance OpenAI-compatible adapter over this provider: base64 24 kHz
   PCM16 at the API edge becomes raw Fabric media, and disconnect cancels the
   provider. Dashboard chat uses this path only when card truth and the local
@@ -144,7 +144,11 @@ A model card's `placement.compatible_backends` selects which engine serves it
   serve experimental `/v1/audio/translations` only with global experimental
   mode and `experiments.speech_translation`; TTS cards may expose static voices
   through the Skulk `/v1/audio/voices` extension. VAD, conversation/full-duplex
-  speech, and managed reference audio remain later phases.
+  speech remain later phases. Managed reference audio is accepted only as a
+  bounded multipart upload for supporting TTS cards. Its bytes use the
+  node-addressed `SPEECH_MEDIA` Zenoh data path, never State or the event log;
+  the worker assembles them in bounded process-local memory and the runner
+  removes its request-scoped temporary file after generation.
 - **`llama_cpp`**: in-process `llama-cpp-python` for GGUF on GPU/Linux nodes.
   Single-node.
 - **`llama_server`**: served-backend engine; the worker launches an external
@@ -157,6 +161,7 @@ Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `COMMANDS`: Workers/API send commands to master
 - `ELECTION_MESSAGES`: Election protocol messages
 - `CONNECTION_MESSAGES`: libp2p connection updates
+- `SPEECH_MEDIA`: node-addressed ephemeral TTS reference audio over Zenoh
 
 ### Event Sourcing
 The system uses event sourcing for state management:
@@ -189,6 +194,8 @@ Skulk now treats model capability handling as two layers:
 - **Resolved capability profiles**: normalized runtime behavior contracts derived from the card plus conservative family defaults
 
 This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, speech/TTS/STT metadata, and additive `/v1/models` metadata consumed by the dashboard.
+TTS cards with fixed speakers may declare `audio.voices` plus a validated
+`audio.default_voice`, which the API applies only when callers omit `voice`.
 
 **Model truth vs platform truth:** a card's `compatible_backends` declares which
 engines the model's artifacts run on (MODEL truth) and must never encode a gap

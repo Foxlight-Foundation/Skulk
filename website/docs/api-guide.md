@@ -523,13 +523,15 @@ Request fields:
 |-------|------|-------|
 | `model` | string | Required mounted TTS model id |
 | `input` | string | Required text to synthesize |
-| `voice` | string or null | Optional model-specific voice name |
+| `voice` | string or null | Optional model-specific voice name. When omitted, Skulk applies the mounted model card's `audio.default_voice` when declared. |
 | `speed` | number or null | Optional positive speaking speed multiplier |
 | `response_format` | string or null | Optional encoded output format. When omitted or set to `null`, Skulk uses `mp3` for `stream=true`; otherwise it uses the mounted model card default when declared and falls back to `mp3`; supported values are constrained by the model card when declared |
 | `stream` | boolean | Optional. When `true`, Skulk returns a chunked HTTP response and yields encoded MP3 bytes as the speech runner emits them; accepted only when the mounted TTS card explicitly declares `audio.supports_streaming = true` |
 | `streaming_interval` | number or null | Optional positive model-specific streaming cadence hint, accepted only with `stream=true` |
 | `instruct`, `lang_code` | string or null | Optional model-specific generation hints |
 | `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number or integer | Optional model-specific sampling controls |
+| `reference_audio` | multipart file or null | Optional request-scoped voice-conditioning audio. Accepted only as a multipart upload for a mounted card declaring `audio.supports_reference_audio = true`; server-local paths are rejected |
+| `reference_text` | string or null | Optional transcript of `reference_audio`; accepted only when the multipart upload is present |
 
 The response body is raw audio bytes with a matching audio media type
 (`audio/mpeg`, `audio/wav`, `audio/flac`, `audio/ogg`, or `audio/opus`).
@@ -546,9 +548,19 @@ remain non-streaming. MP3/streaming support is enabled card-by-card only when
 the runtime can provide the encoder and the model has passed streaming
 validation.
 
-The speech endpoint is still text-only. `streaming_interval` without
-`stream=true`, `reference_audio`, and `reference_text` return **400 Bad
-Request**. Managed reference-audio uploads are a later phase.
+JSON requests remain text-only. To condition a supporting model with reference
+audio, send the same scalar fields as multipart form values and include a
+`reference_audio` file of at most 25 MiB. Skulk validates the mounted model and
+audio metadata, pins the request to one ready single-host instance, and sends
+the bytes over the node-addressed Zenoh data plane. Reference media is never
+written to State or the event log, and the serving runner deletes its temporary
+file when generation ends or fails. Reference-audio requests return **503
+Service Unavailable** when the Zenoh data plane is unavailable; Skulk never
+broadcasts private reference media through the gossipsub fallback.
+
+`streaming_interval` without `stream=true`, `reference_text` without a
+multipart reference upload, and JSON `reference_audio` path strings return
+**400 Bad Request**.
 
 ## Skulk Audio Voices API
 
@@ -963,7 +975,7 @@ Important fields:
 | `tags` | array | UI-friendly derived labels such as `vision`, `thinking`, `embedding`, `tts`, `stt`, `tensor`, and `optiq` |
 | `supports_tensor` | boolean | Whether tensor parallel launch is supported |
 | `base_model` | string | Base family or upstream source model when known |
-| `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, voice/reference-audio flags, translation support, and sample rates |
+| `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
 | `resolved_capabilities.supports_speech_synthesis` | boolean | Whether clients should treat the model as a text-to-speech model |
 | `resolved_capabilities.supports_transcription` | boolean | Whether clients should treat the model as a speech-to-text model |
 | `resolved_capabilities.supports_speech_translation` | boolean | Whether clients should treat the model as supporting speech translation |
@@ -1010,11 +1022,9 @@ gated dashboard section. Current fields:
 
 - `experiments.tts_streaming`: deprecated compatibility field. Stable TTS
   streaming ignores this value and follows mounted model capability metadata.
-- `experiments.stt_realtime`: enables the experimental `stt.realtime@1.0.0`
-  bidirectional provider on nodes that also run with
-  `SKULK_ENABLE_EXPERIMENTAL_MODE`. The node must locally host an eligible STT
-  runner whose card declares both `audio.supports_streaming = true` and
-  `audio.supports_realtime = true`.
+- `experiments.stt_realtime`: deprecated compatibility field. It remains
+  accepted in existing configuration but is ignored; realtime STT is selected
+  from card truth, reachable transport, and ready mounted capacity.
 - `experiments.speech_translation`: enables experimental
   `/v1/audio/translations` on nodes that also run with
   `SKULK_ENABLE_EXPERIMENTAL_MODE`. The mounted card must declare
@@ -1463,9 +1473,8 @@ general immutable blob service.
 ### Transcribe realtime PCM through the built-in STT provider
 
 Production nodes also describe a first-party `stt.realtime@1.0.0`
-bidirectional capability. The capability is experimental and is advertised
-only when experimental mode, `experiments.stt_realtime`, and eligible mounted
-capacity are all active. The owning API may differ from the speech runner node:
+bidirectional capability. It is advertised only when eligible mounted capacity
+is ready and reachable. The owning API may differ from the speech runner node:
 same-node input short-circuits locally, while remote input requires the
 node-addressed Zenoh data plane. Remote capacity is not advertised when Zenoh
 is unavailable.
@@ -1505,9 +1514,9 @@ This transcription-only WebSocket is an API-edge adapter over the same
 `stt.realtime@1.0.0` provider described above. It does not own model placement,
 runner sessions, or a second speech implementation. The API node accepting the
 socket owns the provider call, which may select a speech runner on another node.
-The same experimental-mode, `experiments.stt_realtime`, truthful-card, runner
-readiness, and Zenoh remote-capacity gates apply. OpenAPI does not model
-WebSocket operations, so this manual section is the normative edge contract;
+The same truthful-card, runner-readiness, and Zenoh remote-capacity gates apply.
+OpenAPI does not model WebSocket operations, so this manual section is the
+normative edge contract;
 the underlying provider opening remains represented by the documented HTTP
 capability endpoints.
 
@@ -1538,7 +1547,7 @@ clients without an `Origin` header remain supported.
 
 The dashboard chat microphone uses this edge only when both the selected model
 declares streaming/realtime audio and the API node currently advertises the
-experimental `stt.realtime` provider. An `AudioWorklet` captures mono browser
+stable `stt.realtime` provider. An `AudioWorklet` captures mono browser
 samples, the dashboard continuously resamples them to 24 kHz PCM16, and the
 client aggregates worklet callbacks into 100 ms transport frames before the
 existing mic control commits the socket when recording stops. If either truth

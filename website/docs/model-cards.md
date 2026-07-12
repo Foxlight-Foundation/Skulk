@@ -191,6 +191,9 @@ Declares speech serving metadata for TTS and STT models:
 - `voices`
   - stable built-in voice identifiers returned by `GET /v1/audio/voices`; this
     requires `kind = "tts"` and `supports_voice_listing = true`
+- `default_voice`
+  - built-in voice used when a TTS request omits `voice`; it must appear in
+    `voices`
 - `supports_reference_audio`
   - whether managed reference audio can condition the voice
 - `supports_translation`
@@ -203,10 +206,9 @@ For stable TTS streaming, `audio.supports_streaming = true` is the model-side
 eligibility gate; the model must also be mounted and ready.
 
 For realtime STT, both `supports_streaming = true` and
-`supports_realtime = true` are necessary but not sufficient. The node must run
-with experimental mode, set `experiments.stt_realtime: true`, locally host the
-mounted speech runner, and use a model whose upstream runtime exposes a true
-incremental streaming session. The bundled
+`supports_realtime = true` are necessary but not sufficient. The API must have
+reachable ready single-host capacity and use a model whose upstream runtime
+exposes a true incremental streaming session. The bundled
 `mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit` card is the first validated
 contract candidate. Batch Parakeet and Whisper cards deliberately keep both
 flags false.

@@ -681,6 +681,73 @@ def test_streaming_speech_synthesis_emits_partial_and_terminal_chunks(
     assert generated[2].finish_reason == "stop"
 
 
+def test_tts_reference_audio_temp_file_is_request_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runner reference files exist during generation and are deleted afterward."""
+
+    class _ReferenceSpeechModel:
+        sample_rate = 24000
+
+        def __init__(self) -> None:
+            self.reference_path: Path | None = None
+
+        def generate(
+            self,
+            text: str,
+            *,
+            ref_audio: str | None = None,
+            ref_text: str | None = None,
+        ) -> list[_FakeSpeechResult]:
+            assert text == "hello"
+            assert ref_text == "reference transcript"
+            assert ref_audio is not None
+            self.reference_path = Path(ref_audio)
+            assert self.reference_path.read_bytes() == b"RIFF-reference"
+            return [_FakeSpeechResult()]
+
+    runner, _ = _make_runner()
+    model = _ReferenceSpeechModel()
+    runner.model = model
+
+    def _fake_encode(
+        audio: np.ndarray,
+        sample_rate: int,
+        response_format: AudioResponseFormat,
+    ) -> bytes:
+        assert audio.size > 0
+        assert sample_rate == 24000
+        assert response_format == AudioResponseFormat.Wav
+        return b"WAV"
+
+    monkeypatch.setattr(speech_runner, "_encode_audio", _fake_encode)
+
+    encoded, sample_rate = runner._run_tts(
+        SpeechSynthesis(
+            instance_id=InstanceId("speech-instance-1"),
+            command_id=CommandId("reference-command"),
+            task_params=SpeechSynthesisTaskParams(
+                model=ModelId("org/reference-tts"),
+                input_text="hello",
+                response_format=AudioResponseFormat.Wav,
+                reference_text="reference transcript",
+                reference_audio_present=True,
+                reference_audio_filename="sample.wav",
+                reference_audio_content_type="audio/wav",
+                reference_audio_sha256=hashlib.sha256(
+                    b"RIFF-reference"
+                ).hexdigest(),
+                reference_audio_data=b"RIFF-reference",
+            ),
+        )
+    )
+
+    assert encoded == b"WAV"
+    assert sample_rate == 24000
+    assert model.reference_path is not None
+    assert not model.reference_path.exists()
+
+
 def test_speech_synthesis_handles_single_tuple_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

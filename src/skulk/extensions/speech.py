@@ -191,7 +191,7 @@ REALTIME_STT_CAPABILITY_DESCRIPTOR = CapabilityDescriptor(
         "modality": "audio",
         "latency": "realtime",
         "runtime": "mlx_audio",
-        "stability": "experimental",
+        "stability": "stable",
         "input_codec": "pcm_s16le",
     },
 )
