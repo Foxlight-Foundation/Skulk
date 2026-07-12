@@ -1564,7 +1564,7 @@ The wire contract implements a bounded subset of OpenAI Realtime transcription:
 | server to client | `response.audio.delta` / `response.audio.done` | Streams base64 MP3 chunks from the selected mounted `tts_model`. |
 | client to server | `response.cancel` | Cancels active model generation or TTS. New speech detected by server VAD performs the same cancellation before starting the next turn. |
 | server to client | `response.done` | Terminates one assistant response with `completed`, `cancelled`, or `failed` status. |
-| server to client | `error` | Reports invalid or unsupported client events before a policy/error close. |
+| server to client | `error` | Reports invalid client events, unsupported configuration, or response failures. Policy and transport errors may close the socket; response failures are non-terminal to the socket and are followed by `response.done`. |
 
 Version 1 accepts JSON text WebSocket messages and base64-encoded mono,
 signed little-endian PCM16 at 24 kHz. A decoded audio frame is capped at 1 MiB,

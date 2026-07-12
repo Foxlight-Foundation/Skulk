@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import anyio
 from anyio.abc import TaskGroup
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 from loguru import logger
 from pydantic import (
     BaseModel,
@@ -467,12 +467,14 @@ class RealtimeTranscriptionBridge:
                         logger.opt(exception=exc).warning(
                             "Realtime response participant validation failed"
                         )
+                        detail = (
+                            exc.detail
+                            if isinstance(exc, HTTPException)
+                            else "selected realtime response participants are not ready"
+                        )
                         await self._send_error(
                             code="unsupported_session_update",
-                            message=(
-                                "selected realtime response participants are not "
-                                "ready"
-                            ),
+                            message=detail,
                             client_event_id=event.event_id,
                         )
                         continue
@@ -1068,6 +1070,9 @@ class RealtimeTranscriptionBridge:
                 async for delta in generate(config.model, messages):
                     text_bytes += len(delta.encode("utf-8"))
                     if text_bytes > _MAX_TRANSCRIPT_TEXT_BYTES:
+                        cancel_scope.cancel()
+                        with anyio.CancelScope(shield=True):
+                            await anyio.sleep(0)
                         raise RuntimeError(
                             "assistant response exceeds the bounded text limit"
                         )
@@ -1217,10 +1222,20 @@ class RealtimeTranscriptionBridge:
         finally:
             if not terminal and session.cancel_output is not None:
                 with anyio.CancelScope(shield=True):
-                    await session.cancel_output()
+                    try:
+                        await session.cancel_output()
+                    except Exception as exc:
+                        logger.opt(exception=exc).warning(
+                            "Realtime TTS provider cancellation failed during cleanup"
+                        )
             if isinstance(frames, AsyncGenerator):
                 with anyio.CancelScope(shield=True):
-                    await frames.aclose()
+                    try:
+                        await frames.aclose()
+                    except Exception as exc:
+                        logger.opt(exception=exc).warning(
+                            "Realtime TTS output stream close failed during cleanup"
+                        )
         if not terminal:
             raise RuntimeError("TTS provider ended without a terminal frame")
         if audio_bytes == 0:

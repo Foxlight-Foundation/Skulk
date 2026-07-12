@@ -4618,7 +4618,12 @@ class API:
                 return
             receive_state.cancel_provider = True
             receive_state.cancellation_scheduled = True
-            await self._cancel_remote_capability_stream(call)
+            try:
+                await self._cancel_remote_capability_stream(call)
+            except Exception as exc:
+                logger.opt(exception=exc).warning(
+                    "Best-effort provider stream cancellation failed"
+                )
 
         return CapabilityStreamSession(
             open_result=opened,

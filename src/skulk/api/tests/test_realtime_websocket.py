@@ -10,6 +10,7 @@ from typing import cast
 
 import anyio
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from starlette.testclient import WebSocketTestSession
@@ -632,13 +633,18 @@ def test_realtime_websocket_reports_assistant_text_limit_as_failed() -> None:
 
     api = _build_api()
     _install_completed_session(api, transcript="overflow", call_id="overflow-stt")
+    generation_closed = Event()
 
     async def generate_assistant(
         model: str,
         messages: tuple[ConversationMessage, ...],
     ) -> AsyncIterator[str]:
         del model, messages
-        yield "x" * (_MAX_TRANSCRIPT_TEXT_BYTES + 1)
+        try:
+            yield "x" * (_MAX_TRANSCRIPT_TEXT_BYTES + 1)
+            await anyio.sleep_forever()
+        finally:
+            generation_closed.set()
 
     async def validate_response(config: RealtimeResponseConfig) -> None:
         del config
@@ -683,6 +689,8 @@ def test_realtime_websocket_reports_assistant_text_limit_as_failed() -> None:
         done = _receive_json(websocket)
         assert done["type"] == "response.done"
         assert _mapping(done["response"])["status"] == "failed"
+
+    assert generation_closed.is_set()
 
 
 def test_realtime_websocket_cancels_tts_provider_on_response_abort() -> None:
@@ -729,6 +737,7 @@ def test_realtime_websocket_cancels_tts_provider_on_response_abort() -> None:
             with anyio.CancelScope(shield=True):
                 await anyio.sleep(0.001)
                 provider_cancelled.set()
+                raise RuntimeError("provider cancellation transport failed")
 
         return CapabilityStreamSession(
             open_result=CapabilityResult(
@@ -779,6 +788,53 @@ def test_realtime_websocket_cancels_tts_provider_on_response_abort() -> None:
         assert _mapping(done["response"])["status"] == "cancelled"
 
     assert provider_cancelled.is_set()
+
+
+def test_realtime_websocket_preserves_response_validation_detail() -> None:
+    """Participant admission failures retain an actionable HTTP detail."""
+
+    api = _build_api()
+
+    async def generate_assistant(
+        model: str,
+        messages: tuple[ConversationMessage, ...],
+    ) -> AsyncIterator[str]:
+        del model, messages
+        yield "unused"
+
+    async def validate_response(config: RealtimeResponseConfig) -> None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No instance found for model {config.model}",
+        )
+
+    api._generate_realtime_assistant = generate_assistant
+    api._validate_realtime_response_config = validate_response
+
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt",
+        headers={"origin": "http://testserver"},
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "session.update",
+                "event_id": "response-validation",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {"transcription": {"model": "org/realtime-stt"}}
+                    },
+                    "response": {"model": "org/missing-chat"},
+                },
+            }
+        )
+        error = _receive_json(websocket)
+        assert error["type"] == "error"
+        detail = _mapping(error["error"])
+        assert detail["code"] == "unsupported_session_update"
+        assert detail["message"] == "No instance found for model org/missing-chat"
+        assert detail["event_id"] == "response-validation"
 
 
 def test_realtime_websocket_locks_response_config_after_audio() -> None:
