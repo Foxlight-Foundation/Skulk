@@ -130,3 +130,22 @@ def test_subprocess_peak_memory_unreadable_proc_is_none() -> None:
     # PID -1 never has a /proc entry (and macOS has no /proc at all); the
     # served runner then reports zero rather than its own misleading RSS.
     assert subprocess_peak_memory(-1) is None
+
+
+def test_llama_server_timings_count_cached_prompt_prefix() -> None:
+    # Slot-cache hit: prompt_n is only the newly processed suffix, cache_n the
+    # reused prefix; the request's true prompt size is their sum, while rates
+    # stay over processed tokens (prompt_ms measures exactly that work).
+    stats = stats_from_llama_server_timings(
+        {
+            "prompt_n": 10,
+            "prompt_ms": 100.0,
+            "cache_n": 490,
+            "predicted_n": 20,
+            "predicted_ms": 1000.0,
+        }
+    )
+    assert stats is not None
+    assert stats.prompt_tokens == 500
+    assert stats.prompt_tps == 100.0  # 10 processed / 0.1s, not 500
+    assert stats.generation_tokens == 20

@@ -47,7 +47,9 @@ def process_peak_memory() -> Memory:
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     if sys.platform != "darwin":
         peak *= 1024
-    return Memory.from_bytes(peak)
+    # int() guards the strict Memory model against platforms whose resource
+    # stubs type ru_maxrss as a float.
+    return Memory.from_bytes(int(peak))
 
 
 def parse_vm_hwm(status_text: str) -> Memory | None:
@@ -164,6 +166,11 @@ def stats_from_llama_server_timings(
     predicted_ms = _number("predicted_ms")
     if prompt_n is None or predicted_n is None:
         return None
+    # On a slot-cache hit llama-server reports only the newly processed prompt
+    # suffix as prompt_n, with the cached prefix in cache_n; the request's
+    # true prompt size is their sum. The rates stay over processed tokens
+    # only (prompt_ms measures exactly that work).
+    cache_n = _number("cache_n") or 0.0
     prompt_tps = (
         prompt_n / (prompt_ms / 1000.0) if prompt_ms is not None and prompt_ms > 0 else 0.0
     )
@@ -175,7 +182,7 @@ def stats_from_llama_server_timings(
     return GenerationStats(
         prompt_tps=prompt_tps,
         generation_tps=generation_tps,
-        prompt_tokens=int(prompt_n),
+        prompt_tokens=int(prompt_n + cache_n),
         generation_tokens=int(predicted_n),
         peak_memory_usage=process_peak_memory(),
     )
