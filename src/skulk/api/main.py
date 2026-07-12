@@ -9905,13 +9905,28 @@ class API:
     ) -> CapabilityStreamSession:
         """Open one mounted TTS provider stream for a realtime response."""
 
+        model_id, response_format = await self._validate_speech_synthesis_model(
+            ModelId(model),
+            AudioResponseFormat.Mp3,
+            stream=True,
+        )
+        request = await self._apply_default_speech_voice(
+            AudioSpeechRequest(
+                model=str(model_id),
+                input=text,
+                voice=voice,
+                response_format=response_format,
+                stream=True,
+            ),
+            model_id,
+        )
         payload: dict[str, object] = {
-            "model": model,
+            "model": str(model_id),
             "text": text,
             "response_format": "mp3",
         }
-        if voice is not None:
-            payload["voice"] = voice
+        if request.voice is not None:
+            payload["voice"] = request.voice
         return await self._stream_capability(
             self.node_id,
             TTS_CAPABILITY_DESCRIPTOR.id,

@@ -989,6 +989,7 @@ class RealtimeTranscriptionBridge:
             raise
         completed = False
         failed = False
+        text_limit_exceeded = False
         text_parts: list[str] = []
         text_bytes = 0
         try:
@@ -996,7 +997,9 @@ class RealtimeTranscriptionBridge:
                 async for delta in generate(config.model, messages):
                     text_bytes += len(delta.encode("utf-8"))
                     if text_bytes > _MAX_TRANSCRIPT_TEXT_BYTES:
-                        raise RuntimeError("assistant response exceeds the bounded text limit")
+                        text_limit_exceeded = True
+                        cancel_scope.cancel()
+                        await anyio.sleep(0)
                     text_parts.append(delta)
                     await self._send_json(
                         {
@@ -1033,6 +1036,8 @@ class RealtimeTranscriptionBridge:
                         voice=config.voice,
                     )
                 completed = True
+            if text_limit_exceeded:
+                raise RuntimeError("assistant response exceeds the bounded text limit")
         except WebSocketDisconnect:
             cancel_scope.cancel()
             return
