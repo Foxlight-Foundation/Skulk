@@ -272,10 +272,13 @@ def _parse_sse_line(line: str) -> _StreamDelta | None:
     except json.JSONDecodeError:
         return None
     choices = chunk.get("choices") or []
-    if not choices:
+    if not choices or not isinstance(choices[0], dict):
         return None
     choice = choices[0]
-    delta = choice.get("delta") or {}
+    raw_delta = choice.get("delta")
+    # Non-dict shapes are skipped (the docstring's malformed-payload promise),
+    # not raised: one stray line must never break the whole stream.
+    delta = raw_delta if isinstance(raw_delta, dict) else {}
     raw_timings = chunk.get("timings")
     return _StreamDelta(
         reasoning=delta.get("reasoning_content") or "",

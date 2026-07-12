@@ -197,3 +197,13 @@ def test_parse_sse_line_timings_absent_or_malformed_is_none() -> None:
     )
     assert wrong_shape is not None
     assert wrong_shape.timings is None
+
+
+def test_parse_sse_line_skips_non_dict_choice_and_delta_shapes() -> None:
+    # A malformed payload is skipped (or treated as empty), never raised: one
+    # stray line must not break the whole stream.
+    assert _parse_sse_line('data: {"choices": ["garbage"]}') is None
+    listy_delta = _parse_sse_line('data: {"choices": [{"delta": []}]}')
+    assert listy_delta is not None
+    assert listy_delta.content == ""
+    assert listy_delta.reasoning == ""
