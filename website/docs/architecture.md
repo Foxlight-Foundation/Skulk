@@ -337,7 +337,11 @@ eligible mounted capacity is ready and reachable. The transcription-only
 append/commit events onto this same binary provider path, emits transcript
 delta/final events, enforces same-origin browsers and bounded messages, and
 cancels the provider on disconnect. It is one utterance per socket and does not
-claim VAD, conversation, or speech-to-speech behavior. Dashboard chat selects
+claim conversational orchestration or speech-to-speech behavior. Every API
+also registers stable `vad@1.0.0` through `BuiltinVadProvider`. This reusable
+bidirectional provider frames mono PCM16 for WebRTC VAD and emits typed turn
+boundaries with bounded minimum-speech, hangover, preroll, and maximum-duration
+state; it has no mounted-model dependency and retains no media. Dashboard chat selects
 this path only when both the model card and local provider advertisement say it
 is available; its AudioWorklet resamples microphone Float32 frames to the edge's
 24 kHz PCM16 contract, while non-realtime models retain batch MediaRecorder

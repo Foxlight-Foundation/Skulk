@@ -364,7 +364,7 @@ def test_builtin_tts_capability_tracks_live_experimental_capacity(
 
     api, _ = _build_builtin_provider_api()
     card = _tts_card(supports_streaming=True)
-    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._telemetry_view.local_advertised_capabilities == {"vad"}
     assert api._extensions is not None
     assert TTS_CAPABILITY_DESCRIPTOR in api._extensions.capability_descriptors
 
@@ -372,11 +372,11 @@ def test_builtin_tts_capability_tracks_live_experimental_capacity(
     _write_tts_streaming_experiment_config(api, tmp_path)
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
     api._sync_builtin_speech_capability()
-    assert api._telemetry_view.local_advertised_capabilities == {"tts"}
+    assert api._telemetry_view.local_advertised_capabilities == {"tts", "vad"}
 
     api.state = State()
     api._sync_builtin_speech_capability()
-    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._telemetry_view.local_advertised_capabilities == {"vad"}
 
 
 @pytest.mark.anyio
