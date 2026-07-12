@@ -272,4 +272,41 @@ describe('RealtimeConversationSocket', () => {
     client.close();
     expect(socket.closeCode).toBe(1000);
   });
+
+  it('clears fallback accumulators between events without item IDs', async () => {
+    const socket = new FakeWebSocket();
+    const transcripts: Array<[string, boolean]> = [];
+    const responses: Array<[string, boolean]> = [];
+    const client = new RealtimeConversationSocket({
+      transcriptionModelId: 'org/stt',
+      responseModelId: 'org/chat',
+      location: { protocol: 'https:', host: 'skulk.example' },
+      socketFactory: () => socket as unknown as WebSocket,
+      onTranscript: (text, final) => transcripts.push([text, final]),
+      onAssistantText: (text, final) => responses.push([text, final]),
+    });
+
+    const connected = client.connect();
+    socket.serverEvent({ type: 'session.created' });
+    await connected;
+
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.delta',
+      delta: 'first',
+    });
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      transcript: 'first',
+    });
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.delta',
+      delta: 'second',
+    });
+    socket.serverEvent({ type: 'response.output_text.delta', delta: 'one' });
+    socket.serverEvent({ type: 'response.output_text.done', text: 'one' });
+    socket.serverEvent({ type: 'response.output_text.delta', delta: 'two' });
+
+    expect(transcripts.at(-1)).toEqual(['second', false]);
+    expect(responses.at(-1)).toEqual(['two', false]);
+  });
 });

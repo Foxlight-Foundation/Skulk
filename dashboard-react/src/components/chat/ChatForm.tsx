@@ -477,6 +477,7 @@ export function ChatForm({
   const browserRecordingAvailable = captureMode !== null;
   const useRealtimeCapture = captureMode === 'realtime';
   const useRealtimeConversation = useRealtimeCapture && realtimeVoiceEnabled;
+  const submitRealtimeTranscript = autoSubmitVoice && realtimeResponseModelId !== null;
   const recordingUnavailableReason = !secureRecordingContext
     ? t('chat.form.voiceErrors.secureContextRequired', 'Microphone requires HTTPS or localhost.')
     : !browserRecordingAvailable
@@ -571,13 +572,13 @@ export function ChatForm({
         let capture: RealtimePcmCapture | null = null;
         const socket = new RealtimeConversationSocket({
           transcriptionModelId: selectedTranscriptionId,
-          responseModelId: autoSubmitVoice ? realtimeResponseModelId : null,
+          responseModelId: submitRealtimeTranscript ? realtimeResponseModelId : null,
           onSpeechStarted: onStopSpeaking,
           onTranscript: (text, final) => {
             if (realtimeConversationRef.current !== socket) return;
-            setMessage(final && autoSubmitVoice ? '' : text);
+            setMessage(final && submitRealtimeTranscript ? '' : text);
             onRealtimeTranscript?.(text, final);
-            if (final && conversationStoppingRef.current && !autoSubmitVoice) {
+            if (final && conversationStoppingRef.current && !submitRealtimeTranscript) {
               finishConversation();
             }
           },
@@ -800,7 +801,7 @@ export function ChatForm({
     t,
     transcriptionReady,
     captureMode,
-    autoSubmitVoice,
+    submitRealtimeTranscript,
     onRealtimeAssistantText,
     onRealtimeResponseDone,
     onRealtimeTranscript,
