@@ -23,6 +23,7 @@ from skulk.extensions import (
 )
 
 _PCM_SAMPLE_RATE = 24_000
+_VAD_SOURCE_FRAME_BYTES = _PCM_SAMPLE_RATE * 20 // 1000 * 2
 _MAX_SESSION_AUDIO_BYTES = 64 * 1024 * 1024
 _MAX_TRANSCRIPT_TEXT_BYTES = 1024 * 1024
 REALTIME_WEBSOCKET_MAX_MESSAGE_BYTES = 2 * MAX_INLINE_MEDIA_BYTES
@@ -467,40 +468,49 @@ class RealtimeTranscriptionBridge:
                     )
                     await self._close(1009)
                     return
-                try:
-                    await session.input.send_chunk(
-                        payload={
-                            "format": "pcm_s16le",
-                            "sample_rate": _PCM_SAMPLE_RATE,
-                            "channels": 1,
-                        },
-                        media=InlineMediaAttachment(
-                            data=audio,
-                            media_type="audio/pcm",
-                            codec="pcm_s16le",
-                            sample_rate=_PCM_SAMPLE_RATE,
-                            channels=1,
-                        ),
-                    )
-                except (
-                    TimeoutError,
-                    anyio.BrokenResourceError,
-                    anyio.ClosedResourceError,
-                    RuntimeError,
-                ) as exc:
-                    await self._send_error(
-                        code="input_transport_error",
-                        message=f"provider input transport rejected audio: {exc}",
+                segment_size = (
+                    _VAD_SOURCE_FRAME_BYTES
+                    if self._vad_detector is not None
+                    else len(audio)
+                )
+                for offset in range(0, len(audio), segment_size):
+                    segment = audio[offset : offset + segment_size]
+                    try:
+                        await session.input.send_chunk(
+                            payload={
+                                "format": "pcm_s16le",
+                                "sample_rate": _PCM_SAMPLE_RATE,
+                                "channels": 1,
+                            },
+                            media=InlineMediaAttachment(
+                                data=segment,
+                                media_type="audio/pcm",
+                                codec="pcm_s16le",
+                                sample_rate=_PCM_SAMPLE_RATE,
+                                channels=1,
+                            ),
+                        )
+                    except (
+                        TimeoutError,
+                        anyio.BrokenResourceError,
+                        anyio.ClosedResourceError,
+                        RuntimeError,
+                    ) as exc:
+                        await self._send_error(
+                            code="input_transport_error",
+                            message=f"provider input transport rejected audio: {exc}",
+                            client_event_id=event.event_id,
+                        )
+                        await self._close(1011)
+                        return
+                    if await self._process_vad_audio(
+                        session,
+                        segment,
                         client_event_id=event.event_id,
-                    )
-                    await self._close(1011)
-                    return
-                if await self._process_vad_audio(
-                    session,
-                    audio,
-                    client_event_id=event.event_id,
-                ):
-                    continue
+                    ):
+                        if not self._committed:
+                            return
+                        break
                 continue
 
             assert isinstance(event, InputAudioBufferCommit)

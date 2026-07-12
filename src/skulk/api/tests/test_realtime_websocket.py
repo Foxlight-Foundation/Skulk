@@ -337,7 +337,19 @@ def test_realtime_websocket_server_vad_auto_commits(
         assert completed["type"] == "conversation.item.input_audio_transcription.completed"
         assert completed["transcript"] == "hello"
 
-    assert [frame.kind for frame in input_frames] == ["started", "chunk", "completed"]
+    assert [frame.kind for frame in input_frames] == [
+        "started",
+        "chunk",
+        "chunk",
+        "chunk",
+        "completed",
+    ]
+    forwarded_media = [
+        cast(InlineMediaAttachment, frame.media).data
+        for frame in input_frames
+        if frame.kind == "chunk"
+    ]
+    assert len(b"".join(forwarded_media)) < len(audio)
 
 
 def test_realtime_websocket_rejects_invalid_audio_without_forwarding() -> None:
