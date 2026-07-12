@@ -951,26 +951,37 @@ class RealtimeTranscriptionBridge:
                         return
                     await commit_announced.wait()
                     await self._send_transcript_deltas(pending_deltas, item_id=item_id)
-                    await self._send_json(
-                        {
-                            "event_id": self._event_id(),
-                            "type": (
-                                "conversation.item.input_audio_transcription.completed"
-                            ),
-                            "item_id": item_id,
-                            "content_index": 0,
-                            "transcript": transcript,
-                        }
-                    )
-                    self._finish_turn(session, item_id)
                     response_config = self._response_config
+                    response_cancel_scope: anyio.CancelScope | None = None
                     if response_config is not None:
                         self._cancel_assistant_response()
+                        response_cancel_scope = anyio.CancelScope()
+                        self._response_cancel_scope = response_cancel_scope
+                    self._finish_turn(session, item_id)
+                    try:
+                        await self._send_json(
+                            {
+                                "event_id": self._event_id(),
+                                "type": (
+                                    "conversation.item.input_audio_transcription.completed"
+                                ),
+                                "item_id": item_id,
+                                "content_index": 0,
+                                "transcript": transcript,
+                            }
+                        )
+                    except BaseException:
+                        if self._response_cancel_scope is response_cancel_scope:
+                            self._response_cancel_scope = None
+                        raise
+                    if response_config is not None:
+                        assert response_cancel_scope is not None
                         task_group.start_soon(
                             self._run_assistant_response,
                             transcript,
                             item_id,
                             response_config,
+                            response_cancel_scope,
                         )
                 else:
                     error = frame.error
@@ -1018,6 +1029,7 @@ class RealtimeTranscriptionBridge:
         transcript: str,
         input_item_id: str,
         config: RealtimeResponseConfig,
+        cancel_scope: anyio.CancelScope,
     ) -> None:
         """Generate visible assistant text and optional streamed speech audio."""
 
@@ -1028,8 +1040,6 @@ class RealtimeTranscriptionBridge:
         output_item_id = f"item_{uuid4().hex}"
         user_message: ConversationMessage = ("user", transcript)
         messages = (*self._conversation, user_message)
-        cancel_scope = anyio.CancelScope()
-        self._response_cancel_scope = cancel_scope
         try:
             await self._send_json(
                 {
@@ -1044,7 +1054,6 @@ class RealtimeTranscriptionBridge:
             raise
         completed = False
         failed = False
-        text_limit_exceeded = False
         text_parts: list[str] = []
         text_bytes = 0
         try:
@@ -1052,9 +1061,9 @@ class RealtimeTranscriptionBridge:
                 async for delta in generate(config.model, messages):
                     text_bytes += len(delta.encode("utf-8"))
                     if text_bytes > _MAX_TRANSCRIPT_TEXT_BYTES:
-                        text_limit_exceeded = True
-                        cancel_scope.cancel()
-                        await anyio.sleep(0)
+                        raise RuntimeError(
+                            "assistant response exceeds the bounded text limit"
+                        )
                     text_parts.append(delta)
                     await self._send_json(
                         {
@@ -1091,8 +1100,6 @@ class RealtimeTranscriptionBridge:
                         voice=config.voice,
                     )
                 completed = True
-            if text_limit_exceeded:
-                raise RuntimeError("assistant response exceeds the bounded text limit")
         except WebSocketDisconnect:
             cancel_scope.cancel()
             return

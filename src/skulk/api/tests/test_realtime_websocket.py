@@ -568,6 +568,62 @@ def test_realtime_websocket_cancels_active_assistant_response() -> None:
         assert _mapping(done["response"])["status"] == "cancelled"
 
 
+def test_realtime_websocket_barge_in_cancels_pending_assistant_response() -> None:
+    """Immediate next-turn audio cancels a response before its task can run."""
+
+    api = _build_api()
+    _install_completed_session(api, transcript="first", call_id="pending-response-stt")
+
+    async def generate_assistant(
+        model: str,
+        messages: tuple[ConversationMessage, ...],
+    ) -> AsyncIterator[str]:
+        del model, messages
+        await anyio.sleep_forever()
+        yield "unreachable"
+
+    async def validate_response(config: RealtimeResponseConfig) -> None:
+        del config
+
+    api._generate_realtime_assistant = generate_assistant
+    api._validate_realtime_response_config = validate_response
+
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt",
+        headers={"origin": "http://testserver"},
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {"transcription": {"model": "org/realtime-stt"}}
+                    },
+                    "response": {"model": "org/chat"},
+                },
+            }
+        )
+        assert _receive_json(websocket)["type"] == "session.updated"
+        encoded_audio = base64.b64encode(b"\x01\x00").decode("ascii")
+        websocket.send_json(
+            {"type": "input_audio_buffer.append", "audio": encoded_audio}
+        )
+        websocket.send_json({"type": "input_audio_buffer.commit"})
+        assert _receive_json(websocket)["type"] == "input_audio_buffer.committed"
+        assert _receive_json(websocket)["type"] == (
+            "conversation.item.input_audio_transcription.completed"
+        )
+        websocket.send_json(
+            {"type": "input_audio_buffer.append", "audio": encoded_audio}
+        )
+        assert _receive_json(websocket)["type"] == "response.created"
+        done = _receive_json(websocket)
+        assert done["type"] == "response.done"
+        assert _mapping(done["response"])["status"] == "cancelled"
+
+
 def test_realtime_websocket_reports_assistant_text_limit_as_failed() -> None:
     """A server-enforced response limit is distinct from user cancellation."""
 
