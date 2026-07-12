@@ -30,18 +30,11 @@ git -C "${SKULK_DIR}" fetch --depth 1 origin "${REF}" \
 git -C "${SKULK_DIR}" checkout FETCH_HEAD
 
 cd "${SKULK_DIR}"
-# --extra llama-cpp: llama-cpp-python lives in an optional extra, so a plain
-# sync would install neither it nor its locked dependencies (diskcache and
-# friends), and the --no-deps CUDA wheel swap below would leave the import
-# broken. The extra installs the locked CPU build + deps; the swap then only
-# replaces the artifact.
-log "uv sync --extra llama-cpp (builds the Rust bindings)"
-uv sync --extra llama-cpp
 
-# AFTER uv sync: a plain sync restores the CPU-only PyPI llama-cpp-python
-# wheel, so the CUDA wheel must be (re)installed last, exactly like
-# install-deps.sh --with-skulk-env does.
-log "installing prebaked CUDA llama-cpp-python wheel"
+# ---- verify this ref matches the prebaked wheel BEFORE any sync ------------
+# The checks run against the ref's COMMITTED pins: syncing first (and without
+# --locked) could regenerate uv.lock in the pod and the checks would then
+# validate against bootstrap-generated state instead of the ref.
 # Exactly one wheel must match: zero means the image build silently failed,
 # more than one means an ambiguous install; both should stop the session here.
 WHEELS=(/opt/wheels/llama_cpp_python-*.whl)
@@ -49,17 +42,17 @@ if [ "${#WHEELS[@]}" -ne 1 ] || [ ! -f "${WHEELS[0]}" ]; then
   echo "[bootstrap] ERROR: expected exactly one prebaked wheel, found: ${WHEELS[*]}" >&2
   exit 1
 fi
-# The image is reusable across refs, but the wheel it carries is pinned to
-# the pins of the commit that built it. A ref with a different locked
-# llama-cpp-python would otherwise end up silently un-locked, and a
-# different .python-version fails later with a confusing wheel-tag error;
-# both mismatches stop here with instructions instead.
 for pin_file in uv.lock .python-version; do
   if [ ! -f "${pin_file}" ]; then
     echo "[bootstrap] ERROR: ${pin_file} missing from this checkout; the ref predates (or is incompatible with) the prebaked-image flow. Provision with deployment/cuda/install-deps.sh instead." >&2
     exit 1
   fi
 done
+# The image is reusable across refs, but the wheel it carries is pinned to
+# the pins of the commit that built it. A ref with a different locked
+# llama-cpp-python would otherwise end up silently un-locked, and a
+# different .python-version fails later with a confusing wheel-tag error;
+# both mismatches stop here with instructions instead.
 WHEEL_NAME="$(basename "${WHEELS[0]}")"
 WHEEL_VERSION="$(printf '%s' "${WHEEL_NAME}" | cut -d- -f2)"
 WHEEL_PY_TAG="$(printf '%s' "${WHEEL_NAME}" | cut -d- -f3)"
@@ -75,6 +68,20 @@ if [ "${WHEEL_VERSION}" != "${LOCKED_VERSION}" ] || [ "${WHEEL_PY_TAG}" != "${EX
   echo "[bootstrap]   use the image built for this ref, or rebuild via the cuda-image workflow" >&2
   exit 1
 fi
+
+# ---- sync and swap ----------------------------------------------------------
+# --locked: the sync must install the ref's committed lock verbatim, never
+# re-resolve it on the pod. --extra llama-cpp: llama-cpp-python lives in an
+# optional extra, so a plain sync would install neither it nor its locked
+# dependencies (diskcache and friends), and the --no-deps CUDA wheel swap
+# below would leave the import broken.
+log "uv sync --locked --extra llama-cpp (builds the Rust bindings)"
+uv sync --locked --extra llama-cpp
+
+# AFTER uv sync: a plain sync restores the CPU-only PyPI llama-cpp-python
+# wheel, so the CUDA wheel must be (re)installed last, exactly like
+# install-deps.sh --with-skulk-env does.
+log "installing prebaked CUDA llama-cpp-python wheel"
 # --no-deps: uv sync already installed llama-cpp-python's dependencies at
 # their locked versions; this step only swaps the wheel artifact and must
 # not let pip drift the rest of the environment away from uv.lock.
