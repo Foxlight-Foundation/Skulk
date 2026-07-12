@@ -577,7 +577,7 @@ class RealtimeTranscriptionBridge:
             session = await self._open_session(self._model, _PCM_SAMPLE_RATE)
         except Exception as exc:
             logger.opt(exception=exc).warning(
-                "Realtime transcription provider session failed to reopen"
+                "Realtime transcription provider session failed to open"
             )
             await self._send_internal_error(
                 code="provider_open_error",
@@ -840,6 +840,7 @@ class RealtimeTranscriptionBridge:
                         return
                     await commit_announced.wait()
                     await self._send_transcript_deltas(pending_deltas, item_id=item_id)
+                    self._finish_turn(session, item_id)
                     await self._send_json(
                         {
                             "event_id": self._event_id(),
@@ -851,7 +852,6 @@ class RealtimeTranscriptionBridge:
                             "transcript": transcript,
                         }
                     )
-                    self._finish_turn(session, item_id)
                 else:
                     error = frame.error
                     await self._send_transcription_failed(
