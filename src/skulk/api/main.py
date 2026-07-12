@@ -9130,7 +9130,7 @@ class API:
             stream=True,
         )
         request = await self._apply_default_speech_voice(request, model_id)
-        if response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
+        if response_format != AudioResponseFormat.Mp3:
             raise HTTPException(
                 status_code=400,
                 detail=(
