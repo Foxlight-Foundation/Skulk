@@ -276,6 +276,15 @@ def _encode_audio(
     audio: np.ndarray, sample_rate: int, response_format: AudioResponseFormat
 ) -> bytes:
     """Encode PCM audio into the requested response format."""
+    if response_format == AudioResponseFormat.Pcm:
+        normalized = np.squeeze(np.asarray(audio, dtype=np.float32))
+        if normalized.ndim != 1:
+            raise ValueError(
+                "Raw PCM speech output must be mono; multi-channel audio is unsupported"
+            )
+        clipped = np.clip(normalized, -1.0, 1.0)
+        return (clipped * 32767.0).astype("<i2").tobytes()
+
     from mlx_audio.audio_io import write as audio_write
 
     buffer = io.BytesIO()

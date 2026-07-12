@@ -471,9 +471,10 @@ _AUDIO_CONTENT_TYPES: Final[dict[AudioResponseFormat, str]] = {
     AudioResponseFormat.Flac: "audio/flac",
     AudioResponseFormat.Ogg: "audio/ogg",
     AudioResponseFormat.Opus: "audio/opus",
+    AudioResponseFormat.Pcm: "audio/pcm",
 }
 _STREAMABLE_AUDIO_RESPONSE_FORMATS: Final[frozenset[AudioResponseFormat]] = frozenset(
-    {AudioResponseFormat.Mp3}
+    {AudioResponseFormat.Mp3, AudioResponseFormat.Pcm}
 )
 _MAX_AUDIO_UPLOAD_BYTES: Final[int] = 25 * 1024 * 1024
 _SPEECH_MEDIA_CHUNK_BYTES: Final[int] = 1024 * 1024
@@ -1505,6 +1506,11 @@ class API:
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
+            expose_headers=[
+                "X-Audio-Sample-Rate",
+                "X-Audio-Channels",
+                "X-Audio-Sample-Format",
+            ],
         )
 
     def _setup_routes(self) -> None:
@@ -3214,7 +3220,10 @@ class API:
                     f"requested {resolved_response_format.value}"
                 ),
             )
-        if stream and not self._streaming_tts_model_is_ready(resolved):
+        if stream and not self._streaming_tts_model_is_ready(
+            resolved,
+            resolved_response_format,
+        ):
             raise HTTPException(
                 status_code=503,
                 detail=(
@@ -3282,7 +3291,11 @@ class API:
             and config.experiments.speech_translation
         )
 
-    def _streaming_tts_model_is_ready(self, model_id: ModelId | None = None) -> bool:
+    def _streaming_tts_model_is_ready(
+        self,
+        model_id: ModelId | None = None,
+        response_format: AudioResponseFormat = AudioResponseFormat.Mp3,
+    ) -> bool:
         """Return whether every routable instance of one streaming model is ready."""
 
         eligible_by_model: dict[ModelId, list[Instance]] = {}
@@ -3301,7 +3314,7 @@ class API:
                 and card.audio.supports_streaming is True
                 and (
                     not profile.audio_response_formats
-                    or AudioResponseFormat.Mp3 in profile.audio_response_formats
+                    or response_format in profile.audio_response_formats
                 )
             ):
                 eligible_by_model.setdefault(card.model_id, []).append(instance)
@@ -9122,7 +9135,7 @@ class API:
             stream=True,
         )
         request = await self._apply_default_speech_voice(request, model_id)
-        if response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
+        if response_format != AudioResponseFormat.Mp3:
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -10032,6 +10045,21 @@ class API:
                 first_chunk = await self._receive_initial_audio_speech_chunk(
                     command_id, recv
                 )
+                if first_chunk.format != response_format:
+                    await self._cancel_audio_speech_command(command_id)
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Speech synthesis returned an unexpected audio format",
+                    )
+                if (
+                    response_format == AudioResponseFormat.Pcm
+                    and first_chunk.sample_rate is None
+                ):
+                    await self._cancel_audio_speech_command(command_id)
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Raw PCM speech response did not declare a sample rate",
+                    )
             except anyio.get_cancelled_exc_class():
                 await self._cancel_audio_speech_command(command_id)
                 await self._finalize_command_stream(
@@ -10057,17 +10085,41 @@ class API:
                 headers={
                     "Content-Disposition": (
                         f"attachment; filename=speech.{response_format.value}"
-                    )
+                    ),
+                    **(
+                        {
+                            "X-Audio-Sample-Rate": str(first_chunk.sample_rate),
+                            "X-Audio-Channels": "1",
+                            "X-Audio-Sample-Format": "s16le",
+                        }
+                        if response_format == AudioResponseFormat.Pcm
+                        and first_chunk.sample_rate is not None
+                        else {}
+                    ),
                 },
             )
 
         try:
-            audio_bytes, response_format = await self._collect_audio_speech_chunks(
+            audio_bytes, response_format, sample_rate = await self._collect_audio_speech_chunks(
                 command_id, recv
             )
+            if response_format == AudioResponseFormat.Pcm and sample_rate is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Raw PCM speech response did not declare a sample rate",
+                )
             return Response(
                 content=audio_bytes,
                 media_type=_AUDIO_CONTENT_TYPES[response_format],
+                headers=(
+                    {
+                        "X-Audio-Sample-Rate": str(sample_rate),
+                        "X-Audio-Channels": "1",
+                        "X-Audio-Sample-Format": "s16le",
+                    }
+                    if response_format == AudioResponseFormat.Pcm
+                    else {}
+                ),
             )
 
         except anyio.get_cancelled_exc_class():
@@ -10086,10 +10138,11 @@ class API:
         self,
         command_id: CommandId,
         recv: Receiver[AudioChunk | ErrorChunk],
-    ) -> tuple[bytes, AudioResponseFormat]:
+    ) -> tuple[bytes, AudioResponseFormat, int | None]:
         """Collect a non-streaming TTS response with a terminal-task backstop."""
         audio_parts: list[bytes] = []
         response_format: AudioResponseFormat | None = None
+        sample_rate: int | None = None
         with recv as chunks:
             while True:
                 chunk: AudioChunk | ErrorChunk | None = None
@@ -10130,15 +10183,29 @@ class API:
                         status_code=500,
                         detail=f"Speech synthesis failed: {chunk.error_message}",
                     )
+                if response_format is not None and response_format != chunk.format:
+                    await self._cancel_audio_speech_command(command_id)
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Speech synthesis changed format mid-response",
+                    )
                 audio_parts.append(_decode_audio_chunk_data(chunk))
                 response_format = chunk.format
+                if chunk.sample_rate is not None:
+                    if sample_rate is not None and sample_rate != chunk.sample_rate:
+                        await self._cancel_audio_speech_command(command_id)
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Speech synthesis changed sample rate mid-response",
+                        )
+                    sample_rate = chunk.sample_rate
                 if chunk.finish_reason is not None:
                     break
         if not audio_parts:
             raise HTTPException(
                 status_code=500, detail="No speech audio response received"
             )
-        return b"".join(audio_parts), response_format
+        return b"".join(audio_parts), response_format, sample_rate
 
     async def _cancel_audio_speech_command(self, command_id: CommandId) -> None:
         """Cancel a speech synthesis command that cannot finish cleanly."""
@@ -10214,6 +10281,12 @@ class API:
     ) -> AsyncGenerator[bytes, None]:
         """Yield TTS audio bytes as chunks arrive from the data plane."""
         received_audio = False
+        expected_format = first_chunk.format if first_chunk is not None else None
+        expected_pcm_sample_rate = (
+            first_chunk.sample_rate
+            if first_chunk is not None and first_chunk.format == AudioResponseFormat.Pcm
+            else None
+        )
         try:
             if first_chunk is not None:
                 first_chunk_data = _decode_audio_chunk_data(first_chunk)
@@ -10268,6 +10341,21 @@ class API:
                     if isinstance(chunk, ErrorChunk):
                         raise RuntimeError(
                             f"Speech synthesis failed: {chunk.error_message}"
+                        )
+                    if expected_format is None:
+                        expected_format = chunk.format
+                    elif chunk.format != expected_format:
+                        await self._cancel_audio_speech_command(command_id)
+                        raise RuntimeError(
+                            "Speech synthesis changed format mid-stream"
+                        )
+                    if (
+                        expected_pcm_sample_rate is not None
+                        and chunk.sample_rate != expected_pcm_sample_rate
+                    ):
+                        await self._cancel_audio_speech_command(command_id)
+                        raise RuntimeError(
+                            "Speech synthesis changed sample rate mid-stream"
                         )
                     chunk_data = _decode_audio_chunk_data(chunk)
                     if chunk_data:

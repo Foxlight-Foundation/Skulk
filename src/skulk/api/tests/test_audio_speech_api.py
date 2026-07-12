@@ -116,10 +116,35 @@ def _build_builtin_provider_api() -> tuple[API, Receiver[ForwarderCommand]]:
     )
 
 
+def test_audio_speech_exposes_pcm_framing_headers_to_cors_clients() -> None:
+    """Cross-origin browsers must be able to inspect raw PCM framing metadata."""
+
+    api = _build_api()
+    response = TestClient(api.app).get(
+        "/node_id",
+        headers={"Origin": "https://client.example"},
+    )
+
+    exposed = {
+        value.strip().casefold()
+        for value in response.headers["access-control-expose-headers"].split(",")
+    }
+    assert exposed == {
+        "x-audio-sample-rate",
+        "x-audio-channels",
+        "x-audio-sample-format",
+    }
+
+
 def _tts_card(
     *,
     supports_streaming: bool = True,
     supports_reference_audio: bool = False,
+    response_formats: tuple[AudioResponseFormat, ...] = (
+        AudioResponseFormat.Mp3,
+        AudioResponseFormat.Wav,
+    ),
+    default_response_format: AudioResponseFormat = AudioResponseFormat.Wav,
 ) -> ModelCard:
     """Create a minimal TTS model card for speech API validation tests."""
 
@@ -134,8 +159,8 @@ def _tts_card(
         capabilities=["tts"],
         audio=AudioCardConfig(
             kind=AudioCardKind.TextToSpeech,
-            default_response_format=AudioResponseFormat.Wav,
-            response_formats=(AudioResponseFormat.Mp3, AudioResponseFormat.Wav),
+            default_response_format=default_response_format,
+            response_formats=response_formats,
             supports_streaming=supports_streaming,
             supports_reference_audio=supports_reference_audio,
         ),
@@ -848,6 +873,36 @@ async def test_builtin_tts_admission_rejects_unmounted_model_without_lookup(
 
 
 @pytest.mark.anyio
+async def test_builtin_tts_provider_rejects_pcm_outside_its_mp3_contract() -> None:
+    """The generic provider must remain MP3-only even when REST can stream PCM."""
+
+    api, _ = _build_builtin_provider_api()
+    card = _tts_card(
+        response_formats=(AudioResponseFormat.Pcm,),
+        default_response_format=AudioResponseFormat.Pcm,
+    )
+    api.state = _state_with_running_card(card)
+
+    with pytest.raises(HTTPException, match="only mp3"):
+        await api._prepare_builtin_tts_task(
+            CapabilityCall(
+                call_id="pcm-provider",
+                capability_id="tts",
+                version="1.0.0",
+                descriptor_revision=descriptor_revision(TTS_CAPABILITY_DESCRIPTOR),
+                caller_node="api-node",
+                target_node="api-node",
+                timeout_seconds=2.0,
+                payload={
+                    "model": str(card.model_id),
+                    "text": "hello",
+                    "response_format": "pcm",
+                },
+            )
+        )
+
+
+@pytest.mark.anyio
 async def test_builtin_tts_provider_streams_core_audio_over_provider_data(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1104,6 +1159,227 @@ async def test_audio_speech_streams_audio_chunks_and_sends_command(
 
 
 @pytest.mark.anyio
+async def test_audio_speech_streams_pcm_with_playback_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raw PCM streaming should expose the framing metadata browsers require."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/qwen3-tts-test")
+
+    async def _validate_model(
+        self: API,
+        requested_model: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        assert self is api
+        assert requested_model == model_id
+        assert response_format == AudioResponseFormat.Pcm
+        assert stream is True
+        return model_id, AudioResponseFormat.Pcm
+
+    async def _send(command: object) -> None:
+        if isinstance(command, SpeechSynthesis):
+            await api._audio_speech_queues[command.command_id].send(
+                AudioChunk(
+                    model=model_id,
+                    data=base64.b64encode(b"\x00\x00\xff\x7f").decode("ascii"),
+                    chunk_index=0,
+                    total_chunks=None,
+                    format=AudioResponseFormat.Pcm,
+                    sample_rate=24000,
+                    finish_reason="stop",
+                )
+            )
+
+    monkeypatch.setattr(API, "_validate_speech_synthesis_model", _validate_model)
+    monkeypatch.setattr(api, "_send", _send)
+
+    response = await api.audio_speech(
+        AudioSpeechRequest(
+            model=str(model_id),
+            input="hello",
+            response_format=AudioResponseFormat.Pcm,
+            stream=True,
+        )
+    )
+
+    assert isinstance(response, StreamingResponse)
+    assert response.media_type == "audio/pcm"
+    assert response.headers["x-audio-sample-rate"] == "24000"
+    assert response.headers["x-audio-channels"] == "1"
+    assert response.headers["x-audio-sample-format"] == "s16le"
+    body_iterator = cast(AsyncIterator[bytes], response.body_iterator)
+    assert b"".join([chunk async for chunk in body_iterator]) == b"\x00\x00\xff\x7f"
+
+
+@pytest.mark.anyio
+async def test_audio_speech_rejects_streaming_pcm_without_sample_rate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming raw PCM must fail before response admission without framing."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/qwen3-tts-test")
+    cancelled: list[CommandId] = []
+
+    async def _validate_model(
+        self: API,
+        requested_model: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        del self, requested_model, response_format, stream
+        return model_id, AudioResponseFormat.Pcm
+
+    async def _send(command: object) -> None:
+        if isinstance(command, SpeechSynthesis):
+            await api._audio_speech_queues[command.command_id].send(
+                AudioChunk(
+                    model=model_id,
+                    data=base64.b64encode(b"\x00\x00").decode("ascii"),
+                    chunk_index=0,
+                    total_chunks=None,
+                    format=AudioResponseFormat.Pcm,
+                    sample_rate=None,
+                    finish_reason=None,
+                )
+            )
+
+    async def _cancel(self: API, command_id: CommandId) -> None:
+        assert self is api
+        cancelled.append(command_id)
+
+    monkeypatch.setattr(API, "_validate_speech_synthesis_model", _validate_model)
+    monkeypatch.setattr(api, "_send", _send)
+    monkeypatch.setattr(API, "_cancel_audio_speech_command", _cancel)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.audio_speech(
+            AudioSpeechRequest(
+                model=str(model_id),
+                input="hello",
+                response_format=AudioResponseFormat.Pcm,
+                stream=True,
+            )
+        )
+
+    assert exc_info.value.status_code == 500
+    assert "sample rate" in str(exc_info.value.detail)
+    assert len(cancelled) == 1
+    assert cancelled[0] not in api._audio_speech_queues
+
+
+@pytest.mark.anyio
+async def test_audio_speech_rejects_mismatched_initial_stream_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HTTP framing cannot be committed before runner format truth agrees."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/qwen3-tts-test")
+    cancelled: list[CommandId] = []
+
+    async def _validate_model(
+        self: API,
+        requested_model: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        del self, requested_model, response_format, stream
+        return model_id, AudioResponseFormat.Pcm
+
+    async def _send(command: object) -> None:
+        if isinstance(command, SpeechSynthesis):
+            await api._audio_speech_queues[command.command_id].send(
+                AudioChunk(
+                    model=model_id,
+                    data=base64.b64encode(b"mp3").decode("ascii"),
+                    chunk_index=0,
+                    format=AudioResponseFormat.Mp3,
+                )
+            )
+
+    async def _cancel(self: API, command_id: CommandId) -> None:
+        assert self is api
+        cancelled.append(command_id)
+
+    monkeypatch.setattr(API, "_validate_speech_synthesis_model", _validate_model)
+    monkeypatch.setattr(api, "_send", _send)
+    monkeypatch.setattr(API, "_cancel_audio_speech_command", _cancel)
+
+    with pytest.raises(HTTPException, match="unexpected audio format"):
+        await api.audio_speech(
+            AudioSpeechRequest(
+                model=str(model_id),
+                input="hello",
+                response_format=AudioResponseFormat.Pcm,
+                stream=True,
+            )
+        )
+    assert len(cancelled) == 1
+    assert cancelled[0] not in api._audio_speech_queues
+
+
+@pytest.mark.anyio
+async def test_audio_speech_batch_pcm_includes_playback_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Batch raw PCM should expose the same required framing as streaming PCM."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/qwen3-tts-test")
+
+    async def _validate_model(
+        self: API,
+        requested_model: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        assert self is api
+        assert requested_model == model_id
+        assert response_format == AudioResponseFormat.Pcm
+        assert stream is False
+        return model_id, AudioResponseFormat.Pcm
+
+    async def _send(command: object) -> None:
+        if isinstance(command, SpeechSynthesis):
+            await api._audio_speech_queues[command.command_id].send(
+                AudioChunk(
+                    model=model_id,
+                    data=base64.b64encode(b"\x00\x00\xff\x7f").decode("ascii"),
+                    chunk_index=0,
+                    total_chunks=1,
+                    format=AudioResponseFormat.Pcm,
+                    sample_rate=24000,
+                    finish_reason="stop",
+                )
+            )
+
+    monkeypatch.setattr(API, "_validate_speech_synthesis_model", _validate_model)
+    monkeypatch.setattr(api, "_send", _send)
+
+    response = await api.audio_speech(
+        AudioSpeechRequest(
+            model=str(model_id),
+            input="hello",
+            response_format=AudioResponseFormat.Pcm,
+        )
+    )
+
+    assert response.media_type == "audio/pcm"
+    assert response.headers["x-audio-sample-rate"] == "24000"
+    assert response.headers["x-audio-channels"] == "1"
+    assert response.headers["x-audio-sample-format"] == "s16le"
+    assert response.body == b"\x00\x00\xff\x7f"
+
+
+@pytest.mark.anyio
 async def test_audio_speech_streaming_defaults_to_mp3(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1173,6 +1449,29 @@ async def test_audio_speech_streaming_is_stable_without_experimental_mode(
         AudioResponseFormat.Mp3,
         stream=True,
     ) == (card.model_id, AudioResponseFormat.Mp3)
+
+
+@pytest.mark.anyio
+async def test_audio_speech_streaming_accepts_pcm_only_card() -> None:
+    """Ready streaming capacity may truthfully expose raw PCM without MP3."""
+
+    api = _build_api()
+    card = _tts_card(
+        response_formats=(AudioResponseFormat.Pcm,),
+        default_response_format=AudioResponseFormat.Pcm,
+    )
+    api.state = _state_with_running_card(card)
+
+    assert await api._validate_speech_synthesis_model(
+        card.model_id,
+        AudioResponseFormat.Pcm,
+        stream=True,
+    ) == (card.model_id, AudioResponseFormat.Pcm)
+
+    provider_api, _ = _build_builtin_provider_api()
+    provider_api.state = _state_with_running_card(card)
+    provider_api._sync_builtin_speech_capability()
+    assert provider_api._telemetry_view.local_advertised_capabilities == {"vad"}
 
 
 @pytest.mark.anyio
@@ -1693,6 +1992,162 @@ async def test_audio_speech_collect_terminal_before_any_chunk_reports_no_audio(
 
     assert exc_info.value.status_code == 500
     assert "no audio response" in str(exc_info.value.detail)
+
+
+@pytest.mark.anyio
+async def test_audio_speech_collect_cancels_on_sample_rate_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mid-response framing violation must cancel abandoned generation."""
+
+    api = _build_api()
+    command_id = CommandId("speech-sample-rate-change")
+    sender, receiver = channel[AudioChunk | ErrorChunk]()
+    model_id = ModelId("mlx-community/qwen3-tts-test")
+    cancelled: list[CommandId] = []
+    for index, sample_rate in enumerate((24000, 48000)):
+        await sender.send(
+            AudioChunk(
+                model=model_id,
+                data=base64.b64encode(b"\x00\x00").decode("ascii"),
+                chunk_index=index,
+                total_chunks=2,
+                format=AudioResponseFormat.Pcm,
+                sample_rate=sample_rate,
+                finish_reason="stop" if index == 1 else None,
+            )
+        )
+
+    async def _cancel(self: API, cancelled_id: CommandId) -> None:
+        assert self is api
+        cancelled.append(cancelled_id)
+
+    monkeypatch.setattr(API, "_cancel_audio_speech_command", _cancel)
+
+    with pytest.raises(HTTPException, match="changed sample rate"):
+        await api._collect_audio_speech_chunks(command_id, receiver)
+
+    assert cancelled == [command_id]
+
+
+@pytest.mark.anyio
+async def test_audio_speech_collect_cancels_on_format_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A collected response cannot concatenate different audio encodings."""
+
+    api = _build_api()
+    command_id = CommandId("speech-format-change")
+    sender, receiver = channel[AudioChunk | ErrorChunk]()
+    model_id = ModelId("mlx-community/qwen3-tts-test")
+    for index, response_format in enumerate(
+        (AudioResponseFormat.Mp3, AudioResponseFormat.Wav)
+    ):
+        await sender.send(
+            AudioChunk(
+                model=model_id,
+                data=base64.b64encode(b"audio").decode("ascii"),
+                chunk_index=index,
+                total_chunks=2,
+                format=response_format,
+                finish_reason="stop" if index == 1 else None,
+            )
+        )
+    cancelled: list[CommandId] = []
+
+    async def _cancel(self: API, cancelled_id: CommandId) -> None:
+        assert self is api
+        cancelled.append(cancelled_id)
+
+    monkeypatch.setattr(API, "_cancel_audio_speech_command", _cancel)
+    with pytest.raises(HTTPException, match="changed format"):
+        await api._collect_audio_speech_chunks(command_id, receiver)
+    assert cancelled == [command_id]
+
+
+@pytest.mark.anyio
+async def test_audio_speech_stream_cancels_on_sample_rate_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming PCM must preserve the framing declared by its first chunk."""
+
+    api = _build_api()
+    command_id = CommandId("speech-stream-sample-rate-change")
+    sender, receiver = channel[AudioChunk | ErrorChunk]()
+    api._audio_speech_queues[command_id] = sender
+    model_id = ModelId("mlx-community/qwen3-tts-test")
+    first_chunk = AudioChunk(
+        model=model_id,
+        data=base64.b64encode(b"\x00\x00").decode("ascii"),
+        chunk_index=0,
+        total_chunks=None,
+        format=AudioResponseFormat.Pcm,
+        sample_rate=24000,
+    )
+    await sender.send(
+        AudioChunk(
+            model=model_id,
+            data=base64.b64encode(b"\x00\x00").decode("ascii"),
+            chunk_index=1,
+            total_chunks=None,
+            format=AudioResponseFormat.Pcm,
+            sample_rate=48000,
+            finish_reason="stop",
+        )
+    )
+    cancelled: list[CommandId] = []
+
+    async def _cancel(self: API, cancelled_id: CommandId) -> None:
+        assert self is api
+        cancelled.append(cancelled_id)
+
+    monkeypatch.setattr(API, "_cancel_audio_speech_command", _cancel)
+    stream = api._stream_audio_speech_chunks(command_id, receiver, first_chunk)
+    assert await anext(stream) == b"\x00\x00"
+    with pytest.raises(RuntimeError, match="changed sample rate"):
+        await anext(stream)
+
+    assert cancelled == [command_id]
+
+
+@pytest.mark.anyio
+async def test_audio_speech_stream_cancels_on_format_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A streamed response must retain the first chunk's audio encoding."""
+
+    api = _build_api()
+    command_id = CommandId("speech-stream-format-change")
+    sender, receiver = channel[AudioChunk | ErrorChunk]()
+    api._audio_speech_queues[command_id] = sender
+    model_id = ModelId("mlx-community/qwen3-tts-test")
+    first_chunk = AudioChunk(
+        model=model_id,
+        data=base64.b64encode(b"mp3").decode("ascii"),
+        chunk_index=0,
+        format=AudioResponseFormat.Mp3,
+    )
+    await sender.send(
+        AudioChunk(
+            model=model_id,
+            data=base64.b64encode(b"wav").decode("ascii"),
+            chunk_index=1,
+            format=AudioResponseFormat.Wav,
+            finish_reason="stop",
+        )
+    )
+    cancelled: list[CommandId] = []
+
+    async def _cancel(self: API, cancelled_id: CommandId) -> None:
+        assert self is api
+        cancelled.append(cancelled_id)
+
+    monkeypatch.setattr(API, "_cancel_audio_speech_command", _cancel)
+    stream = api._stream_audio_speech_chunks(command_id, receiver, first_chunk)
+    assert await anext(stream) == b"mp3"
+    with pytest.raises(RuntimeError, match="changed format"):
+        await anext(stream)
+    assert cancelled == [command_id]
 
 
 @pytest.mark.anyio

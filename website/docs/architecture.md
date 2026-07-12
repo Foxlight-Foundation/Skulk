@@ -295,8 +295,13 @@ Speech serving is in a staged rollout. Phase 0 added `TextToSpeech`,
 `SpeechSynthesis` command through the master, the worker dispatches it to the
 single-node `mlx_audio` speech runner, and the runner emits `AudioChunk` output
 on the data plane. TTS output streaming is stable for TTS cards that explicitly
-declare `audio.supports_streaming = true`; no experiment gate is required. The bundled Qwen3
-TTS card declares MP3 streaming support after live validation; Fish Audio and
+declare `audio.supports_streaming = true`; no experiment gate is required. The
+runner can emit independently encoded MP3 segments or headerless mono signed-16-bit
+PCM segments. The API describes PCM framing through response headers before it
+commits the body. The dashboard requests PCM, segments visible assistant output
+into ordered sentences, and pauses HTTP reads against a bounded AudioWorklet
+queue; stop aborts queued and active synthesis. The bundled Qwen3 TTS card
+declares MP3 and PCM streaming support after live validation; Fish Audio and
 the remaining bundled speech cards stay batch-only.
 
 For cards declaring reference-audio support, the same route accepts a bounded

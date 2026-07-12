@@ -115,7 +115,7 @@ A model card's `placement.compatible_backends` selects which engine serves it
 - **`mlx_audio`**: single-node speech backend vocabulary for upstream
   `mlx-audio` TTS/STT models. Skulk probes and advertises `mlx_audio` /
   `mlx_audio-metal` when `mlx_audio` imports on macOS. Mounted TTS models serve
-  `/v1/audio/speech` through the speech runner; stable MP3 `stream=true` requires
+  `/v1/audio/speech` through the speech runner; stable MP3/raw-PCM `stream=true` requires
   card-level streaming support. Mounted STT models serve batch transcription;
   cards with proven streaming support additionally expose typed SSE or
   progressive NDJSON from their actual model deltas. Production nodes also expose the built-in `tts@1.0.0` provider

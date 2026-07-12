@@ -16,7 +16,7 @@ export interface ChatUploadedFile {
 }
 
 /** Audio container formats the dashboard can request from Skulk TTS models. */
-export type AudioResponseFormat = 'mp3' | 'wav' | 'flac' | 'ogg' | 'opus';
+export type AudioResponseFormat = 'mp3' | 'wav' | 'flac' | 'ogg' | 'opus' | 'pcm';
 
 /** Mounted speech model option shown by the chat voice controls. */
 export interface ChatSpeechModelOption {
@@ -25,6 +25,8 @@ export interface ChatSpeechModelOption {
   defaultResponseFormat?: AudioResponseFormat | null;
   responseFormats: AudioResponseFormat[];
   supportsVoiceListing?: boolean;
+  /** Whether the mounted model supports progressive audio generation. */
+  supportsStreaming?: boolean;
   /** Whether the model truthfully supports progressive realtime transcription. */
   supportsRealtime?: boolean;
 }

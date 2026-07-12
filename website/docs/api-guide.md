@@ -525,8 +525,8 @@ Request fields:
 | `input` | string | Required text to synthesize |
 | `voice` | string or null | Optional model-specific voice name. When omitted, Skulk applies the mounted model card's `audio.default_voice` when declared. |
 | `speed` | number or null | Optional positive speaking speed multiplier |
-| `response_format` | string or null | Optional encoded output format. When omitted or set to `null`, Skulk uses `mp3` for `stream=true`; otherwise it uses the mounted model card default when declared and falls back to `mp3`; supported values are constrained by the model card when declared |
-| `stream` | boolean | Optional. When `true`, Skulk returns a chunked HTTP response and yields encoded MP3 bytes as the speech runner emits them; accepted only when the mounted TTS card explicitly declares `audio.supports_streaming = true` and every routable instance of the requested model has a ready runner |
+| `response_format` | string or null | Optional output format: `mp3`, `wav`, `flac`, `ogg`, `opus`, or raw `pcm`. When omitted or set to `null`, Skulk uses `mp3` for `stream=true`; otherwise it uses the mounted model card default when declared and falls back to `mp3`; supported values are constrained by the model card when declared |
+| `stream` | boolean | Optional. When `true`, Skulk returns a chunked HTTP response and yields MP3 or raw PCM bytes as the speech runner emits them; accepted only when the mounted TTS card explicitly declares `audio.supports_streaming = true` and every routable instance of the requested model has a ready runner |
 | `streaming_interval` | number or null | Optional positive model-specific streaming cadence hint, accepted only with `stream=true` |
 | `instruct`, `lang_code` | string or null | Optional model-specific generation hints |
 | `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number or integer | Optional model-specific sampling controls |
@@ -534,18 +534,21 @@ Request fields:
 | `reference_text` | string or null | Optional transcript of `reference_audio`; accepted only when the multipart upload is present |
 
 The response body is raw audio bytes with a matching audio media type
-(`audio/mpeg`, `audio/wav`, `audio/flac`, `audio/ogg`, or `audio/opus`).
+(`audio/mpeg`, `audio/wav`, `audio/flac`, `audio/ogg`, `audio/opus`, or
+`audio/pcm`).
 For `stream=true`, the mounted TTS card must explicitly declare
 `audio.supports_streaming = true`. The response format must currently
-resolve to `mp3`; when a streaming request omits `response_format`, Skulk
+resolve to `mp3` or `pcm`; when a streaming request omits `response_format`, Skulk
 requests `mp3` instead of the model card's non-streaming default. Skulk returns
-`audio/mpeg` with chunked HTTP bytes. Admission returns `503` if any routable
+`audio/mpeg` or `audio/pcm` with chunked HTTP bytes. Raw `pcm` is mono signed
+16-bit little-endian audio; `X-Audio-Sample-Rate`, `X-Audio-Channels`, and
+`X-Audio-Sample-Format` define its framing. Admission returns `503` if any routable
 instance of the requested model lacks a ready runner. This is TTS output streaming, not a
 realtime session: the request text is still a complete bounded input,
 cancellation closes the command stream, and each chunk follows the mounted
-model's generation cadence. The bundled Qwen3 TTS card declares MP3 streaming
+model's generation cadence. The bundled Qwen3 TTS card declares MP3 and PCM streaming
 support after live validation; Fish Audio and the other bundled speech cards
-remain non-streaming. MP3/streaming support is enabled card-by-card only when
+remain non-streaming. Streaming support is enabled card-by-card only when
 the runtime can provide the encoder and the model has passed streaming
 validation.
 
