@@ -1,7 +1,7 @@
 """Generation statistics for runner engines that stream detokenized text.
 
 The MLX engine counts tokens and phases natively inside its generation loop
-and attaches a :class:`~skulk.api.types.api.GenerationStats` to the terminal
+and attaches a :class:`~skulk.api.types.GenerationStats` to the terminal
 chunk; the API forwards it to clients (the bench/harness ``generation_stats``
 surface) and the field-telemetry tap reads it. The llama.cpp engines
 (in-process ``llama_cpp`` and the served ``llama_server`` proxy) stream
