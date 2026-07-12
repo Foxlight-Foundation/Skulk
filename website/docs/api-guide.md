@@ -607,6 +607,7 @@ Request fields:
 | `temperature`, `max_tokens`, `chunk_duration`, `frame_threshold`, `prefill_step_size` | number or integer | Optional model-specific generation controls passed through only when the runner supports them |
 | `word_timestamps` | boolean | Optional request for word timestamp metadata when supported |
 | `timestamp_granularities` | string | Optional comma-separated or JSON-list timestamp granularity hints |
+| `stream` | boolean | Optional. Requires a mounted card declaring `audio.supports_streaming = true` and ready runners. Returns typed SSE events by default; explicit `response_format=ndjson` retains progressive NDJSON framing. |
 
 Response formats:
 
@@ -622,8 +623,13 @@ Response formats:
 The endpoint never accepts server-local file paths. The API reads the multipart
 upload, chunks the base64 payload through Skulk's command/input-chunk pipeline,
 and the worker writes a temporary local audio file only inside the serving
-runner process. `stream=true` returns **400 Bad Request** until streaming STT
-lands through the realtime session path.
+runner process. With `stream=true`, supported models yield their actual decoded
+text deltas. The default `text/event-stream` response emits typed
+`transcription.delta`, `transcription.completed`, `transcription.usage`, and
+`transcription.error` events. Disconnecting before a terminal event cancels the
+core command and releases its bounded output queue. An explicit
+`response_format=ndjson` streams the existing per-chunk JSON shape one line at
+a time. Cards without proven streaming support fail before response headers.
 
 ## OpenAI Audio Translations API
 

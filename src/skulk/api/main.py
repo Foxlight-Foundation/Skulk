@@ -100,7 +100,12 @@ from skulk.api.types import (
     AdvancedImageParams,
     AudioCapabilitySection,
     AudioSpeechRequest,
+    AudioTranscriptionCompletedEvent,
+    AudioTranscriptionDeltaEvent,
+    AudioTranscriptionErrorEvent,
     AudioTranscriptionResponseFormat,
+    AudioTranscriptionStreamEvent,
+    AudioTranscriptionUsageEvent,
     AudioVoice,
     AudioVoiceList,
     BenchChatCompletionRequest,
@@ -704,6 +709,14 @@ def _build_audio_transcription_response(
             payload["language"] = language
         return JSONResponse(payload)
     return JSONResponse({"text": text})
+
+
+def _encode_audio_transcription_sse(
+    event: AudioTranscriptionStreamEvent,
+) -> str:
+    """Encode one typed transcription event as an SSE record."""
+
+    return f"event: {event.type}\ndata: {event.model_dump_json()}\n\n"
 
 # How long the reorder buffer waits for a missing sequence before giving up on
 # it and releasing the chunks behind the gap (#279 Phase 2b). A genuine mesh
@@ -1620,7 +1633,10 @@ class API:
             summary="Transcribe speech audio",
             description=(
                 "OpenAI-compatible speech-to-text endpoint. The requested model "
-                "must already be placed and running as a speech-to-text model."
+                "must already be placed and running as a speech-to-text model. "
+                "stream=true returns typed SSE events for cards declaring "
+                "audio.supports_streaming=true; response_format=ndjson retains "
+                "progressive NDJSON framing."
             ),
         )(self.audio_transcriptions)
         self.app.post(
@@ -3399,11 +3415,8 @@ class API:
 
         return self._realtime_stt_instance() is not None
 
-    def _has_mounted_stt_model(self, model_id: ModelId | None = None) -> bool:
-        """Return whether a ready mounted runner can serve the requested STT."""
-
-        if not self._builtin_speech_provider_enabled:
-            return False
+    def _mounted_stt_model_is_ready(self, model_id: ModelId | None = None) -> bool:
+        """Return whether every routable requested STT instance is ready."""
 
         def instance_is_ready(instance: Instance) -> bool:
             if len(instance.shard_assignments.node_to_runner) != 1:
@@ -3438,6 +3451,14 @@ class API:
             instance_is_ready(instance) for instance in matching_instances
         )
 
+    def _has_mounted_stt_model(self, model_id: ModelId | None = None) -> bool:
+        """Return whether the built-in provider can advertise ready STT."""
+
+        return (
+            self._builtin_speech_provider_enabled
+            and self._mounted_stt_model_is_ready(model_id)
+        )
+
     def _sync_builtin_speech_capability(self) -> None:
         """Advertise speech facades only while core capacity can serve them."""
 
@@ -3461,7 +3482,12 @@ class API:
 
         self._sync_builtin_speech_capability()
 
-    async def _validate_audio_transcription_model(self, model_id: ModelId) -> ModelId:
+    async def _validate_audio_transcription_model(
+        self,
+        model_id: ModelId,
+        *,
+        stream: bool = False,
+    ) -> ModelId:
         """Validate a mounted speech-to-text model exists and is servable."""
 
         model_card = await self._get_running_model_card(model_id)
@@ -3472,6 +3498,15 @@ class API:
                 status_code=400,
                 detail=f"Model {resolved} is not a speech-to-text model",
             )
+        if stream and (
+            model_card.audio is None or model_card.audio.supports_streaming is not True
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Model {resolved} does not declare streaming transcription support"
+                ),
+            )
         if not any(
             instance.shard_assignments.model_id == resolved
             for instance in self.state.instances.values()
@@ -3480,6 +3515,14 @@ class API:
             raise HTTPException(
                 status_code=404,
                 detail=f"No instance found for model {resolved}",
+            )
+        if stream and not self._mounted_stt_model_is_ready(resolved):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"All mounted instances of streaming transcription model "
+                    f"{resolved} must have a ready runner"
+                ),
             )
         return resolved
 
@@ -10292,7 +10335,10 @@ class API:
         stream: Annotated[
             bool,
             Form(
-                description="Streaming transcription is reserved for a later phase.",
+                description=(
+                    "Return typed SSE transcript events as model deltas arrive. "
+                    "With response_format=ndjson, retain progressive NDJSON framing."
+                ),
             ),
         ] = False,
         max_tokens: Annotated[
@@ -10348,11 +10394,6 @@ class API:
 
         if not model.strip():
             raise HTTPException(status_code=400, detail="`model` must not be empty")
-        if stream:
-            raise HTTPException(
-                status_code=400,
-                detail="`stream=true` is not supported by Skulk's STT endpoint yet",
-            )
         if response_format not in _AUDIO_TRANSCRIPTION_FORMATS:
             raise HTTPException(
                 status_code=400,
@@ -10361,28 +10402,62 @@ class API:
 
         _validate_audio_upload_metadata(file)
         audio_bytes = await _read_audio_upload(file)
-        model_id = await self._validate_audio_transcription_model(ModelId(model))
+        model_id = (
+            await self._validate_audio_transcription_model(
+                ModelId(model), stream=True
+            )
+            if stream
+            else await self._validate_audio_transcription_model(ModelId(model))
+        )
         normalized_content_type = _normalize_upload_content_type(file.content_type)
-        transcript_chunks = await self._execute_audio_transcription(
-            AudioTranscriptionTaskParams(
-                model=model_id,
-                filename=file.filename,
-                content_type=normalized_content_type,
-                audio_sha256=hashlib.sha256(audio_bytes).hexdigest(),
-                language=language,
-                prompt=prompt,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                chunk_duration=chunk_duration,
-                frame_threshold=frame_threshold,
-                context=context,
-                prefill_step_size=prefill_step_size,
-                text=text,
-                word_timestamps=word_timestamps,
-                timestamp_granularities=_parse_timestamp_granularities(
-                    timestamp_granularities
-                ),
+        task_params = AudioTranscriptionTaskParams(
+            model=model_id,
+            filename=file.filename,
+            content_type=normalized_content_type,
+            audio_sha256=hashlib.sha256(audio_bytes).hexdigest(),
+            language=language,
+            prompt=prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            chunk_duration=chunk_duration,
+            frame_threshold=frame_threshold,
+            context=context,
+            prefill_step_size=prefill_step_size,
+            text=text,
+            word_timestamps=word_timestamps,
+            timestamp_granularities=_parse_timestamp_granularities(
+                timestamp_granularities
             ),
+            stream=stream,
+        )
+        if stream:
+            command_id, recv = await self._start_audio_transcription(
+                task_params, audio_bytes
+            )
+            ndjson = response_format == "ndjson"
+            body = self._stream_audio_transcription(
+                command_id,
+                recv,
+                model_id=model_id,
+                input_bytes=len(audio_bytes),
+                ndjson=ndjson,
+            )
+            return StreamingResponse(
+                body if ndjson else with_sse_keepalive(body),
+                media_type=(
+                    "application/x-ndjson" if ndjson else "text/event-stream"
+                ),
+                headers=(
+                    {}
+                    if ndjson
+                    else {
+                        "Cache-Control": "no-cache",
+                        "X-Accel-Buffering": "no",
+                    }
+                ),
+            )
+        transcript_chunks = await self._execute_audio_transcription(
+            task_params,
             audio_bytes,
         )
         return _build_audio_transcription_response(response_format, transcript_chunks)
@@ -10493,6 +10568,39 @@ class API:
     ) -> list[TranscriptionChunk]:
         """Run the shared bounded batch STT command path for REST and Fabric."""
 
+        command_id, recv = await self._start_audio_transcription(
+            task_params, audio_bytes
+        )
+        try:
+            transcript_chunks = await self._collect_transcription_chunks(
+                command_id, recv
+            )
+            if not transcript_chunks:
+                raise HTTPException(
+                    status_code=500,
+                    detail="No speech transcription response received",
+                )
+            return transcript_chunks
+        except anyio.get_cancelled_exc_class():
+            with anyio.CancelScope(shield=True):
+                await self._cancel_audio_transcription_command(command_id)
+            raise
+        finally:
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._audio_transcription_queues,
+                ),
+            )
+
+    async def _start_audio_transcription(
+        self,
+        task_params: AudioTranscriptionTaskParams,
+        audio_bytes: bytes,
+    ) -> tuple[CommandId, Receiver[TranscriptionChunk | ErrorChunk]]:
+        """Submit one bounded batch-file STT command before response admission."""
+
         audio_sha256 = hashlib.sha256(audio_bytes).hexdigest()
         audio_chunks = _chunk_base64_payload(
             base64.b64encode(audio_bytes).decode("ascii")
@@ -10528,26 +10636,7 @@ class API:
                     )
                 )
             await self._send(command)
-            transcript_chunks = await self._collect_transcription_chunks(
-                command_id, recv
-            )
-            if not transcript_chunks:
-                raise HTTPException(
-                    status_code=500,
-                    detail="No speech transcription response received",
-                )
-            return transcript_chunks
-        except anyio.get_cancelled_exc_class():
-            self._cancelled_command_ids.add(command_id)
-            with anyio.CancelScope(shield=True):
-                await self.command_sender.send(
-                    ForwarderCommand(
-                        origin=self._system_id,
-                        command=TaskCancelled(cancelled_command_id=command_id),
-                    )
-                )
-            raise
-        finally:
+        except BaseException:
             await self._finalize_command_stream(
                 command_id,
                 cast(
@@ -10555,6 +10644,137 @@ class API:
                     self._audio_transcription_queues,
                 ),
             )
+            raise
+        return command_id, recv
+
+    async def _stream_audio_transcription(
+        self,
+        command_id: CommandId,
+        recv: Receiver[TranscriptionChunk | ErrorChunk],
+        *,
+        model_id: ModelId,
+        input_bytes: int,
+        ndjson: bool,
+    ) -> AsyncIterator[str]:
+        """Yield progressive STT output and own cancellation through cleanup."""
+
+        text_parts: list[str] = []
+        language: str | None = None
+        segments: list[dict[str, str | int | float | bool | None]] = []
+        sequence = 0
+        terminal = False
+        try:
+            with recv as chunks:
+                while True:
+                    chunk: TranscriptionChunk | ErrorChunk | None = None
+                    with anyio.move_on_after(_STREAM_IDLE_TIMEOUT_SECONDS) as scope:
+                        try:
+                            chunk = await chunks.receive()
+                        except (EndOfStream, ClosedResourceError):
+                            break
+                    if scope.cancelled_caught:
+                        if self._command_task_is_terminal(command_id):
+                            error_event = AudioTranscriptionErrorEvent(
+                                model=str(model_id),
+                                sequence=sequence,
+                                code="missing_terminal_chunk",
+                                message=(
+                                    "Speech transcription completed without a final "
+                                    "response chunk"
+                                ),
+                            )
+                            yield (
+                                json.dumps(
+                                    {"error": error_event.model_dump(mode="json")},
+                                    separators=(",", ":"),
+                                )
+                                + "\n"
+                                if ndjson
+                                else _encode_audio_transcription_sse(error_event)
+                            )
+                            terminal = True
+                            return
+                        continue
+                    assert chunk is not None
+                    if isinstance(chunk, ErrorChunk):
+                        error_event = AudioTranscriptionErrorEvent(
+                            model=str(model_id),
+                            sequence=sequence,
+                            code="transcription_failed",
+                            message=chunk.error_message,
+                        )
+                        yield (
+                            json.dumps(
+                                {"error": error_event.model_dump(mode="json")},
+                                separators=(",", ":"),
+                            )
+                            + "\n"
+                            if ndjson
+                            else _encode_audio_transcription_sse(error_event)
+                        )
+                        terminal = True
+                        return
+                    if chunk.text:
+                        text_parts.append(chunk.text)
+                    if chunk.language is not None:
+                        language = chunk.language
+                    segments.extend(chunk.segments)
+                    if ndjson:
+                        yield (
+                            json.dumps(
+                                _transcription_chunk_payload(chunk),
+                                separators=(",", ":"),
+                            )
+                            + "\n"
+                        )
+                    elif chunk.text:
+                        yield _encode_audio_transcription_sse(
+                            AudioTranscriptionDeltaEvent(
+                                model=str(model_id),
+                                sequence=sequence,
+                                delta=chunk.text,
+                                language=chunk.language,
+                                segment_index=chunk.segment_index,
+                            )
+                        )
+                        sequence += 1
+                    if chunk.finish_reason is None:
+                        continue
+                    if not ndjson:
+                        complete_text = "".join(text_parts)
+                        yield _encode_audio_transcription_sse(
+                            AudioTranscriptionCompletedEvent(
+                                model=str(model_id),
+                                sequence=sequence,
+                                text=complete_text,
+                                language=language,
+                                segments=tuple(segments),
+                            )
+                        )
+                        sequence += 1
+                        yield _encode_audio_transcription_sse(
+                            AudioTranscriptionUsageEvent(
+                                model=str(model_id),
+                                sequence=sequence,
+                                input_bytes=input_bytes,
+                                output_characters=len(complete_text),
+                            )
+                        )
+                    terminal = True
+                    return
+        finally:
+            if not terminal and not self._command_task_is_terminal(command_id):
+                with anyio.CancelScope(shield=True):
+                    with anyio.move_on_after(1.0):
+                        await self._cancel_audio_transcription_command(command_id)
+            with anyio.CancelScope(shield=True):
+                await self._finalize_command_stream(
+                    command_id,
+                    cast(
+                        dict[CommandId, Sender[object]],
+                        self._audio_transcription_queues,
+                    ),
+                )
 
     async def _collect_transcription_chunks(
         self,

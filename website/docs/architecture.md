@@ -313,16 +313,19 @@ first-party `tts@1.0.0` provider facade over this same core path. Generic calls
 open through the provider contract, become the existing `SpeechSynthesis`
 command, and return `AudioChunk` output as raw MP3 `InlineMediaAttachment`
 frames over `PROVIDER_DATA`. The descriptor remains available for contract
-discovery, while its telemetry tag is advertised only when the experiment
-gates and an eligible mounted model are present; dynamic admission rechecks the
+discovery, while its telemetry tag is advertised only when an eligible mounted
+model and its routable runners are ready; dynamic admission rechecks the
 specific model before `started`, and cancellation reaches the core command.
-Non-streaming STT serving is exposed at
+STT serving is exposed at
 `POST /v1/audio/transcriptions`: the API validates a mounted STT model, accepts a
 multipart audio upload, sends base64 `AudioInputChunk` events ahead of an
 `AudioTranscription` command, the worker assembles the upload for the speech
-runner, and the runner emits terminal `TranscriptionChunk` output on the data
-plane. The built-in `stt@1.0.0` provider exposes the same batch inference path
-as a Fabric transform. Its opening metadata stays control-sized while one or
+runner, and the runner emits `TranscriptionChunk` output on the data plane.
+Batch requests collect terminal output in the requested response format. Cards
+declaring `audio.supports_streaming = true` may instead return model-produced
+deltas as typed SSE or progressive NDJSON; disconnect cancellation reaches the
+core command and releases its queue. The built-in `stt@1.0.0` provider exposes
+the same batch inference path as a Fabric transform. Its opening metadata stays control-sized while one or
 more raw encoded-audio `InlineMediaAttachment` frames travel over
 `PROVIDER_DATA`; caller input half-close starts inference and one completed
 frame returns the final transcript. It advertises only with ready mounted STT

@@ -78,6 +78,7 @@ class AudioTranscriptionTaskParams(BaseModel, frozen=True):
     word_timestamps: bool = False
     timestamp_granularities: tuple[str, ...] = ()
     translate_to_english: bool = False
+    stream: bool = False
 
 
 class RealtimeAudioTranscriptionTaskParams(BaseModel, frozen=True):
