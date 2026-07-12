@@ -1549,10 +1549,12 @@ The wire contract implements a bounded subset of OpenAI Realtime transcription:
 | Direction | Event | Behavior |
 |---|---|---|
 | server to client | `session.created` | Reports a `type: transcription` session with the selected model and fixed PCM input configuration. |
-| client to server | `session.update` | Confirms the current nested `audio.input` configuration; attempts to change model/codec or enable VAD, noise reduction, language hints, or extra fields are rejected. |
+| client to server | `session.update` | Confirms the current nested `audio.input` configuration. `turn_detection` may be null or a bounded `server_vad` configuration; attempts to change model/codec, enable noise reduction/language hints, or add unsupported fields are rejected. |
 | server to client | `session.updated` | Confirms an accepted current session update. |
 | client to server | `input_audio_buffer.append` | Appends one base64 PCM16 frame and immediately forwards its decoded bytes as binary Fabric media. |
 | client to server | `input_audio_buffer.commit` | Half-closes the single utterance and triggers final provider drain. Empty or duplicate commits are rejected. |
+| server to client | `input_audio_buffer.speech_started` | Reports the detected start timestamp and current item when server VAD is enabled. |
+| server to client | `input_audio_buffer.speech_stopped` | Reports the detected end timestamp immediately before server VAD commits the utterance. |
 | server to client | `input_audio_buffer.committed` | Confirms the input half-close. |
 | server to client | `conversation.item.input_audio_transcription.delta` | Carries one provider transcript delta after commit. |
 | server to client | `conversation.item.input_audio_transcription.completed` | Carries the accumulated final transcript and closes the socket normally. |
@@ -1569,6 +1571,18 @@ forwards audio incrementally and retains no replay buffer that could safely
 retract already-delivered media. Browser connections must be same-origin; SDK
 clients without an `Origin` header remain supported.
 
+`turn_detection: {"type":"server_vad"}` enables server-owned WebRTC VAD.
+Optional settings are `aggressiveness` (0-3), `prefix_padding_ms` (0-2000),
+`silence_duration_ms` (20-5000), `minimum_speech_ms` (20-5000), and
+`maximum_utterance_ms` (100-120000). The edge incrementally resamples the
+24 kHz input to the classifier's 16 kHz frame contract, emits typed speech
+boundaries, and commits on silence or the maximum utterance duration. The
+edge forwards VAD-enabled input in 20 ms source-rate slices and stops at the
+detected boundary, so the unprocessed remainder of a large append cannot leak
+into the committed utterance. The socket still owns one utterance in this
+release; a completed transcript closes
+it normally.
+
 The dashboard chat microphone uses this edge only when both the selected model
 declares streaming/realtime audio and the API node currently advertises the
 stable `stt.realtime` provider. An `AudioWorklet` captures mono browser
@@ -1579,7 +1593,7 @@ is absent, chat retains the batch `MediaRecorder` plus
 `POST /v1/audio/transcriptions` path.
 
 The first version is one committed utterance per socket. It does not implement
-server VAD, noise reduction, G.711, multi-turn conversation state, ephemeral
+noise reduction, G.711, multi-turn conversation state, ephemeral
 session-token creation, response generation, or full-duplex speech-to-speech.
 Provider capacity failures close with retryable WebSocket code `1013`; client
 protocol/policy violations use `1003`, `1008`, or `1009`; internal provider

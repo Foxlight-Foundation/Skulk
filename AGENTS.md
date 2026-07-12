@@ -149,8 +149,9 @@ A model card's `placement.compatible_backends` selects which engine serves it
   media is processed per call and never retained. Translation-capable STT cards
   serve experimental `/v1/audio/translations` only with global experimental
   mode and `experiments.speech_translation`; TTS cards may expose static voices
-  through the Skulk `/v1/audio/voices` extension. VAD, conversation/full-duplex
-  speech remain later phases. Managed reference audio is accepted only as a
+  through the Skulk `/v1/audio/voices` extension. The realtime transcription
+  WebSocket accepts bounded server VAD for one-utterance auto-commit;
+  conversation/full-duplex speech remains a later phase. Managed reference audio is accepted only as a
   bounded multipart upload for supporting TTS cards. Its bytes use the
   node-addressed `SPEECH_MEDIA` Zenoh data path, never State or the event log;
   the worker assembles them in bounded process-local memory and the runner

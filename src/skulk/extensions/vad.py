@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import sys
+from array import array
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
@@ -72,6 +74,47 @@ class VadTurnEvent:
 
 
 @final
+class StreamingPcm16Resampler:
+    """Stateful mono PCM16 linear resampler preserving cross-chunk continuity."""
+
+    def __init__(self, input_rate: int, output_rate: int) -> None:
+        """Create a resampler between positive integer sample rates."""
+
+        if input_rate <= 0 or output_rate <= 0:
+            raise ValueError("sample rates must be positive")
+        self._step = input_rate / output_rate
+        self._carry: list[int] = []
+        self._position = 0.0
+
+    def process(self, pcm16: bytes) -> bytes:
+        """Resample one ordered little-endian PCM16 chunk."""
+
+        if len(pcm16) % 2 != 0:
+            raise ValueError("PCM16 input must contain an even byte count")
+        decoded = array("h")
+        decoded.frombytes(pcm16)
+        if sys.byteorder != "little":
+            decoded.byteswap()
+        combined = self._carry + decoded.tolist()
+        output = array("h")
+        while self._position + 1 < len(combined):
+            left_index = int(self._position)
+            fraction = self._position - left_index
+            value = round(
+                combined[left_index]
+                + (combined[left_index + 1] - combined[left_index]) * fraction
+            )
+            output.append(max(-32768, min(32767, value)))
+            self._position += self._step
+        consumed = min(int(self._position), len(combined))
+        self._carry = combined[consumed:]
+        self._position -= consumed
+        if sys.byteorder != "little":
+            output.byteswap()
+        return output.tobytes()
+
+
+@final
 class VoiceActivityDetector:
     """Convert exact PCM16 frames into stable speech turn boundaries."""
 
@@ -104,6 +147,12 @@ class VoiceActivityDetector:
         self._preroll: deque[bytes] = deque(
             maxlen=max(1, config.preroll_ms // config.frame_ms)
         )
+
+    @property
+    def frame_bytes(self) -> int:
+        """Return the exact PCM byte count required by one detector frame."""
+
+        return self._config.frame_bytes
 
     def process(self, frame: bytes) -> tuple[VadTurnEvent, ...]:
         """Consume one exact PCM16 frame and emit zero or more boundaries."""
