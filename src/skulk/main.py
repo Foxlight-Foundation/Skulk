@@ -366,6 +366,7 @@ class Node:
     # master re-election; the subscriber feeds it, the master/API read it.
     telemetry_view: TelemetryView
     telemetry_receiver: Receiver[NodeTelemetry]
+    data_plane_zenoh: bool = False
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
 
     @classmethod
@@ -461,7 +462,8 @@ class Node:
         await router.register_topic(topics.DATA)
         await router.register_topic(topics.PROVIDER_DATA)
         await router.register_topic(topics.REALTIME_AUDIO)
-        await router.register_topic(topics.SPEECH_MEDIA)
+        if _zenoh_on:
+            await router.register_topic(topics.SPEECH_MEDIA)
         telemetry_view = TelemetryView()
         realtime_audio_sender, realtime_audio_receiver = channel[
             RealtimeAudioInputFrame
@@ -571,8 +573,12 @@ class Node:
                 realtime_audio_packet_receiver=router.receiver(
                     topics.REALTIME_AUDIO
                 ),
-                speech_media_packet_sender=router.sender(topics.SPEECH_MEDIA),
-                speech_media_packet_receiver=router.receiver(topics.SPEECH_MEDIA),
+                speech_media_packet_sender=(
+                    router.sender(topics.SPEECH_MEDIA) if _zenoh_on else None
+                ),
+                speech_media_packet_receiver=(
+                    router.receiver(topics.SPEECH_MEDIA) if _zenoh_on else None
+                ),
                 realtime_audio_sender=(
                     None if args.no_worker else realtime_audio_sender
                 ),
@@ -617,7 +623,9 @@ class Node:
                 realtime_audio_packet_receiver=router.receiver(
                     topics.REALTIME_AUDIO
                 ),
-                speech_media_packet_receiver=router.receiver(topics.SPEECH_MEDIA),
+                speech_media_packet_receiver=(
+                    router.receiver(topics.SPEECH_MEDIA) if _zenoh_on else None
+                ),
                 store_client=worker_store_client,
                 staging_config=worker_staging_cfg,
             )
@@ -671,6 +679,7 @@ class Node:
             store_server,
             telemetry_view,
             router.receiver(topics.TELEMETRY),
+            _zenoh_on,
         )
 
     async def run(self):
@@ -1020,8 +1029,10 @@ class Node:
                             realtime_audio_packet_receiver=self.router.receiver(
                                 topics.REALTIME_AUDIO
                             ),
-                            speech_media_packet_receiver=self.router.receiver(
-                                topics.SPEECH_MEDIA
+                            speech_media_packet_receiver=(
+                                self.router.receiver(topics.SPEECH_MEDIA)
+                                if self.data_plane_zenoh
+                                else None
                             ),
                         )
                         self._tg.start_soon(self.worker.run)

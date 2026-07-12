@@ -329,6 +329,68 @@ def test_audio_speech_http_rejects_non_file_reference_audio() -> None:
     assert response.status_code == 422
 
 
+def test_audio_speech_rejects_oversized_reference_metadata() -> None:
+    """Packet metadata limits are enforced before command submission."""
+
+    upload = UploadFile(
+        filename=f"{'a' * 256}.wav",
+        file=io.BytesIO(b"RIFFsample"),
+        headers=Headers({"content-type": "audio/wav"}),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        api_main._validate_audio_upload_metadata(upload)
+
+    assert exc_info.value.status_code == 422
+    assert "filename is too long" in str(exc_info.value.detail)
+
+
+@pytest.mark.anyio
+async def test_reference_audio_rejects_missing_private_transport_before_targeting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing private media transport fails before placement or command churn."""
+
+    api = _build_api()
+    api._data_plane_zenoh = True
+    model_id = ModelId("org/reference-tts")
+    targeted = False
+
+    async def validate_model(
+        self: API,
+        requested_model: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        del self, requested_model, response_format, stream
+        return model_id, AudioResponseFormat.Wav
+
+    def target_model(requested_model: ModelId) -> tuple[InstanceId, NodeId]:
+        nonlocal targeted
+        del requested_model
+        targeted = True
+        return InstanceId("unused"), NodeId("unused")
+
+    monkeypatch.setattr(API, "_validate_speech_synthesis_model", validate_model)
+    monkeypatch.setattr(api, "_reference_tts_target", target_model)
+    upload = UploadFile(
+        filename="voice.wav",
+        file=io.BytesIO(b"RIFFsample"),
+        headers=Headers({"content-type": "audio/wav"}),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.audio_speech(
+            AudioSpeechRequest(model=str(model_id), input="hello"),
+            reference_audio_file=upload,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert targeted is False
+    assert api._audio_speech_queues == {}
+
+
 def test_audio_speech_http_rejects_invalid_json_payload() -> None:
     """Strict JSON validation failures are exposed as 422 responses."""
 

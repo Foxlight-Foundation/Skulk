@@ -521,6 +521,10 @@ def _normalize_upload_content_type(content_type: str | None) -> str | None:
 def _validate_audio_upload_metadata(file: StarletteUploadFile) -> None:
     """Reject uploads whose metadata is clearly not an audio container."""
     content_type = _normalize_upload_content_type(file.content_type)
+    if file.filename is not None and len(file.filename) > 255:
+        raise HTTPException(status_code=422, detail="Audio filename is too long")
+    if content_type is not None and len(content_type) > 255:
+        raise HTTPException(status_code=422, detail="Audio content type is too long")
     suffix = Path(file.filename or "").suffix.lower()
     if (
         content_type is not None
@@ -9915,7 +9919,7 @@ class API:
         target_instance_id: InstanceId | None = None
         target_node: NodeId | None = None
         if reference_audio_file is not None:
-            if not self._data_plane_zenoh:
+            if not self._data_plane_zenoh or self._speech_media_packet_sender is None:
                 raise HTTPException(
                     status_code=503,
                     detail=(
