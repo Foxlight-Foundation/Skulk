@@ -75,7 +75,7 @@ class VadTurnEvent:
 
 @final
 class StreamingPcm16Resampler:
-    """Stateful mono PCM16 linear resampler preserving chunk boundaries."""
+    """Stateful mono PCM16 linear resampler preserving cross-chunk continuity."""
 
     def __init__(self, input_rate: int, output_rate: int) -> None:
         """Create a resampler between positive integer sample rates."""
