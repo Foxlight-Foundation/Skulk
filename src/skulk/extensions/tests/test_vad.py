@@ -211,5 +211,10 @@ async def test_vad_provider_rejects_partial_terminal_pcm() -> None:
             ),
         )
 
-    with pytest.raises(ValueError, match="partial PCM frame"):
-        _ = [frame async for frame in provider._stream(call, input_frames())]
+    frames = [frame async for frame in provider._stream(call, input_frames())]
+
+    assert len(frames) == 1
+    assert frames[0].kind == "failed"
+    assert frames[0].error is not None
+    assert frames[0].error.code == "invalid_frame"
+    assert "partial PCM frame" in frames[0].error.message

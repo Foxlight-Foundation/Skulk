@@ -12,7 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from skulk.extensions.calls import CapabilityCall
 from skulk.extensions.capabilities import CapabilityDescriptor
-from skulk.extensions.streams import CapabilityStreamFrame, InlineMediaAttachment
+from skulk.extensions.streams import (
+    CapabilityStreamError,
+    CapabilityStreamFrame,
+    InlineMediaAttachment,
+)
 from skulk.extensions.types import ExtensionContext
 
 _VALID_SAMPLE_RATES = frozenset({8000, 16000, 32000, 48000})
@@ -288,13 +292,23 @@ class BuiltinVadProvider:
                 continue
             attachment = frame.media
             if not isinstance(attachment, InlineMediaAttachment):
-                raise ValueError("VAD requires one inline PCM media attachment")
+                yield self._invalid_frame(
+                    call.call_id,
+                    sequence,
+                    "VAD requires one inline PCM media attachment",
+                )
+                return
             if (
                 attachment.codec != "pcm_s16le"
                 or attachment.sample_rate != config.sample_rate
                 or attachment.channels != 1
             ):
-                raise ValueError("VAD media metadata must match negotiated mono PCM16")
+                yield self._invalid_frame(
+                    call.call_id,
+                    sequence,
+                    "VAD media metadata must match negotiated mono PCM16",
+                )
+                return
             buffered_pcm.extend(attachment.data)
             while len(buffered_pcm) >= config.frame_bytes:
                 pcm_frame = bytes(buffered_pcm[: config.frame_bytes])
@@ -305,7 +319,12 @@ class BuiltinVadProvider:
                     yield self._event_frame(call.call_id, sequence, event)
                     sequence += 1
         if buffered_pcm:
-            raise ValueError("VAD input ended with a partial PCM frame")
+            yield self._invalid_frame(
+                call.call_id,
+                sequence,
+                "VAD input ended with a partial PCM frame",
+            )
+            return
         for event in detector.finish():
             yield self._event_frame(call.call_id, sequence, event)
             sequence += 1
@@ -334,4 +353,20 @@ class BuiltinVadProvider:
                 "reason": event.reason,
                 "preroll_ms": event.preroll_ms,
             },
+        )
+
+    @staticmethod
+    def _invalid_frame(
+        call_id: str,
+        sequence: int,
+        message: str,
+    ) -> CapabilityStreamFrame:
+        """Return a caller-actionable terminal for malformed input media."""
+
+        return CapabilityStreamFrame(
+            call_id=call_id,
+            direction="provider_to_caller",
+            sequence=sequence,
+            kind="failed",
+            error=CapabilityStreamError(code="invalid_frame", message=message),
         )
