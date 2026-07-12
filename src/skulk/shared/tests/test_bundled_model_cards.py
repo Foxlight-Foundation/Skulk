@@ -179,3 +179,28 @@ def test_bundled_card_capability_resolution_is_coherent(kind: str, path: Path) -
         f"resolver supports_thinking={profile.supports_thinking} but card "
         f"declaration says {declares_thinking} (family={profile.family})"
     )
+
+
+def test_qwen_custom_voice_card_exposes_upstream_speaker_inventory() -> None:
+    """The voice endpoint must expose the checkpoint's stable speaker IDs."""
+
+    path = (
+        Path(RESOURCES_DIR)
+        / "speech_model_cards"
+        / "mlx-community--Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit.toml"
+    )
+    card = _load(path)
+
+    assert card.audio is not None
+    assert card.audio.supports_voice_listing is True
+    assert card.audio.voices == (
+        "serena",
+        "vivian",
+        "uncle_fu",
+        "ryan",
+        "aiden",
+        "ono_anna",
+        "sohee",
+        "eric",
+        "dylan",
+    )
