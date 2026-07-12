@@ -536,6 +536,8 @@ class RealtimeTranscriptionBridge:
 
             assert isinstance(event, InputAudioBufferCommit)
             if self._committed:
+                if self._vad_auto_committed:
+                    continue
                 await self._send_error(
                     code="input_closed",
                     message="input_audio_buffer.commit may be sent only once",
@@ -555,6 +557,8 @@ class RealtimeTranscriptionBridge:
                 client_event_id=event.event_id,
             ):
                 return
+            if self._committed:
+                continue
             await self._finish_vad_on_manual_commit()
             if not await self._commit_input(
                 session,

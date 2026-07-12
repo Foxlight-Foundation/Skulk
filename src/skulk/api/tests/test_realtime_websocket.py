@@ -363,6 +363,12 @@ def test_realtime_websocket_server_vad_auto_commits(
                 "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
             }
         )
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.commit",
+                "event_id": "already-queued-commit-after-vad-boundary",
+            }
+        )
         assert _receive_json(websocket)["type"] == "input_audio_buffer.speech_started"
         assert _receive_json(websocket)["type"] == "input_audio_buffer.speech_stopped"
         assert _receive_json(websocket)["type"] == "input_audio_buffer.committed"
@@ -377,6 +383,7 @@ def test_realtime_websocket_server_vad_auto_commits(
         "chunk",
         "completed",
     ]
+    assert sum(frame.kind == "completed" for frame in input_frames) == 1
     forwarded_media = [
         cast(InlineMediaAttachment, frame.media).data
         for frame in input_frames
@@ -531,6 +538,67 @@ def test_realtime_websocket_vad_buffers_partial_source_frames(
     ]
     combined = first + second
     assert chunks == [combined[:960], combined[960:]]
+
+
+def test_realtime_websocket_manual_flush_does_not_double_commit_vad(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partial frame that ends a VAD turn is committed exactly once."""
+
+    api = _build_api()
+    input_frames: list[CapabilityStreamFrame] = []
+
+    class FlushBoundaryDetector:
+        frame_bytes = 320
+
+        def __init__(self, config: object) -> None:
+            del config
+
+        def process(self, frame: bytes) -> tuple[VadTurnEvent, ...]:
+            assert len(frame) == self.frame_bytes
+            return (VadTurnEvent("speech_stopped", 10, "silence"),)
+
+        def finish(self) -> tuple[VadTurnEvent, ...]:
+            return ()
+
+    monkeypatch.setattr(realtime_api, "VoiceActivityDetector", FlushBoundaryDetector)
+    _install_waiting_session(api, input_frames, call_id="flush-vad-boundary")
+    audio = _pcm16_bytes([1000] * 240)
+
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt"
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {
+                            "transcription": {"model": "org/realtime-stt"},
+                            "turn_detection": {"type": "server_vad"},
+                        }
+                    },
+                },
+            }
+        )
+        assert _receive_json(websocket)["type"] == "session.updated"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(audio).decode("ascii"),
+            }
+        )
+        websocket.send_json({"type": "input_audio_buffer.commit"})
+        assert _receive_json(websocket)["type"] == "input_audio_buffer.speech_stopped"
+        assert _receive_json(websocket)["type"] == "input_audio_buffer.committed"
+
+    assert [frame.kind for frame in input_frames] == [
+        "started",
+        "chunk",
+        "completed",
+    ]
 
 
 def test_realtime_websocket_rejects_invalid_audio_without_forwarding() -> None:
