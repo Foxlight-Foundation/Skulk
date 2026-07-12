@@ -354,8 +354,9 @@ delta/final events, enforces same-origin browsers and bounded messages, and
 cancels the provider on disconnect. Optional bounded server VAD incrementally
 resamples input for WebRTC classification, emits start/stop events, and commits
 the utterance on silence or maximum duration. VAD-enabled appends are forwarded
-in classifier-sized source slices and stop at the detected boundary. It is one utterance per socket
-and does not claim conversational orchestration or speech-to-speech behavior. Every API
+in classifier-sized source slices and stop at the detected boundary. It is one
+utterance per socket and does not claim conversational orchestration or
+speech-to-speech behavior. Every API
 also registers stable `vad@1.0.0` through `BuiltinVadProvider`. This reusable
 bidirectional provider frames mono PCM16 for WebRTC VAD and emits typed turn
 boundaries with bounded minimum-speech, hangover, preroll, and maximum-duration
