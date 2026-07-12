@@ -670,6 +670,13 @@ def test_realtime_websocket_server_vad_auto_commits(
                 "audio": base64.b64encode(audio).decode("ascii"),
             }
         )
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "event_id": "already-queued-after-vad-boundary",
+                "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
+            }
+        )
         assert _receive_json(websocket)["type"] == "input_audio_buffer.speech_started"
         assert _receive_json(websocket)["type"] == "input_audio_buffer.speech_stopped"
         assert _receive_json(websocket)["type"] == "input_audio_buffer.committed"
@@ -1055,7 +1062,7 @@ def test_realtime_websocket_rejects_binary_compatibility_events() -> None:
             _receive_json(websocket)
         assert disconnect.value.code == 1003
 
-    assert [frame.kind for frame in input_frames] == ["started", "cancelled"]
+    assert input_frames == []
 
 
 def test_realtime_websocket_rejects_invalid_vad_configuration() -> None:
@@ -1081,7 +1088,7 @@ def test_realtime_websocket_rejects_invalid_vad_configuration() -> None:
         error = _receive_json(websocket)
         assert _mapping(error["error"])["code"] == "invalid_event"
 
-    assert [frame.kind for frame in input_frames] == ["started", "cancelled"]
+    assert input_frames == []
 
 
 def test_realtime_websocket_denies_cross_origin_browser_connection() -> None:
@@ -1114,6 +1121,30 @@ def test_realtime_websocket_denies_cross_origin_browser_connection() -> None:
     assert not opened.is_set()
 
 
+def test_realtime_websocket_defers_provider_until_first_audio() -> None:
+    """An idle connected client must not reserve mounted STT capacity."""
+
+    api = _build_api()
+    opened = Event()
+
+    async def open_session(model: str, sample_rate: int) -> CapabilityStreamSession:
+        del model, sample_rate
+        opened.set()
+        return CapabilityStreamSession(
+            open_result=call_failure("unexpected", "provider_error", "unexpected"),
+            frames=_empty_frames(),
+        )
+
+    api._open_realtime_transcription_session = open_session
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt"
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        assert not opened.is_set()
+
+    assert not opened.is_set()
+
+
 def test_realtime_websocket_surfaces_provider_admission_failure() -> None:
     """A typed provider rejection becomes an error event and retryable close."""
 
@@ -1130,6 +1161,13 @@ def test_realtime_websocket_surfaces_provider_admission_failure() -> None:
     client = TestClient(api.app)
 
     with client.websocket_connect("/v1/realtime?model=org%2Frealtime-stt") as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
+            }
+        )
         error = _receive_json(websocket)
         assert error["type"] == "error"
         assert _mapping(error["error"])["code"] == "overloaded"
@@ -1152,6 +1190,13 @@ def test_realtime_websocket_surfaces_unexpected_provider_open_failure() -> None:
     client = TestClient(api.app)
 
     with client.websocket_connect("/v1/realtime?model=org%2Frealtime-stt") as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
+            }
+        )
         error = _receive_json(websocket)
         assert error["type"] == "error"
         assert _mapping(error["error"])["code"] == "provider_open_error"
@@ -1212,6 +1257,12 @@ def test_realtime_websocket_surfaces_provider_failure_before_commit() -> None:
 
     with client.websocket_connect("/v1/realtime?model=org%2Frealtime-stt") as websocket:
         assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
+            }
+        )
         failed = _receive_json(websocket)
         assert failed["type"] == "conversation.item.input_audio_transcription.failed"
         assert _mapping(failed["error"])["code"] == "transport_error"
@@ -1219,7 +1270,7 @@ def test_realtime_websocket_surfaces_provider_failure_before_commit() -> None:
             _receive_json(websocket)
         assert disconnect.value.code == 1011
 
-    assert [frame.kind for frame in input_frames] == ["started", "cancelled"]
+    assert [frame.kind for frame in input_frames] == ["started", "chunk", "cancelled"]
 
 
 def test_realtime_websocket_surfaces_unexpected_provider_output_failure() -> None:
@@ -1265,6 +1316,12 @@ def test_realtime_websocket_surfaces_unexpected_provider_output_failure() -> Non
 
     with client.websocket_connect("/v1/realtime?model=org%2Frealtime-stt") as websocket:
         assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
+            }
+        )
         failed = _receive_json(websocket)
         assert failed["type"] == "conversation.item.input_audio_transcription.failed"
         assert _mapping(failed["error"])["code"] == "provider_output_error"
@@ -1272,7 +1329,7 @@ def test_realtime_websocket_surfaces_unexpected_provider_output_failure() -> Non
             _receive_json(websocket)
         assert disconnect.value.code == 1011
 
-    assert [frame.kind for frame in input_frames] == ["started", "cancelled"]
+    assert [frame.kind for frame in input_frames] == ["started", "chunk", "cancelled"]
 
 
 def test_realtime_websocket_rejects_oversized_final_transcript() -> None:
@@ -1406,6 +1463,12 @@ def test_realtime_websocket_drains_partial_output_before_commit() -> None:
 
     with client.websocket_connect("/v1/realtime?model=org%2Frealtime-stt") as websocket:
         assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
+            }
+        )
         assert partials_drained.wait(timeout=1.0)
         websocket.send_json(
             {
@@ -1428,7 +1491,12 @@ def test_realtime_websocket_drains_partial_output_before_commit() -> None:
         )
         assert completed["transcript"] == "x" * 300
 
-    assert [frame.kind for frame in input_frames] == ["started", "chunk", "completed"]
+    assert [frame.kind for frame in input_frames] == [
+        "started",
+        "chunk",
+        "chunk",
+        "completed",
+    ]
 
 
 def test_realtime_websocket_surfaces_provider_input_transport_failure() -> None:
@@ -1536,6 +1604,12 @@ def test_realtime_websocket_disconnect_cancels_provider_input() -> None:
 
     with client.websocket_connect("/v1/realtime?model=org%2Frealtime-stt") as websocket:
         assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
+            }
+        )
 
     assert output_cancelled.is_set()
-    assert [frame.kind for frame in input_frames] == ["started", "cancelled"]
+    assert [frame.kind for frame in input_frames] == ["started", "chunk", "cancelled"]

@@ -10280,6 +10280,12 @@ class API:
                         status_code=500,
                         detail=f"Speech synthesis failed: {chunk.error_message}",
                     )
+                if response_format is not None and response_format != chunk.format:
+                    await self._cancel_audio_speech_command(command_id)
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Speech synthesis changed format mid-response",
+                    )
                 audio_parts.append(_decode_audio_chunk_data(chunk))
                 response_format = chunk.format
                 if chunk.sample_rate is not None:
@@ -10372,6 +10378,7 @@ class API:
     ) -> AsyncGenerator[bytes, None]:
         """Yield TTS audio bytes as chunks arrive from the data plane."""
         received_audio = False
+        expected_format = first_chunk.format if first_chunk is not None else None
         expected_pcm_sample_rate = (
             first_chunk.sample_rate
             if first_chunk is not None and first_chunk.format == AudioResponseFormat.Pcm
@@ -10431,6 +10438,13 @@ class API:
                     if isinstance(chunk, ErrorChunk):
                         raise RuntimeError(
                             f"Speech synthesis failed: {chunk.error_message}"
+                        )
+                    if expected_format is None:
+                        expected_format = chunk.format
+                    elif chunk.format != expected_format:
+                        await self._cancel_audio_speech_command(command_id)
+                        raise RuntimeError(
+                            "Speech synthesis changed format mid-stream"
                         )
                     if (
                         expected_pcm_sample_rate is not None

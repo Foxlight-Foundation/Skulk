@@ -324,6 +324,7 @@ class RealtimeTranscriptionBridge:
         self._turn_audio_bytes = 0
         self._committed = False
         self._current_session: CapabilityStreamSession | None = None
+        self._vad_auto_committed = False
         self._turn_detection: ServerVadConfig | None = None
         self._vad_detector: VoiceActivityDetector | None = None
         self._vad_resampler: StreamingPcm16Resampler | None = None
@@ -339,42 +340,6 @@ class RealtimeTranscriptionBridge:
             await self._websocket.close(code=1008, reason="cross-origin WebSocket denied")
             return
         await self._websocket.accept()
-        try:
-            session = await self._open_session(self._model, _PCM_SAMPLE_RATE)
-        except Exception as exc:
-            logger.opt(exception=exc).warning(
-                "Realtime transcription provider session failed to open"
-            )
-            await self._send_internal_error(
-                code="provider_open_error",
-                message="realtime transcription provider session could not be opened",
-            )
-            return
-        if not session.open_result.ok:
-            error = session.open_result.error
-            await self._send_error(
-                code=error.code if error is not None else "provider_error",
-                message=(
-                    error.message
-                    if error is not None
-                    else "realtime transcription provider rejected the session"
-                ),
-            )
-            await self._close(
-                self._provider_rejection_close_code(
-                    error.code if error is not None else "provider_error"
-                )
-            )
-            return
-        if session.input is None:
-            await self._send_error(
-                code="invalid_result",
-                message="realtime transcription provider returned no input stream",
-            )
-            await self._close(1011)
-            return
-        self._current_session = session
-
         await self._send_json(
             {
                 "event_id": self._event_id(),
@@ -384,14 +349,6 @@ class RealtimeTranscriptionBridge:
         )
         try:
             async with anyio.create_task_group() as task_group:
-                task_group.start_soon(
-                    self._send_provider_output,
-                    session,
-                    task_group,
-                    task_group.cancel_scope,
-                    self._item_id,
-                    self._commit_announced,
-                )
                 try:
                     await self._receive_client_input(task_group)
                 except WebSocketDisconnect:
@@ -579,6 +536,8 @@ class RealtimeTranscriptionBridge:
 
             if isinstance(event, InputAudioBufferAppend):
                 if self._committed:
+                    if self._vad_auto_committed:
+                        continue
                     await self._send_error(
                         code="turn_in_progress",
                         message="audio cannot be appended until the committed turn completes",
@@ -848,6 +807,7 @@ class RealtimeTranscriptionBridge:
                     session,
                     client_event_id=client_event_id,
                 )
+                self._vad_auto_committed = self._committed
                 return True
         return False
 
@@ -1199,6 +1159,7 @@ class RealtimeTranscriptionBridge:
         self._current_session = None
         self._turn_audio_bytes = 0
         self._committed = False
+        self._vad_auto_committed = False
         self._commit_announced = anyio.Event()
         self._configure_turn_detection(self._turn_detection)
 

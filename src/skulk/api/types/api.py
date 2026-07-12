@@ -972,17 +972,17 @@ class AudioSpeechRequest(BaseModel):
     response_format: AudioResponseFormat | None = Field(
         default=None,
         description=(
-            "Encoded audio format to return. When omitted, Skulk uses the mounted "
-            "model card default when declared and otherwise falls back to mp3."
+            "Audio format to return, including raw PCM when supported. When "
+            "omitted, Skulk uses the mounted model card default when declared "
+            "and otherwise falls back to mp3."
         ),
     )
     stream: bool = Field(
         default=False,
         description=(
-            "Whether to stream encoded MP3 bytes as they are produced by the "
-            "mounted text-to-speech model. Streaming currently supports MP3 "
-            "only; response_format may be omitted to select MP3, and other "
-            "formats are rejected. The mounted model card must declare "
+            "Whether to stream MP3 or raw PCM bytes as they are produced by the "
+            "mounted text-to-speech model. The selected response_format must be "
+            "declared by the model card, and the card must declare "
             "audio.supports_streaming=true."
         ),
     )
