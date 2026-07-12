@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   finalizeRealtimeCaptureStartup,
+  RealtimeConversationSocket,
   RealtimeTranscriptionSocket,
   StreamingLinearResampler,
   realtimeTranscriptionUrl,
@@ -198,6 +199,77 @@ describe('RealtimeTranscriptionSocket', () => {
     client.cancel();
 
     await expect(result).rejects.toThrow('Realtime transcription was cancelled.');
+    expect(socket.closeCode).toBe(1000);
+  });
+});
+
+describe('RealtimeConversationSocket', () => {
+  it('maps server VAD transcript and assistant events across multiple turns', async () => {
+    const socket = new FakeWebSocket();
+    const transcripts: Array<[string, boolean]> = [];
+    const responses: Array<[string, boolean]> = [];
+    const statuses: string[] = [];
+    const client = new RealtimeConversationSocket({
+      transcriptionModelId: 'org/stt',
+      responseModelId: 'org/chat',
+      location: { protocol: 'https:', host: 'skulk.example' },
+      socketFactory: () => socket as unknown as WebSocket,
+      onTranscript: (text, final) => transcripts.push([text, final]),
+      onAssistantText: (text, final) => responses.push([text, final]),
+      onResponseDone: (status) => statuses.push(status),
+    });
+
+    const connected = client.connect();
+    socket.serverEvent({ type: 'session.created' });
+    await connected;
+    expect(JSON.parse(socket.sent[0])).toMatchObject({
+      type: 'session.update',
+      session: {
+        audio: { input: { turn_detection: { type: 'server_vad' } } },
+        response: { model: 'org/chat' },
+      },
+    });
+
+    client.append(Float32Array.from([0, 0.25, 0.5, 0.75, 1]), 48_000);
+    client.commitTurn();
+    expect(JSON.parse(socket.sent.at(-1)!)).toEqual({ type: 'input_audio_buffer.commit' });
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.delta',
+      item_id: 'input-1',
+      delta: 'hello ',
+    });
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.delta',
+      item_id: 'input-1',
+      delta: 'world',
+    });
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'input-1',
+      transcript: 'hello world',
+    });
+    socket.serverEvent({
+      type: 'response.output_text.delta',
+      item_id: 'output-1',
+      delta: 'hi ',
+    });
+    socket.serverEvent({
+      type: 'response.output_text.done',
+      item_id: 'output-1',
+      text: 'hi there',
+    });
+    socket.serverEvent({ type: 'response.done', response: { status: 'completed' } });
+
+    expect(transcripts).toEqual([
+      ['hello ', false],
+      ['hello world', false],
+      ['hello world', true],
+    ]);
+    expect(responses).toEqual([['hi ', false], ['hi there', true]]);
+    expect(statuses).toEqual(['completed']);
+    client.cancelResponse();
+    expect(JSON.parse(socket.sent.at(-1)!)).toEqual({ type: 'response.cancel' });
+    client.close();
     expect(socket.closeCode).toBe(1000);
   });
 });

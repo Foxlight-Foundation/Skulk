@@ -36,6 +36,8 @@
   "chat.form.noSpeechModels": "No TTS",
   "chat.form.noTranscriptionModels": "No STT",
   "chat.form.placeholder": "Type a message...",
+  "chat.form.realtime": "Realtime",
+  "chat.form.autoSubmit": "Auto-send",
   "chat.form.selectSpeechModel": "Select speech model",
   "chat.form.selectTranscriptionModel": "Select transcription model",
   "chat.form.sendMessage": "Send message",

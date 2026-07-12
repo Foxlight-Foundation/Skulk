@@ -1597,8 +1597,10 @@ declares streaming/realtime audio and the API node currently advertises the
 stable `stt.realtime` provider. An `AudioWorklet` captures mono browser
 samples, the dashboard continuously resamples them to 24 kHz PCM16, and the
 client aggregates worklet callbacks into 100 ms transport frames before the
-existing mic control commits the socket when recording stops. If either truth
-is absent, chat retains the batch `MediaRecorder` plus
+mic control commits the socket when recording stops. Realtime mode can retain
+the socket across server-VAD turns, show partial transcripts in the editable
+draft, and optionally auto-send final transcripts through the selected mounted
+chat model. If either capability truth is absent, chat retains the batch `MediaRecorder` plus
 `POST /v1/audio/transcriptions` path.
 
 When `response` is configured, the API node that owns the WebSocket retains the

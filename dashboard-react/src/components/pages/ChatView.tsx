@@ -590,6 +590,8 @@ export function ChatView({
   const selectedSpeechModelId = useAppSelector((s) => s.chat.selectedSpeechModelId);
   const selectedVoice = useAppSelector((s) => s.chat.selectedVoice);
   const autoSpeakAssistant = useAppSelector((s) => s.chat.autoSpeakAssistant);
+  const realtimeVoiceEnabled = useAppSelector((s) => s.chat.realtimeVoiceEnabled);
+  const autoSubmitVoice = useAppSelector((s) => s.chat.autoSubmitVoice);
   const activeConversationId = useAppSelector((s) => s.chat.activeConversationId);
   const messages = useAppSelector((s) =>
     s.chat.activeConversationId
@@ -605,6 +607,10 @@ export function ChatView({
     dispatch(chatActions.setSelectedVoice(voice));
   const setAutoSpeakAssistant = (enabled: boolean) =>
     dispatch(chatActions.setAutoSpeakAssistant(enabled));
+  const setRealtimeVoiceEnabled = (enabled: boolean) =>
+    dispatch(chatActions.setRealtimeVoiceEnabled(enabled));
+  const setAutoSubmitVoice = (enabled: boolean) =>
+    dispatch(chatActions.setAutoSubmitVoice(enabled));
   const addMessage = (msg: ChatMessage) => dispatch(chatActions.addMessage(msg));
   const deleteMessageAction = (id: string) => dispatch(chatActions.deleteMessage(id));
   const editMessageAction = (messageId: string, content: string) =>
@@ -634,6 +640,8 @@ export function ChatView({
   const streamingPlaybackRef = useRef<StreamingSpeechPlayback | null>(null);
   const speechAbortRef = useRef<AbortController | null>(null);
   const speechSentenceQueueRef = useRef<SpeechSentenceQueue | null>(null);
+  const realtimeSpeechTextRef = useRef('');
+  const realtimeSpeechTailRef = useRef('');
 
   // Restore scroll position after store hydration + DOM render
   const dispatch = useAppDispatch();
@@ -1434,6 +1442,89 @@ export function ChatView({
     setExpandedThinking(activeConversationId, next);
   }, [activeConversationId, expandedThinkingMap, setExpandedThinking]);
 
+  const handleRealtimeTranscript = useCallback((text: string, final: boolean) => {
+    if (!final || !autoSubmitVoice || !text.trim()) return;
+    addMessage({
+      id: uuidv4(),
+      role: 'user',
+      content: text.trim(),
+      timestamp: Date.now(),
+    });
+  }, [addMessage, autoSubmitVoice]);
+
+  const handleRealtimeAssistantText = useCallback((text: string, final: boolean) => {
+    const visibleText = text.trimStart();
+    if (!final) {
+      setStreamingContent(visibleText);
+      if (
+        autoSpeakAssistant
+        && selectedSpeechModelId
+        && selectedSpeechOption?.supportsStreaming
+        && selectedSpeechOption.responseFormats.includes('pcm')
+        && canUseStreamingSpeechPlayback()
+      ) {
+        if (!speechSentenceQueueRef.current) {
+          speechSentenceQueueRef.current = new SpeechSentenceQueue(
+            (sentence, signal) => playSpeechSegment(sentence, null, signal),
+            (error) => {
+              setSpeechError(error instanceof Error
+                ? error.message
+                : t('chat.view.errors.speechSynthesisFailed', 'Speech synthesis failed.'));
+            },
+            () => setIsAutoSpeaking(false),
+          );
+        }
+        if (visibleText.startsWith(realtimeSpeechTextRef.current)) {
+          const delta = visibleText.slice(realtimeSpeechTextRef.current.length);
+          const split = splitCompleteSpeechSentences(realtimeSpeechTailRef.current + delta);
+          realtimeSpeechTailRef.current = split.remainder;
+          if (split.sentences.length > 0) {
+            setIsAutoSpeaking(true);
+            speechSentenceQueueRef.current.enqueue(split.sentences);
+          }
+        }
+        realtimeSpeechTextRef.current = visibleText;
+      }
+      return;
+    }
+
+    const finalText = text.trim();
+    setStreamingContent(null);
+    if (!finalText) return;
+    const assistantMessage: ChatMessage = {
+      id: uuidv4(),
+      role: 'assistant',
+      content: finalText,
+      timestamp: Date.now(),
+    };
+    addMessage(assistantMessage);
+    const queue = speechSentenceQueueRef.current;
+    if (queue && realtimeSpeechTailRef.current.trim()) {
+      setIsAutoSpeaking(true);
+      queue.enqueue([realtimeSpeechTailRef.current.trim()]);
+    } else if (autoSpeakAssistant && selectedSpeechModelId && !queue) {
+      void speakText(finalText, assistantMessage.id);
+    }
+    realtimeSpeechTextRef.current = '';
+    realtimeSpeechTailRef.current = '';
+  }, [
+    addMessage,
+    autoSpeakAssistant,
+    playSpeechSegment,
+    selectedSpeechModelId,
+    selectedSpeechOption,
+    speakText,
+    t,
+  ]);
+
+  const handleRealtimeResponseDone = useCallback((status: string) => {
+    if (status === 'completed') return;
+    setStreamingContent(null);
+    realtimeSpeechTextRef.current = '';
+    realtimeSpeechTailRef.current = '';
+    stopSpeechPlayback();
+  }, [stopSpeechPlayback]);
+
   if (readyModels.length === 0 && readyTranscriptionModels.length === 0 && readySpeechModels.length === 0) {
     return (
       <NoModels>
@@ -1496,12 +1587,20 @@ export function ChatView({
           selectedSpeechModelId={selectedSpeechModelId}
           selectedVoice={selectedVoice}
           autoSpeakAssistant={autoSpeakAssistant}
+          realtimeVoiceEnabled={realtimeVoiceEnabled}
+          autoSubmitVoice={autoSubmitVoice}
+          realtimeResponseModelId={selectedModelId}
           isSpeaking={speakingMessageId !== null || isAutoSpeaking}
           voiceError={speechError}
           onSelectTranscriptionModel={selectTranscriptionModel}
           onSelectSpeechModel={selectSpeechModel}
           onSelectedVoiceChange={setSelectedVoice}
           onAutoSpeakAssistantChange={setAutoSpeakAssistant}
+          onRealtimeVoiceEnabledChange={setRealtimeVoiceEnabled}
+          onAutoSubmitVoiceChange={setAutoSubmitVoice}
+          onRealtimeTranscript={handleRealtimeTranscript}
+          onRealtimeAssistantText={handleRealtimeAssistantText}
+          onRealtimeResponseDone={handleRealtimeResponseDone}
           onTranscribeAudio={transcribeAudio}
           onSpeakText={(text) => { void speakText(text, 'draft'); }}
           onStopSpeaking={stopSpeechPlayback}

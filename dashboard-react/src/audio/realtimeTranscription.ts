@@ -13,8 +13,11 @@ interface RealtimeServerError {
 
 interface RealtimeServerEvent {
   type?: unknown;
+  item_id?: unknown;
   transcript?: unknown;
   delta?: unknown;
+  text?: unknown;
+  response?: { status?: unknown };
   error?: RealtimeServerError;
 }
 
@@ -305,6 +308,267 @@ export class RealtimeTranscriptionSocket {
     if (this.resultTimer !== null) window.clearTimeout(this.resultTimer);
     this.connectTimer = null;
     this.resultTimer = null;
+  }
+}
+
+/** Callbacks emitted by one multi-turn realtime voice conversation. */
+export interface RealtimeConversationCallbacks {
+  onTranscript?: (text: string, final: boolean, itemId: string | null) => void;
+  onAssistantText?: (text: string, final: boolean, itemId: string | null) => void;
+  onSpeechStarted?: () => void;
+  onSpeechStopped?: () => void;
+  onResponseDone?: (status: string) => void;
+  onError?: (error: Error) => void;
+}
+
+/** Options for a server-VAD realtime voice conversation. */
+export interface RealtimeConversationSocketOptions extends RealtimeConversationCallbacks {
+  transcriptionModelId: string;
+  responseModelId?: string | null;
+  socketFactory?: WebSocketFactory;
+  location?: Pick<Location, 'protocol' | 'host'>;
+}
+
+/** Own a bounded multi-turn server-VAD socket used by dashboard voice chat. */
+export class RealtimeConversationSocket {
+  private readonly options: RealtimeConversationSocketOptions;
+  private readonly socketFactory: WebSocketFactory;
+  private socket: WebSocket | null = null;
+  private resampler: StreamingLinearResampler | null = null;
+  private inputSampleRate: number | null = null;
+  private readonly pendingSamples: number[] = [];
+  private readonly transcripts = new Map<string, string>();
+  private readonly responses = new Map<string, string>();
+  private connected = false;
+  private acceptingAudio = true;
+  private turnHasAudio = false;
+  private responseActive = false;
+  private terminal = false;
+  private connectResolve: (() => void) | null = null;
+  private connectReject: ((error: Error) => void) | null = null;
+  private connectTimer: number | null = null;
+
+  constructor(options: RealtimeConversationSocketOptions) {
+    this.options = options;
+    this.socketFactory = options.socketFactory ?? ((url) => new WebSocket(url));
+  }
+
+  /** Open the socket and install server VAD plus optional chat response routing. */
+  connect(): Promise<void> {
+    if (this.socket) throw new Error('realtime conversation socket is already opened');
+    const socket = this.socketFactory(realtimeTranscriptionUrl(
+      this.options.transcriptionModelId,
+      this.options.location ?? window.location,
+    ));
+    this.socket = socket;
+    socket.addEventListener('message', (event) => this.handleMessage(event));
+    socket.addEventListener('error', () => this.fail(
+      new Error('Realtime conversation connection failed.'),
+    ));
+    socket.addEventListener('close', () => {
+      if (!this.terminal) this.fail(
+        new Error('Realtime conversation connection closed unexpectedly.'),
+      );
+    });
+    return new Promise<void>((resolve, reject) => {
+      this.connectResolve = resolve;
+      this.connectReject = reject;
+      this.connectTimer = window.setTimeout(() => this.fail(
+        new Error('Realtime conversation connection timed out.'),
+      ), CONNECT_TIMEOUT_MS);
+    });
+  }
+
+  /** Resample and append one ordered microphone frame to the active turn. */
+  append(samples: Float32Array, inputSampleRate: number): void {
+    const socket = this.socket;
+    if (!this.connected || !socket || socket.readyState !== 1) {
+      throw new Error('realtime conversation socket is not connected');
+    }
+    if (!this.acceptingAudio) return;
+    if (socket.bufferedAmount > MAX_SOCKET_BUFFERED_BYTES) {
+      const error = new Error('Realtime conversation cannot keep up with microphone audio.');
+      this.fail(error);
+      throw error;
+    }
+    if (this.inputSampleRate === null) {
+      this.inputSampleRate = inputSampleRate;
+      this.resampler = new StreamingLinearResampler(inputSampleRate);
+    } else if (this.inputSampleRate !== inputSampleRate) {
+      throw new Error('microphone sample rate changed during realtime conversation');
+    }
+    const resampled = this.resampler?.process(samples) ?? new Float32Array(0);
+    if (resampled.length > 0) this.turnHasAudio = true;
+    for (const sample of resampled) this.pendingSamples.push(sample);
+    while (this.pendingSamples.length >= TARGET_FRAME_SAMPLES) {
+      this.sendSamples(Float32Array.from(
+        this.pendingSamples.splice(0, TARGET_FRAME_SAMPLES),
+      ));
+    }
+  }
+
+  /** Flush microphone tail and ask the server to close the current turn. */
+  commitTurn(): boolean {
+    const socket = this.socket;
+    if (!this.connected || !socket || socket.readyState !== 1 || !this.turnHasAudio) {
+      return false;
+    }
+    if (this.pendingSamples.length > 0) {
+      this.sendSamples(Float32Array.from(this.pendingSamples.splice(0)));
+    }
+    socket.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+    this.acceptingAudio = false;
+    return true;
+  }
+
+  /** Return whether assistant model or speech output is still draining. */
+  hasActiveResponse(): boolean {
+    return this.responseActive;
+  }
+
+  /** Cancel active assistant output while preserving the conversation socket. */
+  cancelResponse(): void {
+    if (this.connected && this.socket?.readyState === 1) {
+      this.socket.send(JSON.stringify({ type: 'response.cancel' }));
+    }
+  }
+
+  /** Close the socket and release all pending callback state. */
+  close(): void {
+    if (this.terminal) return;
+    this.terminal = true;
+    this.clearConnectTimer();
+    this.connectReject?.(new Error('Realtime conversation was cancelled.'));
+    this.connectResolve = null;
+    this.connectReject = null;
+    this.socket?.close(1000, 'client closed realtime conversation');
+  }
+
+  private sendSamples(samples: Float32Array): void {
+    const socket = this.socket;
+    if (!socket || socket.readyState !== 1) return;
+    socket.send(JSON.stringify({
+      type: 'input_audio_buffer.append',
+      audio: pcm16Base64(samples),
+    }));
+  }
+
+  private handleMessage(event: MessageEvent): void {
+    if (typeof event.data !== 'string') {
+      this.fail(new Error('Realtime conversation returned a non-JSON event.'));
+      return;
+    }
+    let payload: RealtimeServerEvent;
+    try {
+      payload = JSON.parse(event.data) as RealtimeServerEvent;
+    } catch {
+      this.fail(new Error('Realtime conversation returned invalid JSON.'));
+      return;
+    }
+    if (payload.type === 'session.created') {
+      this.connected = true;
+      this.clearConnectTimer();
+      this.socket?.send(JSON.stringify({
+        type: 'session.update',
+        session: {
+          type: 'transcription',
+          audio: {
+            input: {
+              format: { type: 'audio/pcm', rate: TARGET_SAMPLE_RATE },
+              transcription: { model: this.options.transcriptionModelId },
+              turn_detection: { type: 'server_vad' },
+              noise_reduction: null,
+            },
+          },
+          include: [],
+          ...(this.options.responseModelId
+            ? { response: { model: this.options.responseModelId } }
+            : {}),
+        },
+      }));
+      this.connectResolve?.();
+      this.connectResolve = null;
+      this.connectReject = null;
+      return;
+    }
+    const itemId = typeof payload.item_id === 'string' ? payload.item_id : null;
+    if (payload.type === 'input_audio_buffer.speech_started') {
+      this.options.onSpeechStarted?.();
+      return;
+    }
+    if (payload.type === 'input_audio_buffer.speech_stopped') {
+      this.acceptingAudio = false;
+      this.options.onSpeechStopped?.();
+      return;
+    }
+    if (
+      payload.type === 'conversation.item.input_audio_transcription.delta'
+      && typeof payload.delta === 'string'
+    ) {
+      const key = itemId ?? 'current';
+      const text = (this.transcripts.get(key) ?? '') + payload.delta;
+      this.transcripts.set(key, text);
+      this.options.onTranscript?.(text, false, itemId);
+      return;
+    }
+    if (
+      payload.type === 'conversation.item.input_audio_transcription.completed'
+      && typeof payload.transcript === 'string'
+    ) {
+      if (itemId) this.transcripts.delete(itemId);
+      this.acceptingAudio = true;
+      this.turnHasAudio = false;
+      this.options.onTranscript?.(payload.transcript, true, itemId);
+      return;
+    }
+    if (payload.type === 'response.output_text.delta' && typeof payload.delta === 'string') {
+      const key = itemId ?? 'current';
+      const text = (this.responses.get(key) ?? '') + payload.delta;
+      this.responses.set(key, text);
+      this.options.onAssistantText?.(text, false, itemId);
+      return;
+    }
+    if (payload.type === 'response.created') {
+      this.responseActive = true;
+      return;
+    }
+    if (payload.type === 'response.output_text.done' && typeof payload.text === 'string') {
+      if (itemId) this.responses.delete(itemId);
+      this.options.onAssistantText?.(payload.text, true, itemId);
+      return;
+    }
+    if (payload.type === 'response.done') {
+      this.responseActive = false;
+      const status = typeof payload.response?.status === 'string'
+        ? payload.response.status
+        : 'unknown';
+      this.options.onResponseDone?.(status);
+      return;
+    }
+    if (payload.type === 'error') {
+      const message = typeof payload.error?.message === 'string'
+        ? payload.error.message
+        : 'Realtime conversation failed.';
+      this.options.onError?.(new Error(message));
+    }
+  }
+
+  private fail(error: Error): void {
+    if (this.terminal) return;
+    this.terminal = true;
+    this.clearConnectTimer();
+    this.connectReject?.(error);
+    this.connectResolve = null;
+    this.connectReject = null;
+    this.options.onError?.(error);
+    if (this.socket?.readyState === 0 || this.socket?.readyState === 1) {
+      this.socket.close(1011, 'realtime conversation failed');
+    }
+  }
+
+  private clearConnectTimer(): void {
+    if (this.connectTimer !== null) window.clearTimeout(this.connectTimer);
+    this.connectTimer = null;
   }
 }
 
