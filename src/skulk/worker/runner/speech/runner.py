@@ -68,6 +68,7 @@ from skulk.worker.runner.bootstrap import logger
 
 _DEFAULT_STAGED_TTS_VOICE = "af_heart"
 _AUDIO_BINARY_CHUNK_SIZE = max(1, (SKULK_MAX_CHUNK_SIZE // 4) * 3)
+_CANARY_MASK_COMPAT_MARKER = "_skulk_mask_dtype_compat"
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,35 @@ def _filter_kwargs(fn: Callable[..., Any], kwargs: dict[str, Any]) -> dict[str, 
     if accepted is None or accepted.accepts_var_kwargs:
         return {k: v for k, v in kwargs.items() if v is not None}
     return {k: v for k, v in kwargs.items() if v is not None and k in accepted.params}
+
+
+def _install_attention_mask_dtype_compat(attention_type: type[Any]) -> None:
+    """Cast additive masks to the attention input dtype for one upstream class."""
+
+    if getattr(attention_type, _CANARY_MASK_COMPAT_MARKER, False):
+        return
+    original_call = cast(Callable[..., Any], attention_type.__call__)
+
+    def _compatible_call(
+        self: Any,
+        x: Any,
+        mask: Any | None = None,
+        cache: Any | None = None,
+    ) -> Any:
+        if mask is not None and mask.dtype != x.dtype:
+            mask = mask.astype(x.dtype)
+        return original_call(self, x, mask=mask, cache=cache)
+
+    attention_type.__call__ = _compatible_call
+    setattr(attention_type, _CANARY_MASK_COMPAT_MARKER, True)
+
+
+def _install_canary_compatibility() -> None:
+    """Install runtime compatibility required by upstream bfloat16 Canary."""
+
+    from mlx_audio.stt.models.canary.decoder import MultiHeadSelfAttention
+
+    _install_attention_mask_dtype_compat(MultiHeadSelfAttention)
 
 
 def _first_non_empty_text(*values: str | None) -> str | None:
@@ -714,6 +744,8 @@ class Runner:
         audio_config = self.shard_metadata.model_card.audio
         audio_kind = audio_config.kind if audio_config is not None else None
         self.model = _load_speech_model(local_path, audio_kind)
+        if self.shard_metadata.model_card.family == "canary":
+            _install_canary_compatibility()
         self.current_status = RunnerReady()
         logger.info(
             f"speech runner ready in {time.time() - self.setup_start_time:.1f}s"

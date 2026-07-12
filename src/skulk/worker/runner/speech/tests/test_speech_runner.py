@@ -45,6 +45,7 @@ from skulk.worker.runner.speech import runner as speech_runner
 from skulk.worker.runner.speech.runner import (
     Runner,
     _filter_kwargs,
+    _install_attention_mask_dtype_compat,
     _load_speech_model,
     _resolve_staged_voice_path,
     _stt_generate_kwargs,
@@ -261,6 +262,42 @@ def test_filter_kwargs_drops_unsupported_and_none_values() -> None:
             "reference_audio": None,
         },
     ) == {"voice": "af_heart", "stream": False}
+
+
+def test_attention_mask_compat_casts_mask_to_input_dtype() -> None:
+    """The Canary adapter should cast only mismatched masks before attention."""
+
+    class _Array:
+        def __init__(self, dtype: str) -> None:
+            self.dtype = dtype
+
+        def astype(self, dtype: str) -> "_Array":
+            return _Array(dtype)
+
+    class _Attention:
+        seen_mask: _Array | None = None
+
+        def __call__(
+            self,
+            x: _Array,
+            mask: _Array | None = None,
+            cache: object | None = None,
+        ) -> tuple[_Array, object | None]:
+            del x
+            type(self).seen_mask = mask
+            return _Array("bfloat16"), cache
+
+    _install_attention_mask_dtype_compat(_Attention)
+    result, cache = _Attention()(
+        _Array("bfloat16"),
+        mask=_Array("float32"),
+        cache="cache",
+    )
+
+    assert result.dtype == "bfloat16"
+    assert cache == "cache"
+    assert _Attention.seen_mask is not None
+    assert _Attention.seen_mask.dtype == "bfloat16"
 
 
 def test_translation_kwargs_support_canary_contract() -> None:
