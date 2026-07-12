@@ -869,23 +869,32 @@ export function ChatView({
         'This speech model requires secure streaming audio playback in this browser.',
       ));
     }
-    const response = await fetch('/v1/audio/speech', {
+    const speechRequest = (format: AudioResponseFormat, stream: boolean) => fetch('/v1/audio/speech', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal,
       body: JSON.stringify({
         model: selectedSpeechModelId,
         input,
-        response_format: useStreamingPcm ? 'pcm' : encodedFallbackFormat,
-        ...(useStreamingPcm ? { stream: true } : {}),
+        response_format: format,
+        ...(stream ? { stream: true } : {}),
         ...(selectedVoice ? { voice: selectedVoice } : {}),
       }),
     });
+    const initialFormat: AudioResponseFormat = useStreamingPcm
+      ? 'pcm'
+      : encodedFallbackFormat!;
+    let response = await speechRequest(initialFormat, useStreamingPcm);
+    let streamingResponse = useStreamingPcm;
+    if (response.status === 503 && useStreamingPcm && encodedFallbackFormat) {
+      response = await speechRequest(encodedFallbackFormat, false);
+      streamingResponse = false;
+    }
     if (!response.ok) throw new Error(await responseErrorMessage(response));
 
     setSpeakingMessageId(messageId);
     setIsAutoSpeaking(messageId === null);
-    if (useStreamingPcm) {
+    if (streamingResponse) {
       const playback = new StreamingSpeechPlayback();
       streamingPlaybackRef.current = playback;
       try {
