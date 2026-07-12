@@ -311,6 +311,8 @@ def test_attention_mask_compat_casts_mask_to_input_dtype() -> None:
 def test_canary_cross_attention_accepts_bfloat16_with_encoder_mask() -> None:
     """Canary cross-attention must keep its internally built mask in query dtype."""
 
+    pytest.importorskip("mlx.core")
+    pytest.importorskip("mlx_audio.stt.models.canary.decoder")
     import mlx.core as mx
     from mlx.utils import tree_map
     from mlx_audio.stt.models.canary.decoder import (  # pyright: ignore[reportMissingTypeStubs]
