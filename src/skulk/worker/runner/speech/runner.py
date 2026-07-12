@@ -130,9 +130,13 @@ def _install_attention_mask_dtype_compat(attention_type: type[Any]) -> None:
 def _install_canary_compatibility() -> None:
     """Install runtime compatibility required by upstream bfloat16 Canary."""
 
-    from mlx_audio.stt.models.canary.decoder import MultiHeadSelfAttention
+    from mlx_audio.stt.models.canary.decoder import (
+        MultiHeadCrossAttention,
+        MultiHeadSelfAttention,
+    )
 
     _install_attention_mask_dtype_compat(MultiHeadSelfAttention)
+    _install_attention_mask_dtype_compat(MultiHeadCrossAttention)
 
 
 def _first_non_empty_text(*values: str | None) -> str | None:
