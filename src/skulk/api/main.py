@@ -6291,6 +6291,11 @@ class API:
                     ),
                 )
                 await self._cancel_audio_speech_command(packet.command_id)
+                # Unlike a client disconnect, a transport rejection is already
+                # terminal from the caller's perspective. Allow finalization to
+                # notify the master after cancellation stops the runner, or the
+                # command-to-task mapping remains orphaned indefinitely.
+                self._cancelled_command_ids.discard(packet.command_id)
 
     def _apply_provider_input_frame(self, frame: CapabilityStreamFrame) -> None:
         """Validate and queue one caller frame for its active provider handler."""

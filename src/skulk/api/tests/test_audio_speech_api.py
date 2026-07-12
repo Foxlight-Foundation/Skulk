@@ -45,6 +45,7 @@ from skulk.shared.types.commands import (
     ForwarderDownloadCommand,
     SpeechSynthesis,
     TaskCancelled,
+    TaskFinished,
 )
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import IndexedEvent
@@ -338,6 +339,52 @@ def test_audio_speech_http_rejects_invalid_json_payload() -> None:
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_speech_media_transport_failure_finishes_command_mapping() -> None:
+    """Transport rejection cancels execution and permits master cleanup."""
+
+    api = _build_api()
+    packet_sender, packet_receiver = channel[SpeechMediaPacket](1)
+    command_sender, command_receiver = channel[ForwarderCommand](2)
+    api._speech_media_packet_receiver = packet_receiver
+    api.command_sender = command_sender
+    command_id = CommandId("reference-transport-failure")
+    output_sender, output_receiver = channel[AudioChunk | ErrorChunk](1)
+    api._audio_speech_queues[command_id] = output_sender
+    api._speech_media_commands.add(command_id)
+    chunk: AudioChunk | ErrorChunk | None = None
+    cancelled: ForwarderCommand | None = None
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(api._apply_speech_media_transport)
+        await packet_sender.send(
+            SpeechMediaPacket(
+                source_node=NodeId("speech-node"),
+                target_node=api.node_id,
+                command_id=command_id,
+                sequence=0,
+                kind="transport_failed",
+                error_message="remote media ingress rejected",
+            )
+        )
+        chunk = await output_receiver.receive()
+        cancelled = await command_receiver.receive()
+        task_group.cancel_scope.cancel()
+
+    assert isinstance(chunk, ErrorChunk)
+    assert cancelled is not None
+    assert isinstance(cancelled.command, TaskCancelled)
+    assert command_id not in api._cancelled_command_ids
+
+    await api._finalize_command_stream(
+        command_id,
+        cast(dict[CommandId, Sender[object]], api._audio_speech_queues),
+    )
+    finished = await command_receiver.receive()
+    assert isinstance(finished.command, TaskFinished)
+    assert finished.command.finished_command_id == command_id
 
 
 @pytest.mark.anyio
