@@ -356,6 +356,13 @@ def test_realtime_websocket_server_vad_auto_commits(
                 "audio": base64.b64encode(audio).decode("ascii"),
             }
         )
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "event_id": "already-queued-after-vad-boundary",
+                "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
+            }
+        )
         assert _receive_json(websocket)["type"] == "input_audio_buffer.speech_started"
         assert _receive_json(websocket)["type"] == "input_audio_buffer.speech_stopped"
         assert _receive_json(websocket)["type"] == "input_audio_buffer.committed"

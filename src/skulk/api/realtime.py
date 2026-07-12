@@ -280,6 +280,7 @@ class RealtimeTranscriptionBridge:
         self._commit_announced = anyio.Event()
         self._audio_bytes = 0
         self._committed = False
+        self._vad_auto_committed = False
         self._turn_detection: ServerVadConfig | None = None
         self._vad_detector: VoiceActivityDetector | None = None
         self._vad_resampler: StreamingPcm16Resampler | None = None
@@ -456,6 +457,8 @@ class RealtimeTranscriptionBridge:
 
             if isinstance(event, InputAudioBufferAppend):
                 if self._committed:
+                    if self._vad_auto_committed:
+                        continue
                     await self._send_error(
                         code="input_closed",
                         message="audio cannot be appended after input commit",
@@ -651,6 +654,7 @@ class RealtimeTranscriptionBridge:
                     session,
                     client_event_id=client_event_id,
                 )
+                self._vad_auto_committed = self._committed
                 return True
         return False
 

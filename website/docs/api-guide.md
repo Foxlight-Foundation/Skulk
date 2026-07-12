@@ -1593,7 +1593,7 @@ is absent, chat retains the batch `MediaRecorder` plus
 `POST /v1/audio/transcriptions` path.
 
 The first version is one committed utterance per socket. It does not implement
-server VAD, noise reduction, G.711, multi-turn conversation state, ephemeral
+noise reduction, G.711, multi-turn conversation state, ephemeral
 session-token creation, response generation, or full-duplex speech-to-speech.
 Provider capacity failures close with retryable WebSocket code `1013`; client
 protocol/policy violations use `1003`, `1008`, or `1009`; internal provider
