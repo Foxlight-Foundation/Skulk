@@ -271,6 +271,8 @@ def _parse_sse_line(line: str) -> _StreamDelta | None:
         chunk = json.loads(data)
     except json.JSONDecodeError:
         return None
+    if not isinstance(chunk, dict):
+        return None
     choices = chunk.get("choices") or []
     if not choices or not isinstance(choices[0], dict):
         return None

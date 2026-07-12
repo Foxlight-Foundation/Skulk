@@ -62,6 +62,7 @@ from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
 from skulk.worker.runner.generation_stats import (
     StreamStatsClock,
     blocking_call_stats,
+    resolve_stream_token_counts,
 )
 from skulk.worker.runner.llm_inference.harmony_text_parser import HarmonyTextParser
 from skulk.worker.runner.llm_inference.think_text_parser import ThinkTextParser
@@ -931,19 +932,26 @@ class Runner:
             stream = self.model.create_chat_completion(
                 messages=messages, stream=True, **kwargs
             )
+            # KV position when the first piece arrives == evaluated prompt
+            # size; token-level truth that text-chunk counting lacks (the
+            # binding buffers multi-byte UTF-8 into combined deltas).
+            position_at_first_piece: int | None = None
+
+            def read_kv_position() -> int:
+                # getattr so a binding attribute rename degrades stats to
+                # the piece-count fallback instead of failing generation.
+                raw_position = getattr(self.model, "n_tokens", 0)
+                return raw_position if isinstance(raw_position, int) else 0
 
             def final_stats() -> GenerationStats:
-                # llama-cpp-python streams one delta per sampled token, so the
-                # piece count IS the generation token count. The Llama object
-                # tracks its KV position in ``n_tokens`` (prompt + generated),
-                # which yields the prompt count by subtraction; read it via
-                # getattr so a binding attribute rename degrades this to
-                # prompt_tokens=0 instead of failing the generation.
-                raw_position = getattr(self.model, "n_tokens", 0)
-                context_tokens = raw_position if isinstance(raw_position, int) else 0
+                prompt_tokens, generation_tokens = resolve_stream_token_counts(
+                    context_tokens=read_kv_position(),
+                    position_at_first_piece=position_at_first_piece,
+                    pieces=clock.pieces,
+                )
                 return clock.stats(
-                    prompt_tokens=max(context_tokens - clock.pieces, 0),
-                    generation_tokens=clock.pieces,
+                    prompt_tokens=prompt_tokens,
+                    generation_tokens=generation_tokens,
                 )
 
             emitted_finish = False
@@ -954,8 +962,8 @@ class Runner:
                 choice = chunk["choices"][0]
                 raw_content = choice.get("delta", {}).get("content")
                 if raw_content is not None:
-                    # One content-bearing delta per sampled token (the role
-                    # preamble and the bare finish delta carry no content).
+                    if position_at_first_piece is None:
+                        position_at_first_piece = read_kv_position()
                     clock.mark_piece()
                 text = raw_content or ""
                 finish = map_finish_reason(choice.get("finish_reason"))

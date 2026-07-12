@@ -11,6 +11,7 @@ from skulk.worker.runner.generation_stats import (
     blocking_call_stats,
     parse_vm_hwm,
     process_peak_memory,
+    resolve_stream_token_counts,
     stats_from_llama_server_timings,
     subprocess_peak_memory,
 )
@@ -149,3 +150,22 @@ def test_llama_server_timings_count_cached_prompt_prefix() -> None:
     assert stats.prompt_tokens == 500
     assert stats.prompt_tps == 100.0  # 10 processed / 0.1s, not 500
     assert stats.generation_tokens == 20
+
+
+def test_resolve_stream_token_counts_uses_kv_positions() -> None:
+    # Prompt of 100 evaluated when the first piece arrived; final position 149
+    # spans all generated tokens except the last sampled one, hence 50.
+    assert resolve_stream_token_counts(149, 100, 42) == (100, 50)
+
+
+def test_resolve_stream_token_counts_pieces_floor_multibyte_buffering() -> None:
+    # Buffered multi-byte deltas make pieces an undercount; positions win.
+    # But if positions imply fewer tokens than observed pieces, pieces floor.
+    assert resolve_stream_token_counts(101, 100, 5) == (100, 5)
+
+
+def test_resolve_stream_token_counts_fallbacks() -> None:
+    # No first-piece position: prompt by subtraction from the end position.
+    assert resolve_stream_token_counts(120, None, 20) == (100, 20)
+    # No position signal at all: only the piece count is trustworthy.
+    assert resolve_stream_token_counts(0, None, 7) == (0, 7)

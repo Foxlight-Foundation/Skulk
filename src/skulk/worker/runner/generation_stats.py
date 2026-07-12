@@ -214,3 +214,32 @@ def blocking_call_stats(
         generation_tokens=completion_tokens,
         peak_memory_usage=process_peak_memory(),
     )
+
+
+def resolve_stream_token_counts(
+    context_tokens: int,
+    position_at_first_piece: int | None,
+    pieces: int,
+) -> tuple[int, int]:
+    """Resolve (prompt_tokens, generation_tokens) for an in-process stream.
+
+    Text-chunk counting alone undercounts generation whenever the binding
+    buffers several sampled tokens into one streamed delta to complete a
+    valid UTF-8 sequence (emoji, CJK, byte-fallback tokens). The KV position
+    is the token-level truth: when the first piece arrives the engine has
+    evaluated exactly the prompt (the just-sampled token is not yet
+    appended), and the final position spans prompt plus all generated tokens
+    except the last sampled one — hence the +1. The piece count still serves
+    as a floor so a surprising binding-internal ordering can only make the
+    count more conservative, never negative.
+
+    Falls back to piece counting (prompt by subtraction) when positions were
+    unavailable, and to zeros when there is no signal at all.
+    """
+    if position_at_first_piece is not None and context_tokens > 0:
+        prompt_tokens = max(position_at_first_piece, 0)
+        generation_tokens = max(context_tokens - position_at_first_piece + 1, pieces)
+        return prompt_tokens, generation_tokens
+    if context_tokens > 0:
+        return max(context_tokens - pieces, 0), pieces
+    return 0, pieces
