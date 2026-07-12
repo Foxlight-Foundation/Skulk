@@ -148,6 +148,51 @@ def _install_waiting_session(
     api._open_realtime_transcription_session = open_session
 
 
+def _install_completed_session(api: API, *, transcript: str, call_id: str) -> None:
+    """Install an STT session that completes after its input is committed."""
+
+    async def open_session(model: str, sample_rate: int) -> CapabilityStreamSession:
+        del sample_rate
+        committed = anyio.Event()
+
+        async def send_input(frame: CapabilityStreamFrame) -> None:
+            if frame.kind == "completed":
+                committed.set()
+
+        input_stream = CapabilityStreamInput(
+            call_id=call_id,
+            deadline_at=anyio.current_time() + 10.0,
+            send_frame=send_input,
+        )
+        await input_stream.start()
+
+        async def frames() -> AsyncIterator[CapabilityStreamFrame]:
+            yield CapabilityStreamFrame(
+                call_id=call_id,
+                direction="provider_to_caller",
+                sequence=0,
+                kind="started",
+            )
+            await committed.wait()
+            yield CapabilityStreamFrame(
+                call_id=call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="completed",
+                payload={"model": model, "text": transcript, "is_partial": False},
+            )
+
+        return CapabilityStreamSession(
+            open_result=CapabilityResult(
+                call_id=call_id, ok=True, result={"admitted": True}
+            ),
+            frames=frames(),
+            input=input_stream,
+        )
+
+    api._open_realtime_transcription_session = open_session
+
+
 def test_realtime_websocket_translates_pcm_and_transcript_lifecycle() -> None:
     """The compatibility edge maps one committed utterance onto provider frames."""
 
@@ -521,6 +566,160 @@ def test_realtime_websocket_cancels_active_assistant_response() -> None:
         done = _receive_json(websocket)
         assert done["type"] == "response.done"
         assert _mapping(done["response"])["status"] == "cancelled"
+
+
+def test_realtime_websocket_reports_assistant_text_limit_as_failed() -> None:
+    """A server-enforced response limit is distinct from user cancellation."""
+
+    api = _build_api()
+    _install_completed_session(api, transcript="overflow", call_id="overflow-stt")
+
+    async def generate_assistant(
+        model: str,
+        messages: tuple[ConversationMessage, ...],
+    ) -> AsyncIterator[str]:
+        del model, messages
+        yield "x" * (_MAX_TRANSCRIPT_TEXT_BYTES + 1)
+
+    async def validate_response(config: RealtimeResponseConfig) -> None:
+        del config
+
+    api._generate_realtime_assistant = generate_assistant
+    api._validate_realtime_response_config = validate_response
+
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt",
+        headers={"origin": "http://testserver"},
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {"transcription": {"model": "org/realtime-stt"}}
+                    },
+                    "response": {"model": "org/chat"},
+                },
+            }
+        )
+        assert _receive_json(websocket)["type"] == "session.updated"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
+            }
+        )
+        websocket.send_json({"type": "input_audio_buffer.commit"})
+        for expected in (
+            "input_audio_buffer.committed",
+            "conversation.item.input_audio_transcription.completed",
+            "response.created",
+        ):
+            assert _receive_json(websocket)["type"] == expected
+        error = _receive_json(websocket)
+        assert error["type"] == "error"
+        assert _mapping(error["error"])["code"] == "response_error"
+        done = _receive_json(websocket)
+        assert done["type"] == "response.done"
+        assert _mapping(done["response"])["status"] == "failed"
+
+
+def test_realtime_websocket_cancels_tts_provider_on_response_abort() -> None:
+    """Response cancellation explicitly stops an active Fabric TTS provider."""
+
+    api = _build_api()
+    _install_completed_session(api, transcript="speak", call_id="cancel-tts-stt")
+    provider_cancelled = Event()
+
+    async def generate_assistant(
+        model: str,
+        messages: tuple[ConversationMessage, ...],
+    ) -> AsyncIterator[str]:
+        del model, messages
+        yield "hello"
+
+    async def open_speech(
+        model: str,
+        text: str,
+        voice: str | None,
+    ) -> CapabilityStreamSession:
+        del model, text, voice
+
+        async def frames() -> AsyncIterator[CapabilityStreamFrame]:
+            yield CapabilityStreamFrame(
+                call_id="cancel-tts",
+                direction="provider_to_caller",
+                sequence=0,
+                kind="started",
+            )
+            yield CapabilityStreamFrame(
+                call_id="cancel-tts",
+                direction="provider_to_caller",
+                sequence=1,
+                kind="chunk",
+                payload={"format": "mp3"},
+                media=InlineMediaAttachment(
+                    data=b"audio", media_type="audio/mpeg", codec="mp3"
+                ),
+            )
+            await anyio.sleep_forever()
+
+        async def cancel_output() -> None:
+            with anyio.CancelScope(shield=True):
+                await anyio.sleep(0.001)
+                provider_cancelled.set()
+
+        return CapabilityStreamSession(
+            open_result=CapabilityResult(
+                call_id="cancel-tts", ok=True, result={"admitted": True}
+            ),
+            frames=frames(),
+            cancel_output=cancel_output,
+        )
+
+    async def validate_response(config: RealtimeResponseConfig) -> None:
+        del config
+
+    api._generate_realtime_assistant = generate_assistant
+    api._open_realtime_speech_session = open_speech
+    api._validate_realtime_response_config = validate_response
+
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt",
+        headers={"origin": "http://testserver"},
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {"transcription": {"model": "org/realtime-stt"}}
+                    },
+                    "response": {"model": "org/chat", "tts_model": "org/tts"},
+                },
+            }
+        )
+        assert _receive_json(websocket)["type"] == "session.updated"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
+            }
+        )
+        websocket.send_json({"type": "input_audio_buffer.commit"})
+        seen: list[str] = []
+        while "response.audio.delta" not in seen:
+            seen.append(cast(str, _receive_json(websocket)["type"]))
+        websocket.send_json({"type": "response.cancel"})
+        done = _receive_json(websocket)
+        assert done["type"] == "response.done"
+        assert _mapping(done["response"])["status"] == "cancelled"
+
+    assert provider_cancelled.is_set()
 
 
 def test_realtime_websocket_locks_response_config_after_audio() -> None:

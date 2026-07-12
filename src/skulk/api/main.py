@@ -4608,6 +4608,13 @@ class API:
                     "unreachable",
                     f"provider input stream could not start: {exc}",
                 )
+        async def cancel_output() -> None:
+            if receive_state.cancellation_scheduled:
+                return
+            receive_state.cancel_provider = True
+            receive_state.cancellation_scheduled = True
+            await self._cancel_remote_capability_stream(call)
+
         return CapabilityStreamSession(
             open_result=opened,
             frames=self._consume_capability_stream(
@@ -4616,6 +4623,7 @@ class API:
                 output_receiver,
             ),
             input=input_stream,
+            cancel_output=cancel_output,
         )
 
     async def _consume_capability_stream(

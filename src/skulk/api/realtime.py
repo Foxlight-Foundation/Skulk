@@ -1145,6 +1145,9 @@ class RealtimeTranscriptionBridge:
                     }
                 )
         finally:
+            if not terminal and session.cancel_output is not None:
+                with anyio.CancelScope(shield=True):
+                    await session.cancel_output()
             if isinstance(frames, AsyncGenerator):
                 with anyio.CancelScope(shield=True):
                     await frames.aclose()
