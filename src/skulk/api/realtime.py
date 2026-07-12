@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 import anyio
+from anyio.abc import TaskGroup
 from fastapi import WebSocket, WebSocketDisconnect
 from loguru import logger
 from pydantic import (
@@ -197,7 +198,7 @@ class InputAudioBufferAppend(_RealtimeModel):
 
 
 class InputAudioBufferCommit(_RealtimeModel):
-    """Client half-close for the current single-utterance audio stream."""
+    """Client half-close for the current utterance."""
 
     type: Literal["input_audio_buffer.commit"]
     event_id: str | None = Field(default=None, max_length=256)
@@ -254,7 +255,7 @@ def websocket_origin_allowed(websocket: WebSocket) -> bool:
 
 @final
 class RealtimeTranscriptionBridge:
-    """Translate one WebSocket utterance onto the Fabric STT provider contract."""
+    """Translate serialized WebSocket utterances onto Fabric STT provider calls."""
 
     def __init__(
         self,
@@ -276,10 +277,13 @@ class RealtimeTranscriptionBridge:
         self._open_session = open_session
         self._session_id = f"sess_{uuid4().hex}"
         self._item_id = f"item_{uuid4().hex}"
+        self._previous_item_id: str | None = None
         self._send_lock = anyio.Lock()
         self._commit_announced = anyio.Event()
-        self._audio_bytes = 0
+        self._session_audio_bytes = 0
+        self._turn_audio_bytes = 0
         self._committed = False
+        self._current_session: CapabilityStreamSession | None = None
         self._vad_auto_committed = False
         self._turn_detection: ServerVadConfig | None = None
         self._vad_detector: VoiceActivityDetector | None = None
@@ -294,41 +298,6 @@ class RealtimeTranscriptionBridge:
             await self._websocket.close(code=1008, reason="cross-origin WebSocket denied")
             return
         await self._websocket.accept()
-        try:
-            session = await self._open_session(self._model, _PCM_SAMPLE_RATE)
-        except Exception as exc:
-            logger.opt(exception=exc).warning(
-                "Realtime transcription provider session failed to open"
-            )
-            await self._send_internal_error(
-                code="provider_open_error",
-                message="realtime transcription provider session could not be opened",
-            )
-            return
-        if not session.open_result.ok:
-            error = session.open_result.error
-            await self._send_error(
-                code=error.code if error is not None else "provider_error",
-                message=(
-                    error.message
-                    if error is not None
-                    else "realtime transcription provider rejected the session"
-                ),
-            )
-            await self._close(
-                self._provider_rejection_close_code(
-                    error.code if error is not None else "provider_error"
-                )
-            )
-            return
-        if session.input is None:
-            await self._send_error(
-                code="invalid_result",
-                message="realtime transcription provider returned no input stream",
-            )
-            await self._close(1011)
-            return
-
         await self._send_json(
             {
                 "event_id": self._event_id(),
@@ -338,25 +307,32 @@ class RealtimeTranscriptionBridge:
         )
         try:
             async with anyio.create_task_group() as task_group:
-                task_group.start_soon(
-                    self._send_provider_output,
-                    session,
-                    task_group.cancel_scope,
-                )
                 try:
-                    await self._receive_client_input(session)
+                    await self._receive_client_input(task_group)
                 except WebSocketDisconnect:
                     pass
                 finally:
                     task_group.cancel_scope.cancel()
         finally:
-            if not session.input.closed:
-                with anyio.CancelScope(shield=True):
-                    with anyio.move_on_after(1.0):
-                        await session.input.cancel("WebSocket client disconnected")
+            await self._cancel_current_session()
 
-    async def _receive_client_input(self, session: CapabilityStreamSession) -> None:
-        assert session.input is not None
+    async def _cancel_current_session(self) -> None:
+        """Cancel the provider call still owned when the WebSocket exits."""
+
+        current_session = self._current_session
+        if (
+            current_session is None
+            or current_session.input is None
+            or current_session.input.closed
+        ):
+            return
+        with anyio.CancelScope(shield=True):
+            with anyio.move_on_after(1.0):
+                await current_session.input.cancel("WebSocket client disconnected")
+
+    async def _receive_client_input(self, task_group: TaskGroup) -> None:
+        """Receive client events while rotating one provider call per utterance."""
+
         while True:
             message = await self._websocket.receive()
             if message["type"] == "websocket.disconnect":
@@ -420,7 +396,7 @@ class RealtimeTranscriptionBridge:
                     else event.session.audio.input.turn_detection
                 )
                 if (
-                    self._audio_bytes > 0
+                    self._turn_audio_bytes > 0
                     and requested_turn_detection != self._turn_detection
                 ):
                     await self._send_error(
@@ -429,7 +405,7 @@ class RealtimeTranscriptionBridge:
                         client_event_id=event.event_id,
                     )
                     continue
-                if self._audio_bytes == 0:
+                if self._turn_audio_bytes == 0:
                     self._configure_turn_detection(requested_turn_detection)
                 await self._send_json(
                     {
@@ -458,15 +434,12 @@ class RealtimeTranscriptionBridge:
 
             if isinstance(event, InputAudioBufferAppend):
                 if self._committed:
-                    if self._vad_auto_committed:
-                        continue
                     await self._send_error(
-                        code="input_closed",
-                        message="audio cannot be appended after input commit",
+                        code="turn_in_progress",
+                        message="audio cannot be appended until the committed turn completes",
                         client_event_id=event.event_id,
                     )
-                    await self._close(1008)
-                    return
+                    continue
                 try:
                     audio = base64.b64decode(event.audio, validate=True)
                 except (binascii.Error, ValueError):
@@ -493,8 +466,7 @@ class RealtimeTranscriptionBridge:
                     )
                     await self._close(1009)
                     return
-                self._audio_bytes += len(audio)
-                if self._audio_bytes > _MAX_SESSION_AUDIO_BYTES:
+                if self._session_audio_bytes + len(audio) > _MAX_SESSION_AUDIO_BYTES:
                     await self._send_error(
                         code="audio_session_too_large",
                         message=(
@@ -505,6 +477,15 @@ class RealtimeTranscriptionBridge:
                     )
                     await self._close(1009)
                     return
+                session = self._current_session
+                if session is None:
+                    self._vad_auto_committed = False
+                    session = await self._open_next_turn(task_group)
+                    if session is None:
+                        return
+                assert session.input is not None
+                self._session_audio_bytes += len(audio)
+                self._turn_audio_bytes += len(audio)
                 if self._vad_detector is None:
                     if not await self._forward_audio_segment(
                         session,
@@ -535,6 +516,8 @@ class RealtimeTranscriptionBridge:
                 continue
 
             assert isinstance(event, InputAudioBufferCommit)
+            if self._vad_auto_committed and self._turn_audio_bytes == 0:
+                continue
             if self._committed:
                 if self._vad_auto_committed:
                     continue
@@ -545,13 +528,22 @@ class RealtimeTranscriptionBridge:
                 )
                 await self._close(1008)
                 return
-            if self._audio_bytes == 0:
+            if self._turn_audio_bytes == 0:
                 await self._send_error(
                     code="empty_audio_buffer",
                     message="cannot commit an empty audio buffer",
                     client_event_id=event.event_id,
                 )
                 continue
+            session = self._current_session
+            if session is None:
+                await self._send_error(
+                    code="provider_error",
+                    message="the current transcription turn has no provider session",
+                    client_event_id=event.event_id,
+                )
+                await self._close(1011)
+                return
             if not await self._flush_vad_source_audio(
                 session,
                 client_event_id=event.event_id,
@@ -581,6 +573,58 @@ class RealtimeTranscriptionBridge:
                     "item_id": self._item_id,
                 }
             )
+
+    async def _open_next_turn(
+        self,
+        task_group: TaskGroup,
+    ) -> CapabilityStreamSession | None:
+        """Open and start the provider call for the next utterance."""
+
+        try:
+            session = await self._open_session(self._model, _PCM_SAMPLE_RATE)
+        except Exception as exc:
+            logger.opt(exception=exc).warning(
+                "Realtime transcription provider session failed to open"
+            )
+            await self._send_internal_error(
+                code="provider_open_error",
+                message="realtime transcription provider session could not be opened",
+            )
+            return None
+        if not session.open_result.ok:
+            error = session.open_result.error
+            await self._send_error(
+                code=error.code if error is not None else "provider_error",
+                message=(
+                    error.message
+                    if error is not None
+                    else "realtime transcription provider rejected the next turn"
+                ),
+            )
+            await self._close(
+                self._provider_rejection_close_code(
+                    error.code if error is not None else "provider_error"
+                )
+            )
+            return None
+        if session.input is None:
+            await self._send_error(
+                code="invalid_result",
+                message="realtime transcription provider returned no input stream",
+            )
+            await self._close(1011)
+            return None
+        self._current_session = session
+        item_id = self._item_id
+        commit_announced = self._commit_announced
+        task_group.start_soon(
+            self._send_provider_output,
+            session,
+            task_group.cancel_scope,
+            item_id,
+            commit_announced,
+        )
+        return session
 
     async def _forward_audio_segment(
         self,
@@ -747,7 +791,7 @@ class RealtimeTranscriptionBridge:
             {
                 "event_id": self._event_id(),
                 "type": "input_audio_buffer.committed",
-                "previous_item_id": None,
+                "previous_item_id": self._previous_item_id,
                 "item_id": self._item_id,
             }
         )
@@ -758,6 +802,8 @@ class RealtimeTranscriptionBridge:
         self,
         session: CapabilityStreamSession,
         cancel_scope: anyio.CancelScope,
+        item_id: str,
+        commit_announced: anyio.Event,
     ) -> None:
         terminal = False
         pending_deltas: list[str] = []
@@ -772,14 +818,14 @@ class RealtimeTranscriptionBridge:
                     if text_bytes > _MAX_TRANSCRIPT_TEXT_BYTES:
                         await self._fail_oversized_transcript(cancel_scope)
                         return
-                    if not self._commit_announced.is_set():
+                    if not commit_announced.is_set():
                         pending_delta_bytes += text_bytes
                         if pending_delta_bytes > _MAX_TRANSCRIPT_TEXT_BYTES:
                             await self._fail_oversized_transcript(cancel_scope)
                             return
                         pending_deltas.append(text)
                         continue
-                    await self._send_transcript_deltas(pending_deltas)
+                    await self._send_transcript_deltas(pending_deltas, item_id=item_id)
                     pending_deltas.clear()
                     await self._send_json(
                         {
@@ -787,7 +833,7 @@ class RealtimeTranscriptionBridge:
                             "type": (
                                 "conversation.item.input_audio_transcription.delta"
                             ),
-                            "item_id": self._item_id,
+                            "item_id": item_id,
                             "content_index": 0,
                             "delta": text,
                         }
@@ -799,20 +845,20 @@ class RealtimeTranscriptionBridge:
                     if len(transcript.encode("utf-8")) > _MAX_TRANSCRIPT_TEXT_BYTES:
                         await self._fail_oversized_transcript(cancel_scope)
                         return
-                    await self._commit_announced.wait()
-                    await self._send_transcript_deltas(pending_deltas)
+                    await commit_announced.wait()
+                    await self._send_transcript_deltas(pending_deltas, item_id=item_id)
+                    self._finish_turn(session, item_id)
                     await self._send_json(
                         {
                             "event_id": self._event_id(),
                             "type": (
                                 "conversation.item.input_audio_transcription.completed"
                             ),
-                            "item_id": self._item_id,
+                            "item_id": item_id,
                             "content_index": 0,
                             "transcript": transcript,
                         }
                     )
-                    await self._close(1000)
                 else:
                     error = frame.error
                     await self._send_transcription_failed(
@@ -828,7 +874,8 @@ class RealtimeTranscriptionBridge:
                         ),
                     )
                     await self._close(1011 if frame.kind == "failed" else 1000)
-                cancel_scope.cancel()
+                if frame.kind != "completed":
+                    cancel_scope.cancel()
                 return
         except WebSocketDisconnect:
             cancel_scope.cancel()
@@ -847,7 +894,29 @@ class RealtimeTranscriptionBridge:
             await self._close(1011)
             cancel_scope.cancel()
 
-    async def _send_transcript_deltas(self, deltas: list[str]) -> None:
+    def _finish_turn(
+        self,
+        session: CapabilityStreamSession,
+        item_id: str,
+    ) -> None:
+        """Rotate mutable turn state after one provider call completes."""
+
+        if self._current_session is not session:
+            return
+        self._previous_item_id = item_id
+        self._item_id = f"item_{uuid4().hex}"
+        self._current_session = None
+        self._turn_audio_bytes = 0
+        self._committed = False
+        self._commit_announced = anyio.Event()
+        self._configure_turn_detection(self._turn_detection)
+
+    async def _send_transcript_deltas(
+        self,
+        deltas: list[str],
+        *,
+        item_id: str,
+    ) -> None:
         """Send buffered provider deltas in their original order after commit."""
 
         for text in deltas:
@@ -855,7 +924,7 @@ class RealtimeTranscriptionBridge:
                 {
                     "event_id": self._event_id(),
                     "type": "conversation.item.input_audio_transcription.delta",
-                    "item_id": self._item_id,
+                    "item_id": item_id,
                     "content_index": 0,
                     "delta": text,
                 }

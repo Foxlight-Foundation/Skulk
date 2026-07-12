@@ -1552,12 +1552,12 @@ The wire contract implements a bounded subset of OpenAI Realtime transcription:
 | client to server | `session.update` | Confirms the current nested `audio.input` configuration. `turn_detection` may be null or a bounded `server_vad` configuration; attempts to change model/codec, enable noise reduction/language hints, or add unsupported fields are rejected. |
 | server to client | `session.updated` | Confirms an accepted current session update. |
 | client to server | `input_audio_buffer.append` | Appends one base64 PCM16 frame and immediately forwards its decoded bytes as binary Fabric media. |
-| client to server | `input_audio_buffer.commit` | Half-closes the single utterance and triggers final provider drain. Empty or duplicate commits are rejected. |
+| client to server | `input_audio_buffer.commit` | Half-closes the current utterance and triggers final provider drain. Empty commits and duplicate manual commits are rejected. A manual commit racing after server VAD has already auto-committed the same utterance is an idempotent no-op. The next turn may begin after its completed event. |
 | server to client | `input_audio_buffer.speech_started` | Reports the detected start timestamp and current item when server VAD is enabled. |
 | server to client | `input_audio_buffer.speech_stopped` | Reports the detected end timestamp immediately before server VAD commits the utterance. |
 | server to client | `input_audio_buffer.committed` | Confirms the input half-close. |
 | server to client | `conversation.item.input_audio_transcription.delta` | Carries one provider transcript delta after commit. |
-| server to client | `conversation.item.input_audio_transcription.completed` | Carries the accumulated final transcript and closes the socket normally. |
+| server to client | `conversation.item.input_audio_transcription.completed` | Carries the accumulated final transcript, completes the current item, and leaves the socket ready for another turn. |
 | server to client | `conversation.item.input_audio_transcription.failed` | Carries a provider/transport/cancellation terminal failure. |
 | server to client | `error` | Reports invalid or unsupported client events before a policy/error close. |
 
@@ -1576,12 +1576,16 @@ Optional settings are `aggressiveness` (0-3), `prefix_padding_ms` (0-2000),
 `silence_duration_ms` (20-5000), `minimum_speech_ms` (20-5000), and
 `maximum_utterance_ms` (100-120000). The edge incrementally resamples the
 24 kHz input to the classifier's 16 kHz frame contract, emits typed speech
-boundaries, and commits on silence or the maximum utterance duration. The
-edge forwards VAD-enabled input in 20 ms source-rate slices and stops at the
+boundaries, and commits on silence or the maximum utterance duration. The edge
+forwards VAD-enabled input in 20 ms source-rate slices and stops at the
 detected boundary, so the unprocessed remainder of a large append cannot leak
-into the committed utterance. The socket still owns one utterance in this
-release; a completed transcript closes
-it normally.
+into the committed utterance. The socket serializes turns: each utterance opens
+one bounded Fabric provider call,
+and audio appended while a committed turn is still draining receives a
+non-terminal `turn_in_progress` error. Completed turns rotate `item_id`, link
+the next commit through `previous_item_id`, reset VAD state, and release their
+provider capacity. The 64 MiB decoded-audio bound applies across the complete
+WebSocket session.
 
 The dashboard chat microphone uses this edge only when both the selected model
 declares streaming/realtime audio and the API node currently advertises the
@@ -1592,9 +1596,8 @@ existing mic control commits the socket when recording stops. If either truth
 is absent, chat retains the batch `MediaRecorder` plus
 `POST /v1/audio/transcriptions` path.
 
-The first version is one committed utterance per socket. It does not implement
-noise reduction, G.711, multi-turn conversation state, ephemeral
-session-token creation, response generation, or full-duplex speech-to-speech.
+The edge does not implement noise reduction, G.711, ephemeral session-token
+creation, response generation, or full-duplex speech-to-speech.
 Provider capacity failures close with retryable WebSocket code `1013`; client
 protocol/policy violations use `1003`, `1008`, or `1009`; internal provider
 failures use `1011`. Disconnecting before a terminal event cancels the provider

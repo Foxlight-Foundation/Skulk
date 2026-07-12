@@ -19,8 +19,8 @@ Skulk currently exposes:
 - `POST /v1/audio/transcriptions` for bounded uploaded audio clips;
 - experimental `POST /v1/audio/translations` for speech-to-English translation;
 - `GET /v1/audio/voices` for a mounted model's static built-in voice catalog;
-- `WS /v1/realtime?model=<model-id>` for one-utterance realtime transcription,
-  including optional bounded server VAD and automatic commit.
+- `WS /v1/realtime?model=<model-id>` for serialized multi-turn realtime
+  transcription, including optional bounded server VAD and automatic commit.
 
 `/v1/audio/speech` returns an encoded audio response. Its stable `stream=true`
 path is available when the mounted TTS card declares
