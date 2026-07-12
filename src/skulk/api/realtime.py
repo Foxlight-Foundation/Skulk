@@ -633,7 +633,7 @@ class RealtimeTranscriptionBridge:
                 message="realtime transcription provider session could not be opened",
             )
             return None
-        if not session.open_result.ok or session.input is None:
+        if not session.open_result.ok:
             error = session.open_result.error
             await self._send_error(
                 code=error.code if error is not None else "provider_error",
@@ -648,6 +648,13 @@ class RealtimeTranscriptionBridge:
                     error.code if error is not None else "provider_error"
                 )
             )
+            return None
+        if session.input is None:
+            await self._send_error(
+                code="invalid_result",
+                message="realtime transcription provider returned no input stream",
+            )
+            await self._close(1011)
             return None
         self._current_session = session
         item_id = self._item_id

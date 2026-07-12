@@ -542,6 +542,89 @@ def test_realtime_websocket_rotates_provider_calls_across_turns() -> None:
     ]
 
 
+def test_realtime_websocket_rejects_invalid_next_turn_session() -> None:
+    """A successful reopen without input is an invalid provider result."""
+
+    api = _build_api()
+    open_count = 0
+
+    async def open_session(model: str, sample_rate: int) -> CapabilityStreamSession:
+        nonlocal open_count
+        del model, sample_rate
+        open_count += 1
+        if open_count == 2:
+            return CapabilityStreamSession(
+                open_result=CapabilityResult(
+                    call_id="invalid-next-turn",
+                    ok=True,
+                    result={"admitted": True},
+                ),
+                frames=_empty_frames(),
+            )
+        completed = anyio.Event()
+
+        async def send_input(frame: CapabilityStreamFrame) -> None:
+            if frame.kind == "completed":
+                completed.set()
+
+        input_stream = CapabilityStreamInput(
+            call_id="first-turn",
+            deadline_at=anyio.current_time() + 10.0,
+            send_frame=send_input,
+        )
+        await input_stream.start()
+
+        async def output_frames() -> AsyncIterator[CapabilityStreamFrame]:
+            yield CapabilityStreamFrame(
+                call_id="first-turn",
+                direction="provider_to_caller",
+                sequence=0,
+                kind="started",
+            )
+            await completed.wait()
+            yield CapabilityStreamFrame(
+                call_id="first-turn",
+                direction="provider_to_caller",
+                sequence=1,
+                kind="completed",
+                payload={"text": "first"},
+            )
+
+        return CapabilityStreamSession(
+            open_result=CapabilityResult(
+                call_id="first-turn",
+                ok=True,
+                result={"admitted": True},
+            ),
+            frames=output_frames(),
+            input=input_stream,
+        )
+
+    api._open_realtime_transcription_session = open_session
+    encoded_audio = base64.b64encode(b"\x01\x00").decode("ascii")
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt"
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {"type": "input_audio_buffer.append", "audio": encoded_audio}
+        )
+        websocket.send_json({"type": "input_audio_buffer.commit"})
+        assert _receive_json(websocket)["type"] == "input_audio_buffer.committed"
+        assert _receive_json(websocket)["type"] == (
+            "conversation.item.input_audio_transcription.completed"
+        )
+        websocket.send_json(
+            {"type": "input_audio_buffer.append", "audio": encoded_audio}
+        )
+        error = _receive_json(websocket)
+        assert error["type"] == "error"
+        assert _mapping(error["error"])["code"] == "invalid_result"
+        with pytest.raises(WebSocketDisconnect) as disconnect:
+            _receive_json(websocket)
+        assert disconnect.value.code == 1011
+
+
 def test_realtime_websocket_rejects_overlapping_turn_audio() -> None:
     """A committed turn must release its provider before another turn starts."""
 
