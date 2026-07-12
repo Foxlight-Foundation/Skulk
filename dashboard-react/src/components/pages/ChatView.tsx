@@ -902,14 +902,26 @@ export function ChatView({
     audioObjectUrlRef.current = objectUrl;
     try {
       await new Promise<void>((resolve, reject) => {
-        audio.onended = () => resolve();
-        audio.onerror = () => reject(new Error(
-          t('chat.view.errors.speechPlaybackFailed', 'Speech playback failed.'),
-        ));
-        signal.addEventListener('abort', () => reject(new DOMException('cancelled', 'AbortError')), {
-          once: true,
+        const cleanup = () => signal.removeEventListener('abort', onAbort);
+        const onAbort = () => {
+          cleanup();
+          reject(new DOMException('cancelled', 'AbortError'));
+        };
+        audio.onended = () => {
+          cleanup();
+          resolve();
+        };
+        audio.onerror = () => {
+          cleanup();
+          reject(new Error(
+            t('chat.view.errors.speechPlaybackFailed', 'Speech playback failed.'),
+          ));
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+        void audio.play().catch((error: unknown) => {
+          cleanup();
+          reject(error);
         });
-        void audio.play().catch(reject);
       });
     } finally {
       audio.pause();
@@ -1267,6 +1279,11 @@ export function ChatView({
         );
       }
     } catch (err) {
+      sentenceQueue?.stop();
+      if (speechSentenceQueueRef.current === sentenceQueue) {
+        speechSentenceQueueRef.current = null;
+      }
+      setIsAutoSpeaking(false);
       if ((err as Error).name === 'AbortError') {
         // User cancelled
         if (requestTimedOut) {

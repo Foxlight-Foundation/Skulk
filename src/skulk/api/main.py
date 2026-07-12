@@ -3215,7 +3215,10 @@ class API:
                     f"requested {resolved_response_format.value}"
                 ),
             )
-        if stream and not self._streaming_tts_model_is_ready(resolved):
+        if stream and not self._streaming_tts_model_is_ready(
+            resolved,
+            resolved_response_format,
+        ):
             raise HTTPException(
                 status_code=503,
                 detail=(
@@ -3283,7 +3286,11 @@ class API:
             and config.experiments.speech_translation
         )
 
-    def _streaming_tts_model_is_ready(self, model_id: ModelId | None = None) -> bool:
+    def _streaming_tts_model_is_ready(
+        self,
+        model_id: ModelId | None = None,
+        response_format: AudioResponseFormat = AudioResponseFormat.Mp3,
+    ) -> bool:
         """Return whether every routable instance of one streaming model is ready."""
 
         eligible_by_model: dict[ModelId, list[Instance]] = {}
@@ -3302,10 +3309,7 @@ class API:
                 and card.audio.supports_streaming is True
                 and (
                     not profile.audio_response_formats
-                    or any(
-                        audio_format in _STREAMABLE_AUDIO_RESPONSE_FORMATS
-                        for audio_format in profile.audio_response_formats
-                    )
+                    or response_format in profile.audio_response_formats
                 )
             ):
                 eligible_by_model.setdefault(card.model_id, []).append(instance)
@@ -10260,6 +10264,11 @@ class API:
     ) -> AsyncGenerator[bytes, None]:
         """Yield TTS audio bytes as chunks arrive from the data plane."""
         received_audio = False
+        expected_pcm_sample_rate = (
+            first_chunk.sample_rate
+            if first_chunk is not None and first_chunk.format == AudioResponseFormat.Pcm
+            else None
+        )
         try:
             if first_chunk is not None:
                 first_chunk_data = _decode_audio_chunk_data(first_chunk)
@@ -10314,6 +10323,14 @@ class API:
                     if isinstance(chunk, ErrorChunk):
                         raise RuntimeError(
                             f"Speech synthesis failed: {chunk.error_message}"
+                        )
+                    if (
+                        expected_pcm_sample_rate is not None
+                        and chunk.sample_rate != expected_pcm_sample_rate
+                    ):
+                        await self._cancel_audio_speech_command(command_id)
+                        raise RuntimeError(
+                            "Speech synthesis changed sample rate mid-stream"
                         )
                     chunk_data = _decode_audio_chunk_data(chunk)
                     if chunk_data:
