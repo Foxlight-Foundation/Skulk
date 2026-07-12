@@ -2,6 +2,7 @@
 """Realtime transcription WebSocket compatibility-edge coverage."""
 
 import base64
+import sys
 from array import array
 from collections.abc import AsyncIterator
 from threading import Event
@@ -31,6 +32,13 @@ from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadComma
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import IndexedEvent
 from skulk.utils.channels import channel
+
+
+def _pcm16_bytes(values: list[int]) -> bytes:
+    samples = array("h", values)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    return samples.tobytes()
 
 
 def _build_api() -> API:
@@ -303,7 +311,7 @@ def test_realtime_websocket_server_vad_auto_commits(
         )
 
     api._open_realtime_transcription_session = open_session
-    audio = array("h", [1000] * 2400).tobytes()
+    audio = _pcm16_bytes([1000] * 2400)
     with TestClient(api.app).websocket_connect(
         "/v1/realtime?model=org%2Frealtime-stt"
     ) as websocket:
@@ -380,7 +388,7 @@ def test_realtime_websocket_manual_commit_finishes_locked_vad(
 
     monkeypatch.setattr(realtime_api, "VoiceActivityDetector", ManualCommitDetector)
     _install_waiting_session(api, input_frames, call_id="manual-vad")
-    audio = array("h", [1000] * 480).tobytes()
+    audio = _pcm16_bytes([1000] * 480)
 
     with TestClient(api.app).websocket_connect(
         "/v1/realtime?model=org%2Frealtime-stt"

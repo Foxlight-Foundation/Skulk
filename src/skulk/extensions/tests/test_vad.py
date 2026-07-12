@@ -1,6 +1,7 @@
 # pyright: reportPrivateUsage=false
 """Deterministic coverage for the built-in VAD provider."""
 
+import sys
 from array import array
 from collections.abc import AsyncIterator, Callable, Iterator
 
@@ -16,6 +17,21 @@ from skulk.extensions import (
     descriptor_revision,
 )
 from skulk.extensions.vad import VadConfig, VoiceActivityDetector
+
+
+def _pcm16_bytes(values: Iterator[int] | list[int] | range) -> bytes:
+    samples = array("h", values)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    return samples.tobytes()
+
+
+def _pcm16_values(data: bytes) -> list[int]:
+    samples = array("h")
+    samples.frombytes(data)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    return samples.tolist()
 
 
 def _classifier(decisions: list[bool]) -> Callable[[bytes, int], bool]:
@@ -131,16 +147,16 @@ def test_vad_rejects_unsupported_rates_and_partial_frames() -> None:
 def test_streaming_pcm_resampler_preserves_interpolation_across_chunks() -> None:
     resampler = StreamingPcm16Resampler(48000, 24000)
 
-    first = resampler.process(array("h", [0, 8192, 16384]).tobytes())
-    second = resampler.process(array("h", [24576, 32767]).tobytes())
+    first = resampler.process(_pcm16_bytes([0, 8192, 16384]))
+    second = resampler.process(_pcm16_bytes([24576, 32767]))
 
-    assert array("h", first).tolist() == [0]
-    assert array("h", second).tolist() == [16384]
+    assert _pcm16_values(first) == [0]
+    assert _pcm16_values(second) == [16384]
 
 
 def test_streaming_pcm_resampler_converts_realtime_rate_for_webrtc_vad() -> None:
     resampler = StreamingPcm16Resampler(24000, 16000)
-    one_hundred_ms = array("h", range(2400)).tobytes()
+    one_hundred_ms = _pcm16_bytes(range(2400))
 
     output = resampler.process(one_hundred_ms)
 
