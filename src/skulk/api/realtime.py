@@ -465,15 +465,7 @@ class RealtimeTranscriptionBridge:
                     )
                     await self._close(1009)
                     return
-                session = self._current_session
-                if session is None:
-                    session = await self._open_next_turn(task_group)
-                    if session is None:
-                        return
-                assert session.input is not None
-                self._session_audio_bytes += len(audio)
-                self._turn_audio_bytes += len(audio)
-                if self._session_audio_bytes > _MAX_SESSION_AUDIO_BYTES:
+                if self._session_audio_bytes + len(audio) > _MAX_SESSION_AUDIO_BYTES:
                     await self._send_error(
                         code="audio_session_too_large",
                         message=(
@@ -484,6 +476,14 @@ class RealtimeTranscriptionBridge:
                     )
                     await self._close(1009)
                     return
+                session = self._current_session
+                if session is None:
+                    session = await self._open_next_turn(task_group)
+                    if session is None:
+                        return
+                assert session.input is not None
+                self._session_audio_bytes += len(audio)
+                self._turn_audio_bytes += len(audio)
                 segment_size = (
                     _VAD_SOURCE_FRAME_BYTES
                     if self._vad_detector is not None

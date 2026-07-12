@@ -316,7 +316,7 @@ def test_realtime_websocket_server_vad_auto_commits(
             )
             await completed.wait()
             while not release_output.is_set():
-                await anyio.sleep(0)
+                await anyio.sleep(0.001)
             yield CapabilityStreamFrame(
                 call_id="vad-ws-call",
                 direction="provider_to_caller",
