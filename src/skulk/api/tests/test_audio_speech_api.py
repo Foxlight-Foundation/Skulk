@@ -256,11 +256,45 @@ async def test_audio_voices_returns_static_mounted_catalog(
         return card
 
     monkeypatch.setattr(API, "_get_running_model_card", _running_card)
+    api.state = _state_with_running_card(card)
 
     response = await api.audio_voices(str(card.model_id))
 
     assert [voice.id for voice in response.data] == ["alloy", "coral"]
     assert all(voice.model == str(card.model_id) for voice in response.data)
+
+
+@pytest.mark.anyio
+async def test_audio_voices_rejects_unmounted_catalog_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Voice discovery must not advertise unavailable model capacity."""
+
+    api = _build_api()
+    card = _tts_card()
+    assert card.audio is not None
+    card = card.model_copy(
+        update={
+            "audio": card.audio.model_copy(
+                update={"supports_voice_listing": True, "voices": ("alloy",)}
+            )
+        }
+    )
+
+    async def _catalog_card(self: API, requested: ModelId) -> ModelCard:
+        assert requested == card.model_id
+        return card
+
+    async def _ignore_notification(self: API, model: ModelId) -> None:
+        assert model == card.model_id
+
+    monkeypatch.setattr(API, "_get_running_model_card", _catalog_card)
+    monkeypatch.setattr(API, "_trigger_notify_user_to_download_model", _ignore_notification)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.audio_voices(str(card.model_id))
+
+    assert exc_info.value.status_code == 404
 
 
 def test_builtin_tts_capability_tracks_live_experimental_capacity(

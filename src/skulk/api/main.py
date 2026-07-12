@@ -3434,6 +3434,15 @@ class API:
                 status_code=400,
                 detail=f"Model {resolved} does not support speech translation",
             )
+        if not any(
+            instance.shard_assignments.model_id == resolved
+            for instance in self.state.instances.values()
+        ):
+            await self._trigger_notify_user_to_download_model(resolved)
+            raise HTTPException(
+                status_code=404,
+                detail=f"No instance found for model {resolved}",
+            )
         return resolved
 
     def _advertise_capability(self, capability: str) -> None:
@@ -10074,9 +10083,9 @@ class API:
                 status_code=400,
                 detail=f"Unsupported translation response_format: {response_format}",
             )
+        model_id = await self._validate_audio_translation_model(ModelId(model))
         _validate_audio_upload_metadata(file)
         audio_bytes = await _read_audio_upload(file)
-        model_id = await self._validate_audio_translation_model(ModelId(model))
         transcript_chunks = await self._execute_audio_transcription(
             AudioTranscriptionTaskParams(
                 model=model_id,
@@ -10118,6 +10127,15 @@ class API:
             raise HTTPException(
                 status_code=400,
                 detail=f"Model {resolved} does not support voice listing",
+            )
+        if not any(
+            instance.shard_assignments.model_id == resolved
+            for instance in self.state.instances.values()
+        ):
+            await self._trigger_notify_user_to_download_model(resolved)
+            raise HTTPException(
+                status_code=404,
+                detail=f"No instance found for model {resolved}",
             )
         return AudioVoiceList(
             data=tuple(

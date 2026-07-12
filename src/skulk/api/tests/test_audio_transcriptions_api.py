@@ -139,6 +139,27 @@ async def test_audio_translations_marks_shared_stt_task_for_english(
 
 
 @pytest.mark.anyio
+async def test_audio_translations_rejects_before_reading_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disabled or ineligible translation must not consume the request body."""
+
+    api = _build_api()
+    upload = _upload(b"RIFFtestWAVE")
+
+    async def _reject(self: API, requested_model: ModelId) -> Never:
+        raise HTTPException(status_code=404, detail="not mounted")
+
+    monkeypatch.setattr(API, "_validate_audio_translation_model", _reject)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.audio_translations(file=upload, model="org/not-mounted")
+
+    assert exc_info.value.status_code == 404
+    assert upload.file.tell() == 0
+
+
+@pytest.mark.anyio
 async def test_audio_transcriptions_rejects_streaming_before_model_validation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
