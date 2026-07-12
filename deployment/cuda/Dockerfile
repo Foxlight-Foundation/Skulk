@@ -49,7 +49,10 @@ RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp /opt/llama.cpp \
 # `uv sync` will demand (PR #538 review rounds 3-4).
 COPY uv.lock /tmp/uv.lock
 COPY .python-version /tmp/python-version
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+# UV_VERSION pins the installer for reproducible rebuilds of the same commit;
+# bump deliberately alongside fleet uv upgrades.
+ARG UV_VERSION=0.11.6
+RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh \
     && LLAMA_CPP_PYTHON_VERSION="$(sed -n '/^name = "llama-cpp-python"$/{n;s/^version = "\(.*\)"$/\1/p;}' /tmp/uv.lock | head -1)" \
     && test -n "${LLAMA_CPP_PYTHON_VERSION}" \
     && PYTHON_VERSION="$(tr -d '[:space:]' < /tmp/python-version)" \
@@ -80,13 +83,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /run/sshd \
     && rm -f /etc/ssh/ssh_host_*
 
-# Rust toolchain for the skulk-pyo3-bindings build during `uv sync`.
+# Rust toolchain for the skulk-pyo3-bindings build during `uv sync`. Pinned
+# (not `stable`) so rebuilding this published image later cannot silently
+# change the compiler under older Skulk refs; bump deliberately.
+ARG RUST_VERSION=1.94.1
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --profile minimal --default-toolchain stable
+      | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
 ENV PATH="/root/.cargo/bin:/root/.local/bin:/usr/local/cuda/bin:${PATH}"
 
-# uv: the canonical Skulk runtime path.
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+# uv: the canonical Skulk runtime path. Same pin rationale as the build stage.
+ARG UV_VERSION=0.11.6
+RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
 
 # The whole bin directory, not just the two executables: upstream llama.cpp
 # builds shared on Linux (BUILD_SHARED_LIBS defaults on), so llama-server and

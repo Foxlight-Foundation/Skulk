@@ -49,6 +49,22 @@ if [ "${#WHEELS[@]}" -ne 1 ] || [ ! -f "${WHEELS[0]}" ]; then
   echo "[bootstrap] ERROR: expected exactly one prebaked wheel, found: ${WHEELS[*]}" >&2
   exit 1
 fi
+# The image is reusable across refs, but the wheel it carries is pinned to
+# the pins of the commit that built it. A ref with a different locked
+# llama-cpp-python would otherwise end up silently un-locked, and a
+# different .python-version fails later with a confusing wheel-tag error;
+# both mismatches stop here with instructions instead.
+WHEEL_NAME="$(basename "${WHEELS[0]}")"
+WHEEL_VERSION="$(printf '%s' "${WHEEL_NAME}" | cut -d- -f2)"
+WHEEL_PY_TAG="$(printf '%s' "${WHEEL_NAME}" | cut -d- -f3)"
+LOCKED_VERSION="$(sed -n '/^name = "llama-cpp-python"$/{n;s/^version = "\(.*\)"$/\1/p;}' uv.lock | head -1)"
+EXPECTED_PY_TAG="cp$(tr -d '[:space:].' < .python-version | cut -c1-3)"
+if [ "${WHEEL_VERSION}" != "${LOCKED_VERSION}" ] || [ "${WHEEL_PY_TAG}" != "${EXPECTED_PY_TAG}" ]; then
+  echo "[bootstrap] ERROR: prebaked wheel ${WHEEL_NAME} does not match this ref's pins" >&2
+  echo "[bootstrap]   ref locks llama-cpp-python==${LOCKED_VERSION} on ${EXPECTED_PY_TAG}" >&2
+  echo "[bootstrap]   use the image built for this ref, or rebuild via the cuda-image workflow" >&2
+  exit 1
+fi
 # --no-deps: uv sync already installed llama-cpp-python's dependencies at
 # their locked versions; this step only swaps the wheel artifact and must
 # not let pip drift the rest of the environment away from uv.lock.
