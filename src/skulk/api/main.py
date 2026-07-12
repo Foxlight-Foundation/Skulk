@@ -10050,7 +10050,7 @@ class API:
         ],
         language: Annotated[
             str | None,
-            Form(description="Required model-specific source language code."),
+            Form(description="Optional model-specific source language code."),
         ] = None,
         prompt: Annotated[
             str | None,
