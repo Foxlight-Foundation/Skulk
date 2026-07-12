@@ -9,6 +9,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Prebaked CUDA pod image (`deployment/cuda/Dockerfile`, published to GHCR as
+  `skulk-cuda-pod` by the `cuda-image` workflow): carries the CUDA
+  llama-cpp-python wheel, `llama-server` + `ggml-rpc-server` binaries, uv,
+  and the Rust toolchain, so a rented GPU pod goes from create to serving in
+  minutes (`/opt/skulk/pod-bootstrap.sh <ref>`) instead of the ~1 hour
+  install recipe. The recipe (`install-deps.sh`) remains the from-scratch
+  path for arbitrary driver-equipped machines.
+
 - NVIDIA / CUDA node support (platform plumbing): a passive NVML telemetry
   collector (`utils/info_gatherer/nvidia_gpu.py`) fills the normalized
   accelerator profile on NVIDIA nodes (the Linux GPU monitor tries AMD
