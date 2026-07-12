@@ -1157,7 +1157,7 @@ async def test_audio_speech_streams_pcm_with_playback_metadata(
     )
 
     assert isinstance(response, StreamingResponse)
-    assert response.media_type == "audio/L16"
+    assert response.media_type == "audio/pcm"
     assert response.headers["x-audio-sample-rate"] == "24000"
     assert response.headers["x-audio-channels"] == "1"
     assert response.headers["x-audio-sample-format"] == "s16le"
@@ -1270,7 +1270,7 @@ async def test_audio_speech_batch_pcm_includes_playback_metadata(
         )
     )
 
-    assert response.media_type == "audio/L16"
+    assert response.media_type == "audio/pcm"
     assert response.headers["x-audio-sample-rate"] == "24000"
     assert response.headers["x-audio-channels"] == "1"
     assert response.headers["x-audio-sample-format"] == "s16le"

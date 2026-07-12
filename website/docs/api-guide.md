@@ -535,12 +535,12 @@ Request fields:
 
 The response body is raw audio bytes with a matching audio media type
 (`audio/mpeg`, `audio/wav`, `audio/flac`, `audio/ogg`, `audio/opus`, or
-`audio/L16`).
+`audio/pcm`).
 For `stream=true`, the mounted TTS card must explicitly declare
 `audio.supports_streaming = true`. The response format must currently
 resolve to `mp3` or `pcm`; when a streaming request omits `response_format`, Skulk
 requests `mp3` instead of the model card's non-streaming default. Skulk returns
-`audio/mpeg` or `audio/L16` with chunked HTTP bytes. Raw `pcm` is mono signed
+`audio/mpeg` or `audio/pcm` with chunked HTTP bytes. Raw `pcm` is mono signed
 16-bit little-endian audio; `X-Audio-Sample-Rate`, `X-Audio-Channels`, and
 `X-Audio-Sample-Format` define its framing. Admission returns `503` if any routable
 instance of the requested model lacks a ready runner. This is TTS output streaming, not a

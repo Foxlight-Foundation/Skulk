@@ -157,7 +157,7 @@ export class StreamingSpeechPlayback {
     private readonly resumeBufferedSeconds = DEFAULT_RESUME_BUFFERED_SECONDS,
   ) {}
 
-  /** Stream a validated `audio/L16` response through a bounded AudioWorklet queue. */
+  /** Stream a validated `audio/pcm` response through a bounded AudioWorklet queue. */
   async play(response: Response, signal?: AbortSignal): Promise<void> {
     const sampleRate = validatePcmResponseHeaders(response.headers);
     if (!response.body) throw new Error('Streaming speech response has no body.');
