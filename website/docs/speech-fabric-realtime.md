@@ -45,9 +45,9 @@ mounted capacity is healthy:
 
 | Capability | I/O mode | Behavior |
 | --- | --- | --- |
-| `tts@1.0.0` | Server streaming | Accepts text controls and emits raw MP3 media frames. |
-| `stt@1.0.0` | Client-streaming input, batch result | Accepts bounded encoded audio, starts inference on input half-close, and emits one final transcript. |
-| `stt.realtime@1.0.0` | Bidirectional | Accepts mono PCM16 frames and emits model-provided partial and final transcripts. |
+| `tts@1.0.0` | `server_streaming` | Accepts text controls and emits raw MP3 media frames. |
+| `stt@1.0.0` | `client_streaming` input, batch result | Accepts bounded encoded audio, starts inference on input half-close, and emits one final transcript. |
+| `stt.realtime@1.0.0` | `bidirectional` | Accepts mono PCM16 frames and emits model-provided partial and final transcripts. |
 
 The provider descriptor is the public interface contract. Model cards remain
 the source of model capability truth, while Skulk's backend filters and runner
