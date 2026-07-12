@@ -1568,9 +1568,8 @@ class API:
             description=(
                 "OpenAI-compatible text-to-speech endpoint. The requested model "
                 "must already be placed and running as a text-to-speech model. "
-                "The experimental stream=true path requires "
-                "SKULK_ENABLE_EXPERIMENTAL_MODE, experiments.tts_streaming=true, "
-                "and a mounted card that declares audio.supports_streaming=true."
+                "The stream=true path requires a mounted card that declares "
+                "audio.supports_streaming=true."
             ),
         )(self.audio_speech)
         self.app.post(
@@ -3102,23 +3101,6 @@ class API:
                 status_code=400,
                 detail=f"Model {resolved} is not a text-to-speech model",
             )
-        if stream and not experimental_mode_enabled():
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Streaming text-to-speech is experimental and requires "
-                    f"{EXPERIMENTAL_MODE_ENV_VAR}=1 until a mounted MLX speech "
-                    "model has passed streaming validation"
-                ),
-            )
-        if stream and not self._tts_streaming_experiment_enabled():
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Streaming text-to-speech is experimental and requires "
-                    "experiments.tts_streaming=true in skulk.yaml"
-                ),
-            )
         if stream and (
             model_card.audio is None or model_card.audio.supports_streaming is not True
         ):
@@ -3158,23 +3140,6 @@ class API:
             )
         return resolved, resolved_response_format
 
-    def _tts_streaming_experiment_enabled(self) -> bool:
-        """Return whether the current config opts into experimental TTS streaming."""
-
-        try:
-            config = load_skulk_config(self._config_path)
-        except Exception as exc:
-            logger.warning(
-                "Failed to load config while checking TTS streaming experiment "
-                f"toggle; treating it as disabled: {exc}"
-            )
-            return False
-        return bool(
-            config is not None
-            and config.experiments is not None
-            and config.experiments.tts_streaming
-        )
-
     def _stt_realtime_experiment_enabled(self) -> bool:
         """Return whether config opts into true realtime STT sessions."""
 
@@ -3212,11 +3177,7 @@ class API:
     def _has_mounted_streaming_tts_model(self) -> bool:
         """Return whether core serving currently exposes eligible TTS capacity."""
 
-        if (
-            not self._builtin_speech_provider_enabled
-            or not experimental_mode_enabled()
-            or not self._tts_streaming_experiment_enabled()
-        ):
+        if not self._builtin_speech_provider_enabled:
             return False
         for instance in self.state.instances.values():
             card = self._model_card_for_instance(instance)

@@ -199,9 +199,8 @@ Declares speech serving metadata for TTS and STT models:
 - `sample_rates`
   - supported input or output sample rates in hertz
 
-For TTS streaming, `supports_streaming = true` is necessary but not sufficient:
-the node must also run with `SKULK_ENABLE_EXPERIMENTAL_MODE`, and cluster config
-must set `experiments.tts_streaming: true`.
+For stable TTS streaming, `supports_streaming = true` is the model-side
+eligibility gate; the model must also be mounted and ready.
 
 For realtime STT, both `supports_streaming = true` and
 `supports_realtime = true` are necessary but not sufficient. The node must run

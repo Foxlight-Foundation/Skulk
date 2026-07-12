@@ -902,10 +902,8 @@ class AudioSpeechRequest(BaseModel):
         default=False,
         description=(
             "Whether to stream encoded MP3 bytes as they are produced by the "
-            "mounted text-to-speech model. This experimental path is accepted "
-            "only when SKULK_ENABLE_EXPERIMENTAL_MODE is enabled, "
-            "experiments.tts_streaming=true is configured, and the mounted "
-            "model card declares audio.supports_streaming=true."
+            "mounted text-to-speech model. The mounted model card must declare "
+            "audio.supports_streaming=true."
         ),
     )
     streaming_interval: float | None = Field(

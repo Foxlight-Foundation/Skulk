@@ -294,10 +294,8 @@ Speech serving is in a staged rollout. Phase 0 added `TextToSpeech`,
 `POST /v1/audio/speech`: the API validates a mounted TTS model, sends a
 `SpeechSynthesis` command through the master, the worker dispatches it to the
 single-node `mlx_audio` speech runner, and the runner emits `AudioChunk` output
-on the data plane. TTS output streaming is still experimental: only nodes
-running with `SKULK_ENABLE_EXPERIMENTAL_MODE` and cluster config
-`experiments.tts_streaming: true` accept `stream=true`, and only for TTS cards
-that explicitly declare `audio.supports_streaming = true`. The bundled Qwen3
+on the data plane. TTS output streaming is stable for TTS cards that explicitly
+declare `audio.supports_streaming = true`; no experiment gate is required. The bundled Qwen3
 TTS card declares MP3 streaming support after live validation; Fish Audio and
 the remaining bundled speech cards stay batch-only.
 Non-streaming requests use the default path where the API collects the chunks
@@ -650,11 +648,9 @@ with extensions: an out-of-tree capability can ride the fabric as a plugin and
 still surface a gated toggle here.
 
 Current built-in experiment toggles live under the persisted `experiments`
-config section. `experiments.tts_streaming` enables the experimental
-`/v1/audio/speech` `stream=true` transport only on nodes that also run with
-`SKULK_ENABLE_EXPERIMENTAL_MODE`; the request still requires a mounted TTS card
-whose `audio.supports_streaming` flag has been set after model/backend
-validation.
+config section. `experiments.tts_streaming` remains as a deprecated parsing
+compatibility field; stable `/v1/audio/speech` streaming ignores it and relies
+on the mounted card's validated `audio.supports_streaming` declaration.
 `experiments.speech_translation` enables `/v1/audio/translations` only on nodes
 running with experimental mode and only for mounted cards that explicitly
 declare `audio.supports_translation = true`.

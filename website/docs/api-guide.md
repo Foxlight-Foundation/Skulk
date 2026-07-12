@@ -526,17 +526,15 @@ Request fields:
 | `voice` | string or null | Optional model-specific voice name |
 | `speed` | number or null | Optional positive speaking speed multiplier |
 | `response_format` | string or null | Optional encoded output format. When omitted or set to `null`, Skulk uses `mp3` for `stream=true`; otherwise it uses the mounted model card default when declared and falls back to `mp3`; supported values are constrained by the model card when declared |
-| `stream` | boolean | Optional. Experimental. When `true`, Skulk returns a chunked HTTP response and yields encoded MP3 bytes as the speech runner emits them; accepted only when `SKULK_ENABLE_EXPERIMENTAL_MODE` is enabled, `experiments.tts_streaming` is true, and the mounted TTS card explicitly declares `audio.supports_streaming = true` |
+| `stream` | boolean | Optional. When `true`, Skulk returns a chunked HTTP response and yields encoded MP3 bytes as the speech runner emits them; accepted only when the mounted TTS card explicitly declares `audio.supports_streaming = true` |
 | `streaming_interval` | number or null | Optional positive model-specific streaming cadence hint, accepted only with `stream=true` |
 | `instruct`, `lang_code` | string or null | Optional model-specific generation hints |
 | `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number or integer | Optional model-specific sampling controls |
 
 The response body is raw audio bytes with a matching audio media type
 (`audio/mpeg`, `audio/wav`, `audio/flac`, `audio/ogg`, or `audio/opus`).
-For `stream=true`, the node must be running with
-`SKULK_ENABLE_EXPERIMENTAL_MODE`, the cluster config must set
-`experiments.tts_streaming: true`, and the mounted TTS card must explicitly
-declare `audio.supports_streaming = true`. The response format must currently
+For `stream=true`, the mounted TTS card must explicitly declare
+`audio.supports_streaming = true`. The response format must currently
 resolve to `mp3`; when a streaming request omits `response_format`, Skulk
 requests `mp3` instead of the model card's non-streaming default. Skulk returns
 `audio/mpeg` with chunked HTTP bytes. This is TTS output streaming, not a
@@ -1010,10 +1008,8 @@ The response also carries an `effective` block describing runtime-resolved value
 The persisted `experiments` section holds per-feature opt-ins shown inside that
 gated dashboard section. Current fields:
 
-- `experiments.tts_streaming`: enables the experimental `/v1/audio/speech`
-  `stream=true` transport on nodes that also run with
-  `SKULK_ENABLE_EXPERIMENTAL_MODE`; keep this off until a mounted TTS model has
-  passed streaming validation.
+- `experiments.tts_streaming`: deprecated compatibility field. Stable TTS
+  streaming ignores this value and follows mounted model capability metadata.
 - `experiments.stt_realtime`: enables the experimental `stt.realtime@1.0.0`
   bidirectional provider on nodes that also run with
   `SKULK_ENABLE_EXPERIMENTAL_MODE`. The node must locally host an eligible STT
@@ -1335,7 +1331,7 @@ descriptor carries the capability `id`, semantic `version`, a human/LLM-readable
 description, JSON Schemas for input and output, the call's I/O mode, and the
 response maps each `id@version` to a content revision digest so callers can pin
 the exact shape they discovered. Production nodes also include first-party
-provider descriptors, currently the experimental mounted-model `tts@1.0.0`
+provider descriptors, including the mounted-model `tts@1.0.0`
 facade, so descriptor presence alone is not a liveness claim. Extensions consume this through
 `describe_node`; the light discovery layer (which nodes offer which capability
 tag) rides the telemetry plane and appears as `nodeCapabilities` in
@@ -1438,9 +1434,8 @@ Each `chunk` payload reports `model`, `format: "mp3"`, `chunk_index`,
 as an `InlineMediaAttachment` with `media_type: "audio/mpeg"`.
 
 The descriptor is always available for contract discovery, while the `tts`
-telemetry tag is advertised only when experimental mode,
-`experiments.tts_streaming`, and at least one eligible mounted model are all
-active. Dynamic admission rechecks the requested model before `started`. A
+telemetry tag is advertised when at least one eligible mounted model is active.
+Dynamic admission rechecks the requested model before `started`. A
 caller cancellation propagates to the underlying synthesis command.
 
 ### Transcribe a bounded clip through the built-in STT provider

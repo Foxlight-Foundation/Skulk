@@ -363,12 +363,8 @@ the schema-validated payload, while the encoded MP3 bytes travel as a raw
 `InlineMediaAttachment` rather than base64 JSON.
 
 The descriptor is available through `GET /v1/capabilities`, but its telemetry
-tag is advertised only when all three runtime requirements are true:
-
-- `SKULK_ENABLE_EXPERIMENTAL_MODE` is enabled;
-- `experiments.tts_streaming: true` is configured; and
-- at least one mounted TTS card declares `audio.supports_streaming = true` and
-  MP3 output.
+tag is advertised only when at least one mounted TTS card declares
+`audio.supports_streaming = true` and MP3 output.
 
 The same requirements are rechecked during dynamic admission for the requested
 model. A failure returns a typed opening error before `started`; caller close,

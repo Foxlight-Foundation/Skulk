@@ -795,29 +795,6 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               </Legend>
               <Row>
                 <FieldLabel>
-                  {t('settings.experiments.ttsStreaming', 'TTS streaming')}
-                  <InfoTooltip
-                    content={t(
-                      'settings.experiments.ttsStreamingTooltip',
-                      'Enables the experimental stream=true path for /v1/audio/speech. Leave off until a mounted TTS model has passed streaming validation.',
-                    )}
-                  />
-                </FieldLabel>
-                <Toggle
-                  type="button"
-                  $on={experimentsDraft.tts_streaming}
-                  aria-pressed={experimentsDraft.tts_streaming}
-                  aria-label={t('settings.experiments.ttsStreaming', 'TTS streaming')}
-                  onClick={() =>
-                    setExperimentsDraft((prev) => ({
-                      ...prev,
-                      tts_streaming: !prev.tts_streaming,
-                    }))
-                  }
-                />
-              </Row>
-              <Row>
-                <FieldLabel>
                   {t('settings.experiments.speechTranslation', 'Speech translation')}
                   <InfoTooltip
                     content={t(
