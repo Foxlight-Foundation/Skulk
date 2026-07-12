@@ -30,6 +30,14 @@ class SpeechSynthesisTaskParams(BaseModel, frozen=True):
     max_tokens: int | None = None
     reference_audio: str | None = None
     reference_text: str | None = None
+    reference_audio_present: bool = False
+    reference_audio_filename: str | None = None
+    reference_audio_content_type: str | None = None
+    reference_audio_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    reference_audio_data: bytes | None = None
     stream: bool = False
     streaming_interval: float | None = Field(default=None, gt=0)
 

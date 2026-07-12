@@ -72,6 +72,7 @@ def plan(
     input_audio_chunk_buffer: Mapping[
         CommandId, Mapping[int, AudioInputChunk]
     ] | None = None,
+    speech_media_completed: Mapping[CommandId, object] | None = None,
 ) -> Task | None:
     # Python short circuiting OR logic should evaluate these sequentially.
     return (
@@ -92,6 +93,7 @@ def plan(
             all_runners,
             input_chunk_buffer or {},
             input_audio_chunk_buffer or {},
+            speech_media_completed or {},
         )
     )
 
@@ -376,6 +378,7 @@ def _pending_tasks(
     input_audio_chunk_buffer: Mapping[
         CommandId, Mapping[int, AudioInputChunk]
     ] | None,
+    speech_media_completed: Mapping[CommandId, object] | None = None,
 ) -> Task | None:
     for task in tasks.values():
         # Forward inference tasks to runners
@@ -415,6 +418,13 @@ def _pending_tasks(
             received = len(input_audio_chunk_buffer.get(cmd_id, {}))
             if received < expected_audio_chunks:
                 continue  # Wait for the complete uploaded audio payload
+
+        if (
+            isinstance(task, SpeechSynthesis)
+            and task.task_params.reference_audio_present
+            and task.command_id not in (speech_media_completed or {})
+        ):
+            continue
 
         for runner in runners.values():
             if task.instance_id != runner.bound_instance.instance.instance_id:

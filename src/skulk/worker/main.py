@@ -73,6 +73,7 @@ from skulk.shared.types.tasks import (
     LoadModel,
     RealtimeAudioTranscription,
     Shutdown,
+    SpeechSynthesis,
     StartWarmup,
     Task,
     TaskId,
@@ -153,6 +154,9 @@ _REALTIME_AUDIO_PENDING_FRAMES = 256
 _REALTIME_AUDIO_PENDING_BYTES = 16 * 1024 * 1024
 _REALTIME_AUDIO_PENDING_TTL_SECONDS = 30.0
 _REALTIME_FINISHED_COMMANDS = 1024
+_SPEECH_MEDIA_PENDING_FRAMES = 32
+_SPEECH_MEDIA_PENDING_BYTES = 25 * 1024 * 1024
+_SPEECH_MEDIA_PENDING_TTL_SECONDS = 30.0
 
 
 _RUNNER_FIRST_REPORT_DEADLINE_SECONDS = 120.0
@@ -620,6 +624,12 @@ class Worker:
         self.input_chunk_counts: dict[CommandId, int] = {}
         self.input_audio_chunk_buffer: dict[CommandId, dict[int, AudioInputChunk]] = {}
         self.input_audio_chunk_counts: dict[CommandId, int] = {}
+        self._speech_media_chunks: dict[
+            CommandId, dict[int, SpeechMediaPacket]
+        ] = {}
+        self._speech_media_completed: dict[CommandId, SpeechMediaPacket] = {}
+        self._speech_media_pending_bytes: dict[CommandId, int] = {}
+        self._speech_media_pending_since: dict[CommandId, float] = {}
         self._realtime_audio_pending: dict[
             CommandId, list[RealtimeAudioInputFrame]
         ] = {}
@@ -797,6 +807,9 @@ class Worker:
                     tg.start_soon(self._realtime_audio_ingress)
                 if self._realtime_audio_packet_receiver is not None:
                     tg.start_soon(self._realtime_audio_packet_ingress)
+                if self._speech_media_packet_receiver is not None:
+                    tg.start_soon(self._speech_media_packet_ingress)
+                    tg.start_soon(self._speech_media_janitor)
                 if (
                     self._realtime_audio_receiver is not None
                     or self._realtime_audio_packet_receiver is not None
@@ -829,6 +842,73 @@ class Worker:
                 if packet.target_node != self.node_id or packet.kind == "transport_failed":
                     continue
                 await self._route_realtime_audio_frame(packet.to_input_frame())
+
+    async def _speech_media_packet_ingress(self) -> None:
+        """Collect bounded node-addressed reference audio outside State."""
+
+        assert self._speech_media_packet_receiver is not None
+        with self._speech_media_packet_receiver as packets:
+            async for packet in packets:
+                if packet.target_node != self.node_id or packet.kind == "transport_failed":
+                    continue
+                command_id = packet.command_id
+                if packet.kind in ("cancelled",):
+                    self._clear_speech_media(command_id)
+                    continue
+                self._speech_media_pending_since.setdefault(
+                    command_id, time.monotonic()
+                )
+                if packet.kind == "completed":
+                    self._speech_media_completed[command_id] = packet
+                    continue
+                chunks = self._speech_media_chunks.setdefault(command_id, {})
+                pending_bytes = self._speech_media_pending_bytes.get(command_id, 0)
+                if (
+                    len(chunks) >= _SPEECH_MEDIA_PENDING_FRAMES
+                    or pending_bytes + len(packet.data) > _SPEECH_MEDIA_PENDING_BYTES
+                ):
+                    self._clear_speech_media(command_id)
+                    await self.command_sender.send(
+                        ForwarderCommand(
+                            origin=self._system_id,
+                            command=TaskCancelled(cancelled_command_id=command_id),
+                        )
+                    )
+                    continue
+                if packet.sequence in chunks:
+                    continue
+                chunks[packet.sequence] = packet
+                self._speech_media_pending_bytes[command_id] = (
+                    pending_bytes + len(packet.data)
+                )
+
+    def _clear_speech_media(self, command_id: CommandId) -> None:
+        """Delete all request-scoped media retained for one command."""
+
+        self._speech_media_chunks.pop(command_id, None)
+        self._speech_media_completed.pop(command_id, None)
+        self._speech_media_pending_bytes.pop(command_id, None)
+        self._speech_media_pending_since.pop(command_id, None)
+
+    async def _speech_media_janitor(self) -> None:
+        """Cancel reference media that never acquires a serving task."""
+
+        while True:
+            await anyio.sleep(5)
+            cutoff = time.monotonic() - _SPEECH_MEDIA_PENDING_TTL_SECONDS
+            expired = [
+                command_id
+                for command_id, started_at in self._speech_media_pending_since.items()
+                if started_at <= cutoff
+            ]
+            for command_id in expired:
+                self._clear_speech_media(command_id)
+                await self.command_sender.send(
+                    ForwarderCommand(
+                        origin=self._system_id,
+                        command=TaskCancelled(cancelled_command_id=command_id),
+                    )
+                )
 
     async def _route_realtime_audio_frame(
         self, frame: RealtimeAudioInputFrame
@@ -1123,6 +1203,7 @@ class Worker:
                 self.state.tasks,
                 self.input_chunk_buffer,
                 self.input_audio_chunk_buffer,
+                self._speech_media_completed,
             )
             if task is None:
                 continue
@@ -1384,6 +1465,50 @@ class Worker:
                         del self.input_chunk_buffer[cmd_id]
                     if cmd_id in self.input_chunk_counts:
                         del self.input_chunk_counts[cmd_id]
+                    await self._start_runner_task(modified_task)
+                case SpeechSynthesis() if task.task_params.reference_audio_present:
+                    command_id = task.command_id
+                    chunks = self._speech_media_chunks.get(command_id, {})
+                    completed = self._speech_media_completed.get(command_id)
+                    if completed is None:
+                        continue
+                    try:
+                        reference_audio = b"".join(
+                            chunks[index].data for index in range(completed.sequence)
+                        )
+                    except KeyError as exc:
+                        logger.error(
+                            "Reference audio reached dispatch with missing chunk "
+                            f"{exc.args[0]} for command {command_id}"
+                        )
+                        self._clear_speech_media(command_id)
+                        await self.event_sender.send(
+                            TaskStatusUpdated(
+                                task_id=task.task_id,
+                                task_status=TaskStatus.Failed,
+                            )
+                        )
+                        continue
+                    if hashlib.sha256(reference_audio).hexdigest() != completed.sha256:
+                        logger.error(
+                            f"Reference audio checksum mismatch for command {command_id}"
+                        )
+                        self._clear_speech_media(command_id)
+                        await self.event_sender.send(
+                            TaskStatusUpdated(
+                                task_id=task.task_id,
+                                task_status=TaskStatus.Failed,
+                            )
+                        )
+                        continue
+                    modified_task = task.model_copy(
+                        update={
+                            "task_params": task.task_params.model_copy(
+                                update={"reference_audio_data": reference_audio}
+                            )
+                        }
+                    )
+                    self._clear_speech_media(command_id)
                     await self._start_runner_task(modified_task)
                 case AudioTranscription() if task.task_params.total_input_chunks > 0:
                     cmd_id = task.command_id

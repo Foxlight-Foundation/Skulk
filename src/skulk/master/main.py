@@ -830,15 +830,22 @@ class Master:
                                     f"No instance found for model {command.task_params.model}"
                                 )
 
-                            available_instance_ids = sorted(
-                                instance_task_counts.keys(),
-                                key=lambda instance_id: instance_task_counts[
-                                    instance_id
-                                ],
-                            )
-
                             task_id = TaskId()
-                            selected_instance_id = available_instance_ids[0]
+                            if command.target_instance_id is not None:
+                                if command.target_instance_id not in instance_task_counts:
+                                    raise ValueError(
+                                        "Requested TTS instance is unavailable or "
+                                        "does not serve the requested model"
+                                    )
+                                selected_instance_id = command.target_instance_id
+                            else:
+                                available_instance_ids = sorted(
+                                    instance_task_counts.keys(),
+                                    key=lambda instance_id: instance_task_counts[
+                                        instance_id
+                                    ],
+                                )
+                                selected_instance_id = available_instance_ids[0]
                             trace_enabled = self.state.tracing_enabled
                             generated_events.append(
                                 TaskCreated(

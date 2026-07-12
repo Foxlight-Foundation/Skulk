@@ -1084,33 +1084,50 @@ class Runner:
         """Call the TTS model and normalize its result into an iterable."""
         assert self.model is not None
         params = task.task_params
-        generate_kwargs = {
-            "voice": _resolve_staged_voice_path(
-                self.local_model_path, params.voice
-            ),
-            "speed": params.speed,
-            "instruct": params.instruct,
-            "lang_code": params.lang_code,
-            "ref_audio": params.reference_audio,
-            "ref_text": params.reference_text,
-            "temperature": params.temperature,
-            "top_p": params.top_p,
-            "top_k": params.top_k,
-            "repetition_penalty": params.repetition_penalty,
-            "stream": stream,
-            "streaming_interval": params.streaming_interval if stream else None,
-            "max_tokens": params.max_tokens,
-        }
-        generate = self.model.generate
-        filtered_kwargs = _filter_kwargs(generate, generate_kwargs)
+        reference_path: str | None = None
+        try:
+            if params.reference_audio_data is not None:
+                suffix = _audio_upload_suffix(
+                    params.reference_audio_filename,
+                    params.reference_audio_content_type,
+                )
+                with tempfile.NamedTemporaryFile(
+                    suffix=suffix,
+                    delete=False,
+                ) as reference_file:
+                    reference_file.write(params.reference_audio_data)
+                    reference_path = reference_file.name
+            generate_kwargs = {
+                "voice": _resolve_staged_voice_path(
+                    self.local_model_path, params.voice
+                ),
+                "speed": params.speed,
+                "instruct": params.instruct,
+                "lang_code": params.lang_code,
+                "ref_audio": reference_path or params.reference_audio,
+                "ref_text": params.reference_text,
+                "temperature": params.temperature,
+                "top_p": params.top_p,
+                "top_k": params.top_k,
+                "repetition_penalty": params.repetition_penalty,
+                "stream": stream,
+                "streaming_interval": params.streaming_interval if stream else None,
+                "max_tokens": params.max_tokens,
+            }
+            generate = self.model.generate
+            filtered_kwargs = _filter_kwargs(generate, generate_kwargs)
 
-        generated = generate(params.input_text, **filtered_kwargs)
-        if (
-            isinstance(generated, (str, bytes, dict, tuple, np.ndarray))
-            or not isinstance(generated, Iterable)
-        ):
-            generated = (generated,)
-        return generated
+            generated = generate(params.input_text, **filtered_kwargs)
+            if (
+                isinstance(generated, (str, bytes, dict, tuple, np.ndarray))
+                or not isinstance(generated, Iterable)
+            ):
+                generated = (generated,)
+            yield from generated
+        finally:
+            if reference_path is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(reference_path)
 
     def _run_tts(self, task: SpeechSynthesis) -> tuple[bytes, int]:
         """Generate and encode the complete TTS response."""

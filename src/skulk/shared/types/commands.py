@@ -57,6 +57,7 @@ class SpeechSynthesis(BaseCommand):
 
     task_params: SpeechSynthesisTaskParams
     owner_node: NodeId | None = None
+    target_instance_id: InstanceId | None = None
 
 
 class AudioTranscription(BaseCommand):
