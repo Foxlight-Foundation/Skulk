@@ -76,6 +76,68 @@ def test_audio_transcriptions_route_is_documented_in_openapi() -> None:
     assert operation["summary"] == "Transcribe speech audio"
 
 
+def test_audio_translations_route_is_documented_in_openapi() -> None:
+    """The experimental translation endpoint must appear in OpenAPI."""
+
+    api = _build_api()
+    schema = cast(dict[str, object], api.app.openapi())
+    paths = cast(dict[str, object], schema["paths"])
+    translation_path = cast(dict[str, object], paths["/v1/audio/translations"])
+    operation = cast(dict[str, object], translation_path["post"])
+
+    assert operation["tags"] == ["Audio"]
+    assert operation["summary"] == "Translate speech audio to English"
+
+
+@pytest.mark.anyio
+async def test_audio_translations_marks_shared_stt_task_for_english(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Translation should reuse batch STT while setting explicit task intent."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/canary-test")
+    captured_params: list[object] = []
+
+    async def _validate_model(self: API, requested_model: ModelId) -> ModelId:
+        assert self is api
+        assert requested_model == model_id
+        return model_id
+
+    async def _execute(
+        self: API,
+        params: object,
+        audio_bytes: bytes,
+    ) -> list[TranscriptionChunk]:
+        assert self is api
+        assert audio_bytes == b"RIFFtestWAVE"
+        captured_params.append(params)
+        return [
+            TranscriptionChunk(
+                model=model_id,
+                text="hello world",
+                language="en",
+                segments=[],
+                finish_reason="stop",
+            )
+        ]
+
+    monkeypatch.setattr(API, "_validate_audio_translation_model", _validate_model)
+    monkeypatch.setattr(API, "_execute_audio_transcription", _execute)
+
+    response = await api.audio_translations(
+        file=_upload(b"RIFFtestWAVE"),
+        model=str(model_id),
+        language="fr",
+    )
+
+    assert response.media_type == "application/json"
+    assert len(captured_params) == 1
+    params = cast(api_main.AudioTranscriptionTaskParams, captured_params[0])
+    assert params.translate_to_english is True
+    assert params.language == "fr"
+
+
 @pytest.mark.anyio
 async def test_audio_transcriptions_rejects_streaming_before_model_validation(
     monkeypatch: pytest.MonkeyPatch,

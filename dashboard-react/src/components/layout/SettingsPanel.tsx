@@ -35,6 +35,7 @@ const defaultStoreConfig = (): StoreConfig => ({
 const defaultExperimentsConfig = (): ExperimentsConfig => ({
   tts_streaming: false,
   stt_realtime: false,
+  speech_translation: false,
 });
 
 /* ---- animations ---- */
@@ -811,6 +812,29 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                     setExperimentsDraft((prev) => ({
                       ...prev,
                       tts_streaming: !prev.tts_streaming,
+                    }))
+                  }
+                />
+              </Row>
+              <Row>
+                <FieldLabel>
+                  {t('settings.experiments.speechTranslation', 'Speech translation')}
+                  <InfoTooltip
+                    content={t(
+                      'settings.experiments.speechTranslationTooltip',
+                      'Enables /v1/audio/translations for mounted models with validated speech translation support.',
+                    )}
+                  />
+                </FieldLabel>
+                <Toggle
+                  type="button"
+                  $on={experimentsDraft.speech_translation}
+                  aria-pressed={experimentsDraft.speech_translation}
+                  aria-label={t('settings.experiments.speechTranslation', 'Speech translation')}
+                  onClick={() =>
+                    setExperimentsDraft((prev) => ({
+                      ...prev,
+                      speech_translation: !prev.speech_translation,
                     }))
                   }
                 />

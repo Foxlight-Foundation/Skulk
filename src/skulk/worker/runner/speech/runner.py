@@ -125,6 +125,7 @@ def _stt_generate_kwargs(
         return_timestamps = bool(granularities) if granularities else None
         return {
             "language": params.language,
+            "task": "translate" if params.translate_to_english else None,
             "initial_prompt": _first_non_empty_text(
                 params.prompt, params.context, params.text
             ),
@@ -138,6 +139,13 @@ def _stt_generate_kwargs(
         }
     return {
         "language": params.language,
+        "task": "translate" if params.translate_to_english else None,
+        "source_lang": params.language,
+        "target_lang": "en" if params.translate_to_english else params.language,
+        "source_language": params.language,
+        "target_language": "en" if params.translate_to_english else None,
+        "use_pnc": True if params.translate_to_english else None,
+        "no_repeat_ngram_size": 3 if params.translate_to_english else None,
         "prompt": params.prompt,
         "temperature": params.temperature,
         "max_tokens": params.max_tokens,

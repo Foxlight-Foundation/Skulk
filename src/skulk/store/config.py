@@ -302,10 +302,14 @@ class ExperimentsConfig(FrozenModel):
         stt_realtime: Enables the experimental bidirectional provider facade
             for mounted STT cards that explicitly declare both
             ``audio.supports_streaming`` and ``audio.supports_realtime``.
+        speech_translation: Enables the experimental speech-to-English
+            translation endpoint for mounted cards that explicitly declare
+            ``audio.supports_translation``.
     """
 
     tts_streaming: bool = False
     stt_realtime: bool = False
+    speech_translation: bool = False
 
 
 @final

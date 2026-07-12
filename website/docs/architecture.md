@@ -341,8 +341,12 @@ claim VAD, conversation, or speech-to-speech behavior. Dashboard chat selects
 this path only when both the model card and local provider advertisement say it
 is available; its AudioWorklet resamples microphone Float32 frames to the edge's
 24 kHz PCM16 contract, while non-realtime models retain batch MediaRecorder
-transcription. Voice/reference-audio management and speech translation remain
-later phases.
+transcription. Mounted TTS cards with static `audio.voices` metadata expose it
+through the Skulk `GET /v1/audio/voices` extension. Translation-capable STT
+cards can reuse the bounded batch path through experimental
+`POST /v1/audio/translations`; the speech runner maps the English-target intent
+to model-family generation arguments. Reference-audio management remains a
+later phase.
 See [Speech Fabric and Realtime Design](speech-fabric-realtime).
 The dashboard composes the shipped REST endpoints in chat: mounted TTS models
 can speak draft text, replay assistant messages, or auto-speak final assistant
@@ -651,6 +655,9 @@ config section. `experiments.tts_streaming` enables the experimental
 `SKULK_ENABLE_EXPERIMENTAL_MODE`; the request still requires a mounted TTS card
 whose `audio.supports_streaming` flag has been set after model/backend
 validation.
+`experiments.speech_translation` enables `/v1/audio/translations` only on nodes
+running with experimental mode and only for mounted cards that explicitly
+declare `audio.supports_translation = true`.
 
 ## The dashboard
 

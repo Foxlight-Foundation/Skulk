@@ -321,6 +321,8 @@ class AudioCardConfig(CamelCaseModel):
     """Whether the model exposes a realtime session interface."""
     supports_voice_listing: bool | None = None
     """Whether the model can enumerate voices through a voice-listing API."""
+    voices: tuple[str, ...] = ()
+    """Stable built-in voice identifiers exposed by the model."""
     supports_reference_audio: bool | None = None
     """Whether the model accepts managed reference audio for voice conditioning."""
     supports_translation: bool | None = None
@@ -383,6 +385,26 @@ class AudioCardConfig(CamelCaseModel):
     def _serialize_sample_rates(self, value: tuple[PositiveInt, ...]) -> list[int]:
         return list(value)
 
+    @field_validator("voices", mode="before")
+    @classmethod
+    def _coerce_voices(cls, value: object) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, Iterable) or isinstance(value, (str, bytes)):
+            raise ValueError("voices must be a list of non-empty identifiers")
+        voices = tuple(
+            str(item).strip() for item in cast("Iterable[object]", value)
+        )
+        if any(not voice for voice in voices):
+            raise ValueError("voices must contain only non-empty identifiers")
+        if len(set(voices)) != len(voices):
+            raise ValueError("voices must not contain duplicates")
+        return voices
+
+    @field_serializer("voices")
+    def _serialize_voices(self, value: tuple[str, ...]) -> list[str]:
+        return list(value)
+
     @model_validator(mode="after")
     def _validate_audio_metadata_consistency(self) -> "AudioCardConfig":
         if (
@@ -398,6 +420,10 @@ class AudioCardConfig(CamelCaseModel):
             and self.kind != AudioCardKind.SpeechToText
         ):
             raise ValueError("supports_translation requires kind to be stt")
+        if self.voices and self.kind != AudioCardKind.TextToSpeech:
+            raise ValueError("voices requires kind to be tts")
+        if self.voices and self.supports_voice_listing is not True:
+            raise ValueError("voices requires supports_voice_listing=true")
         return self
 
 
