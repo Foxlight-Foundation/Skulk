@@ -461,6 +461,7 @@ class Node:
         await router.register_topic(topics.DATA)
         await router.register_topic(topics.PROVIDER_DATA)
         await router.register_topic(topics.REALTIME_AUDIO)
+        await router.register_topic(topics.SPEECH_MEDIA)
         telemetry_view = TelemetryView()
         realtime_audio_sender, realtime_audio_receiver = channel[
             RealtimeAudioInputFrame
@@ -570,6 +571,8 @@ class Node:
                 realtime_audio_packet_receiver=router.receiver(
                     topics.REALTIME_AUDIO
                 ),
+                speech_media_packet_sender=router.sender(topics.SPEECH_MEDIA),
+                speech_media_packet_receiver=router.receiver(topics.SPEECH_MEDIA),
                 realtime_audio_sender=(
                     None if args.no_worker else realtime_audio_sender
                 ),
@@ -614,6 +617,7 @@ class Node:
                 realtime_audio_packet_receiver=router.receiver(
                     topics.REALTIME_AUDIO
                 ),
+                speech_media_packet_receiver=router.receiver(topics.SPEECH_MEDIA),
                 store_client=worker_store_client,
                 staging_config=worker_staging_cfg,
             )
@@ -1015,6 +1019,9 @@ class Node:
                             data_sender=self.router.sender(topics.DATA),
                             realtime_audio_packet_receiver=self.router.receiver(
                                 topics.REALTIME_AUDIO
+                            ),
+                            speech_media_packet_receiver=self.router.receiver(
+                                topics.SPEECH_MEDIA
                             ),
                         )
                         self._tg.start_soon(self.worker.run)

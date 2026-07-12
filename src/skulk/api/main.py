@@ -231,6 +231,7 @@ from skulk.master.placement import place_instance as get_instance_placements
 from skulk.master.placement_utils import usable_vram_by_node
 from skulk.routing.provider_streams import ProviderStreamPacket
 from skulk.routing.realtime_audio import RealtimeAudioPacket
+from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.shared.apply import apply
 from skulk.shared.constants import (
     DASHBOARD_DIR,
@@ -1074,6 +1075,8 @@ class API:
         realtime_audio_sender: "Sender[RealtimeAudioInputFrame] | None" = None,
         realtime_audio_packet_sender: "Sender[RealtimeAudioPacket] | None" = None,
         realtime_audio_packet_receiver: "Receiver[RealtimeAudioPacket] | None" = None,
+        speech_media_packet_sender: "Sender[SpeechMediaPacket] | None" = None,
+        speech_media_packet_receiver: "Receiver[SpeechMediaPacket] | None" = None,
         data_plane_zenoh: bool = False,
         data_plane_egress_provider: (
             Callable[[], DataPlaneEgressDiagnostics] | None
@@ -1142,6 +1145,8 @@ class API:
         self._realtime_audio_sender = realtime_audio_sender
         self._realtime_audio_packet_sender = realtime_audio_packet_sender
         self._realtime_audio_packet_receiver = realtime_audio_packet_receiver
+        self._speech_media_packet_sender = speech_media_packet_sender
+        self._speech_media_packet_receiver = speech_media_packet_receiver
         self._data_plane_zenoh = data_plane_zenoh
         self._provider_stream_receivers: dict[
             str, _ProviderStreamReceiveState

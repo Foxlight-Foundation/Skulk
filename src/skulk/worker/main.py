@@ -15,6 +15,7 @@ from PIL import Image
 
 from skulk.download.download_utils import resolve_model_in_path
 from skulk.routing.realtime_audio import RealtimeAudioPacket
+from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
 from skulk.shared.models.memory_estimate import (
@@ -565,6 +566,7 @@ class Worker:
         data_sender: Sender[DataChunk] | None = None,
         realtime_audio_receiver: Receiver[RealtimeAudioInputFrame] | None = None,
         realtime_audio_packet_receiver: Receiver[RealtimeAudioPacket] | None = None,
+        speech_media_packet_receiver: Receiver[SpeechMediaPacket] | None = None,
         store_client: ModelStoreClient | None = None,
         staging_config: StagingNodeConfig | None = None,
     ):
@@ -581,6 +583,7 @@ class Worker:
         self._data_sender = data_sender
         self._realtime_audio_receiver = realtime_audio_receiver
         self._realtime_audio_packet_receiver = realtime_audio_packet_receiver
+        self._speech_media_packet_receiver = speech_media_packet_receiver
         # Shared, Node-owned telemetry view (#279). The worker prunes a node's
         # telemetry here when it sees NodeTimedOut, because the worker runs on
         # EVERY node regardless of role - so a --no-api node (or a --no-api
