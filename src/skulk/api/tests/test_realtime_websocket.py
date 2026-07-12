@@ -11,12 +11,13 @@ from typing import cast
 import anyio
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from starlette.testclient import WebSocketTestSession
 from starlette.websockets import WebSocketDisconnect
 
 from skulk.api import realtime as realtime_api
 from skulk.api.main import API
-from skulk.api.realtime import _MAX_TRANSCRIPT_TEXT_BYTES
+from skulk.api.realtime import _MAX_TRANSCRIPT_TEXT_BYTES, ServerVadConfig
 from skulk.extensions import (
     CapabilityResult,
     CapabilityStreamError,
@@ -70,6 +71,23 @@ def _mapping(value: object) -> dict[str, object]:
     """Narrow one nested JSON object."""
 
     return cast(dict[str, object], value)
+
+
+def test_server_vad_rejects_impossible_duration_relationships() -> None:
+    """Turn thresholds must be reachable before the hard utterance bound."""
+
+    with pytest.raises(ValidationError, match="minimum_speech_ms"):
+        ServerVadConfig(
+            type="server_vad",
+            minimum_speech_ms=1000,
+            maximum_utterance_ms=500,
+        )
+    with pytest.raises(ValidationError, match="silence_duration_ms"):
+        ServerVadConfig(
+            type="server_vad",
+            silence_duration_ms=1000,
+            maximum_utterance_ms=500,
+        )
 
 
 async def _empty_frames() -> AsyncIterator[CapabilityStreamFrame]:

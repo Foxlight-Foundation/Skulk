@@ -3,14 +3,21 @@
 import base64
 import binascii
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Literal, cast, final
+from typing import Annotated, Literal, Self, cast, final
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 import anyio
 from fastapi import WebSocket, WebSocketDisconnect
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
 from skulk.extensions import (
     MAX_INLINE_MEDIA_BYTES,
@@ -88,6 +95,16 @@ class ServerVadConfig(_RealtimeModel):
         le=120000,
         description="Hard duration limit that ends a continuous utterance.",
     )
+
+    @model_validator(mode="after")
+    def validate_turn_durations(self) -> Self:
+        """Reject thresholds that cannot complete within the utterance bound."""
+
+        if self.minimum_speech_ms > self.maximum_utterance_ms:
+            raise ValueError("minimum_speech_ms must not exceed maximum_utterance_ms")
+        if self.silence_duration_ms > self.maximum_utterance_ms:
+            raise ValueError("silence_duration_ms must not exceed maximum_utterance_ms")
+        return self
 
 
 class TranscriptionSessionConfig(_RealtimeModel):
