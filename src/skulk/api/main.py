@@ -10148,6 +10148,12 @@ class API:
                 first_chunk = await self._receive_initial_audio_speech_chunk(
                     command_id, recv
                 )
+                if first_chunk.format != response_format:
+                    await self._cancel_audio_speech_command(command_id)
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Speech synthesis returned an unexpected audio format",
+                    )
                 if (
                     response_format == AudioResponseFormat.Pcm
                     and first_chunk.sample_rate is None

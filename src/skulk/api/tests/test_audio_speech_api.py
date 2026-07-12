@@ -1254,6 +1254,58 @@ async def test_audio_speech_rejects_streaming_pcm_without_sample_rate(
 
 
 @pytest.mark.anyio
+async def test_audio_speech_rejects_mismatched_initial_stream_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HTTP framing cannot be committed before runner format truth agrees."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/qwen3-tts-test")
+    cancelled: list[CommandId] = []
+
+    async def _validate_model(
+        self: API,
+        requested_model: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        del self, requested_model, response_format, stream
+        return model_id, AudioResponseFormat.Pcm
+
+    async def _send(command: object) -> None:
+        if isinstance(command, SpeechSynthesis):
+            await api._audio_speech_queues[command.command_id].send(
+                AudioChunk(
+                    model=model_id,
+                    data=base64.b64encode(b"mp3").decode("ascii"),
+                    chunk_index=0,
+                    format=AudioResponseFormat.Mp3,
+                )
+            )
+
+    async def _cancel(self: API, command_id: CommandId) -> None:
+        assert self is api
+        cancelled.append(command_id)
+
+    monkeypatch.setattr(API, "_validate_speech_synthesis_model", _validate_model)
+    monkeypatch.setattr(api, "_send", _send)
+    monkeypatch.setattr(API, "_cancel_audio_speech_command", _cancel)
+
+    with pytest.raises(HTTPException, match="unexpected audio format"):
+        await api.audio_speech(
+            AudioSpeechRequest(
+                model=str(model_id),
+                input="hello",
+                response_format=AudioResponseFormat.Pcm,
+                stream=True,
+            )
+        )
+    assert len(cancelled) == 1
+    assert cancelled[0] not in api._audio_speech_queues
+
+
+@pytest.mark.anyio
 async def test_audio_speech_batch_pcm_includes_playback_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
