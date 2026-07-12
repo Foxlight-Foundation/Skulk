@@ -3110,6 +3110,14 @@ class API:
                     f"Model {resolved} does not declare streaming speech support"
                 ),
             )
+        if stream and not self._streaming_tts_model_is_ready(resolved):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"All mounted instances of streaming speech model {resolved} "
+                    "must have a ready runner"
+                ),
+            )
         resolved_response_format = (
             response_format
             or profile.default_audio_response_format
@@ -3174,22 +3182,12 @@ class API:
             and config.experiments.speech_translation
         )
 
-    def _has_mounted_streaming_tts_model(self) -> bool:
-        """Return whether core serving currently exposes eligible TTS capacity."""
+    def _streaming_tts_model_is_ready(self, model_id: ModelId | None = None) -> bool:
+        """Return whether every routable instance of one streaming model is ready."""
 
-        if not self._builtin_speech_provider_enabled:
-            return False
+        eligible_by_model: dict[ModelId, list[Instance]] = {}
         for instance in self.state.instances.values():
-            placement_runners = tuple(
-                instance.shard_assignments.node_to_runner.values()
-            )
-            if len(placement_runners) != 1 or not all(
-                isinstance(
-                    self.state.runners.get(runner_id),
-                    (RunnerReady, RunnerRunning),
-                )
-                for runner_id in placement_runners
-            ):
+            if model_id is not None and instance.shard_assignments.model_id != model_id:
                 continue
             card = self._model_card_for_instance(instance)
             if card is None or card.audio is None:
@@ -3206,8 +3204,27 @@ class API:
                     or AudioResponseFormat.Mp3 in profile.audio_response_formats
                 )
             ):
-                return True
-        return False
+                eligible_by_model.setdefault(card.model_id, []).append(instance)
+
+        def instance_is_ready(instance: Instance) -> bool:
+            runner_ids = tuple(instance.shard_assignments.node_to_runner.values())
+            return len(runner_ids) == 1 and all(
+                isinstance(
+                    self.state.runners.get(runner_id),
+                    (RunnerReady, RunnerRunning),
+                )
+                for runner_id in runner_ids
+            )
+
+        return any(
+            instances and all(instance_is_ready(instance) for instance in instances)
+            for instances in eligible_by_model.values()
+        )
+
+    def _has_mounted_streaming_tts_model(self) -> bool:
+        """Return whether core serving currently exposes eligible TTS capacity."""
+
+        return self._builtin_speech_provider_enabled and self._streaming_tts_model_is_ready()
 
     def _realtime_stt_instance(
         self,

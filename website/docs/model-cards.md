@@ -199,7 +199,7 @@ Declares speech serving metadata for TTS and STT models:
 - `sample_rates`
   - supported input or output sample rates in hertz
 
-For stable TTS streaming, `supports_streaming = true` is the model-side
+For stable TTS streaming, `audio.supports_streaming = true` is the model-side
 eligibility gate; the model must also be mounted and ready.
 
 For realtime STT, both `supports_streaming = true` and

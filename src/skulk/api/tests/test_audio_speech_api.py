@@ -179,6 +179,32 @@ def _state_with_running_card(card: ModelCard) -> State:
     )
 
 
+def _with_unready_replica(state: State) -> State:
+    """Add a second routable instance whose runner is not ready."""
+
+    source = next(iter(state.instances.values()))
+    shard = next(iter(source.shard_assignments.runner_to_shard.values()))
+    runner_id = RunnerId("speech-runner-replica")
+    node_id = NodeId("speech-node-replica")
+    instance_id = InstanceId("speech-instance-replica")
+    replica = MlxRingInstance(
+        instance_id=instance_id,
+        shard_assignments=ShardAssignments(
+            model_id=source.shard_assignments.model_id,
+            runner_to_shard={runner_id: shard},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={node_id: []},
+        ephemeral_port=52416,
+    )
+    return state.model_copy(
+        update={
+            "instances": {**state.instances, instance_id: replica},
+            "runners": {**state.runners, runner_id: RunnerIdle()},
+        }
+    )
+
+
 def _write_tts_streaming_experiment_config(api: API, tmp_path: Path) -> None:
     """Point the API at a temp config file with TTS streaming opted in."""
 
@@ -378,6 +404,10 @@ def test_builtin_tts_capability_tracks_live_streaming_capacity() -> None:
     api.state = api.state.model_copy(
         update={"runners": {RunnerId("speech-runner"): RunnerIdle()}}
     )
+    api._sync_builtin_speech_capability()
+    assert api._telemetry_view.local_advertised_capabilities == set()
+
+    api.state = _with_unready_replica(_state_with_running_card(card))
     api._sync_builtin_speech_capability()
     assert api._telemetry_view.local_advertised_capabilities == set()
 
@@ -748,6 +778,25 @@ async def test_audio_speech_streaming_is_stable_without_experimental_mode(
         AudioResponseFormat.Mp3,
         stream=True,
     ) == (card.model_id, AudioResponseFormat.Mp3)
+
+
+@pytest.mark.anyio
+async def test_audio_speech_streaming_rejects_unready_routable_replica() -> None:
+    """Admission fails fast when the master could choose an unready replica."""
+
+    api = _build_api()
+    card = _tts_card(supports_streaming=True)
+    api.state = _with_unready_replica(_state_with_running_card(card))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api._validate_speech_synthesis_model(
+            card.model_id,
+            AudioResponseFormat.Mp3,
+            stream=True,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert "all mounted instances" in str(exc_info.value.detail).lower()
 
 
 @pytest.mark.anyio

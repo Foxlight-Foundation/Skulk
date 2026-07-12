@@ -23,7 +23,8 @@ Skulk currently exposes:
 
 `/v1/audio/speech` returns an encoded audio response. Its stable `stream=true`
 path is available when the mounted TTS card declares
-`audio.supports_streaming = true` and the serving runner is ready.
+`audio.supports_streaming = true`, every routable instance is ready, and the
+request format resolves to MP3. Other encoded formats remain batch-only.
 
 `/v1/audio/transcriptions` accepts a bounded multipart upload and returns one
 completed transcription. It does not provide progressive REST transcription.
