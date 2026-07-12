@@ -61,7 +61,7 @@ from skulk.shared.types.telemetry import TelemetryView
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
 from skulk.shared.types.worker.runners import RunnerId, RunnerReady, ShardAssignments
 from skulk.shared.types.worker.shards import PipelineShardMetadata
-from skulk.utils.channels import Receiver, channel
+from skulk.utils.channels import Receiver, Sender, channel
 
 
 def _build_api() -> API:
@@ -348,7 +348,16 @@ async def test_audio_speech_routes_reference_audio_outside_command(
 
     api = _build_api()
     media_sender, media_receiver = channel[SpeechMediaPacket](8)
-    api._speech_media_packet_sender = media_sender
+    actions: list[str] = []
+
+    class _RecordingMediaSender:
+        async def send(self, packet: SpeechMediaPacket) -> None:
+            actions.append("media")
+            await media_sender.send(packet)
+
+    api._speech_media_packet_sender = cast(
+        "Sender[SpeechMediaPacket]", cast("object", _RecordingMediaSender())
+    )
     api._data_plane_zenoh = True
     card = _tts_card(supports_reference_audio=True)
     state = _state_with_running_card(card)
@@ -369,6 +378,7 @@ async def test_audio_speech_routes_reference_audio_outside_command(
 
     async def _send(command: object) -> None:
         if isinstance(command, SpeechSynthesis):
+            actions.append("command")
             sent_commands.append(command)
             await api._audio_speech_queues[command.command_id].send(
                 AudioChunk(
@@ -407,6 +417,7 @@ async def test_audio_speech_routes_reference_audio_outside_command(
     assert first.data == b"RIFF-reference"
     assert terminal.kind == "completed"
     assert len(sent_commands) == 1
+    assert actions == ["command", "media", "media"]
     command = sent_commands[0]
     assert command.target_instance_id == InstanceId("speech-instance")
     assert command.task_params.reference_audio_present is True

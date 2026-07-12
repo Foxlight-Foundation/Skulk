@@ -8952,6 +8952,7 @@ class API:
             assert target_node is not None
             self._speech_media_targets[command_id] = target_node
         try:
+            await self._send(command)
             if reference_audio is not None:
                 if target_node is None or self._speech_media_packet_sender is None:
                     raise HTTPException(
@@ -8990,8 +8991,10 @@ class API:
                         sha256=task_params.reference_audio_sha256,
                     )
                 )
-            await self._send(command)
         except Exception:
+            if command_id not in self._cancelled_command_ids:
+                with anyio.CancelScope(shield=True):
+                    await self._cancel_audio_speech_command(command_id)
             if reference_audio is not None and target_node is not None:
                 with contextlib.suppress(Exception):
                     assert self._speech_media_packet_sender is not None
