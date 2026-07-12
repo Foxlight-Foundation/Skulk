@@ -96,6 +96,21 @@ export function completePcm16Samples(
   };
 }
 
+/** Split one decoded network frame into independently transferable queue frames. */
+export function splitPlaybackSamples(
+  samples: Float32Array,
+  maximumSamples: number,
+): Float32Array[] {
+  if (!Number.isInteger(maximumSamples) || maximumSamples <= 0) {
+    throw new Error('Playback frame limit must be a positive integer.');
+  }
+  const frames: Float32Array[] = [];
+  for (let offset = 0; offset < samples.length; offset += maximumSamples) {
+    frames.push(samples.slice(offset, Math.min(offset + maximumSamples, samples.length)));
+  }
+  return frames;
+}
+
 /** Split visible text into complete synthesis sentences and one retained tail. */
 export function splitCompleteSpeechSentences(text: string): {
   sentences: string[];
@@ -182,12 +197,14 @@ export class StreamingSpeechPlayback {
         if (framed.complete.byteLength === 0) continue;
         const decodedSamples = pcm16LeToFloat32(framed.complete);
         const samples = resampler?.process(decodedSamples) ?? decodedSamples;
-        if (samples.length > playbackSampleRate * this.maximumBufferedSeconds) {
-          throw new Error('One streaming speech frame exceeds the playback buffer limit.');
+        const maximumFrameSamples = Math.floor(
+          playbackSampleRate * this.maximumBufferedSeconds,
+        );
+        for (const frame of splitPlaybackSamples(samples, maximumFrameSamples)) {
+          await this.waitForCapacity(playbackSampleRate, frame.length, signal);
+          this.bufferedSamples += frame.length;
+          node.port.postMessage({ type: 'audio', samples: frame.buffer }, [frame.buffer]);
         }
-        await this.waitForCapacity(playbackSampleRate, samples.length, signal);
-        this.bufferedSamples += samples.length;
-        node.port.postMessage({ type: 'audio', samples: samples.buffer }, [samples.buffer]);
       }
       if (!this.stopped) {
         if (pendingPcmByte !== null) {

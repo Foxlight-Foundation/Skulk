@@ -10033,6 +10033,15 @@ class API:
                 first_chunk = await self._receive_initial_audio_speech_chunk(
                     command_id, recv
                 )
+                if (
+                    response_format == AudioResponseFormat.Pcm
+                    and first_chunk.sample_rate is None
+                ):
+                    await self._cancel_audio_speech_command(command_id)
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Raw PCM speech response did not declare a sample rate",
+                    )
             except anyio.get_cancelled_exc_class():
                 await self._cancel_audio_speech_command(command_id)
                 await self._finalize_command_stream(

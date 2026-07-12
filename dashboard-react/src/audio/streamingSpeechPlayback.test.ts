@@ -5,6 +5,7 @@ import {
   completePcm16Samples,
   canUseStreamingSpeechPlayback,
   SpeechSentenceQueue,
+  splitPlaybackSamples,
   splitCompleteSpeechSentences,
 } from './streamingSpeechPlayback';
 
@@ -37,6 +38,13 @@ describe('completePcm16Samples', () => {
     const second = completePcm16Samples(new Uint8Array([0x12, 0xff, 0x7f]), first.pendingByte);
     expect(Array.from(second.complete)).toEqual([0x34, 0x12, 0xff, 0x7f]);
     expect(second.pendingByte).toBeNull();
+  });
+});
+
+describe('splitPlaybackSamples', () => {
+  it('splits a resampled backend chunk at the bounded queue capacity', () => {
+    const frames = splitPlaybackSamples(new Float32Array(9), 4);
+    expect(frames.map((frame) => frame.length)).toEqual([4, 4, 1]);
   });
 });
 

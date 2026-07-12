@@ -627,6 +627,7 @@ export function ChatView({
   const [modelCatalogById, setModelCatalogById] = useState<Record<string, ModelInfo>>({});
   const [speechError, setSpeechError] = useState<string | null>(null);
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
+  const [isAutoSpeaking, setIsAutoSpeaking] = useState(false);
   const audioPlaybackRef = useRef<HTMLAudioElement | null>(null);
   const audioObjectUrlRef = useRef<string | null>(null);
   const streamingPlaybackRef = useRef<StreamingSpeechPlayback | null>(null);
@@ -838,6 +839,7 @@ export function ChatView({
       audioObjectUrlRef.current = null;
     }
     setSpeakingMessageId(null);
+    setIsAutoSpeaking(false);
   }, []);
 
   const playSpeechSegment = useCallback(async (
@@ -868,6 +870,7 @@ export function ChatView({
     if (!response.ok) throw new Error(await responseErrorMessage(response));
 
     setSpeakingMessageId(messageId);
+    setIsAutoSpeaking(messageId === null);
     if (useStreamingPcm) {
       const playback = new StreamingSpeechPlayback();
       streamingPlaybackRef.current = playback;
@@ -1042,14 +1045,14 @@ export function ChatView({
       && canUseStreamingSpeechPlayback()
     )
       ? new SpeechSentenceQueue(
-          (sentence, signal) => playSpeechSegment(sentence, 'streaming', signal),
+          (sentence, signal) => playSpeechSegment(sentence, null, signal),
           (error) => {
             const message = error instanceof Error
               ? error.message
               : t('chat.view.errors.speechSynthesisFailed', 'Speech synthesis failed.');
             setSpeechError(message);
           },
-          () => setSpeakingMessageId(null),
+          () => setIsAutoSpeaking(false),
         )
       : null;
     speechSentenceQueueRef.current = sentenceQueue;
@@ -1063,6 +1066,7 @@ export function ChatView({
       for (let toolRound = 0; toolRound < MAX_TOOL_ROUNDS; toolRound++) {
         resetStallTimer();
         speechVisibleContent = '';
+        speechTail = '';
 
         let iterationRawContent = '';
         let iterationThinking = '';
@@ -1315,6 +1319,7 @@ export function ChatView({
     activeCommandIdRef.current = null;
 
     abortRef.current?.abort();
+    stopSpeechPlayback();
 
     if (!commandId) return;
 
@@ -1325,7 +1330,7 @@ export function ChatView({
     } catch {
       // The UI should still stop immediately even if the cancel request races with teardown.
     }
-  }, []);
+  }, [stopSpeechPlayback]);
 
   const handleDelete = useCallback((id: string) => {
     deleteMessageAction(id);
@@ -1430,7 +1435,7 @@ export function ChatView({
           selectedSpeechModelId={selectedSpeechModelId}
           selectedVoice={selectedVoice}
           autoSpeakAssistant={autoSpeakAssistant}
-          isSpeaking={speakingMessageId !== null}
+          isSpeaking={speakingMessageId !== null || isAutoSpeaking}
           voiceError={speechError}
           onSelectTranscriptionModel={selectTranscriptionModel}
           onSelectSpeechModel={selectSpeechModel}

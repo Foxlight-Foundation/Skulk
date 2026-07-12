@@ -1161,6 +1161,64 @@ async def test_audio_speech_streams_pcm_with_playback_metadata(
 
 
 @pytest.mark.anyio
+async def test_audio_speech_rejects_streaming_pcm_without_sample_rate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming raw PCM must fail before response admission without framing."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/qwen3-tts-test")
+    cancelled: list[CommandId] = []
+
+    async def _validate_model(
+        self: API,
+        requested_model: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        del self, requested_model, response_format, stream
+        return model_id, AudioResponseFormat.Pcm
+
+    async def _send(command: object) -> None:
+        if isinstance(command, SpeechSynthesis):
+            await api._audio_speech_queues[command.command_id].send(
+                AudioChunk(
+                    model=model_id,
+                    data=base64.b64encode(b"\x00\x00").decode("ascii"),
+                    chunk_index=0,
+                    total_chunks=None,
+                    format=AudioResponseFormat.Pcm,
+                    sample_rate=None,
+                    finish_reason=None,
+                )
+            )
+
+    async def _cancel(self: API, command_id: CommandId) -> None:
+        assert self is api
+        cancelled.append(command_id)
+
+    monkeypatch.setattr(API, "_validate_speech_synthesis_model", _validate_model)
+    monkeypatch.setattr(api, "_send", _send)
+    monkeypatch.setattr(API, "_cancel_audio_speech_command", _cancel)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.audio_speech(
+            AudioSpeechRequest(
+                model=str(model_id),
+                input="hello",
+                response_format=AudioResponseFormat.Pcm,
+                stream=True,
+            )
+        )
+
+    assert exc_info.value.status_code == 500
+    assert "sample rate" in str(exc_info.value.detail)
+    assert len(cancelled) == 1
+    assert cancelled[0] not in api._audio_speech_queues
+
+
+@pytest.mark.anyio
 async def test_audio_speech_batch_pcm_includes_playback_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
