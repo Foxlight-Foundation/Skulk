@@ -1671,6 +1671,7 @@ class API:
             ),
         )(self.audio_voices)
         self.app.websocket("/v1/realtime")(self.realtime_transcription)
+        self.app.websocket("/v1/fabric/chains/speech")(self.fabric_speech_chain)
         self.app.post(
             "/bench/chat/completions",
             tags=["Compatibility APIs"],
@@ -9998,6 +9999,32 @@ class API:
         await RealtimeTranscriptionBridge(
             websocket=websocket,
             model=model,
+            open_session=self._open_realtime_transcription_session,
+            generate_assistant=self._generate_realtime_assistant,
+            open_speech_session=self._open_realtime_speech_session,
+            validate_response_config=self._validate_realtime_response_config,
+        ).serve()
+
+    async def fabric_speech_chain(
+        self,
+        websocket: WebSocket,
+        stt_model: Annotated[str, Query(min_length=1, max_length=512)],
+    ) -> None:
+        """Serve one typed Fabric speech composition WebSocket.
+
+        Args:
+            websocket: Client WebSocket owned by this API node.
+            stt_model: Mounted realtime STT participant selected for the chain.
+
+        Side effects:
+            Composes the selected STT participant with optional mounted chat and
+            TTS participants declared by ``session.update``. Media remains on
+            bounded provider transports and disconnect cancels active work.
+        """
+
+        await RealtimeTranscriptionBridge(
+            websocket=websocket,
+            model=stt_model,
             open_session=self._open_realtime_transcription_session,
             generate_assistant=self._generate_realtime_assistant,
             open_speech_session=self._open_realtime_speech_session,

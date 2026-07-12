@@ -21,6 +21,8 @@ Skulk currently exposes:
 - `GET /v1/audio/voices` for a mounted model's static built-in voice catalog;
 - `WS /v1/realtime?model=<model-id>` for serialized multi-turn realtime
   transcription, including optional bounded server VAD and automatic commit.
+- `WS /v1/fabric/chains/speech?stt_model=<model-id>` for the same typed
+  STT-to-chat-to-TTS composition under an explicit Fabric endpoint.
 
 `/v1/audio/speech` returns an encoded audio response. Its stable `stream=true`
 path is available when the mounted TTS card declares
@@ -48,6 +50,11 @@ commit events over a WebSocket. It emits transcript delta, final, and failure
 events from the mounted realtime STT model. An optional response configuration
 routes final transcripts through a mounted chat model and can stream the visible
 answer through a mounted TTS participant.
+
+The Fabric chain endpoint deliberately reuses this contract and implementation.
+Clients select optional chat/TTS participants through `session.update`; normal
+capability discovery, health, locality, cancellation, and data-plane rules stay
+authoritative instead of being duplicated in a second orchestration runtime.
 
 See [API Guide](api-guide.md) for request fields, response formats, limits, and
 errors.

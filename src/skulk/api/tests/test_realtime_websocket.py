@@ -318,6 +318,84 @@ def test_realtime_websocket_translates_pcm_and_transcript_lifecycle() -> None:
     assert media.sample_rate == 24_000
 
 
+def test_fabric_speech_chain_uses_typed_realtime_session_contract() -> None:
+    """The Fabric chain surface composes through the hardened realtime bridge."""
+
+    api = _build_api()
+    input_frames: list[CapabilityStreamFrame] = []
+    _install_waiting_session(api, input_frames, call_id="fabric-speech-chain")
+
+    with TestClient(api.app).websocket_connect(
+        "/v1/fabric/chains/speech?stt_model=org%2Frealtime-stt",
+        headers={"origin": "http://testserver"},
+    ) as websocket:
+        created = _receive_json(websocket)
+        assert created["type"] == "session.created"
+        created_session = _mapping(created["session"])
+        created_audio = _mapping(created_session["audio"])
+        created_input = _mapping(created_audio["input"])
+        assert _mapping(created_input["transcription"])["model"] == (
+            "org/realtime-stt"
+        )
+        websocket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {
+                            "transcription": {"model": "org/realtime-stt"},
+                            "turn_detection": {"type": "server_vad"},
+                        }
+                    },
+                },
+            }
+        )
+        updated = _receive_json(websocket)
+        assert updated["type"] == "session.updated"
+        session = _mapping(updated["session"])
+        audio = _mapping(session["audio"])
+        input_config = _mapping(audio["input"])
+        assert input_config["turn_detection"] == {
+            "type": "server_vad",
+            "aggressiveness": 2,
+            "minimum_speech_ms": 120,
+            "silence_duration_ms": 400,
+            "prefix_padding_ms": 200,
+            "maximum_utterance_ms": 30_000,
+        }
+
+
+def test_fabric_speech_chain_denies_cross_origin_browser_connection() -> None:
+    """The composition surface enforces the shared browser-origin policy."""
+
+    api = _build_api()
+    opened = Event()
+
+    async def open_session(model: str, sample_rate: int) -> CapabilityStreamSession:
+        del model, sample_rate
+        opened.set()
+        return CapabilityStreamSession(
+            open_result=call_failure("unexpected", "provider_error", "unexpected"),
+            frames=_empty_frames(),
+        )
+
+    api._open_realtime_transcription_session = open_session
+    client = TestClient(api.app)
+
+    with (
+        pytest.raises(WebSocketDisconnect) as disconnect,
+        client.websocket_connect(
+            "/v1/fabric/chains/speech?stt_model=org%2Frealtime-stt",
+            headers={"origin": "https://untrusted.example"},
+        ),
+    ):
+        pass
+
+    assert disconnect.value.code == 1008
+    assert not opened.is_set()
+
+
 def test_realtime_websocket_generates_text_and_streams_tts_audio() -> None:
     """A completed transcript routes through mounted chat and TTS participants."""
 

@@ -83,6 +83,7 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `POST /v1/audio/translations`
 - `GET /v1/audio/voices`
 - `WS /v1/realtime`
+- `WS /v1/fabric/chains/speech`
 - `POST /v1/messages`
 - `POST /ollama/api/chat`
 - `POST /ollama/api/generate`
@@ -1622,6 +1623,23 @@ For compatibility with clients written against the earlier transcription beta,
 the edge also accepts `transcription_session.update` with
 `input_audio_format`, `input_audio_transcription`, `turn_detection`, and
 `input_audio_noise_reduction`, replying with `transcription_session.updated`.
+
+### Compose a typed Fabric speech chain
+
+**WS** `/v1/fabric/chains/speech?stt_model=<mounted-realtime-stt-model>`
+
+This first-class composition surface uses the same hardened event contract as
+`/v1/realtime`, but names the endpoint by its Fabric role. After
+`session.created`, send `session.update` to select server VAD and an optional
+`response` containing mounted `model`, `tts_model`, and `voice` participants.
+Input PCM, transcript events, assistant text, TTS audio, cancellation, bounded
+history, and terminal status retain the contracts documented above.
+
+The chain resolves every participant through normal mounted capability and
+health checks. It does not create a second runtime, persist audio or transcripts
+in State, perform graph search, or introduce prompt-level authority. Remote
+participants continue to use the normal bounded provider data plane, and socket
+disconnect or `response.cancel` reaches the active provider/model commands.
 
 ```bash
 curl http://localhost:52415/v1/capabilities

@@ -389,7 +389,7 @@ class RealtimeTranscriptionBridge:
             if not isinstance(text, str):
                 await self._send_error(
                     code="unsupported_frame",
-                    message="realtime compatibility events must use JSON text frames",
+                    message="speech WebSocket events must use JSON text frames",
                 )
                 await self._close(1003)
                 return
@@ -397,7 +397,7 @@ class RealtimeTranscriptionBridge:
                 await self._send_error(
                     code="event_too_large",
                     message=(
-                        "realtime client event exceeds the bounded WebSocket "
+                        "client event exceeds the bounded speech WebSocket "
                         f"limit of {REALTIME_WEBSOCKET_MAX_MESSAGE_BYTES} bytes"
                     ),
                 )
@@ -408,7 +408,7 @@ class RealtimeTranscriptionBridge:
             except ValidationError as exc:
                 await self._send_error(
                     code="invalid_event",
-                    message=f"invalid realtime client event: {exc.errors()[0]['msg']}",
+                    message=f"invalid speech WebSocket event: {exc.errors()[0]['msg']}",
                 )
                 await self._close(1008)
                 return
@@ -423,11 +423,12 @@ class RealtimeTranscriptionBridge:
                     await self._send_error(
                         code="unsupported_session_update",
                         message=(
-                            "Skulk realtime transcription currently requires the URL "
-                            "model, pcm16, 24 kHz mono audio, optional supported "
+                            "The Skulk speech WebSocket currently requires the "
+                            "URL-selected STT model, pcm16, 24 kHz mono audio, "
+                            "optional supported "
                             "server VAD, "
                             "no noise reduction, "
-                            "and no additional fields"
+                            "and no unsupported fields"
                         ),
                         client_event_id=event.event_id,
                     )

@@ -137,7 +137,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
   support. `WS /v1/realtime` is a multi-turn OpenAI-compatible adapter over
   this provider: base64 24 kHz
   PCM16 at the API edge becomes raw Fabric media, and disconnect cancels the
-  provider. Dashboard chat uses this path only when card truth and the local
+  provider. `WS /v1/fabric/chains/speech` exposes the same hardened bridge as
+  an explicit typed STT-to-chat-to-TTS composition surface; its session update
+  selects optional mounted chat, TTS, and voice participants. Dashboard chat
+  uses this path only when card truth and the local
   live provider tag agree, resampling AudioWorklet microphone frames to 24 kHz
   PCM16; batch cards keep MediaRecorder upload. Every production API also
   advertises `vad@1.0.0`, a stable bidirectional WebRTC VAD provider for

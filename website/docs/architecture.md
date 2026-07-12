@@ -348,10 +348,11 @@ sourced; partial plus final `TranscriptionChunk` output returns through DATA.
 Remote capacity is not advertised when Zenoh is unavailable. The provider is
 available only when the card declares both streaming and realtime support and
 eligible mounted capacity is ready and reachable. The
-`WS /v1/realtime` compatibility edge adapts OpenAI-style base64 24 kHz PCM16
-append/commit events onto this same binary provider path, emits transcript
-delta/final events, enforces same-origin browsers and bounded messages, and
-cancels the provider on disconnect. Optional bounded server VAD incrementally
+`WS /v1/realtime` compatibility edge and the explicit
+`WS /v1/fabric/chains/speech` composition surface adapt base64 24 kHz PCM16
+append/commit events onto this same binary provider path and emit transcript
+delta/final events, enforce same-origin browsers and bounded messages, and
+cancel the provider on disconnect. Optional bounded server VAD incrementally
 resamples input for WebRTC classification, emits start/stop events, and commits
 the utterance on silence or maximum duration. VAD-enabled appends are forwarded
 in classifier-sized source slices and stop at the detected boundary. The socket
@@ -360,7 +361,8 @@ per-turn VAD reset, and no overlapping STT provider ownership. Optional typed
 response configuration routes final transcripts through the selected mounted
 chat model and then through a normal mounted `tts@1.0.0` provider, emitting
 assistant text and MP3 audio events. Explicit cancellation and VAD barge-in
-cancel active model/TTS work. Every API
+cancel active model/TTS work. The Fabric path names its STT participant with
+`stt_model` and otherwise reuses these lifecycle guarantees. Every API
 also registers stable `vad@1.0.0` through `BuiltinVadProvider`. This reusable
 bidirectional provider frames mono PCM16 for WebRTC VAD and emits typed turn
 boundaries with bounded minimum-speech, hangover, preroll, and maximum-duration
@@ -372,14 +374,16 @@ transcription. Mounted TTS cards with static `audio.voices` metadata expose it
 through the Skulk `GET /v1/audio/voices` extension. Translation-capable STT
 cards can reuse the bounded batch path through experimental
 `POST /v1/audio/translations`; the speech runner maps the English-target intent
-to model-family generation arguments. Reference-audio management remains a
-later phase.
-See [Speech Fabric and Realtime Design](speech-fabric-realtime).
-The dashboard composes the shipped REST endpoints in chat: mounted TTS models
+to model-family generation arguments. Supporting TTS cards can accept bounded
+reference-audio uploads through the request-scoped `SPEECH_MEDIA` path described
+above.
+See [Speech Providers and Realtime Transcription](speech-fabric-realtime).
+The dashboard composes the shipped speech endpoints in chat: mounted TTS models
 can speak draft text, replay assistant messages, or auto-speak final assistant
 responses; mounted STT models can transcribe a browser-recorded clip into the
-draft box. Browser microphone capture uses `MediaRecorder`, so the mic control
-is available only from a secure browser context such as HTTPS or localhost.
+draft box. Realtime cards use an AudioWorklet, server VAD, and a persistent
+multi-turn WebSocket; batch-only cards retain `MediaRecorder`. Microphone
+controls require a secure browser context such as HTTPS or localhost.
 
 The llama.cpp runner serves GGUF models single-node and matches the MLX runner
 on the capabilities llama.cpp supports natively: per-token logprobs (with the
