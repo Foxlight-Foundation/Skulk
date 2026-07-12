@@ -57,7 +57,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && echo "building llama-cpp-python==${LLAMA_CPP_PYTHON_VERSION} for python ${PYTHON_VERSION}" \
     && /root/.local/bin/uv venv --seed --python "${PYTHON_VERSION}" /opt/wheelbuild \
     && CMAKE_ARGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}" \
-      /opt/wheelbuild/bin/python -m pip wheel --no-cache-dir \
+      /opt/wheelbuild/bin/python -m pip wheel --no-cache-dir --no-deps \
         --no-binary llama-cpp-python --wheel-dir /opt/wheels \
         "llama-cpp-python==${LLAMA_CPP_PYTHON_VERSION}"
 

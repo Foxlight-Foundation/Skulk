@@ -30,8 +30,13 @@ git -C "${SKULK_DIR}" fetch --depth 1 origin "${REF}" \
 git -C "${SKULK_DIR}" checkout FETCH_HEAD
 
 cd "${SKULK_DIR}"
-log "uv sync (builds the Rust bindings)"
-uv sync
+# --extra llama-cpp: llama-cpp-python lives in an optional extra, so a plain
+# sync would install neither it nor its locked dependencies (diskcache and
+# friends), and the --no-deps CUDA wheel swap below would leave the import
+# broken. The extra installs the locked CPU build + deps; the swap then only
+# replaces the artifact.
+log "uv sync --extra llama-cpp (builds the Rust bindings)"
+uv sync --extra llama-cpp
 
 # AFTER uv sync: a plain sync restores the CPU-only PyPI llama-cpp-python
 # wheel, so the CUDA wheel must be (re)installed last, exactly like
@@ -48,7 +53,10 @@ fi
 # their locked versions; this step only swaps the wheel artifact and must
 # not let pip drift the rest of the environment away from uv.lock.
 uv pip install --force-reinstall --no-deps "${WHEELS[0]}"
-uv pip install --quiet nvidia-ml-py
+# Optional NVML telemetry binding: best-effort, because a transient PyPI
+# failure must not abort a session Skulk can run without it.
+uv pip install --quiet --no-deps nvidia-ml-py \
+  || log "WARNING: nvidia-ml-py install failed; NVML telemetry disabled this session"
 
 log "verifying GPU offload support in the installed binding"
 uv run --no-sync python - <<'PY'

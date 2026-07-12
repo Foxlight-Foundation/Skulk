@@ -19,6 +19,13 @@ on:
       - 'uv.lock'
       - '.python-version'
 
+# One build at a time, newest wins: without this, two quick dev pushes can
+# race and leave :latest pointing at the older commit if its build finishes
+# last.
+concurrency:
+  group: cuda-pod-image
+  cancel-in-progress: true
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
