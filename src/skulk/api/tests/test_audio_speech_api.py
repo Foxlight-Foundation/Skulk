@@ -55,7 +55,12 @@ from skulk.shared.types.tasks import (
 )
 from skulk.shared.types.telemetry import TelemetryView
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
-from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
+from skulk.shared.types.worker.runners import (
+    RunnerId,
+    RunnerIdle,
+    RunnerReady,
+    ShardAssignments,
+)
 from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.channels import Receiver, channel
 
@@ -169,7 +174,8 @@ def _state_with_running_card(card: ModelCard) -> State:
                 hosts_by_node={node_id: []},
                 ephemeral_port=52415,
             )
-        }
+        },
+        runners={runner_id: RunnerReady()},
     )
 
 
@@ -368,6 +374,12 @@ def test_builtin_tts_capability_tracks_live_streaming_capacity() -> None:
     api.state = _state_with_running_card(card)
     api._sync_builtin_speech_capability()
     assert api._telemetry_view.local_advertised_capabilities == {"tts"}
+
+    api.state = api.state.model_copy(
+        update={"runners": {RunnerId("speech-runner"): RunnerIdle()}}
+    )
+    api._sync_builtin_speech_capability()
+    assert api._telemetry_view.local_advertised_capabilities == set()
 
     api.state = State()
     api._sync_builtin_speech_capability()

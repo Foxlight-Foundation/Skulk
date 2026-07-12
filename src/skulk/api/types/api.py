@@ -902,7 +902,9 @@ class AudioSpeechRequest(BaseModel):
         default=False,
         description=(
             "Whether to stream encoded MP3 bytes as they are produced by the "
-            "mounted text-to-speech model. The mounted model card must declare "
+            "mounted text-to-speech model. Streaming currently supports MP3 "
+            "only; response_format may be omitted to select MP3, and other "
+            "formats are rejected. The mounted model card must declare "
             "audio.supports_streaming=true."
         ),
     )

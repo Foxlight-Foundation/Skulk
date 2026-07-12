@@ -3180,6 +3180,17 @@ class API:
         if not self._builtin_speech_provider_enabled:
             return False
         for instance in self.state.instances.values():
+            placement_runners = tuple(
+                instance.shard_assignments.node_to_runner.values()
+            )
+            if len(placement_runners) != 1 or not all(
+                isinstance(
+                    self.state.runners.get(runner_id),
+                    (RunnerReady, RunnerRunning),
+                )
+                for runner_id in placement_runners
+            ):
+                continue
             card = self._model_card_for_instance(instance)
             if card is None or card.audio is None:
                 continue
