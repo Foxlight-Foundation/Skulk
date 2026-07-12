@@ -1608,9 +1608,8 @@ class API:
             description=(
                 "OpenAI-compatible text-to-speech endpoint. The requested model "
                 "must already be placed and running as a text-to-speech model. "
-                "The experimental stream=true path requires "
-                "SKULK_ENABLE_EXPERIMENTAL_MODE, experiments.tts_streaming=true, "
-                "and a mounted card that declares audio.supports_streaming=true."
+                "The stream=true path requires a mounted card that declares "
+                "audio.supports_streaming=true."
             ),
             openapi_extra=_audio_speech_request_body(),
         )(self.audio_speech_http)
@@ -3145,23 +3144,6 @@ class API:
                 status_code=400,
                 detail=f"Model {resolved} is not a text-to-speech model",
             )
-        if stream and not experimental_mode_enabled():
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Streaming text-to-speech is experimental and requires "
-                    f"{EXPERIMENTAL_MODE_ENV_VAR}=1 until a mounted MLX speech "
-                    "model has passed streaming validation"
-                ),
-            )
-        if stream and not self._tts_streaming_experiment_enabled():
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Streaming text-to-speech is experimental and requires "
-                    "experiments.tts_streaming=true in skulk.yaml"
-                ),
-            )
         if stream and (
             model_card.audio is None or model_card.audio.supports_streaming is not True
         ):
@@ -3170,6 +3152,15 @@ class API:
                 detail=(
                     f"Model {resolved} does not declare streaming speech support"
                 ),
+            )
+        if not any(
+            instance.shard_assignments.model_id == resolved
+            for instance in self.state.instances.values()
+        ):
+            await self._trigger_notify_user_to_download_model(resolved)
+            raise HTTPException(
+                status_code=404,
+                detail=f"No instance found for model {resolved}",
             )
         resolved_response_format = (
             response_format
@@ -3190,14 +3181,28 @@ class API:
                     f"{resolved_response_format.value}; supported formats: {supported}"
                 ),
             )
-        if not any(
-            instance.shard_assignments.model_id == resolved
-            for instance in self.state.instances.values()
-        ):
-            await self._trigger_notify_user_to_download_model(resolved)
+        if stream and resolved_response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
+            supported = ", ".join(
+                audio_format.value
+                for audio_format in sorted(
+                    _STREAMABLE_AUDIO_RESPONSE_FORMATS,
+                    key=lambda audio_format: audio_format.value,
+                )
+            )
             raise HTTPException(
-                status_code=404,
-                detail=f"No instance found for model {resolved}",
+                status_code=400,
+                detail=(
+                    f"`stream=true` supports only {supported} responses for now; "
+                    f"requested {resolved_response_format.value}"
+                ),
+            )
+        if stream and not self._streaming_tts_model_is_ready(resolved):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"All mounted instances of streaming speech model {resolved} "
+                    "must have a ready runner"
+                ),
             )
         return resolved, resolved_response_format
 
@@ -3242,23 +3247,6 @@ class API:
         _, _, instance_id, target_node = min(candidates)
         return instance_id, target_node
 
-    def _tts_streaming_experiment_enabled(self) -> bool:
-        """Return whether the current config opts into experimental TTS streaming."""
-
-        try:
-            config = load_skulk_config(self._config_path)
-        except Exception as exc:
-            logger.warning(
-                "Failed to load config while checking TTS streaming experiment "
-                f"toggle; treating it as disabled: {exc}"
-            )
-            return False
-        return bool(
-            config is not None
-            and config.experiments is not None
-            and config.experiments.tts_streaming
-        )
-
     def _speech_translation_experiment_enabled(self) -> bool:
         """Return whether config opts into experimental speech translation."""
 
@@ -3276,16 +3264,13 @@ class API:
             and config.experiments.speech_translation
         )
 
-    def _has_mounted_streaming_tts_model(self) -> bool:
-        """Return whether core serving currently exposes eligible TTS capacity."""
+    def _streaming_tts_model_is_ready(self, model_id: ModelId | None = None) -> bool:
+        """Return whether every routable instance of one streaming model is ready."""
 
-        if (
-            not self._builtin_speech_provider_enabled
-            or not experimental_mode_enabled()
-            or not self._tts_streaming_experiment_enabled()
-        ):
-            return False
+        eligible_by_model: dict[ModelId, list[Instance]] = {}
         for instance in self.state.instances.values():
+            if model_id is not None and instance.shard_assignments.model_id != model_id:
+                continue
             card = self._model_card_for_instance(instance)
             if card is None or card.audio is None:
                 continue
@@ -3301,8 +3286,27 @@ class API:
                     or AudioResponseFormat.Mp3 in profile.audio_response_formats
                 )
             ):
-                return True
-        return False
+                eligible_by_model.setdefault(card.model_id, []).append(instance)
+
+        def instance_is_ready(instance: Instance) -> bool:
+            runner_ids = tuple(instance.shard_assignments.node_to_runner.values())
+            return len(runner_ids) == 1 and all(
+                isinstance(
+                    self.state.runners.get(runner_id),
+                    (RunnerReady, RunnerRunning),
+                )
+                for runner_id in runner_ids
+            )
+
+        return any(
+            instances and all(instance_is_ready(instance) for instance in instances)
+            for instances in eligible_by_model.values()
+        )
+
+    def _has_mounted_streaming_tts_model(self) -> bool:
+        """Return whether core serving currently exposes eligible TTS capacity."""
+
+        return self._builtin_speech_provider_enabled and self._streaming_tts_model_is_ready()
 
     def _realtime_stt_instance(
         self,

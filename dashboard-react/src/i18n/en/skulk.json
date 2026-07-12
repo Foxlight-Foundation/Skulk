@@ -574,8 +574,6 @@
   "settings.experiments.legend": "Experiments",
   "settings.experiments.legendTooltip": "Opt-in, in-development features. This section is visible because this node runs with SKULK_ENABLE_EXPERIMENTAL_MODE. Features here are unfinished and off by default.",
   "settings.experiments.none": "No experimental features are available in this release.",
-  "settings.experiments.ttsStreaming": "TTS streaming",
-  "settings.experiments.ttsStreamingTooltip": "Enables the experimental stream=true path for /v1/audio/speech. Leave off until a mounted TTS model has passed streaming validation.",
   "settings.experiments.speechTranslation": "Speech translation",
   "settings.experiments.speechTranslationTooltip": "Enables /v1/audio/translations for mounted models with validated speech translation support.",
   "settings.huggingFace.apiToken": "API Token",

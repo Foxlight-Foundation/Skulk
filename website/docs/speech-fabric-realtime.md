@@ -21,13 +21,10 @@ Skulk currently exposes:
 - `GET /v1/audio/voices` for a mounted model's static built-in voice catalog;
 - `WS /v1/realtime?model=<model-id>` for one-utterance realtime transcription.
 
-`/v1/audio/speech` returns an encoded audio response. Its `stream=true` path is
-experimental and is available only when all of these conditions are true:
-
-- the node runs with `SKULK_ENABLE_EXPERIMENTAL_MODE`;
-- cluster settings enable `experiments.tts_streaming`;
-- the mounted TTS card declares `audio.supports_streaming = true`;
-- the serving runner is ready and advertises the required capability.
+`/v1/audio/speech` returns an encoded audio response. Its stable `stream=true`
+path is available when the mounted TTS card declares
+`audio.supports_streaming = true`, every routable instance is ready, and the
+request format resolves to MP3. Other encoded formats remain batch-only.
 
 `/v1/audio/transcriptions` accepts a bounded multipart upload and returns one
 completed transcription. It does not provide progressive REST transcription.
