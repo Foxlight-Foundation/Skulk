@@ -284,6 +284,14 @@ class AudioCapabilitySection(BaseModel):
         default=None,
         description="Whether the model declares voice-listing support.",
     )
+    default_voice: str | None = Field(
+        default=None,
+        description="Built-in voice used when a request omits an explicit voice.",
+    )
+    voices: list[str] = Field(
+        default_factory=list,
+        description="Stable built-in voice identifiers declared by the model card.",
+    )
     supports_reference_audio: bool | None = Field(
         default=None,
         description="Whether the model accepts managed reference audio.",
@@ -313,6 +321,8 @@ class AudioCapabilitySection(BaseModel):
             supports_streaming=config.supports_streaming,
             supports_realtime=config.supports_realtime,
             supports_voice_listing=config.supports_voice_listing,
+            default_voice=config.default_voice,
+            voices=list(config.voices),
             supports_reference_audio=config.supports_reference_audio,
             supports_translation=config.supports_translation,
             sample_rates=list(config.sample_rates),

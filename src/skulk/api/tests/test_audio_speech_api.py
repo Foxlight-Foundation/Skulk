@@ -581,6 +581,101 @@ async def test_audio_voices_returns_static_mounted_catalog(
 
 
 @pytest.mark.anyio
+async def test_audio_speech_applies_card_default_voice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A multi-speaker model remains usable when the caller omits voice."""
+
+    api = _build_api()
+    card = _tts_card()
+    assert card.audio is not None
+    card = card.model_copy(
+        update={
+            "audio": card.audio.model_copy(
+                update={
+                    "supports_voice_listing": True,
+                    "voices": ("ryan", "aiden"),
+                    "default_voice": "ryan",
+                }
+            )
+        }
+    )
+
+    api.state = _state_with_running_card(card)
+    request = AudioSpeechRequest(model=str(card.model_id), input="hello")
+
+    resolved = await api._apply_default_speech_voice(request, card.model_id)
+
+    assert resolved.voice == "ryan"
+
+
+@pytest.mark.anyio
+async def test_audio_speech_default_voice_uses_model_card_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defaulting uses the same fallback card source as request validation."""
+
+    api = _build_api()
+    card = _tts_card()
+    assert card.audio is not None
+    card = card.model_copy(
+        update={
+            "audio": card.audio.model_copy(
+                update={"voices": ("ryan",), "default_voice": "ryan"}
+            )
+        }
+    )
+
+    async def running_card(self: API, model_id: ModelId) -> ModelCard:
+        del self, model_id
+        return card
+
+    def missing_card(instance: object) -> None:
+        del instance
+        return None
+
+    api.state = _state_with_running_card(card)
+    monkeypatch.setattr(API, "_get_running_model_card", running_card)
+    monkeypatch.setattr(
+        API,
+        "_model_card_for_instance",
+        staticmethod(missing_card),
+    )
+    resolved = await api._apply_default_speech_voice(
+        AudioSpeechRequest(model=str(card.model_id), input="hello"),
+        card.model_id,
+    )
+
+    assert resolved.voice == "ryan"
+
+
+@pytest.mark.anyio
+async def test_audio_speech_rejects_unknown_explicit_catalog_voice() -> None:
+    """Static voice catalogs reject stale or misspelled speaker IDs."""
+
+    api = _build_api()
+    card = _tts_card()
+    assert card.audio is not None
+    card = card.model_copy(
+        update={"audio": card.audio.model_copy(update={"voices": ("ryan",)})}
+    )
+    api.state = _state_with_running_card(card)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api._apply_default_speech_voice(
+            AudioSpeechRequest(
+                model=str(card.model_id),
+                input="hello",
+                voice="not-a-speaker",
+            ),
+            card.model_id,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "GET /v1/audio/voices" in str(exc_info.value.detail)
+
+
+@pytest.mark.anyio
 async def test_audio_voices_rejects_unmounted_catalog_card(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

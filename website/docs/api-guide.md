@@ -523,7 +523,7 @@ Request fields:
 |-------|------|-------|
 | `model` | string | Required mounted TTS model id |
 | `input` | string | Required text to synthesize |
-| `voice` | string or null | Optional model-specific voice name |
+| `voice` | string or null | Optional model-specific voice name. When omitted, Skulk applies the mounted model card's `audio.default_voice` when declared. |
 | `speed` | number or null | Optional positive speaking speed multiplier |
 | `response_format` | string or null | Optional encoded output format. When omitted or set to `null`, Skulk uses `mp3` for `stream=true`; otherwise it uses the mounted model card default when declared and falls back to `mp3`; supported values are constrained by the model card when declared |
 | `stream` | boolean | Optional. Experimental. When `true`, Skulk returns a chunked HTTP response and yields encoded MP3 bytes as the speech runner emits them; accepted only when `SKULK_ENABLE_EXPERIMENTAL_MODE` is enabled, `experiments.tts_streaming` is true, and the mounted TTS card explicitly declares `audio.supports_streaming = true` |
@@ -977,7 +977,7 @@ Important fields:
 | `tags` | array | UI-friendly derived labels such as `vision`, `thinking`, `embedding`, `tts`, `stt`, `tensor`, and `optiq` |
 | `supports_tensor` | boolean | Whether tensor parallel launch is supported |
 | `base_model` | string | Base family or upstream source model when known |
-| `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, voice/reference-audio flags, translation support, and sample rates |
+| `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
 | `resolved_capabilities.supports_speech_synthesis` | boolean | Whether clients should treat the model as a text-to-speech model |
 | `resolved_capabilities.supports_transcription` | boolean | Whether clients should treat the model as a speech-to-text model |
 | `resolved_capabilities.supports_speech_translation` | boolean | Whether clients should treat the model as supporting speech translation |

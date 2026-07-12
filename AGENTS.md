@@ -195,6 +195,8 @@ Skulk now treats model capability handling as two layers:
 - **Resolved capability profiles**: normalized runtime behavior contracts derived from the card plus conservative family defaults
 
 This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, speech/TTS/STT metadata, and additive `/v1/models` metadata consumed by the dashboard.
+TTS cards with fixed speakers may declare `audio.voices` plus a validated
+`audio.default_voice`, which the API applies only when callers omit `voice`.
 
 **Model truth vs platform truth:** a card's `compatible_backends` declares which
 engines the model's artifacts run on (MODEL truth) and must never encode a gap

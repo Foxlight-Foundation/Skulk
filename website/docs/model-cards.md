@@ -191,6 +191,9 @@ Declares speech serving metadata for TTS and STT models:
 - `voices`
   - stable built-in voice identifiers returned by `GET /v1/audio/voices`; this
     requires `kind = "tts"` and `supports_voice_listing = true`
+- `default_voice`
+  - built-in voice used when a TTS request omits `voice`; it must appear in
+    `voices`
 - `supports_reference_audio`
   - whether managed reference audio can condition the voice
 - `supports_translation`

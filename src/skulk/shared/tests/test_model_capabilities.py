@@ -193,6 +193,14 @@ def test_audio_card_config_validates_static_voice_catalog() -> None:
     with pytest.raises(ValidationError, match="supports_voice_listing"):
         AudioCardConfig(kind=AudioCardKind.TextToSpeech, voices=("alloy",))
 
+    with pytest.raises(ValidationError, match="default_voice"):
+        AudioCardConfig(
+            kind=AudioCardKind.TextToSpeech,
+            supports_voice_listing=True,
+            voices=("alloy",),
+            default_voice="missing",
+        )
+
     with pytest.raises(ValidationError, match="duplicates"):
         AudioCardConfig(
             kind=AudioCardKind.TextToSpeech,
