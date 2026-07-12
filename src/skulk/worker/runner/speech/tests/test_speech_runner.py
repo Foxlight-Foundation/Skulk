@@ -277,6 +277,13 @@ def test_attention_mask_compat_casts_mask_to_input_dtype() -> None:
     class _Attention:
         seen_mask: _Array | None = None
 
+        def __init__(self) -> None:
+            self.q_proj = type(
+                "_Projection",
+                (),
+                {"weight": _Array("bfloat16")},
+            )()
+
         def __call__(
             self,
             x: _Array,
@@ -289,7 +296,7 @@ def test_attention_mask_compat_casts_mask_to_input_dtype() -> None:
 
     _install_attention_mask_dtype_compat(_Attention)
     result, cache = _Attention()(
-        _Array("bfloat16"),
+        _Array("float32"),
         mask=_Array("float32"),
         cache="cache",
     )

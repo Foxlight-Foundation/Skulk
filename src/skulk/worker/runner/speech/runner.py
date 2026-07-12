@@ -118,8 +118,9 @@ def _install_attention_mask_dtype_compat(attention_type: type[Any]) -> None:
         mask: Any | None = None,
         cache: Any | None = None,
     ) -> Any:
-        if mask is not None and mask.dtype != x.dtype:
-            mask = mask.astype(x.dtype)
+        projection_dtype = self.q_proj.weight.dtype
+        if mask is not None and mask.dtype != projection_dtype:
+            mask = mask.astype(projection_dtype)
         return original_call(self, x, mask=mask, cache=cache)
 
     attention_type.__call__ = _compatible_call
