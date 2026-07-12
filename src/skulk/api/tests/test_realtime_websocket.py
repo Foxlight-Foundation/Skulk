@@ -337,20 +337,16 @@ def test_realtime_websocket_server_vad_auto_commits(
         "/v1/realtime?model=org%2Frealtime-stt"
     ) as websocket:
         assert _receive_json(websocket)["type"] == "session.created"
-        websocket.send_json(
-            {
-                "type": "session.update",
-                "session": {
-                    "type": "transcription",
-                    "audio": {
-                        "input": {
-                            "transcription": {"model": "org/realtime-stt"},
-                            "turn_detection": {"type": "server_vad"},
-                        }
-                    },
+        vad_session = {
+            "type": "transcription",
+            "audio": {
+                "input": {
+                    "transcription": {"model": "org/realtime-stt"},
+                    "turn_detection": {"type": "server_vad"},
                 },
-            }
-        )
+            },
+        }
+        websocket.send_json({"type": "session.update", "session": vad_session})
         updated = _receive_json(websocket)
         assert updated["type"] == "session.updated"
         websocket.send_json(
@@ -709,6 +705,74 @@ def test_realtime_websocket_rejects_overlapping_turn_audio() -> None:
         assert _receive_json(websocket)["type"] == (
             "conversation.item.input_audio_transcription.completed"
         )
+
+
+def test_realtime_websocket_vad_buffers_partial_source_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VAD forwards exact source frames and flushes a final partial on commit."""
+
+    api = _build_api()
+    input_frames: list[CapabilityStreamFrame] = []
+
+    class NoBoundaryDetector:
+        frame_bytes = 640
+
+        def __init__(self, config: object) -> None:
+            del config
+
+        def process(self, frame: bytes) -> tuple[VadTurnEvent, ...]:
+            assert len(frame) == self.frame_bytes
+            return ()
+
+        def finish(self) -> tuple[VadTurnEvent, ...]:
+            return ()
+
+    monkeypatch.setattr(realtime_api, "VoiceActivityDetector", NoBoundaryDetector)
+    _install_waiting_session(api, input_frames, call_id="partial-vad-source")
+    first = _pcm16_bytes([1000] * 240)
+    second = _pcm16_bytes([1000] * 360)
+
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt"
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        vad_session = {
+            "type": "transcription",
+            "audio": {
+                "input": {
+                    "transcription": {"model": "org/realtime-stt"},
+                    "turn_detection": {"type": "server_vad"},
+                },
+            },
+        }
+        websocket.send_json({"type": "session.update", "session": vad_session})
+        assert _receive_json(websocket)["type"] == "session.updated"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(first).decode("ascii"),
+            }
+        )
+        websocket.send_json({"type": "session.update", "session": vad_session})
+        assert _receive_json(websocket)["type"] == "session.updated"
+        assert [frame.kind for frame in input_frames] == ["started"]
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(second).decode("ascii"),
+            }
+        )
+        websocket.send_json({"type": "input_audio_buffer.commit"})
+        assert _receive_json(websocket)["type"] == "input_audio_buffer.committed"
+
+    chunks = [
+        cast(InlineMediaAttachment, frame.media).data
+        for frame in input_frames
+        if frame.kind == "chunk"
+    ]
+    combined = first + second
+    assert chunks == [combined[:960], combined[960:]]
 
 
 def test_realtime_websocket_rejects_invalid_audio_without_forwarding() -> None:
