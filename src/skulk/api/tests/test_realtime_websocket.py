@@ -381,6 +381,14 @@ def test_realtime_websocket_server_vad_auto_commits(
         completed = _receive_json(websocket)
         assert completed["type"] == "conversation.item.input_audio_transcription.completed"
         assert completed["transcript"] == "hello"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.commit",
+                "event_id": "duplicate-after-vad-completion",
+            }
+        )
+        websocket.send_json({"type": "session.update", "session": vad_session})
+        assert _receive_json(websocket)["type"] == "session.updated"
 
     assert [frame.kind for frame in input_frames] == [
         "started",
