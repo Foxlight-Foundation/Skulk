@@ -16,7 +16,7 @@ response_formats = ["wav", "mp3"]
 supports_streaming = true
 supports_realtime = false
 supports_voice_listing = false
-supports_reference_audio = false
+supports_reference_audio = true
 sample_rates = [24000]
 
 [placement]

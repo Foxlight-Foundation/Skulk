@@ -142,7 +142,11 @@ A model card's `placement.compatible_backends` selects which engine serves it
   serve experimental `/v1/audio/translations` only with global experimental
   mode and `experiments.speech_translation`; TTS cards may expose static voices
   through the Skulk `/v1/audio/voices` extension. VAD, conversation/full-duplex
-  speech, and managed reference audio remain later phases.
+  speech remain later phases. Managed reference audio is accepted only as a
+  bounded multipart upload for supporting TTS cards. Its bytes use the
+  node-addressed `SPEECH_MEDIA` Zenoh data path, never State or the event log;
+  the worker assembles them in bounded process-local memory and the runner
+  removes its request-scoped temporary file after generation.
 - **`llama_cpp`** (`worker/runner/llama_cpp/`): in-process `llama-cpp-python` for
   GGUF on GPU/Linux nodes (Vulkan/ROCm/CUDA). Single-node.
 - **`llama_server`** (`worker/runner/llama_server/`): served-backend engine; the
@@ -164,6 +168,7 @@ Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `REALTIME_AUDIO`: Built-in realtime STT PCM ingress, off the event log/master/State. `RealtimeAudioPacket` carries a bounded JSON lifecycle header plus raw PCM bytes from the owning API node to the selected single-host speech worker. It shares the Zenoh scheduler's bounded independent command queues and same-node short circuit; transport rejection is source-routed so only the affected provider call fails. Remote capability is unavailable without Zenoh. Same-version fleet required.
 - `ELECTION_MESSAGES`: Election protocol messages
 - `CONNECTION_MESSAGES`: libp2p connection updates
+- `SPEECH_MEDIA`: node-addressed ephemeral TTS reference audio over Zenoh
 - `TELEMETRY`: Workers gossip `NodeTelemetry` (last-write-wins node readings — `NodeResources`: participation role + backends; `node_memory` + `node_system` since slice 2; `node_identities` + `node_disk` + `node_rdma_ctl` since slice 3) into an in-memory `TelemetryView`, NOT the event log. Control/telemetry/data plane separation (#279); read by the planner for placement and merged into `GET /state` for the dashboard. Those maps live here, not in `State`. The context-admission ceiling is stamped onto the instance at placement time (`context_token_limit`) since telemetry is unordered. NOTE: the **connectivity** readings (`node_network`, `node_thunderbolt`, `node_thunderbolt_bridge`, and the derived `thunderbolt_bridge_cycles`) deliberately STAY on the control plane: `apply()` builds the RDMA topology graph and TB-bridge cycles from them and the planner reads `node_network` for host selection, so they must be ordered, not LWW telemetry (#279 slice 3 scoping). `TELEMETRY_PLANE_INFO` in `telemetry.py` is the source of truth for which `GatheredInfo` variants ride telemetry. `node_system` (`SystemPerformanceProfile`) carries a collector-agnostic `accelerator` block (`AcceleratorMetrics`: vendor/name/utilization_ratio/vram/power/temp/clock, `None` when unmeasured) filled at the collector boundary: mactop on Apple, and a new AMD/Linux passive-sysfs collector (`LinuxGpuMetrics`, `utils/info_gatherer/linux_gpu.py`) so non-Mac GPU nodes are not a telemetry blind spot.
 
 ### Event Sourcing

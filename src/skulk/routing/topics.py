@@ -13,6 +13,11 @@ from skulk.routing.realtime_audio import (
     decode_realtime_audio_packet,
     encode_realtime_audio_packet,
 )
+from skulk.routing.speech_media import (
+    SpeechMediaPacket,
+    decode_speech_media_packet,
+    encode_speech_media_packet,
+)
 from skulk.shared.election import ElectionMessage
 from skulk.shared.types.chunks import DataChunk
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
@@ -138,4 +143,15 @@ REALTIME_AUDIO = TypedTopic(
     is_terminal=lambda packet: packet.is_terminal,
     serializer=encode_realtime_audio_packet,
     deserializer=decode_realtime_audio_packet,
+)
+
+SPEECH_MEDIA = TypedTopic(
+    "speech_media",
+    PublishPolicy.Always,
+    SpeechMediaPacket,
+    routing_key=lambda packet: str(packet.target_node),
+    stream_key=lambda packet: str(packet.command_id),
+    is_terminal=lambda packet: packet.is_terminal,
+    serializer=encode_speech_media_packet,
+    deserializer=decode_speech_media_packet,
 )
