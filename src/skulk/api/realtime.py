@@ -78,7 +78,10 @@ class ServerVadConfig(_RealtimeModel):
         default=200,
         ge=0,
         le=2000,
-        description="Speech preroll duration represented in boundary metadata.",
+        description=(
+            "Speech preroll duration subtracted from the reported audio_start_ms "
+            "boundary timestamp."
+        ),
     )
     silence_duration_ms: int = Field(
         default=400,
