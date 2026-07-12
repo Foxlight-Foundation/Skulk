@@ -204,10 +204,9 @@ the node must also run with `SKULK_ENABLE_EXPERIMENTAL_MODE`, and cluster config
 must set `experiments.tts_streaming: true`.
 
 For realtime STT, both `supports_streaming = true` and
-`supports_realtime = true` are necessary but not sufficient. The node must run
-with experimental mode, set `experiments.stt_realtime: true`, locally host the
-mounted speech runner, and use a model whose upstream runtime exposes a true
-incremental streaming session. The bundled
+`supports_realtime = true` are necessary but not sufficient. The API must have
+reachable ready single-host capacity and use a model whose upstream runtime
+exposes a true incremental streaming session. The bundled
 `mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit` card is the first validated
 contract candidate. Batch Parakeet and Whisper cards deliberately keep both
 flags false.

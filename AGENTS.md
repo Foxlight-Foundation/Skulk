@@ -128,15 +128,15 @@ A model card's `placement.compatible_backends` selects which engine serves it
   callers send bounded encoded audio as binary provider frames, half-close
   input, and receive one final transcript. Its core command path is shared
   with the REST endpoint. The
-  experimental `stt.realtime@1.0.0` bidirectional provider accepts mono PCM16
+  stable `stt.realtime@1.0.0` bidirectional provider accepts mono PCM16
   frames on any API node with reachable mounted capacity, pins a
   `RealtimeAudioTranscription` task to one single-host instance, and feeds a
   true upstream streaming session through bounded ingress. Same-node input
   short-circuits locally; remote input uses node-addressed binary
   `REALTIME_AUDIO` packets over Zenoh and is not advertised when Zenoh is
   unavailable. PCM never enters State or the event log. It advertises only with
-  experimental mode, `experiments.stt_realtime`, and a card declaring both
-  streaming and realtime support. `WS /v1/realtime` is a transcription-only,
+  reachable ready capacity and a card declaring both streaming and realtime
+  support. `WS /v1/realtime` is a transcription-only,
   one-utterance OpenAI-compatible adapter over this provider: base64 24 kHz
   PCM16 at the API edge becomes raw Fabric media, and disconnect cancels the
   provider. Dashboard chat uses this path only when card truth and the local
