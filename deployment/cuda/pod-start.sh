@@ -18,6 +18,11 @@ if [ -n "${PUBLIC_KEY:-}" ]; then
   chmod 600 /root/.ssh/authorized_keys
 fi
 
+# Host keys are generated per pod: the public image ships without any (they
+# are deleted at build time) because baked-in keys would be shared across
+# every pod and readable by anyone who pulls the image.
+ssh-keygen -A
+
 echo "[pod-start] starting sshd; bootstrap a session with /opt/skulk/pod-bootstrap.sh"
 # Foreground as pid 1: container stop signals reach sshd directly, and an
 # sshd death ends the pod instead of leaving it alive but unreachable.

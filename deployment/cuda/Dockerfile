@@ -39,9 +39,9 @@ RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp /opt/llama.cpp \
 # CUDA llama-cpp-python wheel for the in-process llama_cpp engine. Built as a
 # wheel (not installed) so the session's `uv sync`-managed venv can install it
 # after syncing, which is what defeats the uv-sync-restores-CPU-wheel trap.
-# Built with uv-provisioned Python 3.13 to match Skulk's .python-version:
-# Ubuntu 22.04's system python is 3.10, and a cp310 wheel would be rejected by
-# the 3.13 environment pod-bootstrap.sh syncs (PR #538 review, P1).
+# Built with a uv-provisioned Python at the version pinned in the repo's
+# .python-version (Ubuntu 22.04's system python is 3.10, whose wheel tag the
+# synced environment would reject).
 # --no-binary pins the CUDA source build even if PyPI ever starts shipping
 # prebuilt (CPU-only) wheels for this package. Both the package version and
 # the Python version come from the repo's own pins (uv.lock and
@@ -69,11 +69,16 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # build-essential + cmake stay: `uv sync` compiles Skulk's Rust bindings at
 # session time (the Skulk checkout is per-session, so it cannot be prebaked).
+# The host keys openssh-server generates at install time are deleted: this
+# image is public, so baked-in keys would be shared by every pod pulled from
+# it (and readable by anyone), enabling host impersonation. pod-start.sh
+# regenerates per-pod keys before starting sshd.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake git curl pkg-config python3-dev \
       ca-certificates openssh-server rsync tmux \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /run/sshd
+    && mkdir -p /run/sshd \
+    && rm -f /etc/ssh/ssh_host_*
 
 # Rust toolchain for the skulk-pyo3-bindings build during `uv sync`.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
