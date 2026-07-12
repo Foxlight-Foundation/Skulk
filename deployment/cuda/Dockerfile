@@ -21,12 +21,6 @@ ARG CUDA_ARCHS="86;89"
 # pipefail: a curl|sh installer whose download dies must fail the build, not
 # publish an image that is missing its toolchain.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# The CUDA Driver API library (libcuda.so: cuMemMap, cuGetErrorString, ...)
-# ships with the DRIVER, which a GPU-less CI runner does not have; the devel
-# image provides link-time stubs for exactly this case. Without this, the
-# llama.cpp link fails with undefined cu* references (maiden build). Runtime
-# resolution uses the pod's real driver; the stub never leaves this stage.
-ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake git curl pkg-config python3-dev python3-pip \
@@ -42,6 +36,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # - GGML_NATIVE=OFF: default builds tune for the connected (builder) CPU, and
 #   AVX-512/AMX code from a GitHub runner would die with illegal-instruction
 #   on a rented pod with a different CPU.
+# - --allow-shlib-undefined: libggml-cuda references CUDA Driver API symbols
+#   (cuMemMap, ...) that only the driver's libcuda.so provides, and a GPU-less
+#   runner has no driver. Upstream's own CI images defer resolution to runtime
+#   this way (.devops/cuda.Dockerfile); the pod's real driver satisfies them.
 ARG LLAMA_CPP_REF=b9969
 RUN git clone --branch "${LLAMA_CPP_REF}" --depth 1 \
          https://github.com/ggml-org/llama.cpp /opt/llama.cpp \
@@ -49,6 +47,7 @@ RUN git clone --branch "${LLAMA_CPP_REF}" --depth 1 \
          -DGGML_CUDA=ON -DGGML_RPC=ON -DGGML_NATIVE=OFF \
          -DCMAKE_BUILD_TYPE=Release \
          -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
+         -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \
     && cmake --build /opt/llama.cpp/build \
          --target llama-server ggml-rpc-server -j"$(nproc)"
 
@@ -75,7 +74,7 @@ RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh \
     && test -n "${PYTHON_VERSION}" \
     && echo "building llama-cpp-python==${LLAMA_CPP_PYTHON_VERSION} for python ${PYTHON_VERSION}" \
     && /root/.local/bin/uv venv --seed --python "${PYTHON_VERSION}" /opt/wheelbuild \
-    && CMAKE_ARGS="-DGGML_CUDA=ON -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}" \
+    && CMAKE_ARGS="-DGGML_CUDA=ON -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS} -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined" \
       /opt/wheelbuild/bin/python -m pip wheel --no-cache-dir --no-deps \
         --no-binary llama-cpp-python --wheel-dir /opt/wheels \
         "llama-cpp-python==${LLAMA_CPP_PYTHON_VERSION}"
