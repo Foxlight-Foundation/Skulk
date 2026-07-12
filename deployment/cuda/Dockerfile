@@ -81,7 +81,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates openssh-server rsync tmux \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /run/sshd \
-    && rm -f /etc/ssh/ssh_host_*
+    && rm -f /etc/ssh/ssh_host_* \
+    && printf '%s\n' \
+         'PasswordAuthentication no' \
+         'KbdInteractiveAuthentication no' \
+         'PermitRootLogin prohibit-password' \
+         > /etc/ssh/sshd_config.d/90-skulk-pod.conf
+# Key-only auth is pinned explicitly rather than trusted from base-image
+# defaults: this image is public and runs sshd as its entrypoint, so a future
+# base change must not be able to ship password auth silently.
 
 # Rust toolchain for the skulk-pyo3-bindings build during `uv sync`. Pinned
 # (not `stable`) so rebuilding this published image later cannot silently

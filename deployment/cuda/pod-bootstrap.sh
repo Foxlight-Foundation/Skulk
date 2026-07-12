@@ -54,11 +54,21 @@ fi
 # llama-cpp-python would otherwise end up silently un-locked, and a
 # different .python-version fails later with a confusing wheel-tag error;
 # both mismatches stop here with instructions instead.
+for pin_file in uv.lock .python-version; do
+  if [ ! -f "${pin_file}" ]; then
+    echo "[bootstrap] ERROR: ${pin_file} missing from this checkout; the ref predates (or is incompatible with) the prebaked-image flow. Provision with deployment/cuda/install-deps.sh instead." >&2
+    exit 1
+  fi
+done
 WHEEL_NAME="$(basename "${WHEELS[0]}")"
 WHEEL_VERSION="$(printf '%s' "${WHEEL_NAME}" | cut -d- -f2)"
 WHEEL_PY_TAG="$(printf '%s' "${WHEEL_NAME}" | cut -d- -f3)"
 LOCKED_VERSION="$(sed -n '/^name = "llama-cpp-python"$/{n;s/^version = "\(.*\)"$/\1/p;}' uv.lock | head -1)"
 EXPECTED_PY_TAG="cp$(tr -d '[:space:].' < .python-version | cut -c1-3)"
+if [ -z "${LOCKED_VERSION}" ] || [ "${EXPECTED_PY_TAG}" = "cp" ]; then
+  echo "[bootstrap] ERROR: could not parse llama-cpp-python pin (got version '${LOCKED_VERSION:-}', tag '${EXPECTED_PY_TAG}') from this ref's uv.lock/.python-version." >&2
+  exit 1
+fi
 if [ "${WHEEL_VERSION}" != "${LOCKED_VERSION}" ] || [ "${WHEEL_PY_TAG}" != "${EXPECTED_PY_TAG}" ]; then
   echo "[bootstrap] ERROR: prebaked wheel ${WHEEL_NAME} does not match this ref's pins" >&2
   echo "[bootstrap]   ref locks llama-cpp-python==${LOCKED_VERSION} on ${EXPECTED_PY_TAG}" >&2
