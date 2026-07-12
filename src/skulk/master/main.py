@@ -829,18 +829,19 @@ class Master:
                                         task_count
                                     )
 
-                            if not instance_task_counts:
+                            if (
+                                not instance_task_counts
+                                and command.target_instance_id is None
+                            ):
                                 raise ValueError(
                                     f"No instance found for model {command.task_params.model}"
                                 )
 
                             task_id = TaskId()
+                            target_unavailable = False
                             if command.target_instance_id is not None:
                                 if command.target_instance_id not in instance_task_counts:
-                                    raise ValueError(
-                                        "Requested TTS instance is unavailable or "
-                                        "does not serve the requested model"
-                                    )
+                                    target_unavailable = True
                                 selected_instance_id = command.target_instance_id
                             else:
                                 available_instance_ids = sorted(
@@ -859,7 +860,11 @@ class Master:
                                         command_id=command.command_id,
                                         owner_node=command.owner_node,  # #279 Phase 2
                                         instance_id=selected_instance_id,
-                                        task_status=TaskStatus.Pending,
+                                        task_status=(
+                                            TaskStatus.Failed
+                                            if target_unavailable
+                                            else TaskStatus.Pending
+                                        ),
                                         task_params=command.task_params,
                                         trace_enabled=trace_enabled,
                                     ),
@@ -867,11 +872,23 @@ class Master:
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
-                            self._configure_expected_trace_ranks(
-                                task_id,
-                                selected_instance_id,
-                                trace_enabled=trace_enabled,
-                            )
+                            if target_unavailable:
+                                generated_events.append(
+                                    TaskFailed(
+                                        task_id=task_id,
+                                        error_type="instance_unavailable",
+                                        error_message=(
+                                            "Requested TTS instance is unavailable or "
+                                            "does not serve the requested model"
+                                        ),
+                                    )
+                                )
+                            else:
+                                self._configure_expected_trace_ranks(
+                                    task_id,
+                                    selected_instance_id,
+                                    trace_enabled=trace_enabled,
+                                )
                         case AudioTranscription():
                             for instance in self.state.instances.values():
                                 if (

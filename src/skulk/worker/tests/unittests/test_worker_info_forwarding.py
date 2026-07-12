@@ -5,15 +5,18 @@ import pytest
 
 from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.routing.speech_media import SpeechMediaPacket
-from skulk.shared.types.audio import RealtimeAudioInputFrame
+from skulk.shared.models.model_cards import AudioResponseFormat, ModelId
+from skulk.shared.types.audio import RealtimeAudioInputFrame, SpeechSynthesisTaskParams
 from skulk.shared.types.commands import (
     ForwarderCommand,
     ForwarderDownloadCommand,
     TaskCancelled,
 )
 from skulk.shared.types.common import CommandId, NodeId
-from skulk.shared.types.events import Event, IndexedEvent, NodeGatheredInfo
+from skulk.shared.types.events import Event, IndexedEvent, NodeGatheredInfo, TaskFailed
 from skulk.shared.types.profiling import NetworkInterfaceInfo
+from skulk.shared.types.tasks import SpeechSynthesis, TaskId, TaskStatus
+from skulk.shared.types.worker.instances import InstanceId
 from skulk.utils.channels import channel
 from skulk.utils.info_gatherer.info_gatherer import (
     GatheredInfo,
@@ -236,6 +239,82 @@ async def test_speech_media_packet_is_bounded_and_completed_off_state() -> None:
     assert worker._speech_media_chunks[command_id][0].data == payload  # pyright: ignore[reportPrivateUsage]
     assert command_id in worker._speech_media_completed  # pyright: ignore[reportPrivateUsage]
     assert worker.state.tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_duplicate_speech_media_does_not_consume_buffer_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retransmitted sequence must be deduplicated before overflow accounting."""
+
+    monkeypatch.setattr(worker_main, "_SPEECH_MEDIA_PENDING_FRAMES", 1)
+    _, indexed_event_receiver = channel[IndexedEvent]()
+    event_sender, _ = channel[Event]()
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    packet_sender, packet_receiver = channel[SpeechMediaPacket](4)
+    worker = Worker(
+        node_id=NodeId("worker-node"),
+        event_receiver=indexed_event_receiver,
+        event_sender=event_sender,
+        command_sender=command_sender,
+        download_command_sender=download_sender,
+        speech_media_packet_receiver=packet_receiver,
+    )
+    packet = SpeechMediaPacket(
+        source_node=NodeId("api-node"),
+        target_node=NodeId("worker-node"),
+        command_id=CommandId("duplicate-reference"),
+        sequence=0,
+        kind="chunk",
+        data=b"same bytes",
+    )
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(worker._speech_media_packet_ingress)  # pyright: ignore[reportPrivateUsage]
+        await packet_sender.send(packet)
+        await packet_sender.send(packet)
+        await anyio.sleep(0)
+        task_group.cancel_scope.cancel()
+
+    assert worker._speech_media_chunks[packet.command_id] == {0: packet}  # pyright: ignore[reportPrivateUsage]
+    assert worker._speech_media_pending_bytes[packet.command_id] == len(packet.data)  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_invalid_speech_media_emits_terminal_task_failure() -> None:
+    """Corrupt request media must fail immediately instead of waiting for timeout."""
+
+    _, indexed_event_receiver = channel[IndexedEvent]()
+    event_sender, event_receiver = channel[Event]()
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    worker = Worker(
+        node_id=NodeId("worker-node"),
+        event_receiver=indexed_event_receiver,
+        event_sender=event_sender,
+        command_sender=command_sender,
+        download_command_sender=download_sender,
+    )
+    task = SpeechSynthesis(
+        task_id=TaskId("invalid-media-task"),
+        command_id=CommandId("invalid-media-command"),
+        owner_node=NodeId("api-node"),
+        instance_id=InstanceId("speech-instance"),
+        task_status=TaskStatus.Pending,
+        task_params=SpeechSynthesisTaskParams(
+            model=ModelId("org/voice-model"),
+            input_text="hello",
+            response_format=AudioResponseFormat.Wav,
+        ),
+    )
+
+    await worker._fail_speech_media_task(task, "checksum mismatch")  # pyright: ignore[reportPrivateUsage]
+    event = await event_receiver.receive()
+
+    assert isinstance(event, TaskFailed)
+    assert event.task_id == task.task_id
+    assert event.error_type == "invalid_reference_audio"
 
 
 @pytest.mark.asyncio

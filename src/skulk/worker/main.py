@@ -56,6 +56,7 @@ from skulk.shared.types.events import (
     StagedModelEvicted,
     TaskCreated,
     TaskDeleted,
+    TaskFailed,
     TaskStatusUpdated,
     TopologyEdgeCreated,
     TopologyEdgeDeleted,
@@ -885,6 +886,8 @@ class Worker:
                     continue
                 chunks = self._speech_media_chunks.setdefault(command_id, {})
                 pending_bytes = self._speech_media_pending_bytes.get(command_id, 0)
+                if packet.sequence in chunks:
+                    continue
                 if (
                     len(chunks) >= _SPEECH_MEDIA_PENDING_FRAMES
                     or pending_bytes + len(packet.data) > _SPEECH_MEDIA_PENDING_BYTES
@@ -896,8 +899,6 @@ class Worker:
                             command=TaskCancelled(cancelled_command_id=command_id),
                         )
                     )
-                    continue
-                if packet.sequence in chunks:
                     continue
                 chunks[packet.sequence] = packet
                 self._speech_media_pending_bytes[command_id] = (
@@ -911,6 +912,18 @@ class Worker:
         self._speech_media_completed.pop(command_id, None)
         self._speech_media_pending_bytes.pop(command_id, None)
         self._speech_media_pending_since.pop(command_id, None)
+
+    async def _fail_speech_media_task(self, task: SpeechSynthesis, message: str) -> None:
+        """Terminate a synthesis task whose request-scoped media is invalid."""
+
+        self._clear_speech_media(task.command_id)
+        await self.event_sender.send(
+            TaskFailed(
+                task_id=task.task_id,
+                error_type="invalid_reference_audio",
+                error_message=message,
+            )
+        )
 
     async def _speech_media_janitor(self) -> None:
         """Cancel reference media that never acquires a serving task."""
@@ -1510,24 +1523,18 @@ class Worker:
                             "Reference audio reached dispatch with missing chunk "
                             f"{exc.args[0]} for command {command_id}"
                         )
-                        self._clear_speech_media(command_id)
-                        await self.event_sender.send(
-                            TaskStatusUpdated(
-                                task_id=task.task_id,
-                                task_status=TaskStatus.Failed,
-                            )
+                        await self._fail_speech_media_task(
+                            task,
+                            f"Reference audio is missing chunk {exc.args[0]}",
                         )
                         continue
                     if hashlib.sha256(reference_audio).hexdigest() != completed.sha256:
                         logger.error(
                             f"Reference audio checksum mismatch for command {command_id}"
                         )
-                        self._clear_speech_media(command_id)
-                        await self.event_sender.send(
-                            TaskStatusUpdated(
-                                task_id=task.task_id,
-                                task_status=TaskStatus.Failed,
-                            )
+                        await self._fail_speech_media_task(
+                            task,
+                            "Reference audio checksum mismatch",
                         )
                         continue
                     modified_task = task.model_copy(
