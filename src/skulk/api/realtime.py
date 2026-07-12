@@ -383,7 +383,8 @@ class RealtimeTranscriptionBridge:
                         code="unsupported_session_update",
                         message=(
                             "Skulk realtime transcription currently requires the URL "
-                            "model, pcm16, 24 kHz mono audio, supported server VAD, "
+                            "model, pcm16, 24 kHz mono audio, optional supported "
+                            "server VAD, "
                             "no noise reduction, "
                             "and no additional fields"
                         ),
@@ -391,11 +392,23 @@ class RealtimeTranscriptionBridge:
                     )
                     await self._close(1008)
                     return
-                self._configure_turn_detection(
+                requested_turn_detection = (
                     event.session.turn_detection
                     if isinstance(event, TranscriptionSessionUpdate)
                     else event.session.audio.input.turn_detection
                 )
+                if (
+                    self._audio_bytes > 0
+                    and requested_turn_detection != self._turn_detection
+                ):
+                    await self._send_error(
+                        code="turn_detection_locked",
+                        message="turn detection cannot change after audio is appended",
+                        client_event_id=event.event_id,
+                    )
+                    continue
+                if self._audio_bytes == 0:
+                    self._configure_turn_detection(requested_turn_detection)
                 await self._send_json(
                     {
                         "event_id": self._event_id(),
@@ -529,11 +542,28 @@ class RealtimeTranscriptionBridge:
                     client_event_id=event.event_id,
                 )
                 continue
+            await self._finish_vad_on_manual_commit()
             if not await self._commit_input(
                 session,
                 client_event_id=event.event_id,
             ):
                 return
+
+    async def _finish_vad_on_manual_commit(self) -> None:
+        """Emit a terminal VAD boundary before a client-owned input commit."""
+
+        detector = self._vad_detector
+        if detector is None:
+            return
+        for event in detector.finish():
+            await self._send_json(
+                {
+                    "event_id": self._event_id(),
+                    "type": "input_audio_buffer.speech_stopped",
+                    "audio_end_ms": event.timestamp_ms,
+                    "item_id": self._item_id,
+                }
+            )
 
     def _configure_turn_detection(
         self,

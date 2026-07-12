@@ -352,6 +352,84 @@ def test_realtime_websocket_server_vad_auto_commits(
     assert len(b"".join(forwarded_media)) < len(audio)
 
 
+def test_realtime_websocket_manual_commit_finishes_locked_vad(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Manual commit closes active VAD without allowing mid-turn reconfiguration."""
+
+    api = _build_api()
+    input_frames: list[CapabilityStreamFrame] = []
+
+    class ManualCommitDetector:
+        frame_bytes = 640
+
+        def __init__(self, config: object) -> None:
+            del config
+            self.active = False
+
+        def process(self, frame: bytes) -> tuple[VadTurnEvent, ...]:
+            assert len(frame) == self.frame_bytes
+            self.active = True
+            return (VadTurnEvent("speech_started", 0, "minimum_speech"),)
+
+        def finish(self) -> tuple[VadTurnEvent, ...]:
+            if not self.active:
+                return ()
+            self.active = False
+            return (VadTurnEvent("speech_stopped", 20, "input_completed"),)
+
+    monkeypatch.setattr(realtime_api, "VoiceActivityDetector", ManualCommitDetector)
+    _install_waiting_session(api, input_frames, call_id="manual-vad")
+    audio = array("h", [1000] * 480).tobytes()
+
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt"
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        vad_session = {
+            "type": "transcription",
+            "audio": {
+                "input": {
+                    "transcription": {"model": "org/realtime-stt"},
+                    "turn_detection": {"type": "server_vad"},
+                }
+            },
+        }
+        websocket.send_json({"type": "session.update", "session": vad_session})
+        assert _receive_json(websocket)["type"] == "session.updated"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(audio).decode("ascii"),
+            }
+        )
+        assert _receive_json(websocket)["type"] == "input_audio_buffer.speech_started"
+
+        websocket.send_json({"type": "session.update", "session": vad_session})
+        assert _receive_json(websocket)["type"] == "session.updated"
+        no_vad_session = {
+            **vad_session,
+            "audio": {
+                "input": {
+                    "transcription": {"model": "org/realtime-stt"},
+                    "turn_detection": None,
+                }
+            },
+        }
+        websocket.send_json({"type": "session.update", "session": no_vad_session})
+        locked = _receive_json(websocket)
+        assert locked["type"] == "error"
+        assert _mapping(locked["error"])["code"] == "turn_detection_locked"
+
+        websocket.send_json({"type": "input_audio_buffer.commit"})
+        stopped = _receive_json(websocket)
+        assert stopped["type"] == "input_audio_buffer.speech_stopped"
+        assert stopped["audio_end_ms"] == 20
+        assert _receive_json(websocket)["type"] == "input_audio_buffer.committed"
+
+    assert [frame.kind for frame in input_frames] == ["started", "chunk", "completed"]
+
+
 def test_realtime_websocket_rejects_invalid_audio_without_forwarding() -> None:
     """Malformed base64 terminates only the socket and never reaches the provider."""
 
