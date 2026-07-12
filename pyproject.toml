@@ -39,6 +39,7 @@ dependencies = [
   "mlx-vlm==0.6.4; sys_platform == 'darwin'",
   "transformers>=5.5.0,<6.0.0",
   "jsonschema>=4.26.0",
+  "webrtcvad-wheels>=2.0.14,<3",
 ]
 
 [project.scripts]
