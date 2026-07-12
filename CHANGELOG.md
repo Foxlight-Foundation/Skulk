@@ -95,6 +95,10 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Text-generation compatibility endpoints now reject mounted TTS-only and
+  STT-only model cards before command dispatch, preventing modality mistakes
+  from reaching or restarting speech runners.
+
 - **llama.cpp engines now report generation statistics.** Chat completions
   served by the in-process `llama_cpp` engine and the served `llama_server`
   proxy attach real `generation_stats` (prompt/generation token counts and

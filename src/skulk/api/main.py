@@ -1615,7 +1615,8 @@ class API:
             summary="OpenAI Chat Completions-compatible text generation",
             description=(
                 "Generate text with an OpenAI Chat Completions-compatible payload. The requested "
-                "model must already be placed and running or Skulk will return a not-found error."
+                "model must already be placed, running, and declare TextGeneration; speech-only "
+                "models are rejected before command dispatch."
             ),
         )(self.chat_completions)
         self.app.post(
@@ -1676,6 +1677,10 @@ class API:
             "/bench/chat/completions",
             tags=["Compatibility APIs"],
             summary="Benchmark chat completions",
+            description=(
+                "Benchmark text generation for a placed model that declares "
+                "TextGeneration. Speech-only models are rejected before dispatch."
+            ),
         )(self.bench_chat_completions)
         self.app.post(
             "/v1/images/generations",
@@ -1712,7 +1717,7 @@ class API:
             summary="Anthropic Claude Messages-compatible endpoint",
             description=(
                 "Claude Messages-compatible text generation endpoint. As with chat completions, "
-                "the target model must already be placed and ready."
+                "the target model must already be placed, ready, and declare TextGeneration."
             ),
         )(self.claude_messages)
         self.app.post(
@@ -1722,7 +1727,7 @@ class API:
             summary="OpenAI Responses-compatible endpoint",
             description=(
                 "OpenAI Responses-compatible endpoint for text generation and reasoning-style "
-                "workflows backed by a placed Skulk model."
+                "workflows backed by a placed Skulk model that declares TextGeneration."
             ),
         )(self.openai_responses)
         self.app.post(
@@ -1773,7 +1778,10 @@ class API:
             response_model=None,
             tags=["Compatibility APIs"],
             summary="Ollama chat",
-            description="Ollama-compatible chat endpoint backed by Skulk model placement and routing.",
+            description=(
+                "Ollama-compatible chat endpoint backed by a placed model that "
+                "declares TextGeneration."
+            ),
             openapi_extra=_json_request_body(OllamaChatRequest.model_json_schema()),
         )(self.ollama_chat)
         self.app.post(
@@ -1793,7 +1801,10 @@ class API:
             response_model=None,
             tags=["Compatibility APIs"],
             summary="Ollama generate",
-            description="Ollama-compatible prompt-completion endpoint backed by a placed Skulk model.",
+            description=(
+                "Ollama-compatible prompt completion backed by a placed model "
+                "that declares TextGeneration."
+            ),
             openapi_extra=_json_request_body(OllamaGenerateRequest.model_json_schema()),
         )(self.ollama_generate)
         self.app.get(
@@ -3059,9 +3070,10 @@ class API:
         return await self._collect_text_generation_with_stats(command.command_id)
 
     async def _resolve_and_validate_text_model(self, model_id: ModelId) -> ModelId:
-        """Validate a text model exists and return the resolved model ID.
+        """Validate a mounted model supports text generation.
 
-        Raises HTTPException 404 if no instance is found for the model.
+        Raises HTTPException 404 if no instance is found for the model, or 400
+        when the mounted model does not declare ``TextGeneration``.
         """
         if not any(
             instance.shard_assignments.model_id == model_id
@@ -3071,6 +3083,12 @@ class API:
             raise HTTPException(
                 status_code=404,
                 detail=f"No instance found for model {model_id}",
+            )
+        model_card = await self._get_running_model_card(model_id)
+        if ModelTask.TextGeneration not in model_card.tasks:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {model_card.model_id} is not a text-generation model",
             )
         return model_id
 

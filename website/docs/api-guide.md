@@ -15,6 +15,11 @@ That API has two jobs:
 
 A model must be placed and running before chat requests for it succeed; calling
 `/v1/chat/completions` for an unplaced model returns a 404 `No instance found`.
+Text-generation endpoints require the mounted card to declare `TextGeneration`;
+targeting a TTS-only or STT-only model returns **400 Bad Request** before any
+runner command is dispatched. This applies to Chat Completions, Responses,
+Claude, Ollama chat/generate, and benchmark adapters through their shared
+admission path.
 The [First Success Flow](#first-success-flow) below walks from placement to first
 token.
 
@@ -169,6 +174,8 @@ Requests are validated before dispatch: an empty `messages` array or a
 non-positive `max_tokens` returns **400 Bad Request** rather than being
 accepted and failing during generation. (This applies across the Claude,
 Ollama, and Responses wire formats too, which share the same dispatch path.)
+The mounted model must also declare `TextGeneration`; speech-only cards return
+**400 Bad Request** without affecting their speech runner.
 
 ### Context-length limits
 
