@@ -144,6 +144,20 @@ export function splitCompleteSpeechSentences(text: string): {
   return { sentences, remainder: text.slice(boundary) };
 }
 
+/** Re-split visible speech after a reasoning parser rewrites earlier text. */
+export function resyncVisibleSpeech(
+  previousVisible: string,
+  pendingTail: string,
+  nextVisible: string,
+): { sentences: string[]; remainder: string } {
+  const processedLength = Math.max(0, previousVisible.length - pendingTail.length);
+  const processedPrefix = previousVisible.slice(0, processedLength);
+  const unprocessed = nextVisible.startsWith(processedPrefix)
+    ? nextVisible.slice(processedPrefix.length)
+    : nextVisible;
+  return splitCompleteSpeechSentences(unprocessed);
+}
+
 /** One bounded browser playback session for a raw mono PCM HTTP response. */
 export class StreamingSpeechPlayback {
   private context: AudioContext | null = null;

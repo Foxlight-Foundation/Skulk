@@ -132,6 +132,7 @@ describe('RealtimeTranscriptionSocket', () => {
       transcript: 'hello world',
     });
     await expect(result).resolves.toBe('hello world');
+    expect(socket.closeCode).toBe(1000);
   });
 
   it('surfaces typed server errors and closes the socket', async () => {
