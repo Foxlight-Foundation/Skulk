@@ -39,6 +39,7 @@ from typing import Any, Final, Literal, NamedTuple
 import httpx
 from anyio import ClosedResourceError, EndOfStream, WouldBlock
 
+from skulk.api.types import GenerationStats
 from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
 from skulk.shared.models.model_cards import OutputParserType
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
@@ -50,6 +51,7 @@ from skulk.shared.types.events import (
     TaskAcknowledged,
     TaskStatusUpdated,
 )
+from skulk.shared.types.memory import Memory
 from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
     LoadModel,
@@ -72,6 +74,12 @@ from skulk.shared.types.worker.runners import (
 from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
+from skulk.worker.runner.generation_stats import (
+    StreamStatsClock,
+    blocking_call_stats,
+    stats_from_llama_server_timings,
+    subprocess_peak_memory,
+)
 from skulk.worker.runner.llama_cpp.runner import (
     generation_kwargs,
     map_finish_reason,
@@ -218,6 +226,10 @@ class _StreamDelta(NamedTuple):
     content: str
     finish: Literal["stop", "length", "content_filter"] | None
     done: bool  # the terminal ``data: [DONE]`` sentinel
+    # llama-server's native phase measurements, present on the final chunk
+    # when the request asked for them (timings_per_token); source of the
+    # engine-exact GenerationStats (#532).
+    timings: dict[str, object] | None = None
 
 
 def _gpu_layers_for_backend(resolved_backend: str | None) -> str:
@@ -259,16 +271,27 @@ def _parse_sse_line(line: str) -> _StreamDelta | None:
         chunk = json.loads(data)
     except json.JSONDecodeError:
         return None
-    choices = chunk.get("choices") or []
-    if not choices:
+    if not isinstance(chunk, dict):
+        return None
+    choices = chunk.get("choices")
+    if (
+        not isinstance(choices, list)
+        or not choices
+        or not isinstance(choices[0], dict)
+    ):
         return None
     choice = choices[0]
-    delta = choice.get("delta") or {}
+    raw_delta = choice.get("delta")
+    # Non-dict shapes are skipped (the docstring's malformed-payload promise),
+    # not raised: one stray line must never break the whole stream.
+    delta = raw_delta if isinstance(raw_delta, dict) else {}
+    raw_timings = chunk.get("timings")
     return _StreamDelta(
         reasoning=delta.get("reasoning_content") or "",
         content=delta.get("content") or "",
         finish=map_finish_reason(choice.get("finish_reason")),
         done=False,
+        timings=raw_timings if isinstance(raw_timings, dict) else None,
     )
 
 
@@ -795,7 +818,28 @@ class Runner:
         command_id: CommandId,
     ) -> None:
         body["stream"] = True
+        # Ask llama-server to attach its native timings object to the final
+        # streamed chunk: engine-side prompt_n/prompt_ms/predicted_n/
+        # predicted_ms beat any proxy-side wall clock (#532).
+        body["timings_per_token"] = True
         assert self.base_url is not None
+        clock = StreamStatsClock()
+        last_timings: dict[str, object] | None = None
+
+        def final_stats() -> GenerationStats:
+            # Prefer the engine's own measurements; fall back to proxy-side
+            # wall clocks (prompt count unknowable from here, reported as 0).
+            # Peak memory always comes from the server child, never this proxy.
+            if last_timings is not None:
+                from_timings = stats_from_llama_server_timings(last_timings)
+                if from_timings is not None:
+                    return from_timings.model_copy(
+                        update={"peak_memory_usage": self._server_peak_memory()}
+                    )
+            return clock.stats(
+                prompt_tokens=0, generation_tokens=clock.pieces
+            ).model_copy(update={"peak_memory_usage": self._server_peak_memory()})
+
         emitted_finish = False
         # Gemma 4 emits its reasoning as literal <|channel> markers in content;
         # reparse them here (llama-server can't) into reasoning/content chunks.
@@ -819,6 +863,11 @@ class Runner:
                     continue
                 if delta.done:
                     break
+                if delta.timings is not None:
+                    last_timings = delta.timings
+                if delta.reasoning or delta.content:
+                    # One SSE delta per generated token piece.
+                    clock.mark_piece()
                 if delta.reasoning:
                     self._send_token(
                         command_id, model_id, delta.reasoning, is_thinking=True
@@ -838,7 +887,11 @@ class Runner:
                                 command_id, model_id, text, is_thinking=is_thinking
                             )
                     self._send_token(
-                        command_id, model_id, "", finish_reason=delta.finish
+                        command_id,
+                        model_id,
+                        "",
+                        finish_reason=delta.finish,
+                        stats=final_stats(),
                     )
                     emitted_finish = True
         # Guarantee a terminal chunk so the consumer's stream closes even if the
@@ -849,7 +902,9 @@ class Runner:
                     self._send_token(
                         command_id, model_id, text, is_thinking=is_thinking
                     )
-            self._send_token(command_id, model_id, "", finish_reason="stop")
+            self._send_token(
+                command_id, model_id, "", finish_reason="stop", stats=final_stats()
+            )
 
     def _generate_with_tools(
         self,
@@ -870,10 +925,12 @@ class Runner:
         if self._is_cancelled(task.task_id):
             return
         timeout = httpx.Timeout(connect=15.0, read=None, write=30.0, pool=None)
+        request_started = time.perf_counter()
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(f"{self.base_url}/v1/chat/completions", json=body)
             resp.raise_for_status()
             result = resp.json()
+        request_seconds = time.perf_counter() - request_started
         # A cancel that arrived while the (non-streamed) request was in flight:
         # drain it (the streaming path checks every chunk; this blocking path has
         # no mid-flight checkpoint) and skip emission so main() marks the task
@@ -883,13 +940,26 @@ class Runner:
             return
         choice = (result.get("choices") or [{}])[0]
         message = choice.get("message") or {}
+        # Engine-side timings when the server includes them, usage-derived
+        # effective rates otherwise (#532).
+        raw_timings = result.get("timings")
+        stats = (
+            stats_from_llama_server_timings(raw_timings)
+            if isinstance(raw_timings, dict)
+            else None
+        ) or blocking_call_stats(result.get("usage"), request_seconds)
+        if stats is not None:
+            # The model lives in the server child; never report proxy RSS.
+            stats = stats.model_copy(
+                update={"peak_memory_usage": self._server_peak_memory()}
+            )
         tool_calls = tool_calls_from_message(message)
         if tool_calls:
             self.event_sender.send(
                 ChunkGenerated(
                     command_id=command_id,
                     chunk=ToolCallChunk(
-                        model=model_id, tool_calls=tool_calls, usage=None
+                        model=model_id, tool_calls=tool_calls, usage=None, stats=stats
                     ),
                 )
             )
@@ -913,7 +983,20 @@ class Runner:
             else:
                 self._send_token(command_id, model_id, content)
         finish = map_finish_reason(choice.get("finish_reason")) or "stop"
-        self._send_token(command_id, model_id, "", finish_reason=finish)
+        self._send_token(command_id, model_id, "", finish_reason=finish, stats=stats)
+
+    def _server_peak_memory(self) -> Memory:
+        """Peak RSS of the llama-server child, or zero when unmeasurable.
+
+        The weights and KV cache live in the external server process, so the
+        proxy's own RSS would misattribute memory in telemetry (#536 review).
+        Zero means "unmeasured" (non-Linux, or the child already exited);
+        a fabricated proxy-side figure would be worse than none.
+        """
+        proc = self.server_proc
+        if proc is None:
+            return Memory.from_bytes(0)
+        return subprocess_peak_memory(proc.pid) or Memory.from_bytes(0)
 
     def _send_token(
         self,
@@ -923,6 +1006,7 @@ class Runner:
         *,
         is_thinking: bool = False,
         finish_reason: Any = None,
+        stats: GenerationStats | None = None,
     ) -> None:
         """Emit one TokenChunk; skip empty non-terminal chunks."""
         if not text and finish_reason is None:
@@ -937,6 +1021,7 @@ class Runner:
                     usage=None,
                     finish_reason=finish_reason,
                     is_thinking=is_thinking,
+                    stats=stats,
                 ),
             )
         )

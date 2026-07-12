@@ -23,7 +23,7 @@ from typing import Any, Final, Literal
 
 from anyio import WouldBlock
 
-from skulk.api.types import ToolCallItem, TopLogprobItem
+from skulk.api.types import GenerationStats, ToolCallItem, TopLogprobItem
 from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.memory_estimate import KV_CONTEXT_BUDGET_TOKENS
 from skulk.shared.models.model_cards import OutputParserType, ReasoningFormat
@@ -59,6 +59,11 @@ from skulk.shared.types.worker.runners import (
 from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
+from skulk.worker.runner.generation_stats import (
+    StreamStatsClock,
+    blocking_call_stats,
+    resolve_stream_token_counts,
+)
 from skulk.worker.runner.llm_inference.harmony_text_parser import HarmonyTextParser
 from skulk.worker.runner.llm_inference.think_text_parser import ThinkTextParser
 from skulk.worker.runner.llm_inference.tool_text_parser import (
@@ -923,16 +928,44 @@ class Runner:
                 task_id=task.task_id,
                 command_id=str(command_id),
             )
+            clock = StreamStatsClock()
             stream = self.model.create_chat_completion(
                 messages=messages, stream=True, **kwargs
             )
+            # KV position when the first piece arrives == evaluated prompt
+            # size; token-level truth that text-chunk counting lacks (the
+            # binding buffers multi-byte UTF-8 into combined deltas).
+            position_at_first_piece: int | None = None
+
+            def read_kv_position() -> int:
+                # getattr so a binding attribute rename degrades stats to
+                # the piece-count fallback instead of failing generation.
+                raw_position = getattr(self.model, "n_tokens", 0)
+                return raw_position if isinstance(raw_position, int) else 0
+
+            def final_stats() -> GenerationStats:
+                prompt_tokens, generation_tokens = resolve_stream_token_counts(
+                    context_tokens=read_kv_position(),
+                    position_at_first_piece=position_at_first_piece,
+                    pieces=clock.pieces,
+                )
+                return clock.stats(
+                    prompt_tokens=prompt_tokens,
+                    generation_tokens=generation_tokens,
+                )
+
             emitted_finish = False
             for chunk in stream:
                 if self._is_cancelled(task.task_id):
                     logger.info(f"llama.cpp generation cancelled: {task.task_id}")
                     break
                 choice = chunk["choices"][0]
-                text = choice.get("delta", {}).get("content") or ""
+                raw_content = choice.get("delta", {}).get("content")
+                if raw_content is not None:
+                    if position_at_first_piece is None:
+                        position_at_first_piece = read_kv_position()
+                    clock.mark_piece()
+                text = raw_content or ""
                 finish = map_finish_reason(choice.get("finish_reason"))
                 logprob, top_logprobs = (
                     _logprob_fields(choice) if want_logprobs else (None, None)
@@ -953,7 +986,11 @@ class Runner:
                             )
                         emitted_finish = True
                         self._send_token_chunk(
-                            command_id, model_id, "", finish_reason=finish
+                            command_id,
+                            model_id,
+                            "",
+                            finish_reason=finish,
+                            stats=final_stats(),
                         )
                     continue
 
@@ -971,6 +1008,7 @@ class Runner:
                             finish_reason=finish,
                             logprob=logprob,
                             top_logprobs=top_logprobs,
+                            stats=final_stats() if finish is not None else None,
                         ),
                     )
                 )
@@ -994,6 +1032,7 @@ class Runner:
                             token_id=-1,
                             usage=None,
                             finish_reason="stop",
+                            stats=final_stats(),
                         ),
                     )
                 )
@@ -1092,6 +1131,7 @@ class Runner:
         *,
         is_thinking: bool = False,
         finish_reason: Literal["stop", "length", "content_filter"] | None = None,
+        stats: GenerationStats | None = None,
     ) -> None:
         """Emit one harmony-parsed token chunk; skip empty non-terminal chunks."""
         if not text and finish_reason is None:
@@ -1106,6 +1146,7 @@ class Runner:
                     usage=None,
                     finish_reason=finish_reason,
                     is_thinking=is_thinking,
+                    stats=stats,
                 ),
             )
         )
@@ -1140,15 +1181,18 @@ class Runner:
         if self._is_cancelled(task.task_id):
             logger.info(f"llama.cpp tool generation skipped (cancelled): {task.task_id}")
             return
+        request_started = time.perf_counter()
         result = self.model.create_chat_completion(
             messages=messages,
             stream=False,
             tools=task.task_params.tools,
             **kwargs,
         )
+        request_seconds = time.perf_counter() - request_started
         if self._is_cancelled(task.task_id):
             logger.info(f"llama.cpp tool generation cancelled: {task.task_id}")
             return
+        stats = blocking_call_stats(result.get("usage"), request_seconds)
         choice = result["choices"][0]
         message = choice.get("message", {})
         content = message.get("content") or ""
@@ -1191,7 +1235,7 @@ class Runner:
                 ChunkGenerated(
                     command_id=command_id,
                     chunk=ToolCallChunk(
-                        model=model_id, tool_calls=tool_calls, usage=None
+                        model=model_id, tool_calls=tool_calls, usage=None, stats=stats
                     ),
                 )
             )
@@ -1204,7 +1248,9 @@ class Runner:
                 self._send_token_chunk(
                     command_id, model_id, clean_text, is_thinking=is_thinking
                 )
-            self._send_token_chunk(command_id, model_id, "", finish_reason=finish)
+            self._send_token_chunk(
+                command_id, model_id, "", finish_reason=finish, stats=stats
+            )
             return
         self.event_sender.send(
             ChunkGenerated(
@@ -1215,6 +1261,7 @@ class Runner:
                     token_id=-1,
                     usage=None,
                     finish_reason=finish,
+                    stats=stats,
                 ),
             )
         )

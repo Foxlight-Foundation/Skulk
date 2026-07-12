@@ -67,6 +67,7 @@ file already exists (from a previous complete run), the file is skipped.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 from collections.abc import Awaitable
 from datetime import timedelta
@@ -319,8 +320,8 @@ class ModelStoreClient:
 
     Every non-store-host node holds one instance of this class.  The store
     host also holds one instance (with ``local_store_path`` set) so that the
-    staging path is unified — the store host just uses ``shutil.copy2()``
-    instead of HTTP.
+    staging path is unified — the store host hardlinks store files into
+    staging (falling back to ``shutil.copy2()``) instead of using HTTP.
 
     Args:
         store_host: Hostname or IP of the store host node.
@@ -717,6 +718,27 @@ class ModelStoreClient:
     # Local copy path (store host → same filesystem)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _link_or_copy(src_file: Path, dst_file: Path) -> None:
+        """Hardlink ``src_file`` into place, falling back to a full copy.
+
+        Store files are immutable once registered and staged files are never
+        mutated in place (staging eviction deletes whole directories, and the
+        only post-staging write is the separate ``.last_used`` marker), so a
+        hardlink is safe. It avoids doubling disk usage when store and staging
+        share a filesystem: without it a 26GB GGUF needs 52GB to stage, which
+        is exactly what killed staging on a 50GB-disk store-host node. A stale
+        destination is removed first because ``os.link`` refuses to overwrite.
+        Filesystems that cannot link (EXDEV cross-device, EPERM on some network
+        mounts) fall back to ``shutil.copy2``.
+        """
+        if dst_file.exists():
+            dst_file.unlink()
+        try:
+            os.link(src_file, dst_file)
+        except OSError:
+            shutil.copy2(src_file, dst_file)
+
     async def _stage_local(
         self,
         model_id: str,
@@ -746,7 +768,7 @@ class ModelStoreClient:
                 not dst_file.exists()
                 or dst_file.stat().st_size != src_file.stat().st_size
             ):
-                await asyncio.to_thread(shutil.copy2, src_file, dst_file)
+                await asyncio.to_thread(self._link_or_copy, src_file, dst_file)
             staged_bytes += src_file.stat().st_size
             if on_progress is not None:
                 await on_progress(staged_bytes, total_bytes)
