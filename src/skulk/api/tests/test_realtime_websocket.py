@@ -271,6 +271,7 @@ def test_realtime_websocket_server_vad_auto_commits(
 
     api = _build_api()
     input_frames: list[CapabilityStreamFrame] = []
+    release_output = Event()
 
     class DeterministicDetector:
         frame_bytes = 640
@@ -314,6 +315,8 @@ def test_realtime_websocket_server_vad_auto_commits(
                 kind="started",
             )
             await completed.wait()
+            while not release_output.is_set():
+                await anyio.sleep(0)
             yield CapabilityStreamFrame(
                 call_id="vad-ws-call",
                 direction="provider_to_caller",
@@ -366,6 +369,10 @@ def test_realtime_websocket_server_vad_auto_commits(
         assert _receive_json(websocket)["type"] == "input_audio_buffer.speech_started"
         assert _receive_json(websocket)["type"] == "input_audio_buffer.speech_stopped"
         assert _receive_json(websocket)["type"] == "input_audio_buffer.committed"
+        overlap = _receive_json(websocket)
+        assert overlap["type"] == "error"
+        assert _mapping(overlap["error"])["code"] == "turn_in_progress"
+        release_output.set()
         completed = _receive_json(websocket)
         assert completed["type"] == "conversation.item.input_audio_transcription.completed"
         assert completed["transcript"] == "hello"

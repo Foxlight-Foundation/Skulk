@@ -433,8 +433,6 @@ class RealtimeTranscriptionBridge:
 
             if isinstance(event, InputAudioBufferAppend):
                 if self._committed:
-                    if self._vad_auto_committed:
-                        continue
                     await self._send_error(
                         code="turn_in_progress",
                         message="audio cannot be appended until the committed turn completes",
