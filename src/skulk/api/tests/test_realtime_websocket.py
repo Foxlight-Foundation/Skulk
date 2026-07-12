@@ -2,6 +2,7 @@
 """Realtime transcription WebSocket compatibility-edge coverage."""
 
 import base64
+from array import array
 from collections.abc import AsyncIterator
 from threading import Event
 from typing import cast
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketTestSession
 from starlette.websockets import WebSocketDisconnect
 
+from skulk.api import realtime as realtime_api
 from skulk.api.main import API
 from skulk.api.realtime import _MAX_TRANSCRIPT_TEXT_BYTES
 from skulk.extensions import (
@@ -21,6 +23,7 @@ from skulk.extensions import (
     CapabilityStreamInput,
     CapabilityStreamSession,
     InlineMediaAttachment,
+    VadTurnEvent,
     call_failure,
 )
 from skulk.shared.election import ElectionMessage
@@ -235,6 +238,108 @@ def test_realtime_websocket_translates_pcm_and_transcript_lifecycle() -> None:
     assert media.sample_rate == 24_000
 
 
+def test_realtime_websocket_server_vad_auto_commits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Typed server VAD emits boundaries and preserves the transcript lifecycle."""
+
+    api = _build_api()
+    input_frames: list[CapabilityStreamFrame] = []
+
+    class DeterministicDetector:
+        frame_bytes = 640
+
+        def __init__(self, config: object) -> None:
+            del config
+            self.frames = 0
+
+        def process(self, frame: bytes) -> tuple[VadTurnEvent, ...]:
+            assert len(frame) == self.frame_bytes
+            self.frames += 1
+            if self.frames == 1:
+                return (VadTurnEvent("speech_started", 0, "minimum_speech"),)
+            if self.frames == 3:
+                return (VadTurnEvent("speech_stopped", 40, "silence"),)
+            return ()
+
+    monkeypatch.setattr(realtime_api, "VoiceActivityDetector", DeterministicDetector)
+
+    async def open_session(model: str, sample_rate: int) -> CapabilityStreamSession:
+        del model, sample_rate
+        completed = anyio.Event()
+
+        async def send_input(frame: CapabilityStreamFrame) -> None:
+            input_frames.append(frame)
+            if frame.kind == "completed":
+                completed.set()
+
+        input_stream = CapabilityStreamInput(
+            call_id="vad-ws-call",
+            deadline_at=anyio.current_time() + 10.0,
+            send_frame=send_input,
+        )
+        await input_stream.start()
+
+        async def output_frames() -> AsyncIterator[CapabilityStreamFrame]:
+            yield CapabilityStreamFrame(
+                call_id="vad-ws-call",
+                direction="provider_to_caller",
+                sequence=0,
+                kind="started",
+            )
+            await completed.wait()
+            yield CapabilityStreamFrame(
+                call_id="vad-ws-call",
+                direction="provider_to_caller",
+                sequence=1,
+                kind="completed",
+                payload={"model": "org/realtime-stt", "text": "hello", "is_partial": False},
+            )
+
+        return CapabilityStreamSession(
+            open_result=CapabilityResult(call_id="vad-ws-call", ok=True, result={}),
+            frames=output_frames(),
+            input=input_stream,
+        )
+
+    api._open_realtime_transcription_session = open_session
+    audio = array("h", [1000] * 2400).tobytes()
+    with TestClient(api.app).websocket_connect(
+        "/v1/realtime?model=org%2Frealtime-stt"
+    ) as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {
+                            "transcription": {"model": "org/realtime-stt"},
+                            "turn_detection": {"type": "server_vad"},
+                        }
+                    },
+                },
+            }
+        )
+        updated = _receive_json(websocket)
+        assert updated["type"] == "session.updated"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(audio).decode("ascii"),
+            }
+        )
+        assert _receive_json(websocket)["type"] == "input_audio_buffer.speech_started"
+        assert _receive_json(websocket)["type"] == "input_audio_buffer.speech_stopped"
+        assert _receive_json(websocket)["type"] == "input_audio_buffer.committed"
+        completed = _receive_json(websocket)
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
+        assert completed["transcript"] == "hello"
+
+    assert [frame.kind for frame in input_frames] == ["started", "chunk", "completed"]
+
+
 def test_realtime_websocket_rejects_invalid_audio_without_forwarding() -> None:
     """Malformed base64 terminates only the socket and never reaches the provider."""
 
@@ -282,8 +387,8 @@ def test_realtime_websocket_rejects_binary_compatibility_events() -> None:
     assert [frame.kind for frame in input_frames] == ["started", "cancelled"]
 
 
-def test_realtime_websocket_rejects_unimplemented_vad_configuration() -> None:
-    """The edge does not advertise or silently ignore unsupported server VAD."""
+def test_realtime_websocket_rejects_invalid_vad_configuration() -> None:
+    """Out-of-contract server VAD settings fail before audio forwarding."""
 
     api = _build_api()
     input_frames: list[CapabilityStreamFrame] = []
@@ -298,7 +403,7 @@ def test_realtime_websocket_rejects_unimplemented_vad_configuration() -> None:
                 "session": {
                     "input_audio_format": "pcm16",
                     "input_audio_transcription": {"model": "org/realtime-stt"},
-                    "turn_detection": {"type": "server_vad"},
+                    "turn_detection": {"type": "server_vad", "aggressiveness": 5},
                 },
             }
         )

@@ -1,6 +1,7 @@
 # pyright: reportPrivateUsage=false
 """Deterministic coverage for the built-in VAD provider."""
 
+from array import array
 from collections.abc import AsyncIterator, Callable, Iterator
 
 import pytest
@@ -11,6 +12,7 @@ from skulk.extensions import (
     CapabilityCall,
     CapabilityStreamFrame,
     InlineMediaAttachment,
+    StreamingPcm16Resampler,
     descriptor_revision,
 )
 from skulk.extensions.vad import VadConfig, VoiceActivityDetector
@@ -124,6 +126,26 @@ def test_vad_rejects_unsupported_rates_and_partial_frames() -> None:
     detector = VoiceActivityDetector(config, classify=silence)
     with pytest.raises(ValueError, match="exactly"):
         detector.process(b"too short")
+
+
+def test_streaming_pcm_resampler_preserves_interpolation_across_chunks() -> None:
+    resampler = StreamingPcm16Resampler(48000, 24000)
+
+    first = resampler.process(array("h", [0, 8192, 16384]).tobytes())
+    second = resampler.process(array("h", [24576, 32767]).tobytes())
+
+    assert array("h", first).tolist() == [0]
+    assert array("h", second).tolist() == [16384]
+
+
+def test_streaming_pcm_resampler_converts_realtime_rate_for_webrtc_vad() -> None:
+    resampler = StreamingPcm16Resampler(24000, 16000)
+    one_hundred_ms = array("h", range(2400)).tobytes()
+
+    output = resampler.process(one_hundred_ms)
+
+    assert len(output) == 1600 * 2
+    assert len(output) % (16000 * 20 // 1000 * 2) == 0
 
 
 @pytest.mark.anyio

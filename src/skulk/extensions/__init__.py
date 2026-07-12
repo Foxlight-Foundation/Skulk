@@ -75,6 +75,7 @@ from skulk.extensions.types import (
 from skulk.extensions.vad import (
     VAD_CAPABILITY_DESCRIPTOR,
     BuiltinVadProvider,
+    StreamingPcm16Resampler,
     VadConfig,
     VadTurnEvent,
     VoiceActivityDetector,
@@ -124,6 +125,7 @@ __all__ = [
     "ReadClusterTelemetry",
     "REALTIME_STT_CAPABILITY_DESCRIPTOR",
     "STT_CAPABILITY_DESCRIPTOR",
+    "StreamingPcm16Resampler",
     "SkulkExtension",
     "SupportsExtensionStartup",
     "TTS_CAPABILITY_DESCRIPTOR",

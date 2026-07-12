@@ -17,6 +17,9 @@ from skulk.extensions import (
     CapabilityStreamFrame,
     CapabilityStreamSession,
     InlineMediaAttachment,
+    StreamingPcm16Resampler,
+    VadConfig,
+    VoiceActivityDetector,
 )
 
 _PCM_SAMPLE_RATE = 24_000
@@ -48,6 +51,44 @@ class InputAudioTranscriptionConfig(_RealtimeModel):
     )
 
 
+class ServerVadConfig(_RealtimeModel):
+    """Server-owned WebRTC voice activity detection settings."""
+
+    type: Literal["server_vad"] = Field(
+        description="Select server-owned voice activity detection."
+    )
+    aggressiveness: int = Field(
+        default=2,
+        ge=0,
+        le=3,
+        description="WebRTC VAD aggressiveness from least to most restrictive.",
+    )
+    prefix_padding_ms: int = Field(
+        default=200,
+        ge=0,
+        le=2000,
+        description="Speech preroll duration represented in boundary metadata.",
+    )
+    silence_duration_ms: int = Field(
+        default=400,
+        ge=20,
+        le=5000,
+        description="Trailing silence required to end the current utterance.",
+    )
+    minimum_speech_ms: int = Field(
+        default=120,
+        ge=20,
+        le=5000,
+        description="Continuous speech required before announcing a turn start.",
+    )
+    maximum_utterance_ms: int = Field(
+        default=30000,
+        ge=100,
+        le=120000,
+        description="Hard duration limit that ends a continuous utterance.",
+    )
+
+
 class TranscriptionSessionConfig(_RealtimeModel):
     """Supported transcription-session configuration subset."""
 
@@ -58,9 +99,9 @@ class TranscriptionSessionConfig(_RealtimeModel):
     input_audio_transcription: InputAudioTranscriptionConfig = Field(
         description="Mounted realtime STT model selection."
     )
-    turn_detection: None = Field(
+    turn_detection: ServerVadConfig | None = Field(
         default=None,
-        description="Server VAD is not implemented in the initial edge.",
+        description="Optional server-owned WebRTC voice activity detection.",
     )
     input_audio_noise_reduction: None = Field(
         default=None,
@@ -100,7 +141,7 @@ class RealtimeAudioInputConfig(_RealtimeModel):
 
     format: RealtimePcmAudioFormat | None = None
     transcription: RealtimeInputTranscriptionConfig
-    turn_detection: None = None
+    turn_detection: ServerVadConfig | None = None
     noise_reduction: None = None
 
 
@@ -218,6 +259,10 @@ class RealtimeTranscriptionBridge:
         self._commit_announced = anyio.Event()
         self._audio_bytes = 0
         self._committed = False
+        self._turn_detection: ServerVadConfig | None = None
+        self._vad_detector: VoiceActivityDetector | None = None
+        self._vad_resampler: StreamingPcm16Resampler | None = None
+        self._vad_pcm = bytearray()
 
     async def serve(self) -> None:
         """Accept, run, and clean up one transcription WebSocket session."""
@@ -337,13 +382,19 @@ class RealtimeTranscriptionBridge:
                         code="unsupported_session_update",
                         message=(
                             "Skulk realtime transcription currently requires the URL "
-                            "model, pcm16, 24 kHz mono audio, no VAD/noise reduction, "
+                            "model, pcm16, 24 kHz mono audio, supported server VAD, "
+                            "no noise reduction, "
                             "and no additional fields"
                         ),
                         client_event_id=event.event_id,
                     )
                     await self._close(1008)
                     return
+                self._configure_turn_detection(
+                    event.session.turn_detection
+                    if isinstance(event, TranscriptionSessionUpdate)
+                    else event.session.audio.input.turn_detection
+                )
                 await self._send_json(
                     {
                         "event_id": self._event_id(),
@@ -444,6 +495,12 @@ class RealtimeTranscriptionBridge:
                     )
                     await self._close(1011)
                     return
+                if await self._process_vad_audio(
+                    session,
+                    audio,
+                    client_event_id=event.event_id,
+                ):
+                    continue
                 continue
 
             assert isinstance(event, InputAudioBufferCommit)
@@ -462,31 +519,116 @@ class RealtimeTranscriptionBridge:
                     client_event_id=event.event_id,
                 )
                 continue
-            try:
-                await session.input.complete()
-            except (
-                TimeoutError,
-                anyio.BrokenResourceError,
-                anyio.ClosedResourceError,
-                RuntimeError,
-            ) as exc:
-                await self._send_error(
-                    code="input_transport_error",
-                    message=f"provider input transport could not commit audio: {exc}",
-                    client_event_id=event.event_id,
-                )
-                await self._close(1011)
+            if not await self._commit_input(
+                session,
+                client_event_id=event.event_id,
+            ):
                 return
-            self._committed = True
-            await self._send_json(
-                {
-                    "event_id": self._event_id(),
-                    "type": "input_audio_buffer.committed",
-                    "previous_item_id": None,
-                    "item_id": self._item_id,
-                }
+
+    def _configure_turn_detection(
+        self,
+        config: ServerVadConfig | None,
+    ) -> None:
+        """Replace server VAD state before any audio is committed."""
+
+        self._turn_detection = config
+        self._vad_pcm.clear()
+        if config is None:
+            self._vad_detector = None
+            self._vad_resampler = None
+            return
+        self._vad_detector = VoiceActivityDetector(
+            VadConfig(
+                sample_rate=16000,
+                aggressiveness=config.aggressiveness,
+                frame_ms=20,
+                minimum_speech_ms=config.minimum_speech_ms,
+                silence_hangover_ms=config.silence_duration_ms,
+                preroll_ms=config.prefix_padding_ms,
+                maximum_utterance_ms=config.maximum_utterance_ms,
             )
-            self._commit_announced.set()
+        )
+        self._vad_resampler = StreamingPcm16Resampler(_PCM_SAMPLE_RATE, 16000)
+
+    async def _process_vad_audio(
+        self,
+        session: CapabilityStreamSession,
+        audio: bytes,
+        *,
+        client_event_id: str | None,
+    ) -> bool:
+        """Feed one 24 kHz chunk to server VAD and auto-commit on turn end."""
+
+        detector = self._vad_detector
+        resampler = self._vad_resampler
+        if detector is None or resampler is None or self._committed:
+            return False
+        self._vad_pcm.extend(resampler.process(audio))
+        while len(self._vad_pcm) >= detector.frame_bytes:
+            frame_bytes = detector.frame_bytes
+            frame = bytes(self._vad_pcm[:frame_bytes])
+            del self._vad_pcm[:frame_bytes]
+            for event in detector.process(frame):
+                if event.kind == "speech_started":
+                    await self._send_json(
+                        {
+                            "event_id": self._event_id(),
+                            "type": "input_audio_buffer.speech_started",
+                            "audio_start_ms": event.timestamp_ms,
+                            "item_id": self._item_id,
+                        }
+                    )
+                    continue
+                await self._send_json(
+                    {
+                        "event_id": self._event_id(),
+                        "type": "input_audio_buffer.speech_stopped",
+                        "audio_end_ms": event.timestamp_ms,
+                        "item_id": self._item_id,
+                    }
+                )
+                await self._commit_input(
+                    session,
+                    client_event_id=client_event_id,
+                )
+                return True
+        return False
+
+    async def _commit_input(
+        self,
+        session: CapabilityStreamSession,
+        *,
+        client_event_id: str | None,
+    ) -> bool:
+        """Half-close provider input and publish one compatibility commit."""
+
+        assert session.input is not None
+        try:
+            await session.input.complete()
+        except (
+            TimeoutError,
+            anyio.BrokenResourceError,
+            anyio.ClosedResourceError,
+            RuntimeError,
+        ) as exc:
+            await self._send_error(
+                code="input_transport_error",
+                message=f"provider input transport could not commit audio: {exc}",
+                client_event_id=client_event_id,
+            )
+            await self._close(1011)
+            return False
+        self._committed = True
+        await self._send_json(
+            {
+                "event_id": self._event_id(),
+                "type": "input_audio_buffer.committed",
+                "previous_item_id": None,
+                "item_id": self._item_id,
+            }
+        )
+        self._commit_announced.set()
+        return True
 
     async def _send_provider_output(
         self,
@@ -601,7 +743,6 @@ class RealtimeTranscriptionBridge:
             and update.input_audio_transcription.model == self._model
             and update.input_audio_transcription.language is None
             and update.input_audio_transcription.prompt == ""
-            and update.turn_detection is None
             and update.input_audio_noise_reduction is None
             and not update.include
         )
@@ -623,7 +764,6 @@ class RealtimeTranscriptionBridge:
                     and input_config.format.rate == _PCM_SAMPLE_RATE
                 )
             )
-            and input_config.turn_detection is None
             and input_config.noise_reduction is None
             and not update.include
         )
@@ -640,7 +780,11 @@ class RealtimeTranscriptionBridge:
                         "language": None,
                         "delay": "medium",
                     },
-                    "turn_detection": None,
+                    "turn_detection": (
+                        None
+                        if self._turn_detection is None
+                        else self._turn_detection.model_dump(mode="json")
+                    ),
                     "noise_reduction": None,
                 },
             },

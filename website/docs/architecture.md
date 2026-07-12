@@ -351,8 +351,10 @@ eligible mounted capacity is ready and reachable. The transcription-only
 `WS /v1/realtime` compatibility edge adapts OpenAI-style base64 24 kHz PCM16
 append/commit events onto this same binary provider path, emits transcript
 delta/final events, enforces same-origin browsers and bounded messages, and
-cancels the provider on disconnect. It is one utterance per socket and does not
-claim conversational orchestration or speech-to-speech behavior. Every API
+cancels the provider on disconnect. Optional bounded server VAD incrementally
+resamples input for WebRTC classification, emits start/stop events, and commits
+the utterance on silence or maximum duration. It is one utterance per socket
+and does not claim conversational orchestration or speech-to-speech behavior. Every API
 also registers stable `vad@1.0.0` through `BuiltinVadProvider`. This reusable
 bidirectional provider frames mono PCM16 for WebRTC VAD and emits typed turn
 boundaries with bounded minimum-speech, hangover, preroll, and maximum-duration
