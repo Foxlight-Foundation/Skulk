@@ -47,11 +47,13 @@ from .provider_streams import (
     provider_stream_rejection_packets,
 )
 from .realtime_audio import RealtimeAudioPacket
+from .speech_media import SpeechMediaPacket
 from .topics import (
     CONNECTION_MESSAGES,
     DATA,
     PROVIDER_DATA,
     REALTIME_AUDIO,
+    SPEECH_MEDIA,
     PublishPolicy,
     TypedTopic,
 )
@@ -330,6 +332,7 @@ class Router:
             DATA.topic,
             PROVIDER_DATA.topic,
             REALTIME_AUDIO.topic,
+            SPEECH_MEDIA.topic,
         )
 
     async def register_topic[T: CamelCaseModel](self, topic: TypedTopic[T]):
@@ -654,7 +657,10 @@ class Router:
                             "Zenoh DATA command queue full; dropping frame so "
                             "unrelated streams remain progressive"
                         )
-                        if packet.is_terminal or packet.topic == REALTIME_AUDIO.topic:
+                        if packet.is_terminal or packet.topic in (
+                            REALTIME_AUDIO.topic,
+                            SPEECH_MEDIA.topic,
+                        ):
                             sender.close()
                             reject_stream(stream)
                             try:
@@ -695,6 +701,8 @@ class Router:
                 rejection_topic = cast(TypedTopic[CamelCaseModel], PROVIDER_DATA)
             elif packet.topic == REALTIME_AUDIO.topic:
                 rejection_topic = cast(TypedTopic[CamelCaseModel], REALTIME_AUDIO)
+            elif packet.topic == SPEECH_MEDIA.topic:
+                rejection_topic = cast(TypedTopic[CamelCaseModel], SPEECH_MEDIA)
             else:
                 return
             original = rejection_topic.deserialize(packet.data)
@@ -736,6 +744,13 @@ class Router:
                 rejection_frames = [
                     original.transport_failure(
                         "realtime audio transport rejected the command because "
+                        "remote stream capacity is exhausted"
+                    )
+                ]
+            elif isinstance(original, SpeechMediaPacket):
+                rejection_frames = [
+                    original.transport_failure(
+                        "speech media transport rejected the command because "
                         "remote stream capacity is exhausted"
                     )
                 ]
@@ -820,7 +835,7 @@ class Router:
                             "Zenoh DATA command publish failed; dropping frame "
                             "without blocking unrelated streams"
                         )
-                        if packet.topic == REALTIME_AUDIO.topic:
+                        if packet.topic in (REALTIME_AUDIO.topic, SPEECH_MEDIA.topic):
                             reject_stream(stream)
                             rejection_slot = Semaphore(1)
                             rejection_slot.acquire_nowait()
