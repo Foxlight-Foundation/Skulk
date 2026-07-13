@@ -113,6 +113,13 @@ ARG RUST_VERSION=1.94.1
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
 ENV PATH="/root/.cargo/bin:/root/.local/bin:/usr/local/cuda/bin:${PATH}"
+# ENV only reaches the container CMD; SSH sessions build their environment
+# from login profiles, so bake the same PATH there or every remote command
+# hits the uv/nvcc-not-found ambush.
+RUN printf 'export PATH="/root/.cargo/bin:/root/.local/bin:/usr/local/cuda/bin:$PATH"\n' \
+      > /etc/profile.d/skulk-pod.sh \
+    && printf '%s\n' 'export PATH="/root/.cargo/bin:/root/.local/bin:/usr/local/cuda/bin:$PATH"' \
+      >> /root/.bashrc
 
 # uv: the canonical Skulk runtime path. Same pin rationale as the build stage.
 ARG UV_VERSION=0.11.6
