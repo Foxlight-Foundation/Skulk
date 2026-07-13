@@ -51,6 +51,7 @@ from .speech_media import SpeechMediaPacket
 from .topics import (
     CONNECTION_MESSAGES,
     DATA,
+    ELECTION_MESSAGES,
     PROVIDER_DATA,
     REALTIME_AUDIO,
     SPEECH_MEDIA,
@@ -73,6 +74,9 @@ _ZENOH_DATA_MAX_ACTIVE_STREAMS = 1024
 _ZENOH_DATA_MAX_REJECTION_TASKS = 1024
 _ZENOH_DATA_REJECTED_STREAM_TOMBSTONES = 4096
 _ZENOH_DATA_PUBLISH_TIMEOUT_SECONDS = 5.0
+# Election egress owns a small bounded queue and publish loop so a burst on the
+# ordinary gossipsub topics cannot leave liveness traffic waiting in their FIFO.
+_ELECTION_OUTBOUND_BUFFER = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,6 +311,11 @@ class Router:
             )
         self._node_id: str = node_id
         self._tmp_networking_sender: Sender[OutboundPacket] | None = send
+        election_send, election_recv = channel[OutboundPacket](
+            _ELECTION_OUTBOUND_BUFFER
+        )
+        self._election_out_send = election_send
+        self._election_out_recv = election_recv
         # Dedicated outbound channel for the Zenoh DATA plane (#309): the DATA
         # path publishes with CongestionControl::Block, so a stuck/slow
         # subscriber can stall its egress. Draining it on its OWN loop (not the
@@ -318,6 +327,8 @@ class Router:
         self._zenoh_out_send: Sender[OutboundPacket] | None = None
         self._zenoh_out_recv: Receiver[OutboundPacket] | None = None
         self._data_plane_egress_observer = DataPlaneEgressObserver()
+        self._gossipsub_queue_drop_count = 0
+        self._last_gossipsub_queue_warning = 0.0
         if zenoh is not None:
             zsend, zrecv = channel[OutboundPacket](_ZENOH_DATA_OUTBOUND_BUFFER)
             self._zenoh_out_send = zsend
@@ -341,6 +352,8 @@ class Router:
             # can't stall the shared control-plane publish loop (#309).
             assert self._zenoh_out_send is not None
             send = self._zenoh_out_send.clone()
+        elif topic.topic == ELECTION_MESSAGES.topic:
+            send = self._election_out_send.clone()
         else:
             send = self._tmp_networking_sender
             if send:
@@ -406,6 +419,7 @@ class Router:
                     tg.start_soon(router.run)
                 tg.start_soon(self._networking_recv)
                 tg.start_soon(self._networking_publish)
+                tg.start_soon(self._election_networking_publish)
                 if self._zenoh is not None:
                     tg.start_soon(self._zenoh_recv)
                     # Dedicated DATA-plane egress loop so Block backpressure
@@ -527,26 +541,49 @@ class Router:
         # (bare-topic broadcast).
         with self.networking_receiver as networked_items:
             async for packet in networked_items:
-                try:
-                    logger.trace(
-                        f"Sending message on {packet.topic} with payload {packet.data}"
-                    )
-                    if len(packet.data) > 1024 * 1024:
-                        logger.warning(
-                            "Sending overlarge payload, network performance may be temporarily degraded"
-                        )
-                    await self._net.gossipsub_publish(packet.topic, packet.data)
-                except NoPeersSubscribedToTopicError:
-                    pass
-                except AllQueuesFullError:
-                    logger.warning(
-                        f"All peer queues full, dropping message on {packet.topic}"
-                    )
-                except MessageTooLargeError:
-                    logger.warning(
-                        f"Message too large for gossipsub on {packet.topic} "
-                        f"({len(packet.data)} bytes), dropping"
-                    )
+                await self._publish_gossipsub_packet(packet)
+
+    async def _election_networking_publish(self) -> None:
+        """Publish election traffic independently from ordinary gossipsub egress."""
+
+        with self._election_out_recv as election_items:
+            async for packet in election_items:
+                await self._publish_gossipsub_packet(packet)
+
+    async def _publish_gossipsub_packet(self, packet: OutboundPacket) -> None:
+        """Publish one packet while containing and aggregating transport pressure."""
+
+        try:
+            # Log the topic and payload SIZE, not the payload: loguru brace-args
+            # defer formatting until TRACE is actually enabled, and rendering the
+            # bytes (up to max_transmit_size) on every publish would add the very
+            # overload amplification this path guards against.
+            logger.trace(
+                "Sending message on {} ({} bytes)", packet.topic, len(packet.data)
+            )
+            if len(packet.data) > 1024 * 1024:
+                logger.warning(
+                    "Sending overlarge payload, network performance may be temporarily degraded"
+                )
+            await self._net.gossipsub_publish(packet.topic, packet.data)
+        except NoPeersSubscribedToTopicError:
+            pass
+        except AllQueuesFullError:
+            self._gossipsub_queue_drop_count += 1
+            now = time.monotonic()
+            if now - self._last_gossipsub_queue_warning >= 10.0:
+                logger.warning(
+                    f"All peer queues full; dropped "
+                    f"{self._gossipsub_queue_drop_count} gossipsub message(s) "
+                    f"since the last report (latest topic={packet.topic})"
+                )
+                self._gossipsub_queue_drop_count = 0
+                self._last_gossipsub_queue_warning = now
+        except MessageTooLargeError:
+            logger.warning(
+                f"Message too large for gossipsub on {packet.topic} "
+                f"({len(packet.data)} bytes), dropping"
+            )
 
     async def _zenoh_networking_publish(self):
         """Drain the DATA-plane outbound channel onto Zenoh (#309).

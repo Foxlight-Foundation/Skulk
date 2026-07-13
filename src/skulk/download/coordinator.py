@@ -105,6 +105,12 @@ class DownloadCoordinator:
     def _model_dir(self, model_id: ModelId) -> str:
         return str(SKULK_MODELS_DIR / model_id.normalize())
 
+    def _reset_progress_throttle(self, model_id: ModelId) -> None:
+        """Start a fresh progress high-water mark for one download attempt."""
+
+        self._last_progress_time.pop(model_id, None)
+        self._last_progress_fraction.pop(model_id, None)
+
     def _should_emit_in_progress(self, model_id: ModelId, fraction: float) -> bool:
         """Whether to emit an in_progress event given how far the download advanced.
 
@@ -113,11 +119,10 @@ class DownloadCoordinator:
         to avoid bursts) or a slow-download heartbeat.
         """
         now = current_time()
-        # First observation, or a fraction regression (a restarted/cancelled
-        # download whose fraction reset back toward 0): always emit and re-seat
-        # the baseline. Otherwise the delta gate would measure against a stale,
-        # higher baseline and suppress the new download's progress until it
-        # surpassed the old attempt -- a frozen progress bar on download churn.
+        # A new attempt resets these maps at its lifecycle boundary. Treat a
+        # lower fraction inside an attempt as stale/out-of-order instead of a
+        # restart; accepting it would re-seat the baseline and let callback
+        # jitter bypass the bounded event-count guarantee.
         if model_id not in self._last_progress_fraction:
             self._last_progress_time[model_id] = now
             self._last_progress_fraction[model_id] = fraction
@@ -125,9 +130,7 @@ class DownloadCoordinator:
         last_time = self._last_progress_time.get(model_id, 0.0)
         last_fraction = self._last_progress_fraction[model_id]
         if fraction < last_fraction:
-            self._last_progress_time[model_id] = now
-            self._last_progress_fraction[model_id] = fraction
-            return True
+            return False
         advanced = (
             fraction - last_fraction >= self._PROGRESS_STEP
             and now - last_time >= self._MIN_INTERVAL_SECS
@@ -155,8 +158,7 @@ class DownloadCoordinator:
             await self.event_sender.send(
                 NodeDownloadProgress(download_progress=completed)
             )
-            self._last_progress_time.pop(model_id, None)
-            self._last_progress_fraction.pop(model_id, None)
+            self._reset_progress_throttle(model_id)
         elif progress.status == "in_progress":
             total_bytes = progress.total.in_bytes
             fraction = (
@@ -168,7 +170,7 @@ class DownloadCoordinator:
                 node_id=self.node_id,
                 shard_metadata=callback_shard,
                 download_progress=map_repo_download_progress_to_download_progress_data(
-                    progress
+                    progress, include_files=False
                 ),
                 model_directory=self._model_dir(model_id),
             )
@@ -230,6 +232,7 @@ class DownloadCoordinator:
         if model_id in self.active_downloads and model_id in self.download_status:
             logger.info(f"Cancelling download for {model_id}")
             self.active_downloads[model_id].cancel()
+            self._reset_progress_throttle(model_id)
             current_status = self.download_status[model_id]
             pending = DownloadPending(
                 shard_metadata=current_status.shard_metadata,
@@ -510,13 +513,14 @@ class DownloadCoordinator:
         self, shard: ShardMetadata, initial_progress: RepoDownloadProgress
     ) -> None:
         model_id = shard.model_card.model_id
+        self._reset_progress_throttle(model_id)
 
         # Emit ongoing status
         status = DownloadOngoing(
             node_id=self.node_id,
             shard_metadata=shard,
             download_progress=map_repo_download_progress_to_download_progress_data(
-                initial_progress
+                initial_progress, include_files=False
             ),
             model_directory=self._model_dir(model_id),
         )
@@ -551,6 +555,7 @@ class DownloadCoordinator:
                             )
             except Exception as e:
                 logger.error(f"Download failed for {model_id}: {e}")
+                self._reset_progress_throttle(model_id)
                 failed = DownloadFailed(
                     shard_metadata=shard,
                     node_id=self.node_id,
@@ -677,7 +682,7 @@ class DownloadCoordinator:
                                     node_id=self.node_id,
                                     shard_metadata=progress.shard,
                                     download_progress=map_repo_download_progress_to_download_progress_data(
-                                        progress
+                                        progress, include_files=False
                                     ),
                                     model_directory=self._model_dir(
                                         progress.shard.model_card.model_id

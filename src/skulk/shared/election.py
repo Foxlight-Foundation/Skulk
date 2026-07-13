@@ -171,6 +171,13 @@ class Election:
                 if message.clock < self.clock:
                     logger.debug(f"Dropping old message: {message}")
                     continue
+                if message in self._candidates:
+                    # During the rolling-compatibility window, peers publish
+                    # election status on both the legacy and isolated gossipsub
+                    # protocols. Treat the second wire copy as the same vote so
+                    # seniority and campaign outcomes remain protocol-agnostic.
+                    logger.debug(f"Dropping duplicate election candidate: {message}")
+                    continue
                 logger.debug(f"Election added candidate {message}")
                 # Now we are processing this rounds messages - including the message that triggered this round.
                 self._candidates.append(message)

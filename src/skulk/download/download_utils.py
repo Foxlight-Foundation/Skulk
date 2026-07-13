@@ -6,6 +6,7 @@ import ssl
 import time
 import traceback
 from collections.abc import Awaitable
+from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
 from typing import Callable, Literal
@@ -92,7 +93,19 @@ def map_repo_file_download_progress_to_download_progress_data(
 
 def map_repo_download_progress_to_download_progress_data(
     repo_download_progress: RepoDownloadProgress,
+    *,
+    include_files: bool = True,
 ) -> DownloadProgressData:
+    """Map repository progress to its wire-safe aggregate representation.
+
+    Args:
+        repo_download_progress: Latest repository-level download reading.
+        include_files: Whether to include the nested per-file progress map.
+
+    Returns:
+        A progress snapshot with aggregate fields and optional file details.
+    """
+
     return DownloadProgressData(
         total=repo_download_progress.total,
         downloaded=repo_download_progress.downloaded,
@@ -101,12 +114,16 @@ def map_repo_download_progress_to_download_progress_data(
         total_files=repo_download_progress.total_files,
         speed=repo_download_progress.overall_speed,
         eta_ms=int(repo_download_progress.overall_eta.total_seconds() * 1000),
-        files={
-            file_path: map_repo_file_download_progress_to_download_progress_data(
-                file_progress
-            )
-            for file_path, file_progress in repo_download_progress.file_progress.items()
-        },
+        files=(
+            {
+                file_path: map_repo_file_download_progress_to_download_progress_data(
+                    file_progress
+                )
+                for file_path, file_progress in repo_download_progress.file_progress.items()
+            }
+            if include_files
+            else {}
+        ),
     )
 
 
@@ -1180,7 +1197,7 @@ async def download_shard(
         ]
     file_progress: dict[str, RepoFileDownloadProgress] = {}
 
-    async def on_progress_wrapper(
+    def update_file_progress(
         file: FileListEntry, curr_bytes: int, total_bytes: int, is_renamed: bool
     ) -> None:
         previous_progress = file_progress.get(file.path)
@@ -1227,16 +1244,6 @@ async def download_shard(
             else "in_progress",
             start_time=start_time,
         )
-        await on_progress(
-            shard,
-            calculate_repo_progress(
-                shard,
-                shard.model_card.model_id,
-                revision,
-                file_progress,
-                all_start_time,
-            ),
-        )
 
     for file in filtered_file_list:
         downloaded_bytes = await get_downloaded_size(target_dir / file.path)
@@ -1257,13 +1264,45 @@ async def download_shard(
         )
 
     semaphore = asyncio.Semaphore(max_parallel_downloads)
+    pending_progress: dict[str, tuple[FileListEntry, int, int, bool]] = {}
+    progress_ready = asyncio.Event()
+    progress_stopping = False
+
+    async def emit_progress() -> None:
+        """Serialize callbacks while coalescing each file to its latest value."""
+
+        while True:
+            await progress_ready.wait()
+            progress_ready.clear()
+            if pending_progress:
+                updates = tuple(pending_progress.values())
+                pending_progress.clear()
+                for file, curr_bytes, total_bytes, is_renamed in updates:
+                    update_file_progress(file, curr_bytes, total_bytes, is_renamed)
+                await on_progress(
+                    shard,
+                    calculate_repo_progress(
+                        shard,
+                        shard.model_card.model_id,
+                        revision,
+                        file_progress,
+                        all_start_time,
+                    ),
+                )
+            if progress_stopping and not pending_progress:
+                return
+
+    progress_task = asyncio.create_task(emit_progress())
 
     def schedule_progress(
         file: FileListEntry, curr_bytes: int, total_bytes: int, is_renamed: bool
     ) -> None:
-        asyncio.create_task(
-            on_progress_wrapper(file, curr_bytes, total_bytes, is_renamed)
-        )
+        # The downloader calls this once per 8 MB chunk and cannot await. Keep
+        # one latest update per file and one emitter task instead of spawning an
+        # unbounded task per chunk. The emitter is drained before the terminal
+        # repository snapshot, so stale callbacks cannot follow completion.
+        pending_progress[file.path] = (file, curr_bytes, total_bytes, is_renamed)
+        progress_ready.set()
 
     async def download_with_semaphore(file: FileListEntry) -> None:
         async with semaphore:
@@ -1279,10 +1318,37 @@ async def download_shard(
                 skip_internet=skip_internet,
             )
 
-    if not skip_download:
-        await asyncio.gather(
-            *[download_with_semaphore(file) for file in filtered_file_list]
-        )
+    download_cancelled = False
+    try:
+        if not skip_download:
+            await asyncio.gather(
+                *[download_with_semaphore(file) for file in filtered_file_list]
+            )
+    except asyncio.CancelledError:
+        download_cancelled = True
+        raise
+    finally:
+        if download_cancelled:
+            # Cancellation must not wait on a slow status consumer. Cancelling
+            # the one owned emitter also guarantees that no orphan callback can
+            # publish stale progress after the coordinator reports cancellation.
+            progress_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await progress_task
+        else:
+            progress_stopping = True
+            progress_ready.set()
+            try:
+                await progress_task
+            except asyncio.CancelledError:
+                # Cancelled while draining the emitter: cancel and await it so no
+                # orphaned emitter can publish stale progress after we unwind,
+                # preserving the same no-stale-callback guarantee as the
+                # cancelled branch above.
+                progress_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await progress_task
+                raise
     final_repo_progress = calculate_repo_progress(
         shard, shard.model_card.model_id, revision, file_progress, all_start_time
     )
