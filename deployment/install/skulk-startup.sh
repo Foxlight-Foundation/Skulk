@@ -161,8 +161,11 @@ run_prep() {
                 log "warning: could not read llama-cpp-python version from uv.lock; rebuilding unpinned"
             fi
             log "GPU llama.cpp wheel MISSING or CPU-only; rebuilding ${WHEEL_SPEC} from source with CMAKE_ARGS=${WHEEL_CMAKE} (self-heal, #568)"
+            # --no-deps: uv sync already installed llama-cpp-python's locked
+            # dependencies; the rebuild only swaps the wheel artifact and must
+            # not let pip drift the rest of the environment off uv.lock.
             if CMAKE_ARGS="$WHEEL_CMAKE" uv pip install --force-reinstall \
-                --no-cache-dir --no-binary llama-cpp-python \
+                --no-deps --no-cache-dir --no-binary llama-cpp-python \
                 --python .venv/bin/python "$WHEEL_SPEC" 2>&1 \
                 | tee -a "$PREP_LOG" >&2; then
                 if uv run --no-sync python -c "$WHEEL_PROBE" >/dev/null 2>&1; then
