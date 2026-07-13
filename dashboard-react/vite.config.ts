@@ -51,7 +51,7 @@ export default defineConfig({
       extends: true,
       test: {
         name: 'unit',
-        include: ['src/**/*.test.ts'],
+        include: ['src/**/*.test.{ts,tsx}'],
         browser: {
           enabled: true,
           headless: true,
@@ -71,7 +71,7 @@ export default defineConfig({
       })],
       test: {
         name: 'storybook',
-        exclude: ['src/**/*.test.ts'],
+        exclude: ['src/**/*.test.{ts,tsx}'],
         browser: {
           enabled: true,
           headless: true,

@@ -387,7 +387,8 @@ review threads remain:
 2. Verify that all new or modified API endpoints are documented in `website/docs/api-guide.md`.
 3. Verify that all new or modified API endpoints have proper FastAPI decorators (`tags`, `summary`, `description`).
 4. Verify that all new or modified public functions have docstrings.
-5. If the dashboard was changed, run `npm run build` in `dashboard-react/` to confirm it builds.
+5. If the dashboard was changed, run `npm run test` and `npm run build` in
+   `dashboard-react/` to confirm its Chromium suite and production build pass.
 6. Stage any files changed by formatters before committing.
 
 ## Testing

@@ -1,12 +1,17 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   finalizeRealtimeCaptureStartup,
   RealtimeConversationSocket,
+  RealtimePcmCapture,
   RealtimeTranscriptionSocket,
   StreamingLinearResampler,
   realtimeTranscriptionUrl,
   selectTranscriptionCaptureMode,
 } from './realtimeTranscription';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('finalizeRealtimeCaptureStartup', () => {
   it('stops a capture that finishes after its session lost ownership', async () => {
@@ -386,6 +391,39 @@ describe('RealtimeConversationSocket', () => {
     expect(transcripts).toEqual([]);
   });
 
+  it('allows a fresh conversation after an unexpected socket close', async () => {
+    const firstSocket = new FakeWebSocket();
+    const errors: string[] = [];
+    const firstClient = new RealtimeConversationSocket({
+      transcriptionModelId: 'org/stt',
+      location: { protocol: 'https:', host: 'skulk.example' },
+      socketFactory: () => firstSocket as unknown as WebSocket,
+      onError: (error) => errors.push(error.message),
+    });
+
+    const firstConnected = firstClient.connect();
+    firstSocket.serverEvent({ type: 'session.created' });
+    await firstConnected;
+    firstSocket.close(1011);
+    expect(errors).toEqual(['Realtime conversation connection closed unexpectedly.']);
+
+    const secondSocket = new FakeWebSocket();
+    const secondClient = new RealtimeConversationSocket({
+      transcriptionModelId: 'org/stt',
+      location: { protocol: 'https:', host: 'skulk.example' },
+      socketFactory: () => secondSocket as unknown as WebSocket,
+    });
+    const secondConnected = secondClient.connect();
+    secondSocket.serverEvent({ type: 'session.created' });
+
+    await expect(secondConnected).resolves.toBeUndefined();
+    expect(JSON.parse(secondSocket.sent[0])).toMatchObject({
+      type: 'session.update',
+      session: { audio: { input: { transcription: { model: 'org/stt' } } } },
+    });
+    secondClient.close();
+  });
+
   it('drops a partial microphone frame at a server VAD turn boundary', async () => {
     const socket = new FakeWebSocket();
     const client = new RealtimeConversationSocket({
@@ -412,5 +450,90 @@ describe('RealtimeConversationSocket', () => {
     expect(Array.from(atob(append.audio), (char) => char.charCodeAt(0))).toEqual(
       new Array(4_800).fill(0),
     );
+  });
+});
+
+describe('RealtimePcmCapture', () => {
+  it('forwards worklet frames and releases the complete microphone graph', async () => {
+    const addModule = vi.fn().mockResolvedValue(undefined);
+    const resume = vi.fn().mockResolvedValue(undefined);
+    const close = vi.fn().mockResolvedValue(undefined);
+    const sourceConnect = vi.fn();
+    const sourceDisconnect = vi.fn();
+    const captureConnect = vi.fn();
+    const captureDisconnect = vi.fn();
+    const muteConnect = vi.fn();
+    const muteDisconnect = vi.fn();
+    const stopTrack = vi.fn();
+    const source = { connect: sourceConnect, disconnect: sourceDisconnect };
+    const mute = {
+      gain: { value: 1 },
+      connect: muteConnect,
+      disconnect: muteDisconnect,
+    };
+    const destination = {};
+
+    class FakeAudioContext {
+      readonly sampleRate = 48_000;
+      readonly audioWorklet = { addModule };
+      readonly destination = destination;
+
+      createMediaStreamSource(): MediaStreamAudioSourceNode {
+        return source as unknown as MediaStreamAudioSourceNode;
+      }
+
+      createGain(): GainNode {
+        return mute as unknown as GainNode;
+      }
+
+      resume = resume;
+      close = close;
+    }
+
+    const worklets: FakeAudioWorkletNode[] = [];
+    class FakeAudioWorkletNode {
+      readonly port: { onmessage: ((event: MessageEvent<unknown>) => void) | null } = {
+        onmessage: null,
+      };
+
+      constructor(_context: AudioContext, readonly name: string) {
+        worklets.push(this);
+      }
+
+      connect = captureConnect;
+      disconnect = captureDisconnect;
+    }
+
+    vi.stubGlobal('AudioContext', FakeAudioContext);
+    vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode);
+    const stream = {
+      getTracks: () => [{ stop: stopTrack }],
+    } as unknown as MediaStream;
+    const received: Array<[Float32Array, number]> = [];
+
+    const capture = await RealtimePcmCapture.start(
+      stream,
+      (samples, sampleRate) => received.push([samples, sampleRate]),
+    );
+    const worklet = worklets[0];
+    expect(worklet).toBeDefined();
+    const samples = Float32Array.from([0.25, -0.5]);
+    worklet.port.onmessage?.(new MessageEvent('message', { data: samples }));
+
+    expect(addModule).toHaveBeenCalledWith('/realtime-pcm-worklet.js');
+    expect(sourceConnect).toHaveBeenCalledWith(worklet);
+    expect(captureConnect).toHaveBeenCalledWith(mute);
+    expect(muteConnect).toHaveBeenCalledWith(destination);
+    expect(mute.gain.value).toBe(0);
+    expect(received).toEqual([[samples, 48_000]]);
+
+    await capture.stop();
+
+    expect(worklet.port.onmessage).toBeNull();
+    expect(sourceDisconnect).toHaveBeenCalledOnce();
+    expect(captureDisconnect).toHaveBeenCalledOnce();
+    expect(muteDisconnect).toHaveBeenCalledOnce();
+    expect(stopTrack).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
   });
 });
