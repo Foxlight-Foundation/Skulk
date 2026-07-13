@@ -420,7 +420,8 @@ def test_cluster_diagnostics_returns_local_and_peer_results(
     api = _build_api("local-node")
     client = TestClient(api.app)
 
-    async def _reachable_peer_api_urls() -> dict[str, str]:
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
         return {"peer-node": "http://peer-node:52415"}
 
     class _FakeAsyncClient:
@@ -597,7 +598,8 @@ def test_cluster_timeline_merges_flight_recorders_by_wall_clock(
         supervisor_runners=[peer_runner],
     )
 
-    async def _reachable_peer_api_urls() -> dict[str, str]:
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
         return {"peer-node": "http://peer-node:52415"}
 
     class _FakeAsyncClient:
@@ -673,7 +675,8 @@ def test_cluster_timeline_records_unreachable_peers(
 
     api.set_runner_diagnostics_provider(list)
 
-    async def _reachable_peer_api_urls() -> dict[str, str]:
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
         return {"peer-node": "http://peer-node:52415"}
 
     class _FakeAsyncClient:
@@ -751,7 +754,8 @@ def test_cancel_cluster_runner_task_proxies_to_peer(
     api = _build_api("local-node")
     client = TestClient(api.app)
 
-    async def _reachable_peer_api_urls() -> dict[str, str]:
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
         return {"peer-node": "http://peer-node:52415"}
 
     class _FakeAsyncClient:
@@ -812,7 +816,8 @@ def test_capture_cluster_node_diagnostics_proxies_to_peer(
     api = _build_api("local-node")
     client = TestClient(api.app)
 
-    async def _reachable_peer_api_urls() -> dict[str, str]:
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
         return {"peer-node": "http://peer-node:52415"}
 
     capture = DiagnosticCaptureResponse(

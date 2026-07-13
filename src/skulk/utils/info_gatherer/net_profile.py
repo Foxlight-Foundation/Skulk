@@ -68,6 +68,9 @@ async def check_reachability(
     remote_node_id = None
     last_error = None
 
+    # Same contract as check_reachable: a zero/negative budget is a caller
+    # bug and degrades to one probe rather than silently probing nothing.
+    attempts = max(1, attempts)
     for attempt_index in range(attempts):
         # Backoff only BETWEEN retries: sleeping after the final attempt
         # (always, for attempts=1 sweeps) would defeat the fail-fast budget.
