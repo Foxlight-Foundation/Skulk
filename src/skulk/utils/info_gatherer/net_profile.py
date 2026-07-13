@@ -141,6 +141,9 @@ async def check_reachable(
 
     send, recv = channel[tuple[str, NodeId]]()
 
+    # A zero or negative budget is a caller bug; probing at least once keeps
+    # the contract explicit instead of silently probing nothing.
+    attempts = max(1, attempts)
     timeout = httpx.Timeout(timeout=timeout_seconds)
     limits = httpx.Limits(
         max_connections=100,
