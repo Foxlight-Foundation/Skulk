@@ -24,3 +24,16 @@ def test_owner_diagnostics_remain_bounded_during_owner_churn() -> None:
         observer.record_stream_closed(f"owner-{owner_index}")
 
     assert observer.snapshot().active_stream_queues == 0
+
+
+def test_idle_stream_reclaims_are_visible_globally_and_per_owner() -> None:
+    observer = DataPlaneEgressObserver()
+
+    observer.record_stream_opened("owner-a")
+    observer.record_stream_idle_reclaimed("owner-a")
+    observer.record_stream_closed("owner-a")
+
+    snapshot = observer.snapshot()
+    assert snapshot.idle_stream_reclaims == 1
+    assert snapshot.owners["owner-a"].idle_stream_reclaims == 1
+    assert snapshot.active_stream_queues == 0

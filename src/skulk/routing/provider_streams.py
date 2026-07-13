@@ -122,8 +122,19 @@ def provider_stream_rejection_packets(
     packet: ProviderStreamPacket,
     *,
     include_started: bool,
+    failure_message: str = (
+        "provider DATA transport rejected the stream because remote "
+        "egress capacity is exhausted"
+    ),
+    failure_sequence_offset: int = 0,
 ) -> tuple[ProviderStreamPacket, ...]:
-    """Build a typed transport failure when router admission cannot proceed."""
+    """Build a typed provider transport failure.
+
+    ``include_started`` creates a complete synthetic lifecycle for a stream
+    rejected before admission. Otherwise ``failure_sequence_offset`` places the
+    failure at or after the source packet's sequence, which lets idle egress
+    reclamation follow a frame already delivered to the receiving node.
+    """
 
     frame = packet.frame
     frames: list[CapabilityStreamFrame] = []
@@ -141,15 +152,16 @@ def provider_stream_rejection_packets(
         CapabilityStreamFrame(
             call_id=frame.call_id,
             direction=frame.direction,
-            sequence=1 if include_started else frame.sequence,
+            sequence=(
+                1
+                if include_started
+                else frame.sequence + failure_sequence_offset
+            ),
             kind="failed",
             synthetic=True,
             error=CapabilityStreamError(
                 code="transport_error",
-                message=(
-                    "provider DATA transport rejected the stream because remote "
-                    "egress capacity is exhausted"
-                ),
+                message=failure_message,
             ),
         )
     )

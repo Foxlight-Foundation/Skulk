@@ -668,6 +668,9 @@ class DataPlaneOwnerDiagnostics(CamelCaseModel):
     publish_failures: int = Field(
         description="Publish exceptions or deadline expirations for this owner."
     )
+    idle_stream_reclaims: int = Field(
+        description="Command queues reclaimed after their egress idle lease expired."
+    )
 
 
 class DataPlaneEgressDiagnostics(CamelCaseModel):
@@ -699,6 +702,9 @@ class DataPlaneEgressDiagnostics(CamelCaseModel):
     )
     remote_bytes_published: int = Field(
         description="Serialized DATA bytes successfully published over Zenoh."
+    )
+    idle_stream_reclaims: int = Field(
+        description="Remote command queues reclaimed after their idle lease expired."
     )
     enqueue_latency_samples: int = Field(
         description="Remote frames with measured TopicRouter enqueue latency."
@@ -741,6 +747,7 @@ class DataPlaneEgressDiagnostics(CamelCaseModel):
             remote_frames_dropped=0,
             remote_publish_failures=0,
             remote_bytes_published=0,
+            idle_stream_reclaims=0,
             enqueue_latency_samples=0,
             enqueue_latency_seconds_average=None,
             enqueue_latency_seconds_max=None,

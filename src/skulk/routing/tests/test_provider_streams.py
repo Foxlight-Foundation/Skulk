@@ -119,6 +119,32 @@ def test_provider_admission_rejection_is_started_then_failed() -> None:
     assert rejected[-1].frame.error.code == "transport_error"
 
 
+def test_provider_transport_failure_can_follow_last_published_sequence() -> None:
+    packet = ProviderStreamPacket(
+        owner_node=NodeId("caller-node"),
+        frame=CapabilityStreamFrame(
+            call_id="tts-call",
+            direction="provider_to_caller",
+            sequence=7,
+            kind="chunk",
+            payload={"text": "partial"},
+        ),
+    )
+
+    failed = provider_stream_rejection_packets(
+        packet,
+        include_started=False,
+        failure_message="egress idle lease expired",
+        failure_sequence_offset=1,
+    )
+
+    assert len(failed) == 1
+    assert failed[0].frame.sequence == 8
+    assert failed[0].frame.kind == "failed"
+    assert failed[0].frame.error is not None
+    assert failed[0].frame.error.message == "egress idle lease expired"
+
+
 async def test_remote_provider_packet_egresses_with_call_isolation_key() -> None:
     networking_sender, networking_receiver = channel[OutboundPacket]()
     router = TopicRouter[ProviderStreamPacket](

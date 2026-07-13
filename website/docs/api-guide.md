@@ -1151,8 +1151,11 @@ Behavior notes:
   stream-span timing; duplicate, reordered, skipped, late, idle-timeout,
   transport-failure, and missing-lifecycle counters; plus router egress queue
   depth, independent command-queue count, per-owner pressure, drops, publish
-  failures, byte volume, and enqueue/publish latency. The dashboard Node tab
-  renders the operational subset and highlights non-zero failure counters.
+  failures, idle stream reclamations, byte volume, and enqueue/publish latency.
+  `dataPlane.egress.idleStreamReclaims` and each owner's matching counter
+  increase when a remote command queue emits no frame for its 30-minute resource
+  lease and is forcibly terminated and released. The dashboard Node tab renders
+  the operational subset and highlights non-zero failure counters.
   Provider diagnostics report active unary calls and streams, concurrency
   limits and high-water marks, admissions and overload rejections, caller input
   queue depth, input/output frame and inline-media byte volume, first-output and

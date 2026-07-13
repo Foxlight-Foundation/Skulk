@@ -114,6 +114,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Abandoned Zenoh DATA streams no longer retain admission forever.** Each
+  remote command queue has a renewed-on-frame 30-minute resource lease. An
+  omitted terminal now tombstones and closes the stream, releases owner and
+  process admission, best-effort emits a correctly sequenced typed failure, and
+  increments global/per-owner `idleStreamReclaims` diagnostics instead of
+  leaving an empty active queue until process restart (#567).
+
 - Control-plane saturation can no longer starve master election: election messages
   use dedicated Python egress plus an isolated libp2p gossipsub protocol and
   handler queue, while a deduplicated legacy copy preserves rolling upgrades.

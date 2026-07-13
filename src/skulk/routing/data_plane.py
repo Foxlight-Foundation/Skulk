@@ -36,6 +36,7 @@ class _OwnerMetrics:
     frames_published: int = 0
     frames_dropped: int = 0
     publish_failures: int = 0
+    idle_stream_reclaims: int = 0
 
 
 class DataPlaneEgressObserver:
@@ -58,6 +59,7 @@ class DataPlaneEgressObserver:
         self.remote_frames_dropped = 0
         self.remote_publish_failures = 0
         self.remote_bytes_published = 0
+        self.idle_stream_reclaims = 0
 
     def record_local_short_circuit(self) -> None:
         """Record one frame whose owner is the producing node."""
@@ -130,6 +132,12 @@ class DataPlaneEgressObserver:
         self.remote_publish_failures += 1
         self._publish_latency.record(max(0.0, seconds))
 
+    def record_stream_idle_reclaimed(self, owner: str) -> None:
+        """Record one command queue reclaimed after its idle lease expired."""
+
+        self._owner(owner).idle_stream_reclaims += 1
+        self.idle_stream_reclaims += 1
+
     def snapshot(self) -> DataPlaneEgressDiagnostics:
         """Return the current immutable egress diagnostics model."""
 
@@ -143,6 +151,7 @@ class DataPlaneEgressObserver:
             remote_frames_dropped=self.remote_frames_dropped,
             remote_publish_failures=self.remote_publish_failures,
             remote_bytes_published=self.remote_bytes_published,
+            idle_stream_reclaims=self.idle_stream_reclaims,
             enqueue_latency_samples=self._enqueue_latency.count,
             enqueue_latency_seconds_average=self._enqueue_latency.average,
             enqueue_latency_seconds_max=self._enqueue_latency.maximum,
@@ -162,6 +171,7 @@ class DataPlaneEgressObserver:
                 frames_published=metrics.frames_published,
                 frames_dropped=metrics.frames_dropped,
                 publish_failures=metrics.publish_failures,
+                idle_stream_reclaims=metrics.idle_stream_reclaims,
             )
             for owner, metrics in self._owners.items()
         }
@@ -175,6 +185,7 @@ class DataPlaneEgressObserver:
                 overflow.frames_published,
                 overflow.frames_dropped,
                 overflow.publish_failures,
+                overflow.idle_stream_reclaims,
             )
         ):
             owners[_OVERFLOW_OWNER_KEY] = DataPlaneOwnerDiagnostics(
@@ -185,6 +196,7 @@ class DataPlaneEgressObserver:
                 frames_published=overflow.frames_published,
                 frames_dropped=overflow.frames_dropped,
                 publish_failures=overflow.publish_failures,
+                idle_stream_reclaims=overflow.idle_stream_reclaims,
             )
         return owners
 
