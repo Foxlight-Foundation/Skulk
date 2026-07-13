@@ -95,13 +95,12 @@ def test_in_progress_throttle_gates_by_fraction_rate_and_heartbeat(
     assert co._should_emit_in_progress(mid, 0.24) is True
 
 
-def test_in_progress_throttle_resets_baseline_on_fraction_regression(
+def test_in_progress_throttle_ignores_fraction_regression_within_one_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A restarted/cancelled download whose fraction resets back toward 0 must
-    # re-seat the baseline and emit, not stay frozen against the old high
-    # baseline until it surpasses the prior attempt (download churn on
-    # placement re-tries). The heartbeat alone is too coarse for that case.
+    # Async file callbacks can arrive out of order. A stale lower fraction must
+    # not be mistaken for a fresh attempt because doing so defeats the bounded
+    # event-count guarantee and can overwrite a terminal status.
     co = _make_coordinator()
     mid = ModelId("org/model")
     clock = {"now": 1000.0}
@@ -116,15 +115,18 @@ def test_in_progress_throttle_resets_baseline_on_fraction_regression(
     clock["now"] = 1002.0
     assert co._should_emit_in_progress(mid, 0.80) is True
 
-    # A regression (new download started) emits immediately, even within the
-    # rate floor and far below the heartbeat interval.
+    # A regression in the same attempt is stale and stays suppressed.
     clock["now"] = 1002.2
-    assert co._should_emit_in_progress(mid, 0.01) is True
+    assert co._should_emit_in_progress(mid, 0.01) is False
 
-    # And the baseline is now the regressed value: a small further advance is
-    # gated again as usual (no longer measured against the stale 0.80).
-    clock["now"] = 1002.3
-    assert co._should_emit_in_progress(mid, 0.02) is False
+    # The high-water mark is retained, so another stale update cannot reopen it.
+    clock["now"] = 1004.0
+    assert co._should_emit_in_progress(mid, 0.10) is False
+
+    # A lifecycle reset starts a new attempt and allows its first observation.
+    co._reset_progress_throttle(mid)
+    clock["now"] = 1004.1
+    assert co._should_emit_in_progress(mid, 0.01) is True
 
 
 def test_in_progress_throttle_bounds_event_count_for_a_long_download(

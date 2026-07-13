@@ -12,6 +12,7 @@ import pytest
 from skulk_pyo3_bindings import NetworkingHandle, ZenohHandle
 
 from skulk.routing.router import (
+    _ELECTION_OUTBOUND_BUFFER,  # pyright: ignore[reportPrivateUsage]
     _ZENOH_DATA_OUTBOUND_BUFFER,  # pyright: ignore[reportPrivateUsage]
     OutboundPacket,
     Router,
@@ -19,6 +20,7 @@ from skulk.routing.router import (
 from skulk.routing.topics import (
     COMMANDS,
     DATA,
+    ELECTION_MESSAGES,
     GLOBAL_EVENTS,
     PROVIDER_DATA,
     REALTIME_AUDIO,
@@ -60,6 +62,30 @@ def test_zenoh_outbound_channel_is_bounded() -> None:
     assert stats.max_buffer_size == _ZENOH_DATA_OUTBOUND_BUFFER
     # Sanity: a finite (non-inf) bound.
     assert stats.max_buffer_size < float("inf")
+
+
+async def test_election_egress_uses_a_dedicated_bounded_channel() -> None:
+    """Ordinary outbound backlog cannot queue ahead of election liveness."""
+
+    router = _router(zenoh=False)
+    await router.register_topic(ELECTION_MESSAGES)
+    election_router = router.topic_routers[ELECTION_MESSAGES.topic]
+    packet = OutboundPacket(
+        topic=ELECTION_MESSAGES.topic,
+        routing_key=None,
+        stream_key=None,
+        is_terminal=False,
+        data=b"election",
+    )
+
+    await election_router.networking_sender.send(packet)
+
+    assert await router._election_out_recv.receive() == packet  # pyright: ignore[reportPrivateUsage]
+    assert router.networking_receiver.collect() == []
+    assert (
+        election_router.networking_sender.statistics().max_buffer_size
+        == _ELECTION_OUTBOUND_BUFFER
+    )
 
 
 def test_data_owner_key_addresses_owning_node() -> None:

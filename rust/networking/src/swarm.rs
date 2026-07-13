@@ -16,6 +16,8 @@ use tokio::sync::{mpsc, oneshot};
 ///       this is all VERY very hard to figure out and needs to be mulled over as a team.
 pub const NETWORK_VERSION: &[u8] = b"v0.0.1";
 pub const OVERRIDE_VERSION_ENV_VAR: &str = "SKULK_LIBP2P_NAMESPACE";
+const ELECTION_TOPIC: &str = "election_messages";
+const ELECTION_PROTOCOL_PREFIX: &str = "/skulk/election/meshsub";
 
 // Uses oneshot senders to emulate function calling apis while avoiding requiring unique ownership
 // of the Swarm.
@@ -85,20 +87,42 @@ fn on_message(swarm: &mut libp2p::Swarm<Behaviour>, message: ToSwarm) {
             topic,
             result_sender,
         } => {
-            let result = swarm
-                .behaviour_mut()
-                .gossipsub
-                .subscribe(&gossipsub::IdentTopic::new(topic));
+            let topic_id = gossipsub::IdentTopic::new(topic.clone());
+            let result = if topic == ELECTION_TOPIC {
+                // Keep the default-protocol subscription during the migration
+                // window so old and new binaries can still elect while nodes
+                // are restarted one at a time. New peers also use the isolated
+                // protocol, whose independent handler queue preserves liveness.
+                let isolated = swarm
+                    .behaviour_mut()
+                    .election_gossipsub
+                    .subscribe(&topic_id);
+                let legacy = swarm.behaviour_mut().gossipsub.subscribe(&topic_id);
+                isolated.and_then(|isolated_subscribed| {
+                    legacy.map(|legacy_subscribed| {
+                        isolated_subscribed || legacy_subscribed
+                    })
+                })
+            } else {
+                swarm.behaviour_mut().gossipsub.subscribe(&topic_id)
+            };
             _ = result_sender.send(result);
         }
         ToSwarm::Unsubscribe {
             topic,
             result_sender,
         } => {
-            let result = swarm
-                .behaviour_mut()
-                .gossipsub
-                .unsubscribe(&gossipsub::IdentTopic::new(topic));
+            let topic_id = gossipsub::IdentTopic::new(topic.clone());
+            let result = if topic == ELECTION_TOPIC {
+                let isolated = swarm
+                    .behaviour_mut()
+                    .election_gossipsub
+                    .unsubscribe(&topic_id);
+                let legacy = swarm.behaviour_mut().gossipsub.unsubscribe(&topic_id);
+                isolated || legacy
+            } else {
+                swarm.behaviour_mut().gossipsub.unsubscribe(&topic_id)
+            };
             _ = result_sender.send(result);
         }
         ToSwarm::Publish {
@@ -106,27 +130,68 @@ fn on_message(swarm: &mut libp2p::Swarm<Behaviour>, message: ToSwarm) {
             data,
             result_sender,
         } => {
-            let result = swarm
-                .behaviour_mut()
-                .gossipsub
-                .publish(gossipsub::IdentTopic::new(topic), data);
+            let topic_id = gossipsub::IdentTopic::new(topic.clone());
+            let result = if topic == ELECTION_TOPIC {
+                let isolated = swarm
+                    .behaviour_mut()
+                    .election_gossipsub
+                    .publish(topic_id.clone(), data.clone());
+                let legacy = swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(topic_id, data);
+                combine_election_publish_results(isolated, legacy)
+            } else {
+                swarm.behaviour_mut().gossipsub.publish(topic_id, data)
+            };
             _ = result_sender.send(result);
+        }
+    }
+}
+
+fn combine_election_publish_results(
+    isolated: Result<gossipsub::MessageId, gossipsub::PublishError>,
+    legacy: Result<gossipsub::MessageId, gossipsub::PublishError>,
+) -> Result<gossipsub::MessageId, gossipsub::PublishError> {
+    match (isolated, legacy) {
+        (Ok(message_id), _) | (_, Ok(message_id)) => Ok(message_id),
+        (Err(isolated_error), Err(legacy_error)) => {
+            if matches!(
+                isolated_error,
+                gossipsub::PublishError::NoPeersSubscribedToTopic
+            ) {
+                Err(legacy_error)
+            } else {
+                Err(isolated_error)
+            }
         }
     }
 }
 
 fn filter_swarm_event(event: SwarmEvent<BehaviourEvent>) -> Option<FromSwarm> {
     match event {
-        SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {
-            message:
-                gossipsub::Message {
-                    source: Some(peer_id),
-                    topic,
-                    data,
-                    ..
-                },
-            ..
-        })) => Some(FromSwarm::Message {
+        SwarmEvent::Behaviour(
+            BehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                message:
+                    gossipsub::Message {
+                        source: Some(peer_id),
+                        topic,
+                        data,
+                        ..
+                    },
+                ..
+            })
+            | BehaviourEvent::ElectionGossipsub(gossipsub::Event::Message {
+                message:
+                    gossipsub::Message {
+                        source: Some(peer_id),
+                        topic,
+                        data,
+                        ..
+                    },
+                ..
+            }),
+        ) => Some(FromSwarm::Message {
             from: peer_id,
             topic: topic.into_string(),
             data,
@@ -246,7 +311,7 @@ mod transport {
 }
 
 mod behaviour {
-    use crate::{alias, discovery};
+    use crate::{alias, discovery, swarm::ELECTION_PROTOCOL_PREFIX};
     use libp2p::swarm::NetworkBehaviour;
     use libp2p::{gossipsub, identity};
 
@@ -256,6 +321,7 @@ mod behaviour {
     pub struct Behaviour {
         pub discovery: discovery::Behaviour,
         pub gossipsub: gossipsub::Behaviour,
+        pub election_gossipsub: gossipsub::Behaviour,
     }
 
     impl Behaviour {
@@ -265,25 +331,102 @@ mod behaviour {
         ) -> alias::AnyResult<Self> {
             Ok(Self {
                 discovery: discovery::Behaviour::new(keypair, bootstrap_peers)?,
-                gossipsub: gossipsub_behaviour(keypair),
+                gossipsub: gossipsub_behaviour(keypair, None),
+                // Election traffic negotiates a separate protocol and therefore
+                // owns a distinct connection-handler queue. Bulk control or
+                // telemetry fan-out can no longer consume its liveness capacity.
+                election_gossipsub: gossipsub_behaviour(keypair, Some(ELECTION_PROTOCOL_PREFIX)),
             })
         }
     }
 
-    fn gossipsub_behaviour(keypair: &identity::Keypair) -> gossipsub::Behaviour {
+    fn gossipsub_behaviour(
+        keypair: &identity::Keypair,
+        protocol_prefix: Option<&'static str>,
+    ) -> gossipsub::Behaviour {
         use gossipsub::{ConfigBuilder, MessageAuthenticity, ValidationMode};
+
+        let mut config = ConfigBuilder::default();
+        config
+            .max_transmit_size(8 * 1024 * 1024)
+            .validation_mode(ValidationMode::Strict);
+        if let Some(prefix) = protocol_prefix {
+            config.protocol_id_prefix(prefix);
+        }
 
         // build a gossipsub network behaviour
         //  => signed message authenticity + strict validation mode means the message-ID is
         //     automatically provided by gossipsub w/out needing to provide custom message-ID function
         gossipsub::Behaviour::new(
             MessageAuthenticity::Signed(keypair.clone()),
-            ConfigBuilder::default()
-                .max_transmit_size(8 * 1024 * 1024)
-                .validation_mode(ValidationMode::Strict)
+            config
                 .build()
                 .expect("the configuration should always be valid"),
         )
         .expect("creating gossipsub behavior should always work")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ELECTION_TOPIC, behaviour::Behaviour};
+    use libp2p::{gossipsub, identity};
+
+    #[test]
+    fn election_topic_can_subscribe_on_both_gossipsub_behaviours() {
+        let keypair = identity::Keypair::generate_ed25519();
+        let mut behaviour = Behaviour::new(&keypair, Vec::new()).expect("valid behaviour");
+        let election_topic = gossipsub::IdentTopic::new(ELECTION_TOPIC);
+
+        assert!(
+            behaviour
+                .election_gossipsub
+                .subscribe(&election_topic)
+                .expect("valid subscription")
+        );
+        assert!(
+            behaviour
+                .gossipsub
+                .subscribe(&election_topic)
+                .expect("valid legacy subscription")
+        );
+        assert!(
+            behaviour
+                .election_gossipsub
+                .topics()
+                .any(|topic| topic == &election_topic.hash())
+        );
+        assert!(
+            behaviour
+                .gossipsub
+                .topics()
+                .any(|topic| topic == &election_topic.hash())
+        );
+    }
+
+    #[test]
+    fn ordinary_topics_remain_on_the_shared_gossipsub_behaviour() {
+        let keypair = identity::Keypair::generate_ed25519();
+        let mut behaviour = Behaviour::new(&keypair, Vec::new()).expect("valid behaviour");
+        let control_topic = gossipsub::IdentTopic::new("global_events");
+
+        assert!(
+            behaviour
+                .gossipsub
+                .subscribe(&control_topic)
+                .expect("valid subscription")
+        );
+        assert!(
+            behaviour
+                .gossipsub
+                .topics()
+                .any(|topic| topic == &control_topic.hash())
+        );
+        assert!(
+            !behaviour
+                .election_gossipsub
+                .topics()
+                .any(|topic| topic == &control_topic.hash())
+        );
     }
 }

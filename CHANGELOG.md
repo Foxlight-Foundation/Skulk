@@ -95,6 +95,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Control-plane saturation can no longer starve master election: election messages
+  use dedicated Python egress plus an isolated libp2p gossipsub protocol and
+  handler queue, while a deduplicated legacy copy preserves rolling upgrades.
+  Repository download callbacks are bounded, coalesced, terminal-ordered, and
+  aggregate-only on the event path; queue-pressure logs are rate-limited and
+  omit failed payloads.
+
 - Text-generation compatibility endpoints now reject mounted TTS-only and
   STT-only model cards before command dispatch, preventing modality mistakes
   from reaching or restarting speech runners.
