@@ -426,7 +426,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
           nodeId: nid,
           name: nodeInfo?.friendly_name ?? nid.slice(0, 8),
           memoryUsedPercent: pct,
-          deviceModel: detectDeviceModel(nodeInfo?.system_info?.model_id, nodeInfo?.system_info?.chip),
+          deviceModel: detectDeviceModel(nodeInfo?.system_info?.model_id, nodeInfo?.system_info?.chip, nodeInfo?.system_info?.accelerator_vendor),
         };
       });
 

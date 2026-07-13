@@ -338,7 +338,12 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
   const nodeEligibility = useMemo(() => {
     const map: Record<string, boolean> = {};
     for (const [nodeId, info] of Object.entries(topology?.nodes ?? {})) {
-      const isAmd = detectDeviceModel(info.system_info?.model_id, info.system_info?.chip) === 'amd-strix';
+      const isAmd =
+        detectDeviceModel(
+          info.system_info?.model_id,
+          info.system_info?.chip,
+          info.system_info?.accelerator_vendor,
+        ) === 'amd-strix';
       map[nodeId] = isGguf ? isAmd : !isAmd;
     }
     return map;
