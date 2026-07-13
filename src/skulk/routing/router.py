@@ -74,6 +74,11 @@ _ZENOH_DATA_MAX_ACTIVE_STREAMS = 1024
 _ZENOH_DATA_MAX_REJECTION_TASKS = 1024
 _ZENOH_DATA_REJECTED_STREAM_TOMBSTONES = 4096
 _ZENOH_DATA_PUBLISH_TIMEOUT_SECONDS = 5.0
+# This is a router resource lease, not the API's 120-second post-output idle
+# deadline. It deliberately allows long model prefill while ensuring a producer
+# that disappears without a terminal frame cannot retain an admission slot
+# forever. Every producer frame observed by egress renews the lease.
+_ZENOH_DATA_STREAM_IDLE_LEASE_SECONDS = 30 * 60.0
 # Election egress owns a small bounded queue and publish loop so a burst on the
 # ordinary gossipsub topics cannot leave liveness traffic waiting in their FIFO.
 _ELECTION_OUTBOUND_BUFFER = 128
@@ -329,6 +334,8 @@ class Router:
         self._data_plane_egress_observer = DataPlaneEgressObserver()
         self._gossipsub_queue_drop_count = 0
         self._last_gossipsub_queue_warning = 0.0
+        self._zenoh_idle_stream_reclaim_count = 0
+        self._last_zenoh_idle_stream_reclaim_warning = 0.0
         if zenoh is not None:
             zsend, zrecv = channel[OutboundPacket](_ZENOH_DATA_OUTBOUND_BUFFER)
             self._zenoh_out_send = zsend
@@ -727,6 +734,12 @@ class Router:
         owner: str,
         rejection_slots: Semaphore,
         include_started: bool,
+        *,
+        failure_message: str = (
+            "DATA transport rejected the stream because remote egress "
+            "capacity is exhausted"
+        ),
+        failure_sequence_offset: int = 0,
     ) -> None:
         """Tell one admitted API that router stream capacity rejected its call."""
 
@@ -744,7 +757,11 @@ class Router:
                 return
             original = rejection_topic.deserialize(packet.data)
             if isinstance(original, DataChunk):
-                failed_sequence = 1 if include_started else original.sequence
+                failed_sequence = (
+                    1
+                    if include_started
+                    else original.sequence + failure_sequence_offset
+                )
                 rejection_frames: list[CamelCaseModel] = []
                 if include_started:
                     rejection_frames.append(
@@ -761,10 +778,7 @@ class Router:
                         kind="failed",
                         chunk=ErrorChunk(
                             model=ModelId("unknown"),
-                            error_message=(
-                                "DATA transport rejected the command because remote "
-                                "stream capacity is exhausted"
-                            ),
+                            error_message=failure_message,
                         ),
                         sequence=failed_sequence,
                         owner_node=original.owner_node,
@@ -775,21 +789,13 @@ class Router:
                     provider_stream_rejection_packets(
                         original,
                         include_started=include_started,
+                        failure_message=failure_message,
+                        failure_sequence_offset=failure_sequence_offset,
                     )
                 )
-            elif isinstance(original, RealtimeAudioPacket):
+            elif isinstance(original, (RealtimeAudioPacket, SpeechMediaPacket)):
                 rejection_frames = [
-                    original.transport_failure(
-                        "realtime audio transport rejected the command because "
-                        "remote stream capacity is exhausted"
-                    )
-                ]
-            elif isinstance(original, SpeechMediaPacket):
-                rejection_frames = [
-                    original.transport_failure(
-                        "speech media transport rejected the command because "
-                        "remote stream capacity is exhausted"
-                    )
+                    original.transport_failure(failure_message)
                 ]
             else:
                 return
@@ -851,10 +857,48 @@ class Router:
         """Publish one command independently so blocked owners cannot stall peers."""
 
         assert self._zenoh is not None
-        _topic, owner, _stream_id = stream
+        topic, owner, _stream_id = stream
+        last_packet: OutboundPacket | None = None
+        last_published_packet: OutboundPacket | None = None
         try:
             with receiver as packets:
-                async for packet in packets:
+                while True:
+                    packet: OutboundPacket | None = None
+                    with move_on_after(
+                        _ZENOH_DATA_STREAM_IDLE_LEASE_SECONDS
+                    ) as idle_scope:
+                        try:
+                            packet = await anext(packets)
+                        except StopAsyncIteration:
+                            return
+                    if idle_scope.cancelled_caught:
+                        reject_stream(stream)
+                        sender = stream_senders.get(stream)
+                        if sender is not None:
+                            sender.close()
+                        self._data_plane_egress_observer.record_stream_idle_reclaimed(
+                            owner
+                        )
+                        self._record_zenoh_idle_stream_reclaim(topic)
+                        if last_packet is not None:
+                            rejection_slot = Semaphore(1)
+                            rejection_slot.acquire_nowait()
+                            await self._publish_zenoh_data_rejection(
+                                last_published_packet or last_packet,
+                                owner,
+                                rejection_slot,
+                                last_published_packet is None,
+                                failure_message=(
+                                    "DATA transport reclaimed the stream after its "
+                                    "egress idle lease expired"
+                                ),
+                                failure_sequence_offset=(
+                                    1 if last_published_packet is not None else 0
+                                ),
+                            )
+                        return
+                    assert packet is not None
+                    last_packet = packet
                     self._data_plane_egress_observer.record_dequeued(owner)
                     started_at = time.monotonic()
                     try:
@@ -884,6 +928,7 @@ class Router:
                             )
                             return
                     else:
+                        last_published_packet = packet
                         self._data_plane_egress_observer.record_published(
                             owner,
                             len(packet.data),
@@ -901,6 +946,20 @@ class Router:
             if owner_stream_counts[owner] == 0:
                 owner_stream_counts.pop(owner, None)
             self._data_plane_egress_observer.record_stream_closed(owner)
+
+    def _record_zenoh_idle_stream_reclaim(self, topic: str) -> None:
+        """Rate-limit payload-free warnings for reclaimed command queues."""
+
+        self._zenoh_idle_stream_reclaim_count += 1
+        now = time.monotonic()
+        if now - self._last_zenoh_idle_stream_reclaim_warning < 10.0:
+            return
+        logger.warning(
+            f"Reclaimed {self._zenoh_idle_stream_reclaim_count} idle Zenoh DATA "
+            f"stream(s) since the last report (latest topic={topic})"
+        )
+        self._zenoh_idle_stream_reclaim_count = 0
+        self._last_zenoh_idle_stream_reclaim_warning = now
 
 
 def get_node_id_keypair(

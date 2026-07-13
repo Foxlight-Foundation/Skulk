@@ -407,6 +407,96 @@ def test_stream_admission_limit_sends_terminal_rejection(
     anyio.run(_run)
 
 
+def test_idle_command_queue_emits_terminal_failure_and_releases_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A producer that omits its terminal cannot retain an egress slot forever."""
+
+    import anyio
+
+    import skulk.routing.router as router_module
+    from skulk.shared.types.chunks import DataChunk, ErrorChunk
+    from skulk.shared.types.common import CommandId, NodeId
+
+    monkeypatch.setattr(
+        router_module,
+        "_ZENOH_DATA_STREAM_IDLE_LEASE_SECONDS",
+        0.05,
+    )
+
+    class _RecordingZenoh:
+        def __init__(self) -> None:
+            self.frames: list[DataChunk] = []
+            self.idle_failure = anyio.Event()
+            self.follow_up_completed = anyio.Event()
+
+        async def zenoh_publish(self, _key: str, data: bytes) -> None:
+            frame = DATA.deserialize(data)
+            self.frames.append(frame)
+            if frame.kind == "failed":
+                self.idle_failure.set()
+            if frame.command_id == CommandId("follow-up"):
+                self.follow_up_completed.set()
+
+    def _packet(command_id: str, *, terminal: bool) -> OutboundPacket:
+        frame = DataChunk(
+            command_id=CommandId(command_id),
+            kind="completed" if terminal else "started",
+            sequence=0,
+            owner_node=NodeId("remote-owner"),
+        )
+        return OutboundPacket(
+            topic=DATA.topic,
+            routing_key="remote-owner",
+            stream_key=command_id,
+            is_terminal=frame.is_terminal,
+            data=DATA.serialize(frame),
+        )
+
+    async def _run() -> None:
+        zenoh = _RecordingZenoh()
+        router = Router(
+            handle=cast(NetworkingHandle, object()),
+            zenoh=cast(ZenohHandle, cast(object, zenoh)),
+            node_id="self-node",
+        )
+        assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                router._zenoh_networking_publish  # pyright: ignore[reportPrivateUsage]
+            )
+            await router._zenoh_out_send.send(  # pyright: ignore[reportPrivateUsage]
+                _packet("abandoned", terminal=False)
+            )
+            with anyio.fail_after(0.5):
+                await zenoh.idle_failure.wait()
+
+            await router._zenoh_out_send.send(  # pyright: ignore[reportPrivateUsage]
+                _packet("follow-up", terminal=True)
+            )
+            with anyio.fail_after(0.5):
+                await zenoh.follow_up_completed.wait()
+            await anyio.sleep(0)
+            task_group.cancel_scope.cancel()
+
+        abandoned = [
+            frame
+            for frame in zenoh.frames
+            if frame.command_id == CommandId("abandoned")
+        ]
+        assert [frame.kind for frame in abandoned] == ["started", "failed"]
+        assert [frame.sequence for frame in abandoned] == [0, 1]
+        assert isinstance(abandoned[-1].chunk, ErrorChunk)
+        assert "idle lease expired" in abandoned[-1].chunk.error_message
+        diagnostics = router.data_plane_egress_diagnostics()
+        assert diagnostics.active_stream_queues == 0
+        assert diagnostics.idle_stream_reclaims == 1
+        assert diagnostics.owners["remote-owner"].idle_stream_reclaims == 1
+
+    anyio.run(_run)
+
+
 def test_malformed_rejections_release_bounded_task_slots() -> None:
     """Bad rejection frames cannot leak slots or fail later rejections."""
 
