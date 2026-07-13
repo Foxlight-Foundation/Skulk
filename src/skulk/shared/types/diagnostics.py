@@ -935,7 +935,12 @@ class ClusterNodeDiagnostics(CamelCaseModel):
 
 
 class ClusterDiagnostics(CamelCaseModel):
-    """Read-only diagnostic bundle collected from reachable cluster nodes."""
+    """Read-only diagnostic bundle covering every topology member.
+
+    Reachable peers carry their collected diagnostics; topology members with
+    no reachable API route appear as explicit ``ok=false`` entries so an
+    overlay-joined node always has an observability presence (#558).
+    """
 
     generated_at: str = Field(description="UTC timestamp when collection finished.")
     local_node_id: str = Field(description="Node ID of the API serving this response.")
@@ -945,7 +950,7 @@ class ClusterDiagnostics(CamelCaseModel):
     )
     nodes: list[ClusterNodeDiagnostics] = Field(
         default_factory=list,
-        description="Local and reachable peer diagnostic results.",
+        description="One entry per topology member: local, reachable peers, and explicit failures for unreachable peers.",
     )
 
 

@@ -127,6 +127,76 @@ run_prep() {
         log "warning: uv sync failed (continuing with current venv)"
     fi
 
+    # GPU llama.cpp wheel self-heal (#568). --inexact above PRESERVES a
+    # present source-built wheel, but cannot RESTORE one that was already
+    # pruned (a plain `uv sync` run by hand or by another tool drops it). A
+    # GPU node that declares a llama.cpp backend but cannot import llama_cpp
+    # with GPU offload would otherwise come up silently degraded -- advertising
+    # no llama.cpp backend and dropping out of all GGUF/served-MTP placement
+    # with no error. So on such a node, verify the wheel and rebuild it from
+    # source once if it is missing or CPU-only. Non-fatal and single-shot: the
+    # node still serves (just without the in-process GGUF engine) if the
+    # rebuild fails, and the common case (wheel present) skips the rebuild.
+    if [ -n "$SYNC_FLAGS" ]; then
+        WHEEL_PROBE='import sys; import llama_cpp; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 3)'
+        if uv run --no-sync python -c "$WHEEL_PROBE" >/dev/null 2>&1; then
+            log "GPU llama.cpp wheel: present with GPU offload"
+        else
+            # Match the backend to the canonical install scripts: NVIDIA builds
+            # with CUDA, AMD Strix (vulkan/rocm) builds with Vulkan/RADV.
+            case ",${DECLARED_BACKENDS}," in
+            *,cuda,*) WHEEL_CMAKE="-DGGML_CUDA=ON" ;;
+            *)        WHEEL_CMAKE="-DGGML_VULKAN=on" ;;
+            esac
+            # Pin to the version in uv.lock so a self-healed node cannot drift
+            # onto whatever llama-cpp-python PyPI serves at boot; a mixed
+            # binding version across the fleet is the anti-pattern (#568 review).
+            LOCKED_LLAMA_CPP="$(sed -n '/^name = "llama-cpp-python"$/{n;s/^version = "\(.*\)"$/\1/p;}' uv.lock | head -1)"
+            if [ -n "$LOCKED_LLAMA_CPP" ]; then
+                WHEEL_SPEC="llama-cpp-python==${LOCKED_LLAMA_CPP}"
+            else
+                # uv.lock parse failed (format change): rebuild unpinned rather
+                # than skip the self-heal, so the node still regains GGUF.
+                WHEEL_SPEC="llama-cpp-python"
+                log "warning: could not read llama-cpp-python version from uv.lock; rebuilding unpinned"
+            fi
+            log "GPU llama.cpp wheel MISSING or CPU-only; rebuilding ${WHEEL_SPEC} from source with CMAKE_ARGS=${WHEEL_CMAKE} (self-heal, #568)"
+            # llama-cpp-python's own dependencies (e.g. diskcache) live only in
+            # the llama-cpp optional extra, so a plain `uv sync` prunes them
+            # alongside the wheel. Restore just those deps at their LOCKED
+            # versions first (uv export of the extra, minus the package itself),
+            # so the rebuilt wheel can import; then the --no-deps source build
+            # swaps in the GPU wheel without letting pip re-resolve anything off
+            # uv.lock (#569 review: --no-deps alone left llama_cpp
+            # importable-but-broken when diskcache was also pruned).
+            LLAMA_DEPS_REQ="$(mktemp)"
+            if uv export --frozen --extra llama-cpp --no-hashes \
+                --no-emit-project --no-emit-workspace \
+                --no-emit-package llama-cpp-python -o "$LLAMA_DEPS_REQ" 2>>"$PREP_LOG"; then
+                uv pip install --python .venv/bin/python -r "$LLAMA_DEPS_REQ" 2>&1 \
+                    | tee -a "$PREP_LOG" >&2 \
+                    || log "warning: could not restore llama-cpp extra deps; wheel may still fail to import"
+            else
+                log "warning: uv export of llama-cpp deps failed; rebuilding wheel without restoring its deps"
+            fi
+            rm -f "$LLAMA_DEPS_REQ"
+            # --no-deps: the extra's deps are handled above at locked versions;
+            # this step only swaps the wheel artifact and must not re-resolve.
+            if CMAKE_ARGS="$WHEEL_CMAKE" uv pip install --force-reinstall \
+                --no-deps --no-cache-dir --no-binary llama-cpp-python \
+                --python .venv/bin/python "$WHEEL_SPEC" 2>&1 \
+                | tee -a "$PREP_LOG" >&2; then
+                if uv run --no-sync python -c "$WHEEL_PROBE" >/dev/null 2>&1; then
+                    log "GPU llama.cpp wheel: rebuilt, GPU offload OK"
+                else
+                    log "warning: llama.cpp wheel rebuilt but still lacks GPU offload; node runs without the in-process GGUF engine"
+                fi
+            else
+                log "warning: llama.cpp wheel rebuild failed; node runs without the in-process GGUF engine"
+            fi
+        fi
+    fi
+
     # Headless nodes (e.g. a non-Mac worker like a Strix Halo / ROCm box)
     # intentionally serve the API without the web UI: the node sets
     # DASHBOARD_DIR=None and skips the mount when assets are absent (#333).

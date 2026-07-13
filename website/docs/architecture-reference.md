@@ -543,6 +543,7 @@ Only `SKULK_*` names are read. The legacy `EXO_*` deprecation runway was removed
 | `SKULK_IMAGE_TRANSPORT_DEBUG` | Verbose logging in image-transport pipeline |
 | `SKULK_VISION_DEBUG_SAVE_DIR` | Save debug image artifacts |
 | `SKULK_NATIVE_VISION_REFERENCE_PATH` | Force native-vision reference path (Gemma 4) |
+| `SKULK_NODE_NAME` | Node display-name override used ahead of the hostname/Computer Name fallback. Node-local launch config for machines whose hostname is meaningless: containers and rented GPU pods get runtime-random hostnames (`a21147cd1ae7`) and an unprivileged container cannot call sethostname (#555) |
 | `SKULK_OFFLINE` | Run without internet checks (no model fetching) |
 | `SKULK_HEADLESS` | Deploy knob read by `deployment/install/skulk-startup.sh` (the LaunchAgent/systemd entrypoint). `1` on a node that serves the API without the web UI (e.g. a non-Mac worker like a Strix Halo/ROCm box with no Node/npm): boot-time prep skips the dashboard build and its otherwise-fatal `dashboard-react/dist` missing check, and the node runs with `DASHBOARD_DIR` unset (#333). Default `0` keeps the fail-loud behavior so a Mac with an accidentally-absent build is caught. |
 | `VITE_TOLGEE_CDN_PREFIX` | Dashboard build-time env var. CDN/static prefix for Tolgee JSON bundles, default `/i18n`; Tolgee fetches namespaced bundles as `{prefix}/{namespace}/{language}.json`, and the dashboard uses the `skulk` namespace. |

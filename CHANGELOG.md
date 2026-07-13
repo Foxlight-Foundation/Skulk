@@ -9,6 +9,25 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **Placement previews expose every valid host, not just the ranking
+  winner.** `GET /instance/previews` now includes per-host single-node
+  previews marked `alternative: true` for each host that passes admission
+  but lost the planner ranking, and the dashboard placement dialog derives
+  node eligibility from the planner's answers instead of a chip-family
+  heuristic. Previously a heterogeneous fleet showed only the ranked pick
+  (typically the largest free GPU) as placeable, and the heuristic rendered
+  a CUDA node's pill as unable to run GGUF while the planner was placing
+  GGUF on it (#557).
+
+- **Nodes can name themselves, and CUDA devices get their own topology tile.**
+  `SKULK_NODE_NAME` overrides the gossiped display name ahead of the
+  hostname/Computer Name fallback, so containers and rented GPU pods (whose
+  runtime-random hostnames cannot be changed without privileges) identify
+  themselves properly in the dashboard. Nodes whose telemetry reports an
+  NVIDIA accelerator now render as a spark-style CUDA device tile with the
+  NVIDIA wordmark, in the same visual family as the Mac and AMD tiles,
+  instead of the generic hexagon (#555).
+
 - Prebaked CUDA pod image (`deployment/cuda/Dockerfile`, published to GHCR as
   `skulk-cuda-pod` by the `cuda-image` workflow): carries the CUDA
   llama-cpp-python wheel, `llama-server` + `ggml-rpc-server` binaries, uv,
@@ -101,6 +120,28 @@ This project records release notes here and mirrors public-facing notes in
   Repository download callbacks are bounded, coalesced, terminal-ordered, and
   aggregate-only on the event path; queue-pressure logs are rate-limited and
   omit failed payloads.
+
+- **GPU llama.cpp nodes self-heal a pruned inference wheel at startup.** A node
+  that declares a GPU llama.cpp backend builds its `llama-cpp-python` wheel
+  from source; `uv sync --inexact` preserves a present wheel, but could not
+  restore one that a plain `uv sync` (run by hand or another tool) had pruned,
+  leaving the node silently unable to import `llama_cpp` and dropping it out of
+  all GGUF and served-MTP placement with no error. The startup script now
+  verifies the wheel after sync on a GPU node and rebuilds it from source once
+  (Vulkan for AMD, CUDA for NVIDIA) if it is missing or CPU-only. Non-fatal and
+  single-shot: the node still serves without the in-process GGUF engine if the
+  rebuild fails, and the common case (wheel present) skips it (#568).
+
+- **Cluster observability answers fast and accounts for every node.** The
+  diagnostics fan-out probed each peer address with a patient retry policy
+  meant for targeted lookups, so a single unroutable advertised address
+  (an overlay-joined node, a docker bridge, a dead interface) stalled the
+  whole observability surface for ~18 seconds; fleet-wide sweeps now use a
+  fail-fast single-attempt policy (measured 18.4s -> 3.3s on a six-node
+  fleet with unroutable candidates). Peers with no reachable API route now
+  appear in the response as explicit failures instead of silently vanishing,
+  so a node that joined over an overlay keeps an observability presence
+  (#558).
 
 - Text-generation compatibility endpoints now reject mounted TTS-only and
   STT-only model cards before command dispatch, preventing modality mistakes

@@ -420,7 +420,8 @@ def test_cluster_diagnostics_returns_local_and_peer_results(
     api = _build_api("local-node")
     client = TestClient(api.app)
 
-    async def _reachable_peer_api_urls() -> dict[str, str]:
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
         return {"peer-node": "http://peer-node:52415"}
 
     class _FakeAsyncClient:
@@ -597,7 +598,8 @@ def test_cluster_timeline_merges_flight_recorders_by_wall_clock(
         supervisor_runners=[peer_runner],
     )
 
-    async def _reachable_peer_api_urls() -> dict[str, str]:
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
         return {"peer-node": "http://peer-node:52415"}
 
     class _FakeAsyncClient:
@@ -673,7 +675,8 @@ def test_cluster_timeline_records_unreachable_peers(
 
     api.set_runner_diagnostics_provider(list)
 
-    async def _reachable_peer_api_urls() -> dict[str, str]:
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
         return {"peer-node": "http://peer-node:52415"}
 
     class _FakeAsyncClient:
@@ -751,7 +754,8 @@ def test_cancel_cluster_runner_task_proxies_to_peer(
     api = _build_api("local-node")
     client = TestClient(api.app)
 
-    async def _reachable_peer_api_urls() -> dict[str, str]:
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
         return {"peer-node": "http://peer-node:52415"}
 
     class _FakeAsyncClient:
@@ -812,7 +816,8 @@ def test_capture_cluster_node_diagnostics_proxies_to_peer(
     api = _build_api("local-node")
     client = TestClient(api.app)
 
-    async def _reachable_peer_api_urls() -> dict[str, str]:
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
         return {"peer-node": "http://peer-node:52415"}
 
     capture = DiagnosticCaptureResponse(
@@ -917,3 +922,39 @@ async def test_node_diagnostics_tailscale_probe_exception_is_null(
     response = client.get("/v1/diagnostics/node")
     assert response.status_code == 200
     assert _json_object(response)["tailscale"] is None
+
+
+def test_cluster_diagnostics_reports_unreachable_topology_members(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A topology member with no reachable API route must appear as an
+    explicit ok=false entry, not vanish: an overlay-joined node otherwise has
+    no observability presence at all (#558)."""
+
+    api = _build_api("local-node")
+    client = TestClient(api.app)
+
+    api.state.topology.add_node(NodeId("local-node"))
+    api.state.topology.add_node(NodeId("unroutable-node"))
+
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
+        return {}
+
+    monkeypatch.setattr(api, "_reachable_peer_api_urls", _reachable_peer_api_urls)
+
+    response = client.get("/v1/diagnostics/cluster")
+
+    assert response.status_code == 200
+    nodes = {
+        str(node["nodeId"]): node
+        for node in (
+            _json_mapping(item)
+            for item in _json_list(_json_object(response)["nodes"])
+        )
+    }
+    assert nodes["local-node"]["ok"] is True
+    unreachable = nodes["unroutable-node"]
+    assert unreachable["ok"] is False
+    assert unreachable["url"] is None
+    assert "no reachable API route" in str(unreachable["error"])

@@ -123,6 +123,8 @@ function transformTopology(
         model_id: identity?.modelId,
         chip: identity?.chipId,
         memory: unifiedTotal,
+        accelerator_vendor: sys?.accelerator?.vendor ?? undefined,
+        accelerator_name: sys?.accelerator?.name ?? undefined,
       },
       network_interfaces: networkInterfaces,
       ip_to_interface: ipToInterface,
