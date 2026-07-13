@@ -148,10 +148,22 @@ run_prep() {
             *,cuda,*) WHEEL_CMAKE="-DGGML_CUDA=ON" ;;
             *)        WHEEL_CMAKE="-DGGML_VULKAN=on" ;;
             esac
-            log "GPU llama.cpp wheel MISSING or CPU-only; rebuilding from source with CMAKE_ARGS=${WHEEL_CMAKE} (self-heal, #568)"
+            # Pin to the version in uv.lock so a self-healed node cannot drift
+            # onto whatever llama-cpp-python PyPI serves at boot; a mixed
+            # binding version across the fleet is the anti-pattern (#568 review).
+            LOCKED_LLAMA_CPP="$(sed -n '/^name = "llama-cpp-python"$/{n;s/^version = "\(.*\)"$/\1/p;}' uv.lock | head -1)"
+            if [ -n "$LOCKED_LLAMA_CPP" ]; then
+                WHEEL_SPEC="llama-cpp-python==${LOCKED_LLAMA_CPP}"
+            else
+                # uv.lock parse failed (format change): rebuild unpinned rather
+                # than skip the self-heal, so the node still regains GGUF.
+                WHEEL_SPEC="llama-cpp-python"
+                log "warning: could not read llama-cpp-python version from uv.lock; rebuilding unpinned"
+            fi
+            log "GPU llama.cpp wheel MISSING or CPU-only; rebuilding ${WHEEL_SPEC} from source with CMAKE_ARGS=${WHEEL_CMAKE} (self-heal, #568)"
             if CMAKE_ARGS="$WHEEL_CMAKE" uv pip install --force-reinstall \
                 --no-cache-dir --no-binary llama-cpp-python \
-                --python .venv/bin/python llama-cpp-python 2>&1 \
+                --python .venv/bin/python "$WHEEL_SPEC" 2>&1 \
                 | tee -a "$PREP_LOG" >&2; then
                 if uv run --no-sync python -c "$WHEEL_PROBE" >/dev/null 2>&1; then
                     log "GPU llama.cpp wheel: rebuilt, GPU offload OK"
