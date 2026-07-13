@@ -361,7 +361,9 @@ in classifier-sized source slices and stop at the detected boundary. The socket
 serializes multiple utterances as distinct provider calls with linked item IDs,
 per-turn VAD reset, and no overlapping STT provider ownership. Optional typed
 response configuration routes final transcripts through the selected mounted
-chat model and then through a normal mounted `tts@1.0.0` provider, emitting
+chat model under a strict 1-4096 output-token ceiling (256 by default), with
+hidden reasoning disabled by default for speech-ready output, and then through
+a normal mounted `tts@1.0.0` provider, emitting
 assistant text and MP3 audio events. Explicit cancellation and VAD barge-in
 cancel active model/TTS work. The Fabric path names its STT participant with
 `stt_model` and otherwise reuses these lifecycle guarantees. Every API
