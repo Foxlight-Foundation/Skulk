@@ -1338,7 +1338,17 @@ async def download_shard(
         else:
             progress_stopping = True
             progress_ready.set()
-            await progress_task
+            try:
+                await progress_task
+            except asyncio.CancelledError:
+                # Cancelled while draining the emitter: cancel and await it so no
+                # orphaned emitter can publish stale progress after we unwind,
+                # preserving the same no-stale-callback guarantee as the
+                # cancelled branch above.
+                progress_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await progress_task
+                raise
     final_repo_progress = calculate_repo_progress(
         shard, shard.model_card.model_id, revision, file_progress, all_start_time
     )
