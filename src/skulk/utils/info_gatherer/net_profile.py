@@ -107,7 +107,7 @@ async def check_reachability(
 
     if last_error is not None:
         logger.warning(
-            f"connect error {type(last_error).__name__} from {target_ip} after {attempts} attempts; treating as down"
+            f"peer probe failed with {type(last_error).__name__} from {target_ip} after {attempts} attempts; treating as down"
         )
 
     if remote_node_id is None:
