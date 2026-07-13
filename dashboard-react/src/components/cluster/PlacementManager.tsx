@@ -360,8 +360,16 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
   const nodeEligibility = useMemo(() => {
     const map: Record<string, boolean> = {};
     for (const [nodeId, info] of Object.entries(topology?.nodes ?? {})) {
+      // An excluded node must always stay eligible so its pill remains
+      // clickable to re-include it - otherwise excluding every placeable node
+      // empties the previews and the fallback below could strand the pills
+      // as un-clickable (#557).
+      if (excludedNodes.has(nodeId)) {
+        map[nodeId] = true;
+        continue;
+      }
       if (previewHosts.size > 0) {
-        map[nodeId] = previewHosts.has(nodeId) || excludedNodes.has(nodeId);
+        map[nodeId] = previewHosts.has(nodeId);
         continue;
       }
       const isAmd = detectDeviceModel(info.system_info?.model_id, info.system_info?.chip) === 'amd-strix';

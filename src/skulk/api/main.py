@@ -2527,6 +2527,14 @@ class API:
                 )
                 if len(nodes_of_preview) == 1:
                     winner_hosts.add(nodes_of_preview[0])
+            # Hoisted out of the per-candidate loop: both depend only on the
+            # telemetry snapshots and current instances, not on the candidate.
+            alt_node_vram = usable_vram_by_node(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=self._telemetry_view.node_memory,
+            )
+            existing_instance_ids = set(self.state.instances.keys())
             for candidate in self.state.topology.list_nodes():
                 if candidate in winner_hosts:
                     continue
@@ -2548,18 +2556,14 @@ class API:
                         download_status=self.state.downloads,
                         excluded_nodes=excluded_nodes,
                         node_resources=self._telemetry_view.node_resources,
-                        node_vram=usable_vram_by_node(
-                            self._telemetry_view.node_system,
-                            self._telemetry_view.node_resources,
-                            node_memory=self._telemetry_view.node_memory,
-                        ),
+                        node_vram=alt_node_vram,
                     )
                 except ValueError:
                     continue
                 alt_instances = [
                     instance
                     for instance_id, instance in alt_placements.items()
-                    if instance_id not in set(self.state.instances.keys())
+                    if instance_id not in existing_instance_ids
                 ]
                 if len(alt_instances) != 1:
                     continue
