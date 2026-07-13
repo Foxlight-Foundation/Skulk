@@ -9,6 +9,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **Nodes can name themselves, and CUDA devices get their own topology tile.**
+  `SKULK_NODE_NAME` overrides the gossiped display name ahead of the
+  hostname/Computer Name fallback, so containers and rented GPU pods (whose
+  runtime-random hostnames cannot be changed without privileges) identify
+  themselves properly in the dashboard. Nodes whose telemetry reports an
+  NVIDIA accelerator now render as a spark-style CUDA device tile with the
+  NVIDIA wordmark, in the same visual family as the Mac and AMD tiles,
+  instead of the generic hexagon (#555).
+
 - Prebaked CUDA pod image (`deployment/cuda/Dockerfile`, published to GHCR as
   `skulk-cuda-pod` by the `cuda-image` workflow): carries the CUDA
   llama-cpp-python wheel, `llama-server` + `ggml-rpc-server` binaries, uv,
