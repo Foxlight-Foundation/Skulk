@@ -100,7 +100,7 @@ If `nix fmt` changes any files, stage them before committing. The CI runs `nix f
 A single Skulk `Node` (src/skulk/main.py) runs multiple components:
 - **Router**: libp2p-based pub/sub messaging via Rust bindings (`skulk_pyo3_bindings`). Ordinary control/telemetry topics share the default gossipsub egress queue and behavior; `ELECTION_MESSAGES` uses a dedicated Python egress queue plus a second protocol and handler queue so fan-out pressure cannot starve election liveness. A temporary legacy-protocol copy preserves rolling-upgrade interoperability.
 - **Worker**: Handles inference tasks, downloads models, manages runner processes
-- **Master**: Coordinates cluster state, places model instances across nodes
+- **Master**: Coordinates cluster state, places model instances across nodes; retained event-log replay is coalesced onto one asynchronously paced worker, and sustained idle-state event-log growth emits an operator warning
 - **Election**: Bully algorithm for master election, carried on the isolated election gossipsub behavior with duplicate candidate suppression during protocol migration
 - **API**: FastAPI server for OpenAI-compatible chat completions
 

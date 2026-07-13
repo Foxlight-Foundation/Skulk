@@ -206,6 +206,8 @@ Discriminated union at `src/skulk/shared/types/events.py`. Selected events:
 
 Apply function: `src/skulk/shared/apply.py::apply`, a pure `(State, IndexedEvent) -> State`.
 
+Snapshot bootstrap is followed by a retained-tail request. The master serves at most `EVENT_LOG_REPLAY_BATCH_SIZE` (10,000) events per request, but does not enqueue that tail as one burst: a single background replay worker coalesces overlapping requests and emits `EVENT_LOG_REPLAY_CHUNK_SIZE` (32) events followed by `EVENT_LOG_REPLAY_CHUNK_INTERVAL_SECONDS` (250 ms) of pacing. Replay therefore cannot block the command processor, and repeated NACKs cannot create concurrent full-tail broadcasters. Separately, `EventLogGrowthMonitor` resets during active tasks/downloads and warns when otherwise-idle indexing remains at or above 60 events/min across a 60-second window, with a five-minute warning cooldown.
+
 ## Commands
 
 Two distinct command unions on two distinct topics:

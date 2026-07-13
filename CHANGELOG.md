@@ -114,6 +114,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Retained event-log replay no longer arrives as an unpaced 10k-event
+  burst.** The master coalesces replay requests onto one background worker,
+  emits the retained tail in bounded paced chunks without blocking command
+  processing, and warns when the event log grows at an elevated rate while
+  the cluster has no active task or download. This removes the replay
+  amplifier that could turn slow periodic event growth into follower flaps
+  and repeated state-sync storms (#449).
+
 - **Realtime Fabric speech replies cannot generate indefinitely before TTS.**
   Automatic chat responses now enforce a configurable 1-4096 output-token
   ceiling (256 by default) and disable hidden reasoning unless explicitly
