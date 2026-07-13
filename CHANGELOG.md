@@ -95,6 +95,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Cluster observability answers fast and accounts for every node.** The
+  diagnostics fan-out probed each peer address with a patient retry policy
+  meant for targeted lookups, so a single unroutable advertised address
+  (an overlay-joined node, a docker bridge, a dead interface) stalled the
+  whole observability surface for ~18 seconds; fleet-wide sweeps now use a
+  fail-fast single-attempt policy (measured 18.4s -> 3.3s on a six-node
+  fleet with unroutable candidates). Peers with no reachable API route now
+  appear in the response as explicit failures instead of silently vanishing,
+  so a node that joined over an overlay keeps an observability presence
+  (#558).
+
 - Text-generation compatibility endpoints now reject mounted TTS-only and
   STT-only model cards before command dispatch, preventing modality mistakes
   from reaching or restarting speech runners.

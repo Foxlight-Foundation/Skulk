@@ -14,6 +14,12 @@ from skulk.shared.types.profiling import NodeNetworkInfo
 from skulk.utils.channels import Sender, channel
 
 REACHABILITY_ATTEMPTS = 3
+# Full-fleet sweeps (dashboard observability fan-out) probe every advertised
+# interface of every peer; a dead address must fail fast, not retry on the
+# targeted-lookup policy above (3 attempts x (5s timeout + 1s sleep) = ~18s of
+# stall per unroutable address, which read as "observability is broken", #558).
+SWEEP_ATTEMPTS = 1
+SWEEP_TIMEOUT_SECONDS = 2.0
 
 
 def _should_probe_remote_ip(target_ip: str) -> bool:
@@ -45,8 +51,14 @@ async def check_reachability(
     expected_node_id: NodeId,
     out: dict[NodeId, set[str]],
     client: httpx.AsyncClient,
+    attempts: int = REACHABILITY_ATTEMPTS,
 ) -> None:
-    """Check if a node is reachable at the given IP and verify its identity."""
+    """Check if a node is reachable at the given IP and verify its identity.
+
+    ``attempts`` selects the retry budget: targeted lookups keep the patient
+    default, fleet-wide sweeps pass ``SWEEP_ATTEMPTS`` so one dead address
+    cannot stall an interactive caller.
+    """
     if ":" in target_ip:
         # TODO: use real IpAddress types
         url = f"http://[{target_ip}]:52415/node_id"
@@ -56,7 +68,7 @@ async def check_reachability(
     remote_node_id = None
     last_error = None
 
-    for _ in range(REACHABILITY_ATTEMPTS):
+    for _ in range(attempts):
         try:
             r = await client.get(url)
             if r.status_code != 200:
@@ -113,8 +125,9 @@ async def check_reachable(
 
     send, recv = channel[tuple[str, NodeId]]()
 
-    # these are intentionally httpx's defaults so we can tune them later
-    timeout = httpx.Timeout(timeout=5.0)
+    # Sweep policy: short timeout, single attempt per address (see
+    # SWEEP_ATTEMPTS). This generator backs interactive surfaces.
+    timeout = httpx.Timeout(timeout=SWEEP_TIMEOUT_SECONDS)
     limits = httpx.Limits(
         max_connections=100,
         max_keepalive_connections=20,
@@ -129,7 +142,9 @@ async def check_reachable(
     ) -> None:
         async with send:
             out: defaultdict[NodeId, set[str]] = defaultdict(set)
-            await check_reachability(target_ip, expected_node_id, out, client)
+            await check_reachability(
+                target_ip, expected_node_id, out, client, attempts=SWEEP_ATTEMPTS
+            )
             if expected_node_id in out:
                 await send.send((target_ip, expected_node_id))
 
