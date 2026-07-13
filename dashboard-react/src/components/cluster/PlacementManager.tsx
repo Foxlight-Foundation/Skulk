@@ -54,6 +54,19 @@ function comboKey(sharding: string, meta: string): keyof NodeCountOptions {
   return `${s}_${m}` as keyof NodeCountOptions;
 }
 
+function extractHosts(preview: PlacementPreview): string[] {
+  if (!preview.instance || typeof preview.instance !== 'object') return [];
+  const inner = (preview.instance as Record<string, unknown>).MlxRingInstance
+    ?? (preview.instance as Record<string, unknown>).MlxJacclInstance
+    ?? (preview.instance as Record<string, unknown>).LlamaRpcInstance;
+  if (!inner || typeof inner !== 'object') return [];
+  const sa = (inner as Record<string, unknown>).shardAssignments;
+  if (!sa || typeof sa !== 'object') return [];
+  const ntr = (sa as Record<string, unknown>).nodeToRunner;
+  if (!ntr || typeof ntr !== 'object') return [];
+  return Object.keys(ntr as Record<string, unknown>);
+}
+
 function extractNodeCount(preview: PlacementPreview): number {
   if (!preview.instance || typeof preview.instance !== 'object') return 1;
   const inner = (preview.instance as Record<string, unknown>).MlxRingInstance
@@ -326,23 +339,36 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
 
   const totalNodes = Object.keys(effectiveNodes).length;
 
-  // Per-node placement eligibility. On the current fleet a node's device family
-  // maps to its engine: MLX (safetensors) runs on Apple Silicon, and the
-  // llama.cpp / served engines (GGUF) run on the AMD/Strix GPU nodes. So GGUF is
-  // treated as eligible only on AMD/Strix nodes and safetensors only on non-AMD
-  // nodes. This is a heuristic keyed on the chip family, NOT the authoritative
-  // backend contract: a future non-AMD llama.cpp node (CUDA/CPU) would be hidden
-  // for GGUF until eligibility keys off the advertised backend tags instead. The
-  // backend planner remains the source of truth for what can actually place.
+  // Per-node placement eligibility. Once previews are loaded, the planner is
+  // the source of truth: a node is eligible when it appears in ANY returned
+  // preview (ranked pick or per-host alternative, #557) - this is exactly the
+  // case the old chip-family heuristic mispredicted (a CUDA node serving GGUF
+  // rendered as "can't run this model" while the planner placed on it).
+  // Nodes the operator has excluded stay eligible so their pill remains
+  // clickable to re-include (an excluded node cannot appear in previews).
+  // Until previews arrive, fall back to the chip-family heuristic: MLX
+  // (safetensors) on Apple Silicon, GGUF on AMD/Strix.
   const isGguf = /gguf/i.test(modelId);
+  const previewHosts = useMemo(() => {
+    const hosts = new Set<string>();
+    for (const p of previews) {
+      if (!p.instance || p.error) continue;
+      for (const host of extractHosts(p)) hosts.add(host);
+    }
+    return hosts;
+  }, [previews]);
   const nodeEligibility = useMemo(() => {
     const map: Record<string, boolean> = {};
     for (const [nodeId, info] of Object.entries(topology?.nodes ?? {})) {
+      if (previewHosts.size > 0) {
+        map[nodeId] = previewHosts.has(nodeId) || excludedNodes.has(nodeId);
+        continue;
+      }
       const isAmd = detectDeviceModel(info.system_info?.model_id, info.system_info?.chip) === 'amd-strix';
       map[nodeId] = isGguf ? isAmd : !isAmd;
     }
     return map;
-  }, [topology?.nodes, isGguf]);
+  }, [topology?.nodes, isGguf, previewHosts, excludedNodes]);
   const eligibleNodeIds = useMemo(
     () => Object.keys(nodeEligibility).filter((id) => nodeEligibility[id]),
     [nodeEligibility],
@@ -413,6 +439,11 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
     for (const p of previews) {
       const key = comboKey(p.sharding, p.instance_meta);
 
+      if (p.alternative) {
+        // A losing-but-valid host: it feeds node eligibility (the pills) but
+        // must never clobber the ranked pick's option slot (#557).
+        continue;
+      }
       if (p.instance && !p.error) {
         // Successful placement — map to the actual node count
         const count = extractNodeCount(p);

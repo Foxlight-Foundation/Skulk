@@ -1556,7 +1556,11 @@ class API:
                 "Return candidate placements for a model before launch. This is the best first "
                 "step when you want to see what Skulk can place on the current node or cluster. "
                 "Pass `excluded_node_ids` (repeatable) to mirror the `excluded_nodes` field on "
-                "POST /place_instance and preview against the post-exclusion topology."
+                "POST /place_instance and preview against the post-exclusion topology. "
+                "Besides the planner's ranked pick per placement shape, the response includes "
+                "per-host single-node previews marked `alternative: true` for every other host "
+                "that passes admission, so heterogeneous fleets expose the full set of valid "
+                "hosts rather than only the ranking winner."
             ),
         )(self.get_placement_previews)
         self.app.get(
@@ -2503,6 +2507,84 @@ class API:
                     len(placement_node_ids),
                 )
             )
+
+        # Per-host single-node alternatives (#557): the ranked pick above is
+        # one preview per shape, so on a heterogeneous fleet the winner
+        # (typically the largest free GPU) hides every other host that passes
+        # admission, and the operator cannot choose cost/locality/keeping the
+        # big GPU free. Re-run the planner once per remaining host as a
+        # required single-node placement and surface the viable ones, marked
+        # as alternatives. Skipped when the caller already constrained hosts
+        # via node_ids. Hosts that fail admission stay silent: the ranked
+        # pass already reported shape-level errors.
+        if required_nodes is None:
+            winner_hosts: set[NodeId] = set()
+            for preview in previews:
+                if preview.instance is None:
+                    continue
+                nodes_of_preview = list(
+                    preview.instance.shard_assignments.node_to_runner.keys()
+                )
+                if len(nodes_of_preview) == 1:
+                    winner_hosts.add(nodes_of_preview[0])
+            for candidate in self.state.topology.list_nodes():
+                if candidate in winner_hosts:
+                    continue
+                if excluded_nodes is not None and candidate in excluded_nodes:
+                    continue
+                try:
+                    alt_placements = get_instance_placements(
+                        PlaceInstance(
+                            model_card=model_card,
+                            sharding=Sharding.Pipeline,
+                            instance_meta=InstanceMeta.MlxRing,
+                            min_nodes=1,
+                        ),
+                        node_memory=self._telemetry_view.node_memory,
+                        node_network=self.state.node_network,
+                        topology=self.state.topology,
+                        current_instances=self.state.instances,
+                        required_nodes={candidate},
+                        download_status=self.state.downloads,
+                        excluded_nodes=excluded_nodes,
+                        node_resources=self._telemetry_view.node_resources,
+                        node_vram=usable_vram_by_node(
+                            self._telemetry_view.node_system,
+                            self._telemetry_view.node_resources,
+                            node_memory=self._telemetry_view.node_memory,
+                        ),
+                    )
+                except ValueError:
+                    continue
+                alt_instances = [
+                    instance
+                    for instance_id, instance in alt_placements.items()
+                    if instance_id not in set(self.state.instances.keys())
+                ]
+                if len(alt_instances) != 1:
+                    continue
+                alt_instance = alt_instances[0]
+                alt_nodes = list(
+                    alt_instance.shard_assignments.node_to_runner.keys()
+                )
+                # The planner may satisfy required_nodes with a larger cycle;
+                # only a true single-host placement on the candidate is an
+                # alternative the operator can reason about.
+                if alt_nodes != [candidate]:
+                    continue
+                previews.append(
+                    PlacementPreview(
+                        model_id=model_card.model_id,
+                        sharding=Sharding.Pipeline,
+                        instance_meta=instance_meta_of(alt_instance),
+                        instance=alt_instance,
+                        memory_delta_by_node={
+                            str(candidate): model_card.storage_size.in_bytes
+                        },
+                        error=None,
+                        alternative=True,
+                    )
+                )
 
         return PlacementPreviewResponse(previews=previews)
 

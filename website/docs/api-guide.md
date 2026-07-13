@@ -864,6 +864,14 @@ GGUF model previewed at two GPU nodes reports `LlamaRpc` (driver plus memory
 donors) even though the request enumerates the generic metas. Trust the
 preview's reported meta when constructing a follow-up `POST /place_instance`.
 
+Besides the planner's ranked pick per shape, the response also contains
+per-host single-node previews marked `"alternative": true` for every other
+host that passes admission. On a heterogeneous fleet the ranked winner is
+typically the node with the most free accelerator memory; the alternatives
+expose the full set of valid hosts so an operator can choose by cost,
+locality, or to keep the big GPU free. Alternatives are omitted when
+`node_ids` already constrains the hosts.
+
 | Query parameter | Meaning |
 |-----------------|---------|
 | `model_id` | Required. Hugging Face-style model ID. |

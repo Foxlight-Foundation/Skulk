@@ -9,6 +9,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **Placement previews expose every valid host, not just the ranking
+  winner.** `GET /instance/previews` now includes per-host single-node
+  previews marked `alternative: true` for each host that passes admission
+  but lost the planner ranking, and the dashboard placement dialog derives
+  node eligibility from the planner's answers instead of a chip-family
+  heuristic. Previously a heterogeneous fleet showed only the ranked pick
+  (typically the largest free GPU) as placeable, and the heuristic rendered
+  a CUDA node's pill as unable to run GGUF while the planner was placing
+  GGUF on it (#557).
+
 - Prebaked CUDA pod image (`deployment/cuda/Dockerfile`, published to GHCR as
   `skulk-cuda-pod` by the `cuda-image` workflow): carries the CUDA
   llama-cpp-python wheel, `llama-server` + `ggml-rpc-server` binaries, uv,
