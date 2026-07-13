@@ -1573,7 +1573,7 @@ The wire contract implements a bounded subset of OpenAI Realtime transcription:
 | Direction | Event | Behavior |
 |---|---|---|
 | server to client | `session.created` | Reports a `type: transcription` session with the selected model and fixed PCM input configuration. |
-| client to server | `session.update` | Confirms the current nested `audio.input` configuration. `turn_detection` may be null or a bounded `server_vad` configuration. Optional `response` selects a mounted chat `model`, optional mounted `tts_model`, and optional `voice`; attempts to change the input model/codec, enable noise reduction/language hints, or add unsupported fields are rejected. |
+| client to server | `session.update` | Confirms the current nested `audio.input` configuration. `turn_detection` may be null or a bounded `server_vad` configuration. Optional `response` selects a mounted chat `model`, optional mounted `tts_model`, optional `voice`, and `max_output_tokens` from 1 through 4096 (default 256); attempts to change the input model/codec, enable noise reduction/language hints, or add unsupported fields are rejected. |
 | server to client | `session.updated` | Confirms an accepted current session update. |
 | client to server | `input_audio_buffer.append` | Appends one base64 PCM16 frame and immediately forwards its decoded bytes as binary Fabric media. |
 | client to server | `input_audio_buffer.commit` | Half-closes the current utterance and triggers final provider drain. Empty commits and duplicate manual commits are rejected. A manual commit racing after server VAD has already auto-committed the same utterance is an idempotent no-op. The next turn may begin after its completed event. |
@@ -1629,8 +1629,9 @@ chat model. If either capability truth is absent, chat retains the batch `MediaR
 
 When `response` is configured, the API node that owns the WebSocket retains the
 bounded text-only conversation history for that socket, routes each final
-transcript through the selected mounted chat model, and optionally opens a
-normal `tts@1.0.0` Fabric provider stream for the visible final answer. Explicit
+transcript through the selected mounted chat model with the configured
+`max_output_tokens` ceiling, and optionally opens a normal `tts@1.0.0` Fabric
+provider stream for the visible final answer. Explicit
 `response.cancel`, a new non-VAD audio turn, or VAD speech detection cancels the
 active model/TTS command before the replacement turn proceeds. Media bytes are
 not added to conversation history or State.
@@ -1654,7 +1655,8 @@ the edge also accepts `transcription_session.update` with
 This first-class composition surface uses the same hardened event contract as
 `/v1/realtime`, but names the endpoint by its Fabric role. After
 `session.created`, send `session.update` to select server VAD and an optional
-`response` containing mounted `model`, `tts_model`, and `voice` participants.
+`response` containing mounted `model`, `tts_model`, and `voice` participants
+plus an optional bounded `max_output_tokens` limit.
 Input PCM, transcript events, assistant text, TTS audio, cancellation, bounded
 history, and terminal status retain the contracts documented above.
 

@@ -114,6 +114,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Realtime Fabric speech replies cannot generate indefinitely before TTS.**
+  Automatic chat responses now enforce a configurable 1-4096 output-token
+  ceiling (256 by default), so a model that does not emit EOS cannot consume
+  the entire WebSocket deadline and prevent the selected speech participant
+  from starting.
+
 - **Abandoned Zenoh DATA streams no longer retain admission forever.** Each
   remote command queue has a renewed-on-frame 30-minute resource lease. An
   omitted terminal now tombstones and closes the stream, releases owner and

@@ -10024,8 +10024,9 @@ class API:
         self,
         model: str,
         messages: tuple[ConversationMessage, ...],
+        max_output_tokens: int,
     ) -> AsyncIterator[str]:
-        """Stream visible assistant text for one realtime conversation turn."""
+        """Stream one token-bounded assistant response for a realtime turn."""
 
         resolved_model = await self._resolve_and_validate_text_model(ModelId(model))
         model_card = await self._get_running_model_card(resolved_model)
@@ -10036,6 +10037,7 @@ class API:
                 for role, content in messages
             ],
             stream=True,
+            max_tokens=max_output_tokens,
         )
         task_params = await chat_request_to_text_generation(
             request,
