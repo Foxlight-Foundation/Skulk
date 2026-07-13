@@ -114,6 +114,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **GPU llama.cpp nodes self-heal a pruned inference wheel at startup.** A node
+  that declares a GPU llama.cpp backend builds its `llama-cpp-python` wheel
+  from source; `uv sync --inexact` preserves a present wheel, but could not
+  restore one that a plain `uv sync` (run by hand or another tool) had pruned,
+  leaving the node silently unable to import `llama_cpp` and dropping it out of
+  all GGUF and served-MTP placement with no error. The startup script now
+  verifies the wheel after sync on a GPU node and rebuilds it from source once
+  (Vulkan for AMD, CUDA for NVIDIA) if it is missing or CPU-only. Non-fatal and
+  single-shot: the node still serves without the in-process GGUF engine if the
+  rebuild fails, and the common case (wheel present) skips it (#568).
+
 - **Cluster observability answers fast and accounts for every node.** The
   diagnostics fan-out probed each peer address with a patient retry policy
   meant for targeted lookups, so a single unroutable advertised address
