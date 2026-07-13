@@ -116,12 +116,17 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
 ENV PATH="/root/.cargo/bin:/root/.local/bin:/usr/local/cuda/bin:${PATH}"
 # ENV only reaches the container CMD; SSH sessions build their environment
-# from login profiles, so bake the same PATH there or every remote command
-# hits the uv/nvcc-not-found ambush.
-RUN printf 'export PATH="/root/.cargo/bin:/root/.local/bin:/usr/local/cuda/bin:$PATH"\n' \
+# elsewhere, so the toolchain PATH is planted once per session type:
+# /etc/environment covers EVERY sshd session via PAM, including the
+# noninteractive `ssh pod <command>` shape operators actually use for
+# bootstrap (it reads no shell profiles, so nothing else would);
+# /etc/profile.d covers login shells; .bashrc sources profile.d for
+# interactive non-login shells rather than duplicating the value.
+RUN printf 'PATH="/root/.cargo/bin:/root/.local/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' \
+      > /etc/environment \
+    && printf 'export PATH="/root/.cargo/bin:/root/.local/bin:/usr/local/cuda/bin:$PATH"\n' \
       > /etc/profile.d/skulk-pod.sh \
-    && printf '%s\n' 'export PATH="/root/.cargo/bin:/root/.local/bin:/usr/local/cuda/bin:$PATH"' \
-      >> /root/.bashrc
+    && printf '%s\n' '. /etc/profile.d/skulk-pod.sh' >> /root/.bashrc
 
 # uv: the canonical Skulk runtime path. Same pin rationale as the build stage.
 ARG UV_VERSION=0.11.6
