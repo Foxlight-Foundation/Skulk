@@ -167,3 +167,59 @@ async def test_alternatives_skipped_when_caller_pins_nodes(
     assert response.status_code == 200
     # Every planner call carried the caller's constraint; no per-host fan-out.
     assert all(req == {NodeId("gpu-winner")} for req in calls)
+
+
+async def test_alternatives_use_ranked_single_node_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model whose single-node placement is Tensor (not Pipeline/MlxRing)
+    must still surface losing hosts as alternatives, using the shape the
+    ranked pass proved viable (#557)."""
+
+    from skulk.shared.types.worker.instances import InstanceMeta
+    from skulk.shared.types.worker.shards import Sharding
+
+    api = _build_api()
+    client = TestClient(api.app)
+    api.state.topology.add_node(NodeId("gpu-winner"))
+    api.state.topology.add_node(NodeId("second-host"))
+
+    async def _load(_model_id: object) -> ModelCard:
+        return _card()
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+
+    seen_shardings: list[str] = []
+
+    def _fake_placements(
+        command: PlaceInstance,
+        **kwargs: object,
+    ) -> dict[InstanceId, MlxRingInstance]:
+        required = cast("set[NodeId] | None", kwargs.get("required_nodes"))
+        # Only Tensor sharding places this model single-node.
+        if command.sharding != Sharding.Tensor:
+            raise ValueError("this model only single-node places under Tensor")
+        if required is None:
+            seen_shardings.append("ranked")
+            instance = _single_node_instance("gpu-winner")
+            return {instance.instance_id: instance}
+        if required == {NodeId("second-host")}:
+            seen_shardings.append("alt")
+            instance = _single_node_instance("second-host")
+            return {instance.instance_id: instance}
+        raise ValueError(f"no viable placement for {required}")
+
+    monkeypatch.setattr(api_main, "get_instance_placements", _fake_placements)
+    _ = InstanceMeta  # imported for clarity; shape comes from ranked previews
+
+    response = client.get("/instance/previews", params={"model_id": str(_MODEL_ID)})
+
+    assert response.status_code == 200
+    payload = cast("dict[str, object]", cast(object, response.json()))
+    previews = cast("list[dict[str, object]]", payload["previews"])
+    alternatives = [p for p in previews if p.get("alternative")]
+    # The alternative surfaced despite the model never placing under
+    # Pipeline/MlxRing, proving the shape came from the ranked pass.
+    assert len(alternatives) == 1
+    assert alternatives[0]["sharding"] == "Tensor"
+    assert "alt" in seen_shardings

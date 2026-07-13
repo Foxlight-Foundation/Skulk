@@ -357,18 +357,24 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
     }
     return hosts;
   }, [previews]);
+  // Once the previews response has arrived (even if it contains only error
+  // entries), the planner is authoritative: a node is eligible iff it appears
+  // in some successful preview. Only before the first response do we fall back
+  // to the chip-family heuristic (#557).
+  const previewsLoaded = previews.length > 0;
   const nodeEligibility = useMemo(() => {
     const map: Record<string, boolean> = {};
     for (const [nodeId, info] of Object.entries(topology?.nodes ?? {})) {
-      // An excluded node must always stay eligible so its pill remains
-      // clickable to re-include it - otherwise excluding every placeable node
-      // empties the previews and the fallback below could strand the pills
-      // as un-clickable (#557).
+      // An excluded node stays eligible so its pill remains clickable to
+      // re-include it (an excluded node never appears in previews).
       if (excludedNodes.has(nodeId)) {
         map[nodeId] = true;
         continue;
       }
-      if (previewHosts.size > 0) {
+      if (previewsLoaded) {
+        // Planner truth: eligible only if a successful preview placed here.
+        // If the response was all errors, nothing (bar excluded pills) is
+        // eligible, which is correct - the planner said nothing places.
         map[nodeId] = previewHosts.has(nodeId);
         continue;
       }
@@ -376,7 +382,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
       map[nodeId] = isGguf ? isAmd : !isAmd;
     }
     return map;
-  }, [topology?.nodes, isGguf, previewHosts, excludedNodes]);
+  }, [topology?.nodes, isGguf, previewsLoaded, previewHosts, excludedNodes]);
   const eligibleNodeIds = useMemo(
     () => Object.keys(nodeEligibility).filter((id) => nodeEligibility[id]),
     [nodeEligibility],
