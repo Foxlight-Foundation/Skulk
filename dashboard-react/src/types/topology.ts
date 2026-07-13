@@ -99,6 +99,10 @@ export type DeviceModel = 'macbook-pro' | 'mac-studio' | 'mac-mini' | 'amd-strix
  *
  * @param modelId machine model string (Apple's "Mac mini", or a barebones name)
  * @param chipId  SoC/chip string; the reliable signal for AMD AI Max hardware
+ * @param acceleratorVendor accelerator vendor from telemetry (`nvidia`, ...);
+ *   the reliable signal for discrete-GPU nodes whose modelId is a container
+ *   hostname. Omitting it skips NVIDIA classification, so pass it wherever
+ *   node telemetry is available.
  */
 export function detectDeviceModel(
   modelId?: string,
