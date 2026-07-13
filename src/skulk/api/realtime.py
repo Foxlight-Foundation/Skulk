@@ -147,6 +147,13 @@ class RealtimeResponseConfig(_RealtimeModel):
     model: str = Field(min_length=1, max_length=512)
     tts_model: str | None = Field(default=None, min_length=1, max_length=512)
     voice: str | None = Field(default=None, min_length=1, max_length=256)
+    enable_thinking: bool = Field(
+        default=False,
+        description=(
+            "Whether the mounted chat participant may emit hidden reasoning. "
+            "Disabled by default for bounded, low-latency voice responses."
+        ),
+    )
     max_output_tokens: int = Field(
         default=256,
         ge=1,
@@ -258,7 +265,7 @@ _CLIENT_EVENT_ADAPTER: TypeAdapter[RealtimeClientEvent] = TypeAdapter(
 OpenRealtimeSession = Callable[[str, int], Awaitable[CapabilityStreamSession]]
 ConversationMessage = tuple[Literal["user", "assistant"], str]
 GenerateAssistant = Callable[
-    [str, tuple[ConversationMessage, ...], int], AsyncIterator[str]
+    [str, tuple[ConversationMessage, ...], int, bool], AsyncIterator[str]
 ]
 OpenSpeechSession = Callable[
     [str, str, str | None], Awaitable[CapabilityStreamSession]
@@ -1081,6 +1088,7 @@ class RealtimeTranscriptionBridge:
                     config.model,
                     messages,
                     config.max_output_tokens,
+                    config.enable_thinking,
                 ):
                     text_bytes += len(delta.encode("utf-8"))
                     if text_bytes > _MAX_TRANSCRIPT_TEXT_BYTES:

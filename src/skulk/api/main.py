@@ -10025,6 +10025,7 @@ class API:
         model: str,
         messages: tuple[ConversationMessage, ...],
         max_output_tokens: int,
+        enable_thinking: bool,
     ) -> AsyncIterator[str]:
         """Stream one token-bounded assistant response for a realtime turn."""
 
@@ -10038,6 +10039,7 @@ class API:
             ],
             stream=True,
             max_tokens=max_output_tokens,
+            enable_thinking=enable_thinking,
         )
         task_params = await chat_request_to_text_generation(
             request,

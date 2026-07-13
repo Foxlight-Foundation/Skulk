@@ -475,16 +475,17 @@ def test_realtime_websocket_generates_text_and_streams_tts_audio() -> None:
         )
 
     generated_requests: list[
-        tuple[tuple[ConversationMessage, ...], int]
+        tuple[tuple[ConversationMessage, ...], int, bool]
     ] = []
 
     async def generate_assistant(
         model: str,
         messages: tuple[ConversationMessage, ...],
         max_output_tokens: int,
+        enable_thinking: bool,
     ) -> AsyncIterator[str]:
         assert model == "org/chat"
-        generated_requests.append((messages, max_output_tokens))
+        generated_requests.append((messages, max_output_tokens, enable_thinking))
         yield "Hello "
         yield "back"
 
@@ -558,6 +559,7 @@ def test_realtime_websocket_generates_text_and_streams_tts_audio() -> None:
                         "tts_model": "org/tts",
                         "voice": "coral",
                         "max_output_tokens": 64,
+                        "enable_thinking": True,
                     },
                 },
             }
@@ -582,7 +584,7 @@ def test_realtime_websocket_generates_text_and_streams_tts_audio() -> None:
             "response.done",
         ]
 
-    assert generated_requests == [((('user', 'hello'),), 64)]
+    assert generated_requests == [((('user', 'hello'),), 64, True)]
     assert speech_requests == [("org/tts", "Hello back", "coral")]
 
 
@@ -597,8 +599,9 @@ def test_realtime_websocket_cancels_active_assistant_response() -> None:
         model: str,
         messages: tuple[ConversationMessage, ...],
         max_output_tokens: int,
+        enable_thinking: bool,
     ) -> AsyncIterator[str]:
-        del model, messages, max_output_tokens
+        del model, messages, max_output_tokens, enable_thinking
         await anyio.sleep_forever()
         yield "unreachable"
 
@@ -699,8 +702,9 @@ def test_realtime_websocket_barge_in_cancels_pending_assistant_response() -> Non
         model: str,
         messages: tuple[ConversationMessage, ...],
         max_output_tokens: int,
+        enable_thinking: bool,
     ) -> AsyncIterator[str]:
-        del model, messages, max_output_tokens
+        del model, messages, max_output_tokens, enable_thinking
         await anyio.sleep_forever()
         yield "unreachable"
 
@@ -757,8 +761,9 @@ def test_realtime_websocket_reports_assistant_text_limit_as_failed() -> None:
         model: str,
         messages: tuple[ConversationMessage, ...],
         max_output_tokens: int,
+        enable_thinking: bool,
     ) -> AsyncIterator[str]:
-        del model, messages, max_output_tokens
+        del model, messages, max_output_tokens, enable_thinking
         try:
             yield "x" * (_MAX_TRANSCRIPT_TEXT_BYTES + 1)
             await anyio.sleep_forever()
@@ -823,8 +828,9 @@ def test_realtime_websocket_cancels_tts_provider_on_response_abort() -> None:
         model: str,
         messages: tuple[ConversationMessage, ...],
         max_output_tokens: int,
+        enable_thinking: bool,
     ) -> AsyncIterator[str]:
-        del model, messages, max_output_tokens
+        del model, messages, max_output_tokens, enable_thinking
         yield "hello"
 
     async def open_speech(
@@ -919,8 +925,9 @@ def test_realtime_websocket_preserves_response_validation_detail() -> None:
         model: str,
         messages: tuple[ConversationMessage, ...],
         max_output_tokens: int,
+        enable_thinking: bool,
     ) -> AsyncIterator[str]:
-        del model, messages, max_output_tokens
+        del model, messages, max_output_tokens, enable_thinking
         yield "unused"
 
     async def validate_response(config: RealtimeResponseConfig) -> None:
@@ -969,8 +976,9 @@ def test_realtime_websocket_locks_response_config_after_audio() -> None:
         model: str,
         messages: tuple[ConversationMessage, ...],
         max_output_tokens: int,
+        enable_thinking: bool,
     ) -> AsyncIterator[str]:
-        del model, messages, max_output_tokens
+        del model, messages, max_output_tokens, enable_thinking
         yield "unused"
 
     async def validate_response(config: RealtimeResponseConfig) -> None:
