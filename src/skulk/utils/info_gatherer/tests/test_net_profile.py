@@ -294,3 +294,43 @@ async def test_check_reachability_no_backoff_after_final_attempt(
         "203.0.113.9", NodeId("remote"), out, _DeadClient(), attempts=3  # pyright: ignore[reportArgumentType]
     )
     assert sleeps == [1, 1]
+
+
+@pytest.mark.anyio
+async def test_check_reachability_no_warning_on_eventual_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry that eventually succeeds must not log 'treating as down':
+    last_error is cleared on success so only genuinely-down addresses warn."""
+
+    warnings: list[str] = []
+
+    def _record_warning(msg: object, *_args: object, **_kwargs: object) -> None:
+        warnings.append(str(msg))
+
+    monkeypatch.setattr(net_profile.logger, "warning", _record_warning)
+
+    calls = 0
+
+    class _FlakyClient:
+        async def get(self, url: str) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise httpx.ConnectError(f"transient for {url}")
+            return httpx.Response(
+                200, text='"remote"', request=httpx.Request("GET", url)
+            )
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(net_profile.anyio, "sleep", _no_sleep)
+    out: dict[NodeId, set[str]] = {}
+    await net_profile.check_reachability(
+        "203.0.113.9", NodeId("remote"), out, _FlakyClient(), attempts=3  # pyright: ignore[reportArgumentType]
+    )
+
+    assert calls == 2
+    assert out == {NodeId("remote"): {"203.0.113.9"}}
+    assert warnings == []

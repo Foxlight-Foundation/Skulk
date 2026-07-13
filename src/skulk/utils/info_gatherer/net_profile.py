@@ -89,13 +89,15 @@ async def check_reachability(
                 continue
 
             remote_node_id = NodeId(body)
+            last_error = None
             break
 
         # expected failure cases
         except (
             httpx.TimeoutException,
             httpx.NetworkError,
-        ):
+        ) as e:
+            last_error = e
             if not is_last_attempt:
                 await anyio.sleep(1)
 
@@ -105,12 +107,12 @@ async def check_reachability(
             if not is_last_attempt:
                 await anyio.sleep(1)
 
-    if last_error is not None:
-        logger.warning(
-            f"peer probe failed with {type(last_error).__name__} from {target_ip} after {attempts} attempts; treating as down"
-        )
-
     if remote_node_id is None:
+        if last_error is not None:
+            logger.warning(
+                f"peer probe failed with {type(last_error).__name__} from "
+                f"{target_ip} after {attempts} attempts; treating as down"
+            )
         return
 
     if remote_node_id != expected_node_id:
@@ -148,11 +150,12 @@ async def check_reachable(
     # the contract explicit instead of silently probing nothing.
     attempts = max(1, attempts)
     timeout = httpx.Timeout(timeout=timeout_seconds)
-    limits = httpx.Limits(
-        max_connections=100,
-        max_keepalive_connections=20,
-        keepalive_expiry=5,
-    )
+    # No connection cap: every advertised address is probed at most once with a
+    # bounded timeout, so a wide fan-out (a large fleet, many interfaces per
+    # node) must not leave probes queued behind a 100-connection ceiling where
+    # the keepalive expiry could time them out before they run (#558). Drop
+    # keepalive entirely since each probe connection is used exactly once.
+    limits = httpx.Limits(max_connections=None, max_keepalive_connections=0)
 
     async def _probe(
         target_ip: str,
