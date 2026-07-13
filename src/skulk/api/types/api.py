@@ -906,6 +906,15 @@ class PlacementPreview(BaseModel):
     # Keys are NodeId strings, values are additional bytes that would be used on that node
     memory_delta_by_node: dict[str, int] | None = None
     error: str | None = None
+    alternative: bool = Field(
+        default=False,
+        description=(
+            "True for a per-host alternative to the planner's ranked pick: a "
+            "single-node placement on a host that passes admission but lost "
+            "the ranking. On heterogeneous fleets the ranked winner (often "
+            "the largest GPU) would otherwise hide every other valid host."
+        ),
+    )
 
 
 class PlacementPreviewResponse(BaseModel):

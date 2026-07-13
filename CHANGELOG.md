@@ -9,6 +9,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **Placement previews expose every valid host, not just the ranking
+  winner.** `GET /instance/previews` now includes per-host single-node
+  previews marked `alternative: true` for each host that passes admission
+  but lost the planner ranking, and the dashboard placement dialog derives
+  node eligibility from the planner's answers instead of a chip-family
+  heuristic. Previously a heterogeneous fleet showed only the ranked pick
+  (typically the largest free GPU) as placeable, and the heuristic rendered
+  a CUDA node's pill as unable to run GGUF while the planner was placing
+  GGUF on it (#557).
+
 - **Nodes can name themselves, and CUDA devices get their own topology tile.**
   `SKULK_NODE_NAME` overrides the gossiped display name ahead of the
   hostname/Computer Name fallback, so containers and rented GPU pods (whose

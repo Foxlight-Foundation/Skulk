@@ -161,10 +161,13 @@ export interface DownloadProgress {
 export interface PlacementPreview {
   model_id: string;
   sharding: 'Pipeline' | 'Tensor';
-  instance_meta: 'MlxRing' | 'MlxJaccl';
+  instance_meta: 'MlxRing' | 'MlxJaccl' | 'LlamaRpc';
   instance: unknown | null;
   memory_delta_by_node: Record<string, number> | null;
   error: string | null;
+  /** Per-host alternative to the ranked pick: a single-node placement on a
+   * host that passes admission but lost the planner ranking (#557). */
+  alternative?: boolean;
 }
 
 /** All known capability tags. */
