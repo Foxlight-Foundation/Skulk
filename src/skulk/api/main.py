@@ -391,7 +391,12 @@ from skulk.tools.web_search import default_browser_tool_provider
 from skulk.utils.banner import print_startup_banner
 from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.disk_event_log import DiskEventLog
-from skulk.utils.info_gatherer.net_profile import check_reachable, first_reachable_ip
+from skulk.utils.info_gatherer.net_profile import (
+    SWEEP_ATTEMPTS,
+    SWEEP_TIMEOUT_SECONDS,
+    check_reachable,
+    first_reachable_ip,
+)
 from skulk.utils.power_sampler import PowerSampler
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.engines.mlx.constants import (
@@ -7232,10 +7237,15 @@ class API:
         """Return reachable peer API base URLs keyed by node ID."""
 
         reachable_by_node: dict[str, str] = {}
+        # Fail-fast sweep policy: this backs interactive surfaces (dashboard
+        # observability), where one dead advertised address must cost ~2s,
+        # not the patient retry budget (#558).
         async for ip_address, node_id in check_reachable(
             self.state.topology,
             self.node_id,
             self.state.node_network,
+            attempts=SWEEP_ATTEMPTS,
+            timeout_seconds=SWEEP_TIMEOUT_SECONDS,
         ):
             normalized_node_id = str(node_id)
             if normalized_node_id in reachable_by_node:
@@ -8122,6 +8132,27 @@ class API:
                             error=f"{exc.__class__.__name__}: {exc}",
                         )
                     )
+
+        # A topology member with no reachable API route must appear as an
+        # explicit failure, not vanish: an overlay-joined node (advertising
+        # only addresses its peers cannot route) otherwise has no
+        # observability presence at all and the gap is invisible (#558).
+        reported = {entry.node_id for entry in nodes}
+        for topology_node_id in self.state.topology.list_nodes():
+            normalized = str(topology_node_id)
+            if normalized in reported:
+                continue
+            nodes.append(
+                ClusterNodeDiagnostics(
+                    node_id=normalized,
+                    url=None,
+                    ok=False,
+                    error=(
+                        "no reachable API route among the node's advertised "
+                        "addresses"
+                    ),
+                )
+            )
 
         return ClusterDiagnostics(
             generated_at=datetime.now(tz=timezone.utc).isoformat(),

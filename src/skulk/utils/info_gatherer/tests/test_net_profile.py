@@ -196,12 +196,13 @@ async def test_first_reachable_ip_returns_none_when_target_has_no_valid_address(
 
 
 @pytest.mark.anyio
-async def test_check_reachable_sweeps_with_single_attempt_policy(
+async def test_check_reachable_passes_caller_attempt_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The fleet-wide sweep must pass the fail-fast budget, not the patient
-    targeted-lookup default: one dead address stalled interactive callers for
-    ~18s under the retry policy (#558)."""
+    """The sweep budget is the caller's choice: interactive surfaces pass the
+    fail-fast SWEEP_ATTEMPTS (#558) while the worker's connection maintenance
+    keeps the patient default (one dead address must not stall a dashboard,
+    but link upkeep deliberately retries)."""
 
     self_node_id = NodeId("self")
     remote_node_id = NodeId("remote")
@@ -226,11 +227,21 @@ async def test_check_reachable_sweeps_with_single_attempt_policy(
         out[expected_node_id].add(target_ip)
 
     monkeypatch.setattr(net_profile, "check_reachability", fake_check_reachability)
+
+    async for _ in net_profile.check_reachable(
+        topology=topology,
+        self_node_id=self_node_id,
+        node_network=node_network,
+        attempts=net_profile.SWEEP_ATTEMPTS,
+    ):
+        pass
+    assert seen_attempts == [net_profile.SWEEP_ATTEMPTS]
+
+    seen_attempts.clear()
     await _collect_reachable_targets(
         topology=topology, self_node_id=self_node_id, node_network=node_network
     )
-
-    assert seen_attempts == [net_profile.SWEEP_ATTEMPTS]
+    assert seen_attempts == [net_profile.REACHABILITY_ATTEMPTS]
 
 
 @pytest.mark.anyio
@@ -252,3 +263,34 @@ async def test_check_reachability_single_attempt_probes_once() -> None:
 
     assert calls == 1
     assert out == {}
+
+
+@pytest.mark.anyio
+async def test_check_reachability_no_backoff_after_final_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 1s inter-retry backoff must not run after the last attempt: for
+    attempts=1 sweeps it would silently reintroduce the stall the fail-fast
+    budget exists to remove."""
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(net_profile.anyio, "sleep", fake_sleep)
+
+    class _DeadClient:
+        async def get(self, url: str) -> object:
+            raise httpx.ConnectError(f"dead: {url}")
+
+    out: dict[NodeId, set[str]] = {}
+    await net_profile.check_reachability(
+        "203.0.113.9", NodeId("remote"), out, _DeadClient(), attempts=1  # pyright: ignore[reportArgumentType]
+    )
+    assert sleeps == []
+
+    await net_profile.check_reachability(
+        "203.0.113.9", NodeId("remote"), out, _DeadClient(), attempts=3  # pyright: ignore[reportArgumentType]
+    )
+    assert sleeps == [1, 1]

@@ -68,16 +68,21 @@ async def check_reachability(
     remote_node_id = None
     last_error = None
 
-    for _ in range(attempts):
+    for attempt_index in range(attempts):
+        # Backoff only BETWEEN retries: sleeping after the final attempt
+        # (always, for attempts=1 sweeps) would defeat the fail-fast budget.
+        is_last_attempt = attempt_index == attempts - 1
         try:
             r = await client.get(url)
             if r.status_code != 200:
-                await anyio.sleep(1)
+                if not is_last_attempt:
+                    await anyio.sleep(1)
                 continue
 
             body = r.text.strip().strip('"')
             if not body:
-                await anyio.sleep(1)
+                if not is_last_attempt:
+                    await anyio.sleep(1)
                 continue
 
             remote_node_id = NodeId(body)
@@ -88,16 +93,18 @@ async def check_reachability(
             httpx.TimeoutException,
             httpx.NetworkError,
         ):
-            await anyio.sleep(1)
+            if not is_last_attempt:
+                await anyio.sleep(1)
 
         # other failures should be logged on last attempt
         except httpx.HTTPError as e:
             last_error = e
-            await anyio.sleep(1)
+            if not is_last_attempt:
+                await anyio.sleep(1)
 
     if last_error is not None:
         logger.warning(
-            f"connect error {type(last_error).__name__} from {target_ip} after {REACHABILITY_ATTEMPTS} attempts; treating as down"
+            f"connect error {type(last_error).__name__} from {target_ip} after {attempts} attempts; treating as down"
         )
 
     if remote_node_id is None:
@@ -120,14 +127,21 @@ async def check_reachable(
     topology: Topology,
     self_node_id: NodeId,
     node_network: Mapping[NodeId, NodeNetworkInfo],
+    attempts: int = REACHABILITY_ATTEMPTS,
+    timeout_seconds: float = 5.0,
 ) -> AsyncGenerator[tuple[str, NodeId], None]:
-    """Yield (ip, node_id) pairs as reachability probes complete."""
+    """Yield (ip, node_id) pairs as reachability probes complete.
+
+    The default budget stays patient: the worker's connection maintenance
+    tolerates slow links and deliberately retries. Interactive callers (the
+    dashboard diagnostics fan-out) pass ``SWEEP_ATTEMPTS`` /
+    ``SWEEP_TIMEOUT_SECONDS`` so one dead advertised address cannot stall
+    them (#558).
+    """
 
     send, recv = channel[tuple[str, NodeId]]()
 
-    # Sweep policy: short timeout, single attempt per address (see
-    # SWEEP_ATTEMPTS). This generator backs interactive surfaces.
-    timeout = httpx.Timeout(timeout=SWEEP_TIMEOUT_SECONDS)
+    timeout = httpx.Timeout(timeout=timeout_seconds)
     limits = httpx.Limits(
         max_connections=100,
         max_keepalive_connections=20,
@@ -143,7 +157,7 @@ async def check_reachable(
         async with send:
             out: defaultdict[NodeId, set[str]] = defaultdict(set)
             await check_reachability(
-                target_ip, expected_node_id, out, client, attempts=SWEEP_ATTEMPTS
+                target_ip, expected_node_id, out, client, attempts=attempts
             )
             if expected_node_id in out:
                 await send.send((target_ip, expected_node_id))
