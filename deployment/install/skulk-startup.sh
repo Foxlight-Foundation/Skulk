@@ -161,9 +161,27 @@ run_prep() {
                 log "warning: could not read llama-cpp-python version from uv.lock; rebuilding unpinned"
             fi
             log "GPU llama.cpp wheel MISSING or CPU-only; rebuilding ${WHEEL_SPEC} from source with CMAKE_ARGS=${WHEEL_CMAKE} (self-heal, #568)"
-            # --no-deps: uv sync already installed llama-cpp-python's locked
-            # dependencies; the rebuild only swaps the wheel artifact and must
-            # not let pip drift the rest of the environment off uv.lock.
+            # llama-cpp-python's own dependencies (e.g. diskcache) live only in
+            # the llama-cpp optional extra, so a plain `uv sync` prunes them
+            # alongside the wheel. Restore just those deps at their LOCKED
+            # versions first (uv export of the extra, minus the package itself),
+            # so the rebuilt wheel can import; then the --no-deps source build
+            # swaps in the GPU wheel without letting pip re-resolve anything off
+            # uv.lock (#569 review: --no-deps alone left llama_cpp
+            # importable-but-broken when diskcache was also pruned).
+            LLAMA_DEPS_REQ="$(mktemp)"
+            if uv export --frozen --extra llama-cpp --no-hashes \
+                --no-emit-project --no-emit-workspace \
+                --no-emit-package llama-cpp-python -o "$LLAMA_DEPS_REQ" 2>>"$PREP_LOG"; then
+                uv pip install --python .venv/bin/python -r "$LLAMA_DEPS_REQ" 2>&1 \
+                    | tee -a "$PREP_LOG" >&2 \
+                    || log "warning: could not restore llama-cpp extra deps; wheel may still fail to import"
+            else
+                log "warning: uv export of llama-cpp deps failed; rebuilding wheel without restoring its deps"
+            fi
+            rm -f "$LLAMA_DEPS_REQ"
+            # --no-deps: the extra's deps are handled above at locked versions;
+            # this step only swaps the wheel artifact and must not re-resolve.
             if CMAKE_ARGS="$WHEEL_CMAKE" uv pip install --force-reinstall \
                 --no-deps --no-cache-dir --no-binary llama-cpp-python \
                 --python .venv/bin/python "$WHEEL_SPEC" 2>&1 \
