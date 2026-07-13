@@ -1169,7 +1169,12 @@ Behavior notes:
 - `POST /v1/diagnostics/node/runners/{runner_id}/cancel` requests cooperative
   cancellation for one task that the local runner supervisor still knows about.
 - `GET /v1/diagnostics/cluster` fans out to reachable peer APIs and returns
-  partial results when some peers are unavailable.
+  partial results when some peers are unavailable. The sweep uses a fail-fast
+  probe budget (single attempt, short timeout per advertised address) so one
+  unroutable address cannot stall the response. Every topology member appears
+  in `nodes`: peers with no reachable API route are explicit `ok: false`
+  entries with a `no reachable API route` error rather than being omitted, so
+  an overlay-joined node always has an observability presence.
 - `GET /v1/diagnostics/cluster/timeline` stitches every reachable node's
   runner-supervisor diagnostics into one cross-rank chronological view. The
   response carries a per-runner synopsis sorted by `(modelId, deviceRank)`

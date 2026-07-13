@@ -378,7 +378,12 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
         map[nodeId] = previewHosts.has(nodeId);
         continue;
       }
-      const isAmd = detectDeviceModel(info.system_info?.model_id, info.system_info?.chip) === 'amd-strix';
+      const isAmd =
+        detectDeviceModel(
+          info.system_info?.model_id,
+          info.system_info?.chip,
+          info.system_info?.accelerator_vendor,
+        ) === 'amd-strix';
       map[nodeId] = isGguf ? isAmd : !isAmd;
     }
     return map;

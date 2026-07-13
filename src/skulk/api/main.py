@@ -391,7 +391,13 @@ from skulk.tools.web_search import default_browser_tool_provider
 from skulk.utils.banner import print_startup_banner
 from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.disk_event_log import DiskEventLog
-from skulk.utils.info_gatherer.net_profile import check_reachable, first_reachable_ip
+from skulk.utils.info_gatherer.net_profile import (
+    REACHABILITY_ATTEMPTS,
+    SWEEP_ATTEMPTS,
+    SWEEP_TIMEOUT_SECONDS,
+    check_reachable,
+    first_reachable_ip,
+)
 from skulk.utils.power_sampler import PowerSampler
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.engines.mlx.constants import (
@@ -7327,14 +7333,23 @@ class API:
         host = f"[{ip_address}]" if ":" in ip_address else ip_address
         return f"http://{host}:52415"
 
-    async def _reachable_peer_api_urls(self) -> dict[str, str]:
-        """Return reachable peer API base URLs keyed by node ID."""
+    async def _reachable_peer_api_urls(self, fail_fast: bool = False) -> dict[str, str]:
+        """Return reachable peer API base URLs keyed by node ID.
+
+        ``fail_fast`` selects the probe budget: the interactive observability
+        sweep passes ``True`` so one dead advertised address costs ~2s rather
+        than the patient retry budget (#558); targeted proxy paths (runner
+        cancellation, per-node diagnostics) keep the patient default, where
+        tolerating a slow link matters more than latency.
+        """
 
         reachable_by_node: dict[str, str] = {}
         async for ip_address, node_id in check_reachable(
             self.state.topology,
             self.node_id,
             self.state.node_network,
+            attempts=SWEEP_ATTEMPTS if fail_fast else REACHABILITY_ATTEMPTS,
+            timeout_seconds=SWEEP_TIMEOUT_SECONDS if fail_fast else 5.0,
         ):
             normalized_node_id = str(node_id)
             if normalized_node_id in reachable_by_node:
@@ -8184,7 +8199,12 @@ class API:
         return DiagnosticCaptureResponse.model_validate(response.json())
 
     async def get_cluster_diagnostics(self) -> ClusterDiagnostics:
-        """Return read-only diagnostics for local and reachable peer nodes."""
+        """Return read-only diagnostics for every topology member.
+
+        Reachable peers carry their collected bundle; topology members with no
+        reachable API route appear as explicit ``ok=false`` entries so an
+        overlay-joined node keeps an observability presence (#558).
+        """
 
         local_diagnostics = await self.get_node_diagnostics()
         nodes = [
@@ -8196,7 +8216,7 @@ class API:
             )
         ]
 
-        peer_urls = await self._reachable_peer_api_urls()
+        peer_urls = await self._reachable_peer_api_urls(fail_fast=True)
         timeout = httpx.Timeout(timeout=10.0, connect=2.0)
         async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
             for node_id, base_url in peer_urls.items():
@@ -8221,6 +8241,27 @@ class API:
                             error=f"{exc.__class__.__name__}: {exc}",
                         )
                     )
+
+        # A topology member with no reachable API route must appear as an
+        # explicit failure, not vanish: an overlay-joined node (advertising
+        # only addresses its peers cannot route) otherwise has no
+        # observability presence at all and the gap is invisible (#558).
+        reported = {entry.node_id for entry in nodes}
+        for topology_node_id in self.state.topology.list_nodes():
+            normalized = str(topology_node_id)
+            if normalized in reported:
+                continue
+            nodes.append(
+                ClusterNodeDiagnostics(
+                    node_id=normalized,
+                    url=None,
+                    ok=False,
+                    error=(
+                        "no reachable API route among the node's advertised "
+                        "addresses"
+                    ),
+                )
+            )
 
         return ClusterDiagnostics(
             generated_at=datetime.now(tz=timezone.utc).isoformat(),
