@@ -9,15 +9,17 @@
 # runners: nvcc compiles CUDA kernels without a GPU present.
 #
 # CUDA_ARCHS pins the compiled GPU architectures. Default covers the rental
-# fleet we actually use: 86 (A40/A5000/3090) and 89 (4090/L40S). Add 80 (A100)
-# or 90 (H100) when renting those tiers; every extra arch lengthens the build.
+# tiers in actual use: 80 (A100 - learned the hard way when an sm_86-only
+# image crashed kernel launches on the first A100 pod), 86 (A40/A5000/3090),
+# and 89 (4090/L40S). Add 90 (H100) when renting that tier; every extra arch
+# lengthens the build.
 
 ARG CUDA_VERSION=12.4.1
 ARG UBUNTU_VERSION=22.04
 
 # ---- build stage: the two expensive CUDA compiles ---------------------------
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS build
-ARG CUDA_ARCHS="86;89"
+ARG CUDA_ARCHS="80;86;89"
 # pipefail: a curl|sh installer whose download dies must fail the build, not
 # publish an image that is missing its toolchain.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -113,6 +115,18 @@ ARG RUST_VERSION=1.94.1
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
 ENV PATH="/root/.cargo/bin:/root/.local/bin:/usr/local/cuda/bin:${PATH}"
+# ENV only reaches the container CMD; SSH sessions build their environment
+# elsewhere, so the toolchain PATH is planted once per session type:
+# /etc/environment covers EVERY sshd session via PAM, including the
+# noninteractive `ssh pod <command>` shape operators actually use for
+# bootstrap (it reads no shell profiles, so nothing else would);
+# /etc/profile.d covers login shells; .bashrc sources profile.d for
+# interactive non-login shells rather than duplicating the value.
+RUN printf 'PATH="/root/.cargo/bin:/root/.local/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n' \
+      > /etc/environment \
+    && printf 'export PATH="/root/.cargo/bin:/root/.local/bin:/usr/local/cuda/bin:$PATH"\n' \
+      > /etc/profile.d/skulk-pod.sh \
+    && printf '%s\n' '. /etc/profile.d/skulk-pod.sh' >> /root/.bashrc
 
 # uv: the canonical Skulk runtime path. Same pin rationale as the build stage.
 ARG UV_VERSION=0.11.6

@@ -58,11 +58,13 @@ WHEEL_VERSION="$(printf '%s' "${WHEEL_NAME}" | cut -d- -f2)"
 WHEEL_PY_TAG="$(printf '%s' "${WHEEL_NAME}" | cut -d- -f3)"
 LOCKED_VERSION="$(sed -n '/^name = "llama-cpp-python"$/{n;s/^version = "\(.*\)"$/\1/p;}' uv.lock | head -1)"
 EXPECTED_PY_TAG="cp$(tr -d '[:space:].' < .python-version | cut -c1-3)"
+# llama-cpp-python loads its native library via ctypes, so its wheel builds
+# as version-independent py3-none; that tag is valid for any synced Python.
 if [ -z "${LOCKED_VERSION}" ] || [ "${EXPECTED_PY_TAG}" = "cp" ]; then
   echo "[bootstrap] ERROR: could not parse llama-cpp-python pin (got version '${LOCKED_VERSION:-}', tag '${EXPECTED_PY_TAG}') from this ref's uv.lock/.python-version." >&2
   exit 1
 fi
-if [ "${WHEEL_VERSION}" != "${LOCKED_VERSION}" ] || [ "${WHEEL_PY_TAG}" != "${EXPECTED_PY_TAG}" ]; then
+if [ "${WHEEL_VERSION}" != "${LOCKED_VERSION}" ] || { [ "${WHEEL_PY_TAG}" != "${EXPECTED_PY_TAG}" ] && [ "${WHEEL_PY_TAG}" != "py3" ]; }; then
   echo "[bootstrap] ERROR: prebaked wheel ${WHEEL_NAME} does not match this ref's pins" >&2
   echo "[bootstrap]   ref locks llama-cpp-python==${LOCKED_VERSION} on ${EXPECTED_PY_TAG}" >&2
   echo "[bootstrap]   use the image built for this ref, or rebuild via the cuda-image workflow" >&2
