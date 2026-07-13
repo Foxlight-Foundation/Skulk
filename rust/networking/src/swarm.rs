@@ -98,11 +98,20 @@ fn on_message(swarm: &mut libp2p::Swarm<Behaviour>, message: ToSwarm) {
                     .election_gossipsub
                     .subscribe(&topic_id);
                 let legacy = swarm.behaviour_mut().gossipsub.subscribe(&topic_id);
-                isolated.and_then(|isolated_subscribed| {
-                    legacy.map(|legacy_subscribed| {
-                        isolated_subscribed || legacy_subscribed
-                    })
-                })
+                // Registration succeeds if EITHER protocol subscribes; only a
+                // double failure is a real error. `isolated.and_then(..)` would
+                // abort election registration whenever the isolated subscribe
+                // failed even though the legacy subscription worked, defeating
+                // the rolling-upgrade guarantee this dual subscription exists
+                // for.
+                match (isolated, legacy) {
+                    (Ok(isolated_subscribed), Ok(legacy_subscribed)) => {
+                        Ok(isolated_subscribed || legacy_subscribed)
+                    }
+                    (Ok(isolated_subscribed), Err(_)) => Ok(isolated_subscribed),
+                    (Err(_), Ok(legacy_subscribed)) => Ok(legacy_subscribed),
+                    (Err(isolated_err), Err(_)) => Err(isolated_err),
+                }
             } else {
                 swarm.behaviour_mut().gossipsub.subscribe(&topic_id)
             };

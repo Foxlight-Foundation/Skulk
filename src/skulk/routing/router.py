@@ -554,8 +554,12 @@ class Router:
         """Publish one packet while containing and aggregating transport pressure."""
 
         try:
+            # Log the topic and payload SIZE, not the payload: loguru brace-args
+            # defer formatting until TRACE is actually enabled, and rendering the
+            # bytes (up to max_transmit_size) on every publish would add the very
+            # overload amplification this path guards against.
             logger.trace(
-                f"Sending message on {packet.topic} with payload {packet.data}"
+                "Sending message on {} ({} bytes)", packet.topic, len(packet.data)
             )
             if len(packet.data) > 1024 * 1024:
                 logger.warning(
