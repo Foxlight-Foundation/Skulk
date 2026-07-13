@@ -8100,7 +8100,12 @@ class API:
         return DiagnosticCaptureResponse.model_validate(response.json())
 
     async def get_cluster_diagnostics(self) -> ClusterDiagnostics:
-        """Return read-only diagnostics for local and reachable peer nodes."""
+        """Return read-only diagnostics for every topology member.
+
+        Reachable peers carry their collected bundle; topology members with no
+        reachable API route appear as explicit ``ok=false`` entries so an
+        overlay-joined node keeps an observability presence (#558).
+        """
 
         local_diagnostics = await self.get_node_diagnostics()
         nodes = [

@@ -334,3 +334,49 @@ async def test_check_reachability_no_warning_on_eventual_success(
     assert calls == 2
     assert out == {NodeId("remote"): {"203.0.113.9"}}
     assert warnings == []
+
+
+@pytest.mark.anyio
+async def test_check_reachable_bounds_probe_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wide fan-out must not run more than MAX_CONCURRENT_PROBES probes at
+    once, so a large fleet or interface-heavy peers cannot exhaust file
+    descriptors (#558)."""
+
+    self_node_id = NodeId("self")
+    topology = Topology()
+    topology.add_node(self_node_id)
+    node_network: dict[NodeId, NodeNetworkInfo] = {}
+    total = net_profile.MAX_CONCURRENT_PROBES * 3
+    for i in range(total):
+        node = NodeId(f"remote-{i}")
+        topology.add_node(node)
+        node_network[node] = NodeNetworkInfo(
+            interfaces=[NetworkInterfaceInfo(name="en0", ip_address=f"10.0.0.{i % 250}")]
+        )
+
+    in_flight = 0
+    peak = 0
+
+    async def fake_check_reachability(
+        target_ip: str,
+        expected_node_id: NodeId,
+        out: dict[NodeId, set[str]],
+        _client: object,
+        attempts: int = net_profile.REACHABILITY_ATTEMPTS,
+    ) -> None:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await anyio.sleep(0)
+        in_flight -= 1
+        out[expected_node_id].add(target_ip)
+
+    monkeypatch.setattr(net_profile, "check_reachability", fake_check_reachability)
+    results = await _collect_reachable_targets(
+        topology=topology, self_node_id=self_node_id, node_network=node_network
+    )
+
+    assert len(results) == total
+    assert peak <= net_profile.MAX_CONCURRENT_PROBES

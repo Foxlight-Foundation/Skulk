@@ -20,6 +20,12 @@ REACHABILITY_ATTEMPTS = 3
 # stall per unroutable address, which read as "observability is broken", #558).
 SWEEP_ATTEMPTS = 1
 SWEEP_TIMEOUT_SECONDS = 2.0
+# Max reachability probes in flight at once. Bounds file-descriptor and
+# connection pressure on a wide fan-out (a large fleet, or peers advertising
+# many Docker/VPN/link-local interfaces) while staying well above a normal
+# fleet's address count, so the semaphore is inert in the common case and only
+# engages as a safety ceiling (#558).
+MAX_CONCURRENT_PROBES = 64
 
 
 def _should_probe_remote_ip(target_ip: str) -> bool:
@@ -150,12 +156,15 @@ async def check_reachable(
     # the contract explicit instead of silently probing nothing.
     attempts = max(1, attempts)
     timeout = httpx.Timeout(timeout=timeout_seconds)
-    # No connection cap: every advertised address is probed at most once with a
-    # bounded timeout, so a wide fan-out (a large fleet, many interfaces per
-    # node) must not leave probes queued behind a 100-connection ceiling where
-    # the keepalive expiry could time them out before they run (#558). Drop
-    # keepalive entirely since each probe connection is used exactly once.
-    limits = httpx.Limits(max_connections=None, max_keepalive_connections=0)
+    # A semaphore bounds probes in flight so a wide fan-out cannot exhaust file
+    # descriptors, while a probe's bounded timeout only starts once it holds a
+    # slot (unlike a connection-pool cap, which lets a queued request's timeout
+    # run down while it waits, the failure mode of the original keepalive-bound
+    # pool, #558). Keepalive is off: each probe connection is used exactly once.
+    limits = httpx.Limits(
+        max_connections=MAX_CONCURRENT_PROBES, max_keepalive_connections=0
+    )
+    probe_slots = anyio.Semaphore(MAX_CONCURRENT_PROBES)
 
     async def _probe(
         target_ip: str,
@@ -163,7 +172,7 @@ async def check_reachable(
         client: httpx.AsyncClient,
         send: Sender[tuple[str, NodeId]],
     ) -> None:
-        async with send:
+        async with send, probe_slots:
             out: defaultdict[NodeId, set[str]] = defaultdict(set)
             await check_reachability(
                 target_ip, expected_node_id, out, client, attempts=attempts
