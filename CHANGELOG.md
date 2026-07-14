@@ -114,6 +114,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Multi-homed peers no longer churn connections on every weak ping or dead
+  link-local retry (#401).** mDNS still tries every advertised path once so a
+  reachable Thunderbolt link is retained, but once another path connects,
+  failed link-local addresses retry once per minute instead of every five
+  seconds. A socket now requires three consecutive five-second ping failures
+  before teardown. Routable paths, API reachability discovery, and real peer
+  loss retain their normal behavior.
+
 - **Realtime Fabric speech replies cannot generate indefinitely before TTS.**
   Automatic chat responses now enforce a configurable 1-4096 output-token
   ceiling (256 by default) and disable hidden reasoning unless explicitly

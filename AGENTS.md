@@ -98,7 +98,7 @@ If `nix fmt` changes any files, stage them before committing. The CI runs `nix f
 
 ### Node Composition
 A single Skulk `Node` (src/skulk/main.py) runs multiple components:
-- **Router**: libp2p-based pub/sub messaging via Rust bindings (`skulk_pyo3_bindings`). Ordinary control/telemetry topics share the default gossipsub egress queue and behavior; `ELECTION_MESSAGES` uses a dedicated Python egress queue plus a second protocol and handler queue so fan-out pressure cannot starve election liveness. A temporary legacy-protocol copy preserves rolling-upgrade interoperability.
+- **Router**: libp2p-based pub/sub messaging via Rust bindings (`skulk_pyo3_bindings`). Ordinary control/telemetry topics share the default gossipsub egress queue and behavior; `ELECTION_MESSAGES` uses a dedicated Python egress queue plus a second protocol and handler queue so fan-out pressure cannot starve election liveness. A temporary legacy-protocol copy preserves rolling-upgrade interoperability. Peer discovery tries all mDNS addresses once, then slows link-local retries to one minute after another path connects; socket liveness requires three consecutive five-second ping failures.
 - **Worker**: Handles inference tasks, downloads models, manages runner processes
 - **Master**: Coordinates cluster state, places model instances across nodes
 - **Election**: Bully algorithm for master election, carried on the isolated election gossipsub behavior with duplicate candidate suppression during protocol migration
