@@ -1046,7 +1046,7 @@ class Worker:
         # re-send it on the next poll until it actually lands in the log, and go
         # quiet once it does. No periodic keepalive is needed; node liveness is
         # carried by the telemetry plane (the master prune and node-health read
-        # telemetry freshness, which gossips every ~1s), not by these events.
+        # the explicit telemetry heartbeat), not by these events.
         with recv as info_stream:
             async for info in info_stream:
                 try:

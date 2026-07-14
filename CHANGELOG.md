@@ -15,6 +15,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **Explicit, auditable cluster heartbeat.** Nodes now publish a dedicated
+  telemetry heartbeat instead of making liveness an accidental side effect of
+  collector cadence. The master warns before the prune window, retains ordinary
+  telemetry and control events as fallbacks, and records every deciding signal
+  age in `NodeTimedOut` so a removal remains explainable after replay (#448).
+
 - **Placement previews expose every valid host, not just the ranking
   winner.** `GET /instance/previews` now includes per-host single-node
   previews marked `alternative: true` for each host that passes admission

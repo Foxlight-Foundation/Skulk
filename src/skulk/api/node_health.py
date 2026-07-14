@@ -26,10 +26,8 @@ from skulk.shared.types.profiling import DiskUsage
 from skulk.shared.types.worker.downloads import DownloadFailed, DownloadProgress
 from skulk.utils.pydantic_ext import CamelCaseModel
 
-# A node is pruned from the cluster once its heartbeat is ~30s stale (the
-# master's NodeTimedOut threshold), so a still-present node whose last_seen is
-# already this stale is missing heartbeats and about to drop -- warn before it
-# vanishes so the operator sees "this node is going" rather than a silent
+# A node is pruned once every liveness signal is ~30s stale. Warn while it is
+# still present so the operator sees "this node is going" rather than a silent
 # disappearance.
 UNREACHABLE_WARN_AFTER = timedelta(seconds=15)
 
@@ -179,6 +177,7 @@ def compute_node_health(
     downloads: Mapping[NodeId, Sequence[DownloadProgress]],
     node_disk: Mapping[NodeId, DiskUsage],
     now: datetime,
+    heartbeat_last_seen: Mapping[NodeId, datetime] | None = None,
     telemetry_last_seen: Mapping[NodeId, datetime] | None = None,
     unreachable_warn_after: timedelta = UNREACHABLE_WARN_AFTER,
 ) -> dict[str, NodeHealth]:
@@ -186,21 +185,19 @@ def compute_node_health(
 
     Args:
         live_nodes: ``State.last_seen`` -- the nodes currently in the cluster,
-            mapped to their last heartbeat. Health is computed for exactly these
-            (a node already pruned for timeout is absent here and from ``/state``).
+            mapped to their last indexed control-plane event. This timestamp is
+            not a heartbeat. Health is computed for exactly these nodes (a node
+            already pruned for timeout is absent here and from ``/state``).
         downloads: ``State.downloads`` -- per-node download progress, scanned for
             terminal ``DownloadFailed`` entries.
         node_disk: ``TelemetryView.node_disk`` -- per-node models-volume usage.
         now: The wall clock used for heartbeat-staleness; injected for testing.
-        telemetry_last_seen: ``TelemetryView.node_last_telemetry`` -- when this node
-            last received telemetry from each peer. Telemetry gossips every ~1s
-            cluster-wide, so it is a live liveness signal independent of whether
-            connectivity events are logged. The heartbeat check uses the fresher of
-            this and ``last_seen``, so the connectivity change-gate/de-dup that
-            stops the AMD gossip storm (and leaves followers' ``last_seen`` stale)
-            does not raise a false "heartbeats are late" warning on healthy nodes.
-            A genuinely departing node stops both, so the warning still fires in the
-            window before it is pruned.
+        heartbeat_last_seen: ``TelemetryView.node_last_heartbeat`` -- local
+            receipt time of each peer's dedicated heartbeat, the primary
+            liveness signal.
+        telemetry_last_seen: ``TelemetryView.node_last_telemetry`` -- local
+            receipt time of each peer's ordinary telemetry, retained as a
+            fallback liveness signal if the dedicated heartbeat path degrades.
         unreachable_warn_after: Heartbeat-staleness past which a node is flagged
             as at-risk of pruning.
 
@@ -209,6 +206,7 @@ def compute_node_health(
         live node (``level`` is ``ok`` with no reasons for a healthy node), so
         the dashboard can render an indicator (or none) per topology node.
     """
+    heartbeat_last_seen = heartbeat_last_seen or {}
     telemetry_last_seen = telemetry_last_seen or {}
     health: dict[str, NodeHealth] = {}
     for node_id, last_seen in live_nodes.items():
@@ -219,17 +217,28 @@ def compute_node_health(
             disk_reason = _disk_reason(disk)
             if disk_reason is not None:
                 reasons.append(disk_reason)
-        # Heartbeat = the fresher of the event-log last_seen and the last telemetry
-        # receipt; connectivity readings (which bump last_seen) are now change-gated
-        # so telemetry, gossiped every ~1s, is the live signal on non-master nodes.
-        # last_seen is stamped tz-aware by the master, but a tz-naive snapshot value
-        # compared with the tz-aware telemetry stamp would raise and 500 /state, so
-        # normalize before the comparison (mirrors _unreachable_reason's guard).
-        heartbeat = last_seen if last_seen.tzinfo is not None else last_seen.replace(tzinfo=timezone.utc)
-        telemetry_seen = telemetry_last_seen.get(node_id)
-        if telemetry_seen is not None and telemetry_seen > heartbeat:
-            heartbeat = telemetry_seen
-        unreachable = _unreachable_reason(heartbeat, now, unreachable_warn_after)
+        # Use the freshest of the control event, dedicated heartbeat, and
+        # ordinary telemetry fallback. Normalize a tz-naive snapshot timestamp
+        # defensively so /state cannot fail on an aware-vs-naive comparison.
+        liveness_signals = [
+            last_seen
+            if last_seen.tzinfo is not None
+            else last_seen.replace(tzinfo=timezone.utc)
+        ]
+        for signal in (
+            heartbeat_last_seen.get(node_id),
+            telemetry_last_seen.get(node_id),
+        ):
+            if signal is not None:
+                liveness_signals.append(
+                    signal
+                    if signal.tzinfo is not None
+                    else signal.replace(tzinfo=timezone.utc)
+                )
+        liveness_seen = max(liveness_signals)
+        unreachable = _unreachable_reason(
+            liveness_seen, now, unreachable_warn_after
+        )
         if unreachable is not None:
             reasons.append(unreachable)
         health[str(node_id)] = NodeHealth(

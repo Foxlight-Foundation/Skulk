@@ -1108,9 +1108,12 @@ problem on a node is visible rather than silent. Each entry is a `level`
 (`ok`, `warn`, or `error`) plus a list of `reasons`, where each reason has a
 `code`, a `message` describing what is wrong, and a `remediation` describing how
 to fix it. It is computed read-only from state already in the response (terminal
-download failures, low or full models-volume disk, and late heartbeats), so it
-adds no new polling. A node with no problems reports `level: "ok"` with an empty
-`reasons` list.
+download failures, low or full models-volume disk, and late liveness signals),
+so it adds no new polling. Liveness uses the freshest of the dedicated
+telemetry heartbeat, ordinary telemetry fallback, and `lastSeen`. The
+`lastSeen` response field is only the last indexed control-plane event and may
+be stale for a healthy node; it must not be interpreted as a heartbeat. A node
+with no problems reports `level: "ok"` with an empty `reasons` list.
 
 Operational note:
 

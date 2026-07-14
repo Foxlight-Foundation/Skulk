@@ -6,6 +6,8 @@ reaches the view and the planner reads nothing. Mirrors the #287 lesson where
 an in-process-only test missed a strict round-trip failure.
 """
 
+from datetime import datetime, timedelta, timezone
+
 from skulk.routing.topics import TELEMETRY
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
@@ -23,6 +25,7 @@ from skulk.utils.info_gatherer.info_gatherer import (
     MiscData,
     NodeCapabilities,
     NodeDiskUsage,
+    NodeHeartbeat,
     RdmaCtlStatus,
     StaticNodeInformation,
 )
@@ -38,6 +41,37 @@ def test_node_telemetry_survives_topic_codec_round_trip() -> None:
     assert isinstance(restored.info, NodeResources)
     assert restored.info.participation == "management"
     assert restored.info.backends == frozenset({"mlx"})
+
+
+def test_node_heartbeat_survives_topic_codec_round_trip() -> None:
+    """The named liveness reading must survive the real gossip codec."""
+    message = NodeTelemetry(node_id=NodeId("node-a"), info=NodeHeartbeat())
+
+    restored = TELEMETRY.deserialize(TELEMETRY.serialize(message))
+
+    assert restored == message
+    assert isinstance(restored.info, NodeHeartbeat)
+
+
+def test_heartbeat_and_fallback_receipts_remain_independent() -> None:
+    """Heartbeat traffic must not overwrite ordinary telemetry fallback age."""
+    view = TelemetryView()
+    node = NodeId("node-a")
+    fallback_at = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
+    heartbeat_at = fallback_at + timedelta(seconds=1)
+
+    view.apply(
+        NodeTelemetry(node_id=node, info=NodeResources(participation="full")),
+        received_at=fallback_at,
+    )
+    view.apply(
+        NodeTelemetry(node_id=node, info=NodeHeartbeat()),
+        received_at=heartbeat_at,
+    )
+
+    assert view.node_last_telemetry[node] == fallback_at
+    assert view.node_last_heartbeat[node] == heartbeat_at
+    assert view.last_liveness_receipt(node) == heartbeat_at
 
 
 def test_view_keeps_latest_per_node() -> None:
@@ -236,6 +270,7 @@ def test_prune_drops_all_telemetry_for_a_node() -> None:
     view = TelemetryView()
     a, b = NodeId("node-a"), NodeId("node-b")
     for node in (a, b):
+        view.apply(NodeTelemetry(node_id=node, info=NodeHeartbeat()))
         view.apply(
             NodeTelemetry(node_id=node, info=NodeResources(participation="full"))
         )
@@ -279,6 +314,8 @@ def test_prune_drops_all_telemetry_for_a_node() -> None:
         view.node_disk,
         view.node_rdma_ctl,
         view.node_capabilities,
+        view.node_last_heartbeat,
+        view.node_last_telemetry,
     ):
         assert a not in m
         assert b in m  # only the pruned node is dropped

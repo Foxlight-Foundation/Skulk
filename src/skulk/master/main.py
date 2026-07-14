@@ -67,6 +67,7 @@ from skulk.shared.types.events import (
     NodeDownloadProgress,
     NodeGatheredInfo,
     NodeTimedOut,
+    NodeTimeoutEvidence,
     StagedModelEvicted,
     StateSnapshotHydrated,
     TaskCreated,
@@ -222,53 +223,137 @@ _COMMAND_TASK_TYPES = (
 
 
 NODE_LIVENESS_TIMEOUT = timedelta(seconds=30)
+NODE_HEARTBEAT_GAP_WARNING = timedelta(seconds=10)
+
+
+def _aware_timestamp(when: datetime) -> datetime:
+    """Return a timestamp that is safe to compare with UTC receipt times."""
+    return when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+
+
+def _signal_age_seconds(*, now: datetime, seen_at: datetime) -> float:
+    """Return a non-negative signal age, defensively tolerating clock drift."""
+    return max(
+        0.0,
+        (_aware_timestamp(now) - _aware_timestamp(seen_at)).total_seconds(),
+    )
+
+
+def compute_node_timeout_evidence(
+    last_seen: Mapping[NodeId, datetime],
+    heartbeat_last_seen: Mapping[NodeId, datetime],
+    telemetry_last_seen: Mapping[NodeId, datetime],
+    *,
+    now: datetime,
+    timeout: timedelta = NODE_LIVENESS_TIMEOUT,
+) -> dict[NodeId, NodeTimeoutEvidence]:
+    """Build reproducible liveness evidence for every event-known node.
+
+    Args:
+        last_seen: Last indexed control-plane event per node.
+        heartbeat_last_seen: Local receipt time of each dedicated heartbeat.
+        telemetry_last_seen: Local receipt time of ordinary fallback telemetry.
+        now: Decision wall clock, injected for deterministic tests.
+        timeout: Configured node-prune timeout.
+
+    Returns:
+        Evidence keyed by every node represented in ``last_seen``.
+    """
+    evidence: dict[NodeId, NodeTimeoutEvidence] = {}
+    for node_id, last_logged_event_at in last_seen.items():
+        last_logged_event_age = _signal_age_seconds(
+            now=now, seen_at=last_logged_event_at
+        )
+        heartbeat_at = heartbeat_last_seen.get(node_id)
+        heartbeat_age = (
+            _signal_age_seconds(now=now, seen_at=heartbeat_at)
+            if heartbeat_at is not None
+            else None
+        )
+        fallback_telemetry_at = telemetry_last_seen.get(node_id)
+        fallback_telemetry_age = (
+            _signal_age_seconds(now=now, seen_at=fallback_telemetry_at)
+            if fallback_telemetry_at is not None
+            else None
+        )
+        available_ages = [last_logged_event_age]
+        if heartbeat_age is not None:
+            available_ages.append(heartbeat_age)
+        if fallback_telemetry_age is not None:
+            available_ages.append(fallback_telemetry_age)
+        evidence[node_id] = NodeTimeoutEvidence(
+            last_logged_event_age_seconds=last_logged_event_age,
+            heartbeat_age_seconds=heartbeat_age,
+            fallback_telemetry_age_seconds=fallback_telemetry_age,
+            effective_age_seconds=min(available_ages),
+            timeout_seconds=timeout.total_seconds(),
+        )
+    return evidence
+
+
+def _timed_out_nodes_from_evidence(
+    evidence: Mapping[NodeId, NodeTimeoutEvidence],
+) -> set[NodeId]:
+    """Select nodes whose freshest liveness signal exceeds the timeout."""
+    return {
+        node_id
+        for node_id, observation in evidence.items()
+        if observation.effective_age_seconds > observation.timeout_seconds
+    }
 
 
 def compute_timed_out_nodes(
     last_seen: Mapping[NodeId, datetime],
+    heartbeat_last_seen: Mapping[NodeId, datetime],
     telemetry_last_seen: Mapping[NodeId, datetime],
     *,
     now: datetime,
     timeout: timedelta = NODE_LIVENESS_TIMEOUT,
 ) -> set[NodeId]:
-    """Nodes whose liveness signals have BOTH gone stale past ``timeout``.
-
-    Liveness is the fresher of the event-log ``State.last_seen`` and the last
-    telemetry receipt (``TelemetryView.node_last_telemetry``). Connectivity
-    readings (which bump ``last_seen``) are only emitted on change (the AMD
-    gossip-storm fix), so a stable node's ``last_seen`` goes cold by design;
-    telemetry gossips every ~1s, so it is the live signal. A node with no
-    telemetry yet (just appeared, or telemetry not gossiped) falls back to its
-    ``last_seen`` so the timeout window still applies.
-
-    ``last_seen`` is stamped tz-aware by the master, but a tz-naive value (an
-    odd snapshot) compared against the tz-aware telemetry stamp would raise
-    and crash the plan loop, so both are normalized defensively (mirrors the
-    nodeHealth guard).
+    """Return nodes whose event, heartbeat, and telemetry signals are stale.
 
     Args:
         last_seen: ``State.last_seen`` (last logged event per node).
-        telemetry_last_seen: local receipt time of each node's last telemetry.
+        heartbeat_last_seen: Local receipt time of each dedicated heartbeat.
+        telemetry_last_seen: Local receipt time of ordinary fallback telemetry.
         now: The wall clock (tz-aware); injected for testing.
         timeout: Staleness past which a node is considered gone.
 
     Returns:
-        Node ids to time out (drives ``NodeTimedOut``: membership prune plus
-        instance/task cleanup).
+        Node ids to time out.
     """
+    return _timed_out_nodes_from_evidence(
+        compute_node_timeout_evidence(
+            last_seen,
+            heartbeat_last_seen,
+            telemetry_last_seen,
+            now=now,
+            timeout=timeout,
+        )
+    )
 
-    def _aware(when: datetime) -> datetime:
-        return when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
 
+def compute_heartbeat_gap_nodes(
+    last_seen: Mapping[NodeId, datetime],
+    heartbeat_last_seen: Mapping[NodeId, datetime],
+    *,
+    now: datetime,
+    warning_after: timedelta = NODE_HEARTBEAT_GAP_WARNING,
+) -> set[NodeId]:
+    """Return live members whose dedicated heartbeat is late or absent.
+
+    Before a node's first heartbeat, its last indexed event anchors the warning
+    window so a new member gets a full grace period without making a missing
+    heartbeat invisible forever.
+    """
     return {
         node_id
-        for node_id, last_seen_at in last_seen.items()
-        if now
-        - max(
-            _aware(last_seen_at),
-            _aware(telemetry_last_seen.get(node_id, last_seen_at)),
+        for node_id, last_logged_event_at in last_seen.items()
+        if _signal_age_seconds(
+            now=now,
+            seen_at=heartbeat_last_seen.get(node_id, last_logged_event_at),
         )
-        > timeout
+        >= warning_after.total_seconds()
     }
 
 
@@ -454,6 +539,10 @@ class Master:
         self._active_replay_next_idx: int | None = None
         self._active_replay_end_idx: int | None = None
         self._event_log_growth_monitor = EventLogGrowthMonitor()
+        # Nodes with an active dedicated-heartbeat gap warning. Tracking the
+        # transition makes a 10-second planning loop emit one warning and one
+        # recovery message instead of repeating the same warning indefinitely.
+        self._heartbeat_gap_warned_nodes: set[NodeId] = set()
         self._pending_traces: dict[TaskId, dict[int, list[TraceEventData]]] = {}
         self._expected_ranks: dict[TaskId, set[int]] = {}
         # Instance ids whose memory-refusal re-placement has already been
@@ -1385,11 +1474,66 @@ class Master:
                 except ValueError as e:
                     logger.opt(exception=e).warning("Error in command processor")
 
+    def _report_heartbeat_gap_changes(self, *, now: datetime) -> None:
+        """Log dedicated-heartbeat degradation and recovery once per transition."""
+        current_nodes = set(self.state.last_seen)
+        gap_nodes = compute_heartbeat_gap_nodes(
+            self.state.last_seen,
+            self._telemetry_view.node_last_heartbeat,
+            now=now,
+        )
+        # Once absence has produced a warning, only an actual heartbeat receipt
+        # clears it. A later control event grants initial grace to a new node but
+        # must not masquerade as heartbeat recovery.
+        gap_nodes |= {
+            node_id
+            for node_id in self._heartbeat_gap_warned_nodes & current_nodes
+            if node_id not in self._telemetry_view.node_last_heartbeat
+        }
+        observations = compute_node_timeout_evidence(
+            self.state.last_seen,
+            self._telemetry_view.node_last_heartbeat,
+            self._telemetry_view.node_last_telemetry,
+            now=now,
+        )
+        for node_id in sorted(
+            gap_nodes - self._heartbeat_gap_warned_nodes, key=str
+        ):
+            evidence = observations[node_id]
+            logger.bind(
+                liveness_event="heartbeat_gap",
+                node_id=str(node_id),
+                heartbeat_age_seconds=evidence.heartbeat_age_seconds,
+                fallback_telemetry_age_seconds=(
+                    evidence.fallback_telemetry_age_seconds
+                ),
+                last_logged_event_age_seconds=(
+                    evidence.last_logged_event_age_seconds
+                ),
+            ).warning(
+                f"Dedicated heartbeat from node {node_id} is late or absent; "
+                "ordinary telemetry and logged events remain liveness fallbacks"
+            )
+        recovered_nodes = (
+            self._heartbeat_gap_warned_nodes - gap_nodes
+        ) & current_nodes
+        for node_id in sorted(recovered_nodes, key=str):
+            heartbeat_at = self._telemetry_view.node_last_heartbeat[node_id]
+            logger.bind(
+                liveness_event="heartbeat_recovered",
+                node_id=str(node_id),
+                heartbeat_age_seconds=_signal_age_seconds(
+                    now=now, seen_at=heartbeat_at
+                ),
+            ).info(f"Dedicated heartbeat from node {node_id} recovered")
+        self._heartbeat_gap_warned_nodes = gap_nodes
+
     # These plan loops are the cracks showing in our event sourcing architecture - more things could be commands
     async def _plan(self) -> None:
         while True:
             connected_node_ids = set(self.state.topology.list_nodes())
             now = datetime.now(tz=timezone.utc)
+            self._report_heartbeat_gap_changes(now=now)
             # ALL liveness-based action is suppressed while this session's
             # topology is still settling (#273): a failover-seeded master
             # carries instances but rebuilds topology and last_seen from
@@ -1408,15 +1552,17 @@ class Master:
                 time.monotonic() - self._started_monotonic
                 >= TOPOLOGY_SETTLE_GRACE_SECONDS
             )
-            timed_out_node_ids: set[NodeId] = (
-                compute_timed_out_nodes(
+            timeout_evidence = (
+                compute_node_timeout_evidence(
                     self.state.last_seen,
+                    self._telemetry_view.node_last_heartbeat,
                     self._telemetry_view.node_last_telemetry,
                     now=now,
                 )
                 if topology_settled
-                else set()
+                else {}
             )
+            timed_out_node_ids = _timed_out_nodes_from_evidence(timeout_evidence)
             dying_instance_ids: set[InstanceId] = (
                 instances_on_dead_nodes(
                     self.state, connected_node_ids, timed_out_node_ids
@@ -1454,8 +1600,26 @@ class Master:
 
             # time out dead nodes
             for node_id in timed_out_node_ids:
-                logger.info(f"Manually removing node {node_id} due to inactivity")
-                await self.event_sender.send(NodeTimedOut(node_id=node_id))
+                evidence = timeout_evidence[node_id]
+                logger.bind(
+                    liveness_event="node_timed_out",
+                    node_id=str(node_id),
+                    last_logged_event_age_seconds=(
+                        evidence.last_logged_event_age_seconds
+                    ),
+                    heartbeat_age_seconds=evidence.heartbeat_age_seconds,
+                    fallback_telemetry_age_seconds=(
+                        evidence.fallback_telemetry_age_seconds
+                    ),
+                    effective_age_seconds=evidence.effective_age_seconds,
+                    timeout_seconds=evidence.timeout_seconds,
+                ).warning(
+                    f"Removing node {node_id}: all liveness signals exceeded "
+                    f"the {evidence.timeout_seconds:.0f}s timeout"
+                )
+                await self.event_sender.send(
+                    NodeTimedOut(node_id=node_id, evidence=evidence)
+                )
 
             # Recover instances wedged because a rank's download failed (#381).
             # Suppressed during the settle grace for the same reason as the

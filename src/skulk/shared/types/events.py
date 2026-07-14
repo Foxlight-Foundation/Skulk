@@ -82,8 +82,44 @@ class RunnerStatusUpdated(BaseEvent):
     runner_status: RunnerStatus
 
 
+class NodeTimeoutEvidence(FrozenModel):
+    """Signal ages captured when the master decides to prune a node."""
+
+    last_logged_event_age_seconds: float = Field(
+        ge=0,
+        description="Age of the node's last indexed control-plane event.",
+    )
+    heartbeat_age_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description="Age of the node's last dedicated telemetry heartbeat receipt.",
+    )
+    fallback_telemetry_age_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description="Age of the node's last non-heartbeat telemetry receipt.",
+    )
+    effective_age_seconds: float = Field(
+        ge=0,
+        description="Age of the freshest available liveness signal.",
+    )
+    timeout_seconds: float = Field(
+        gt=0,
+        description="Configured liveness timeout used for the prune decision.",
+    )
+
+
 class NodeTimedOut(BaseEvent):
-    node_id: NodeId
+    """Remove a node after every available liveness signal becomes stale."""
+
+    node_id: NodeId = Field(description="Node removed from cluster membership.")
+    evidence: NodeTimeoutEvidence | None = Field(
+        default=None,
+        description=(
+            "Signal ages captured by the deciding master; absent only on legacy "
+            "or manually constructed events."
+        ),
+    )
 
 
 # TODO: bikeshed this name

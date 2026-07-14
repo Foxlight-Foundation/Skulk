@@ -1,6 +1,6 @@
 """Tests for the extension telemetry-plane read surface (fabric-citizenship Phase 1)."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from skulk.extensions.telemetry import ClusterNodeView, snapshot_cluster
 from skulk.shared.types.common import NodeId
@@ -48,6 +48,21 @@ def test_snapshot_projects_full_node() -> None:
     assert node.accelerator_vendor == "apple"
     assert node.ram_total_bytes == 16_000_000_000
     assert node.last_telemetry == datetime(2026, 7, 9, 6, 0, tzinfo=timezone.utc)
+
+
+def test_snapshot_uses_freshest_heartbeat_or_fallback_receipt() -> None:
+    """The extension liveness contract includes the dedicated heartbeat."""
+    view = TelemetryView()
+    node_id = NodeId("n-heartbeat")
+    fallback_at = datetime(2026, 7, 9, 6, 0, tzinfo=timezone.utc)
+    heartbeat_at = fallback_at + timedelta(seconds=1)
+    view.node_last_telemetry[node_id] = fallback_at
+    view.node_last_heartbeat[node_id] = heartbeat_at
+
+    node = snapshot_cluster(view)[0]
+
+    assert node.node_id == node_id
+    assert node.last_telemetry == heartbeat_at
 
 
 def test_snapshot_is_stably_sorted_and_heterogeneous() -> None:

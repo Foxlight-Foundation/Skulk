@@ -199,16 +199,30 @@ def test_only_live_nodes_get_entries() -> None:
     assert health["node-a"].level == "ok"
 
 
-def test_stale_last_seen_but_fresh_telemetry_does_not_warn() -> None:
-    # Connectivity change-gate/de-dup (the AMD gossip-storm fix) leaves a
-    # follower's State.last_seen stale for a healthy node. Telemetry still gossips
-    # every ~1s, so a fresh telemetry receipt must suppress the "heartbeats late"
-    # warning.
+def test_stale_last_seen_but_fresh_heartbeat_does_not_warn() -> None:
+    # State.last_seen is the last indexed event and goes stale by design. The
+    # dedicated heartbeat is the primary liveness signal.
     stale = _NOW - UNREACHABLE_WARN_AFTER - timedelta(seconds=5)
     health = compute_node_health(
         live_nodes={_NODE: stale},
         downloads={},
         node_disk={},
+        heartbeat_last_seen={_NODE: _NOW},
+        now=_NOW,
+    )
+    assert health["node-a"].level == "ok"
+    assert list(health["node-a"].reasons) == []
+
+
+def test_fresh_ordinary_telemetry_remains_a_liveness_fallback() -> None:
+    # A heartbeat-path defect must not warn about a node that is still sending
+    # ordinary telemetry.
+    stale = _NOW - UNREACHABLE_WARN_AFTER - timedelta(seconds=5)
+    health = compute_node_health(
+        live_nodes={_NODE: stale},
+        downloads={},
+        node_disk={},
+        heartbeat_last_seen={_NODE: stale},
         telemetry_last_seen={_NODE: _NOW},
         now=_NOW,
     )
@@ -216,7 +230,7 @@ def test_stale_last_seen_but_fresh_telemetry_does_not_warn() -> None:
     assert list(health["node-a"].reasons) == []
 
 
-def test_tz_naive_last_seen_with_aware_telemetry_does_not_raise() -> None:
+def test_tz_naive_last_seen_with_aware_heartbeat_does_not_raise() -> None:
     # A tz-naive State.last_seen (odd snapshot) compared against the tz-aware
     # telemetry stamp would raise on the freshness `>` and 500 /state. It must be
     # normalized before the comparison; here fresh telemetry suppresses the warning.
@@ -227,21 +241,22 @@ def test_tz_naive_last_seen_with_aware_telemetry_does_not_raise() -> None:
         live_nodes={_NODE: naive_stale},
         downloads={},
         node_disk={},
-        telemetry_last_seen={_NODE: _NOW},
+        heartbeat_last_seen={_NODE: _NOW},
         now=_NOW,
     )
     assert health["node-a"].level == "ok"
     assert list(health["node-a"].reasons) == []
 
 
-def test_stale_last_seen_and_stale_telemetry_still_warns() -> None:
-    # A genuinely departing node stops both signals, so the warning must still
+def test_all_stale_liveness_signals_still_warn() -> None:
+    # A genuinely departing node stops every signal, so the warning must still
     # fire in the window before the master prunes it.
     stale = _NOW - UNREACHABLE_WARN_AFTER - timedelta(seconds=5)
     health = compute_node_health(
         live_nodes={_NODE: stale},
         downloads={},
         node_disk={},
+        heartbeat_last_seen={_NODE: stale},
         telemetry_last_seen={_NODE: stale},
         now=_NOW,
     )

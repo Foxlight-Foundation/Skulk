@@ -86,8 +86,8 @@ DOWNLOAD_COMMANDS = TypedTopic(
 STATE_SYNC_MESSAGES = TypedTopic(
     "state_sync_messages", PublishPolicy.Always, StateSyncMessage
 )
-# Telemetry plane (#279): per-node live readings gossiped last-write-wins,
-# off the event log. Slice 1 carries NodeResources only.
+# Telemetry plane (#279): per-node live readings and the explicit heartbeat,
+# gossiped last-write-wins off the event log.
 TELEMETRY = TypedTopic("telemetry", PublishPolicy.Always, NodeTelemetry)
 # Data plane (#279 Phase 2): per-token generation output chunks streamed
 # directly from the serving rank-0 worker to the owning API node, off the event
