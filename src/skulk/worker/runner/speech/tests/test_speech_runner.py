@@ -3,6 +3,7 @@
 
 import base64
 import hashlib
+import inspect
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -53,6 +54,19 @@ from skulk.worker.runner.speech.runner import (
     _resolve_staged_voice_path,
     _stt_generate_kwargs,
 )
+
+
+def test_fish_s2_dependency_advances_generation_hidden_state() -> None:
+    """The pinned Fish runtime must carry the upstream semantic-output fix."""
+
+    pytest.importorskip("mlx_audio.tts.models.fish_qwen3_omni.fish_speech")
+    from mlx_audio.tts.models.fish_qwen3_omni.fish_speech import (  # pyright: ignore[reportMissingTypeStubs]
+        Model,
+    )
+
+    source = inspect.getsource(Model._generate_codes_for_batch)
+
+    assert "hidden_state = next_result.hidden_states[:, -1]" in source
 
 
 def test_encode_audio_emits_little_endian_pcm16() -> None:
