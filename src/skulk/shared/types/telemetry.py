@@ -27,6 +27,7 @@ from skulk.shared.types.events import (
     NodeDownloadProgress,
     NodeTimedOut,
     StagedModelEvicted,
+    StateSnapshotHydrated,
 )
 from skulk.shared.types.profiling import (
     DiskUsage,
@@ -289,9 +290,10 @@ class TelemetryView:
                     return
             elif isinstance(info, DownloadPending):
                 if evicted:
-                    if info.attempt_id is None:
-                        return
-                    self._node_download_eviction_tombstones.pop(key, None)
+                    # Only the ordered Pending event proves that an operator
+                    # started a new attempt after eviction. A delayed telemetry
+                    # sample can carry an ID too, but must not resurrect state.
+                    return
                 if terminal_recorded:
                     if info.attempt_id is None or info.attempt_id == terminal_attempt:
                         return
@@ -448,6 +450,22 @@ class TelemetryView:
         ):
             self._node_download_eviction_tombstones.popitem(last=False)
 
+    def record_download_snapshot(
+        self,
+        downloads: Mapping[NodeId, Sequence[DownloadProgress]],
+    ) -> None:
+        """Seed terminal ordering from an authoritative hydrated state.
+
+        Args:
+            downloads: Download outcomes carried by the state snapshot.
+        """
+
+        for progresses in downloads.values():
+            for progress in progresses:
+                self.record_download_event(
+                    NodeDownloadProgress(download_progress=progress)
+                )
+
 
 def record_membership_from_event(view: TelemetryView, event: Event) -> None:
     """Prune a node's telemetry when it leaves the cluster.
@@ -470,3 +488,5 @@ def record_membership_from_event(view: TelemetryView, event: Event) -> None:
         view.record_download_event(event)
     elif isinstance(event, StagedModelEvicted):
         view.remove_download_model(str(event.model_id))
+    elif isinstance(event, StateSnapshotHydrated):
+        view.record_download_snapshot(event.state.downloads)

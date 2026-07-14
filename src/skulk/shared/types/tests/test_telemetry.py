@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from skulk.routing.topics import TELEMETRY
 from skulk.shared.tests.conftest import get_pipeline_shard_metadata
 from skulk.shared.types.common import NodeId
-from skulk.shared.types.events import NodeDownloadProgress
+from skulk.shared.types.events import NodeDownloadProgress, StateSnapshotHydrated
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
     AcceleratorMetrics,
@@ -20,7 +20,12 @@ from skulk.shared.types.profiling import (
     NodeResources,
     SystemPerformanceProfile,
 )
-from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
+from skulk.shared.types.state import State
+from skulk.shared.types.telemetry import (
+    NodeTelemetry,
+    TelemetryView,
+    record_membership_from_event,
+)
 from skulk.shared.types.worker.downloads import (
     DownloadAttemptId,
     DownloadCompleted,
@@ -118,13 +123,52 @@ def test_live_download_progress_round_trips_and_terminal_wins() -> None:
         attempt_id=next_attempt,
     )
     view.apply(NodeTelemetry(node_id=node, info=pending))
+    assert view.effective_downloads({}) == {}
     view.record_download_event(NodeDownloadProgress(download_progress=pending))
+    view.apply(NodeTelemetry(node_id=node, info=pending))
     assert view.effective_downloads({})[node] == [pending]
 
     # The reset's fresh attempt is authoritative even if the old producer's
     # telemetry tail arrives after it on the independent protocol.
     view.apply(restored)
     assert view.effective_downloads({})[node] == [pending]
+
+
+def test_hydrated_terminal_download_rejects_delayed_progress() -> None:
+    """Snapshot state seeds ordering before independent telemetry can overlay it."""
+
+    node = NodeId("node-a")
+    shard = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=1)
+    attempt = DownloadAttemptId("attempt-a")
+    ongoing = DownloadOngoing(
+        node_id=node,
+        shard_metadata=shard,
+        attempt_id=attempt,
+        download_progress=DownloadProgressData(
+            total=Memory.from_mb(100),
+            downloaded=Memory.from_mb(50),
+            downloaded_this_session=Memory.from_mb(50),
+            completed_files=1,
+            total_files=2,
+            speed=1.0,
+            eta_ms=1_000,
+            files={},
+        ),
+    )
+    completed = DownloadCompleted(
+        node_id=node,
+        shard_metadata=shard,
+        attempt_id=attempt,
+        total=Memory.from_mb(100),
+    )
+    view = TelemetryView()
+    view.apply(NodeTelemetry(node_id=node, info=ongoing))
+
+    snapshot = State(downloads={node: [completed]})
+    record_membership_from_event(view, StateSnapshotHydrated(state=snapshot))
+    view.apply(NodeTelemetry(node_id=node, info=ongoing))
+
+    assert view.effective_downloads(snapshot.downloads)[node] == [completed]
 
 
 def test_pending_telemetry_can_establish_new_attempt_before_control_event() -> None:
