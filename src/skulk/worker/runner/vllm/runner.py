@@ -153,6 +153,7 @@ def build_vllm_serve_args(
     port: int,
     max_model_len: int,
     gpu_memory_utilization: float,
+    trust_remote_code: bool,
 ) -> list[str]:
     """Build the ``vllm serve`` command line. Pure, so it is unit-testable.
 
@@ -160,9 +161,11 @@ def build_vllm_serve_args(
     llama-server there is no per-compute-backend flag to set -- the node advertised
     ``vllm-cuda`` / ``vllm-rocm`` only because the matching vLLM build is present.
     ``--served-model-name`` pins the model id callers address (the Skulk model id),
-    decoupled from the on-disk directory path.
+    decoupled from the on-disk directory path. ``--trust-remote-code`` is added when
+    the card permits it (the ModelCard default; required by custom-code HF repos)
+    since vLLM's flag defaults off and those models would otherwise fail at startup.
     """
-    return [
+    args = [
         binary,
         "serve",
         str(model_dir),
@@ -179,6 +182,9 @@ def build_vllm_serve_args(
         "--tensor-parallel-size",
         "1",
     ]
+    if trust_remote_code:
+        args.append("--trust-remote-code")
+    return args
 
 
 def vllm_generation_kwargs(task_params: Any) -> dict[str, Any]:
@@ -270,7 +276,10 @@ def parse_openai_sse_line(line: str) -> _StreamDelta | None:
         else map_finish_reason(raw_finish)
     )
     return _StreamDelta(
-        reasoning=delta.get("reasoning_content") or "",
+        # vLLM has streamed reasoning under `reasoning_content` (DeepSeek-style)
+        # and, in newer versions, `reasoning`; accept both so a reasoning model's
+        # thinking stream is not silently dropped.
+        reasoning=delta.get("reasoning_content") or delta.get("reasoning") or "",
         content=delta.get("content") or "",
         finish=finish,
         done=False,
@@ -518,11 +527,16 @@ class Runner:
             port,
             n_ctx,
             _gpu_memory_utilization(),
+            self.shard_metadata.model_card.trust_remote_code,
         )
-        log_fd, log_name = tempfile.mkstemp(prefix="vllm-serve-", suffix=".log")
-        self.server_log_path = Path(log_name)
-        self.server_log = os.fdopen(log_fd, "wb")
-        logger.info(f"spawning vllm serve: {' '.join(args)} (log={log_name})")
+        # Deterministic log path keyed by runner_id (matching llama_server), so
+        # postmortem debugging is easy and restarts truncate rather than pile up
+        # random temp files.
+        self.server_log_path = (
+            Path(tempfile.gettempdir()) / f"skulk-vllm-serve-{self.runner_id}.log"
+        )
+        self.server_log = open(self.server_log_path, "wb")  # noqa: SIM115
+        logger.info(f"spawning vllm serve: {' '.join(args)} (log={self.server_log_path})")
         self.server_proc = subprocess.Popen(
             args,
             stdout=self.server_log,

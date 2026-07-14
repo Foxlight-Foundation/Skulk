@@ -80,8 +80,8 @@ def test_vllm_reasoning_overrides_maps_thinking_controls() -> None:
     assert vllm_reasoning_overrides(_params()) == {}
 
 
-def test_build_vllm_serve_args_shape() -> None:
-    args = build_vllm_serve_args(
+def _serve_args(**overrides: object) -> list[str]:
+    kwargs: dict[str, object] = dict(
         binary="/opt/vllm/bin/vllm",
         model_dir=Path("/models/org--repo"),
         served_model_name="org/repo",
@@ -89,7 +89,14 @@ def test_build_vllm_serve_args_shape() -> None:
         port=51234,
         max_model_len=8192,
         gpu_memory_utilization=0.9,
+        trust_remote_code=False,
     )
+    kwargs.update(overrides)
+    return build_vllm_serve_args(**kwargs)  # type: ignore[arg-type]
+
+
+def test_build_vllm_serve_args_shape() -> None:
+    args = _serve_args()
     assert args[0] == "/opt/vllm/bin/vllm"
     assert args[1] == "serve"
     assert args[2] == "/models/org--repo"
@@ -101,6 +108,11 @@ def test_build_vllm_serve_args_shape() -> None:
     assert args[args.index("--gpu-memory-utilization") + 1] == "0.90"
     # single-node in this slice.
     assert args[args.index("--tensor-parallel-size") + 1] == "1"
+
+
+def test_build_vllm_serve_args_trust_remote_code() -> None:
+    assert "--trust-remote-code" not in _serve_args(trust_remote_code=False)
+    assert "--trust-remote-code" in _serve_args(trust_remote_code=True)
 
 
 def test_parse_sse_content_delta() -> None:
