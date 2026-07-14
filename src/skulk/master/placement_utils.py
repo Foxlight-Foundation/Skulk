@@ -74,19 +74,20 @@ class CycleMemoryDiagnostics(CamelCaseModel):
 # against VRAM, not system RAM). Both the in-process llama.cpp runner and the
 # served llama-server engine launch with ``-ngl`` full-GPU offload; vLLM would
 # join here too. The bare CPU compute tag is excluded by the ``-cpu`` check.
-_GPU_OFFLOAD_ENGINE_PREFIXES: Final = ("llama_cpp-", "llama_server-")
+_GPU_OFFLOAD_ENGINE_PREFIXES: Final = ("llama_cpp-", "llama_server-", "vllm-")
 
 
 def _has_gpu_offload_backend(backends: frozenset[str]) -> bool:
     """Whether a node advertises a discrete-GPU-offload backend.
 
-    True for a non-CPU GPU-offload compute tag (``llama_cpp-vulkan/rocm/cuda`` or
-    ``llama_server-vulkan/rocm/cuda``). A node that exposes a GPU but advertises
-    only a ``-cpu`` tag (the default when ``SKULK_LLAMA_CPP_BACKENDS`` is unset, or
-    after a GPU wheel is replaced) runs out of system RAM, so it must NOT be
-    admitted against VRAM it will not use. The served ``llama_server`` engine is
-    included because it launches ``llama-server -ngl 99``, allocating weights + KV
-    from the GPU exactly like the in-process llama.cpp runner.
+    True for a non-CPU GPU-offload compute tag (``llama_cpp-vulkan/rocm/cuda``,
+    ``llama_server-vulkan/rocm/cuda``, or ``vllm-cuda/rocm``). A node that exposes a
+    GPU but advertises only a ``-cpu`` tag (the default when
+    ``SKULK_LLAMA_CPP_BACKENDS`` is unset, or after a GPU wheel is replaced) runs out
+    of system RAM, so it must NOT be admitted against VRAM it will not use. The
+    served ``llama_server`` engine is included because it launches
+    ``llama-server -ngl 99``, and ``vllm`` because ``vllm serve`` allocates weights +
+    KV from the GPU -- both use VRAM exactly like the in-process llama.cpp runner.
     """
     return any(
         tag.startswith(_GPU_OFFLOAD_ENGINE_PREFIXES) and not tag.endswith("-cpu")

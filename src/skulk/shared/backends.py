@@ -39,7 +39,7 @@ def _is_executable_file(path: str) -> bool:
     """Whether ``path`` names an existing executable file."""
     return os.path.isfile(path) and os.access(path, os.X_OK)
 
-EngineType = Literal["mlx", "mlx_audio", "llama_cpp", "llama_server"]
+EngineType = Literal["mlx", "mlx_audio", "llama_cpp", "llama_server", "vllm"]
 """Inference runtime that loads and runs a model; selects the worker runner.
 
 ``llama_server`` is a *served-backend* engine: instead of loading the model
@@ -49,6 +49,18 @@ to reach llama.cpp's native multi-token-prediction speculative decoding
 (``--spec-type draft-mtp``), whose orchestration lives in the server application
 rather than ``libllama`` / the Python binding. It coexists with the in-process
 ``llama_cpp`` engine and is selected per model by the card's ``compatible_backends``.
+
+``vllm`` is a second served-backend engine (same managed-subprocess-plus-proxy
+shape as ``llama_server``): the worker launches an external ``vllm serve`` process
+and proxies its OpenAI HTTP API. It is the GPU-serving fast path -- vLLM's
+continuous batching and paged attention hold latency flat and grow aggregate
+throughput under concurrent load where the single-stream engines collapse (a
+benchmark on an A100 measured llama.cpp's time-to-first-token hitting ~31s at
+64-way concurrency vs vLLM's ~0.5s). It coexists with ``llama_cpp`` /
+``llama_server``: the planner picks by hardware and expected concurrency, since
+vLLM's win is concurrency, not single-stream (on GPUs without native FP4 the
+in-process engines can beat it for one request). GPU-only in scope: ``cuda``
+(NVIDIA) and ``rocm`` (AMD CDNA).
 
 ``mlx_audio`` is the single-node speech engine backed by the upstream
 ``mlx-audio`` package. It is kept separate from ``mlx`` because TTS/STT model
@@ -66,6 +78,7 @@ _ENGINES: Final[tuple[EngineType, ...]] = (
     "mlx_audio",
     "llama_cpp",
     "llama_server",
+    "vllm",
 )
 _COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = (
     "metal",
@@ -97,6 +110,24 @@ LLAMA_SERVER_BIN_ENV: Final = "SKULK_LLAMA_SERVER_BIN"
 # declaration (the GPU is the same regardless of which engine drives it), then to
 # ``cpu``.
 LLAMA_SERVER_BACKENDS_ENV: Final = "SKULK_LLAMA_SERVER_BACKENDS"
+
+# Path to the ``vllm`` CLI the vLLM served-backend engine launches (``vllm serve``).
+# Set this on a GPU node that should serve models via the ``vllm`` engine. Absent
+# => the node does not advertise ``vllm`` and is never a placement candidate for
+# vLLM cards. Mirrors ``SKULK_LLAMA_SERVER_BIN``.
+VLLM_BIN_ENV: Final = "SKULK_VLLM_BIN"
+
+# Compute backends the vLLM install targets (comma-separated). vLLM is GPU-only in
+# our scope, so only ``cuda`` / ``rocm`` are honored (``metal`` / ``vulkan`` /
+# ``cpu`` are ignored). When unset, falls back to the node's
+# ``SKULK_LLAMA_SERVER_BACKENDS`` then ``SKULK_LLAMA_CPP_BACKENDS`` declaration
+# (the GPU is the same whichever engine drives it). Unlike the llama_server probe
+# there is no ``cpu`` fallback: a vLLM node with no GPU backend is not useful.
+VLLM_BACKENDS_ENV: Final = "SKULK_VLLM_BACKENDS"
+
+# vLLM compute backends we support advertising. GPU-only: NVIDIA CUDA and AMD
+# CDNA ROCm. vLLM's Vulkan/Metal/CPU paths are out of scope for placement.
+_VLLM_COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = ("cuda", "rocm")
 
 # Path to the ``ggml-rpc-server`` binary an RPC memory-donor runner launches
 # (#328, multi-node GGUF pooling). Optional: when unset, the donor looks for
@@ -389,6 +420,41 @@ def _probe_served_backends() -> frozenset[str]:
     return frozenset(tags)
 
 
+def _probe_vllm_backends() -> frozenset[str]:
+    """Probe whether this node can serve models via the ``vllm`` engine.
+
+    Returns the bare ``vllm`` tag plus one compound tag per advertised GPU compute
+    backend when ``SKULK_VLLM_BIN`` points at an existing executable (the ``vllm``
+    CLI); otherwise an empty set (the node does not advertise vLLM and is never a
+    candidate for vLLM cards). Compute backends come from ``SKULK_VLLM_BACKENDS``,
+    falling back to the node's ``SKULK_LLAMA_SERVER_BACKENDS`` then
+    ``SKULK_LLAMA_CPP_BACKENDS`` declaration (the GPU is the same whichever engine
+    drives it). Only ``cuda`` / ``rocm`` are honored; unlike the llama_server probe
+    there is deliberately no ``cpu`` fallback, since a vLLM node with no GPU backend
+    is not a useful placement target.
+    """
+    binary = os.environ.get(VLLM_BIN_ENV, "").strip()
+    if not binary or not _is_executable_file(binary):
+        return frozenset()
+
+    declared = (
+        os.environ.get(VLLM_BACKENDS_ENV, "").strip()
+        or os.environ.get(LLAMA_SERVER_BACKENDS_ENV, "").strip()
+        or os.environ.get(LLAMA_CPP_BACKENDS_ENV, "")
+    )
+    declared_tokens = {token for raw in declared.split(",") if (token := raw.strip())}
+    computes: list[ComputeBackend] = [
+        cb for cb in _VLLM_COMPUTE_BACKENDS if cb in declared_tokens
+    ]
+    if not computes:
+        return frozenset()
+
+    tags: set[str] = {"vllm"}
+    for compute in computes:
+        tags.add(make_backend_tag("vllm", compute))
+    return frozenset(tags)
+
+
 def _probe_mlx_audio_backends() -> frozenset[str]:
     """Probe whether this macOS node can serve speech models via ``mlx_audio``.
 
@@ -414,7 +480,8 @@ def probe_node_backends() -> frozenset[str]:
     is kept for backward compatibility with cards written against the original
     ``{"mlx"}`` vocabulary). Any node with an importable ``llama_cpp`` adds its
     llama.cpp tags; a node with ``SKULK_LLAMA_SERVER_BIN`` set adds its
-    ``llama_server`` tags. A macOS node with importable ``mlx_audio`` adds
+    ``llama_server`` tags; a GPU node with ``SKULK_VLLM_BIN`` set adds its
+    ``vllm`` tags. A macOS node with importable ``mlx_audio`` adds
     ``{"mlx_audio", "mlx_audio-metal"}`` for single-node speech models. A bare
     Linux node with none advertises an empty set and is therefore not a placement
     candidate, which is the pre-existing behavior.
@@ -424,5 +491,6 @@ def probe_node_backends() -> frozenset[str]:
         tags |= {"mlx", make_backend_tag("mlx", "metal")}
     tags |= _probe_llama_cpp_backends()
     tags |= _probe_served_backends()
+    tags |= _probe_vllm_backends()
     tags |= _probe_mlx_audio_backends()
     return frozenset(tags)
