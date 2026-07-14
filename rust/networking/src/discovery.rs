@@ -22,6 +22,8 @@ use std::time::Duration;
 use util::wakerdeque::WakerDeque;
 
 const RETRY_CONNECT_INTERVAL: Duration = Duration::from_secs(5);
+const CONNECTED_PEER_LINK_LOCAL_RETRY_ROUNDS: u64 = 12;
+const MAX_CONSECUTIVE_PING_FAILURES: u8 = 3;
 
 mod managed {
     use libp2p::swarm::NetworkBehaviour;
@@ -31,8 +33,8 @@ mod managed {
 
     const MDNS_RECORD_TTL: Duration = Duration::from_secs(2_500);
     const MDNS_QUERY_INTERVAL: Duration = Duration::from_secs(1_500);
-    const PING_TIMEOUT: Duration = Duration::from_millis(2_500);
-    const PING_INTERVAL: Duration = Duration::from_millis(2_500);
+    const PING_TIMEOUT: Duration = Duration::from_secs(5);
+    const PING_INTERVAL: Duration = Duration::from_secs(5);
 
     #[derive(NetworkBehaviour)]
     pub struct Behaviour {
@@ -114,6 +116,19 @@ pub struct Behaviour {
     // already connected, and resume once it drops.
     connected_ips: HashMap<IpAddr, usize>,
 
+    // A peer can be connected on several interfaces. Once any path is live,
+    // failed link-local addresses are retried at a slower cadence instead of
+    // every five seconds. The initial mDNS discovery still dials every address,
+    // preserving direct Thunderbolt paths when they are actually routable.
+    connected_peers: HashMap<PeerId, usize>,
+
+    // One transiently delayed ping must not tear down a healthy connection.
+    // Failure counts are per socket because a multi-homed peer can have one bad
+    // path while its other paths remain healthy.
+    ping_failures: HashMap<(PeerId, ConnectionId), u8>,
+
+    retry_round: u64,
+
     retry_delay: Delay, // retry interval
 
     // pending events to emmit => waker-backed Deque to control polling
@@ -127,6 +142,9 @@ impl Behaviour {
             mdns_discovered: HashMap::new(),
             bootstrap_peers,
             connected_ips: HashMap::new(),
+            connected_peers: HashMap::new(),
+            ping_failures: HashMap::new(),
+            retry_round: 0,
             retry_delay: Delay::new(RETRY_CONNECT_INTERVAL),
             pending_events: WakerDeque::new(),
         })
@@ -191,6 +209,7 @@ impl Behaviour {
         // track the connected IP so the retry loop stops re-dialing a bootstrap
         // peer we already reached (see `connected_ips`)
         *self.connected_ips.entry(remote_ip).or_insert(0) += 1;
+        *self.connected_peers.entry(peer_id).or_insert(0) += 1;
 
         // send out connected event
         self.pending_events
@@ -217,6 +236,13 @@ impl Behaviour {
                 self.connected_ips.remove(&remote_ip);
             }
         }
+        if let Some(count) = self.connected_peers.get_mut(&peer_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.connected_peers.remove(&peer_id);
+            }
+        }
+        self.ping_failures.remove(&(peer_id, connection_id));
 
         // send out disconnected event
         self.pending_events
@@ -226,6 +252,40 @@ impl Behaviour {
                 remote_ip,
                 remote_tcp_port,
             }));
+    }
+
+    fn record_ping_result(
+        &mut self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+        succeeded: bool,
+    ) -> bool {
+        let key = (peer_id, connection_id);
+        if succeeded {
+            self.ping_failures.remove(&key);
+            return false;
+        }
+
+        let failures = self.ping_failures.entry(key).or_insert(0);
+        *failures = failures.saturating_add(1);
+        if *failures < MAX_CONSECUTIVE_PING_FAILURES {
+            return false;
+        }
+        self.ping_failures.remove(&key);
+        true
+    }
+
+    fn should_retry_mdns_address(&self, peer_id: &PeerId, addr: &Multiaddr) -> bool {
+        let is_link_local = addr.try_to_tcp_addr().is_some_and(|(ip, _)| match ip {
+            IpAddr::V4(ip) => ip.is_link_local(),
+            IpAddr::V6(ip) => ip.is_unicast_link_local(),
+        });
+        if !is_link_local || !self.connected_peers.contains_key(peer_id) {
+            return true;
+        }
+
+        self.retry_round
+            .is_multiple_of(CONNECTED_PEER_LINK_LOCAL_RETRY_ROUNDS)
     }
 }
 
@@ -363,8 +423,8 @@ impl NetworkBehaviour for Behaviour {
 
                     // handle ping events => if error then disconnect
                     managed::BehaviourEvent::Ping(e) => {
-                        if let Err(_) = e.result {
-                            self.close_connection(e.peer, e.connection.clone())
+                        if self.record_ping_result(e.peer, e.connection, e.result.is_ok()) {
+                            self.close_connection(e.peer, e.connection)
                         }
                     }
                 }
@@ -387,9 +447,12 @@ impl NetworkBehaviour for Behaviour {
 
         // retry connecting to all mDNS peers periodically (fails safely if already connected)
         if self.retry_delay.poll(cx).is_ready() {
+            self.retry_round = self.retry_round.wrapping_add(1);
             for (p, mas) in self.mdns_discovered.clone() {
                 for ma in mas {
-                    self.dial(p, ma)
+                    if self.should_retry_mdns_address(&p, &ma) {
+                        self.dial(p, ma)
+                    }
                 }
             }
             // dial bootstrap peers (for environments where mDNS is unavailable),
@@ -421,5 +484,50 @@ impl NetworkBehaviour for Behaviour {
 
         // wait for pending events
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn behaviour() -> Behaviour {
+        let keypair = identity::Keypair::generate_ed25519();
+        Behaviour::new(&keypair, vec![]).expect("discovery behaviour")
+    }
+
+    #[test]
+    fn ping_requires_three_consecutive_failures_before_close() {
+        let mut behaviour = behaviour();
+        let peer = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let connection = ConnectionId::new_unchecked(1);
+
+        assert!(!behaviour.record_ping_result(peer, connection, false));
+        assert!(!behaviour.record_ping_result(peer, connection, false));
+        assert!(!behaviour.record_ping_result(peer, connection, true));
+        assert!(!behaviour.record_ping_result(peer, connection, false));
+        assert!(!behaviour.record_ping_result(peer, connection, false));
+        assert!(behaviour.record_ping_result(peer, connection, false));
+    }
+
+    #[test]
+    fn connected_peer_link_local_retries_are_slow_but_not_disabled() {
+        let mut behaviour = behaviour();
+        let peer = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let link_local: Multiaddr = "/ip4/169.254.10.2/tcp/52416"
+            .parse()
+            .expect("link-local multiaddr");
+        let routable: Multiaddr = "/ip4/192.168.1.2/tcp/52416"
+            .parse()
+            .expect("routable multiaddr");
+
+        assert!(behaviour.should_retry_mdns_address(&peer, &link_local));
+        behaviour.connected_peers.insert(peer, 1);
+        behaviour.retry_round = 1;
+        assert!(!behaviour.should_retry_mdns_address(&peer, &link_local));
+        assert!(behaviour.should_retry_mdns_address(&peer, &routable));
+
+        behaviour.retry_round = CONNECTED_PEER_LINK_LOCAL_RETRY_ROUNDS;
+        assert!(behaviour.should_retry_mdns_address(&peer, &link_local));
     }
 }
