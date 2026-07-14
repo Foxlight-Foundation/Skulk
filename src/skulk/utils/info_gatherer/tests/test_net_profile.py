@@ -6,7 +6,9 @@ import pytest
 
 from skulk.shared.topology import Topology
 from skulk.shared.types.common import NodeId
+from skulk.shared.types.multiaddr import Multiaddr
 from skulk.shared.types.profiling import NetworkInterfaceInfo, NodeNetworkInfo
+from skulk.shared.types.topology import Connection, SocketConnection
 from skulk.utils.channels import Sender
 from skulk.utils.info_gatherer import net_profile
 
@@ -28,7 +30,7 @@ async def _collect_reachable_targets(
 
 
 @pytest.mark.anyio
-async def test_check_reachable_skips_loopback_and_unspecified_addresses(
+async def test_check_reachable_skips_loopback_unspecified_and_unproven_link_local(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     self_node_id = NodeId("self")
@@ -72,10 +74,62 @@ async def test_check_reachable_skips_loopback_and_unspecified_addresses(
         node_network=node_network,
     )
 
-    assert probed_targets == ["192.168.0.117", "fe80::20:315a:c2e5:286b%en0"]
+    assert probed_targets == ["192.168.0.117"]
+    assert reachable_targets == [("192.168.0.117", remote_node_id)]
+
+
+@pytest.mark.anyio
+async def test_check_reachable_keeps_observed_link_local_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    self_node_id = NodeId("self")
+    remote_node_id = NodeId("remote")
+    topology = Topology()
+    topology.add_connection(
+        Connection(
+            source=self_node_id,
+            sink=remote_node_id,
+            edge=SocketConnection(
+                sink_multiaddr=Multiaddr(
+                    address="/ip4/169.254.10.2/tcp/52416"
+                )
+            ),
+        )
+    )
+    node_network = {
+        remote_node_id: NodeNetworkInfo(
+            interfaces=[
+                NetworkInterfaceInfo(name="bridge0", ip_address="192.168.0.117"),
+                NetworkInterfaceInfo(name="en7", ip_address="169.254.10.2"),
+                NetworkInterfaceInfo(name="en8", ip_address="169.254.20.2"),
+            ]
+        )
+    }
+    probed_targets: list[str] = []
+
+    async def fake_check_reachability(
+        target_ip: str,
+        expected_node_id: NodeId,
+        out: dict[NodeId, set[str]],
+        _client: object,
+        attempts: int = net_profile.REACHABILITY_ATTEMPTS,
+    ) -> None:
+        del attempts
+        probed_targets.append(target_ip)
+        out[expected_node_id].add(target_ip)
+
+    monkeypatch.setattr(net_profile, "check_reachability", fake_check_reachability)
+
+    reachable_targets = await _collect_reachable_targets(
+        topology=topology,
+        self_node_id=self_node_id,
+        node_network=node_network,
+    )
+
+    assert probed_targets == ["192.168.0.117", "169.254.10.2"]
     assert reachable_targets == [
         ("192.168.0.117", remote_node_id),
-        ("fe80::20:315a:c2e5:286b%en0", remote_node_id),
+        ("169.254.10.2", remote_node_id),
     ]
 
 

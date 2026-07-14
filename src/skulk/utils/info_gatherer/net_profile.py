@@ -11,6 +11,7 @@ from loguru import logger
 from skulk.shared.topology import Topology
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.profiling import NodeNetworkInfo
+from skulk.shared.types.topology import SocketConnection
 from skulk.utils.channels import Sender, channel
 
 REACHABILITY_ATTEMPTS = 3
@@ -50,6 +51,50 @@ def _should_probe_remote_ip(target_ip: str) -> bool:
         return candidate not in {"localhost"}
 
     return not (parsed.is_loopback or parsed.is_unspecified)
+
+
+def _parsed_ip(target_ip: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse an interface address after removing an IPv6 zone suffix."""
+
+    candidate = target_ip.strip().split("%", maxsplit=1)[0]
+    try:
+        return ipaddress.ip_address(candidate)
+    except ValueError:
+        return None
+
+
+def _candidate_probe_ips(
+    topology: Topology,
+    self_node_id: NodeId,
+    target_node_id: NodeId,
+    network: NodeNetworkInfo,
+) -> list[str]:
+    """Return API probe targets, excluding unproven link-local paths.
+
+    Link-local addresses are interface-scoped and frequently advertised to
+    peers that cannot route them. A successful libp2p socket on that exact IP is
+    the proof that the path exists from this node. Routable addresses and host
+    names retain their prior behavior.
+    """
+
+    observed_ips = {
+        parsed
+        for connection in topology.out_edges(self_node_id)
+        if connection.sink == target_node_id
+        and isinstance(connection.edge, SocketConnection)
+        and (parsed := _parsed_ip(connection.edge.sink_multiaddr.ip_address))
+        is not None
+    }
+    candidates: list[str] = []
+    for interface in network.interfaces:
+        target_ip = interface.ip_address
+        if not _should_probe_remote_ip(target_ip):
+            continue
+        parsed = _parsed_ip(target_ip)
+        if parsed is not None and parsed.is_link_local and parsed not in observed_ips:
+            continue
+        candidates.append(target_ip)
+    return candidates
 
 
 async def check_reachability(
@@ -189,10 +234,13 @@ async def check_reachable(
                 continue
             if node_id == self_node_id:
                 continue
-            for iface in node_network[node_id].interfaces:
-                if not _should_probe_remote_ip(iface.ip_address):
-                    continue
-                tg.start_soon(_probe, iface.ip_address, node_id, client, send.clone())
+            for target_ip in _candidate_probe_ips(
+                topology,
+                self_node_id,
+                node_id,
+                node_network[node_id],
+            ):
+                tg.start_soon(_probe, target_ip, node_id, client, send.clone())
         send.close()
 
         with recv:
@@ -219,11 +267,12 @@ async def first_reachable_ip(
         or target_node_id not in node_network
     ):
         return None
-    target_ips = [
-        interface.ip_address
-        for interface in node_network[target_node_id].interfaces
-        if _should_probe_remote_ip(interface.ip_address)
-    ]
+    target_ips = _candidate_probe_ips(
+        topology,
+        self_node_id,
+        target_node_id,
+        node_network[target_node_id],
+    )
     if not target_ips:
         return None
 
