@@ -1466,8 +1466,8 @@ wheels = [
 
 [[package]]
 name = "mlx-audio"
-version = "0.4.3"
-source = { registry = "https://pypi.org/simple" }
+version = "0.4.3.post1"
+source = { url = "https://github.com/Foxlight-Foundation/mlx-audio/archive/7f87787fe8a48faffe2a6fb16c87d457b5fac289.tar.gz" }
 dependencies = [
     { name = "huggingface-hub", marker = "sys_platform == 'darwin'" },
     { name = "miniaudio", marker = "sys_platform == 'darwin'" },
@@ -1479,10 +1479,45 @@ dependencies = [
     { name = "tqdm", marker = "sys_platform == 'darwin'" },
     { name = "transformers", marker = "sys_platform == 'darwin'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/95/db/a9f95e3794eca373d681220c8b9f8f84451a0d14959f85cc341ca592394c/mlx_audio-0.4.3.tar.gz", hash = "sha256:8e87badf56a0f73bf91e3797b1195c01440a181cf0b64a2a08dc1bda4b037f54", size = 1144947, upload-time = "2026-04-28T20:18:12.09Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e5/25/0a89073ed7b7cdf34299042bd03d867c12c0c8b43f597be61bea7f146793/mlx_audio-0.4.3-py3-none-any.whl", hash = "sha256:6b87bf42d79d9ceb6b9310a77656b9b76429c2d6ddd89f634b2786c58a2e4721", size = 1373582, upload-time = "2026-04-28T20:18:10.512Z" },
+sdist = { hash = "sha256:7c11134fbb0edcb10d6f308c407996b42bb17dbf632300adc2ac4611fab74e70" }
+
+[package.metadata]
+requires-dist = [
+    { name = "black", marker = "extra == 'dev'", specifier = ">=24.2.0" },
+    { name = "fastapi", marker = "extra == 'all'", specifier = ">=0.95.0" },
+    { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.95.0" },
+    { name = "huggingface-hub", specifier = ">=1.0" },
+    { name = "isort", marker = "extra == 'dev'", specifier = ">=5.13.2" },
+    { name = "miniaudio", specifier = ">=1.61" },
+    { name = "mistral-common", extras = ["audio"], marker = "extra == 'all'" },
+    { name = "mistral-common", extras = ["audio"], marker = "extra == 'tts'" },
+    { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.6" },
+    { name = "mkdocstrings", extras = ["python"], marker = "extra == 'docs'", specifier = ">=0.29" },
+    { name = "mlx", specifier = ">=0.31.1" },
+    { name = "mlx-lm", specifier = ">=0.31.1" },
+    { name = "numpy", specifier = ">=1.26.4" },
+    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.7.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.0.0" },
+    { name = "python-multipart", marker = "extra == 'server'", specifier = ">=0.0.22" },
+    { name = "scipy", specifier = ">=1.10.0" },
+    { name = "sentencepiece", marker = "extra == 'all'", specifier = ">=0.2.0" },
+    { name = "sentencepiece", marker = "extra == 'sts'", specifier = ">=0.2.0" },
+    { name = "sentencepiece", marker = "extra == 'stt'", specifier = ">=0.2.0" },
+    { name = "sentencepiece", marker = "extra == 'tts'", specifier = ">=0.2.0" },
+    { name = "setuptools", marker = "extra == 'all'", specifier = "<81" },
+    { name = "setuptools", marker = "extra == 'server'", specifier = "<81" },
+    { name = "setuptools", marker = "extra == 'sts'", specifier = "<81" },
+    { name = "sounddevice", specifier = ">=0.5.3" },
+    { name = "tqdm", specifier = ">=4.67.1" },
+    { name = "transformers", specifier = ">=5.5.0" },
+    { name = "uvicorn", extras = ["standard"], marker = "extra == 'all'", specifier = ">=0.22.0" },
+    { name = "uvicorn", extras = ["standard"], marker = "extra == 'server'", specifier = ">=0.22.0" },
+    { name = "webrtcvad", marker = "extra == 'all'", specifier = ">=2.0.10" },
+    { name = "webrtcvad", marker = "extra == 'server'", specifier = ">=2.0.10" },
+    { name = "webrtcvad", marker = "extra == 'sts'", specifier = ">=2.0.10" },
 ]
+provides-extras = ["stt", "tts", "server", "sts", "all", "dev", "docs"]
 
 [[package]]
 name = "mlx-cpu"
@@ -2988,6 +3023,7 @@ dependencies = [
     { name = "mflux", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "mlx", version = "0.30.6", source = { registry = "https://pypi.org/simple" }, extra = ["cpu"], marker = "sys_platform == 'linux'" },
     { name = "mlx", version = "0.31.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
+    { name = "mlx-audio", marker = "sys_platform == 'darwin'" },
     { name = "mlx-lm", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "mlx-optiq", extra = ["convert"], marker = "sys_platform == 'darwin'" },
     { name = "mlx-vlm", marker = "sys_platform == 'darwin'" },
@@ -3042,6 +3078,7 @@ requires-dist = [
     { name = "mflux", specifier = ">=0.16.9" },
     { name = "mlx", marker = "sys_platform == 'darwin'", specifier = "==0.31.2" },
     { name = "mlx", extras = ["cpu"], marker = "sys_platform == 'linux'", specifier = "==0.30.6" },
+    { name = "mlx-audio", marker = "sys_platform == 'darwin'", url = "https://github.com/Foxlight-Foundation/mlx-audio/archive/7f87787fe8a48faffe2a6fb16c87d457b5fac289.tar.gz" },
     { name = "mlx-lm", git = "https://github.com/Foxlight-Foundation/mlx-lm?rev=e2f7ddcd31ec7d5214447a8d3206af0d2bff6e35" },
     { name = "mlx-optiq", extras = ["convert"], marker = "sys_platform == 'darwin'" },
     { name = "mlx-vlm", marker = "sys_platform == 'darwin'", specifier = "==0.6.4" },

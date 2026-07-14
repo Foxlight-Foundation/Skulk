@@ -37,6 +37,10 @@ dependencies = [
   # 0.6.4 carries server-side audio model loading, MTP/APC fixes, and
   # request-local M-RoPE batching fixes; Skulk wrappers are audited against it.
   "mlx-vlm==0.6.4; sys_platform == 'darwin'",
+  # Upstream 0.4.3 fails to advance Fish S2's hidden state while generating
+  # codebooks, producing fluent but unrelated speech. The Foxlight post-release
+  # carries only upstream mlx-audio #693 on top of the 0.4.3 tag.
+  "mlx-audio @ https://github.com/Foxlight-Foundation/mlx-audio/archive/7f87787fe8a48faffe2a6fb16c87d457b5fac289.tar.gz ; sys_platform == 'darwin'",
   "transformers>=5.5.0,<6.0.0",
   "jsonschema>=4.26.0",
   "webrtcvad-wheels>=2.0.14,<3",
