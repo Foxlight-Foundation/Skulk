@@ -217,6 +217,22 @@ class AcceleratorMetrics(CamelCaseModel):
     power_watts: float | None = None
     temperature_celsius: float | None = None
     clock_mhz: int | None = None
+    compute_capability: str | None = None
+    """Discrete-GPU compute capability as ``"<major>.<minor>"`` (NVIDIA SM level),
+    e.g. ``"8.0"`` (A100 Ampere), ``"9.0"`` (H100 Hopper), ``"10.0"`` (B100/B200
+    Blackwell), ``"12.0"`` (RTX 50 Blackwell). The engine/quant/placement decision
+    keys on this, not on vendor: the same model+engine performs oppositely across
+    generations (a benchmark showed vLLM's MXFP4 path losing single-stream on
+    Ampere, which has no native FP4, but winning on Blackwell, which does).
+    ``None`` on collectors that do not report it (AMD sysfs, Apple)."""
+    native_fp4: bool | None = None
+    """Whether the GPU accelerates FP4 natively (Blackwell sm100+, i.e.
+    ``compute_capability >= "10.0"``). Derived at the collector boundary from the
+    compute capability. ``None`` when unmeasured."""
+    native_fp8: bool | None = None
+    """Whether the GPU accelerates FP8 natively (Ada sm89 / Hopper sm90 and later).
+    Derived at the collector boundary from the compute capability. ``None`` when
+    unmeasured."""
 
 
 class SystemPerformanceProfile(CamelCaseModel):

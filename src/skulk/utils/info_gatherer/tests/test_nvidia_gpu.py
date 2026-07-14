@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import final
 
+import pytest
+
 from skulk.utils.info_gatherer.nvidia_gpu import (
     has_nvidia_gpu,
     read_accelerator_metrics,
@@ -26,9 +28,15 @@ class _Rates:
 class _FakeNvml:
     """Scriptable NvmlLike: per-query failures via the `broken` set."""
 
-    def __init__(self, broken: set[str] | None = None, name: str | bytes = "NVIDIA GeForce RTX 4090") -> None:
+    def __init__(
+        self,
+        broken: set[str] | None = None,
+        name: str | bytes = "NVIDIA GeForce RTX 4090",
+        cc: tuple[int, int] = (8, 9),  # RTX 4090 is Ada sm89
+    ) -> None:
         self.broken = broken or set()
         self._name = name
+        self._cc = cc
 
     def _maybe_break(self, query: str) -> None:
         if query in self.broken:
@@ -69,6 +77,12 @@ class _FakeNvml:
         self._maybe_break("clock")
         return 2520
 
+    def nvmlDeviceGetCudaComputeCapability(  # noqa: N802
+        self, handle: object
+    ) -> tuple[int, int]:
+        self._maybe_break("compute_capability")
+        return self._cc
+
 
 def test_full_metrics_normalize() -> None:
     metrics = read_accelerator_metrics(_FakeNvml())
@@ -79,6 +93,38 @@ def test_full_metrics_normalize() -> None:
     assert metrics.vram_used_bytes == 7 * 1024**3
     assert metrics.power_watts == 285.0
     assert metrics.temperature_celsius == 63.0
+    assert metrics.clock_mhz == 2520
+    # RTX 4090 (Ada sm89): FP8 native, FP4 not.
+    assert metrics.compute_capability == "8.9"
+    assert metrics.native_fp8 is True
+    assert metrics.native_fp4 is False
+
+
+@pytest.mark.parametrize(
+    ("cc", "capability", "fp4", "fp8"),
+    [
+        ((8, 0), "8.0", False, False),  # A100 Ampere: no native FP4 or FP8
+        ((8, 9), "8.9", False, True),  # Ada: FP8
+        ((9, 0), "9.0", False, True),  # H100 Hopper: FP8
+        ((10, 0), "10.0", True, True),  # B100/B200 Blackwell: FP4
+        ((12, 0), "12.0", True, True),  # RTX 50 Blackwell: FP4
+    ],
+)
+def test_compute_capability_derives_native_formats(
+    cc: tuple[int, int], capability: str, fp4: bool, fp8: bool
+) -> None:
+    metrics = read_accelerator_metrics(_FakeNvml(cc=cc))
+    assert metrics.compute_capability == capability
+    assert metrics.native_fp4 is fp4
+    assert metrics.native_fp8 is fp8
+
+
+def test_compute_capability_degrades_to_none() -> None:
+    metrics = read_accelerator_metrics(_FakeNvml(broken={"compute_capability"}))
+    assert metrics.compute_capability is None
+    assert metrics.native_fp4 is None
+    assert metrics.native_fp8 is None
+    # ...while the rest still report.
     assert metrics.clock_mhz == 2520
 
 
