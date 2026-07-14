@@ -66,8 +66,8 @@ class ClusterNodeView(BaseModel):
             (``apple`` / ``amd`` / ``nvidia`` / ``unknown``), or ``None`` when
             no system telemetry has been received.
         ram_total_bytes: Total RAM in bytes, or ``None``.
-        last_telemetry: When this node last received any telemetry from the
-            peer (its liveness signal), or ``None``.
+        last_telemetry: When this node last received either the peer's explicit
+            heartbeat or ordinary fallback telemetry, or ``None``.
         capabilities: Extension-advertised capability tags the node offers
             (sorted), for example ``("memory",)``; empty when the node
             advertises nothing. These are opaque strings set by extensions on
@@ -110,6 +110,7 @@ def snapshot_cluster(view: TelemetryView) -> tuple[ClusterNodeView, ...]:
     node_ids |= set(view.node_memory)
     node_ids |= set(view.node_system)
     node_ids |= set(view.node_capabilities)
+    node_ids |= set(view.node_last_heartbeat)
     node_ids |= set(view.node_last_telemetry)
 
     snapshots: list[ClusterNodeView] = []
@@ -130,7 +131,7 @@ def snapshot_cluster(view: TelemetryView) -> tuple[ClusterNodeView, ...]:
                 skulk_version=_known(identity.skulk_version) if identity is not None else None,
                 accelerator_vendor=accelerator.vendor if accelerator is not None else None,
                 ram_total_bytes=memory.ram_total.in_bytes if memory is not None else None,
-                last_telemetry=view.node_last_telemetry.get(node_id),
+                last_telemetry=view.last_liveness_receipt(node_id),
                 capabilities=tuple(sorted(view.node_capabilities.get(node_id, frozenset()))),
             )
         )

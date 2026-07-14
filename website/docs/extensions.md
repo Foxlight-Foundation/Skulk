@@ -57,8 +57,9 @@ extensions must degrade gracefully on `None`, never raise.
 `ExtensionContext.read_cluster()` returns an immutable snapshot of the telemetry
 plane: one `ClusterNodeView` per node the local node currently sees, each with
 `node_id`, `friendly_name`, `backends`, `participation`, `skulk_version`,
-`accelerator_vendor`, `ram_total_bytes`, `last_telemetry` (its liveness signal),
-and `capabilities` (the tags peers have advertised; see below). This is how an
+`accelerator_vendor`, `ram_total_bytes`, `last_telemetry` (the freshest dedicated
+heartbeat or ordinary telemetry fallback receipt), and `capabilities` (the tags
+peers have advertised; see below). This is how an
 extension discovers the cluster it belongs to instead of being blind to
 everything beyond the request in front of it.
 

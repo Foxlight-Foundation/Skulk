@@ -2984,6 +2984,7 @@ class API:
                 live_nodes=live,
                 downloads=self.state.downloads,
                 node_disk=self._telemetry_view.node_disk,
+                heartbeat_last_seen=self._telemetry_view.node_last_heartbeat,
                 telemetry_last_seen=self._telemetry_view.node_last_telemetry,
                 now=datetime.now(tz=timezone.utc),
             ).items()

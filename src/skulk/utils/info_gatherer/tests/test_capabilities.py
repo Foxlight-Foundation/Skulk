@@ -22,6 +22,7 @@ def _capabilities_only_gatherer(
     """A gatherer whose only live monitor is the capability advertiser."""
     return InfoGatherer(
         info_sender=info_send,
+        heartbeat_poll_interval=None,
         interface_watcher_interval=None,
         misc_poll_interval=None,
         system_profiler_interval=None,

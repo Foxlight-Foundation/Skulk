@@ -497,6 +497,16 @@ class NodeCapabilities(TaggedModel):
         return sorted(value)
 
 
+class NodeHeartbeat(TaggedModel):
+    """Small, explicit liveness reading published on the telemetry plane.
+
+    The reading intentionally has no payload: peers stamp their local receipt
+    time, which avoids trusting wall clocks from another node. Keeping liveness
+    as a named reading prevents collector cadence changes from silently changing
+    the master's node-timeout behavior.
+    """
+
+
 class NodeDiskUsage(TaggedModel):
     """Disk space information for the models directory."""
 
@@ -549,12 +559,14 @@ GatheredInfo = (
     | NodeResources
     | NodeDiskUsage
     | NodeCapabilities
+    | NodeHeartbeat
 )
 
 
 @dataclass
 class InfoGatherer:
     info_sender: Sender[GatheredInfo]
+    heartbeat_poll_interval: float | None = 2
     interface_watcher_interval: float | None = 10
     misc_poll_interval: float | None = 60
     system_profiler_interval: float | None = 5 if IS_DARWIN else None
@@ -600,6 +612,7 @@ class InfoGatherer:
                 tg.start_soon(self._monitor_node_resources)
                 tg.start_soon(self._monitor_disk_usage)
                 tg.start_soon(self._monitor_capabilities)
+                tg.start_soon(self._monitor_heartbeat)
 
                 nc = await NodeConfig.gather()
                 if nc is not None:
@@ -633,6 +646,22 @@ class InfoGatherer:
 
     def shutdown(self):
         self._tg.cancel_tasks()
+
+    async def _monitor_heartbeat(self) -> None:
+        """Publish the node's explicit liveness reading at a fixed cadence."""
+        if self.heartbeat_poll_interval is None:
+            return
+        while True:
+            try:
+                with fail_after(5):
+                    await self.info_sender.send(NodeHeartbeat())
+            except (ClosedResourceError, BrokenResourceError):
+                # The worker owns the consumer. Its disappearance is the same
+                # clean shutdown signal handled by every other monitor.
+                raise
+            except Exception as error:
+                logger.warning(f"Error publishing node heartbeat: {error}")
+            await anyio.sleep(self.heartbeat_poll_interval)
 
     async def _monitor_static_info(self):
         if self.static_info_poll_interval is None:

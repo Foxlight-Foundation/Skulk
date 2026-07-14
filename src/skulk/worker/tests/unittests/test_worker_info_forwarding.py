@@ -16,11 +16,13 @@ from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import Event, IndexedEvent, NodeGatheredInfo, TaskFailed
 from skulk.shared.types.profiling import NetworkInterfaceInfo
 from skulk.shared.types.tasks import SpeechSynthesis, TaskId, TaskStatus
+from skulk.shared.types.telemetry import NodeTelemetry
 from skulk.shared.types.worker.instances import InstanceId
 from skulk.utils.channels import channel
 from skulk.utils.info_gatherer.info_gatherer import (
     GatheredInfo,
     MiscData,
+    NodeHeartbeat,
     NodeNetworkInterfaces,
 )
 from skulk.worker import main as worker_main
@@ -52,6 +54,39 @@ async def test_forward_info_ignores_closed_event_sender() -> None:
     indexed_event_sender.close()
     command_sender.close()
     download_sender.close()
+
+
+@pytest.mark.asyncio
+async def test_forward_info_routes_heartbeat_to_telemetry_plane() -> None:
+    """The named heartbeat bypasses the ordered event log."""
+    indexed_event_sender, indexed_event_receiver = channel[IndexedEvent]()
+    event_sender, event_receiver = channel[Event]()
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    telemetry_sender, telemetry_receiver = channel[NodeTelemetry]()
+    info_sender, info_receiver = channel[GatheredInfo]()
+    worker = Worker(
+        node_id=NodeId("node-a"),
+        event_receiver=indexed_event_receiver,
+        event_sender=event_sender,
+        command_sender=command_sender,
+        download_command_sender=download_sender,
+        telemetry_sender=telemetry_sender,
+    )
+    await info_sender.send(NodeHeartbeat())
+    info_sender.close()
+
+    await worker._forward_info(info_receiver)  # pyright: ignore[reportPrivateUsage]
+
+    message = await telemetry_receiver.receive()
+    assert message.node_id == NodeId("node-a")
+    assert isinstance(message.info, NodeHeartbeat)
+    assert event_receiver.collect() == []
+    indexed_event_sender.close()
+    event_sender.close()
+    command_sender.close()
+    download_sender.close()
+    telemetry_sender.close()
 
 
 @pytest.mark.asyncio

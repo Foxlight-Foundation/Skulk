@@ -11,6 +11,8 @@ Phase 1 slice 1 carried only ``NodeResources`` (single reader: the planner).
 Slice 2 adds node memory and the system performance profile — the highest-volume
 ``NodeGatheredInfo`` readings — and the placement memory-fit check, dashboard,
 and power sampler now read them here instead of off the event log.
+``NodeHeartbeat`` names the primary liveness reading; ordinary telemetry
+receipt remains a separately tracked fallback.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from skulk.utils.info_gatherer.info_gatherer import (
     MiscData,
     NodeCapabilities,
     NodeDiskUsage,
+    NodeHeartbeat,
     RdmaCtlStatus,
     StaticNodeInformation,
 )
@@ -63,6 +66,7 @@ TELEMETRY_PLANE_INFO = (
     MiscData,
     StaticNodeInformation,
     RdmaCtlStatus,
+    NodeHeartbeat,
     # Extension-advertised capability tags (fabric-citizenship): a plugin
     # advertises what it offers so peers discover it, off the event log.
     NodeCapabilities,
@@ -109,14 +113,42 @@ class TelemetryView:
         # `ExtensionContext.advertise_capability`; polled by the InfoGatherer's
         # `_monitor_capabilities` and gossiped as `NodeCapabilities`.
         self.local_advertised_capabilities: set[str] = set()
-        # When this node last RECEIVED any telemetry from each peer. Telemetry
-        # gossips last-write-wins every ~1s to every node, so this is a live,
-        # cluster-wide liveness signal that (unlike State.last_seen) does not
-        # depend on connectivity events being logged/broadcast. nodeHealth reads it
-        # so the connectivity change-gate/de-dup (which stops the AMD gossip storm
-        # but leaves followers' State.last_seen stale) does not produce a false
-        # "heartbeats are late" warning on healthy nodes.
+        # Receipt time of the explicit, payload-free liveness reading. The
+        # master treats this as its primary liveness signal.
+        self.node_last_heartbeat: dict[NodeId, datetime] = {}
+        # Receipt time of any NON-heartbeat telemetry. This remains a fallback
+        # liveness signal so a heartbeat collector defect cannot prune a node
+        # that is demonstrably still publishing ordinary telemetry.
         self.node_last_telemetry: dict[NodeId, datetime] = {}
+
+    def last_liveness_receipt(self, node_id: NodeId) -> datetime | None:
+        """Return the freshest heartbeat or fallback telemetry receipt.
+
+        Args:
+            node_id: Node whose local receipt timestamp should be selected.
+
+        Returns:
+            The freshest known receipt, or ``None`` before any telemetry from
+            the node has arrived.
+        """
+        receipts = [
+            receipt
+            for receipt in (
+                self.node_last_heartbeat.get(node_id),
+                self.node_last_telemetry.get(node_id),
+            )
+            if receipt is not None
+        ]
+        if not receipts:
+            return None
+        return max(
+            receipts,
+            key=lambda receipt: (
+                receipt
+                if receipt.tzinfo is not None
+                else receipt.replace(tzinfo=timezone.utc)
+            ).timestamp(),
+        )
 
     def prune(self, node_id: NodeId) -> None:
         """Drop all telemetry for a node that left the cluster.
@@ -135,17 +167,35 @@ class TelemetryView:
         self.node_identities.pop(node_id, None)
         self.node_rdma_ctl.pop(node_id, None)
         self.node_capabilities.pop(node_id, None)
+        self.node_last_heartbeat.pop(node_id, None)
         self.node_last_telemetry.pop(node_id, None)
         # local_advertised_capabilities is deliberately NOT pruned: it is this
         # node's own outbound advertisement, not a peer reading, so a peer
         # timing out must never clear what this node offers.
 
-    def apply(self, message: NodeTelemetry) -> None:
-        """Coalesce one telemetry message into the latest-value view."""
+    def apply(
+        self,
+        message: NodeTelemetry,
+        *,
+        received_at: datetime | None = None,
+    ) -> None:
+        """Coalesce one telemetry message into the latest-value view.
+
+        Args:
+            message: Reading received from the telemetry topic.
+            received_at: Local receipt time, injectable for deterministic tests.
+                Defaults to the current UTC time; sender clocks are never used.
+        """
         info = message.info
         node_id = message.node_id
-        # Receipt time = liveness signal (see node_last_telemetry above).
-        self.node_last_telemetry[node_id] = datetime.now(tz=timezone.utc)
+        receipt_time = received_at or datetime.now(tz=timezone.utc)
+        if isinstance(info, NodeHeartbeat):
+            self.node_last_heartbeat[node_id] = receipt_time
+        else:
+            self.node_last_telemetry[node_id] = receipt_time
+
+        if isinstance(info, NodeHeartbeat):
+            return
         if isinstance(info, NodeResources):
             self.node_resources[node_id] = info
         elif isinstance(info, MemoryUsage):
