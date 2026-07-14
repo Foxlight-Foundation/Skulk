@@ -20,6 +20,16 @@ Scope of this slice: streamed chat completions only. Tool calling and per-token
 logprobs are rejected loudly rather than silently mismeasured (the OpenAI SSE
 proxy does not surface logprobs, and tool-call round-tripping is a follow-up).
 
+Reasoning is best-effort in this slice. Thinking control (``enable_thinking`` /
+``reasoning_effort``) is forwarded so the model thinks, and both ``reasoning_content``
+and ``reasoning`` SSE deltas are parsed into ``is_thinking`` chunks. But vLLM only
+SPLITS reasoning from content when the server is launched with a family-specific
+``--reasoning-parser`` (e.g. ``qwen3`` / ``deepseek_r1`` / ``openai_gptoss``); this
+slice does not yet map the card to that flag, so on a reasoning model the thinking
+text arrives inline in ``content`` (raw markers) rather than as a separated
+reasoning stream. Threading the card's reasoning family into ``--reasoning-parser``
+is a follow-up (alongside tool calling and logprobs).
+
 KNOWN LIMITATION -- serialized dispatch (the required next slice): like every
 current runner, ``main()`` processes one task at a time and ``_generate_streaming``
 blocks the loop until its HTTP stream finishes. So even though the worker will
