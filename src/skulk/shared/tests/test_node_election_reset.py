@@ -36,6 +36,9 @@ class _FakeRouter:
     def sender(self, _topic: object) -> object:
         return object()
 
+    def telemetry_sender(self) -> object:
+        return object()
+
     def receiver(self, _topic: object) -> object:
         return object()
 

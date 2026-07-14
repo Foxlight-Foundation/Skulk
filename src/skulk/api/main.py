@@ -346,6 +346,7 @@ from skulk.shared.types.diagnostics import (
     RunnerTaskCancelRequest,
     RunnerTaskCancelResponse,
     RunnerTaskDiagnostics,
+    TelemetryPlaneDiagnostics,
 )
 from skulk.shared.types.events import (
     Event,
@@ -1137,6 +1138,9 @@ class API:
         data_plane_egress_provider: (
             Callable[[], DataPlaneEgressDiagnostics] | None
         ) = None,
+        telemetry_plane_provider: (
+            Callable[[], TelemetryPlaneDiagnostics] | None
+        ) = None,
         extensions: LoadedExtensions | None = None,
         enable_builtin_providers: bool = False,
     ) -> None:
@@ -1396,6 +1400,7 @@ class API:
         )
         self._provider_observer = ProviderObserver()
         self._data_plane_egress_provider = data_plane_egress_provider
+        self._telemetry_plane_provider = telemetry_plane_provider
         self._image_store = ImageStore(SKULK_IMAGE_CACHE_DIR)
         self._tg: TaskGroup = TaskGroup()
 
@@ -2007,6 +2012,15 @@ class API:
                 "state, local resources, and relevant OS processes."
             ),
         )(self.get_node_diagnostics)
+        self.app.get(
+            "/v1/diagnostics/telemetry",
+            tags=["Diagnostics"],
+            summary="Get local telemetry-plane diagnostics",
+            description=(
+                "Return aggregate bounded-admission, coalescing, drop, queue, and "
+                "publish metrics for this node's isolated telemetry transport."
+            ),
+        )(self.get_telemetry_plane_diagnostics)
         self.app.post(
             "/v1/diagnostics/node/runners/{runner_id}/cancel",
             tags=["Diagnostics"],
@@ -2279,7 +2293,9 @@ class API:
                     current_instances=self.state.instances,
                     node_memory=self._telemetry_view.node_memory,
                     node_network=self.state.node_network,
-                    download_status=self.state.downloads,
+                    download_status=self._telemetry_view.effective_downloads(
+                        self.state.downloads
+                    ),
                     excluded_nodes=set(command.excluded_nodes),
                     node_resources=self._telemetry_view.node_resources,
                     node_vram=usable_vram_by_node(
@@ -2353,7 +2369,9 @@ class API:
                 node_network=self.state.node_network,
                 topology=self.state.topology,
                 current_instances=self.state.instances,
-                download_status=self.state.downloads,
+                download_status=self._telemetry_view.effective_downloads(
+                    self.state.downloads
+                ),
                 node_resources=self._telemetry_view.node_resources,
                 node_vram=usable_vram_by_node(
                     self._telemetry_view.node_system,
@@ -2424,7 +2442,9 @@ class API:
                     topology=self.state.topology,
                     current_instances=self.state.instances,
                     required_nodes=required_nodes,
-                    download_status=self.state.downloads,
+                    download_status=self._telemetry_view.effective_downloads(
+                        self.state.downloads
+                    ),
                     excluded_nodes=excluded_nodes,
                     node_resources=self._telemetry_view.node_resources,
                     node_vram=usable_vram_by_node(
@@ -2569,7 +2589,9 @@ class API:
                             topology=self.state.topology,
                             current_instances=self.state.instances,
                             required_nodes={candidate},
-                            download_status=self.state.downloads,
+                            download_status=self._telemetry_view.effective_downloads(
+                                self.state.downloads
+                            ),
                             excluded_nodes=excluded_nodes,
                             node_resources=self._telemetry_view.node_resources,
                             node_vram=alt_node_vram,
@@ -2937,7 +2959,12 @@ class API:
         those same-loop mutators.
         """
         live = self.state.last_seen
-        payload = self.state.model_dump(mode="json", by_alias=True)
+        effective_downloads = self._telemetry_view.effective_downloads(
+            self.state.downloads
+        )
+        payload = self.state.model_copy(
+            update={"downloads": effective_downloads}
+        ).model_dump(mode="json", by_alias=True)
         payload["nodeMemory"] = {
             str(node_id): usage.model_dump(mode="json", by_alias=True)
             for node_id, usage in self._telemetry_view.node_memory.items()
@@ -2982,7 +3009,7 @@ class API:
             node_id: summary.model_dump(mode="json", by_alias=True)
             for node_id, summary in compute_node_health(
                 live_nodes=live,
-                downloads=self.state.downloads,
+                downloads=effective_downloads,
                 node_disk=self._telemetry_view.node_disk,
                 heartbeat_last_seen=self._telemetry_view.node_last_heartbeat,
                 telemetry_last_seen=self._telemetry_view.node_last_telemetry,
@@ -7901,6 +7928,13 @@ class API:
             warnings=sorted(warnings),
             tailscale=tailscale,
         )
+
+    async def get_telemetry_plane_diagnostics(self) -> TelemetryPlaneDiagnostics:
+        """Return aggregate local telemetry admission and egress diagnostics."""
+
+        if self._telemetry_plane_provider is None:
+            return TelemetryPlaneDiagnostics.empty()
+        return self._telemetry_plane_provider()
 
     @staticmethod
     def _proxy_error_detail(response: httpx.Response) -> str:

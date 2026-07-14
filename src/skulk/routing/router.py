@@ -1,6 +1,7 @@
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from copy import copy
 from dataclasses import dataclass
 from itertools import count
@@ -35,7 +36,11 @@ from skulk_pyo3_bindings import (
 from skulk.shared.constants import SKULK_NODE_ID_KEYPAIR
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.chunks import DataChunk, ErrorChunk
-from skulk.shared.types.diagnostics import DataPlaneEgressDiagnostics
+from skulk.shared.types.diagnostics import (
+    DataPlaneEgressDiagnostics,
+    TelemetryPlaneDiagnostics,
+)
+from skulk.shared.types.telemetry import NodeTelemetry
 from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.pydantic_ext import CamelCaseModel
 from skulk.utils.task_group import TaskGroup
@@ -48,6 +53,7 @@ from .provider_streams import (
 )
 from .realtime_audio import RealtimeAudioPacket
 from .speech_media import SpeechMediaPacket
+from .telemetry_plane import TelemetryPlaneObserver
 from .topics import (
     CONNECTION_MESSAGES,
     DATA,
@@ -55,6 +61,7 @@ from .topics import (
     PROVIDER_DATA,
     REALTIME_AUDIO,
     SPEECH_MEDIA,
+    TELEMETRY,
     PublishPolicy,
     TypedTopic,
 )
@@ -82,6 +89,10 @@ _ZENOH_DATA_STREAM_IDLE_LEASE_SECONDS = 30 * 60.0
 # Election egress owns a small bounded queue and publish loop so a burst on the
 # ordinary gossipsub topics cannot leave liveness traffic waiting in their FIFO.
 _ELECTION_OUTBOUND_BUFFER = 128
+# Telemetry holds at most one serialized packet beyond the in-flight publish.
+# Newer values remain in the keyed admission map and replace stale values there.
+_TELEMETRY_OUTBOUND_BUFFER = 1
+_TELEMETRY_ADMISSION_CAPACITY = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +104,46 @@ class OutboundPacket:
     stream_key: str | None
     is_terminal: bool
     data: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingTelemetry:
+    """One latest-value telemetry reading awaiting serialized egress."""
+
+    item: NodeTelemetry
+    enqueued_at: float
+
+
+class TelemetrySender:
+    """Non-blocking producer handle for latest-value telemetry admission."""
+
+    def __init__(self, router: "TelemetryTopicRouter") -> None:
+        self._router = router
+        self._closed = False
+
+    async def send(self, item: NodeTelemetry) -> None:
+        """Offer a reading without waiting for network capacity."""
+
+        self.send_nowait(item)
+
+    def send_nowait(self, item: NodeTelemetry) -> None:
+        """Offer a reading, coalescing or evicting stale pending data."""
+
+        if self._closed:
+            raise ClosedResourceError
+        self._router.offer(item)
+
+    def clone(self) -> "TelemetrySender":
+        """Return an independently closable handle to the same admission map."""
+
+        if self._closed:
+            raise ClosedResourceError
+        return TelemetrySender(self._router)
+
+    def close(self) -> None:
+        """Close this producer handle without closing shared telemetry egress."""
+
+        self._closed = True
 
 
 # A significant current limitation of the TopicRouter is that it is not capable
@@ -257,6 +308,82 @@ class TopicRouter[T: CamelCaseModel]:
             )
 
 
+class TelemetryTopicRouter(TopicRouter[NodeTelemetry]):
+    """Bounded latest-value admission before isolated telemetry egress."""
+
+    def __init__(
+        self,
+        topic: TypedTopic[NodeTelemetry],
+        networking_sender: Sender[OutboundPacket],
+        observer: TelemetryPlaneObserver,
+        *,
+        admission_capacity: int = _TELEMETRY_ADMISSION_CAPACITY,
+    ) -> None:
+        super().__init__(topic, networking_sender)
+        wake_send, wake_recv = channel[None](1)
+        self._wake_send = wake_send
+        self._wake_recv = wake_recv
+        self._pending: OrderedDict[str, _PendingTelemetry] = OrderedDict()
+        self._admission_capacity = admission_capacity
+        self._observer = observer
+
+    def new_telemetry_sender(self) -> TelemetrySender:
+        """Return a producer handle backed by this router's coalescing map."""
+
+        return TelemetrySender(self)
+
+    def offer(self, item: NodeTelemetry) -> None:
+        """Keep only the latest reading for one bounded telemetry identity."""
+
+        self._observer.record_offered()
+        key = item.coalescing_key()
+        if key in self._pending:
+            self._pending.pop(key)
+            self._observer.record_coalesced()
+        elif len(self._pending) >= self._admission_capacity:
+            self._pending.popitem(last=False)
+            self._observer.record_dropped()
+        self._pending[key] = _PendingTelemetry(item=item, enqueued_at=time.monotonic())
+        self._observer.record_depth(
+            pending=len(self._pending),
+            network_queue=(
+                self.networking_sender.statistics().current_buffer_used
+            ),
+        )
+        with suppress(WouldBlock):
+            self._wake_send.send_nowait(None)
+
+    async def run(self) -> None:
+        """Drain admitted latest values while producers continue to coalesce."""
+
+        logger.debug(f"Telemetry Topic Router {self.topic} ready to send")
+        with self._wake_recv as wakeups:
+            async for _ in wakeups:
+                while self._pending:
+                    _, pending = self._pending.popitem(last=False)
+                    # Local readers never wait for a remote peer or transport queue.
+                    await self.publish(pending.item, origin=None)
+                    await self._send_out(pending.item)
+
+    async def shutdown(self) -> None:
+        """Close telemetry admission and inherited local receivers."""
+
+        self._wake_send.close()
+        self._wake_recv.close()
+        await super().shutdown()
+
+    def pending_enqueued_at(self) -> tuple[float, ...]:
+        """Return pending timestamps for aggregate age diagnostics."""
+
+        return tuple(pending.enqueued_at for pending in self._pending.values())
+
+    @property
+    def pending_count(self) -> int:
+        """Number of distinct latest-value keys awaiting egress."""
+
+        return len(self._pending)
+
+
 class Router:
     @classmethod
     def create(
@@ -321,6 +448,15 @@ class Router:
         )
         self._election_out_send = election_send
         self._election_out_recv = election_recv
+        telemetry_send, telemetry_recv = channel[OutboundPacket](
+            _TELEMETRY_OUTBOUND_BUFFER
+        )
+        self._telemetry_out_send = telemetry_send
+        self._telemetry_out_recv = telemetry_recv
+        self._telemetry_plane_observer = TelemetryPlaneObserver(
+            admission_capacity=_TELEMETRY_ADMISSION_CAPACITY,
+            network_queue_capacity=_TELEMETRY_OUTBOUND_BUFFER,
+        )
         # Dedicated outbound channel for the Zenoh DATA plane (#309): the DATA
         # path publishes with CongestionControl::Block, so a stuck/slow
         # subscriber can stall its egress. Draining it on its OWN loop (not the
@@ -361,6 +497,8 @@ class Router:
             send = self._zenoh_out_send.clone()
         elif topic.topic == ELECTION_MESSAGES.topic:
             send = self._election_out_send.clone()
+        elif topic.topic == TELEMETRY.topic:
+            send = self._telemetry_out_send.clone()
         else:
             send = self._tmp_networking_sender
             if send:
@@ -368,27 +506,46 @@ class Router:
             else:
                 send = self.networking_receiver.clone_sender()
         local_routing_key = self._node_id if topic.routing_key is not None else None
-        router = TopicRouter[T](
-            topic,
-            send,
-            local_routing_key=local_routing_key,
-            data_plane_egress_observer=(
-                self._data_plane_egress_observer
-                if topic.routing_key is not None
-                else None
-            ),
-        )
+        if topic.topic == TELEMETRY.topic:
+            router = cast(
+                TopicRouter[T],
+                TelemetryTopicRouter(
+                    cast(TypedTopic[NodeTelemetry], topic),
+                    send,
+                    self._telemetry_plane_observer,
+                ),
+            )
+        else:
+            router = TopicRouter[T](
+                topic,
+                send,
+                local_routing_key=local_routing_key,
+                data_plane_egress_observer=(
+                    self._data_plane_egress_observer
+                    if topic.routing_key is not None
+                    else None
+                ),
+            )
         self.topic_routers[topic.topic] = cast(TopicRouter[CamelCaseModel], router)
         if self._tg.is_running():
             await self._networking_subscribe(topic.topic)
 
     def sender[T: CamelCaseModel](self, topic: TypedTopic[T]) -> Sender[T]:
+        if topic.topic == TELEMETRY.topic:
+            raise ValueError("Use telemetry_sender() for bounded telemetry admission")
         router = self.topic_routers.get(topic.topic, None)
         # There's gotta be a way to do this without THIS many asserts
         assert router is not None
         assert router.topic == topic
         sender = cast(TopicRouter[T], router).new_sender()
         return sender
+
+    def telemetry_sender(self) -> TelemetrySender:
+        """Return a non-blocking sender for bounded latest-value telemetry."""
+
+        router = self.topic_routers.get(TELEMETRY.topic)
+        assert isinstance(router, TelemetryTopicRouter)
+        return router.new_telemetry_sender()
 
     def receiver[T: CamelCaseModel](self, topic: TypedTopic[T]) -> Receiver[T]:
         router = self.topic_routers.get(topic.topic, None)
@@ -427,6 +584,7 @@ class Router:
                 tg.start_soon(self._networking_recv)
                 tg.start_soon(self._networking_publish)
                 tg.start_soon(self._election_networking_publish)
+                tg.start_soon(self._telemetry_networking_publish)
                 if self._zenoh is not None:
                     tg.start_soon(self._zenoh_recv)
                     # Dedicated DATA-plane egress loop so Block backpressure
@@ -450,6 +608,18 @@ class Router:
         """Return process-local DATA egress pressure and isolation metrics."""
 
         return self._data_plane_egress_observer.snapshot()
+
+    def telemetry_plane_diagnostics(self) -> TelemetryPlaneDiagnostics:
+        """Return bounded telemetry admission and isolated egress metrics."""
+
+        router = self.topic_routers.get(TELEMETRY.topic)
+        assert isinstance(router, TelemetryTopicRouter)
+        network_depth = self._telemetry_out_recv.statistics().current_buffer_used
+        return self._telemetry_plane_observer.snapshot(
+            pending_enqueued_at=router.pending_enqueued_at(),
+            pending_readings=router.pending_count,
+            network_queue_depth=network_depth,
+        )
 
     async def _networking_subscribe(self, topic: str):
         if self.uses_zenoh(topic):
@@ -542,10 +712,10 @@ class Router:
             raise
 
     async def _networking_publish(self):
-        # Gossipsub (control/telemetry/election + DATA when Zenoh is off). DATA on
-        # Zenoh is diverted to _zenoh_networking_publish at register time, so it
-        # never reaches this shared loop (#309). routing_key is gossipsub-irrelevant
-        # (bare-topic broadcast).
+        # Gossipsub control traffic plus DATA when Zenoh is off. DATA on Zenoh is
+        # diverted to _zenoh_networking_publish at register time, while election
+        # and telemetry each have a dedicated loop. routing_key is irrelevant to
+        # bare-topic gossipsub broadcast.
         with self.networking_receiver as networked_items:
             async for packet in networked_items:
                 await self._publish_gossipsub_packet(packet)
@@ -557,7 +727,22 @@ class Router:
             async for packet in election_items:
                 await self._publish_gossipsub_packet(packet)
 
-    async def _publish_gossipsub_packet(self, packet: OutboundPacket) -> None:
+    async def _telemetry_networking_publish(self) -> None:
+        """Publish telemetry independently from correctness-critical egress."""
+
+        with self._telemetry_out_recv as telemetry_items:
+            async for packet in telemetry_items:
+                try:
+                    await self._publish_gossipsub_packet(packet, telemetry=True)
+                except Exception as exception:  # noqa: BLE001 - lossy plane containment
+                    self._telemetry_plane_observer.record_publish_failure()
+                    logger.opt(exception=exception).warning(
+                        "Isolated telemetry publish failed; latest values remain lossy"
+                    )
+
+    async def _publish_gossipsub_packet(
+        self, packet: OutboundPacket, *, telemetry: bool = False
+    ) -> None:
         """Publish one packet while containing and aggregating transport pressure."""
 
         try:
@@ -573,9 +758,13 @@ class Router:
                     "Sending overlarge payload, network performance may be temporarily degraded"
                 )
             await self._net.gossipsub_publish(packet.topic, packet.data)
+            if telemetry:
+                self._telemetry_plane_observer.record_published(len(packet.data))
         except NoPeersSubscribedToTopicError:
             pass
         except AllQueuesFullError:
+            if telemetry:
+                self._telemetry_plane_observer.record_publish_failure()
             self._gossipsub_queue_drop_count += 1
             now = time.monotonic()
             if now - self._last_gossipsub_queue_warning >= 10.0:
@@ -587,6 +776,8 @@ class Router:
                 self._gossipsub_queue_drop_count = 0
                 self._last_gossipsub_queue_warning = now
         except MessageTooLargeError:
+            if telemetry:
+                self._telemetry_plane_observer.record_publish_failure()
             logger.warning(
                 f"Message too large for gossipsub on {packet.topic} "
                 f"({len(packet.data)} bytes), dropping"

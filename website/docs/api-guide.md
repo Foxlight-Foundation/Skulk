@@ -142,6 +142,7 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `GET /v1/traces/cluster/{task_id}/stats`
 - `GET /v1/traces/cluster/{task_id}/raw`
 - `GET /v1/diagnostics/node`
+- `GET /v1/diagnostics/telemetry`
 - `POST /v1/diagnostics/node/capture`
 - `POST /v1/diagnostics/node/runners/{runner_id}/cancel`
 - `GET /v1/diagnostics/cluster`
@@ -1134,6 +1135,7 @@ Returns stored events from the API-side event log.
 ### Diagnostics
 
 - `GET /v1/diagnostics/node`
+- `GET /v1/diagnostics/telemetry`
 - `POST /v1/diagnostics/node/capture`
 - `POST /v1/diagnostics/node/runners/{runner_id}/cancel`
 - `GET /v1/diagnostics/cluster`
@@ -1147,6 +1149,15 @@ shutting down and you need a read-only snapshot without SSHing into every node.
 
 Behavior notes:
 
+- `GET /v1/diagnostics/telemetry` takes no parameters and returns aggregate
+  metrics for the API node's isolated telemetry transport: fixed admission and
+  network-queue capacities, current and maximum depth, offered/coalesced/dropped
+  readings, successful publishes, publish failures and bytes, plus oldest
+  pending and last-successful-publish age. It never returns telemetry payloads, node/model maps,
+  or completed attempt identifiers. Query each node directly for its local
+  counters; this endpoint is deliberately separate from the node diagnostics
+  bundle so additive telemetry instrumentation does not change that bundle's
+  rolling-window schema.
 - `GET /v1/diagnostics/node` returns the local node's runtime/config facts,
   resources, process tree, live runner-supervisor state, flight-recorder phase
   state, placement analysis, and `dataPlane` plus `provider` blocks. DATA diagnostics include
@@ -1215,6 +1226,7 @@ Example:
 
 ```bash
 curl http://localhost:52415/v1/diagnostics/node
+curl http://localhost:52415/v1/diagnostics/telemetry
 curl http://localhost:52415/v1/diagnostics/cluster
 curl http://localhost:52415/v1/diagnostics/cluster/timeline
 curl http://localhost:52415/v1/diagnostics/cluster/<node_id>

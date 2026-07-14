@@ -9,7 +9,9 @@ an in-process-only test missed a strict round-trip failure.
 from datetime import datetime, timedelta, timezone
 
 from skulk.routing.topics import TELEMETRY
+from skulk.shared.tests.conftest import get_pipeline_shard_metadata
 from skulk.shared.types.common import NodeId
+from skulk.shared.types.events import NodeDownloadProgress
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
     AcceleratorMetrics,
@@ -19,6 +21,13 @@ from skulk.shared.types.profiling import (
     SystemPerformanceProfile,
 )
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
+from skulk.shared.types.worker.downloads import (
+    DownloadAttemptId,
+    DownloadCompleted,
+    DownloadOngoing,
+    DownloadPending,
+    DownloadProgressData,
+)
 from skulk.utils.info_gatherer.info_gatherer import (
     LinuxGpuMetrics,
     MactopMetrics,
@@ -29,6 +38,7 @@ from skulk.utils.info_gatherer.info_gatherer import (
     RdmaCtlStatus,
     StaticNodeInformation,
 )
+from skulk.worker.tests.constants import MODEL_A_ID
 
 
 def test_node_telemetry_survives_topic_codec_round_trip() -> None:
@@ -51,6 +61,100 @@ def test_node_heartbeat_survives_topic_codec_round_trip() -> None:
 
     assert restored == message
     assert isinstance(restored.info, NodeHeartbeat)
+
+
+def test_live_download_progress_round_trips_and_terminal_wins() -> None:
+    """Late progress cannot override its durable terminal outcome."""
+
+    node = NodeId("node-a")
+    shard = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=1)
+    attempt = DownloadAttemptId("attempt-a")
+    ongoing = DownloadOngoing(
+        node_id=node,
+        shard_metadata=shard,
+        attempt_id=attempt,
+        download_progress=DownloadProgressData(
+            total=Memory.from_mb(100),
+            downloaded=Memory.from_mb(50),
+            downloaded_this_session=Memory.from_mb(50),
+            completed_files=1,
+            total_files=2,
+            speed=1.0,
+            eta_ms=1_000,
+            files={},
+        ),
+    )
+    message = NodeTelemetry(node_id=node, info=ongoing)
+    restored = TELEMETRY.deserialize(TELEMETRY.serialize(message))
+    assert restored == message
+    assert isinstance(restored.info, DownloadOngoing)
+
+    view = TelemetryView()
+    view.apply(restored)
+    assert view.effective_downloads({})[node] == [ongoing]
+
+    completed = DownloadCompleted(
+        node_id=node,
+        shard_metadata=shard,
+        attempt_id=attempt,
+        total=Memory.from_mb(100),
+    )
+    view.record_download_event(NodeDownloadProgress(download_progress=completed))
+    assert view.effective_downloads({node: [completed]})[node] == [completed]
+
+    # Independent telemetry/control protocols do not promise cross-plane order.
+    # A queued sample from the completed attempt is ignored after the terminal.
+    view.apply(restored)
+    assert view.effective_downloads({node: [completed]})[node] == [completed]
+
+    view.remove_download_model(str(MODEL_A_ID))
+    view.apply(restored)
+    assert view.effective_downloads({}) == {}
+
+    next_attempt = DownloadAttemptId("attempt-b")
+    pending = DownloadPending(
+        node_id=node,
+        shard_metadata=shard,
+        attempt_id=next_attempt,
+    )
+    view.apply(NodeTelemetry(node_id=node, info=pending))
+    view.record_download_event(NodeDownloadProgress(download_progress=pending))
+    assert view.effective_downloads({})[node] == [pending]
+
+    # The reset's fresh attempt is authoritative even if the old producer's
+    # telemetry tail arrives after it on the independent protocol.
+    view.apply(restored)
+    assert view.effective_downloads({})[node] == [pending]
+
+
+def test_pending_telemetry_can_establish_new_attempt_before_control_event() -> None:
+    """Cross-plane reordering must not hide the next attempt's live status."""
+
+    node = NodeId("node-a")
+    shard = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=1)
+    completed_attempt = DownloadAttemptId("attempt-a")
+    next_attempt = DownloadAttemptId("attempt-b")
+    view = TelemetryView()
+    view.record_download_event(
+        NodeDownloadProgress(
+            download_progress=DownloadCompleted(
+                node_id=node,
+                shard_metadata=shard,
+                attempt_id=completed_attempt,
+                total=Memory.from_mb(100),
+            )
+        )
+    )
+
+    pending = DownloadPending(
+        node_id=node,
+        shard_metadata=shard,
+        attempt_id=next_attempt,
+    )
+    view.apply(NodeTelemetry(node_id=node, info=pending))
+    view.record_download_event(NodeDownloadProgress(download_progress=pending))
+
+    assert view.effective_downloads({})[node] == [pending]
 
 
 def test_heartbeat_and_fallback_receipts_remain_independent() -> None:

@@ -18,6 +18,8 @@ pub const NETWORK_VERSION: &[u8] = b"v0.0.1";
 pub const OVERRIDE_VERSION_ENV_VAR: &str = "SKULK_LIBP2P_NAMESPACE";
 const ELECTION_TOPIC: &str = "election_messages";
 const ELECTION_PROTOCOL_PREFIX: &str = "/skulk/election/meshsub";
+const TELEMETRY_TOPIC: &str = "telemetry";
+const TELEMETRY_PROTOCOL_PREFIX: &str = "/skulk/telemetry/meshsub";
 
 // Uses oneshot senders to emulate function calling apis while avoiding requiring unique ownership
 // of the Swarm.
@@ -112,6 +114,11 @@ fn on_message(swarm: &mut libp2p::Swarm<Behaviour>, message: ToSwarm) {
                     (Err(_), Ok(legacy_subscribed)) => Ok(legacy_subscribed),
                     (Err(isolated_err), Err(_)) => Err(isolated_err),
                 }
+            } else if topic == TELEMETRY_TOPIC {
+                swarm
+                    .behaviour_mut()
+                    .telemetry_gossipsub
+                    .subscribe(&topic_id)
             } else {
                 swarm.behaviour_mut().gossipsub.subscribe(&topic_id)
             };
@@ -129,6 +136,11 @@ fn on_message(swarm: &mut libp2p::Swarm<Behaviour>, message: ToSwarm) {
                     .unsubscribe(&topic_id);
                 let legacy = swarm.behaviour_mut().gossipsub.unsubscribe(&topic_id);
                 isolated || legacy
+            } else if topic == TELEMETRY_TOPIC {
+                swarm
+                    .behaviour_mut()
+                    .telemetry_gossipsub
+                    .unsubscribe(&topic_id)
             } else {
                 swarm.behaviour_mut().gossipsub.unsubscribe(&topic_id)
             };
@@ -145,11 +157,13 @@ fn on_message(swarm: &mut libp2p::Swarm<Behaviour>, message: ToSwarm) {
                     .behaviour_mut()
                     .election_gossipsub
                     .publish(topic_id.clone(), data.clone());
-                let legacy = swarm
-                    .behaviour_mut()
-                    .gossipsub
-                    .publish(topic_id, data);
+                let legacy = swarm.behaviour_mut().gossipsub.publish(topic_id, data);
                 combine_election_publish_results(isolated, legacy)
+            } else if topic == TELEMETRY_TOPIC {
+                swarm
+                    .behaviour_mut()
+                    .telemetry_gossipsub
+                    .publish(topic_id, data)
             } else {
                 swarm.behaviour_mut().gossipsub.publish(topic_id, data)
             };
@@ -191,6 +205,16 @@ fn filter_swarm_event(event: SwarmEvent<BehaviourEvent>) -> Option<FromSwarm> {
                 ..
             })
             | BehaviourEvent::ElectionGossipsub(gossipsub::Event::Message {
+                message:
+                    gossipsub::Message {
+                        source: Some(peer_id),
+                        topic,
+                        data,
+                        ..
+                    },
+                ..
+            })
+            | BehaviourEvent::TelemetryGossipsub(gossipsub::Event::Message {
                 message:
                     gossipsub::Message {
                         source: Some(peer_id),
@@ -320,7 +344,10 @@ mod transport {
 }
 
 mod behaviour {
-    use crate::{alias, discovery, swarm::ELECTION_PROTOCOL_PREFIX};
+    use crate::{
+        alias, discovery,
+        swarm::{ELECTION_PROTOCOL_PREFIX, TELEMETRY_PROTOCOL_PREFIX},
+    };
     use libp2p::swarm::NetworkBehaviour;
     use libp2p::{gossipsub, identity};
 
@@ -331,6 +358,7 @@ mod behaviour {
         pub discovery: discovery::Behaviour,
         pub gossipsub: gossipsub::Behaviour,
         pub election_gossipsub: gossipsub::Behaviour,
+        pub telemetry_gossipsub: gossipsub::Behaviour,
     }
 
     impl Behaviour {
@@ -345,6 +373,10 @@ mod behaviour {
                 // owns a distinct connection-handler queue. Bulk control or
                 // telemetry fan-out can no longer consume its liveness capacity.
                 election_gossipsub: gossipsub_behaviour(keypair, Some(ELECTION_PROTOCOL_PREFIX)),
+                // Telemetry is lossy and independently capacity-bounded. Giving
+                // it a distinct negotiated protocol prevents its handler queues
+                // from consuming command, event, or event-log repair capacity.
+                telemetry_gossipsub: gossipsub_behaviour(keypair, Some(TELEMETRY_PROTOCOL_PREFIX)),
             })
         }
     }
@@ -378,7 +410,7 @@ mod behaviour {
 
 #[cfg(test)]
 mod tests {
-    use super::{ELECTION_TOPIC, behaviour::Behaviour};
+    use super::{ELECTION_TOPIC, TELEMETRY_TOPIC, behaviour::Behaviour};
     use libp2p::{gossipsub, identity};
 
     #[test]
@@ -436,6 +468,44 @@ mod tests {
                 .election_gossipsub
                 .topics()
                 .any(|topic| topic == &control_topic.hash())
+        );
+        assert!(
+            !behaviour
+                .telemetry_gossipsub
+                .topics()
+                .any(|topic| topic == &control_topic.hash())
+        );
+    }
+
+    #[test]
+    fn telemetry_topic_uses_only_the_isolated_gossipsub_behaviour() {
+        let keypair = identity::Keypair::generate_ed25519();
+        let mut behaviour = Behaviour::new(&keypair, Vec::new()).expect("valid behaviour");
+        let telemetry_topic = gossipsub::IdentTopic::new(TELEMETRY_TOPIC);
+
+        assert!(
+            behaviour
+                .telemetry_gossipsub
+                .subscribe(&telemetry_topic)
+                .expect("valid telemetry subscription")
+        );
+        assert!(
+            behaviour
+                .telemetry_gossipsub
+                .topics()
+                .any(|topic| topic == &telemetry_topic.hash())
+        );
+        assert!(
+            !behaviour
+                .gossipsub
+                .topics()
+                .any(|topic| topic == &telemetry_topic.hash())
+        );
+        assert!(
+            !behaviour
+                .election_gossipsub
+                .topics()
+                .any(|topic| topic == &telemetry_topic.hash())
         );
     }
 }

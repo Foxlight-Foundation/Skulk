@@ -21,6 +21,7 @@ from skulk.shared.types.commands import (
 from skulk.shared.types.common import NodeId, SystemId
 from skulk.shared.types.events import Event, NodeDownloadProgress
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.telemetry import NodeTelemetry
 from skulk.shared.types.worker.downloads import DownloadCompleted
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 from skulk.utils.channels import Receiver, Sender, channel
@@ -132,6 +133,7 @@ async def test_re_download_after_delete_completes() -> None:
     cmd_send: Sender[ForwarderDownloadCommand]
     cmd_send, cmd_recv = channel[ForwarderDownloadCommand]()
     event_send, event_recv = channel[Event]()
+    telemetry_send, _ = channel[NodeTelemetry]()
 
     fake_downloader = FakeShardDownloader()
     wrapped_downloader = SingletonShardDownloader(fake_downloader)
@@ -140,6 +142,7 @@ async def test_re_download_after_delete_completes() -> None:
         shard_downloader=wrapped_downloader,
         download_command_receiver=cmd_recv,
         event_sender=event_send,
+        telemetry_sender=telemetry_send,
     )
 
     shard = _make_shard()

@@ -42,7 +42,13 @@ class State(CamelCaseModel):
     )
     instances: Mapping[InstanceId, Instance] = {}
     runners: Mapping[RunnerId, RunnerStatus] = {}
-    downloads: Mapping[NodeId, Sequence[DownloadProgress]] = {}
+    downloads: Mapping[NodeId, Sequence[DownloadProgress]] = Field(
+        default={},
+        description=(
+            "Durable per-node download outcomes. Current state retains completed "
+            "and failed outcomes only; pending and ongoing progress is live telemetry."
+        ),
+    )
     tasks: Mapping[TaskId, Task] = {}
     last_seen: Mapping[NodeId, datetime] = Field(
         default={},

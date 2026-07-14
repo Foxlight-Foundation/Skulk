@@ -24,6 +24,7 @@ from skulk.shared.types.diagnostics import (
     RunnerSupervisorDiagnostics,
     RunnerTaskCancelResponse,
     RunnerTaskDiagnostics,
+    TelemetryPlaneDiagnostics,
 )
 from skulk.shared.types.events import IndexedEvent
 from skulk.shared.types.memory import Memory
@@ -129,6 +130,38 @@ def _running_state_without_master_placement() -> State:
         runners={runner_1: RunnerWarmingUp(), runner_2: RunnerWarmingUp()},
         tasks={warmup_task.task_id: warmup_task},
     )
+
+
+def test_telemetry_diagnostics_are_exposed_without_changing_node_bundle() -> None:
+    """Telemetry pressure uses a separate endpoint safe for older node schemas."""
+
+    api = _build_api("local-node")
+    api._telemetry_plane_provider = lambda: TelemetryPlaneDiagnostics(  # pyright: ignore[reportPrivateUsage]
+        transport="isolated_gossipsub",
+        admission_capacity=256,
+        pending_readings=3,
+        network_queue_capacity=1,
+        network_queue_depth=1,
+        max_queue_depth=4,
+        readings_offered=20,
+        readings_coalesced=15,
+        readings_dropped=1,
+        readings_published=3,
+        publish_failures=1,
+        bytes_published=512,
+        oldest_pending_age_seconds=0.25,
+        last_successful_publish_age_seconds=0.1,
+    )
+    client = TestClient(api.app)
+
+    telemetry_response = client.get("/v1/diagnostics/telemetry")
+    node_response = client.get("/v1/diagnostics/node")
+
+    assert telemetry_response.status_code == 200
+    assert telemetry_response.json()["readingsCoalesced"] == 15
+    assert telemetry_response.json()["networkQueueDepth"] == 1
+    assert node_response.status_code == 200
+    assert "telemetryPlane" not in node_response.json()
 
 
 def test_node_diagnostics_marks_master_outside_placement() -> None:

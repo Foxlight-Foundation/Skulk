@@ -548,6 +548,7 @@ class Node:
                 node_id,
                 shard_downloader,
                 event_sender=event_router.sender(),
+                telemetry_sender=router.telemetry_sender(),
                 download_command_receiver=router.receiver(topics.DOWNLOAD_COMMANDS),
                 offline=args.offline,
                 staging_cache_path=coordinator_staging_path,
@@ -584,6 +585,7 @@ class Node:
                 ),
                 data_plane_zenoh=_zenoh_on,
                 data_plane_egress_provider=router.data_plane_egress_diagnostics,
+                telemetry_plane_provider=router.telemetry_plane_diagnostics,
                 # Installed plugins (skulk.extensions entry points), discovered
                 # once per process. First-party provider facades are registered
                 # by the API and delegate to the existing core runtimes.
@@ -616,7 +618,7 @@ class Node:
                 event_sender=event_router.sender(),
                 command_sender=router.sender(topics.COMMANDS),
                 download_command_sender=router.sender(topics.DOWNLOAD_COMMANDS),
-                telemetry_sender=router.sender(topics.TELEMETRY),
+                telemetry_sender=router.telemetry_sender(),
                 telemetry_view=telemetry_view,
                 data_sender=router.sender(topics.DATA),
                 realtime_audio_receiver=realtime_audio_receiver,
@@ -977,6 +979,7 @@ class Node:
                             self.node_id,
                             elect_downloader,
                             event_sender=self.event_router.sender(),
+                            telemetry_sender=self.router.telemetry_sender(),
                             download_command_receiver=self.router.receiver(
                                 topics.DOWNLOAD_COMMANDS
                             ),
@@ -1018,7 +1021,7 @@ class Node:
                             # telemetry_view) the node never reappears in
                             # node_resources, so placement silently treats a
                             # management/edge node as eligible (#279 review).
-                            telemetry_sender=self.router.sender(topics.TELEMETRY),
+                            telemetry_sender=self.router.telemetry_sender(),
                             telemetry_view=self.telemetry_view,
                             # Must ALSO match Node.create's wiring: without this
                             # the recreated worker has no data sender, so every

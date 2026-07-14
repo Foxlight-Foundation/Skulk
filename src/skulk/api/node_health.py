@@ -188,8 +188,8 @@ def compute_node_health(
             mapped to their last indexed control-plane event. This timestamp is
             not a heartbeat. Health is computed for exactly these nodes (a node
             already pruned for timeout is absent here and from ``/state``).
-        downloads: ``State.downloads`` -- per-node download progress, scanned for
-            terminal ``DownloadFailed`` entries.
+        downloads: Effective per-node download status, scanned for terminal
+            ``DownloadFailed`` entries.
         node_disk: ``TelemetryView.node_disk`` -- per-node models-volume usage.
         now: The wall clock used for heartbeat-staleness; injected for testing.
         heartbeat_last_seen: ``TelemetryView.node_last_heartbeat`` -- local

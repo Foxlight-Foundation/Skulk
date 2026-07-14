@@ -110,9 +110,11 @@ from skulk.shared.types.tasks import (
 )
 from skulk.shared.types.telemetry import TelemetryView
 from skulk.shared.types.worker.downloads import (
+    DownloadAttemptId,
     DownloadFailed,
     DownloadOngoing,
     DownloadPending,
+    DownloadProgress,
 )
 from skulk.shared.types.worker.instances import Instance, InstanceId
 from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
@@ -576,6 +578,11 @@ class Master:
         # applied; keeping the structure preserves one place to revisit this if
         # we later have a shutdown-complete signal that proves memory recovered.
         self._recently_freed_bytes: dict[NodeId, list[tuple[int, float]]] = {}
+
+    def _effective_downloads(self) -> dict[NodeId, list[DownloadProgress]]:
+        """Return durable outcomes overlaid with live download telemetry."""
+
+        return self._telemetry_view.effective_downloads(self.state.downloads)
 
     def _record_freed_instance(self, instance: Instance) -> None:
         """Record a deleted instance's per-node footprint for the grace window.
@@ -1181,7 +1188,7 @@ class Master:
                                 self.state.instances, placement, self.state.tasks
                             )
                             for cmd in cancel_unnecessary_downloads(
-                                placement, self.state.downloads
+                                placement, self._effective_downloads()
                             ):
                                 await self.download_command_sender.send(
                                     ForwarderDownloadCommand(
@@ -1225,7 +1232,7 @@ class Master:
                                 # wastes bandwidth/disk and can re-trigger
                                 # wedged-download recovery later.
                                 for cancel_cmd in cancel_unnecessary_downloads(
-                                    after_delete, self.state.downloads
+                                    after_delete, self._effective_downloads()
                                 ):
                                     await self.download_command_sender.send(
                                         ForwarderDownloadCommand(
@@ -1271,7 +1278,7 @@ class Master:
                                         after_delete,
                                         self._telemetry_view.node_memory,
                                         self.state.node_network,
-                                        download_status=self.state.downloads,
+                                        download_status=self._effective_downloads(),
                                         node_resources=self._telemetry_view.node_resources,
                                         node_vram=usable_vram_by_node(
                                             self._telemetry_view.node_system,
@@ -1320,7 +1327,7 @@ class Master:
                                             after_delete,
                                             self._telemetry_view.node_memory,
                                             self.state.node_network,
-                                            download_status=self.state.downloads,
+                                            download_status=self._effective_downloads(),
                                             excluded_nodes={command.node_id},
                                             node_resources=self._telemetry_view.node_resources,
                                             node_vram=usable_vram_by_node(
@@ -1361,7 +1368,7 @@ class Master:
                                     self.state.tasks,
                                 )
                                 for cmd in cancel_unnecessary_downloads(
-                                    final_placement, self.state.downloads
+                                    final_placement, self._effective_downloads()
                                 ):
                                     await self.download_command_sender.send(
                                         ForwarderDownloadCommand(
@@ -1384,7 +1391,7 @@ class Master:
                                 self.state.instances,
                                 credited_memory,
                                 self.state.node_network,
-                                download_status=self.state.downloads,
+                                download_status=self._effective_downloads(),
                                 excluded_nodes=set(command.excluded_nodes),
                                 node_resources=self._telemetry_view.node_resources,
                                 node_vram=credited_vram,
@@ -1679,7 +1686,7 @@ class Master:
                     after_delete,
                     self._telemetry_view.node_memory,
                     self.state.node_network,
-                    download_status=self.state.downloads,
+                    download_status=self._effective_downloads(),
                     excluded_nodes=set(failed_nodes),
                     node_resources=self._telemetry_view.node_resources,
                     node_vram=usable_vram_by_node(
@@ -1702,7 +1709,7 @@ class Master:
                 self.state.instances, final_placement, self.state.tasks
             )
             for cmd in cancel_unnecessary_downloads(
-                final_placement, self.state.downloads
+                final_placement, self._effective_downloads()
             ):
                 await self.download_command_sender.send(
                     ForwarderDownloadCommand(origin=self._system_id, command=cmd)
@@ -1736,6 +1743,7 @@ class Master:
                             node_id=node_id,
                             shard_metadata=shard,
                             model_directory="",
+                            attempt_id=DownloadAttemptId(),
                         )
                     )
                 )
@@ -1901,7 +1909,7 @@ class Master:
         self._event_log.append(event)
         active_download = any(
             isinstance(progress, DownloadOngoing)
-            for progress_values in self.state.downloads.values()
+            for progress_values in self._effective_downloads().values()
             for progress in progress_values
         )
         idle = not self.state.tasks and not active_download

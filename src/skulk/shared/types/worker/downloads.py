@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt
 
-from skulk.shared.types.common import NodeId
+from skulk.shared.types.common import Id, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.shards import ShardMetadata
 from skulk.utils.pydantic_ext import CamelCaseModel, TaggedModel
@@ -23,10 +23,21 @@ class DownloadProgressData(CamelCaseModel):
     files: dict[str, "DownloadProgressData"]
 
 
+class DownloadAttemptId(Id):
+    """Opaque identity shared by transient and terminal status for one attempt."""
+
+
 class BaseDownloadProgress(TaggedModel):
     node_id: NodeId
     shard_metadata: ShardMetadata
     model_directory: str = ""
+    attempt_id: DownloadAttemptId | None = Field(
+        default=None,
+        description=(
+            "Download attempt identity used to reject late transient telemetry "
+            "after its terminal control event. Null is accepted for legacy logs."
+        ),
+    )
 
 
 class DownloadPending(BaseDownloadProgress):
@@ -50,6 +61,8 @@ class DownloadOngoing(BaseDownloadProgress):
 DownloadProgress = (
     DownloadPending | DownloadCompleted | DownloadFailed | DownloadOngoing
 )
+LiveDownloadProgress = DownloadPending | DownloadOngoing
+TerminalDownloadProgress = DownloadCompleted | DownloadFailed
 
 
 class ModelSafetensorsIndexMetadata(BaseModel):
