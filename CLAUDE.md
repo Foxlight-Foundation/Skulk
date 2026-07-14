@@ -167,7 +167,19 @@ A model card's `placement.compatible_backends` selects which engine serves it
   whose orchestration lives in the server app, not `libllama` / the Python binding.
   Enabled per node via `SKULK_LLAMA_SERVER_BIN`; configured per model via the card
   `served_spec_type` / `served_spec_n_max` runtime fields. Single-node; coexists
-  with `llama_cpp`; the managed-server-plus-proxy shape is the vLLM on-ramp.
+  with `llama_cpp`; the managed-server-plus-proxy shape is shared with `vllm`.
+- **`vllm`** (`worker/runner/vllm/`): second served-backend engine; the worker
+  launches an external `vllm serve` process and proxies its OpenAI HTTP API. The
+  GPU-serving fast path: continuous batching + paged attention hold latency flat
+  and grow aggregate throughput under concurrent load where the single-stream
+  engines collapse (Phase 0 spike, A100 gpt-oss-120B, 64-way concurrency:
+  llama.cpp TTFT ~31s vs vLLM ~0.5s), while single-stream on non-FP4 GPUs the
+  in-process engines can win. **Coexists** (not replaces): the planner picks by
+  hardware + expected concurrency. Enabled per node via `SKULK_VLLM_BIN`
+  (advertises `vllm-cuda`/`vllm-rocm`, GPU-only). Single-node text in v1; tool
+  calling / logprobs / multi-node / vLLM-aware admission are follow-ups.
+  `AcceleratorMetrics.compute_capability` (+ `native_fp4`/`native_fp8`, via NVML)
+  is the capability signal for keying placement on GPU generation, not vendor.
 
 ### Message Flow
 Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
