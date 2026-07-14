@@ -119,9 +119,8 @@ This project records release notes here and mirrors public-facing notes in
   reachable Thunderbolt link is retained, but once another path connects,
   failed link-local addresses retry once per minute instead of every five
   seconds. A socket now requires three consecutive five-second ping failures
-  before teardown, and worker API sweeps probe link-local addresses only when
-  libp2p has observed that exact path. Routable paths and real peer loss retain
-  their normal discovery and election behavior.
+  before teardown. Routable paths, API reachability discovery, and real peer
+  loss retain their normal behavior.
 
 - **Realtime Fabric speech replies cannot generate indefinitely before TTS.**
   Automatic chat responses now enforce a configurable 1-4096 output-token
