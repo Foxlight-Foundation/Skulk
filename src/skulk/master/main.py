@@ -1,9 +1,11 @@
 import copy
 import time
+from collections import deque
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import cast
+from typing import cast, final
 
 import anyio
 import yaml
@@ -106,7 +108,11 @@ from skulk.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
 )
 from skulk.shared.types.telemetry import TelemetryView
-from skulk.shared.types.worker.downloads import DownloadFailed, DownloadPending
+from skulk.shared.types.worker.downloads import (
+    DownloadFailed,
+    DownloadOngoing,
+    DownloadPending,
+)
 from skulk.shared.types.worker.instances import Instance, InstanceId
 from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
 from skulk.shared.types.worker.shards import RpcDonorShardMetadata
@@ -118,8 +124,62 @@ from skulk.utils.state_snapshot_store import StateSnapshotStore
 from skulk.utils.task_group import TaskGroup
 
 EVENT_LOG_REPLAY_BATCH_SIZE = 10_000
+EVENT_LOG_REPLAY_CHUNK_SIZE = 32
+EVENT_LOG_REPLAY_CHUNK_INTERVAL_SECONDS = 0.25
 SNAPSHOT_EVENT_CADENCE = 10_000
 REPLAY_TAIL_RETENTION_EVENTS = SNAPSHOT_EVENT_CADENCE
+EVENT_LOG_GROWTH_WINDOW_SECONDS = 60.0
+EVENT_LOG_IDLE_GROWTH_WARNING_EVENTS_PER_MINUTE = 60.0
+EVENT_LOG_GROWTH_WARNING_COOLDOWN_SECONDS = 300.0
+
+
+@final
+@dataclass(slots=True)
+class EventLogGrowthMonitor:
+    """Detect sustained event-log growth while the master has no active work."""
+
+    window_seconds: float = EVENT_LOG_GROWTH_WINDOW_SECONDS
+    warning_rate_per_minute: float = EVENT_LOG_IDLE_GROWTH_WARNING_EVENTS_PER_MINUTE
+    warning_cooldown_seconds: float = EVENT_LOG_GROWTH_WARNING_COOLDOWN_SECONDS
+    _idle_event_times: deque[float] = field(default_factory=deque)
+    _idle_since: float | None = None
+    _last_warning_at: float | None = None
+
+    def observe(self, *, now: float, idle: bool) -> float | None:
+        """Record one indexed event and return its warning rate when elevated.
+
+        Active placement, download, and inference work resets the idle window so
+        legitimate lifecycle bursts cannot prime a later warning. The returned
+        rate is limited by ``warning_cooldown_seconds``; callers may log it or
+        expose it through operator diagnostics without retaining event payloads.
+        """
+
+        if not idle:
+            self._idle_event_times.clear()
+            self._idle_since = None
+            return None
+
+        if self._idle_since is None:
+            self._idle_since = now
+        self._idle_event_times.append(now)
+        cutoff = now - self.window_seconds
+        while self._idle_event_times and self._idle_event_times[0] < cutoff:
+            self._idle_event_times.popleft()
+
+        observed_seconds = now - self._idle_since
+        if observed_seconds < self.window_seconds:
+            return None
+        if (
+            self._last_warning_at is not None
+            and now - self._last_warning_at < self.warning_cooldown_seconds
+        ):
+            return None
+
+        rate = len(self._idle_event_times) * 60.0 / self.window_seconds
+        if rate < self.warning_rate_per_minute:
+            return None
+        self._last_warning_at = now
+        return rate
 
 TOPOLOGY_SETTLE_GRACE_SECONDS = 60.0
 """How long after master start the plan loop trusts topology for pruning.
@@ -389,6 +449,11 @@ class Master:
         )
         self._snapshot_event_cadence = snapshot_event_cadence
         self._last_snapshot_idx = -1
+        self._pending_replay_start_idx: int | None = None
+        self._replay_worker_running = False
+        self._active_replay_next_idx: int | None = None
+        self._active_replay_end_idx: int | None = None
+        self._event_log_growth_monitor = EventLogGrowthMonitor()
         self._pending_traces: dict[TaskId, dict[int, list[TraceEventData]]] = {}
         self._expected_ranks: dict[TaskId, set[int]] = {}
         # Instance ids whose memory-refusal re-placement has already been
@@ -561,7 +626,7 @@ class Master:
         self._seed_state = None
         indexed = IndexedEvent(event=StateSnapshotHydrated(state=seed), idx=idx)
         self.state = apply(self.state, indexed)
-        self._event_log.append(indexed.event)
+        self._append_event_log(indexed.event)
         await self._send_event(indexed)
         logger.info(
             f"Indexed failover seed as event {idx}: "
@@ -1314,27 +1379,7 @@ class Master:
                                 StagedModelEvicted(model_id=command.model_id)
                             )
                         case RequestEventLog():
-                            # We should just be able to send everything, since other buffers will ignore old messages
-                            # Large sessions can take many minutes to replay at 1k events per request,
-                            # which leaves freshly joined nodes with an incomplete topology view.
-                            replay_start = max(
-                                command.since_idx,
-                                self._event_log.start_idx,
-                            )
-                            if replay_start != command.since_idx:
-                                logger.warning(
-                                    "Requested replay index predates retained master tail; "
-                                    f"serving from {replay_start} instead of {command.since_idx}"
-                                )
-                            end = min(
-                                replay_start + EVENT_LOG_REPLAY_BATCH_SIZE,
-                                len(self._event_log),
-                            )
-                            for i, event in enumerate(
-                                self._event_log.read_range(replay_start, end),
-                                start=replay_start,
-                            ):
-                                await self._send_event(IndexedEvent(idx=i, event=event))
+                            self._schedule_event_log_replay(command.since_idx)
                     for event in generated_events:
                         await self.event_sender.send(event)
                 except ValueError as e:
@@ -1606,9 +1651,107 @@ class Master:
                     if isinstance(event, NodeGatheredInfo):
                         event.when = str(datetime.now(tz=timezone.utc))
 
-                    self._event_log.append(event)
+                    self._append_event_log(event)
                     await self._send_event(indexed)
                     await self._persist_snapshot()
+
+    def _schedule_event_log_replay(self, since_idx: int) -> None:
+        """Coalesce replay requests onto one paced background worker."""
+
+        active_next = self._active_replay_next_idx
+        active_end = self._active_replay_end_idx
+        if (
+            active_next is not None
+            and active_end is not None
+            and active_next <= since_idx < active_end
+        ):
+            # The active replay has not sent this index yet, so its existing pass
+            # will satisfy the request without another broadcast of the same tail.
+            return
+        if self._pending_replay_start_idx is None:
+            self._pending_replay_start_idx = since_idx
+        else:
+            self._pending_replay_start_idx = min(
+                self._pending_replay_start_idx, since_idx
+            )
+        if self._replay_worker_running:
+            return
+        self._replay_worker_running = True
+        self._tg.start_soon(self._drain_event_log_replays)
+
+    async def _drain_event_log_replays(self) -> None:
+        """Serve coalesced replay requests without blocking command processing."""
+
+        try:
+            while self._pending_replay_start_idx is not None:
+                requested_start = self._pending_replay_start_idx
+                self._pending_replay_start_idx = None
+                await self._serve_event_log_replay(requested_start)
+        finally:
+            self._active_replay_next_idx = None
+            self._active_replay_end_idx = None
+            self._replay_worker_running = False
+
+    async def _serve_event_log_replay(self, requested_start: int) -> None:
+        """Broadcast one retained replay tail in bounded, paced chunks."""
+
+        retained_start = max(requested_start, self._event_log.start_idx)
+        replay_start = min(retained_start, len(self._event_log))
+        if requested_start < self._event_log.start_idx:
+            logger.warning(
+                "Requested replay index predates retained master tail; "
+                f"serving from {replay_start} instead of {requested_start}"
+            )
+        elif requested_start > len(self._event_log):
+            logger.debug(
+                "Requested replay index is beyond the current master tail; "
+                f"serving an empty range at {replay_start}"
+            )
+        replay_end = min(
+            replay_start + EVENT_LOG_REPLAY_BATCH_SIZE,
+            len(self._event_log),
+        )
+        self._active_replay_next_idx = replay_start
+        self._active_replay_end_idx = replay_end
+        replayed = 0
+        for idx, event in enumerate(
+            self._event_log.read_range(replay_start, replay_end),
+            start=replay_start,
+        ):
+            await self._send_event(IndexedEvent(idx=idx, event=event))
+            replayed += 1
+            self._active_replay_next_idx = idx + 1
+            if (
+                replayed % EVENT_LOG_REPLAY_CHUNK_SIZE == 0
+                and idx + 1 < replay_end
+            ):
+                await anyio.sleep(EVENT_LOG_REPLAY_CHUNK_INTERVAL_SECONDS)
+        logger.info(
+            "Served paced event-log replay "
+            f"(start={replay_start}, end={replay_end}, events={replayed})"
+        )
+
+    def _append_event_log(self, event: Event) -> None:
+        """Append one decision and warn on sustained idle-state log growth."""
+
+        self._event_log.append(event)
+        active_download = any(
+            isinstance(progress, DownloadOngoing)
+            for progress_values in self.state.downloads.values()
+            for progress in progress_values
+        )
+        idle = not self.state.tasks and not active_download
+        rate = self._event_log_growth_monitor.observe(
+            now=time.monotonic(),
+            idle=idle,
+        )
+        if rate is not None:
+            logger.warning(
+                "Event log is growing during an idle cluster state "
+                f"({rate:.1f} events/min over "
+                f"{self._event_log_growth_monitor.window_seconds:.0f}s); "
+                "inspect periodic control-plane event sources before replay pressure accumulates"
+            )
 
     # This function is re-entrant, take care!
     async def _send_event(self, event: IndexedEvent):
