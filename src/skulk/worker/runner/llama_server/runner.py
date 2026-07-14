@@ -127,35 +127,59 @@ def _force_no_spec() -> bool:
     )
 
 
-def _draft_model_args(runtime: Any, spec_type: str) -> list[str]:
+def _draft_model_args(runtime: Any, spec_type: str) -> list[str] | None:
     """Resolve the ``--model-draft`` args for a served spec mode.
 
     When the card declares a draft GGUF (``served_spec_draft_repo`` +
     ``served_spec_draft_file``), resolve its on-disk path and return
     ``["--model-draft", path]`` (Gemma 4 draft_mtp, draft_simple, draft_eagle3).
-    Modes in ``_DRAFT_MODEL_REQUIRED`` raise loudly when no draft is configured;
-    ``draft_mtp`` without a draft is fine (built-in heads), and ``ngram`` needs
-    none. Returns ``[]`` when no draft applies. Pure except for the on-disk path
+
+    Returns ``None`` when the card DECLARES a draft but it cannot be provided
+    (missing ``served_spec_draft_file``, or the draft GGUF is not on disk): the
+    draft is best-effort at download (a failed cross-repo co-fetch is swallowed,
+    #574), so a declared-but-absent draft must degrade to serving WITHOUT
+    speculation rather than crashing the runner. The caller drops ``--spec-type``
+    entirely in that case, since a draft-backed mode without its draft is not a
+    valid llama-server invocation.
+
+    Returns ``[]`` when no draft applies (``draft_mtp`` with built-in heads,
+    ``ngram``); the caller still passes ``--spec-type`` for those. Modes in
+    ``_DRAFT_MODEL_REQUIRED`` with no draft declared at all are a card
+    misconfiguration and still raise loudly. Pure except for the on-disk path
     resolution, so the validation branches are unit-testable.
     """
     draft_repo = getattr(runtime, "served_spec_draft_repo", None) if runtime else None
     draft_file = getattr(runtime, "served_spec_draft_file", None) if runtime else None
-    if draft_repo:
+    # ngram-cache speculation uses no `--model-draft`, so a draft repo on an
+    # ngram card is spurious: ignore it and keep `--spec-type ngram-cache`
+    # rather than dropping speculation for a draft that mode never consults.
+    if draft_repo and spec_type != "ngram":
         if not draft_file:
-            raise RuntimeError(
-                "served_spec_draft_repo is set but served_spec_draft_file is "
-                "missing; both are required to pass --model-draft"
+            logger.warning(
+                f"Card declares served_spec_draft_repo {draft_repo!r} without "
+                "served_spec_draft_file; serving without speculation."
             )
+            return None
         from skulk.download.download_utils import build_model_path
 
-        draft_dir = build_model_path(ModelId(draft_repo))
+        try:
+            draft_dir = build_model_path(ModelId(draft_repo))
+        except FileNotFoundError:
+            logger.warning(
+                f"Served {spec_type} draft repo {draft_repo!r} is not on disk; "
+                "serving without speculation (the draft is a best-effort "
+                "companion, so its absence must not fail the model)."
+            )
+            return None
         draft_path = (draft_dir / draft_file).resolve()
         if not draft_path.is_file() or not draft_path.is_relative_to(
             draft_dir.resolve()
         ):
-            raise RuntimeError(
-                f"served draft GGUF {draft_file!r} not found under {draft_dir}"
+            logger.warning(
+                f"Served draft GGUF {draft_file!r} not found under {draft_dir}; "
+                "serving without speculation."
             )
+            return None
         return ["--model-draft", str(draft_path)]
     if spec_type in _DRAFT_MODEL_REQUIRED:
         raise RuntimeError(
@@ -637,11 +661,22 @@ class Runner:
                     "speculative decoding"
                 )
             else:
-                cmd += ["--spec-type", flag]
-                n_max = getattr(runtime, "served_spec_n_max", None)
-                if n_max is not None:
-                    cmd += ["--spec-draft-n-max", str(n_max)]
-                cmd += _draft_model_args(runtime, spec_type)
+                # Resolve the draft FIRST: a card that declares a draft it
+                # cannot provide (the draft is a best-effort companion, so a
+                # failed cross-repo co-fetch is swallowed and the model is still
+                # marked complete, #574) degrades to plain decode rather than
+                # crashing. --spec-type is dropped too, since a draft-backed mode
+                # without its draft is not a valid llama-server invocation.
+                # None => the declared draft is unavailable; _draft_model_args
+                # has already logged the specific reason, so drop the spec
+                # silently (serve plain decode). Otherwise pass the spec + draft.
+                draft_args = _draft_model_args(runtime, spec_type)
+                if draft_args is not None:
+                    cmd += ["--spec-type", flag]
+                    n_max = getattr(runtime, "served_spec_n_max", None)
+                    if n_max is not None:
+                        cmd += ["--spec-draft-n-max", str(n_max)]
+                    cmd += draft_args
 
         self.server_log_path = (
             Path(tempfile.gettempdir()) / f"skulk-llama-server-{self.runner_id}.log"
