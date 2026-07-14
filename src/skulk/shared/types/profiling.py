@@ -226,9 +226,10 @@ class AcceleratorMetrics(CamelCaseModel):
     Ampere, which has no native FP4, but winning on Blackwell, which does).
     ``None`` on collectors that do not report it (AMD sysfs, Apple)."""
     native_fp4: bool | None = None
-    """Whether the GPU accelerates FP4 natively (Blackwell sm100+, i.e.
-    ``compute_capability >= "10.0"``). Derived at the collector boundary from the
-    compute capability. ``None`` when unmeasured."""
+    """Whether the GPU accelerates FP4 natively (Blackwell sm100+, i.e. SM level
+    (major, minor) >= (10, 0)). Derived at the collector boundary from the parsed
+    compute capability (a numeric tuple compare, not a string compare). ``None``
+    when unmeasured."""
     native_fp8: bool | None = None
     """Whether the GPU accelerates FP8 natively (Ada sm89 / Hopper sm90 and later).
     Derived at the collector boundary from the compute capability. ``None`` when

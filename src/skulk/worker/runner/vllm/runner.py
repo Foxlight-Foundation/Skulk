@@ -19,6 +19,17 @@ holding GPU memory. Per-request cancellation aborts the proxied HTTP connection
 Scope of this slice: streamed chat completions only. Tool calling and per-token
 logprobs are rejected loudly rather than silently mismeasured (the OpenAI SSE
 proxy does not surface logprobs, and tool-call round-tripping is a follow-up).
+
+KNOWN LIMITATION -- serialized dispatch (the required next slice): like every
+current runner, ``main()`` processes one task at a time and ``_generate_streaming``
+blocks the loop until its HTTP stream finishes. So even though the worker will
+forward a second task to a ``RunnerRunning`` runner, that task queues until the
+first completes, and vLLM never sees concurrent in-flight requests. That means
+this slice does NOT yet deliver vLLM's continuous-batching throughput benefit --
+its whole reason for existing. Realizing it requires concurrent in-flight
+generation dispatch in the runner (thread/async per request, thread-safe event
+sends, per-request cancellation, status while N are in flight), a focused
+follow-up that also needs live GPU validation.
 """
 
 import contextlib
@@ -77,7 +88,6 @@ from skulk.worker.runner.generation_stats import (
     subprocess_peak_memory,
 )
 from skulk.worker.runner.llama_cpp.runner import (
-    generation_kwargs,
     map_finish_reason,
     messages_for_llama,
     serving_n_ctx,
@@ -169,6 +179,58 @@ def build_vllm_serve_args(
         "--tensor-parallel-size",
         "1",
     ]
+
+
+def vllm_generation_kwargs(task_params: Any) -> dict[str, Any]:
+    """Translate Skulk sampling params into vLLM ``/v1/chat/completions`` fields.
+
+    Distinct from the llama.cpp mapper (``generation_kwargs``): vLLM's OpenAI server
+    uses OpenAI/HF parameter names, so the repetition control is ``repetition_penalty``
+    (llama.cpp's ``repeat_penalty`` would be silently ignored by vLLM). ``top_k`` /
+    ``min_p`` are vLLM sampling extensions passed through by name. Pure, so the
+    mapping is unit-testable. Thinking control is layered separately by
+    :func:`vllm_reasoning_overrides`; logprobs are rejected before this is called.
+    """
+    kwargs: dict[str, Any] = {}
+    if task_params.max_output_tokens is not None:
+        kwargs["max_tokens"] = task_params.max_output_tokens
+    if task_params.temperature is not None:
+        kwargs["temperature"] = task_params.temperature
+    if task_params.top_p is not None:
+        kwargs["top_p"] = task_params.top_p
+    if task_params.top_k is not None:
+        kwargs["top_k"] = task_params.top_k
+    if task_params.min_p is not None:
+        kwargs["min_p"] = task_params.min_p
+    if task_params.repetition_penalty is not None:
+        kwargs["repetition_penalty"] = task_params.repetition_penalty
+    if task_params.stop is not None:
+        kwargs["stop"] = task_params.stop
+    if task_params.seed is not None:
+        kwargs["seed"] = task_params.seed
+    return kwargs
+
+
+def vllm_reasoning_overrides(task_params: Any) -> dict[str, Any]:
+    """Map Skulk's thinking controls onto vLLM request fields.
+
+    vLLM's OpenAI server exposes the same two levers as llama-server:
+    ``chat_template_kwargs`` (the model's jinja template reads ``enable_thinking``,
+    the Qwen3 / Gemma toggle; a template that ignores it is harmless) and
+    ``reasoning_effort`` (OpenAI-style effort for gpt-oss). Without this the sampling
+    body carries no thinking control, so ``enable_thinking=False`` would be silently
+    ignored and a reasoning model would think on every request. ``"none"`` effort is
+    not a valid server value (disabling goes through ``enable_thinking=False``), so
+    it is dropped.
+    """
+    overrides: dict[str, Any] = {}
+    enable_thinking = getattr(task_params, "enable_thinking", None)
+    if enable_thinking is not None:
+        overrides["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+    effort = getattr(task_params, "reasoning_effort", None)
+    if effort is not None and effort != "none":
+        overrides["reasoning_effort"] = effort
+    return overrides
 
 
 def parse_openai_sse_line(line: str) -> _StreamDelta | None:
@@ -427,10 +489,14 @@ class Runner:
         self, model_dir: Path, served_model_name: str, n_ctx: int
     ) -> None:
         binary = os.environ.get(VLLM_BIN_ENV, "").strip()
-        if not binary:
+        if not binary or not (os.path.isfile(binary) and os.access(binary, os.X_OK)):
+            # Validate up front (like the llama_server runner) so a misconfigured or
+            # vanished-since-probe binary surfaces as a clear runner error rather
+            # than a bare FileNotFoundError/PermissionError out of subprocess.Popen.
             raise RuntimeError(
-                f"{VLLM_BIN_ENV} is not set; the vllm runner cannot spawn a server. "
-                "This node should not have been a placement candidate for a vLLM card."
+                f"{VLLM_BIN_ENV}={binary!r} is not an existing executable; the vllm "
+                "runner cannot spawn a server. This node should not have been a "
+                "placement candidate for a vLLM card."
             )
         host = "127.0.0.1"
         port = self._pick_port()
@@ -531,8 +597,12 @@ class Runner:
 
         model_id = self.shard_metadata.model_card.model_id
         command_id = task.command_id
-        body: dict[str, Any] = generation_kwargs(task.task_params)
+        body: dict[str, Any] = vllm_generation_kwargs(task.task_params)
         body["messages"] = messages_for_llama(task.task_params)
+        # Forward thinking control (enable_thinking / reasoning_effort) to vLLM;
+        # without it a reasoning model thinks on every request regardless of the
+        # request's toggle.
+        body.update(vllm_reasoning_overrides(task.task_params))
 
         record_runner_phase(
             "task_submission",

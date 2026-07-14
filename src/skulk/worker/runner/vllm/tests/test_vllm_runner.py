@@ -7,6 +7,7 @@ SSE parser, and the GPU-memory-utilization knob.
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,7 +17,67 @@ from skulk.worker.runner.vllm.runner import (
     _gpu_memory_utilization,
     build_vllm_serve_args,
     parse_openai_sse_line,
+    vllm_generation_kwargs,
+    vllm_reasoning_overrides,
 )
+
+
+def _params(**overrides: object) -> SimpleNamespace:
+    base: dict[str, object] = dict(
+        max_output_tokens=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        min_p=None,
+        repetition_penalty=None,
+        stop=None,
+        seed=None,
+        enable_thinking=None,
+        reasoning_effort=None,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_vllm_generation_kwargs_uses_vllm_parameter_names() -> None:
+    kwargs = vllm_generation_kwargs(
+        _params(
+            max_output_tokens=256,
+            temperature=0.7,
+            top_p=0.9,
+            top_k=40,
+            min_p=0.05,
+            repetition_penalty=1.1,
+            stop=["</s>"],
+            seed=7,
+        )
+    )
+    assert kwargs["max_tokens"] == 256
+    assert kwargs["temperature"] == 0.7
+    assert kwargs["top_p"] == 0.9
+    assert kwargs["top_k"] == 40
+    assert kwargs["min_p"] == 0.05
+    # vLLM's name, not llama.cpp's repeat_penalty (which vLLM would ignore).
+    assert kwargs["repetition_penalty"] == 1.1
+    assert "repeat_penalty" not in kwargs
+    assert kwargs["stop"] == ["</s>"]
+    assert kwargs["seed"] == 7
+
+
+def test_vllm_generation_kwargs_omits_unset() -> None:
+    assert vllm_generation_kwargs(_params()) == {}
+
+
+def test_vllm_reasoning_overrides_maps_thinking_controls() -> None:
+    assert vllm_reasoning_overrides(_params(enable_thinking=False)) == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
+    assert vllm_reasoning_overrides(_params(reasoning_effort="high")) == {
+        "reasoning_effort": "high"
+    }
+    # "none" effort is not a valid server value; disabling goes via enable_thinking.
+    assert vllm_reasoning_overrides(_params(reasoning_effort="none")) == {}
+    assert vllm_reasoning_overrides(_params()) == {}
 
 
 def test_build_vllm_serve_args_shape() -> None:
