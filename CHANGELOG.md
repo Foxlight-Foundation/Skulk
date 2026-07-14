@@ -7,6 +7,8 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+- Fixed HTTP model-store staging progress to use the canonical registry byte total across fresh and resumed multi-file transfers, restoring the bounded fraction gate that prevents progress telemetry from flooding the ordered control plane (#520).
+
 ### Added
 
 - **Placement previews expose every valid host, not just the ranking
@@ -139,6 +141,14 @@ This project records release notes here and mirrors public-facing notes in
   seconds. A socket now requires three consecutive five-second ping failures
   before teardown. Routable paths, API reachability discovery, and real peer
   loss retain their normal behavior.
+
+- **Retained event-log replay no longer arrives as an unpaced 10k-event
+  burst.** The master coalesces replay requests onto one background worker,
+  emits the retained tail in bounded paced chunks without blocking command
+  processing, and warns when the event log grows at an elevated rate while
+  the cluster has no active task or download. This removes the replay
+  amplifier that could turn slow periodic event growth into follower flaps
+  and repeated state-sync storms (#449).
 
 - **Realtime Fabric speech replies cannot generate indefinitely before TTS.**
   Automatic chat responses now enforce a configurable 1-4096 output-token
