@@ -9,6 +9,7 @@ from skulk.download.shard_downloader import ShardDownloader
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
+from skulk.store import model_store_client
 from skulk.store.config import StagingNodeConfig
 from skulk.store.model_store_client import ModelStoreClient, ModelStoreDownloader
 
@@ -60,6 +61,30 @@ class _FakeStoreClient:
         return dest_path
 
 
+class _FakeRegistryResponse:
+    status = 200
+
+    async def __aenter__(self) -> "_FakeRegistryResponse":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    async def json(self) -> object:
+        return [{"model_id": "org/model", "total_bytes": 1_000}]
+
+
+class _FakeRegistrySession:
+    async def __aenter__(self) -> "_FakeRegistrySession":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    def get(self, _url: str) -> _FakeRegistryResponse:
+        return _FakeRegistryResponse()
+
+
 def _build_shard() -> PipelineShardMetadata:
     return PipelineShardMetadata(
         model_card=ModelCard(
@@ -108,6 +133,79 @@ async def test_model_store_downloader_emits_real_stage_progress() -> None:
     assert observed[1].total.in_bytes == 2048
     assert observed[2].downloaded.in_bytes == 2048
     assert observed[2].completed_files == 1
+
+
+@pytest.mark.anyio
+async def test_http_stage_uses_registered_total_for_resumed_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = ModelStoreClient(store_host="store.local", store_port=58080)
+    model_id = "org/model"
+    dest_path = tmp_path / "staging"
+    dest_path.mkdir()
+    (dest_path / "config.json").write_bytes(b"x" * 250)
+    observed: list[tuple[int, int]] = []
+    download_sizes = {
+        "weights-1.safetensors": 300,
+        "weights-2.safetensors": 450,
+    }
+
+    async def fetch_file_list(_model_id: str) -> list[str]:
+        return ["config.json", *download_sizes]
+
+    async def fetch_model_total_bytes(_model_id: str) -> int:
+        return 1_000
+
+    async def download_store_file(
+        _model_id: str,
+        file_path: str,
+        _dest_path: Path,
+        on_progress: Callable[[int, int], Awaitable[None]] | None,
+        total_bytes_offset: int,
+        grand_total: int,
+    ) -> int:
+        size = download_sizes[file_path]
+        assert on_progress is not None
+        await on_progress(total_bytes_offset + size, grand_total)
+        return size
+
+    async def record_progress(downloaded: int, total: int) -> None:
+        observed.append((downloaded, total))
+
+    monkeypatch.setattr(client, "_fetch_file_list", fetch_file_list)
+    monkeypatch.setattr(client, "_fetch_model_total_bytes", fetch_model_total_bytes)
+    monkeypatch.setattr(client, "_download_store_file", download_store_file)
+
+    path = await client._stage_http(  # pyright: ignore[reportPrivateUsage]
+        model_id,
+        dest_path,
+        record_progress,
+    )
+
+    assert path == dest_path
+    assert observed == [(550, 1_000), (1_000, 1_000)]
+
+
+@pytest.mark.anyio
+async def test_registered_total_lookup_reads_canonical_store_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_create_http_session(**_kwargs: object) -> _FakeRegistrySession:
+        return _FakeRegistrySession()
+
+    monkeypatch.setattr(
+        model_store_client,
+        "create_http_session",
+        fake_create_http_session,
+    )
+    client = ModelStoreClient(store_host="store.local", store_port=58080)
+
+    total_bytes = await client._fetch_model_total_bytes(  # pyright: ignore[reportPrivateUsage]
+        "org/model"
+    )
+
+    assert total_bytes == 1_000
 
 
 async def _record_progress(

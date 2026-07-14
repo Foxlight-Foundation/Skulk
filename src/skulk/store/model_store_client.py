@@ -509,6 +509,48 @@ class ModelStoreClient:
             logger.debug(f"ModelStoreClient: fetch_registry failed: {exc}")
             return []
 
+    async def _fetch_model_total_bytes(self, model_id: str) -> int:
+        """Return the canonical registered byte total for one stored model."""
+
+        url = _make_store_url(self._store_host, self._store_port, "/registry")
+
+        async def _request() -> int:
+            async with (
+                create_http_session(timeout_profile="short") as session,
+                session.get(url) as resp,
+            ):
+                if resp.status != 200:
+                    raise RuntimeError(
+                        f"ModelStoreClient: /registry returned {resp.status}"
+                    )
+                data: object = await resp.json()
+                if not isinstance(data, list):
+                    raise RuntimeError(
+                        "ModelStoreClient: unexpected registry response type"
+                    )
+                for entry in data:
+                    if not isinstance(entry, dict) or entry.get("model_id") != model_id:
+                        continue
+                    total_bytes = entry.get("total_bytes")
+                    if (
+                        not isinstance(total_bytes, int)
+                        or isinstance(total_bytes, bool)
+                        or total_bytes <= 0
+                    ):
+                        raise RuntimeError(
+                            "ModelStoreClient: invalid registered byte total for "
+                            f"{model_id}"
+                        )
+                    return total_bytes
+                raise ModelNotInStoreError(
+                    f"Model {model_id} not found in store registry"
+                )
+
+        return await _retry_store_http(
+            _request,
+            description=f"registry lookup for {model_id}",
+        )
+
     async def list_active_downloads(self) -> list[dict[str, object]]:
         """Fetch the list of active store-side downloads."""
         url = _make_store_url(self._store_host, self._store_port, "/downloads")
@@ -913,16 +955,17 @@ class ModelStoreClient:
         on_progress: Callable[[int, int], Awaitable[None]] | None,
     ) -> Path:
         """Stage all files for *model_id* over HTTP."""
-        file_list = await self._fetch_file_list(model_id)
+        file_list, grand_total = await asyncio.gather(
+            self._fetch_file_list(model_id),
+            self._fetch_model_total_bytes(model_id),
+        )
 
         # Compute progress baseline from already-staged files
-        grand_total = 0
         staged_offset = 0
         for file_path in file_list:
             target = dest_path / file_path
             if target.exists():
                 size = target.stat().st_size
-                grand_total += size
                 staged_offset += size
 
         bytes_done = staged_offset
@@ -935,7 +978,7 @@ class ModelStoreClient:
                 dest_path,
                 on_progress,
                 total_bytes_offset=bytes_done,
-                grand_total=max(grand_total, 1),
+                grand_total=grand_total,
             )
             bytes_done += file_bytes
 
