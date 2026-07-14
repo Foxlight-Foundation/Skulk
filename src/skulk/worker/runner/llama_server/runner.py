@@ -664,13 +664,11 @@ class Runner:
                 # marked complete, #574) degrades to plain decode rather than
                 # crashing. --spec-type is dropped too, since a draft-backed mode
                 # without its draft is not a valid llama-server invocation.
+                # None => the declared draft is unavailable; _draft_model_args
+                # has already logged the specific reason, so drop the spec
+                # silently (serve plain decode). Otherwise pass the spec + draft.
                 draft_args = _draft_model_args(runtime, spec_type)
-                if draft_args is None:
-                    logger.warning(
-                        f"Serving {spec_type!r} model without speculative "
-                        "decoding: its declared draft is unavailable on disk."
-                    )
-                else:
+                if draft_args is not None:
                     cmd += ["--spec-type", flag]
                     n_max = getattr(runtime, "served_spec_n_max", None)
                     if n_max is not None:
