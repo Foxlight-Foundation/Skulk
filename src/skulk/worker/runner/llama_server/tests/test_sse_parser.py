@@ -36,9 +36,10 @@ def test_draft_args_required_modes_raise_without_draft() -> None:
             _draft_model_args(_runtime(), mode)
 
 
-def test_draft_args_repo_without_file_raises() -> None:
-    with pytest.raises(RuntimeError, match="served_spec_draft_file is"):
-        _draft_model_args(_runtime(repo="org/draft-GGUF"), "draft_mtp")
+def test_draft_args_repo_without_file_degrades() -> None:
+    # A card that names a draft repo but no file cannot pass --model-draft;
+    # degrade to plain decode (None) rather than crash the runner (#574).
+    assert _draft_model_args(_runtime(repo="org/draft-GGUF"), "draft_mtp") is None
 
 
 def test_draft_args_resolves_model_draft_path(
@@ -56,17 +57,38 @@ def test_draft_args_resolves_model_draft_path(
     assert args == ["--model-draft", str(tmp_path / "draft.gguf")]
 
 
-def test_draft_args_missing_file_on_disk_raises(
+def test_draft_args_missing_file_on_disk_degrades(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # Draft dir resolves but the declared file is not present: degrade to plain
+    # decode (None), not crash (#574).
     import skulk.download.download_utils as du
 
     def _fake_build_model_path(_model_id: object) -> Path:
         return tmp_path
 
     monkeypatch.setattr(du, "build_model_path", _fake_build_model_path)
-    with pytest.raises(RuntimeError, match="not found under"):
+    assert (
         _draft_model_args(_runtime(repo="org/draft-GGUF", file="missing.gguf"), "draft_simple")
+        is None
+    )
+
+
+def test_draft_args_draft_dir_absent_degrades(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The gemma-4-31B scenario: the cross-repo draft was never staged (its
+    # best-effort co-fetch failed and was swallowed, #574), so build_model_path
+    # raises FileNotFoundError. Degrade to plain decode rather than crash the
+    # runner at launch.
+    import skulk.download.download_utils as du
+
+    def _raise(_model_id: object) -> Path:
+        raise FileNotFoundError("Model org/draft-GGUF not found on disk")
+
+    monkeypatch.setattr(du, "build_model_path", _raise)
+    assert (
+        _draft_model_args(_runtime(repo="org/draft-GGUF", file="draft.gguf"), "draft_mtp")
+        is None
+    )
 
 
 def _card(reasoning: object = None, capabilities: list[str] | None = None) -> SimpleNamespace:

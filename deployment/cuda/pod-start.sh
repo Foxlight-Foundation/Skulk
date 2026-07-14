@@ -18,6 +18,21 @@ if [ -n "${PUBLIC_KEY:-}" ]; then
   chmod 600 /root/.ssh/authorized_keys
 fi
 
+# A Hugging Face token can be injected as the HF_TOKEN environment variable at
+# pod-create time (same pattern as PUBLIC_KEY). Persist it to the canonical
+# Hugging Face token file so skulk's downloader and huggingface_hub authenticate
+# every download: without a token, model fetches from gated or Xet-backed repos
+# fail and a `--ensure-store-downloads` run stalls waiting on a download that
+# never starts. Written to the token file (which skulk's get_hf_token reads via
+# HF_HOME) and exported for the interactive bootstrap shell.
+if [ -n "${HF_TOKEN:-}" ]; then
+  mkdir -p /root/.cache/huggingface
+  printf '%s' "${HF_TOKEN}" > /root/.cache/huggingface/token
+  chmod 600 /root/.cache/huggingface/token
+  printf 'export HF_TOKEN=%s\n' "${HF_TOKEN}" > /etc/profile.d/skulk-hf-token.sh
+  chmod 600 /etc/profile.d/skulk-hf-token.sh
+fi
+
 # Host keys are generated per pod: the public image ships without any (they
 # are deleted at build time) because baked-in keys would be shared across
 # every pod and readable by anyone who pulls the image.

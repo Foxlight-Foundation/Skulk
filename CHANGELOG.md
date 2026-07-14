@@ -114,6 +114,24 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **A served-MTP model with a missing speculative draft serves without
+  speculation instead of crashing.** When a served card declares a
+  cross-repo draft (`served_spec_draft_repo`/`served_spec_draft_file`) whose
+  GGUF is not on disk, the `llama_server` runner used to raise `FileNotFoundError`
+  at launch and crash the instance. The draft is a best-effort companion (a
+  failed cross-repo co-fetch is swallowed and the base is still marked
+  complete), so a declared-but-absent draft now degrades to plain decode: the
+  runner drops `--spec-type`/`--model-draft` and logs a warning rather than
+  failing a loadable model (#574, sharpens #554).
+
+- **The CUDA pod entrypoint wires an injected `HF_TOKEN`.** A Hugging Face
+  token passed as the `HF_TOKEN` pod environment variable (same pattern as
+  `PUBLIC_KEY`) is now persisted to the canonical Hugging Face token file so
+  skulk's downloader authenticates every model fetch. Without it, downloads
+  from gated or Xet-backed repos fail and a `--ensure-store-downloads` run
+  stalls on a download that never starts (#575). The prebaked image must be
+  rebuilt to pick up the new entrypoint.
+
 - **Realtime Fabric speech replies cannot generate indefinitely before TTS.**
   Automatic chat responses now enforce a configurable 1-4096 output-token
   ceiling (256 by default) and disable hidden reasoning unless explicitly
