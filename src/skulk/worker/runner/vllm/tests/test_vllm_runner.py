@@ -128,6 +128,14 @@ def test_parse_sse_finish_reason_mapped() -> None:
     assert delta.finish == "length"
 
 
+def test_parse_sse_preserves_content_filter() -> None:
+    # vLLM can emit content_filter; it must not be collapsed to a normal stop.
+    line = 'data: {"choices":[{"delta":{"content":""},"finish_reason":"content_filter"}]}'
+    delta = parse_openai_sse_line(line)
+    assert delta is not None
+    assert delta.finish == "content_filter"
+
+
 def test_parse_sse_done_sentinel() -> None:
     delta = parse_openai_sse_line("data: [DONE]")
     assert delta is not None

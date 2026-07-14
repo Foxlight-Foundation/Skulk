@@ -260,10 +260,19 @@ def parse_openai_sse_line(line: str) -> _StreamDelta | None:
     choice = choices[0]
     raw_delta = choice.get("delta")
     delta = raw_delta if isinstance(raw_delta, dict) else {}
+    # Preserve OpenAI's `content_filter` finish reason, which vLLM can emit but the
+    # shared llama.cpp `map_finish_reason` collapses to `stop` (llama.cpp never
+    # emits it); otherwise a filtered response is misreported as a normal stop.
+    raw_finish = choice.get("finish_reason")
+    finish = (
+        "content_filter"
+        if raw_finish == "content_filter"
+        else map_finish_reason(raw_finish)
+    )
     return _StreamDelta(
         reasoning=delta.get("reasoning_content") or "",
         content=delta.get("content") or "",
-        finish=map_finish_reason(choice.get("finish_reason")),
+        finish=finish,
         done=False,
     )
 
@@ -598,6 +607,10 @@ class Runner:
         model_id = self.shard_metadata.model_card.model_id
         command_id = task.command_id
         body: dict[str, Any] = vllm_generation_kwargs(task.task_params)
+        # vLLM's OpenAI server requires `model` in the request body (unlike
+        # llama-server, which serves one model and ignores it); it must match the
+        # server's --served-model-name, which the runner sets to the Skulk model id.
+        body["model"] = str(model_id)
         body["messages"] = messages_for_llama(task.task_params)
         # Forward thinking control (enable_thinking / reasoning_effort) to vLLM;
         # without it a reasoning model thinks on every request regardless of the
