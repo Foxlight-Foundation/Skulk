@@ -1,0 +1,702 @@
+# pyright: reportAny=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
+"""Served-backend text-generation runner: launches and proxies ``vllm serve``.
+
+The second *served* engine (after ``llama_server``), reusing that engine's
+generic shape -- a managed inference-server subprocess plus an OpenAI HTTP proxy
+-- with the vLLM CLI instead of ``llama-server``. vLLM is the GPU-serving fast
+path: its continuous batching and paged attention hold latency flat and grow
+aggregate throughput under concurrent load, where the single-stream engines
+(``llama_cpp`` / ``llama_server``) collapse. It coexists with those engines and
+is selected per model by the card's ``compatible_backends`` on a node that set
+``SKULK_VLLM_BIN``.
+
+Single-node only in this first slice (no ring / warmup / RPC), mirroring the
+in-process runners. Linux-oriented: the subprocess is reaped on parent death via
+``PR_SET_PDEATHSIG`` so a runner crash never orphans a ``vllm serve`` process
+holding GPU memory. Per-request cancellation aborts the proxied HTTP connection
+(stopping server-side generation); ``SIGTERM`` is for whole-server teardown.
+
+Scope of this slice: streamed chat completions only. Tool calling and per-token
+logprobs are rejected loudly rather than silently mismeasured (the OpenAI SSE
+proxy does not surface logprobs, and tool-call round-tripping is a follow-up).
+"""
+
+import contextlib
+import ctypes
+import json
+import os
+import random
+import signal
+import socket
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+from typing import Any, Final, Literal, NamedTuple
+
+import httpx
+from anyio import ClosedResourceError, EndOfStream, WouldBlock
+
+from skulk.api.types import GenerationStats
+from skulk.download.download_utils import build_model_path
+from skulk.shared.backends import VLLM_BIN_ENV
+from skulk.shared.types.chunks import ErrorChunk, TokenChunk
+from skulk.shared.types.common import CommandId, ModelId
+from skulk.shared.types.events import (
+    ChunkGenerated,
+    Event,
+    RunnerStatusUpdated,
+    TaskAcknowledged,
+    TaskStatusUpdated,
+)
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.tasks import (
+    CANCEL_ALL_TASKS,
+    LoadModel,
+    Shutdown,
+    Task,
+    TaskId,
+    TaskStatus,
+    TextGeneration,
+)
+from skulk.shared.types.worker.instances import BoundInstance
+from skulk.shared.types.worker.runners import (
+    RunnerIdle,
+    RunnerLoading,
+    RunnerReady,
+    RunnerRunning,
+    RunnerShutdown,
+    RunnerShuttingDown,
+    RunnerStatus,
+)
+from skulk.utils.channels import MpReceiver, MpSender
+from skulk.worker.runner.bootstrap import logger
+from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
+from skulk.worker.runner.generation_stats import (
+    StreamStatsClock,
+    subprocess_peak_memory,
+)
+from skulk.worker.runner.llama_cpp.runner import (
+    generation_kwargs,
+    map_finish_reason,
+    messages_for_llama,
+    serving_n_ctx,
+    wants_logprobs,
+)
+
+# vLLM startup can be slow: weight load + torch.compile + CUDA-graph capture on a
+# large model runs to a couple of minutes, so allow a generous health deadline.
+_HEALTH_DEADLINE_S: Final = 600.0
+# Between tasks the runner wakes at this cadence to verify the server subprocess
+# is still alive (a dead server between requests must crash the runner, not wedge
+# it Ready), mirroring the llama_server runner.
+_LIVENESS_POLL_S: Final = 2.0
+
+# Fraction of GPU VRAM vLLM may use for weights + KV cache. Operator-tunable via
+# env; vLLM's own default is 0.90. Placement admits against the same usable-VRAM
+# figure, so this stays a node-local serving knob for now (a card-level override
+# is a follow-up when vLLM-aware admission lands).
+_GPU_MEMORY_UTILIZATION_ENV: Final = "SKULK_VLLM_GPU_MEMORY_UTILIZATION"
+_DEFAULT_GPU_MEMORY_UTILIZATION: Final = 0.90
+
+
+class _StreamDelta(NamedTuple):
+    """One parsed SSE delta from the proxied ``/v1/chat/completions`` stream."""
+
+    reasoning: str
+    content: str
+    finish: Literal["stop", "length", "content_filter"] | None
+    done: bool  # the terminal ``data: [DONE]`` sentinel
+
+
+def _gpu_memory_utilization() -> float:
+    """The ``--gpu-memory-utilization`` fraction, from env or the 0.90 default.
+
+    An unparseable or out-of-range (0, 1] value falls back to the default rather
+    than passing vLLM a nonsense fraction that would fail the server at spawn.
+    """
+    raw = os.environ.get(_GPU_MEMORY_UTILIZATION_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_GPU_MEMORY_UTILIZATION
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            f"{_GPU_MEMORY_UTILIZATION_ENV}={raw!r} is not a number; "
+            f"using {_DEFAULT_GPU_MEMORY_UTILIZATION}"
+        )
+        return _DEFAULT_GPU_MEMORY_UTILIZATION
+    if not 0.0 < value <= 1.0:
+        logger.warning(
+            f"{_GPU_MEMORY_UTILIZATION_ENV}={value} is outside (0, 1]; "
+            f"using {_DEFAULT_GPU_MEMORY_UTILIZATION}"
+        )
+        return _DEFAULT_GPU_MEMORY_UTILIZATION
+    return value
+
+
+def build_vllm_serve_args(
+    binary: str,
+    model_dir: Path,
+    served_model_name: str,
+    host: str,
+    port: int,
+    max_model_len: int,
+    gpu_memory_utilization: float,
+) -> list[str]:
+    """Build the ``vllm serve`` command line. Pure, so it is unit-testable.
+
+    vLLM auto-detects the platform (CUDA vs ROCm) from its own install, so unlike
+    llama-server there is no per-compute-backend flag to set -- the node advertised
+    ``vllm-cuda`` / ``vllm-rocm`` only because the matching vLLM build is present.
+    ``--served-model-name`` pins the model id callers address (the Skulk model id),
+    decoupled from the on-disk directory path.
+    """
+    return [
+        binary,
+        "serve",
+        str(model_dir),
+        "--served-model-name",
+        served_model_name,
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--max-model-len",
+        str(max_model_len),
+        "--gpu-memory-utilization",
+        f"{gpu_memory_utilization:.2f}",
+        "--tensor-parallel-size",
+        "1",
+    ]
+
+
+def parse_openai_sse_line(line: str) -> _StreamDelta | None:
+    """Parse one OpenAI SSE line into a ``_StreamDelta``, or ``None`` to skip it.
+
+    Handles the standard streaming shape vLLM emits: ``data: {json}`` lines whose
+    first choice carries a ``delta`` (``content`` and/or ``reasoning_content`` when
+    a reasoning parser is configured) plus an optional ``finish_reason``, and the
+    terminal ``data: [DONE]``. Returns ``None`` for non-``data:`` lines; ``[DONE]``
+    is reported via ``done=True``; malformed JSON or a choice-less payload is
+    skipped (``None``) so a stray line never breaks the stream. Pure (no I/O).
+    """
+    if not line.startswith("data:"):
+        return None
+    data = line[len("data:") :].strip()
+    if data == "[DONE]":
+        return _StreamDelta("", "", None, done=True)
+    try:
+        chunk = json.loads(data)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(chunk, dict):
+        return None
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return None
+    choice = choices[0]
+    raw_delta = choice.get("delta")
+    delta = raw_delta if isinstance(raw_delta, dict) else {}
+    return _StreamDelta(
+        reasoning=delta.get("reasoning_content") or "",
+        content=delta.get("content") or "",
+        finish=map_finish_reason(choice.get("finish_reason")),
+        done=False,
+    )
+
+
+def _set_pdeathsig() -> None:
+    """Ask the kernel to SIGKILL this child when its parent (the runner) dies.
+
+    Runs in the forked child before ``exec`` (``preexec_fn``). Linux-only,
+    best-effort: a runner-process crash must never leave an orphaned ``vllm serve``
+    holding GPU memory. Any failure is swallowed (the explicit teardown path still
+    applies on graceful shutdown).
+    """
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        pr_set_pdeathsig = 1
+        libc.prctl(pr_set_pdeathsig, signal.SIGKILL, 0, 0, 0)
+    except Exception:  # noqa: BLE001 - best-effort; non-Linux or no libc
+        pass
+
+
+class Runner:
+    """Single-node served-backend runner that proxies an external ``vllm serve``.
+
+    Lifecycle mirrors the ``llama_server`` runner: it skips the ring
+    (``ConnectToGroup`` / ``StartWarmup``), spawns the server on ``LoadModel``, and
+    serves ``TextGeneration`` by streaming the server's SSE output back as
+    ``ChunkGenerated`` events.
+    """
+
+    def __init__(
+        self,
+        bound_instance: BoundInstance,
+        event_sender: MpSender[Event],
+        task_receiver: MpReceiver[Task],
+        cancel_receiver: MpReceiver[TaskId],
+        context_token_limit: int | None = None,
+    ):
+        self.event_sender = event_sender
+        self.task_receiver = task_receiver
+        self.cancel_receiver = cancel_receiver
+        self.bound_instance = bound_instance
+        self.context_token_limit = context_token_limit
+        self.instance, self.runner_id, self.shard_metadata = (
+            bound_instance.instance,
+            bound_instance.bound_runner_id,
+            bound_instance.bound_shard,
+        )
+        # vLLM is single-node in this slice: vLLM's own tensor/pipeline parallelism
+        # is a later track, so any multi-node placement reaching here is a bug.
+        if self.shard_metadata.world_size != 1:
+            raise RuntimeError(
+                "vllm runner requires single-node placement, got "
+                f"world_size={self.shard_metadata.world_size}"
+            )
+        self.setup_start_time = time.time()
+        self.cancelled_tasks: set[TaskId] = set()
+        self.seen: set[TaskId] = set()
+        self.server_proc: subprocess.Popen[bytes] | None = None
+        self.server_log: Any = None
+        self.server_log_path: Path | None = None
+        self.base_url: str | None = None
+        self.current_status: RunnerStatus = RunnerIdle()
+        logger.info("vllm runner created")
+        self.update_status(RunnerIdle())
+
+    # --- runner-contract plumbing (mirrors the llama_server runner) ------------
+
+    def update_status(self, status: RunnerStatus) -> None:
+        self.current_status = status
+        self.event_sender.send(
+            RunnerStatusUpdated(
+                runner_id=self.runner_id, runner_status=self.current_status
+            )
+        )
+
+    def send_task_status(self, task: Task, status: TaskStatus) -> None:
+        self.event_sender.send(
+            TaskStatusUpdated(task_id=task.task_id, task_status=status)
+        )
+
+    def acknowledge_task(self, task: Task) -> None:
+        record_runner_phase(
+            "task_submission",
+            event="task_acknowledged",
+            detail=task.__class__.__name__,
+            task_id=task.task_id,
+        )
+        self.event_sender.send(TaskAcknowledged(task_id=task.task_id))
+
+    def _drain_cancellations(self) -> None:
+        while True:
+            try:
+                cancelled = self.cancel_receiver.receive_nowait()
+            except WouldBlock:
+                break
+            self.cancelled_tasks.add(cancelled)
+
+    def _is_cancelled(self, task_id: TaskId) -> bool:
+        self._drain_cancellations()
+        return (
+            task_id in self.cancelled_tasks or CANCEL_ALL_TASKS in self.cancelled_tasks
+        )
+
+    def main(self) -> None:
+        try:
+            with self.task_receiver as tasks:
+                while True:
+                    try:
+                        task = tasks.receive_timeout(_LIVENESS_POLL_S)
+                    except WouldBlock:
+                        # No task within the poll window: verify the vllm serve
+                        # subprocess is still alive. Without this a server that
+                        # dies BETWEEN requests leaves the runner gossiping Ready
+                        # forever while every future request fails.
+                        self._ensure_server_alive()
+                        continue
+                    except (EndOfStream, ClosedResourceError):
+                        break
+                    if task.task_id in self.seen:
+                        logger.warning("repeat task - potential error")
+                    self.seen.add(task.task_id)
+                    self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
+                    self.send_task_status(task, TaskStatus.Running)
+                    self.handle_task(task)
+                    was_cancelled = (
+                        task.task_id in self.cancelled_tasks
+                        or CANCEL_ALL_TASKS in self.cancelled_tasks
+                    )
+                    self.send_task_status(
+                        task,
+                        TaskStatus.Cancelled if was_cancelled else TaskStatus.Complete,
+                    )
+                    self.update_status(self.current_status)
+                    if isinstance(self.current_status, RunnerShutdown):
+                        break
+        finally:
+            # Never leave the server subprocess running past the runner loop, even
+            # on an unexpected exit (PR_SET_PDEATHSIG is the SIGKILL backstop).
+            self._teardown_server()
+
+    def _ensure_server_alive(self) -> None:
+        """Raise if the spawned ``vllm serve`` exited behind our back.
+
+        Raising kills the runner process; the supervisor observes the crash and
+        the peer-failure cascade tears the instance down instead of leaving a
+        wedged Ready runner.
+        """
+        proc = self.server_proc
+        if proc is None or isinstance(
+            self.current_status, (RunnerShuttingDown, RunnerShutdown)
+        ):
+            return
+        if proc.poll() is not None:
+            record_runner_phase(
+                "error",
+                event="server_exited",
+                detail=f"vllm serve exited unexpectedly (code {proc.returncode})",
+            )
+            raise RuntimeError(
+                f"vllm serve exited unexpectedly (code {proc.returncode}); "
+                f"log tail:\n{self._server_log_tail()}"
+            )
+
+    def handle_task(self, task: Task) -> None:
+        match task:
+            case LoadModel() if isinstance(self.current_status, RunnerIdle):
+                self._load_model(task)
+            case TextGeneration() if isinstance(self.current_status, RunnerReady):
+                self._generate(task)
+            case Shutdown():
+                logger.info("vllm runner shutting down")
+                record_runner_phase(
+                    "shutdown_cleanup",
+                    event="runner_shutdown_requested",
+                    task_id=task.task_id,
+                )
+                self.update_status(RunnerShuttingDown())
+                self.acknowledge_task(task)
+                self._teardown_server()
+                record_runner_phase(
+                    "shutdown_cleanup",
+                    event="server_teardown_complete",
+                    task_id=task.task_id,
+                )
+                self.current_status = RunnerShutdown()
+            case _:
+                raise RuntimeError(
+                    f"vllm runner received unsupported task "
+                    f"{task.__class__.__name__} in status "
+                    f"{self.current_status.__class__.__name__}"
+                )
+
+    # --- model load: spawn + health-check the server --------------------------
+
+    def _load_model(self, task: Task) -> None:
+        self.update_status(RunnerLoading())
+        self.acknowledge_task(task)
+
+        card = self.shard_metadata.model_card
+        model_id = card.model_id
+        model_dir = build_model_path(ModelId(model_id))
+        n_ctx = serving_n_ctx(self.context_token_limit, logits_all=False)
+        try:
+            with runner_phase(
+                "load_model",
+                detail="spawn_vllm_serve",
+                task_id=task.task_id,
+                attrs={"model_dir": model_dir.name, "n_ctx": n_ctx},
+            ):
+                self._spawn_server(model_dir, str(model_id), n_ctx)
+                self._await_health()
+        except Exception:
+            self._teardown_server()
+            raise
+        self.current_status = RunnerReady()
+        record_runner_phase("idle", event="runner_ready", task_id=task.task_id)
+        logger.info(
+            f"vllm runner ready in {time.time() - self.setup_start_time:.1f}s "
+            f"(url={self.base_url})"
+        )
+
+    def _spawn_server(
+        self, model_dir: Path, served_model_name: str, n_ctx: int
+    ) -> None:
+        binary = os.environ.get(VLLM_BIN_ENV, "").strip()
+        if not binary:
+            raise RuntimeError(
+                f"{VLLM_BIN_ENV} is not set; the vllm runner cannot spawn a server. "
+                "This node should not have been a placement candidate for a vLLM card."
+            )
+        host = "127.0.0.1"
+        port = self._pick_port()
+        self.base_url = f"http://{host}:{port}"
+        args = build_vllm_serve_args(
+            binary,
+            model_dir,
+            served_model_name,
+            host,
+            port,
+            n_ctx,
+            _gpu_memory_utilization(),
+        )
+        log_fd, log_name = tempfile.mkstemp(prefix="vllm-serve-", suffix=".log")
+        self.server_log_path = Path(log_name)
+        self.server_log = os.fdopen(log_fd, "wb")
+        logger.info(f"spawning vllm serve: {' '.join(args)} (log={log_name})")
+        self.server_proc = subprocess.Popen(
+            args,
+            stdout=self.server_log,
+            stderr=subprocess.STDOUT,
+            preexec_fn=_set_pdeathsig if os.name == "posix" else None,
+        )
+
+    def _pick_port(self) -> int:
+        """Pick a free ephemeral port for the server, avoiding the API port."""
+        for _ in range(30):
+            port = random.randint(49153, 65535)
+            if port == 52415:
+                continue
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                try:
+                    probe.bind(("127.0.0.1", port))
+                except OSError:
+                    continue
+            return port
+        raise RuntimeError("could not find a free port for vllm serve")
+
+    def _await_health(self) -> None:
+        assert self.server_proc is not None and self.base_url is not None
+        deadline = time.time() + _HEALTH_DEADLINE_S
+        with httpx.Client(timeout=5.0) as client:
+            while time.time() < deadline:
+                if self.server_proc.poll() is not None:
+                    raise RuntimeError(
+                        "vllm serve exited during startup (code "
+                        f"{self.server_proc.returncode}); log tail:\n"
+                        f"{self._server_log_tail()}"
+                    )
+                try:
+                    # vLLM's /health returns 200 with an empty body once the engine
+                    # is up (no JSON status field, unlike llama-server).
+                    if client.get(f"{self.base_url}/health").status_code == 200:
+                        return
+                except Exception:  # noqa: BLE001 - not up yet; keep polling
+                    pass
+                time.sleep(2)
+        raise RuntimeError(
+            f"vllm serve did not become healthy within {_HEALTH_DEADLINE_S:.0f}s; "
+            f"log tail:\n{self._server_log_tail()}"
+        )
+
+    def _server_log_tail(self, lines: int = 30) -> str:
+        if self.server_log_path is None or not self.server_log_path.exists():
+            return "(no log)"
+        try:
+            text = self.server_log_path.read_text(errors="replace")
+        except OSError:
+            return "(log unreadable)"
+        return "\n".join(text.splitlines()[-lines:])
+
+    def _teardown_server(self) -> None:
+        proc = self.server_proc
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=5)
+            except Exception:  # noqa: BLE001 - teardown is best-effort
+                pass
+            self.server_proc = None
+        if self.server_log is not None:
+            with contextlib.suppress(Exception):
+                self.server_log.close()
+            self.server_log = None
+
+    # --- generation: proxy the server's OpenAI streaming API ------------------
+
+    def _generate(self, task: Task) -> None:
+        assert isinstance(task, TextGeneration)
+        self.update_status(RunnerRunning())
+        self.acknowledge_task(task)
+        assert self.base_url is not None
+
+        model_id = self.shard_metadata.model_card.model_id
+        command_id = task.command_id
+        body: dict[str, Any] = generation_kwargs(task.task_params)
+        body["messages"] = messages_for_llama(task.task_params)
+
+        record_runner_phase(
+            "task_submission",
+            event="submit_text_generation",
+            task_id=task.task_id,
+            command_id=str(command_id),
+            attrs={"tools": bool(task.task_params.tools)},
+        )
+        try:
+            # Tool calling and per-token logprobs are out of scope for this slice:
+            # the tool-call round trip and logprob surfacing over the SSE proxy are
+            # follow-ups. Fail loud rather than silently drop them (matching the
+            # llama_server runner's #385 no-silent-empty contract).
+            if task.task_params.tools:
+                raise RuntimeError(
+                    "Tool calling is not yet supported on the vllm engine; retry "
+                    "without tools or use a llama_cpp/llama_server card."
+                )
+            if wants_logprobs(
+                task.task_params.logprobs, task.task_params.top_logprobs
+            ):
+                body.pop("logprobs", None)
+                body.pop("top_logprobs", None)
+                raise RuntimeError(
+                    "Per-token logprobs are not supported on the vllm engine: the "
+                    "OpenAI SSE proxy does not surface them. Retry without "
+                    "logprobs/top_logprobs."
+                )
+            record_runner_phase(
+                "decode_stream",
+                event="request_started",
+                task_id=task.task_id,
+                command_id=str(command_id),
+            )
+            self._generate_streaming(task, body, model_id, command_id)
+        except Exception as exc:  # noqa: BLE001 - surface as an ErrorChunk
+            record_runner_phase(
+                "error",
+                event="generation_failed",
+                detail=f"{type(exc).__name__}: {exc}",
+                task_id=task.task_id,
+                command_id=str(command_id),
+            )
+            logger.opt(exception=exc).warning("vllm generation failed")
+            self.event_sender.send(
+                ChunkGenerated(
+                    command_id=command_id,
+                    chunk=ErrorChunk(model=model_id, error_message=str(exc)),
+                )
+            )
+        else:
+            was_cancelled = (
+                task.task_id in self.cancelled_tasks
+                or CANCEL_ALL_TASKS in self.cancelled_tasks
+            )
+            record_runner_phase(
+                "cancel_observed" if was_cancelled else "completion",
+                event="generation_finished",
+                task_id=task.task_id,
+                command_id=str(command_id),
+            )
+        self.current_status = RunnerReady()
+        record_runner_phase("idle", event="runner_ready", task_id=task.task_id)
+
+    def _generate_streaming(
+        self,
+        task: TextGeneration,
+        body: dict[str, Any],
+        model_id: ModelId,
+        command_id: CommandId,
+    ) -> None:
+        body["stream"] = True
+        assert self.base_url is not None
+        clock = StreamStatsClock()
+
+        def final_stats() -> GenerationStats:
+            # Peak memory always comes from the server child (weights + KV live
+            # there), never this proxy. Prompt count is unknowable from the SSE
+            # stream, reported as 0 (a zero reads as "unmeasured").
+            return clock.stats(
+                prompt_tokens=0, generation_tokens=clock.pieces
+            ).model_copy(update={"peak_memory_usage": self._server_peak_memory()})
+
+        emitted_finish = False
+        # No read timeout: generation can pause between tokens on a busy GPU. The
+        # connection is closed (aborting server generation) when we break out.
+        timeout = httpx.Timeout(connect=15.0, read=None, write=30.0, pool=None)
+        with (
+            httpx.Client(timeout=timeout) as client,
+            client.stream(
+                "POST", f"{self.base_url}/v1/chat/completions", json=body
+            ) as resp,
+        ):
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if self._is_cancelled(task.task_id):
+                    logger.info(f"vllm generation cancelled: {task.task_id}")
+                    break
+                delta = parse_openai_sse_line(line)
+                if delta is None:
+                    continue
+                if delta.done:
+                    break
+                if delta.reasoning or delta.content:
+                    # One SSE delta per generated token piece.
+                    clock.mark_piece()
+                if delta.reasoning:
+                    self._send_token(
+                        command_id, model_id, delta.reasoning, is_thinking=True
+                    )
+                if delta.content:
+                    self._send_token(command_id, model_id, delta.content)
+                if delta.finish is not None:
+                    self._send_token(
+                        command_id,
+                        model_id,
+                        "",
+                        finish_reason=delta.finish,
+                        stats=final_stats(),
+                    )
+                    emitted_finish = True
+        # Guarantee a terminal chunk so the consumer's stream closes even if the
+        # server ended without an explicit finish_reason.
+        if not emitted_finish and not self._is_cancelled(task.task_id):
+            self._send_token(
+                command_id, model_id, "", finish_reason="stop", stats=final_stats()
+            )
+
+    def _server_peak_memory(self) -> Memory:
+        """Peak RSS of the ``vllm serve`` child, or zero when unmeasurable.
+
+        The weights and KV cache live in the external server process, so the
+        proxy's own RSS would misattribute memory in telemetry. Zero means
+        "unmeasured" (non-Linux, or the child already exited).
+        """
+        proc = self.server_proc
+        if proc is None:
+            return Memory.from_bytes(0)
+        return subprocess_peak_memory(proc.pid) or Memory.from_bytes(0)
+
+    def _send_token(
+        self,
+        command_id: CommandId,
+        model_id: ModelId,
+        text: str,
+        *,
+        is_thinking: bool = False,
+        finish_reason: Any = None,
+        stats: GenerationStats | None = None,
+    ) -> None:
+        """Emit one TokenChunk; skip empty non-terminal chunks."""
+        if not text and finish_reason is None:
+            return
+        self.event_sender.send(
+            ChunkGenerated(
+                command_id=command_id,
+                chunk=TokenChunk(
+                    model=model_id,
+                    text=text,
+                    token_id=-1,  # the OpenAI proxy stream does not expose ids
+                    usage=None,
+                    finish_reason=finish_reason,
+                    is_thinking=is_thinking,
+                    stats=stats,
+                ),
+            )
+        )
