@@ -36,6 +36,14 @@ def test_draft_args_required_modes_raise_without_draft() -> None:
             _draft_model_args(_runtime(), mode)
 
 
+def test_draft_args_ngram_ignores_spurious_draft_repo() -> None:
+    # ngram-cache uses no --model-draft; a draft repo on an ngram card is
+    # spurious and must NOT drop --spec-type ngram-cache (returns [], not None).
+    assert (
+        _draft_model_args(_runtime(repo="org/draft-GGUF", file="draft.gguf"), "ngram") == []
+    )
+
+
 def test_draft_args_repo_without_file_degrades() -> None:
     # A card that names a draft repo but no file cannot pass --model-draft;
     # degrade to plain decode (None) rather than crash the runner (#574).

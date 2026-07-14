@@ -150,7 +150,10 @@ def _draft_model_args(runtime: Any, spec_type: str) -> list[str] | None:
     """
     draft_repo = getattr(runtime, "served_spec_draft_repo", None) if runtime else None
     draft_file = getattr(runtime, "served_spec_draft_file", None) if runtime else None
-    if draft_repo:
+    # ngram-cache speculation uses no `--model-draft`, so a draft repo on an
+    # ngram card is spurious: ignore it and keep `--spec-type ngram-cache`
+    # rather than dropping speculation for a draft that mode never consults.
+    if draft_repo and spec_type != "ngram":
         if not draft_file:
             logger.warning(
                 f"Card declares served_spec_draft_repo {draft_repo!r} without "
