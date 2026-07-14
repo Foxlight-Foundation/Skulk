@@ -10,6 +10,7 @@ from skulk.master.main import (
     Master,
 )
 from skulk.routing.router import get_node_id_keypair
+from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.commands import (
     ForwarderCommand,
     ForwarderDownloadCommand,
@@ -24,7 +25,15 @@ from skulk.shared.types.events import (
     TestEvent,
     TracingStateChanged,
 )
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSyncMessage
+from skulk.shared.types.worker.downloads import (
+    DownloadOngoing,
+    DownloadPending,
+    DownloadProgressData,
+)
+from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.channels import Receiver, Sender, channel
 
 
@@ -40,6 +49,9 @@ class _ReplayEventLog:
         offset_start = max(start - self.start_idx, 0)
         offset_end = max(end - self.start_idx, 0)
         return self._events[offset_start:offset_end]
+
+    def append(self, event: Event) -> None:
+        self._events.append(event)
 
 
 def _make_master() -> tuple[
@@ -157,6 +169,20 @@ def test_event_log_replay_requests_coalesce_around_active_range() -> None:
     assert master._pending_replay_start_idx == 5  # pyright: ignore[reportPrivateUsage]
 
 
+@pytest.mark.asyncio
+async def test_event_log_replay_clamps_request_beyond_current_tail() -> None:
+    master, global_receiver, _command_sender, _event_receiver = _make_master()
+    master._event_log = _ReplayEventLog(  # pyright: ignore[reportAttributeAccessIssue,reportPrivateUsage]
+        [TestEvent() for _ in range(3)]
+    )
+
+    await master._serve_event_log_replay(8)  # pyright: ignore[reportPrivateUsage]
+
+    assert global_receiver.collect() == []
+    assert master._active_replay_next_idx == 3  # pyright: ignore[reportPrivateUsage]
+    assert master._active_replay_end_idx == 3  # pyright: ignore[reportPrivateUsage]
+
+
 def test_event_log_growth_monitor_warns_only_after_sustained_idle_growth() -> None:
     monitor = EventLogGrowthMonitor(
         window_seconds=60.0,
@@ -182,3 +208,84 @@ def test_event_log_growth_monitor_resets_for_active_work() -> None:
     assert monitor.observe(now=60.0, idle=False) is None
     assert monitor.observe(now=61.0, idle=True) is None
     assert monitor.observe(now=121.0, idle=True) == 2.0
+
+
+def _download_state(*, ongoing: bool) -> State:
+    node_id = NodeId("download-node")
+    shard = PipelineShardMetadata(
+        model_card=ModelCard(
+            model_id=ModelId("test/model"),
+            storage_size=Memory.from_mb(100),
+            n_layers=2,
+            hidden_size=8,
+            supports_tensor=False,
+            tasks=[ModelTask.TextGeneration],
+        ),
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=2,
+        n_layers=2,
+    )
+    if ongoing:
+        progress = DownloadOngoing(
+            node_id=node_id,
+            shard_metadata=shard,
+            download_progress=DownloadProgressData(
+                total=Memory.from_mb(100),
+                downloaded=Memory.from_mb(50),
+                downloaded_this_session=Memory.from_mb(50),
+                completed_files=1,
+                total_files=2,
+                speed=1.0,
+                eta_ms=1_000,
+                files={},
+            ),
+        )
+    else:
+        progress = DownloadPending(
+            node_id=node_id,
+            shard_metadata=shard,
+            total=Memory.from_mb(100),
+        )
+    return State(downloads={node_id: [progress]})
+
+
+def test_pending_download_does_not_suppress_idle_growth_alarm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    master, _global_receiver, _command_sender, _event_receiver = _make_master()
+    master.state = _download_state(ongoing=False)
+    master._event_log = _ReplayEventLog([])  # pyright: ignore[reportAttributeAccessIssue,reportPrivateUsage]
+    observed_idle: list[bool] = []
+
+    def observe(
+        _monitor: EventLogGrowthMonitor, *, now: float, idle: bool
+    ) -> None:
+        del now
+        observed_idle.append(idle)
+
+    monkeypatch.setattr(EventLogGrowthMonitor, "observe", observe)
+    master._append_event_log(TestEvent())  # pyright: ignore[reportPrivateUsage]
+
+    assert observed_idle == [True]
+
+
+def test_ongoing_download_resets_idle_growth_alarm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    master, _global_receiver, _command_sender, _event_receiver = _make_master()
+    master.state = _download_state(ongoing=True)
+    master._event_log = _ReplayEventLog([])  # pyright: ignore[reportAttributeAccessIssue,reportPrivateUsage]
+    observed_idle: list[bool] = []
+
+    def observe(
+        _monitor: EventLogGrowthMonitor, *, now: float, idle: bool
+    ) -> None:
+        del now
+        observed_idle.append(idle)
+
+    monkeypatch.setattr(EventLogGrowthMonitor, "observe", observe)
+    master._append_event_log(TestEvent())  # pyright: ignore[reportPrivateUsage]
+
+    assert observed_idle == [False]

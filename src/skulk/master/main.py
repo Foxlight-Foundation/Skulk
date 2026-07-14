@@ -108,7 +108,11 @@ from skulk.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
 )
 from skulk.shared.types.telemetry import TelemetryView
-from skulk.shared.types.worker.downloads import DownloadFailed, DownloadPending
+from skulk.shared.types.worker.downloads import (
+    DownloadFailed,
+    DownloadOngoing,
+    DownloadPending,
+)
 from skulk.shared.types.worker.instances import Instance, InstanceId
 from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
 from skulk.shared.types.worker.shards import RpcDonorShardMetadata
@@ -1691,11 +1695,17 @@ class Master:
     async def _serve_event_log_replay(self, requested_start: int) -> None:
         """Broadcast one retained replay tail in bounded, paced chunks."""
 
-        replay_start = max(requested_start, self._event_log.start_idx)
-        if replay_start != requested_start:
+        retained_start = max(requested_start, self._event_log.start_idx)
+        replay_start = min(retained_start, len(self._event_log))
+        if requested_start < self._event_log.start_idx:
             logger.warning(
                 "Requested replay index predates retained master tail; "
                 f"serving from {replay_start} instead of {requested_start}"
+            )
+        elif requested_start > len(self._event_log):
+            logger.debug(
+                "Requested replay index is beyond the current master tail; "
+                f"serving an empty range at {replay_start}"
             )
         replay_end = min(
             replay_start + EVENT_LOG_REPLAY_BATCH_SIZE,
@@ -1726,7 +1736,7 @@ class Master:
 
         self._event_log.append(event)
         active_download = any(
-            isinstance(progress, DownloadPending)
+            isinstance(progress, DownloadOngoing)
             for progress_values in self.state.downloads.values()
             for progress in progress_values
         )
