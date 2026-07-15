@@ -209,6 +209,55 @@ def test_vision_network_terminal_lane_bypasses_full_payload_lane() -> None:
     assert terminal.packet == accepted
 
 
+def test_vision_network_completion_stays_ordered_with_upload_payload() -> None:
+    """Completion cannot overtake the open and chunk frames it verifies."""
+
+    router = _router(zenoh=False)
+    opened = VisionMediaPacket(
+        source_node=NodeId("api-node"),
+        target_node=NodeId("test-node"),
+        command_id=CommandId("ordered-command"),
+        model=ModelId("org/model"),
+        sequence=0,
+        kind="opened",
+        total_chunks=1,
+        image_count=1,
+    )
+    chunk = VisionMediaPacket(
+        source_node=opened.source_node,
+        target_node=opened.target_node,
+        command_id=opened.command_id,
+        model=opened.model,
+        sequence=1,
+        kind="chunk",
+        data=b"image-data",
+        image_index=0,
+        total_chunks=1,
+    )
+    completed = VisionMediaPacket(
+        source_node=opened.source_node,
+        target_node=opened.target_node,
+        command_id=opened.command_id,
+        model=opened.model,
+        sequence=2,
+        kind="completed",
+        total_chunks=1,
+        image_count=1,
+        sha256="0" * 64,
+    )
+
+    for packet in (opened, chunk, completed):
+        router._offer_vision_network_packet(  # pyright: ignore[reportPrivateUsage]
+            VISION_MEDIA.serialize(packet), None
+        )
+
+    received = [
+        router._vision_network_ingress_recv.receive_nowait().packet  # pyright: ignore[reportPrivateUsage]
+        for _ in range(3)
+    ]
+    assert received == [opened, chunk, completed]
+
+
 async def test_election_egress_uses_a_dedicated_bounded_channel() -> None:
     """Ordinary outbound backlog cannot queue ahead of election liveness."""
 

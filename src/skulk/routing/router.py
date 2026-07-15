@@ -1126,7 +1126,9 @@ class Router:
             return
         if str(packet.target_node) != self._node_id:
             return
-        terminal_lane = packet.kind not in ("opened", "chunk")
+        # Completion is part of the ordered upload sequence. Sending it through
+        # the independent terminal lane would let it overtake open/chunk frames.
+        terminal_lane = packet.kind in ("accepted", "cancelled", "transport_failed")
         sender = (
             self._vision_network_terminal_send
             if terminal_lane
