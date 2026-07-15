@@ -9561,7 +9561,10 @@ class API:
                     finish = cast("str | None", getattr(chunk, "finish_reason", None))
                     if finish == "error":
                         outcome = "error"
-                    elif finish is not None:
+                    elif finish is not None and outcome != "error":
+                        # Latch an observed error: a later terminal chunk must not
+                        # reclassify an errored generation as success (matches the
+                        # field-telemetry tap).
                         outcome = "success"
                     yield chunk
             finally:
@@ -9579,6 +9582,12 @@ class API:
                             ttft_seconds=ttft_seconds,
                             decode_tps=decode_tps,
                             outcome=outcome,
+                            # vLLM decodes concurrent requests together
+                            # (continuous batching); the single-stream engines and
+                            # llama_server at its default --parallel 1 queue them,
+                            # so only vLLM scales aggregate throughput with
+                            # concurrency. Conservative to avoid an upward knee bias.
+                            batches=backend.startswith("vllm"),
                         )
                 except Exception as exc:  # noqa: BLE001 - must not propagate
                     logger.debug(f"performance-envelope record failed: {exc}")

@@ -35,6 +35,7 @@ def test_single_observation_forms_one_bucket() -> None:
         ttft_seconds=0.2,
         decode_tps=50.0,
         outcome="success",
+        batches=True,
     )
     report = reg.snapshot()
     assert len(report.envelopes) == 1
@@ -62,8 +63,29 @@ def test_concurrency_clamped_to_one() -> None:
         ttft_seconds=0.1,
         decode_tps=10.0,
         outcome="success",
+        batches=True,
     )
     assert reg.snapshot().envelopes[0].buckets[0].concurrency == 1
+
+
+def test_serial_backend_aggregate_uses_effective_concurrency_one() -> None:
+    reg = _registry()
+    # A serial backend (batches=False) queues concurrent requests, so its
+    # aggregate must NOT scale with the observed concurrency bucket: at
+    # concurrency 4 with full-speed decode, aggregate stays at the per-request
+    # rate, and the knee is not biased upward.
+    for concurrency in (1, 2, 4):
+        for _ in range(3):
+            reg.record(hardware_class="apple-m4-24gb", model_id="m", backend="mlx",
+                       quantization="4bit", concurrency=concurrency,
+                       ttft_seconds=0.2, decode_tps=20.0, outcome="success",
+                       batches=False)
+    env = reg.snapshot().envelopes[0]
+    assert env.batches is False
+    aggregates = {b.concurrency: b.aggregate_decode_tps for b in env.buckets}
+    assert aggregates == {1: 20.0, 2: 20.0, 4: 20.0}
+    # Flat aggregate -> the knee is the lowest concurrency (no upward bias).
+    assert env.knee_concurrency == 1
 
 
 def test_curve_and_knee_across_concurrency_levels() -> None:
@@ -74,13 +96,13 @@ def test_curve_and_knee_across_concurrency_levels() -> None:
     for _ in range(5):
         reg.record(hardware_class="hw", model_id="m", backend="vllm-cuda",
                    quantization="", concurrency=1, ttft_seconds=0.2,
-                   decode_tps=40.0, outcome="success")
+                   decode_tps=40.0, outcome="success", batches=True)
         reg.record(hardware_class="hw", model_id="m", backend="vllm-cuda",
                    quantization="", concurrency=2, ttft_seconds=0.3,
-                   decode_tps=30.0, outcome="success")
+                   decode_tps=30.0, outcome="success", batches=True)
         reg.record(hardware_class="hw", model_id="m", backend="vllm-cuda",
                    quantization="", concurrency=4, ttft_seconds=0.6,
-                   decode_tps=15.0, outcome="success")
+                   decode_tps=15.0, outcome="success", batches=True)
     env = reg.snapshot().envelopes[0]
     assert [b.concurrency for b in env.buckets] == [1, 2, 4]
     aggregates = {b.concurrency: b.aggregate_decode_tps for b in env.buckets}
@@ -94,11 +116,11 @@ def test_curve_and_knee_across_concurrency_levels() -> None:
 def test_errors_and_cancellations_excluded_from_distributions() -> None:
     reg = _registry()
     reg.record(hardware_class="hw", model_id="m", backend="b", quantization="",
-               concurrency=1, ttft_seconds=0.2, decode_tps=50.0, outcome="success")
+               concurrency=1, ttft_seconds=0.2, decode_tps=50.0, outcome="success", batches=True)
     reg.record(hardware_class="hw", model_id="m", backend="b", quantization="",
-               concurrency=1, ttft_seconds=99.0, decode_tps=0.1, outcome="error")
+               concurrency=1, ttft_seconds=99.0, decode_tps=0.1, outcome="error", batches=True)
     reg.record(hardware_class="hw", model_id="m", backend="b", quantization="",
-               concurrency=1, ttft_seconds=88.0, decode_tps=0.2, outcome="cancelled")
+               concurrency=1, ttft_seconds=88.0, decode_tps=0.2, outcome="cancelled", batches=True)
     bucket = reg.snapshot().envelopes[0].buckets[0]
     assert bucket.request_count == 3
     assert bucket.success_count == 1
@@ -113,7 +135,7 @@ def test_distinct_keys_form_distinct_envelopes() -> None:
     for backend in ("vllm-cuda", "llama_server-cuda"):
         reg.record(hardware_class="hw", model_id="m", backend=backend,
                    quantization="", concurrency=1, ttft_seconds=0.2,
-                   decode_tps=10.0, outcome="success")
+                   decode_tps=10.0, outcome="success", batches=True)
     assert len(reg.snapshot().envelopes) == 2
 
 
@@ -122,17 +144,17 @@ def test_envelope_cap_drops_new_keys_but_keeps_existing() -> None:
     for i in range(_MAX_ENVELOPES):
         reg.record(hardware_class="hw", model_id=f"m{i}", backend="b",
                    quantization="", concurrency=1, ttft_seconds=0.2,
-                   decode_tps=10.0, outcome="success")
+                   decode_tps=10.0, outcome="success", batches=True)
     assert len(reg.snapshot().envelopes) == _MAX_ENVELOPES
     # A new key past the cap is dropped...
     reg.record(hardware_class="hw", model_id="overflow", backend="b",
                quantization="", concurrency=1, ttft_seconds=0.2,
-               decode_tps=10.0, outcome="success")
+               decode_tps=10.0, outcome="success", batches=True)
     assert len(reg.snapshot().envelopes) == _MAX_ENVELOPES
     # ...but an existing key still updates.
     reg.record(hardware_class="hw", model_id="m0", backend="b",
                quantization="", concurrency=2, ttft_seconds=0.2,
-               decode_tps=10.0, outcome="success")
+               decode_tps=10.0, outcome="success", batches=True)
     m0 = next(e for e in reg.snapshot().envelopes if e.model_id == "m0")
     assert {b.concurrency for b in m0.buckets} == {1, 2}
 
@@ -144,7 +166,7 @@ def test_concurrency_clamped_to_max_bucket() -> None:
     for concurrency in (_MAX_CONCURRENCY_BUCKET, _MAX_CONCURRENCY_BUCKET + 1, 5000):
         reg.record(hardware_class="hw", model_id="m", backend="b", quantization="",
                    concurrency=concurrency, ttft_seconds=0.2, decode_tps=10.0,
-                   outcome="success")
+                   outcome="success", batches=True)
     buckets = reg.snapshot().envelopes[0].buckets
     assert [b.concurrency for b in buckets] == [_MAX_CONCURRENCY_BUCKET]
     assert buckets[0].request_count == 3
@@ -159,6 +181,6 @@ def test_empty_registry_snapshot() -> None:
 def test_knee_helper_needs_two_levels() -> None:
     reg = _registry()
     reg.record(hardware_class="hw", model_id="m", backend="b", quantization="",
-               concurrency=1, ttft_seconds=0.2, decode_tps=10.0, outcome="success")
+               concurrency=1, ttft_seconds=0.2, decode_tps=10.0, outcome="success", batches=True)
     env = reg.snapshot().envelopes[0]
     assert _knee(env.buckets) is None

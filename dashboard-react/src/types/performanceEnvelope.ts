@@ -41,6 +41,8 @@ export interface PerformanceEnvelopeSummary {
   buckets: ConcurrencyBucketSummary[];
   /** Concurrency past which aggregate throughput stops rising, or null. */
   kneeConcurrency: number | null;
+  /** Whether the backend batches concurrent requests (vLLM); false is serial. */
+  batches: boolean;
   /** Total observations across all buckets. */
   observationCount: number;
 }

@@ -69,9 +69,13 @@ class ConcurrencyBucketSummary(CamelCaseModel):
         ttft_seconds_p90: 90th-percentile time-to-first-token.
         decode_tps_mean: Mean steady-state decode tokens/second.
         decode_tps_p50: Median steady-state decode tokens/second.
-        aggregate_decode_tps: ``concurrency * decode_tps_mean`` -- the instance's
-            total useful throughput at this concurrency, the quantity whose knee
-            an admission controller targets.
+        aggregate_decode_tps: The instance's total useful decode throughput at
+            this concurrency, the quantity whose knee an admission controller
+            targets. For a batching backend it is ``concurrency *
+            decode_tps_mean``; for a serial (single-stream) backend, where
+            concurrent client requests queue rather than decode together, the
+            effective concurrency is 1 (``= decode_tps_mean``) so the knee is not
+            biased upward.
     """
 
     concurrency: int
@@ -101,6 +105,9 @@ class PerformanceEnvelopeSummary(CamelCaseModel):
         knee_concurrency: Concurrency past which aggregate decode throughput
             stops rising meaningfully, or ``None`` when too few concurrency
             levels have been observed to estimate one.
+        batches: Whether the serving backend decodes concurrent requests together
+            (vLLM). False for the single-stream engines, where the aggregate uses
+            effective concurrency 1.
         observation_count: Total observations across all buckets.
     """
 
@@ -110,6 +117,7 @@ class PerformanceEnvelopeSummary(CamelCaseModel):
     quantization: str
     buckets: list[ConcurrencyBucketSummary]
     knee_concurrency: int | None
+    batches: bool
     observation_count: int
 
 
@@ -204,11 +212,15 @@ class _Bucket:
         if decode_tps is not None and decode_tps > 0.0:
             self.decode_tps.append(decode_tps)
 
-    def summary(self, concurrency: int) -> ConcurrencyBucketSummary:
+    def summary(self, concurrency: int, batches: bool) -> ConcurrencyBucketSummary:
         ttft_sorted = sorted(self.ttft_seconds)
         tps_sorted = sorted(self.decode_tps)
         decode_mean = sum(tps_sorted) / len(tps_sorted) if tps_sorted else None
-        aggregate = decode_mean * concurrency if decode_mean is not None else None
+        # A serial backend queues concurrent requests and decodes one at a time,
+        # so its aggregate throughput does not scale with concurrency; using
+        # effective concurrency 1 keeps the knee from being biased upward.
+        effective = concurrency if batches else 1
+        aggregate = decode_mean * effective if decode_mean is not None else None
         return ConcurrencyBucketSummary(
             concurrency=concurrency,
             request_count=self.request_count,
@@ -260,6 +272,8 @@ class PerformanceEnvelopeRegistry:
         self._max_envelopes = max_envelopes
         # (hardware_class, model_id, backend, quantization) -> concurrency -> bucket
         self._envelopes: dict[tuple[str, str, str, str], dict[int, _Bucket]] = {}
+        # Whether each envelope's backend decodes concurrent requests together.
+        self._batches: dict[tuple[str, str, str, str], bool] = {}
 
     def record(
         self,
@@ -272,6 +286,7 @@ class PerformanceEnvelopeRegistry:
         ttft_seconds: float | None,
         decode_tps: float | None,
         outcome: GenerationOutcome,
+        batches: bool,
     ) -> None:
         """Fold one completed generation into its envelope's concurrency bucket.
 
@@ -291,6 +306,7 @@ class PerformanceEnvelopeRegistry:
                 return
             envelope = {}
             self._envelopes[key] = envelope
+        self._batches[key] = batches
         bucket = envelope.get(concurrency)
         if bucket is None:
             bucket = _Bucket()
@@ -300,9 +316,11 @@ class PerformanceEnvelopeRegistry:
     def snapshot(self) -> PerformanceEnvelopeReport:
         """Compute the read-only report: per-envelope curves, sorted, with knees."""
         summaries: list[PerformanceEnvelopeSummary] = []
-        for (hardware, model_id, backend, quant), buckets in self._envelopes.items():
+        for key, buckets in self._envelopes.items():
+            hardware, model_id, backend, quant = key
+            batches = self._batches.get(key, False)
             bucket_summaries = [
-                buckets[concurrency].summary(concurrency)
+                buckets[concurrency].summary(concurrency, batches)
                 for concurrency in sorted(buckets)
             ]
             observation_count = sum(b.request_count for b in bucket_summaries)
@@ -314,6 +332,7 @@ class PerformanceEnvelopeRegistry:
                     quantization=quant,
                     buckets=bucket_summaries,
                     knee_concurrency=_knee(bucket_summaries),
+                    batches=batches,
                     observation_count=observation_count,
                 )
             )

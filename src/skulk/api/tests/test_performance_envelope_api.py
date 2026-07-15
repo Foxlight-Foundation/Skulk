@@ -66,6 +66,7 @@ def test_endpoint_reflects_registry() -> None:
         ttft_seconds=0.2,
         decode_tps=50.0,
         outcome="success",
+        batches=True,
     )
     populated = client.get("/v1/diagnostics/performance-envelopes")
     body = cast(dict[str, Any], populated.json())
