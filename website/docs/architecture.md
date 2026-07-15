@@ -255,7 +255,13 @@ points at the `vllm` CLI (it advertises `vllm-cuda` / `vllm-rocm`, GPU-only), an
 card opts in through `compatible_backends`. Because the right engine now depends on
 the GPU *generation* (FP4 support and all), each node also reports its GPU compute
 capability in telemetry, so placement can eventually route a model to the metal
-that serves it best. This first slice is single-node text generation; tool calling,
+that serves it best. Unlike the in-process runners, which serve one request at a
+time, the vLLM runner keeps several generations in flight at once (one streaming
+HTTP request per worker thread, bounded by `SKULK_VLLM_MAX_CONCURRENT_REQUESTS`) so
+the server actually *sees* concurrent requests and its continuous batching engages
+— without that the batching benefit never appears. The runner reports itself
+running while any generation is in flight and returns to ready only when the last
+one drains. This first slice is single-node text generation; tool calling,
 logprobs, vLLM's own multi-GPU parallelism, and vLLM-aware memory admission are
 follow-ups.
 

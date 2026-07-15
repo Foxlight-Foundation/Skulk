@@ -1,4 +1,4 @@
-# pyright: reportPrivateUsage=false
+# pyright: reportPrivateUsage=false, reportAny=false
 """Unit tests for the pure helpers of the vLLM served-backend runner.
 
 The live subprocess + streaming path is validated on GPU hardware; these cover
@@ -6,19 +6,31 @@ the pure, engine-specific logic: the ``vllm serve`` argument builder, the OpenAI
 SSE parser, and the GPU-memory-utilization knob.
 """
 
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
+from skulk.shared.types.common import CommandId
+from skulk.shared.types.tasks import CANCEL_ALL_TASKS, TaskId, TaskStatus
+from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
 from skulk.worker.runner.vllm.runner import (
     _DEFAULT_GPU_MEMORY_UTILIZATION,
+    _DEFAULT_MAX_CONCURRENT_REQUESTS,
     _GPU_MEMORY_UTILIZATION_ENV,
+    _MAX_CONCURRENT_REQUESTS_ENV,
     _gpu_memory_utilization,
+    _max_concurrent_requests,
     build_vllm_serve_args,
     parse_openai_sse_line,
     vllm_generation_kwargs,
     vllm_reasoning_overrides,
+)
+from skulk.worker.runner.vllm.runner import (
+    Runner as VllmRunner,
 )
 
 
@@ -185,3 +197,179 @@ def test_gpu_memory_utilization_rejects_bad_values(
     # passing vLLM a fraction that would fail the server at spawn.
     monkeypatch.setenv(_GPU_MEMORY_UTILIZATION_ENV, bad)
     assert _gpu_memory_utilization() == _DEFAULT_GPU_MEMORY_UTILIZATION
+
+
+def test_max_concurrent_requests_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(_MAX_CONCURRENT_REQUESTS_ENV, raising=False)
+    assert _max_concurrent_requests() == _DEFAULT_MAX_CONCURRENT_REQUESTS
+
+
+def test_max_concurrent_requests_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(_MAX_CONCURRENT_REQUESTS_ENV, "8")
+    assert _max_concurrent_requests() == 8
+
+
+@pytest.mark.parametrize("bad", ["nonsense", "0", "-3", "1.5"])
+def test_max_concurrent_requests_rejects_bad_values(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    # Unparseable or below-1 values fall back to the default rather than
+    # disabling concurrency or crashing the pool at construction.
+    monkeypatch.setenv(_MAX_CONCURRENT_REQUESTS_ENV, bad)
+    assert _max_concurrent_requests() == _DEFAULT_MAX_CONCURRENT_REQUESTS
+
+
+# --- concurrent dispatch --------------------------------------------------
+#
+# These exercise the runner's dispatch orchestration (in-flight counting, status
+# transitions, terminal-status classification, stale-cancel recovery) with a fake
+# ``_generate`` -- no server, no GPU. The live streaming path is validated on
+# hardware. The runner is built with ``__new__`` so only the dispatch state is
+# set up; ``update_status`` / ``send_task_status`` are stubbed to record calls
+# (and keep ``current_status`` in sync) rather than construct wire events.
+
+
+def _fake_task() -> Any:
+    """A duck-typed stand-in for a TextGeneration (only ids are read here)."""
+    return SimpleNamespace(task_id=TaskId(), command_id=CommandId())
+
+
+def _bare_runner(max_concurrency: int = 4) -> Any:
+    runner: Any = VllmRunner.__new__(VllmRunner)
+    runner._status_lock = threading.Lock()
+    runner._cancel_lock = threading.Lock()
+    runner._inflight = 0
+    runner._max_concurrency = max_concurrency
+    runner.cancelled_tasks = set()
+    runner.seen = set()
+    runner.current_status = RunnerReady()
+    runner.status_updates = []
+    runner.task_statuses = []
+
+    def _record_status(status: Any) -> None:
+        runner.status_updates.append(status)
+        runner.current_status = status
+
+    def _record_task_status(task: Any, status: Any) -> None:
+        runner.task_statuses.append((task.task_id, status))
+
+    runner.update_status = _record_status
+    runner.send_task_status = _record_task_status
+    return runner
+
+
+def test_dispatch_runs_generations_concurrently() -> None:
+    runner = _bare_runner(max_concurrency=4)
+    started = threading.Semaphore(0)
+    release = threading.Event()
+
+    def fake_generate(_task: Any) -> None:
+        started.release()  # signal this generation has started
+        release.wait(5)  # hold it open until the test releases all at once
+
+    runner._generate = fake_generate
+    tasks = [_fake_task() for _ in range(3)]
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for task in tasks:
+            # Must return immediately: dispatch is non-blocking so the loop can
+            # keep receiving while prior generations stream.
+            runner._dispatch_generation(task, pool)
+        # All three run at once (proving they are not serialized).
+        for _ in range(3):
+            assert started.acquire(timeout=5)
+        assert runner._inflight_count() == 3
+        assert isinstance(runner.current_status, RunnerRunning)
+        release.set()
+        pool.shutdown(wait=True)
+
+    # Done-callbacks (terminal status + inflight decrement) run on the worker
+    # threads as their futures resolve; all have run by the time shutdown returns.
+    assert runner._inflight_count() == 0
+    assert isinstance(runner.current_status, RunnerReady)
+    running = [s for _, s in runner.task_statuses if s is TaskStatus.Running]
+    complete = [s for _, s in runner.task_statuses if s is TaskStatus.Complete]
+    assert len(running) == 3
+    assert len(complete) == 3
+
+
+def test_finish_generation_marks_cancelled_and_returns_ready() -> None:
+    runner = _bare_runner()
+    runner._inflight = 1
+    runner.current_status = RunnerRunning()
+    task = _fake_task()
+    runner.cancelled_tasks.add(task.task_id)
+    future: Future[None] = Future()
+    future.set_result(None)
+
+    runner._finish_generation(task, future)
+
+    assert (task.task_id, TaskStatus.Cancelled) in runner.task_statuses
+    assert runner._inflight == 0
+    assert isinstance(runner.current_status, RunnerReady)
+
+
+def test_finish_generation_cancel_all_marks_cancelled() -> None:
+    runner = _bare_runner()
+    runner._inflight = 1
+    runner.current_status = RunnerRunning()
+    runner.cancelled_tasks.add(CANCEL_ALL_TASKS)
+    task = _fake_task()
+    future: Future[None] = Future()
+    future.set_result(None)
+
+    runner._finish_generation(task, future)
+
+    assert (task.task_id, TaskStatus.Cancelled) in runner.task_statuses
+
+
+def test_dispatch_clears_stale_cancel_all_when_idle() -> None:
+    # A lingering cluster-wide cancel must not kill a fresh request admitted when
+    # nothing else is in flight.
+    runner = _bare_runner()
+    runner.cancelled_tasks.add(CANCEL_ALL_TASKS)
+    release = threading.Event()
+
+    def fake_generate(_task: Any) -> None:
+        release.wait(5)
+
+    runner._generate = fake_generate
+    task = _fake_task()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        runner._dispatch_generation(task, pool)
+        assert CANCEL_ALL_TASKS not in runner.cancelled_tasks
+        release.set()
+        pool.shutdown(wait=True)
+
+    assert (task.task_id, TaskStatus.Complete) in runner.task_statuses
+
+
+def test_note_generation_status_transitions() -> None:
+    runner = _bare_runner()
+    assert isinstance(runner.current_status, RunnerReady)
+
+    runner._note_generation_started()
+    assert runner._inflight == 1
+    assert isinstance(runner.current_status, RunnerRunning)
+
+    # A second concurrent generation does not re-flip status.
+    runner._note_generation_started()
+    assert runner._inflight == 2
+    assert isinstance(runner.current_status, RunnerRunning)
+
+    # Only the LAST one to drain returns the runner to Ready.
+    runner._note_generation_finished()
+    assert isinstance(runner.current_status, RunnerRunning)
+    runner._note_generation_finished()
+    assert runner._inflight == 0
+    assert isinstance(runner.current_status, RunnerReady)
+
+
+def test_inflight_never_goes_negative() -> None:
+    # Defensive: an extra finish (double done-callback) must not drive the count
+    # below zero or spuriously toggle status.
+    runner = _bare_runner()
+    runner._note_generation_finished()
+    assert runner._inflight == 0
+    assert isinstance(runner.current_status, RunnerReady)

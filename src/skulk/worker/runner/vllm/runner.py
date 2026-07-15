@@ -30,16 +30,21 @@ text arrives inline in ``content`` (raw markers) rather than as a separated
 reasoning stream. Threading the card's reasoning family into ``--reasoning-parser``
 is a follow-up (alongside tool calling and logprobs).
 
-KNOWN LIMITATION -- serialized dispatch (the required next slice): like every
-current runner, ``main()`` processes one task at a time and ``_generate_streaming``
-blocks the loop until its HTTP stream finishes. So even though the worker will
-forward a second task to a ``RunnerRunning`` runner, that task queues until the
-first completes, and vLLM never sees concurrent in-flight requests. That means
-this slice does NOT yet deliver vLLM's continuous-batching throughput benefit --
-its whole reason for existing. Realizing it requires concurrent in-flight
-generation dispatch in the runner (thread/async per request, thread-safe event
-sends, per-request cancellation, status while N are in flight), a focused
-follow-up that also needs live GPU validation.
+Concurrent dispatch: unlike the in-process runners (which serialize one task at a
+time), ``main()`` keeps up to N ``TextGeneration`` requests in flight at once,
+each streaming its own HTTP request to the one shared ``vllm serve`` on its own
+thread. That is what actually lets vLLM's continuous batching + paged attention
+activate: the server sees concurrent in-flight requests and batches their decode
+steps, holding latency flat and growing aggregate throughput under load (the
+whole reason this engine exists). N is bounded by a thread pool sized from
+``SKULK_VLLM_MAX_CONCURRENT_REQUESTS`` (vLLM itself caps at ``--max-num-seqs``, so
+this is a client-side admission bound, not the batch width). Runner status is
+``RunnerRunning`` while any generation is in flight and ``RunnerReady`` when the
+last one drains; ``MpSender`` event sends and the diagnostic emitter are already
+thread-safe, and each ``DataChunk`` carries ``command_id`` + ``sequence`` so the
+API demultiplexes interleaved token streams. The lifecycle tasks (``LoadModel``,
+``Shutdown``) run inline on the dispatch thread; shutdown cancels every in-flight
+generation and drains the pool before tearing down the server.
 """
 
 import contextlib
@@ -51,7 +56,9 @@ import signal
 import socket
 import subprocess
 import tempfile
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple
 
@@ -118,6 +125,40 @@ _LIVENESS_POLL_S: Final = 2.0
 # is a follow-up when vLLM-aware admission lands).
 _GPU_MEMORY_UTILIZATION_ENV: Final = "SKULK_VLLM_GPU_MEMORY_UTILIZATION"
 _DEFAULT_GPU_MEMORY_UTILIZATION: Final = 0.90
+
+# Upper bound on concurrent in-flight generations the runner streams to the one
+# ``vllm serve`` at once. This is a client-side admission bound (the thread-pool
+# width), NOT vLLM's batch width -- the server batches up to its own
+# ``--max-num-seqs`` (default 256). Kept below that so queued requests wait in the
+# runner's bounded pool rather than piling unbounded threads against the server.
+_MAX_CONCURRENT_REQUESTS_ENV: Final = "SKULK_VLLM_MAX_CONCURRENT_REQUESTS"
+_DEFAULT_MAX_CONCURRENT_REQUESTS: Final = 32
+
+
+def _max_concurrent_requests() -> int:
+    """The concurrent in-flight generation cap, from env or the default.
+
+    An unparseable or below-1 value falls back to the default rather than
+    disabling concurrency (0) or crashing the pool at construction.
+    """
+    raw = os.environ.get(_MAX_CONCURRENT_REQUESTS_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_MAX_CONCURRENT_REQUESTS
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            f"{_MAX_CONCURRENT_REQUESTS_ENV}={raw!r} is not an integer; "
+            f"using {_DEFAULT_MAX_CONCURRENT_REQUESTS}"
+        )
+        return _DEFAULT_MAX_CONCURRENT_REQUESTS
+    if value < 1:
+        logger.warning(
+            f"{_MAX_CONCURRENT_REQUESTS_ENV}={value} is below 1; "
+            f"using {_DEFAULT_MAX_CONCURRENT_REQUESTS}"
+        )
+        return _DEFAULT_MAX_CONCURRENT_REQUESTS
+    return value
 
 
 class _StreamDelta(NamedTuple):
@@ -349,6 +390,13 @@ class Runner:
         self.setup_start_time = time.time()
         self.cancelled_tasks: set[TaskId] = set()
         self.seen: set[TaskId] = set()
+        # Concurrent-dispatch state. Worker threads mutate the cancel set and the
+        # in-flight counter, so both are lock-guarded; never hold both locks at
+        # once (no nested acquisition) to keep the ordering trivially deadlock-free.
+        self._max_concurrency: int = _max_concurrent_requests()
+        self._status_lock = threading.Lock()
+        self._cancel_lock = threading.Lock()
+        self._inflight: int = 0
         self.server_proc: subprocess.Popen[bytes] | None = None
         self.server_log: Any = None
         self.server_log_path: Path | None = None
@@ -382,20 +430,39 @@ class Runner:
         self.event_sender.send(TaskAcknowledged(task_id=task.task_id))
 
     def _drain_cancellations(self) -> None:
-        while True:
-            try:
-                cancelled = self.cancel_receiver.receive_nowait()
-            except WouldBlock:
-                break
-            self.cancelled_tasks.add(cancelled)
+        # Concurrent generation threads all poll cancellation, so serialize the
+        # single-consumer cancel pipe and the shared set behind the cancel lock.
+        with self._cancel_lock:
+            while True:
+                try:
+                    cancelled = self.cancel_receiver.receive_nowait()
+                except WouldBlock:
+                    break
+                self.cancelled_tasks.add(cancelled)
 
     def _is_cancelled(self, task_id: TaskId) -> bool:
         self._drain_cancellations()
-        return (
-            task_id in self.cancelled_tasks or CANCEL_ALL_TASKS in self.cancelled_tasks
-        )
+        return self._was_cancelled(task_id)
+
+    def _was_cancelled(self, task_id: TaskId) -> bool:
+        """Whether ``task_id`` is cancelled, WITHOUT draining the pipe.
+
+        Used to classify a finished generation's terminal status: draining here
+        could pull in a cancellation for a *different, still-running* task and,
+        combined with a stale ``CANCEL_ALL``, misreport this one.
+        """
+        with self._cancel_lock:
+            return (
+                task_id in self.cancelled_tasks
+                or CANCEL_ALL_TASKS in self.cancelled_tasks
+            )
 
     def main(self) -> None:
+        # One thread per in-flight generation, bounded so queued requests wait in
+        # the pool rather than piling unbounded threads/streams against the server.
+        pool = ThreadPoolExecutor(
+            max_workers=self._max_concurrency, thread_name_prefix="vllm-gen"
+        )
         try:
             with self.task_receiver as tasks:
                 while True:
@@ -412,25 +479,130 @@ class Runner:
                         break
                     if task.task_id in self.seen:
                         logger.warning("repeat task - potential error")
+                        continue
                     self.seen.add(task.task_id)
-                    self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
-                    self.send_task_status(task, TaskStatus.Running)
-                    self.handle_task(task)
-                    was_cancelled = (
-                        task.task_id in self.cancelled_tasks
-                        or CANCEL_ALL_TASKS in self.cancelled_tasks
-                    )
-                    self.send_task_status(
-                        task,
-                        TaskStatus.Cancelled if was_cancelled else TaskStatus.Complete,
-                    )
-                    self.update_status(self.current_status)
-                    if isinstance(self.current_status, RunnerShutdown):
-                        break
+                    match task:
+                        case TextGeneration() if isinstance(
+                            self.current_status, (RunnerReady, RunnerRunning)
+                        ):
+                            # Non-blocking: dispatch to the pool and immediately
+                            # loop back to receive the next task, so N generations
+                            # run concurrently and vLLM batches them.
+                            self._dispatch_generation(task, pool)
+                        case Shutdown():
+                            self._handle_shutdown(task, pool)
+                            break
+                        case _:
+                            # Lifecycle (LoadModel) or an out-of-state task: run it
+                            # inline on this thread. LoadModel only occurs once,
+                            # before any generation, so serial handling is correct.
+                            self.send_task_status(task, TaskStatus.Running)
+                            self.handle_task(task)
+                            self.send_task_status(task, TaskStatus.Complete)
         finally:
-            # Never leave the server subprocess running past the runner loop, even
-            # on an unexpected exit (PR_SET_PDEATHSIG is the SIGKILL backstop).
+            # Drain in-flight generations, then stop the server. Shutdown already
+            # cancels them (so the pool drains promptly); this also covers the
+            # EndOfStream / crash exits. PR_SET_PDEATHSIG is the SIGKILL backstop.
+            pool.shutdown(wait=True)
             self._teardown_server()
+
+    # --- concurrent dispatch --------------------------------------------------
+
+    def _dispatch_generation(self, task: TextGeneration, pool: ThreadPoolExecutor) -> None:
+        """Admit a generation and run it on the pool without blocking the loop."""
+        # Recover from a stale cluster-wide cancel: with nothing in flight, a
+        # lingering CANCEL_ALL must not kill this fresh request. (While requests
+        # are in flight it is left set so those observe it.)
+        if self._inflight_count() == 0:
+            with self._cancel_lock:
+                self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
+        self.send_task_status(task, TaskStatus.Running)
+        self._note_generation_started()
+        future = pool.submit(self._run_one_generation, task)
+        future.add_done_callback(lambda f: self._finish_generation(task, f))
+
+    def _run_one_generation(self, task: TextGeneration) -> None:
+        """Pool-worker body: stream one generation. Runs on a worker thread.
+
+        ``_generate`` catches its own errors and surfaces them as an ErrorChunk;
+        this outer guard only covers an unexpected escape so a crashed worker
+        never swallows the stream silently (its terminal status is still emitted
+        by the done-callback).
+        """
+        try:
+            self._generate(task)
+        except Exception as exc:  # noqa: BLE001 - defensive; keep the pool alive
+            logger.opt(exception=exc).error("vllm generation worker crashed")
+            with contextlib.suppress(Exception):
+                self.event_sender.send(
+                    ChunkGenerated(
+                        command_id=task.command_id,
+                        chunk=ErrorChunk(
+                            model=self.shard_metadata.model_card.model_id,
+                            error_message=str(exc),
+                        ),
+                    )
+                )
+
+    def _finish_generation(self, task: TextGeneration, future: "Future[None]") -> None:
+        """Done-callback: emit the terminal task status and drop the in-flight count.
+
+        Runs on the worker thread once the generation future completes. The
+        terminal status classification does NOT drain the cancel pipe (see
+        ``_was_cancelled``); ``_note_generation_finished`` flips the runner back to
+        Ready when this was the last in-flight generation.
+        """
+        try:
+            was_cancelled = self._was_cancelled(task.task_id)
+            self.send_task_status(
+                task,
+                TaskStatus.Cancelled if was_cancelled else TaskStatus.Complete,
+            )
+        finally:
+            self._note_generation_finished()
+
+    def _note_generation_started(self) -> None:
+        with self._status_lock:
+            self._inflight += 1
+            # First in-flight generation flips Ready -> Running.
+            if self._inflight == 1 and isinstance(self.current_status, RunnerReady):
+                self.update_status(RunnerRunning())
+
+    def _note_generation_finished(self) -> None:
+        with self._status_lock:
+            self._inflight = max(0, self._inflight - 1)
+            # Last in-flight generation flips Running -> Ready. A shutdown in
+            # progress (ShuttingDown/Shutdown) is left alone.
+            if self._inflight == 0 and isinstance(self.current_status, RunnerRunning):
+                self.update_status(RunnerReady())
+
+    def _inflight_count(self) -> int:
+        with self._status_lock:
+            return self._inflight
+
+    def _handle_shutdown(self, task: Task, pool: ThreadPoolExecutor) -> None:
+        """Cancel in-flight generations, drain the pool, then tear down the server."""
+        logger.info("vllm runner shutting down")
+        record_runner_phase(
+            "shutdown_cleanup",
+            event="runner_shutdown_requested",
+            task_id=task.task_id,
+        )
+        self.update_status(RunnerShuttingDown())
+        self.acknowledge_task(task)
+        # Break every in-flight stream: their loops poll _is_cancelled.
+        with self._cancel_lock:
+            self.cancelled_tasks.add(CANCEL_ALL_TASKS)
+        pool.shutdown(wait=True)
+        self._teardown_server()
+        record_runner_phase(
+            "shutdown_cleanup",
+            event="server_teardown_complete",
+            task_id=task.task_id,
+        )
+        self.current_status = RunnerShutdown()
+        self.send_task_status(task, TaskStatus.Complete)
+        self.update_status(RunnerShutdown())
 
     def _ensure_server_alive(self) -> None:
         """Raise if the spawned ``vllm serve`` exited behind our back.
@@ -456,27 +628,11 @@ class Runner:
             )
 
     def handle_task(self, task: Task) -> None:
+        # TextGeneration and Shutdown are handled directly by the concurrent
+        # dispatch loop in main(); this serves the inline lifecycle path (LoadModel).
         match task:
             case LoadModel() if isinstance(self.current_status, RunnerIdle):
                 self._load_model(task)
-            case TextGeneration() if isinstance(self.current_status, RunnerReady):
-                self._generate(task)
-            case Shutdown():
-                logger.info("vllm runner shutting down")
-                record_runner_phase(
-                    "shutdown_cleanup",
-                    event="runner_shutdown_requested",
-                    task_id=task.task_id,
-                )
-                self.update_status(RunnerShuttingDown())
-                self.acknowledge_task(task)
-                self._teardown_server()
-                record_runner_phase(
-                    "shutdown_cleanup",
-                    event="server_teardown_complete",
-                    task_id=task.task_id,
-                )
-                self.current_status = RunnerShutdown()
             case _:
                 raise RuntimeError(
                     f"vllm runner received unsupported task "
@@ -623,8 +779,10 @@ class Runner:
     # --- generation: proxy the server's OpenAI streaming API ------------------
 
     def _generate(self, task: Task) -> None:
+        # Runs on a pool worker thread. Runner status (Running/Ready) is owned by
+        # the dispatch loop's in-flight counter, not this per-request path, so a
+        # finishing generation never flips the runner to Ready while others run.
         assert isinstance(task, TextGeneration)
-        self.update_status(RunnerRunning())
         self.acknowledge_task(task)
         assert self.base_url is not None
 
@@ -701,8 +859,10 @@ class Runner:
                 task_id=task.task_id,
                 command_id=str(command_id),
             )
-        self.current_status = RunnerReady()
-        record_runner_phase("idle", event="runner_ready", task_id=task.task_id)
+        # Status is NOT flipped here: the dispatch loop returns the runner to
+        # Ready only when the LAST in-flight generation drains (see
+        # _note_generation_finished), so a peer generation still streaming keeps
+        # the runner Running.
 
     def _generate_streaming(
         self,
