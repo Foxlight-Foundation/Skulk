@@ -741,6 +741,7 @@ def _encode_audio_transcription_sse(
 # because nothing has been yielded yet. A periodic sweep flushes such gaps.
 _REORDER_GAP_FLUSH_SECONDS = 5.0
 _VISION_MEDIA_PENDING_COMMANDS = 64
+_VISION_MEDIA_PENDING_FRAMES = 64
 _VISION_MEDIA_PENDING_COMMAND_BYTES = 32 * 1024 * 1024
 _VISION_MEDIA_PENDING_TOTAL_BYTES = 512 * 1024 * 1024
 _VISION_MEDIA_PENDING_TTL_SECONDS = 5 * 60.0
@@ -3147,6 +3148,11 @@ class API:
             raise HTTPException(
                 status_code=400,
                 detail="Image input must not be empty",
+            )
+        if len(chunks) > _VISION_MEDIA_PENDING_FRAMES:
+            raise HTTPException(
+                status_code=413,
+                detail="Image input exceeds the per-request media frame limit",
             )
         encoded_chunks = tuple(
             (image_index, data.encode("ascii")) for image_index, data in chunks

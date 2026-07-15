@@ -126,6 +126,25 @@ def test_vision_media_admission_rejects_excess_pending_commands(
     assert error.value.status_code == 503
 
 
+def test_vision_media_admission_rejects_excess_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("skulk.api.main._VISION_MEDIA_PENDING_FRAMES", 1)
+    api, _, _, _ = _build_api()
+    command_id = CommandId("too-many-frames")
+
+    with pytest.raises(HTTPException, match="media frame limit") as error:
+        api._stage_vision_media(  # pyright: ignore[reportPrivateUsage]
+            command_id,
+            ModelId("org/vlm"),
+            [(0, "YQ=="), (1, "Yg==")],
+            2,
+        )
+
+    assert error.value.status_code == 413
+    assert command_id not in api._pending_vision_media  # pyright: ignore[reportPrivateUsage]
+
+
 @pytest.mark.asyncio
 async def test_text_image_transport_targets_authoritative_task_participants() -> None:
     api, command_receiver, vision_receiver, _ = _build_api()
