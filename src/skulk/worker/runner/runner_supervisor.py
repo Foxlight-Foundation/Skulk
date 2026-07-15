@@ -40,6 +40,7 @@ from skulk.shared.types.events import (
     RunnerStatusUpdated,
     TaskAcknowledged,
     TaskDeleted,
+    TaskFailed,
     TaskStatusUpdated,
 )
 from skulk.shared.types.streaming import StreamFrameKind, is_terminal_stream_frame_kind
@@ -725,19 +726,30 @@ class RunnerSupervisor:
                     RealtimeAudioTranscription,
                 ),
             ):
+                failure_message = f"Runner shutdown before completing command ({cause})"
                 with anyio.CancelScope(shield=True):
-                    await self._emit(
-                        ChunkGenerated(
-                            command_id=task.command_id,
-                            chunk=ErrorChunk(
-                                model=self.shard_metadata.model_card.model_id,
-                                error_message=(
-                                    "Runner shutdown before completing command "
-                                    f"({cause})"
-                                ),
-                            ),
+                    if self._data_sender is not None and not self._owns_data_stream():
+                        # A non-output rank must not become a competing DATA
+                        # publisher, but its death still invalidates the whole
+                        # distributed task. Fail it on the ordered control plane
+                        # so every owning API terminates the command promptly.
+                        await self._event_sender.send(
+                            TaskFailed(
+                                task_id=task.task_id,
+                                error_type="runner_terminated",
+                                error_message=failure_message,
+                            )
                         )
-                    )
+                    else:
+                        await self._emit(
+                            ChunkGenerated(
+                                command_id=task.command_id,
+                                chunk=ErrorChunk(
+                                    model=self.shard_metadata.model_card.model_id,
+                                    error_message=failure_message,
+                                ),
+                            )
+                        )
                 self._clear_data_stream(task.command_id)
 
         try:

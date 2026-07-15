@@ -25,6 +25,7 @@ from skulk.shared.types.events import (
     RunnerStatusUpdated,
     TaskAcknowledged,
     TaskDeleted,
+    TaskFailed,
     TaskStatusUpdated,
 )
 from skulk.shared.types.tasks import (
@@ -613,6 +614,72 @@ async def test_check_runner_emits_errors_for_inflight_generation_and_realtime() 
     event_sender.close()
     with anyio.move_on_after(0.1):
         await event_receiver.aclose()
+
+
+@pytest.mark.asyncio
+async def test_non_output_rank_crash_fails_task_without_publishing_data() -> None:
+    """A non-output rank reports failure without competing on the DATA stream."""
+
+    from skulk.shared.types.chunks import DataChunk
+
+    event_sender, event_receiver = channel[Event]()
+    data_sender, data_receiver = channel[DataChunk]()
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    _, event_pipe_receiver = mp_channel[Event]()
+    _, diagnostic_receiver = mp_channel[RunnerDiagnosticUpdate]()
+    model_id = ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit")
+    rank_zero_bound = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-multi-rank-failure"),
+        model_id=model_id,
+        runner_id=RunnerId("runner-zero"),
+        node_id=NodeId("node-zero"),
+    )
+    rank_one_bound = BoundInstance(
+        instance=rank_zero_bound.instance,
+        bound_runner_id=RunnerId("other_runner"),
+        bound_node_id=NodeId("other_node"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=rank_one_bound.bound_shard,
+        bound_instance=rank_one_bound,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=event_pipe_receiver,
+        _diag_recv=diagnostic_receiver,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+        _data_sender=data_sender,
+    )
+    command_id = CommandId("cmd-rank-failure")
+    task = TextGeneration(
+        task_id=TaskId("task-rank-failure"),
+        instance_id=rank_one_bound.instance.instance_id,
+        command_id=command_id,
+        owner_node=NodeId("remote-api-owner"),
+        task_params=TextGenerationTaskParams(
+            model=model_id,
+            input=[InputMessage(role="user", content="hi")],
+            stream=True,
+        ),
+    )
+    supervisor.in_progress[task.task_id] = task
+    supervisor.shutdown = lambda: None
+
+    await supervisor._check_runner(RuntimeError("boom"))  # pyright: ignore[reportPrivateUsage]
+
+    failure = await event_receiver.receive()
+    status = await event_receiver.receive()
+    assert isinstance(failure, TaskFailed)
+    assert failure.task_id == task.task_id
+    assert failure.error_type == "runner_terminated"
+    assert "Runner shutdown before completing command" in failure.error_message
+    assert isinstance(status, RunnerStatusUpdated)
+    assert isinstance(status.runner_status, RunnerFailed)
+    assert data_receiver.collect() == []
+    data_sender.close()
+    event_sender.close()
 
 
 @pytest.mark.asyncio
