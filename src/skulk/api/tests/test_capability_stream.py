@@ -142,24 +142,32 @@ class _InvalidChunkProvider(_TtsProvider):
 
 
 class _TrailingFrameProvider(_TtsProvider):
+    def __init__(self) -> None:
+        self.cleanup_started = anyio.Event()
+        self.release_cleanup = anyio.Event()
+
     async def handle_stream(
         self,
         context: ExtensionContext,
         call: CapabilityCall,
     ) -> AsyncIterator[CapabilityStreamFrame]:
-        yield CapabilityStreamFrame(
-            call_id=call.call_id,
-            direction="provider_to_caller",
-            sequence=1,
-            kind="completed",
-        )
-        yield CapabilityStreamFrame(
-            call_id=call.call_id,
-            direction="provider_to_caller",
-            sequence=2,
-            kind="chunk",
-            payload={"format": "pcm_s16le"},
-        )
+        try:
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="completed",
+            )
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=2,
+                kind="chunk",
+                payload={"format": "pcm_s16le"},
+            )
+        finally:
+            self.cleanup_started.set()
+            await self.release_cleanup.wait()
 
 
 class _RejectingTtsProvider(_TtsProvider):
@@ -971,9 +979,40 @@ async def test_invalid_provider_chunk_becomes_typed_failed_terminal() -> None:
 
 
 async def test_provider_frame_after_terminal_becomes_typed_failure() -> None:
-    opened, frames = await _collect_local_stream(
-        _build_api(_TrailingFrameProvider())
-    )
+    provider = _TrailingFrameProvider()
+    api = _build_api(provider)
+    frames: list[CapabilityStreamFrame] = []
+    stream_finished = anyio.Event()
+    opened = False
+
+    async with api._tg as task_group:  # pyright: ignore[reportPrivateUsage]
+        task_group.start_soon(
+            api._apply_provider_data  # pyright: ignore[reportPrivateUsage]
+        )
+        session = await api._extension_context.stream_capability(  # pyright: ignore[reportPrivateUsage]
+            NodeId("api-node"),
+            "tts",
+            "1.0.0",
+            _TTS_REVISION,
+            {"text": "invalid trailing frame"},
+            timeout_seconds=2.0,
+        )
+        opened = session.open_result.ok
+
+        async def collect_frames() -> None:
+            frames.extend([frame async for frame in session.frames])
+            stream_finished.set()
+
+        task_group.start_soon(collect_frames)
+        try:
+            with anyio.fail_after(1.0):
+                await provider.cleanup_started.wait()
+            assert stream_finished.is_set() is False
+        finally:
+            provider.release_cleanup.set()
+        with anyio.fail_after(1.0):
+            await stream_finished.wait()
+        task_group.cancel_scope.cancel()
 
     assert opened is True
     assert [frame.kind for frame in frames] == ["started", "failed"]

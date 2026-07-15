@@ -628,8 +628,9 @@ The contract is deliberately small (`src/skulk/extensions/`):
   `started`, validates handler sequence and direction-specific chunk schemas,
   requires one terminal per active direction, and withholds a provider terminal
   until its handler iterator returns and completes `finally` cleanup. It
-  preserves raw inline media outside JSON, expires gaps, and explicitly cancels
-  abandoned calls.
+  closes closable handler iterators before publishing a synthetic failure for
+  malformed output. It preserves raw inline media outside JSON, expires gaps,
+  and explicitly cancels abandoned calls.
   `CapabilityStreamInput.complete()` is caller input half-close: it terminates
   only `caller_to_provider`, leaving provider output active. Remote pressure is
   isolated by owner, call, and direction. The transport now executes
@@ -637,7 +638,10 @@ The contract is deliberately small (`src/skulk/extensions/`):
   built-in bidirectional consumer is `stt.realtime@1.0.0`: it admits only a
   truthful streaming STT model, pins one single-host instance, and keeps caller
   PCM off State and the event log through bounded local or node-addressed Zenoh
-  ingress. Remote capacity is not advertised without Zenoh.
+  ingress. After core output terminates, it sends `TaskFinished` and withholds
+  the provider terminal until replicated task state is terminal or deleted, so
+  the next turn cannot race stale busy admission. Remote capacity is not
+  advertised without Zenoh.
 - Production API nodes prepend first-party providers to the guarded extension
   registry. They include `tts@1.0.0`, a facade over mounted core `mlx_audio`
   serving rather than a duplicate runtime, and experimental

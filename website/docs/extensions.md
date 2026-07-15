@@ -305,7 +305,8 @@ handler fails only its own stream with a typed terminal. After a handler yields
 its terminal it must return. Skulk advances the iterator to exhaustion and
 withholds that terminal from callers until the handler's `finally` cleanup has
 completed, so dependent work cannot race resources that the provider still
-owns.
+owns. If handler output is malformed or continues after its terminal, Skulk
+closes a closable iterator before publishing the synthetic failure terminal.
 
 For `client_streaming` and `bidirectional`, the returned session has a
 `CapabilityStreamInput` sink. `send_chunk()` accepts schema-validated metadata

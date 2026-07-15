@@ -172,7 +172,8 @@ class CapabilityStreamHandler(Protocol):
         the iterator reaches exhaustion so handler ``finally`` cleanup is
         complete before callers can begin dependent work. It validates
         identity, sequence, chunk schema, and terminal ownership before
-        publishing any handler frame.
+        publishing any handler frame. Malformed output closes a closable
+        iterator before Skulk publishes its synthetic failure terminal.
         """
 
         ...
