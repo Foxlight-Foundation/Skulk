@@ -135,6 +135,49 @@ def test_live_download_progress_round_trips_and_terminal_wins() -> None:
     assert view.effective_downloads({})[node] == [pending]
 
 
+def test_eviction_tombstones_model_before_any_download_is_observed() -> None:
+    """Fleet-wide eviction rejects delayed telemetry for an unknown model key."""
+
+    node = NodeId("node-a")
+    shard = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=1)
+    attempt = DownloadAttemptId("attempt-old")
+    pending = DownloadPending(
+        node_id=node,
+        shard_metadata=shard,
+        attempt_id=attempt,
+    )
+    ongoing = DownloadOngoing(
+        node_id=node,
+        shard_metadata=shard,
+        attempt_id=attempt,
+        download_progress=DownloadProgressData(
+            total=Memory.from_mb(100),
+            downloaded=Memory.from_mb(50),
+            downloaded_this_session=Memory.from_mb(50),
+            completed_files=1,
+            total_files=2,
+            speed=1.0,
+            eta_ms=1_000,
+            files={},
+        ),
+    )
+    view = TelemetryView()
+
+    view.remove_download_model(str(MODEL_A_ID))
+    view.apply(NodeTelemetry(node_id=node, info=pending))
+    view.apply(NodeTelemetry(node_id=node, info=ongoing))
+
+    assert view.effective_downloads({}) == {}
+
+    next_attempt = DownloadAttemptId("attempt-next")
+    restart = pending.model_copy(update={"attempt_id": next_attempt})
+    view.record_download_event(NodeDownloadProgress(download_progress=restart))
+    view.apply(NodeTelemetry(node_id=node, info=pending))
+    assert view.effective_downloads({}) == {}
+    view.apply(NodeTelemetry(node_id=node, info=restart))
+    assert view.effective_downloads({})[node] == [restart]
+
+
 def test_hydrated_terminal_download_rejects_delayed_progress() -> None:
     """Snapshot state seeds ordering before independent telemetry can overlay it."""
 

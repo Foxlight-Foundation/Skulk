@@ -148,12 +148,12 @@ class TelemetryView:
         self._node_download_terminal_attempts: dict[
             tuple[NodeId, str], DownloadAttemptId | None
         ] = {}
-        # A bounded tombstone prevents delayed telemetry from resurrecting a
-        # model after a fleet-wide staged eviction. Unlike terminal-attempt
-        # records, these no longer mirror durable State and therefore need an
-        # explicit cap.
-        self._node_download_eviction_tombstones: OrderedDict[
-            tuple[NodeId, str], None
+        # A bounded model-wide tombstone prevents delayed telemetry from
+        # resurrecting a staged model after fleet-wide eviction. Its per-node
+        # mapping records only restart attempts proven by an ordered Pending
+        # event; telemetry alone can never create that proof.
+        self._download_eviction_tombstones: OrderedDict[
+            str, dict[NodeId, DownloadAttemptId | None]
         ] = OrderedDict()
         # This node's OWN outbound capability set: the write half of the plane.
         # It lives on the shared view (not in State) so the API-side extension
@@ -220,10 +220,11 @@ class TelemetryView:
         for attempts in (
             self._node_download_attempts,
             self._node_download_terminal_attempts,
-            self._node_download_eviction_tombstones,
         ):
             for key in [key for key in attempts if key[0] == node_id]:
                 attempts.pop(key, None)
+        for restart_attempts in self._download_eviction_tombstones.values():
+            restart_attempts.pop(node_id, None)
         self.node_last_heartbeat.pop(node_id, None)
         self.node_last_telemetry.pop(node_id, None)
         # local_advertised_capabilities is deliberately NOT pruned: it is this
@@ -273,7 +274,14 @@ class TelemetryView:
             key = (node_id, model_id)
             terminal_recorded = key in self._node_download_terminal_attempts
             terminal_attempt = self._node_download_terminal_attempts.get(key)
-            evicted = key in self._node_download_eviction_tombstones
+            eviction_restarts = self._download_eviction_tombstones.get(model_id)
+            evicted = eviction_restarts is not None and node_id not in eviction_restarts
+            if eviction_restarts is not None and not evicted:
+                restart_attempt = eviction_restarts[node_id]
+                if info.attempt_id != restart_attempt:
+                    # Once the ordered restart names an attempt, delayed
+                    # telemetry from every other attempt remains pre-eviction.
+                    return
             if isinstance(info, DownloadOngoing) and (terminal_recorded or evicted):
                 # A new attempt always starts with Pending. Until that boundary
                 # arrives, every ongoing sample is stale relative to the
@@ -379,7 +387,9 @@ class TelemetryView:
             else:
                 self._node_download_attempts.pop(key, None)
             self._node_download_terminal_attempts.pop(key, None)
-            self._node_download_eviction_tombstones.pop(key, None)
+            eviction_restarts = self._download_eviction_tombstones.get(model_id)
+            if eviction_restarts is not None:
+                eviction_restarts[progress.node_id] = progress.attempt_id
             if live_by_model is not None:
                 current = live_by_model.get(model_id)
                 if (
@@ -414,7 +424,6 @@ class TelemetryView:
         if progress.attempt_id is not None:
             self._node_download_attempts[key] = progress.attempt_id
         self._node_download_terminal_attempts[key] = progress.attempt_id
-        self._node_download_eviction_tombstones.pop(key, None)
         if live_by_model is not None:
             current = live_by_model.get(model_id)
             if (
@@ -447,13 +456,10 @@ class TelemetryView:
         for key in keys:
             self._node_download_attempts.pop(key, None)
             self._node_download_terminal_attempts.pop(key, None)
-            self._node_download_eviction_tombstones.pop(key, None)
-            self._node_download_eviction_tombstones[key] = None
-        while (
-            len(self._node_download_eviction_tombstones)
-            > _DOWNLOAD_EVICTION_TOMBSTONE_CAPACITY
-        ):
-            self._node_download_eviction_tombstones.popitem(last=False)
+        self._download_eviction_tombstones.pop(model_id, None)
+        self._download_eviction_tombstones[model_id] = {}
+        while len(self._download_eviction_tombstones) > _DOWNLOAD_EVICTION_TOMBSTONE_CAPACITY:
+            self._download_eviction_tombstones.popitem(last=False)
 
     def record_download_snapshot(
         self,
@@ -471,6 +477,8 @@ class TelemetryView:
         self.node_downloads.clear()
         self._node_download_attempts.clear()
         self._node_download_terminal_attempts.clear()
+        for restart_attempts in self._download_eviction_tombstones.values():
+            restart_attempts.clear()
         for progresses in downloads.values():
             for progress in progresses:
                 if not isinstance(progress, (DownloadCompleted, DownloadFailed)):
