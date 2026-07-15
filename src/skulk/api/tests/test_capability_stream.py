@@ -503,9 +503,9 @@ async def test_provider_terminal_waits_for_handler_finalization() -> None:
         try:
             with anyio.fail_after(1.0):
                 await provider.finalization_started.wait()
+            assert terminal_received.is_set() is False
         finally:
             provider.release_finalization.set()
-        assert terminal_received.is_set() is False
 
         with anyio.fail_after(1.0):
             await terminal_received.wait()
