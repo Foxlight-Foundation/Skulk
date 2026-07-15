@@ -1041,15 +1041,6 @@ class Worker:
                                 "Vision media open metadata changed in flight",
                             )
                         continue
-                    if len(self._vision_media_pending_since) >= (
-                        _VISION_MEDIA_PENDING_STREAMS
-                    ):
-                        await self._reject_vision_media(
-                            packet,
-                            "Vision media ingress rejected the stream because worker "
-                            "capacity is exhausted",
-                        )
-                        continue
                     if (
                         packet.total_chunks is None
                         or packet.total_chunks > _VISION_MEDIA_PENDING_FRAMES
@@ -1060,32 +1051,95 @@ class Worker:
                             packet, "Vision media open exceeds declared bounds"
                         )
                         continue
+                    buffered_completion = self._vision_media_completed.get(command_id)
+                    buffered_chunks = self._vision_media_chunks.get(command_id, {})
+                    buffered_packets = [
+                        *buffered_chunks.values(),
+                        *(
+                            [buffered_completion]
+                            if buffered_completion is not None
+                            else []
+                        ),
+                    ]
+                    if any(
+                        buffered.source_node != packet.source_node
+                        or buffered.model != packet.model
+                        or buffered.total_chunks != packet.total_chunks
+                        for buffered in buffered_packets
+                    ) or (
+                        buffered_completion is not None
+                        and buffered_completion.image_count != packet.image_count
+                    ):
+                        await self._reject_vision_media(
+                            packet,
+                            "Vision media open does not match buffered stream metadata",
+                        )
+                        continue
+                    if command_id not in self._vision_media_pending_since:
+                        if len(self._vision_media_pending_since) >= (
+                            _VISION_MEDIA_PENDING_STREAMS
+                        ):
+                            await self._reject_vision_media(
+                                packet,
+                                "Vision media ingress rejected the stream because "
+                                "worker capacity is exhausted",
+                            )
+                            continue
+                        self._vision_media_pending_since[command_id] = time.monotonic()
                     self._vision_media_opened[command_id] = packet
-                    self._vision_media_pending_since[command_id] = time.monotonic()
+                    await self._finalize_vision_media(command_id)
                     continue
 
                 opened = self._vision_media_opened.get(command_id)
-                if opened is None:
-                    await self._reject_vision_media(
-                        packet, "Vision media stream did not begin with an open frame"
-                    )
-                    continue
                 if (
-                    packet.source_node != opened.source_node
-                    or packet.model != opened.model
-                    or packet.total_chunks != opened.total_chunks
+                    packet.total_chunks is None
+                    or packet.total_chunks > _VISION_MEDIA_PENDING_FRAMES
+                    or (
+                        packet.kind == "completed"
+                        and (
+                            packet.image_count is None
+                            or packet.image_count > packet.total_chunks
+                        )
+                    )
                 ):
                     await self._reject_vision_media(
-                        packet, "Vision media frame does not match its open metadata"
+                        packet, "Vision media frame exceeds declared bounds"
+                    )
+                    continue
+                if command_id not in self._vision_media_pending_since:
+                    if len(self._vision_media_pending_since) >= (
+                        _VISION_MEDIA_PENDING_STREAMS
+                    ):
+                        await self._reject_vision_media(
+                            packet,
+                            "Vision media ingress rejected the stream because worker "
+                            "capacity is exhausted",
+                        )
+                        continue
+                    self._vision_media_pending_since[command_id] = time.monotonic()
+                existing_completion = self._vision_media_completed.get(command_id)
+                existing_chunks = self._vision_media_chunks.get(command_id, {})
+                reference = opened or existing_completion or next(
+                    iter(existing_chunks.values()), None
+                )
+                if (
+                    reference is not None
+                    and (
+                        packet.source_node != reference.source_node
+                        or packet.model != reference.model
+                        or packet.total_chunks != reference.total_chunks
+                    )
+                ):
+                    await self._reject_vision_media(
+                        packet, "Vision media frame metadata changed in flight"
                     )
                     continue
                 if packet.kind == "completed":
-                    if packet.image_count != opened.image_count:
+                    if opened is not None and packet.image_count != opened.image_count:
                         await self._reject_vision_media(
                             packet, "Vision media completion does not match its open"
                         )
                         continue
-                    existing_completion = self._vision_media_completed.get(command_id)
                     if existing_completion is not None and existing_completion != packet:
                         await self._reject_vision_media(
                             packet, "Vision media completion metadata changed in flight"
@@ -1095,7 +1149,9 @@ class Worker:
                     await self._finalize_vision_media(command_id)
                     continue
 
-                chunks = self._vision_media_chunks.setdefault(command_id, {})
+                chunks = self._vision_media_chunks.setdefault(
+                    command_id, existing_chunks
+                )
                 existing = chunks.get(packet.sequence)
                 if existing is not None:
                     if existing != packet:

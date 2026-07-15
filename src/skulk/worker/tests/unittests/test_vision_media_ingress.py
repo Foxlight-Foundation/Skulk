@@ -199,28 +199,42 @@ async def test_vision_media_rejects_declared_frame_count_over_bound(
 
 
 @pytest.mark.asyncio
-async def test_vision_media_rejects_chunk_without_open() -> None:
-    worker, packet_sender, failure_receiver = _worker_with_vision_transport()
-    command_id = CommandId("missing-open")
-    failure: VisionMediaPacket | None = None
+async def test_vision_media_buffers_pre_open_frames_until_open_arrives() -> None:
+    worker, packet_sender, _ = _worker_with_vision_transport()
+    command_id = CommandId("reordered-open")
+    payload = b"aGVsbG8="
+    completion = VisionMediaPacket(
+        source_node=NodeId("api-node"),
+        target_node=NodeId("worker-node"),
+        command_id=command_id,
+        model=ModelId("org/vlm"),
+        sequence=2,
+        kind="completed",
+        total_chunks=1,
+        image_count=1,
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(worker._vision_media_packet_ingress)  # pyright: ignore[reportPrivateUsage]
+        await packet_sender.send(completion)
         await packet_sender.send(
             _packet(
                 command_id=command_id,
                 sequence=1,
-                data=b"aGVsbG8=",
+                data=payload,
                 image_index=0,
                 total_chunks=1,
             )
         )
-        failure = await failure_receiver.receive()
+        assert command_id not in worker._vision_media_verified  # pyright: ignore[reportPrivateUsage]
+        await packet_sender.send(_open(command_id, 1))
+        while command_id not in worker._vision_media_verified_chunks:  # pyright: ignore[reportPrivateUsage]
+            await anyio.sleep(0)
         task_group.cancel_scope.cancel()
 
-    assert failure is not None
-    assert failure.kind == "transport_failed"
-    assert "open frame" in (failure.error_message or "")
+    assert command_id in worker._vision_media_verified  # pyright: ignore[reportPrivateUsage]
+    assert worker.collect_vision_media_ingress_diagnostics().rejected_streams == 0
 
 
 @pytest.mark.asyncio
