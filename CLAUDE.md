@@ -262,6 +262,8 @@ Centralized logging uses a three-layer stack:
 - **Vector**: A local log shipper on each node reads Skulk's stdout and forwards to VictoriaLogs. Config at `deployment/logging/vector.yaml`.
 - **VictoriaLogs + Grafana**: Central log storage and dashboards on the R720. Stack definition at `deployment/logging/docker-compose.yml`.
 
+**Performance envelopes (adaptive concurrency, Phase 0):** the API node records one observation per completed generation into a bounded in-memory `PerformanceEnvelopeRegistry` (`src/skulk/api/performance_envelope.py`), keyed by `(hardware class x model x engine+backend x quant)` and bucketed by in-flight concurrency at admission, computing per-bucket p50/p90 TTFT, decode tok/s, aggregate throughput, and a knee estimate. A guarded stream tap (`API._tap_performance_envelope`) feeds it; it is exposed only via `GET /v1/diagnostics/performance-envelopes` (+ `/cluster` fan-out) and the dashboard Performance tab. Observe-only (no behavior change), off State/event-log/telemetry gossip plane. It records only when the serving node's hardware is fully known and exactly one instance serves the model (conservative skips keep the data trustworthy). Later phases (static caps -> online refinement -> closed-loop) are gated.
+
 ### Tracing
 Runtime tracing is a cluster-scoped debugging feature controlled by command and
 event flow rather than a required env-var-only launch mode:

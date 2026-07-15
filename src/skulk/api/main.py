@@ -9484,16 +9484,21 @@ class API:
             return None
         profile = self._telemetry_view.node_system.get(node_id)
         memory = self._telemetry_view.node_memory.get(node_id)
-        if profile is None and memory is None:
-            # No hardware telemetry for the serving node yet. Skip rather than
-            # record a bogus "unknown" hardware envelope that early traffic would
-            # create and later samples would have to correct.
+        if profile is None or memory is None:
+            # Require BOTH readings before recording. They populate independently
+            # (e.g. on Linux GPU nodes LinuxGpuMetrics and MemoryUsage arrive
+            # separately), so recording with one missing yields an incomplete key
+            # (a missing memory tier, or an "unknown" accelerator) that later
+            # samples would correct -- splitting the very envelope this feature is
+            # meant to learn. Skip until the serving node's hardware is fully known.
             return None
-        accelerator = profile.accelerator if profile is not None else None
+        # Both readings are present (guarded above); accelerator within the
+        # system profile is still optional (a CPU-only node reports none).
+        accelerator = profile.accelerator
         node_hardware = hardware_class(
             accelerator.vendor if accelerator is not None else None,
             accelerator.name if accelerator is not None else None,
-            memory.ram_total.in_bytes if memory is not None else None,
+            memory.ram_total.in_bytes,
         )
         return (node_hardware, backend, quantization)
 

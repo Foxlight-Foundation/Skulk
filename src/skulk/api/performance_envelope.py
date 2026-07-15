@@ -58,8 +58,9 @@ class ConcurrencyBucketSummary(CamelCaseModel):
     """Aggregated performance at one in-flight-concurrency level.
 
     Attributes:
-        concurrency: In-flight requests the instance was already serving when a
-            request in this bucket was admitted (1 for the single-stream engines).
+        concurrency: Total in-flight requests INCLUDING this one when a request in
+            this bucket was admitted (so a lone request is concurrency 1, and the
+            single-stream engines are always 1).
         request_count: Observations recorded in this bucket across ALL outcomes
             (the latency/throughput reservoirs below hold successes only).
         success_count: Observations that finished cleanly.
