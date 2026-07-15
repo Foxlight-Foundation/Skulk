@@ -204,6 +204,23 @@ def shard_preallocates_kv_upfront(shard: ShardMetadata) -> bool:
     )
 
 
+def backend_offloads_to_vram(resolved_backend: str | None) -> bool:
+    """Whether a resolved backend allocates weights + KV from DISCRETE GPU VRAM.
+
+    A GPU compute tag (``llama_cpp-cuda`` / ``-rocm``, ``llama_server-cuda`` /
+    ``-rocm``, ``vllm-cuda`` / ``-rocm``) offloads to VRAM. A ``-cpu`` tag OR a
+    bare engine tag (no compute suffix) runs ``-ngl 0`` and allocates from system
+    RAM, so it does NOT. ``None`` (unresolved) is treated as not-VRAM: we cannot
+    confirm VRAM offload, so the caller stays conservative. Mirrors the runner's
+    ``_gpu_layers_for_backend`` (GPU only for a ``<engine>-<gpu>`` tag).
+    """
+    if resolved_backend is None:
+        return False
+    return resolved_backend.startswith(
+        ("llama_cpp-", "llama_server-", "vllm-")
+    ) and not resolved_backend.endswith("-cpu")
+
+
 def per_token_kv_bytes(model_card: ModelCard) -> int:
     """Whole-model KV-cache bytes consumed by ONE token of context.
 
@@ -324,8 +341,22 @@ def instance_context_token_limit(
     # nodes at the budget floor; the memory-fit lift applies to discrete-VRAM (GPU)
     # nodes. ``node_vram`` membership is static per node, so this stays deterministic.
     if served_preallocates and memory_limit is not None:
-        hosting_nodes = shard_assignments.node_to_runner
-        if not all(node_vram.get(node_id) is not None for node_id in hosting_nodes):
+        # Keep the lift only where the served window is preallocated in DISCRETE
+        # VRAM (the pool placement admitted against): every hosting shard must both
+        # resolve to a GPU-offload backend (``-cuda`` / ``-rocm``; a ``-cpu`` / bare
+        # tag runs ``-ngl 0`` and preallocates in SYSTEM RAM, which competes with
+        # live ram_available) AND run on a node reporting discrete VRAM (a
+        # ram_total-derived fit likewise competes with ram_available). Anything
+        # else -- CPU-resolved on a GPU node, a non-VRAM node, or an unresolved
+        # backend -- clamps to the floor to avoid a load-time OOM.
+        lift_in_vram = all(
+            node_vram.get(node_id) is not None
+            and backend_offloads_to_vram(
+                shard_assignments.runner_to_shard[runner_id].resolved_backend
+            )
+            for node_id, runner_id in shard_assignments.node_to_runner.items()
+        )
+        if not lift_in_vram:
             memory_limit = min(memory_limit, KV_CONTEXT_BUDGET_TOKENS)
 
     card_limit = model_card.context_length if model_card.context_length > 0 else None

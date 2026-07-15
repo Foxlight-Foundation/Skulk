@@ -311,9 +311,12 @@ def test_instance_limit_gguf_not_capped_to_kv_budget_on_vram_node():
     card = _card(1, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
         update={"context_length": 131072}
     )
-    assignments = _assignments(
-        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    # The shard must resolve to a GPU-offload backend for the lift: only then does
+    # the runner preallocate KV in VRAM (a -cpu/bare backend runs -ngl 0 in RAM).
+    gpu_shard = _pipeline_shard(card, start=0, end=32).model_copy(
+        update={"resolved_backend": "llama_server-cuda"}
     )
+    assignments = _assignments(card, {"r0": (gpu_shard, "n0")})
     limit = instance_context_token_limit(
         assignments,
         {NodeId("n0"): Memory.from_gb(64)},
@@ -321,6 +324,26 @@ def test_instance_limit_gguf_not_capped_to_kv_budget_on_vram_node():
     )
     assert limit is not None and limit > KV_CONTEXT_BUDGET_TOKENS
     assert limit <= 131072  # never above the card's advertised max
+
+
+def test_instance_limit_gguf_cpu_resolved_on_vram_node_clamps_to_floor():
+    # A gguf shard that resolves to a CPU/bare backend on a node WITH discrete VRAM
+    # runs -ngl 0 and preallocates KV in SYSTEM RAM, so the VRAM-sized lift is
+    # unsafe -- it clamps to the floor even though the node reports VRAM. (P2
+    # review, #585.)
+    card = _card(1, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
+        update={"context_length": 131072}
+    )
+    cpu_shard = _pipeline_shard(card, start=0, end=32).model_copy(
+        update={"resolved_backend": "llama_server-cpu"}
+    )
+    assignments = _assignments(card, {"r0": (cpu_shard, "n0")})
+    limit = instance_context_token_limit(
+        assignments,
+        {NodeId("n0"): Memory.from_gb(64)},
+        node_vram={NodeId("n0"): Memory.from_gb(48)},
+    )
+    assert limit == KV_CONTEXT_BUDGET_TOKENS
 
 
 def test_instance_limit_gguf_non_vram_node_clamps_to_floor():
