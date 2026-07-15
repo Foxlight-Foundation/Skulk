@@ -396,6 +396,13 @@ class Runner:
         self._max_concurrency: int = _max_concurrent_requests()
         self._status_lock = threading.Lock()
         self._cancel_lock = threading.Lock()
+        # Backpressure: caps SUBMITTED generations to _max_concurrency. A bare
+        # ThreadPoolExecutor bounds active threads but has an UNBOUNDED submit
+        # queue, so without this the runner would accumulate an unbounded backlog
+        # of queued TextGeneration jobs under sustained load. The dispatch loop
+        # acquires a permit before submitting and blocks (applying backpressure to
+        # the task receiver) when all are held; a finished generation releases one.
+        self._dispatch_permits = threading.Semaphore(self._max_concurrency)
         self._inflight: int = 0
         self.server_proc: subprocess.Popen[bytes] | None = None
         self.server_log: Any = None
@@ -458,8 +465,11 @@ class Runner:
             )
 
     def main(self) -> None:
-        # One thread per in-flight generation, bounded so queued requests wait in
-        # the pool rather than piling unbounded threads/streams against the server.
+        # One thread per in-flight generation. The pool caps ACTIVE threads; the
+        # _dispatch_permits semaphore (acquired below before each submit) caps
+        # SUBMITTED jobs to the same bound, so the pool's otherwise-unbounded submit
+        # queue never accumulates a backlog -- excess load backpressures the task
+        # receiver instead.
         pool = ThreadPoolExecutor(
             max_workers=self._max_concurrency, thread_name_prefix="vllm-gen"
         )
@@ -485,9 +495,20 @@ class Runner:
                         case TextGeneration() if isinstance(
                             self.current_status, (RunnerReady, RunnerRunning)
                         ):
-                            # Non-blocking: dispatch to the pool and immediately
-                            # loop back to receive the next task, so N generations
-                            # run concurrently and vLLM batches them.
+                            # Backpressure: block until a dispatch slot frees so the
+                            # runner never accumulates an unbounded backlog in the
+                            # pool's submit queue (max_concurrency caps ACTIVE
+                            # threads, not the queue). Blocking here stops pulling
+                            # from the receiver, backpressuring the master. Wake
+                            # periodically while saturated so a dead server is still
+                            # caught by the liveness check.
+                            while not self._dispatch_permits.acquire(
+                                timeout=_LIVENESS_POLL_S
+                            ):
+                                self._ensure_server_alive()
+                            # Dispatch to the pool and loop back to receive the next
+                            # task, so N generations run concurrently and vLLM
+                            # batches them.
                             self._dispatch_generation(task, pool)
                         case Shutdown():
                             self._handle_shutdown(task, pool)
@@ -584,6 +605,9 @@ class Runner:
                         self.current_status, (RunnerShuttingDown, RunnerShutdown)
                     ):
                         self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
+            # Release the backpressure slot this generation held (acquired in the
+            # dispatch loop), letting a queued task be pulled and submitted.
+            self._dispatch_permits.release()
 
     def _note_generation_started(self) -> None:
         with self._status_lock:

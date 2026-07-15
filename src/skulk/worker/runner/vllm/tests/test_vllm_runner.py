@@ -16,7 +16,13 @@ from typing import Any
 import pytest
 
 from skulk.shared.types.common import CommandId
-from skulk.shared.types.tasks import CANCEL_ALL_TASKS, TaskId, TaskStatus
+from skulk.shared.types.tasks import (
+    CANCEL_ALL_TASKS,
+    TaskId,
+    TaskStatus,
+    TextGeneration,
+)
+from skulk.shared.types.text_generation import TextGenerationTaskParams
 from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
 from skulk.worker.runner.vllm.runner import (
     _DEFAULT_GPU_MEMORY_UTILIZATION,
@@ -235,12 +241,20 @@ def _fake_task() -> Any:
     return SimpleNamespace(task_id=TaskId(), command_id=CommandId())
 
 
+def _gen_params() -> "TextGenerationTaskParams":
+    """A minimal valid TextGenerationTaskParams for main-loop tests."""
+    from skulk.shared.types.common import ModelId
+
+    return TextGenerationTaskParams(model=ModelId("m"), input=[])
+
+
 def _bare_runner(max_concurrency: int = 4) -> Any:
     runner: Any = VllmRunner.__new__(VllmRunner)
     runner._status_lock = threading.Lock()
     runner._cancel_lock = threading.Lock()
     runner._inflight = 0
     runner._max_concurrency = max_concurrency
+    runner._dispatch_permits = threading.Semaphore(max_concurrency)
     runner.cancelled_tasks = set()
     runner.seen = set()
     runner.current_status = RunnerReady()
@@ -461,4 +475,79 @@ def test_main_broadcasts_ready_after_load_model() -> None:
         task_s.send(
             Shutdown(instance_id=InstanceId("probe-inst"), runner_id=runner.runner_id)
         )
+        thread.join(timeout=5)
+
+
+def test_main_backpressure_caps_submitted_generations() -> None:
+    # The dispatch loop must not submit an unbounded backlog into the pool's queue:
+    # with max_concurrency=2 and 4 generations forwarded at once, only 2 run
+    # concurrently; the loop blocks on _dispatch_permits before dispatching the
+    # 3rd/4th until a slot frees (backpressure). Drives the real main() loop.
+    from skulk.shared.types.events import Event
+    from skulk.shared.types.tasks import LoadModel, Shutdown, Task
+    from skulk.shared.types.worker.instances import InstanceId
+    from skulk.shared.types.worker.runners import RunnerId, RunnerIdle
+    from skulk.utils.channels import mp_channel
+
+    runner: Any = VllmRunner.__new__(VllmRunner)
+    runner._status_lock = threading.Lock()
+    runner._cancel_lock = threading.Lock()
+    runner._inflight = 0
+    runner._max_concurrency = 2
+    runner._dispatch_permits = threading.Semaphore(2)
+    runner.cancelled_tasks = set()
+    runner.seen = set()
+    runner.runner_id = RunnerId("vllm-bp")
+    runner.current_status = RunnerIdle()
+
+    evt_s, _evt_r = mp_channel[Event]()
+    task_s, task_r = mp_channel[Task]()
+    _cancel_s, cancel_r = mp_channel[TaskId]()
+    runner.event_sender = evt_s
+    runner.task_receiver = task_r
+    runner.cancel_receiver = cancel_r
+
+    started = threading.Semaphore(0)
+    release = threading.Event()
+    peak_lock = threading.Lock()
+    peak_inflight = 0
+
+    def fake_load(_task: Any) -> None:
+        runner.current_status = RunnerReady()
+
+    def fake_generate(_task: Any) -> None:
+        nonlocal peak_inflight
+        started.release()
+        with peak_lock:
+            peak_inflight = max(peak_inflight, runner._inflight_count())
+        release.wait(5)
+
+    runner._load_model = fake_load
+    runner._generate = fake_generate
+    runner._teardown_server = lambda: None
+    runner._ensure_server_alive = lambda: None
+
+    thread = threading.Thread(target=runner.main, daemon=True)
+    thread.start()
+    try:
+        iid = InstanceId("bp-inst")
+        task_s.send(LoadModel(instance_id=iid))
+        # Forward 4 generations at once.
+        for _ in range(4):
+            task_s.send(
+                TextGeneration(command_id=CommandId(), task_params=_gen_params(), instance_id=iid)
+            )
+        # Exactly 2 should start; a 3rd must NOT start while the first 2 are held.
+        assert started.acquire(timeout=5)
+        assert started.acquire(timeout=5)
+        assert not started.acquire(timeout=1), "a 3rd generation ran despite the 2-permit cap"
+        assert runner._inflight_count() == 2
+        # Release: the remaining 2 now run as slots free.
+        release.set()
+        assert started.acquire(timeout=5)
+        assert started.acquire(timeout=5)
+        assert peak_inflight == 2, f"in-flight exceeded the cap: peak={peak_inflight}"
+    finally:
+        release.set()
+        task_s.send(Shutdown(instance_id=InstanceId("bp-inst"), runner_id=runner.runner_id))
         thread.join(timeout=5)
