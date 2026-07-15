@@ -1319,6 +1319,7 @@ class Worker:
                 self.input_chunk_buffer[command_id] = verified_chunks
                 self.input_chunk_counts[command_id] = len(verified_chunks)
                 self._vision_media_accepted.add(command_id)
+                self._vision_media_pending_since.pop(command_id, None)
         finally:
             self._vision_media_ack_inflight.discard(command_id)
 

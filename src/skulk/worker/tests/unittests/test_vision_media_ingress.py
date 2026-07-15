@@ -290,6 +290,7 @@ async def test_vision_media_acknowledges_authoritative_task_owner() -> None:
     assert acknowledgement.source_node == NodeId("worker-node")
     assert acknowledgement.target_node == NodeId("api-node")
     assert command_id in worker._vision_media_accepted  # pyright: ignore[reportPrivateUsage]
+    assert command_id not in worker._vision_media_pending_since  # pyright: ignore[reportPrivateUsage]
     assert command_id in worker.input_chunk_buffer
 
 
