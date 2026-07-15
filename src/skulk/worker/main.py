@@ -304,7 +304,16 @@ def _local_usable_vram() -> Memory | None:
         # against VRAM would falsely refuse CPU placements that fit.
         from skulk.shared.backends import probe_node_backends
 
-        if "llama_cpp-cuda" not in probe_node_backends():
+        # Gated on the node advertising a CUDA GPU-offload backend. Both the
+        # in-process llama.cpp runner AND the vLLM served engine allocate weights
+        # + KV from VRAM (`vllm-` joins the GPU-offload prefixes in placement, so
+        # the master admits vLLM against VRAM), so a vLLM-only CUDA node
+        # (`vllm-cuda` advertised, `llama_cpp-cuda` not) must also size the local
+        # guard against VRAM -- else it would refuse the very placement the master
+        # admitted against VRAM. A node advertising only `*-cpu` was admitted
+        # against system RAM and correctly keeps the RAM path.
+        backends = probe_node_backends()
+        if not any(tag in backends for tag in ("llama_cpp-cuda", "vllm-cuda")):
             return None
         nvml = load_nvml()
         if nvml is None or not has_nvidia_gpu(nvml):

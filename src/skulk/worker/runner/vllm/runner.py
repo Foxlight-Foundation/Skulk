@@ -495,6 +495,13 @@ class Runner:
                         case TextGeneration() if isinstance(
                             self.current_status, (RunnerReady, RunnerRunning)
                         ):
+                            # Acknowledge acceptance NOW, before any backpressure
+                            # block: the supervisor's start_task waits on the ack
+                            # before the worker can plan again, so deferring it until
+                            # a pool slot frees would stall dispatch of cancellations
+                            # / shutdown / other work behind the first over-capacity
+                            # request. Ack means "accepted", not "running".
+                            self.acknowledge_task(task)
                             # Backpressure: block until a dispatch slot frees so the
                             # runner never accumulates an unbounded backlog in the
                             # pool's submit queue (max_concurrency caps ACTIVE
@@ -550,7 +557,27 @@ class Runner:
                 self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
         self.send_task_status(task, TaskStatus.Running)
         self._note_generation_started()
-        future = pool.submit(self._run_one_generation, task)
+        try:
+            future = pool.submit(self._run_one_generation, task)
+        except RuntimeError as exc:
+            # The pool rejected the job (already shut down / broken). The
+            # done-callback that normally releases the permit and decrements the
+            # in-flight count will never run, so undo them here and surface a
+            # terminal error rather than leaking a slot and wedging RunnerRunning.
+            logger.opt(exception=exc).error("vllm dispatch submit failed")
+            self.event_sender.send(
+                ChunkGenerated(
+                    command_id=task.command_id,
+                    chunk=ErrorChunk(
+                        model=self.shard_metadata.model_card.model_id,
+                        error_message=f"runner could not dispatch generation: {exc}",
+                    ),
+                )
+            )
+            self.send_task_status(task, TaskStatus.Failed)
+            self._note_generation_finished()
+            self._dispatch_permits.release()
+            return
         future.add_done_callback(lambda f: self._finish_generation(task, f))
 
     def _run_one_generation(self, task: TextGeneration) -> None:
@@ -837,8 +864,9 @@ class Runner:
         # Runs on a pool worker thread. Runner status (Running/Ready) is owned by
         # the dispatch loop's in-flight counter, not this per-request path, so a
         # finishing generation never flips the runner to Ready while others run.
+        # The task was already acknowledged at acceptance in the dispatch loop
+        # (before backpressure), so it is not re-acknowledged here.
         assert isinstance(task, TextGeneration)
-        self.acknowledge_task(task)
         assert self.base_url is not None
 
         model_id = self.shard_metadata.model_card.model_id
