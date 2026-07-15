@@ -552,30 +552,36 @@ def serving_n_ctx(context_token_limit: int | None, logits_all: bool) -> int:
     """Context window (tokens) to allocate for the llama.cpp KV cache on load.
 
     llama.cpp allocates the whole KV cache up front from ``n_ctx`` (unlike MLX,
-    which grows it per request), so ``n_ctx`` must not exceed the memory placement
-    actually reserved. Two failure modes this guards against:
+    which grows it per request), so ``n_ctx`` must be a value placement actually
+    reserved memory for. That value is the instance's stamped
+    ``context_token_limit`` (``instance_context_token_limit``): the largest context
+    that fits the hosting node's working set after weights and overhead, capped at
+    the model's own advertised maximum. Because placement admits a node against the
+    SAME working set (VRAM on a GPU node) that this ceiling is derived from, loading
+    the whole KV cache at this window fits by construction -- and it is always at
+    least ``KV_CONTEXT_BUDGET_TOKENS`` (the admission floor placement enforces), so
+    it never serves a smaller window than before.
 
-    - ``n_ctx=0`` tells llama.cpp to size the cache for the model's FULL trained
-      context (e.g. gemma-4's 128k), which OOM-killed the whole worker on load
-      (observed loading gemma-4-31B on a Vulkan node: the process was oom-killed
-      and the instance vanished).
-    - The instance's request-admission ceiling (#145, ``context_token_limit``) is
-      NOT a safe size either: it is derived from ~0.75 x total RAM and can be tens
-      of thousands of tokens, whereas placement's fit check
-      (``filter_cycles_by_memory``) only reserved KV for ``KV_CONTEXT_BUDGET_TOKENS``
-      (8192). Allocating the larger ceiling up front would again exceed reserved
-      memory and OOM the node.
+    This replaces the previous fixed clamp to ``KV_CONTEXT_BUDGET_TOKENS`` (8192),
+    which made a served model unusable for real-context work (a whole codebase does
+    not fit in 8192 tokens). ``n_ctx=0`` (the model's full trained context, e.g.
+    gemma-4's 128k, which OOM-killed the worker on load) is still never used; the
+    memory-fit ceiling is the cap.
 
-    So the load-time window is the placement KV budget -- the value placement
-    sized node memory against -- additionally clamped down by the admission
-    ceiling on the (degenerate) tiny node where it is even smaller, and by the
-    logits-buffer window when ``logits_all`` is on (that buffer scales with
-    ``n_ctx``). Serving llama.cpp beyond this budget requires placement to reserve
-    the larger KV footprint first (tracked separately with VRAM-aware admission).
+    Falls back to ``KV_CONTEXT_BUDGET_TOKENS`` only when no ceiling was stamped
+    (missing memory info), and is additionally bounded by the logits-buffer window
+    when ``logits_all`` is on (that buffer scales with ``n_ctx``).
+
+    NOTE (KV dtype, #584): the fit that sizes ``context_token_limit`` assumes fp16
+    KV (``KV_DTYPE_BYTES``). If KV-cache quantization is ever enabled at the runner,
+    that same estimate must use the quantized bytes-per-token or this window would
+    be sized against the wrong footprint.
     """
-    ceiling = KV_CONTEXT_BUDGET_TOKENS
-    if context_token_limit and 0 < context_token_limit < ceiling:
-        ceiling = context_token_limit
+    ceiling = (
+        context_token_limit
+        if context_token_limit and context_token_limit > 0
+        else KV_CONTEXT_BUDGET_TOKENS
+    )
     if logits_all:
         return min(ceiling, _logits_all_n_ctx())
     return ceiling

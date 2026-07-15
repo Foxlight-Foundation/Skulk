@@ -233,31 +233,37 @@ def test_instance_limit_none_when_nothing_enforceable():
     assert instance_context_token_limit(assignments, {}) is None
 
 
-def test_instance_limit_gguf_capped_to_kv_budget():
-    # #362: a GGUF/llama.cpp instance whose memory + card ceiling exceed the
-    # runner's loaded window (KV_CONTEXT_BUDGET_TOKENS, serving_n_ctx) must admit
-    # only up to that window, else a request beyond it is admitted then fails at
-    # the runner. Card advertises a large context, lots of memory -> would be huge.
+def test_instance_limit_gguf_not_capped_to_kv_budget():
+    # The old fixed 8192 clamp on GGUF/llama.cpp instances is gone: a served model
+    # is now sized to the memory/card fit like every other engine (the runner
+    # serves that window via serving_n_ctx, and placement admits the node against
+    # the same working set the ceiling is derived from). Generous memory + a large
+    # advertised context -> well above the old budget, capped only by the card max.
+    # A fixed 8192 here made served models unusable for real-context work.
     card = _card(1, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
         update={"context_length": 131072}
     )
     assignments = _assignments(
         card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
     )
-    assert (
-        instance_context_token_limit(assignments, {NodeId("n0"): Memory.from_gb(64)})
-        == KV_CONTEXT_BUDGET_TOKENS
+    limit = instance_context_token_limit(
+        assignments, {NodeId("n0"): Memory.from_gb(64)}
     )
+    assert limit is not None and limit > KV_CONTEXT_BUDGET_TOKENS
+    assert limit <= 131072  # never above the card's advertised max
 
 
-def test_instance_limit_gguf_capped_even_without_memory_or_card_limit():
-    # A bare GGUF card (no advertised context, no node memory) still serves a
-    # bounded n_ctx, so admission is the budget, not None.
+def test_instance_limit_gguf_no_info_returns_none():
+    # A bare GGUF card with neither node memory nor an advertised context has no
+    # memory-fit ceiling to compute, so the limit is None -- the runner's
+    # serving_n_ctx applies the KV_CONTEXT_BUDGET_TOKENS floor at load. GGUF is no
+    # longer special-cased to a fixed 8192 stamp; it matches every other engine's
+    # no-info behavior.
     card = _card(4, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf")
     assignments = _assignments(
         card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
     )
-    assert instance_context_token_limit(assignments, {}) == KV_CONTEXT_BUDGET_TOKENS
+    assert instance_context_token_limit(assignments, {}) is None
 
 
 def test_instance_limit_gguf_below_budget_unchanged():

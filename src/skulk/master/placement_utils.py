@@ -344,6 +344,14 @@ def filter_cycles_by_memory(
     diagnostics = CycleMemoryDiagnostics()
     filtered_cycles: list[Cycle] = []
     required_memory = model_card.storage_size
+    # ``context_budget`` (KV_CONTEXT_BUDGET_TOKENS) is the admission FLOOR, not the
+    # served window: a node is admissible only if it can hold at least this much KV,
+    # so every placement can serve at least this context. The runner then serves the
+    # LARGER memory-fit window from ``instance_context_token_limit`` (up to the card
+    # max), derived from the SAME working set this filter admits against (VRAM on a
+    # GPU node), so loading KV at that larger window fits by construction and is
+    # always >= this floor. (Lifting the floor itself, to admit a big model at a
+    # reduced context rather than reject it, is a separate future lever.)
     total_kv = _estimate_kv_cache_bytes(model_card, model_card.n_layers, context_budget)
     kv_ratio = (
         total_kv.in_bytes / required_memory.in_bytes

@@ -276,22 +276,19 @@ def instance_context_token_limit(
     else:
         limit = min(memory_limit, card_limit)
 
-    # The llama.cpp runner allocates its KV cache up front and caps the loaded
-    # context to KV_CONTEXT_BUDGET_TOKENS (the same budget placement reserves; see
-    # the runner's serving_n_ctx). The memory/card ceiling above can be far
-    # larger (tens of thousands of tokens), so without this a request between the
-    # budget and that ceiling is ADMITTED by the API but exceeds the runner's
-    # loaded window and fails/truncates at generation instead of being cleanly
-    # rejected (#362; logprobs lowers the runner window further, the original
-    # report). Cap a GGUF/llama.cpp instance's admission ceiling to the budget so
-    # admission matches what the runner actually serves. (Serving beyond the
-    # budget needs placement to reserve the larger KV footprint first, tracked
-    # with VRAM-aware admission; when that lands both this cap and serving_n_ctx
-    # move together off the shared constant.)
-    if model_card.gguf_file:
-        limit = (
-            KV_CONTEXT_BUDGET_TOKENS
-            if limit is None
-            else min(limit, KV_CONTEXT_BUDGET_TOKENS)
-        )
+    # This ceiling is now the value the runner actually serves: a served engine
+    # (llama.cpp / vLLM) loads its KV cache at ``serving_n_ctx(context_token_limit)``,
+    # i.e. this memory-fit window (capped at the card's max), not a fixed 8192. The
+    # ceiling and the runner window moved off the shared constant together, as the
+    # previous fixed-clamp comment anticipated: placement's per-node fit is derived
+    # from the same working set as this ceiling, so a node admitted at the
+    # KV_CONTEXT_BUDGET_TOKENS floor can hold the KV for this larger window (see
+    # filter_cycles_by_memory and serving_n_ctx). The old fixed 8192 clamp made
+    # served models unusable for real-context work (a codebase does not fit in 8192
+    # tokens); the memory/card fit is the honest ceiling, and it is always at least
+    # the admission floor so it never regresses below the old behavior.
+    #
+    # KV dtype (#584): the fit assumes fp16 KV (KV_DTYPE_BYTES); enabling KV-cache
+    # quantization must feed the estimate the quantized bytes-per-token or this
+    # ceiling would be sized against the wrong footprint.
     return limit
