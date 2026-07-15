@@ -58,13 +58,14 @@ class BaseInstance(TaggedModel):
         ``instance_context_token_limit`` itself returns the card limit when no
         memory-derived ceiling applies), so this only fills the legacy gap.
 
-        For a gguf card the fallback is bounded to ``KV_CONTEXT_BUDGET_TOKENS``:
-        the served llama.cpp engine loads its whole KV cache up front from this
-        value (``serving_n_ctx``), so backfilling a large advertised context
-        (e.g. 128k) would preallocate a fictitious window and OOM the node at
-        load. The budget floor is the safe legacy default; a freshly placed
-        instance gets the real memory-fit ceiling instead. MLX (lazy KV) keeps
-        the full advertised context.
+        For a window-committing served engine (llama.cpp / llama-server / vLLM, per
+        ``shard_preallocates_kv_upfront``) the fallback is bounded to
+        ``KV_CONTEXT_BUDGET_TOKENS``: the engine commits its load-time context
+        window from this value (``serving_n_ctx``), so backfilling a large
+        advertised context (e.g. 128k) would commit a fictitious window and OOM /
+        fail to load. The budget floor is the safe legacy default; a freshly placed
+        instance gets the real memory-fit ceiling instead. MLX (lazy KV) keeps the
+        full advertised context.
         """
         if self.context_token_limit is None:
             # All shards of an instance share one model card, so any shard's
@@ -73,13 +74,13 @@ class BaseInstance(TaggedModel):
             if shard is not None:
                 card = shard.model_card
                 if shard_preallocates_kv_upfront(shard):
-                    # A legacy gguf instance ALWAYS needs a ceiling, even when the
-                    # card's context_length is unknown (0): the served llama.cpp
-                    # engine still preallocates a KV cache at KV_CONTEXT_BUDGET_TOKENS
-                    # (serving_n_ctx falls back to the floor for a None ceiling), so
-                    # leaving context_token_limit=None would let the API admit
-                    # requests larger than the runner serves. Fall back to the floor
-                    # (a known context_length is additionally bounded by it).
+                    # A legacy served-engine instance ALWAYS needs a ceiling, even
+                    # when the card's context_length is unknown (0): the engine still
+                    # commits a window at KV_CONTEXT_BUDGET_TOKENS (serving_n_ctx
+                    # falls back to the floor for a None ceiling), so leaving
+                    # context_token_limit=None would let the API admit requests
+                    # larger than the runner serves. Fall back to the floor (a known
+                    # context_length is additionally bounded by it).
                     self.context_token_limit = (
                         min(card.context_length, KV_CONTEXT_BUDGET_TOKENS)
                         if card.context_length > 0

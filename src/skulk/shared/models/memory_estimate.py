@@ -171,7 +171,7 @@ def gpu_working_set_ceiling(ram_total: Memory) -> Memory:
 # The served engines that size a fixed context WINDOW at load from
 # ``serving_n_ctx``: in-process llama.cpp and llama-server allocate ``n_ctx`` of KV
 # up front (OOM-kill on overflow); vLLM passes it as ``vllm serve --max-model-len``
-# and validates it against its KV pool at startup. All three need the served-context
+# (the max sequence length the loaded server accepts). All three need the served-context
 # clamps and the worker fit-guard sized to the real window. MLX is NOT here: it
 # grows KV lazily per request, so it must not be force-clamped (that would regress
 # MLX context).
@@ -219,10 +219,9 @@ def backend_offloads_to_vram(resolved_backend: str | None) -> bool:
 
     A GPU compute tag (``llama_cpp-cuda`` / ``-rocm``, ``llama_server-cuda`` /
     ``-rocm``, ``vllm-cuda`` / ``-rocm``) offloads to VRAM. A ``-cpu`` tag OR a
-    bare engine tag (no compute suffix) runs ``-ngl 0`` and allocates from system
-    RAM, so it does NOT. ``None`` (unresolved) is treated as not-VRAM: we cannot
-    confirm VRAM offload, so the caller stays conservative. Mirrors the runner's
-    ``_gpu_layers_for_backend`` (GPU only for a ``<engine>-<gpu>`` tag).
+    bare engine tag (no compute suffix) does not offload to the GPU and allocates
+    from system RAM, so it does NOT. ``None`` (unresolved) is treated as not-VRAM:
+    we cannot confirm VRAM offload, so the caller stays conservative.
     """
     if resolved_backend is None:
         return False

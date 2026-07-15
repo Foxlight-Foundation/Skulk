@@ -554,8 +554,9 @@ def serving_n_ctx(context_token_limit: int | None, logits_all: bool) -> int:
     Shared by the served engines that commit a fixed context window at load:
     in-process ``llama_cpp`` and ``llama_server`` allocate the whole KV cache up
     front from ``n_ctx``, and ``vllm`` passes the returned value as ``vllm serve
-    --max-model-len`` (validated against its KV pool at startup). Unlike MLX, which
-    grows KV per request, this window must be a value placement actually reserved
+    --max-model-len`` (the max sequence length the loaded server accepts). Unlike
+    MLX, which grows KV per request, this window must be a value placement actually
+    reserved
     memory for. That value is the instance's stamped
     ``context_token_limit`` (``instance_context_token_limit``): the largest context
     that fits the hosting node's working set after weights and overhead, capped at
