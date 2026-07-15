@@ -346,6 +346,7 @@ from skulk.shared.types.diagnostics import (
     InstancePlacementDiagnostics,
     MlxMemorySnapshot,
     NodeDiagnostics,
+    NodeDiagnosticsVersionStatus,
     NodeResourceDiagnostics,
     NodeRuntimeDiagnostics,
     NodeTailscaleDiagnostics,
@@ -8939,6 +8940,14 @@ class API:
                         )
                     )
 
+        # Every advertised route participates in the comparison, including a
+        # failed collection whose build is therefore unknown. Topology members
+        # with no route remain visible below but cannot be queried by this API
+        # owner and do not make the reachable-build result uncertain.
+        routed_version_statuses: list[NodeDiagnosticsVersionStatus] = [
+            entry.version_status for entry in nodes
+        ]
+
         # A topology member with no reachable API route must appear as an
         # explicit failure, not vanish: an overlay-joined node (advertising
         # only addresses its peers cannot route) otherwise has no
@@ -8965,7 +8974,7 @@ class API:
             local_node_id=str(self.node_id),
             master_node_id=str(self._master_node_id),
             version_status=aggregate_diagnostics_version_status(
-                [entry.version_status for entry in nodes if entry.ok]
+                routed_version_statuses
             ),
             nodes=nodes,
         )

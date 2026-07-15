@@ -658,6 +658,59 @@ def test_cluster_diagnostics_marks_mixed_source_builds(
     assert nodes["peer-node"]["ok"] is True
 
 
+def test_cluster_diagnostics_marks_failed_routed_peer_version_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A known route that fails collection must make build status uncertain."""
+
+    api = _build_api("local-node")
+    client = TestClient(api.app)
+
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
+        return {"peer-node": "http://peer-node:52415"}
+
+    class _FakeAsyncClient:
+        async def __aenter__(self) -> "_FakeAsyncClient":
+            return self
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            return None
+
+        async def get(self, url: str) -> httpx.Response:
+            return httpx.Response(
+                503,
+                request=httpx.Request("GET", url),
+            )
+
+    def _build_async_client(*_args: object, **_kwargs: object) -> _FakeAsyncClient:
+        return _FakeAsyncClient()
+
+    monkeypatch.setattr(api, "_reachable_peer_api_urls", _reachable_peer_api_urls)
+    monkeypatch.setattr(api_main.httpx, "AsyncClient", _build_async_client)
+
+    response = client.get("/v1/diagnostics/cluster")
+
+    assert response.status_code == 200
+    body = _json_object(response)
+    assert body["versionStatus"] == "unknown"
+    nodes = {
+        str(node["nodeId"]): node
+        for node in (
+            _json_mapping(item) for item in _json_list(body["nodes"])
+        )
+    }
+    peer = nodes["peer-node"]
+    assert peer["ok"] is False
+    assert peer["url"] == "http://peer-node:52415"
+    assert peer["versionStatus"] == "unknown"
+
+
 def _build_supervisor_runner(
     *,
     node_id: str,
