@@ -1,11 +1,16 @@
-from skulk.shared.apply import apply_node_download_progress
+from skulk.shared.apply import apply, apply_node_download_progress
 from skulk.shared.tests.conftest import get_pipeline_shard_metadata
 from skulk.shared.types.common import NodeId
-from skulk.shared.types.events import NodeDownloadProgress
+from skulk.shared.types.events import (
+    IndexedEvent,
+    NodeDownloadProgress,
+    StateSnapshotHydrated,
+)
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
+    DownloadFailed,
     DownloadOngoing,
     DownloadPending,
     DownloadProgressData,
@@ -97,3 +102,47 @@ def test_apply_pending_download_clears_prior_terminal_outcome() -> None:
     )
 
     assert updated.downloads == {}
+
+
+def test_snapshot_hydration_keeps_only_durable_download_outcomes() -> None:
+    """Legacy transient snapshot entries cannot repopulate durable State."""
+
+    node = NodeId("node-1")
+    shard_a = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=1)
+    shard_b = get_pipeline_shard_metadata(MODEL_B_ID, device_rank=0, world_size=1)
+    completed = DownloadCompleted(
+        node_id=node,
+        shard_metadata=shard_a,
+        total=Memory.from_mb(10),
+    )
+    failed = DownloadFailed(
+        node_id=node,
+        shard_metadata=shard_b,
+        error_message="terminal failure",
+    )
+    pending = DownloadPending(node_id=node, shard_metadata=shard_a)
+    ongoing = DownloadOngoing(
+        node_id=node,
+        shard_metadata=shard_b,
+        download_progress=DownloadProgressData(
+            total=Memory.from_mb(10),
+            downloaded=Memory.from_mb(1),
+            downloaded_this_session=Memory.from_mb(1),
+            completed_files=0,
+            total_files=1,
+            speed=1.0,
+            eta_ms=1,
+            files={},
+        ),
+    )
+    snapshot = State(
+        downloads={node: [completed, pending, ongoing, failed]},
+        last_event_applied_idx=0,
+    )
+
+    hydrated = apply(
+        State(),
+        IndexedEvent(idx=0, event=StateSnapshotHydrated(state=snapshot)),
+    )
+
+    assert hydrated.downloads == {node: [completed, failed]}

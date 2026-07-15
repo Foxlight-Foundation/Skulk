@@ -112,13 +112,30 @@ def event_apply(event: Event, state: State) -> State:
         case TracingStateChanged():
             return state.model_copy(update={"tracing_enabled": event.enabled})
         case StateSnapshotHydrated():
-            return event.state
+            return _sanitize_snapshot_downloads(event.state)
+
+
+def _sanitize_snapshot_downloads(snapshot: State) -> State:
+    """Remove legacy transient download progress from one durable snapshot."""
+
+    downloads = {
+        node_id: [
+            progress
+            for progress in progresses
+            if isinstance(progress, (DownloadCompleted, DownloadFailed))
+        ]
+        for node_id, progresses in snapshot.downloads.items()
+    }
+    downloads = {
+        node_id: progresses for node_id, progresses in downloads.items() if progresses
+    }
+    return snapshot.model_copy(update={"downloads": downloads})
 
 
 def apply(state: State, event: IndexedEvent) -> State:
     if isinstance(event.event, StateSnapshotHydrated):
         assert event.event.state.last_event_applied_idx == event.idx
-        return event.event.state
+        return _sanitize_snapshot_downloads(event.event.state)
 
     # Just to test that events are only applied in correct order
     if state.last_event_applied_idx != event.idx - 1:

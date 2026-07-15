@@ -465,8 +465,18 @@ class TelemetryView:
             downloads: Download outcomes carried by the state snapshot.
         """
 
+        # Hydration is authoritative for durable outcomes. Live progress and
+        # attempt identities belong to the prior in-memory view and must not
+        # survive a failover seed or component bootstrap.
+        self.node_downloads.clear()
+        self._node_download_attempts.clear()
+        self._node_download_terminal_attempts.clear()
         for progresses in downloads.values():
             for progress in progresses:
+                if not isinstance(progress, (DownloadCompleted, DownloadFailed)):
+                    # Older snapshots can still decode transient variants; they
+                    # are replay-compatible input, not durable snapshot state.
+                    continue
                 self.record_download_event(
                     NodeDownloadProgress(download_progress=progress)
                 )

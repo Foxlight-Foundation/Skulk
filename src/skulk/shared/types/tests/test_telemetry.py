@@ -172,6 +172,45 @@ def test_hydrated_terminal_download_rejects_delayed_progress() -> None:
     assert view.effective_downloads(snapshot.downloads)[node] == [completed]
 
 
+def test_hydration_clears_live_downloads_absent_from_snapshot() -> None:
+    """Old-session live progress cannot survive an authoritative hydration."""
+
+    node = NodeId("node-a")
+    shard = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=1)
+    old_attempt = DownloadAttemptId("attempt-old")
+    ongoing = DownloadOngoing(
+        node_id=node,
+        shard_metadata=shard,
+        attempt_id=old_attempt,
+        download_progress=DownloadProgressData(
+            total=Memory.from_mb(100),
+            downloaded=Memory.from_mb(50),
+            downloaded_this_session=Memory.from_mb(50),
+            completed_files=1,
+            total_files=2,
+            speed=1.0,
+            eta_ms=1_000,
+            files={},
+        ),
+    )
+    view = TelemetryView()
+    view.apply(NodeTelemetry(node_id=node, info=ongoing))
+
+    record_membership_from_event(
+        view,
+        StateSnapshotHydrated(state=State(last_event_applied_idx=0)),
+    )
+
+    assert view.effective_downloads({}) == {}
+    next_pending = DownloadPending(
+        node_id=node,
+        shard_metadata=shard,
+        attempt_id=DownloadAttemptId("attempt-next"),
+    )
+    view.apply(NodeTelemetry(node_id=node, info=next_pending))
+    assert view.effective_downloads({})[node] == [next_pending]
+
+
 def test_pending_telemetry_can_establish_new_attempt_before_control_event() -> None:
     """Cross-plane reordering must not hide the next attempt's live status."""
 
