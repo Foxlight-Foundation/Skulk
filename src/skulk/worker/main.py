@@ -21,6 +21,7 @@ from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
+    KV_CONTEXT_BUDGET_TOKENS,
     UMA_GPU_OS_HEADROOM,
     estimate_shard_footprint,
     gpu_working_set_ceiling,
@@ -700,7 +701,9 @@ class Worker:
             return (shard.end_layer - shard.start_layer) / shard.n_layers
         return 1.0 / shard.world_size if shard.world_size > 0 else 1.0
 
-    def _local_shard_fit_error(self, shard: ShardMetadata) -> str | None:
+    def _local_shard_fit_error(
+        self, shard: ShardMetadata, context_token_limit: int | None = None
+    ) -> str | None:
         """Reason this node cannot hold ``shard``, or ``None`` if it fits.
 
         Last-resort guard using *local, current* memory, not the master's
@@ -714,9 +717,29 @@ class Worker:
         OOM-abort, which on an abnormal Metal termination leaks wired GPU
         memory reclaimable only by reboot (the GLM-4.7-Flash class,
         2026-06-08).
+
+        ``context_token_limit`` is the instance's stamped served window. A gguf
+        engine allocates its whole KV cache up front at that window
+        (``serving_n_ctx``), so the guard must size the footprint to it, not the
+        fixed ``KV_CONTEXT_BUDGET_TOKENS``: with the memory-fit lift a stamped 32k
+        window would otherwise pass an 8192-sized guard and then OOM at load if
+        live VRAM has dropped since placement (stale telemetry, a concurrently
+        loaded instance). MLX grows KV lazily (no up-front preallocation), so the
+        budget floor is the correct estimate there; a non-gguf card keeps it.
         """
+        kv_context = (
+            context_token_limit
+            if (
+                shard.model_card.gguf_file
+                and context_token_limit
+                and context_token_limit > 0
+            )
+            else KV_CONTEXT_BUDGET_TOKENS
+        )
         footprint = estimate_shard_footprint(
-            shard.model_card, self._shard_memory_fraction(shard)
+            shard.model_card,
+            self._shard_memory_fraction(shard),
+            context_budget=kv_context,
         )
         # On a discrete-GPU node the engine allocates from VRAM, not system RAM,
         # so size the guard against local usable VRAM or it would falsely refuse
@@ -1288,7 +1311,8 @@ class Worker:
                         None
                         if isinstance(task.bound_instance.instance, LlamaRpcInstance)
                         else self._local_shard_fit_error(
-                            task.bound_instance.bound_shard
+                            task.bound_instance.bound_shard,
+                            task.bound_instance.instance.context_token_limit,
                         )
                     )
                     if fit_error is not None:
@@ -1626,7 +1650,9 @@ class Worker:
                 # has loaded, so this is the last accurate point - current free
                 # memory now reflects those other loads - to refuse before the
                 # runner allocates and risks an OOM-abort that leaks GPU memory.
-                fit_error = self._local_shard_fit_error(shard)
+                fit_error = self._local_shard_fit_error(
+                    shard, instance.context_token_limit
+                )
                 if fit_error is not None:
                     logger.error(fit_error)
                     await self.event_sender.send(

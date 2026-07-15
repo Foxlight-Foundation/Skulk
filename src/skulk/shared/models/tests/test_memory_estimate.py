@@ -80,6 +80,17 @@ def test_shard_footprint_zero_fraction_is_zero():
     assert estimate_shard_footprint(_card(8), 0.0).in_bytes == 0
 
 
+def test_shard_footprint_scales_with_context_budget():
+    # The worker's pre-load fit guard now sizes KV to the stamped served window
+    # (context_token_limit) for gguf instead of a fixed 8192, so a larger window
+    # yields a larger footprint -- the guard refuses if live memory cannot hold the
+    # window the runner will actually preallocate up front. (P1 review, #585.)
+    card = _card(4, kv_heads=8, n_layers=32, gguf_file="m.gguf")
+    small = estimate_shard_footprint(card, 1.0, context_budget=8192)
+    large = estimate_shard_footprint(card, 1.0, context_budget=32768)
+    assert large.in_bytes > small.in_bytes
+
+
 def test_shard_footprint_fraction_scales_weights_and_kv_not_floor():
     card = _card(8, kv_heads=8)
     half = estimate_shard_footprint(card, 0.5)

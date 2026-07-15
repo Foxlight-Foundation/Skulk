@@ -556,9 +556,13 @@ def serving_n_ctx(context_token_limit: int | None, logits_all: bool) -> int:
     reserved memory for. That value is the instance's stamped
     ``context_token_limit`` (``instance_context_token_limit``): the largest context
     that fits the hosting node's working set after weights and overhead, capped at
-    the model's own advertised maximum. Because placement admits a node against the
-    SAME working set (VRAM on a GPU node) that this ceiling is derived from, loading
-    the whole KV cache at this window fits by construction. On an admitted node the
+    the model's own advertised maximum -- and, for a gguf instance on a node WITHOUT
+    discrete VRAM, conservatively clamped back to ``KV_CONTEXT_BUDGET_TOKENS`` (that
+    node's fit is derived from static ram_total but load competes with live
+    ram_available, so a larger window could OOM; see ``instance_context_token_limit``).
+    Because placement admits a node against the SAME working set (VRAM on a GPU node)
+    that this ceiling is derived from, loading the whole KV cache at this window fits
+    by construction. On an admitted node the
     fit is >= ``KV_CONTEXT_BUDGET_TOKENS`` (the admission floor), so the window is
     too -- EXCEPT when the model's own advertised max context is smaller, in which
     case it serves that smaller max (a 4k-context model serves 4k). When the fit is
