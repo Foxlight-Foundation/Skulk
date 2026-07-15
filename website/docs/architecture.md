@@ -626,8 +626,10 @@ The contract is deliberately small (`src/skulk/extensions/`):
   `PROVIDER_DATA` carries both active directions directly between caller and
   provider nodes (master and State remain outside the hot path). Skulk owns
   `started`, validates handler sequence and direction-specific chunk schemas,
-  requires one terminal per active direction, preserves raw inline media
-  outside JSON, expires gaps, and explicitly cancels abandoned calls.
+  requires one terminal per active direction, and withholds a provider terminal
+  until its handler iterator returns and completes `finally` cleanup. It
+  preserves raw inline media outside JSON, expires gaps, and explicitly cancels
+  abandoned calls.
   `CapabilityStreamInput.complete()` is caller input half-close: it terminates
   only `caller_to_provider`, leaving provider output active. Remote pressure is
   isolated by owner, call, and direction. The transport now executes
