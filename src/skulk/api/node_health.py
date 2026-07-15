@@ -25,6 +25,7 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
     DiskUsage,
     NodeDataTransport,
+    NodeIdentity,
     NodeResources,
 )
 from skulk.shared.types.worker.downloads import DownloadFailed, DownloadProgress
@@ -45,6 +46,7 @@ DISK_FULL_THRESHOLD = Memory.from_gb(2.0)
 HealthLevel = Literal["ok", "warn", "error"]
 HealthCode = Literal[
     "data_transport_mismatch",
+    "version_mismatch",
     "download_failed",
     "disk_low",
     "disk_full",
@@ -128,6 +130,49 @@ def live_data_transports(
     )
 
 
+def live_skulk_build_mismatch(
+    *,
+    live_nodes: Mapping[NodeId, datetime],
+    node_identities: Mapping[NodeId, NodeIdentity],
+) -> bool:
+    """Return whether live telemetry positively identifies multiple builds.
+
+    Unknown version or commit sentinels are omitted so startup telemetry gaps do
+    not create false warnings. Either multiple package versions or multiple Git
+    commits is sufficient evidence of a mixed deployment.
+
+    Args:
+        live_nodes: Nodes currently present in replicated cluster membership.
+        node_identities: Latest per-node package and source identity telemetry.
+
+    Returns:
+        True when at least one known build identifier disagrees across live nodes.
+    """
+
+    identities = (
+        identity
+        for node_id, identity in node_identities.items()
+        if node_id in live_nodes
+    )
+    versions: set[str] = set()
+    commits: set[str] = set()
+    for identity in identities:
+        version = _known_build_identifier(identity.skulk_version)
+        commit = _known_build_identifier(identity.skulk_commit)
+        if version is not None:
+            versions.add(version)
+        if commit is not None:
+            commits.add(commit)
+    return len(versions) > 1 or len(commits) > 1
+
+
+def _known_build_identifier(value: str) -> str | None:
+    """Normalize one build identifier, excluding telemetry sentinels."""
+
+    normalized = value.strip().lower()
+    return None if normalized in {"", "unknown", "none", "null"} else normalized
+
+
 def _data_transport_mismatch_reason(
     *,
     node_id: NodeId,
@@ -151,6 +196,29 @@ def _data_transport_mismatch_reason(
             "Configure every node to use the same DATA transport, restart the "
             "fleet, and confirm nodeResources reports one transport before "
             "serving inference."
+        ),
+    )
+
+
+def _version_mismatch_reason(
+    *, node_id: NodeId, node_identities: Mapping[NodeId, NodeIdentity]
+) -> NodeHealthReason:
+    """Build the degraded-health reason for one node in a mixed-build fleet."""
+
+    identity = node_identities.get(node_id)
+    version = identity.skulk_version if identity is not None else "not yet advertised"
+    commit = identity.skulk_commit if identity is not None else "not yet advertised"
+    return NodeHealthReason(
+        code="version_mismatch",
+        message=(
+            "Cluster nodes report different Skulk builds; this node reports "
+            f"version {version} at commit {commit}. Correctness-bearing wire "
+            "compatibility is not guaranteed until deployment converges."
+        ),
+        remediation=(
+            "Complete the deployment so every node runs the same version and "
+            "commit, then confirm the version warning clears before starting "
+            "new inference work."
         ),
     )
 
@@ -240,6 +308,7 @@ def compute_node_health(
     node_disk: Mapping[NodeId, DiskUsage],
     now: datetime,
     node_resources: Mapping[NodeId, NodeResources] | None = None,
+    node_identities: Mapping[NodeId, NodeIdentity] | None = None,
     heartbeat_last_seen: Mapping[NodeId, datetime] | None = None,
     telemetry_last_seen: Mapping[NodeId, datetime] | None = None,
     unreachable_warn_after: timedelta = UNREACHABLE_WARN_AFTER,
@@ -257,6 +326,8 @@ def compute_node_health(
         now: The wall clock used for heartbeat-staleness; injected for testing.
         node_resources: ``TelemetryView.node_resources`` -- resolved DATA
             transport and placement capability facts for split-fleet detection.
+        node_identities: ``TelemetryView.node_identities`` -- package version and
+            source commit facts for mixed-build detection.
         heartbeat_last_seen: ``TelemetryView.node_last_heartbeat`` -- local
             receipt time of each peer's dedicated heartbeat, the primary
             liveness signal.
@@ -274,9 +345,14 @@ def compute_node_health(
     heartbeat_last_seen = heartbeat_last_seen or {}
     telemetry_last_seen = telemetry_last_seen or {}
     node_resources = node_resources or {}
+    node_identities = node_identities or {}
     transports = live_data_transports(
         live_nodes=live_nodes,
         node_resources=node_resources,
+    )
+    build_mismatch = live_skulk_build_mismatch(
+        live_nodes=live_nodes,
+        node_identities=node_identities,
     )
     health: dict[str, NodeHealth] = {}
     for node_id, last_seen in live_nodes.items():
@@ -287,6 +363,13 @@ def compute_node_health(
                     node_id=node_id,
                     node_resources=node_resources,
                     transports=transports,
+                )
+            )
+        if build_mismatch:
+            reasons.append(
+                _version_mismatch_reason(
+                    node_id=node_id,
+                    node_identities=node_identities,
                 )
             )
         reasons.extend(_download_failure_reasons(downloads.get(node_id, ())))

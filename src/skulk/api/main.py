@@ -82,6 +82,11 @@ from skulk.api.adapters.responses import (
     responses_request_to_text_generation,
 )
 from skulk.api.data_plane import DataPlaneObserver
+from skulk.api.diagnostics_compatibility import (
+    aggregate_diagnostics_version_status,
+    compare_diagnostics_builds,
+    parse_peer_node_diagnostics,
+)
 from skulk.api.field_telemetry import (
     FieldTelemetryCollector,
     prepare_telemetry_config_update,
@@ -89,7 +94,11 @@ from skulk.api.field_telemetry import (
 )
 from skulk.api.keepalive import with_sse_keepalive
 from skulk.api.model_search import search_hugging_face_models
-from skulk.api.node_health import compute_node_health, live_data_transports
+from skulk.api.node_health import (
+    compute_node_health,
+    live_data_transports,
+    live_skulk_build_mismatch,
+)
 from skulk.api.provider_diagnostics import ProviderObserver
 from skulk.api.realtime import (
     REALTIME_WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -2148,7 +2157,9 @@ class API:
             description=(
                 "Fan out to reachable peer APIs and return read-only diagnostic "
                 "bundles for the local node and peers. Unreachable peers are "
-                "reported as partial failures instead of failing the whole request."
+                "reported as partial failures instead of failing the whole request. "
+                "Peer bundles tolerate additive diagnostic fields, and aggregate "
+                "plus per-node versionStatus values expose mixed-build rollouts."
             ),
         )(self.get_cluster_diagnostics)
         self.app.get(
@@ -2171,7 +2182,8 @@ class API:
             summary="Get one cluster node diagnostic bundle",
             description=(
                 "Return diagnostics for the requested node from local state or by "
-                "proxying to a reachable peer API."
+                "proxying to a reachable peer API. Peer responses tolerate unknown "
+                "additive diagnostic fields."
             ),
         )(self.get_cluster_node_diagnostics)
         self.app.post(
@@ -2180,7 +2192,8 @@ class API:
             summary="Capture one cluster node diagnostic bundle",
             description=(
                 "Return an on-demand diagnostic capture bundle for the requested "
-                "node, proxying to a reachable peer API when the target is remote."
+                "node, proxying to a reachable peer API when the target is remote. "
+                "Peer responses tolerate unknown additive diagnostic fields."
             ),
         )(self.capture_cluster_node_diagnostics)
         self.app.post(
@@ -3172,6 +3185,7 @@ class API:
                 downloads=effective_downloads,
                 node_disk=self._telemetry_view.node_disk,
                 node_resources=self._telemetry_view.node_resources,
+                node_identities=self._telemetry_view.node_identities,
                 heartbeat_last_seen=self._telemetry_view.node_last_heartbeat,
                 telemetry_last_seen=self._telemetry_view.node_last_telemetry,
                 now=datetime.now(tz=timezone.utc),
@@ -8530,6 +8544,15 @@ class API:
                 f"{', '.join(sorted(fleet_data_transports))}. Cross-transport "
                 "inference output cannot be delivered."
             )
+        if live_skulk_build_mismatch(
+            live_nodes=self._live_node_timestamps(),
+            node_identities=self._telemetry_view.node_identities,
+        ):
+            warnings.add(
+                "Fleet Skulk version mismatch: live nodes report different "
+                "package versions or source commits. Complete the deployment "
+                "before starting new inference work."
+            )
         return NodeDiagnostics(
             generated_at=datetime.now(tz=timezone.utc).isoformat(),
             runtime=self._runtime_diagnostics(),
@@ -8861,7 +8884,9 @@ class API:
                 status_code=response.status_code,
                 detail=self._proxy_error_detail(response),
             )
-        return DiagnosticCaptureResponse.model_validate(response.json())
+        return DiagnosticCaptureResponse.model_validate(
+            response.json(), extra="ignore"
+        )
 
     async def get_cluster_diagnostics(self) -> ClusterDiagnostics:
         """Return read-only diagnostics for every topology member.
@@ -8877,6 +8902,7 @@ class API:
                 node_id=str(self.node_id),
                 url=None,
                 ok=True,
+                version_status="current",
                 diagnostics=local_diagnostics,
             )
         ]
@@ -8888,12 +8914,18 @@ class API:
                 try:
                     response = await client.get(f"{base_url}/v1/diagnostics/node")
                     response.raise_for_status()
-                    diagnostics = NodeDiagnostics.model_validate(response.json())
+                    diagnostics = parse_peer_node_diagnostics(
+                        cast(object, response.json())
+                    )
                     nodes.append(
                         ClusterNodeDiagnostics(
                             node_id=node_id,
                             url=base_url,
                             ok=True,
+                            version_status=compare_diagnostics_builds(
+                                local_diagnostics.runtime,
+                                diagnostics.runtime,
+                            ),
                             diagnostics=diagnostics,
                         )
                     )
@@ -8932,6 +8964,9 @@ class API:
             generated_at=datetime.now(tz=timezone.utc).isoformat(),
             local_node_id=str(self.node_id),
             master_node_id=str(self._master_node_id),
+            version_status=aggregate_diagnostics_version_status(
+                [entry.version_status for entry in nodes]
+            ),
             nodes=nodes,
         )
 
@@ -9043,7 +9078,7 @@ class API:
                     detail=f"Node diagnostics not found: {node_id}",
                 )
             response.raise_for_status()
-            return NodeDiagnostics.model_validate(response.json())
+            return parse_peer_node_diagnostics(cast(object, response.json()))
 
     async def get_tracing_state(self) -> TracingStateResponse:
         return TracingStateResponse(enabled=self.state.tracing_enabled)

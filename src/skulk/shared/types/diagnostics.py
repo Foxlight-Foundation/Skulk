@@ -49,6 +49,8 @@ RunnerTaskCancelStatus = Literal[
 ]
 DataPlaneTransport = Literal["disabled", "gossipsub", "zenoh"]
 TelemetryPlaneTransport = Literal["isolated_gossipsub"]
+NodeDiagnosticsVersionStatus = Literal["current", "version_mismatch", "unknown"]
+ClusterDiagnosticsVersionStatus = Literal["consistent", "mixed", "unknown"]
 
 
 class MlxMemorySnapshot(CamelCaseModel):
@@ -670,6 +672,7 @@ class DataPlaneOwnerDiagnostics(CamelCaseModel):
         description="Publish exceptions or deadline expirations for this owner."
     )
     idle_stream_reclaims: int = Field(
+        default=0,
         description="Command queues reclaimed after their egress idle lease expired."
     )
 
@@ -725,6 +728,7 @@ class DataPlaneEgressDiagnostics(CamelCaseModel):
         description="Network-ingress frames rejected by isolated lane bounds.",
     )
     idle_stream_reclaims: int = Field(
+        default=0,
         description="Remote command queues reclaimed after their idle lease expired."
     )
     enqueue_latency_samples: int = Field(
@@ -1095,6 +1099,13 @@ class ClusterNodeDiagnostics(CamelCaseModel):
         description="Peer API URL used to collect diagnostics, if remote.",
     )
     ok: bool = Field(description="Whether diagnostics were collected successfully.")
+    version_status: NodeDiagnosticsVersionStatus = Field(
+        default="unknown",
+        description=(
+            "Whether this node reports the same known Skulk version and build as "
+            "the API collecting the cluster response."
+        ),
+    )
     diagnostics: NodeDiagnostics | None = Field(
         default=None,
         description="Collected node diagnostics when ok is true.",
@@ -1118,6 +1129,13 @@ class ClusterDiagnostics(CamelCaseModel):
     master_node_id: str | None = Field(
         default=None,
         description="Current master node ID, when known.",
+    )
+    version_status: ClusterDiagnosticsVersionStatus = Field(
+        default="unknown",
+        description=(
+            "Aggregate build state: consistent, mixed, or unknown when build "
+            "identity cannot be compared for every reachable participant."
+        ),
     )
     nodes: list[ClusterNodeDiagnostics] = Field(
         default_factory=list,

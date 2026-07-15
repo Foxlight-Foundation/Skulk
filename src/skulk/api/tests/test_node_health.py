@@ -11,7 +11,7 @@ from skulk.api.node_health import (
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.profiling import DiskUsage, NodeResources
+from skulk.shared.types.profiling import DiskUsage, NodeIdentity, NodeResources
 from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
     DownloadFailed,
@@ -314,4 +314,59 @@ def test_missing_transport_telemetry_does_not_create_false_mismatch() -> None:
         node_resources={_NODE: NodeResources(data_transport="zenoh")},
         now=_NOW,
     )
+    assert all(node.level == "ok" for node in health.values())
+
+
+def test_mixed_source_commits_warn_on_every_live_node() -> None:
+    """Equal package versions at different commits are a degraded rollout."""
+
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_identities={
+            _NODE: NodeIdentity(skulk_version="1.4.3", skulk_commit="aaaaaaaa"),
+            other: NodeIdentity(skulk_version="1.4.3", skulk_commit="bbbbbbbb"),
+        },
+        now=_NOW,
+    )
+
+    for node in health.values():
+        assert node.level == "warn"
+        reason = next(reason for reason in node.reasons if reason.code == "version_mismatch")
+        assert "Correctness-bearing wire compatibility is not guaranteed" in reason.message
+
+
+def test_uniform_source_build_is_healthy() -> None:
+    """Matching package and commit identities do not create a rollout warning."""
+
+    other = NodeId("node-b")
+    identity = NodeIdentity(skulk_version="1.4.3", skulk_commit="aaaaaaaa")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_identities={_NODE: identity, other: identity},
+        now=_NOW,
+    )
+
+    assert all(node.level == "ok" for node in health.values())
+
+
+def test_unknown_build_identity_does_not_create_false_mismatch() -> None:
+    """Startup gaps are not positive evidence of a mixed deployment."""
+
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_identities={
+            _NODE: NodeIdentity(skulk_version="1.4.3", skulk_commit="aaaaaaaa"),
+            other: NodeIdentity(),
+        },
+        now=_NOW,
+    )
+
     assert all(node.level == "ok" for node in health.values())
