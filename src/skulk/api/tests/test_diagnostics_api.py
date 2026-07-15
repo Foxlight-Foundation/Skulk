@@ -1,5 +1,6 @@
 """Tests for read-only node and cluster diagnostics endpoints."""
 
+from datetime import datetime, timezone
 from typing import cast
 
 import httpx
@@ -28,6 +29,7 @@ from skulk.shared.types.diagnostics import (
 )
 from skulk.shared.types.events import IndexedEvent
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.profiling import NodeResources
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import StartWarmup, TaskId, TaskStatus
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
@@ -162,6 +164,34 @@ def test_telemetry_diagnostics_are_exposed_without_changing_node_bundle() -> Non
     assert telemetry_response.json()["networkQueueDepth"] == 1
     assert node_response.status_code == 200
     assert "telemetryPlane" not in node_response.json()
+
+
+def test_node_diagnostics_warns_about_split_data_transports() -> None:
+    """Diagnostics should fail loudly when live nodes advertise both transports."""
+    api = _build_api("local-node")
+    local_node = NodeId("local-node")
+    peer_node = NodeId("peer-node")
+    now = datetime.now(tz=timezone.utc)
+    api.state = api.state.model_copy(
+        update={"last_seen": {local_node: now, peer_node: now}}
+    )
+    api._telemetry_view.node_resources.update(  # pyright: ignore[reportPrivateUsage]
+        {
+            local_node: NodeResources(data_transport="zenoh"),
+            peer_node: NodeResources(data_transport="gossipsub"),
+        }
+    )
+    client = TestClient(api.app)
+
+    response = client.get("/v1/diagnostics/node")
+
+    assert response.status_code == 200
+    warnings = _json_list(_json_object(response)["warnings"])
+    assert any(
+        "Fleet DATA transport mismatch" in cast(str, warning)
+        and "gossipsub, zenoh" in cast(str, warning)
+        for warning in warnings
+    )
 
 
 def test_node_diagnostics_marks_master_outside_placement() -> None:

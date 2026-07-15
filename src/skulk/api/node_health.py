@@ -22,7 +22,11 @@ from pydantic import ConfigDict
 
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.profiling import DiskUsage
+from skulk.shared.types.profiling import (
+    DiskUsage,
+    NodeDataTransport,
+    NodeResources,
+)
 from skulk.shared.types.worker.downloads import DownloadFailed, DownloadProgress
 from skulk.utils.pydantic_ext import CamelCaseModel
 
@@ -40,6 +44,7 @@ DISK_FULL_THRESHOLD = Memory.from_gb(2.0)
 
 HealthLevel = Literal["ok", "warn", "error"]
 HealthCode = Literal[
+    "data_transport_mismatch",
     "download_failed",
     "disk_low",
     "disk_full",
@@ -87,10 +92,67 @@ def _aggregate_level(reasons: Sequence[NodeHealthReason]) -> HealthLevel:
     """Return the worst severity across *reasons* (``ok`` when empty)."""
     worst: HealthLevel = "ok"
     for reason in reasons:
-        level: HealthLevel = "error" if reason.code in ("download_failed", "disk_full") else "warn"
+        level: HealthLevel = (
+            "error"
+            if reason.code
+            in ("data_transport_mismatch", "download_failed", "disk_full")
+            else "warn"
+        )
         if _LEVEL_RANK[level] > _LEVEL_RANK[worst]:
             worst = level
     return worst
+
+
+def live_data_transports(
+    *,
+    live_nodes: Mapping[NodeId, datetime],
+    node_resources: Mapping[NodeId, NodeResources],
+) -> frozenset[NodeDataTransport]:
+    """Return transports advertised by live nodes with resource telemetry.
+
+    Nodes whose first ``NodeResources`` reading has not arrived are omitted. A
+    mismatch is reported only from positive evidence of both transports, never
+    from a transient telemetry gap during startup.
+
+    Args:
+        live_nodes: Nodes currently present in replicated cluster membership.
+        node_resources: Latest per-node resource advertisements.
+
+    Returns:
+        The distinct resolved DATA transports advertised by live nodes.
+    """
+    return frozenset(
+        resources.data_transport
+        for node_id, resources in node_resources.items()
+        if node_id in live_nodes
+    )
+
+
+def _data_transport_mismatch_reason(
+    *,
+    node_id: NodeId,
+    node_resources: Mapping[NodeId, NodeResources],
+    transports: frozenset[NodeDataTransport],
+) -> NodeHealthReason:
+    """Build the fail-loud health reason for one node in a split DATA fleet."""
+    resources = node_resources.get(node_id)
+    local_transport = (
+        resources.data_transport if resources is not None else "not yet advertised"
+    )
+    fleet_transports = ", ".join(sorted(transports))
+    return NodeHealthReason(
+        code="data_transport_mismatch",
+        message=(
+            "Cluster DATA transports disagree "
+            f"({fleet_transports}); this node uses {local_transport}. "
+            "Cross-transport inference output cannot be delivered."
+        ),
+        remediation=(
+            "Configure every node to use the same DATA transport, restart the "
+            "fleet, and confirm nodeResources reports one transport before "
+            "serving inference."
+        ),
+    )
 
 
 def _download_failure_reasons(
@@ -177,6 +239,7 @@ def compute_node_health(
     downloads: Mapping[NodeId, Sequence[DownloadProgress]],
     node_disk: Mapping[NodeId, DiskUsage],
     now: datetime,
+    node_resources: Mapping[NodeId, NodeResources] | None = None,
     heartbeat_last_seen: Mapping[NodeId, datetime] | None = None,
     telemetry_last_seen: Mapping[NodeId, datetime] | None = None,
     unreachable_warn_after: timedelta = UNREACHABLE_WARN_AFTER,
@@ -192,6 +255,8 @@ def compute_node_health(
             ``DownloadFailed`` entries.
         node_disk: ``TelemetryView.node_disk`` -- per-node models-volume usage.
         now: The wall clock used for heartbeat-staleness; injected for testing.
+        node_resources: ``TelemetryView.node_resources`` -- resolved DATA
+            transport and placement capability facts for split-fleet detection.
         heartbeat_last_seen: ``TelemetryView.node_last_heartbeat`` -- local
             receipt time of each peer's dedicated heartbeat, the primary
             liveness signal.
@@ -208,9 +273,22 @@ def compute_node_health(
     """
     heartbeat_last_seen = heartbeat_last_seen or {}
     telemetry_last_seen = telemetry_last_seen or {}
+    node_resources = node_resources or {}
+    transports = live_data_transports(
+        live_nodes=live_nodes,
+        node_resources=node_resources,
+    )
     health: dict[str, NodeHealth] = {}
     for node_id, last_seen in live_nodes.items():
         reasons: list[NodeHealthReason] = []
+        if len(transports) > 1:
+            reasons.append(
+                _data_transport_mismatch_reason(
+                    node_id=node_id,
+                    node_resources=node_resources,
+                    transports=transports,
+                )
+            )
         reasons.extend(_download_failure_reasons(downloads.get(node_id, ())))
         disk = node_disk.get(node_id)
         if disk is not None:

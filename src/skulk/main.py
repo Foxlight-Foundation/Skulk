@@ -626,6 +626,7 @@ class Node:
                 download_command_sender=router.sender(topics.DOWNLOAD_COMMANDS),
                 telemetry_sender=router.telemetry_sender(),
                 telemetry_view=telemetry_view,
+                data_transport="zenoh" if _zenoh_on else "gossipsub",
                 data_sender=router.sender(topics.DATA),
                 realtime_audio_receiver=realtime_audio_receiver,
                 realtime_audio_packet_receiver=router.receiver(
@@ -1034,6 +1035,9 @@ class Node:
                             # management/edge node as eligible (#279 review).
                             telemetry_sender=self.router.telemetry_sender(),
                             telemetry_view=self.telemetry_view,
+                            data_transport=(
+                                "zenoh" if self.data_plane_zenoh else "gossipsub"
+                            ),
                             # Must ALSO match Node.create's wiring: without this
                             # the recreated worker has no data sender, so every
                             # generation output chunk falls back to the event

@@ -5,6 +5,8 @@ exercises `_dispatch_generation_chunk` directly (the shared routing used by the
 DATA-plane consumer) without standing up the full gossip path.
 """
 
+from datetime import datetime, timezone
+from typing import cast
 from unittest.mock import AsyncMock
 
 import anyio
@@ -27,6 +29,7 @@ from skulk.shared.types.chunks import (
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import IndexedEvent
+from skulk.shared.types.profiling import NodeResources
 from skulk.utils.channels import channel
 
 
@@ -71,6 +74,49 @@ def test_reorder_buffer_default_follows_transport(
     assert _build_api(data_plane_zenoh=True)._reorder_buffer_enabled is True  # pyright: ignore[reportPrivateUsage]
     monkeypatch.setenv("SKULK_DATA_REORDER_BUFFER", "0")
     assert _build_api()._reorder_buffer_enabled is False  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_state_surfaces_split_data_transport_health() -> None:
+    api = _build_api(data_plane_zenoh=True)
+    local_node = NodeId("api-node")
+    peer_node = NodeId("peer-node")
+    now = datetime.now(tz=timezone.utc)
+    api.state = api.state.model_copy(
+        update={"last_seen": {local_node: now, peer_node: now}}
+    )
+    api._telemetry_view.node_resources.update(  # pyright: ignore[reportPrivateUsage]
+        {
+            local_node: NodeResources(data_transport="zenoh"),
+            peer_node: NodeResources(data_transport="gossipsub"),
+        }
+    )
+
+    payload = await api.get_cluster_state()
+
+    assert payload["nodeResources"] == {
+        "api-node": {
+            "backends": ["mlx"],
+            "participation": "full",
+            "dataTransport": "zenoh",
+        },
+        "peer-node": {
+            "backends": ["mlx"],
+            "participation": "full",
+            "dataTransport": "gossipsub",
+        },
+    }
+    health = cast("dict[str, object]", payload["nodeHealth"])
+    assert isinstance(health, dict)
+    for node_id in ("api-node", "peer-node"):
+        summary = cast("dict[str, object]", health[node_id])
+        assert isinstance(summary, dict)
+        assert summary["level"] == "error"
+        reasons = cast("list[dict[str, object]]", summary["reasons"])
+        assert isinstance(reasons, list)
+        assert any(
+            reason.get("code") == "data_transport_mismatch"
+            for reason in reasons
+        )
 
 
 @pytest.mark.asyncio

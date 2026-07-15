@@ -69,7 +69,7 @@ from skulk.shared.types.events import (
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.multiaddr import Multiaddr
-from skulk.shared.types.profiling import MemoryUsage
+from skulk.shared.types.profiling import MemoryUsage, NodeDataTransport
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import (
     AudioTranscription,
@@ -640,6 +640,7 @@ class Worker:
         download_command_sender: Sender[ForwarderDownloadCommand],
         telemetry_sender: TelemetrySender | Sender[NodeTelemetry] | None = None,
         telemetry_view: TelemetryView | None = None,
+        data_transport: NodeDataTransport = "gossipsub",
         data_sender: Sender[DataChunk] | None = None,
         realtime_audio_receiver: Receiver[RealtimeAudioInputFrame] | None = None,
         realtime_audio_packet_receiver: Receiver[RealtimeAudioPacket] | None = None,
@@ -655,6 +656,7 @@ class Worker:
         self.command_sender = command_sender
         self.download_command_sender = download_command_sender
         self._telemetry_sender = telemetry_sender
+        self._data_transport: NodeDataTransport = data_transport
         # Data plane (#279 Phase 2): per-token output chunks stream direct to the
         # owning API node via this sender (DATA topic), bypassing the master's
         # event log. Threaded into each RunnerSupervisor. None falls back to the
@@ -918,6 +920,7 @@ class Worker:
         info_send, info_recv = channel[GatheredInfo]()
         info_gatherer: InfoGatherer = InfoGatherer(
             info_send,
+            data_transport=self._data_transport,
             # Fabric-citizenship: the gatherer publishes whatever the API-side
             # extension surface has advertised on the shared TelemetryView. The
             # provider snapshots the outbound set each poll (empty -> nothing

@@ -1122,6 +1122,14 @@ telemetry heartbeat, ordinary telemetry fallback, and `lastSeen`. The
 be stale for a healthy node; it must not be interpreted as a heartbeat. A node
 with no problems reports `level: "ok"` with an empty `reasons` list.
 
+The response carries a live `nodeResources` map as well. Each node entry includes
+its placement `backends`, declared `participation`, and resolved `dataTransport`
+(`gossipsub` or `zenoh`). A live fleet that advertises both transports receives
+the error-level `data_transport_mismatch` reason in every `nodeHealth` entry.
+Mixed DATA transports are unsupported: the signal is diagnostic and does not
+bridge traffic. Configure and restart every node uniformly before serving
+inference.
+
 Operational note:
 
 - a follower may briefly report a local view that is behind the elected master

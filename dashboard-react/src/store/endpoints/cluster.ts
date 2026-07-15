@@ -81,6 +81,13 @@ export interface RawRdmaCtl {
   interfacesPresent?: boolean;
 }
 
+/** Resolved node policy and placement capability advertised over telemetry. */
+export interface RawNodeResources {
+  backends?: string[];
+  participation?: 'full' | 'management' | 'ffn_only';
+  dataTransport?: 'gossipsub' | 'zenoh';
+}
+
 /** One derived health problem on a node, with its remediation (#388). */
 export interface RawNodeHealthReason {
   code: string;
@@ -107,6 +114,7 @@ export interface RawStateResponse {
   nodeThunderbolt?: Record<string, RawThunderboltInfo>;
   nodeThunderboltBridge?: Record<string, RawThunderboltBridge>;
   nodeRdmaCtl?: Record<string, RawRdmaCtl>;
+  nodeResources?: Record<string, RawNodeResources>;
   nodeHealth?: Record<string, RawNodeHealth>;
   nodeCapabilities?: Record<string, string[]>;
   thunderboltBridgeCycles?: string[][];

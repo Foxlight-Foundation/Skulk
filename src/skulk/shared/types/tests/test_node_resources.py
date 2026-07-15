@@ -12,12 +12,15 @@ from skulk.shared.types.profiling import NodeResources
 
 def test_node_resources_survives_json_wire_round_trip() -> None:
     original = NodeResources(
-        backends=frozenset({"mlx"}), participation="management"
+        backends=frozenset({"mlx"}),
+        participation="management",
+        data_transport="zenoh",
     )
     restored = NodeResources.model_validate(original.model_dump(mode="json"))
     assert restored == original
     assert restored.backends == frozenset({"mlx"})
     assert restored.participation == "management"
+    assert restored.data_transport == "zenoh"
 
 
 def test_node_resources_coerces_list_backends() -> None:
@@ -32,3 +35,9 @@ def test_node_resources_defaults_are_full_mlx() -> None:
     nr = NodeResources()
     assert nr.backends == frozenset({"mlx"})
     assert nr.participation == "full"
+    assert nr.data_transport == "gossipsub"
+
+
+async def test_node_resources_gather_uses_resolved_data_transport() -> None:
+    resources = await NodeResources.gather(data_transport="zenoh")
+    assert resources.data_transport == "zenoh"
