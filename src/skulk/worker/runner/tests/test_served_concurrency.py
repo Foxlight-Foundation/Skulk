@@ -73,7 +73,10 @@ class _FakeHost(ServedConcurrentDispatch):
         self.started.release()
         self.peak_inflight = max(self.peak_inflight, self._inflight_count())
         if self.generate_gate is not None:
-            self.generate_gate.wait(5)
+            # Generous hang-guard only: every test sets the gate. A short timeout
+            # would let the earliest generation return (and drop the in-flight
+            # count) before the test asserts on it under full-suite CPU load.
+            self.generate_gate.wait(60)
         # A real _generate polls _is_cancelled per streamed line (which drains the
         # cancel pipe into the shared set); mirror that so cancellation classifies.
         self._is_cancelled(task.task_id)
