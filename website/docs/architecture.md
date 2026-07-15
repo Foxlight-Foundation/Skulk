@@ -209,6 +209,16 @@ backends come from `SKULK_LLAMA_CPP_BACKENDS`, defaulting to `cpu` when that env
 var is unset so a node never over-claims a GPU). Backends are probed per node and
 gossiped on the telemetry plane as part of `NodeResources`.
 
+`NodeResources` also carries the DATA transport that startup actually resolved
+(`gossipsub` or `zenoh`). This is a fleet invariant, not a placement preference:
+Skulk does not bridge the transports. `GET /state` merges the live resource map
+back under `nodeResources` and derives an error-level
+`data_transport_mismatch` health reason when live nodes disagree. The topology
+health badge and per-node diagnostics therefore fail loudly instead of leaving a
+cross-transport output timeout unexplained. A missing first resource reading is
+treated as unknown during startup; a mismatch requires positive advertisements
+of both transports.
+
 The llama.cpp runner loads GGUF models with Flash Attention on by default (the
 modern llama.cpp default; it fixes the slow padded-V-cache and full-size
 sliding-window-cache path that gemma-style interleaved attention otherwise hits).

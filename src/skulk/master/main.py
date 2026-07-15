@@ -109,7 +109,11 @@ from skulk.shared.types.tasks import (
 from skulk.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
 )
-from skulk.shared.types.telemetry import TelemetryView, record_membership_from_event
+from skulk.shared.types.telemetry import (
+    NODE_LIVENESS_TIMEOUT,
+    TelemetryView,
+    record_membership_from_event,
+)
 from skulk.shared.types.worker.downloads import (
     DownloadAttemptId,
     DownloadFailed,
@@ -225,7 +229,6 @@ _COMMAND_TASK_TYPES = (
 )
 
 
-NODE_LIVENESS_TIMEOUT = timedelta(seconds=30)
 NODE_HEARTBEAT_GAP_WARNING = timedelta(seconds=10)
 
 

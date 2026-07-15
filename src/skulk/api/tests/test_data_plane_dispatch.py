@@ -5,6 +5,8 @@ exercises `_dispatch_generation_chunk` directly (the shared routing used by the
 DATA-plane consumer) without standing up the full gossip path.
 """
 
+from datetime import datetime, timedelta, timezone
+from typing import cast
 from unittest.mock import AsyncMock
 
 import anyio
@@ -27,6 +29,8 @@ from skulk.shared.types.chunks import (
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import IndexedEvent
+from skulk.shared.types.profiling import NodeResources
+from skulk.shared.types.telemetry import NODE_LIVENESS_TIMEOUT, NodeTelemetry
 from skulk.utils.channels import channel
 
 
@@ -71,6 +75,86 @@ def test_reorder_buffer_default_follows_transport(
     assert _build_api(data_plane_zenoh=True)._reorder_buffer_enabled is True  # pyright: ignore[reportPrivateUsage]
     monkeypatch.setenv("SKULK_DATA_REORDER_BUFFER", "0")
     assert _build_api()._reorder_buffer_enabled is False  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_state_surfaces_split_data_transport_health() -> None:
+    api = _build_api(data_plane_zenoh=True)
+    management_node = NodeId("remote-management-node")
+    worker_node = NodeId("worker-node")
+    now = datetime.now(tz=timezone.utc)
+    # Replicated membership tracks the worker but can omit a remote API-only
+    # participant whose resource reading arrives exclusively on telemetry.
+    api.state = api.state.model_copy(update={"last_seen": {worker_node: now}})
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=management_node,
+            info=NodeResources(
+                backends=frozenset(),
+                participation="management",
+                data_transport="zenoh",
+            ),
+        ),
+        received_at=now,
+    )
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=worker_node,
+            info=NodeResources(data_transport="gossipsub"),
+        ),
+        received_at=now,
+    )
+
+    payload = await api.get_cluster_state()
+
+    assert payload["nodeResources"] == {
+        "remote-management-node": {
+            "backends": [],
+            "participation": "management",
+            "dataTransport": "zenoh",
+        },
+        "worker-node": {
+            "backends": ["mlx"],
+            "participation": "full",
+            "dataTransport": "gossipsub",
+        },
+    }
+    health = cast("dict[str, object]", payload["nodeHealth"])
+    assert isinstance(health, dict)
+    for node_id in ("remote-management-node", "worker-node"):
+        summary = cast("dict[str, object]", health[node_id])
+        assert isinstance(summary, dict)
+        assert summary["level"] == "error"
+        reasons = cast("list[dict[str, object]]", summary["reasons"])
+        assert isinstance(reasons, list)
+        assert any(
+            reason.get("code") == "data_transport_mismatch"
+            for reason in reasons
+        )
+
+
+async def test_state_omits_stale_telemetry_only_participant() -> None:
+    api = _build_api()
+    stale_node = NodeId("stale-management-node")
+    stale_at = (
+        datetime.now(tz=timezone.utc)
+        - NODE_LIVENESS_TIMEOUT
+        - timedelta(seconds=1)
+    )
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=stale_node,
+            info=NodeResources(
+                backends=frozenset(),
+                participation="management",
+            ),
+        ),
+        received_at=stale_at,
+    )
+
+    payload = await api.get_cluster_state()
+
+    assert payload["nodeResources"] == {}
+    assert payload["nodeHealth"] == {}
 
 
 @pytest.mark.asyncio

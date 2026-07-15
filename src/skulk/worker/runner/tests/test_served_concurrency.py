@@ -164,11 +164,21 @@ def test_dispatch_runs_generations_concurrently() -> None:
         assert host._inflight_count() == 3
         assert isinstance(host.current_status, RunnerRunning)
         host.generate_gate.set()
+        # Wait for all three generations to reach terminal Complete BEFORE
+        # shutting down. Shutdown sets CANCEL_ALL, which correctly reclassifies a
+        # still-finishing generation as Cancelled; sending it immediately races
+        # the Completes we assert on here (a test-only race, seen under heavy
+        # CPU load, not a product bug).
+        deadline = time.monotonic() + 10
+        while (
+            time.monotonic() < deadline
+            and host.task_statuses(TaskStatus.Complete) < 3
+        ):
+            time.sleep(0.02)
+        assert host.task_statuses(TaskStatus.Complete) >= 3
     finally:
         host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
         t.join(timeout=5)
-    assert isinstance(host.current_status, type(host.current_status))
-    assert host.task_statuses(TaskStatus.Complete) >= 3
 
 
 def test_backpressure_caps_submitted() -> None:
