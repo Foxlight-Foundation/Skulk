@@ -371,6 +371,7 @@ from skulk.shared.types.profiling import (
 )
 from skulk.shared.types.state import State
 from skulk.shared.types.telemetry import (
+    NODE_LIVENESS_TIMEOUT,
     TelemetryView,
     record_membership_from_event,
 )
@@ -3064,21 +3065,34 @@ class API:
         return max(limits) if limits else None
 
     def _live_node_timestamps(self) -> dict[NodeId, datetime]:
-        """Return peer membership plus this API process when telemetry is live.
+        """Return replicated membership plus fresh telemetry-only participants.
 
-        Replicated ``State.last_seen`` tracks peer activity and can omit the
-        local process, especially on ``--no-worker`` API nodes. Local telemetry
-        is positive evidence that this process is live, so include its latest
-        receipt for API-side health and resource filtering.
+        Replicated ``State.last_seen`` tracks worker control-plane activity and
+        can omit local or remote ``--no-worker`` API nodes. Fresh telemetry is
+        positive liveness evidence for those management participants. Bound it
+        by the shared node timeout so a stopped telemetry-only node cannot
+        remain in API health and resource views indefinitely.
 
         Returns:
             Live-node timestamps suitable for telemetry filtering and health
             derivation on this API process.
         """
         live = dict(self.state.last_seen)
-        local_seen = self._telemetry_view.last_liveness_receipt(self.node_id)
-        if local_seen is not None:
-            live[self.node_id] = local_seen
+        now = datetime.now(tz=timezone.utc)
+        telemetry_nodes = set(self._telemetry_view.node_last_heartbeat) | set(
+            self._telemetry_view.node_last_telemetry
+        )
+        for node_id in telemetry_nodes - live.keys():
+            seen_at = self._telemetry_view.last_liveness_receipt(node_id)
+            if seen_at is None:
+                continue
+            aware_seen_at = (
+                seen_at
+                if seen_at.tzinfo is not None
+                else seen_at.replace(tzinfo=timezone.utc)
+            )
+            if now - aware_seen_at <= NODE_LIVENESS_TIMEOUT:
+                live[node_id] = seen_at
         return live
 
     async def get_cluster_state(self) -> dict[str, object]:

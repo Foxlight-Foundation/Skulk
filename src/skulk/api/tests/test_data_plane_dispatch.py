@@ -5,7 +5,7 @@ exercises `_dispatch_generation_chunk` directly (the shared routing used by the
 DATA-plane consumer) without standing up the full gossip path.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import cast
 from unittest.mock import AsyncMock
 
@@ -30,7 +30,7 @@ from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadComma
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import IndexedEvent
 from skulk.shared.types.profiling import NodeResources
-from skulk.shared.types.telemetry import NodeTelemetry
+from skulk.shared.types.telemetry import NODE_LIVENESS_TIMEOUT, NodeTelemetry
 from skulk.utils.channels import channel
 
 
@@ -79,14 +79,15 @@ def test_reorder_buffer_default_follows_transport(
 
 async def test_state_surfaces_split_data_transport_health() -> None:
     api = _build_api(data_plane_zenoh=True)
-    local_node = NodeId("api-node")
-    peer_node = NodeId("peer-node")
+    management_node = NodeId("remote-management-node")
+    worker_node = NodeId("worker-node")
     now = datetime.now(tz=timezone.utc)
-    # Replicated membership tracks the peer but can omit the local API process.
-    api.state = api.state.model_copy(update={"last_seen": {peer_node: now}})
+    # Replicated membership tracks the worker but can omit a remote API-only
+    # participant whose resource reading arrives exclusively on telemetry.
+    api.state = api.state.model_copy(update={"last_seen": {worker_node: now}})
     api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
         NodeTelemetry(
-            node_id=local_node,
+            node_id=management_node,
             info=NodeResources(
                 backends=frozenset(),
                 participation="management",
@@ -97,7 +98,7 @@ async def test_state_surfaces_split_data_transport_health() -> None:
     )
     api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
         NodeTelemetry(
-            node_id=peer_node,
+            node_id=worker_node,
             info=NodeResources(data_transport="gossipsub"),
         ),
         received_at=now,
@@ -106,12 +107,12 @@ async def test_state_surfaces_split_data_transport_health() -> None:
     payload = await api.get_cluster_state()
 
     assert payload["nodeResources"] == {
-        "api-node": {
+        "remote-management-node": {
             "backends": [],
             "participation": "management",
             "dataTransport": "zenoh",
         },
-        "peer-node": {
+        "worker-node": {
             "backends": ["mlx"],
             "participation": "full",
             "dataTransport": "gossipsub",
@@ -119,7 +120,7 @@ async def test_state_surfaces_split_data_transport_health() -> None:
     }
     health = cast("dict[str, object]", payload["nodeHealth"])
     assert isinstance(health, dict)
-    for node_id in ("api-node", "peer-node"):
+    for node_id in ("remote-management-node", "worker-node"):
         summary = cast("dict[str, object]", health[node_id])
         assert isinstance(summary, dict)
         assert summary["level"] == "error"
@@ -129,6 +130,31 @@ async def test_state_surfaces_split_data_transport_health() -> None:
             reason.get("code") == "data_transport_mismatch"
             for reason in reasons
         )
+
+
+async def test_state_omits_stale_telemetry_only_participant() -> None:
+    api = _build_api()
+    stale_node = NodeId("stale-management-node")
+    stale_at = (
+        datetime.now(tz=timezone.utc)
+        - NODE_LIVENESS_TIMEOUT
+        - timedelta(seconds=1)
+    )
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=stale_node,
+            info=NodeResources(
+                backends=frozenset(),
+                participation="management",
+            ),
+        ),
+        received_at=stale_at,
+    )
+
+    payload = await api.get_cluster_state()
+
+    assert payload["nodeResources"] == {}
+    assert payload["nodeHealth"] == {}
 
 
 @pytest.mark.asyncio

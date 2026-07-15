@@ -170,13 +170,13 @@ def test_telemetry_diagnostics_are_exposed_without_changing_node_bundle() -> Non
 def test_node_diagnostics_warns_about_split_data_transports() -> None:
     """Diagnostics should fail loudly when live nodes advertise both transports."""
     api = _build_api("local-node")
-    local_node = NodeId("local-node")
-    peer_node = NodeId("peer-node")
+    management_node = NodeId("remote-management-node")
+    worker_node = NodeId("worker-node")
     now = datetime.now(tz=timezone.utc)
-    api.state = api.state.model_copy(update={"last_seen": {peer_node: now}})
+    api.state = api.state.model_copy(update={"last_seen": {worker_node: now}})
     api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
         NodeTelemetry(
-            node_id=local_node,
+            node_id=management_node,
             info=NodeResources(
                 backends=frozenset(),
                 participation="management",
@@ -187,7 +187,7 @@ def test_node_diagnostics_warns_about_split_data_transports() -> None:
     )
     api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
         NodeTelemetry(
-            node_id=peer_node,
+            node_id=worker_node,
             info=NodeResources(data_transport="gossipsub"),
         ),
         received_at=now,
