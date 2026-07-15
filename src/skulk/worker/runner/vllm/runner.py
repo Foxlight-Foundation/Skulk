@@ -499,14 +499,17 @@ class Runner:
                             self.send_task_status(task, TaskStatus.Running)
                             self.handle_task(task)
                             # _load_model sets current_status = RunnerReady() by
-                            # direct assignment; broadcast it as a status event so
-                            # the worker learns the runner is ready to serve. The
-                            # serial loop did this via update_status(current_status)
-                            # after every task; without it the runner loads but
-                            # never announces Ready and no generation is ever
-                            # dispatched to it.
-                            self.update_status(self.current_status)
+                            # direct assignment (no broadcast); broadcast it here so
+                            # the worker learns the runner is ready to serve -- but
+                            # ONLY AFTER the terminal Complete. Order is load-bearing:
+                            # RunnerSupervisor._forward_events asserts the runner is
+                            # in an active state (Loading/Running/...) when a terminal
+                            # task status arrives, so Ready must not precede Complete
+                            # (else Loading -> Ready -> Complete trips that assertion
+                            # and aborts the forwarder). This matches the serial loop,
+                            # which sent Complete then update_status(current_status).
                             self.send_task_status(task, TaskStatus.Complete)
+                            self.update_status(self.current_status)
         finally:
             # Drain in-flight generations, then stop the server. Shutdown already
             # cancels them (so the pool drains promptly); this also covers the
@@ -567,7 +570,20 @@ class Runner:
                 TaskStatus.Cancelled if was_cancelled else TaskStatus.Complete,
             )
         finally:
-            self._note_generation_finished()
+            drained_to_idle = self._note_generation_finished()
+            # Clear a stale cluster-wide cancel the moment the last in-flight
+            # generation drains, not only on the next dispatch: a CANCEL_ALL that
+            # arrived while requests were in flight would otherwise linger until a
+            # new task happens to arrive (and the dispatch-time clear runs), and a
+            # request that arrives before that could be spuriously cancelled. Not
+            # under _status_lock (lock ordering); skipped during shutdown, which
+            # sets CANCEL_ALL deliberately to break the draining streams.
+            if drained_to_idle:
+                with self._cancel_lock:
+                    if not isinstance(
+                        self.current_status, (RunnerShuttingDown, RunnerShutdown)
+                    ):
+                        self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
 
     def _note_generation_started(self) -> None:
         with self._status_lock:
@@ -576,13 +592,15 @@ class Runner:
             if self._inflight == 1 and isinstance(self.current_status, RunnerReady):
                 self.update_status(RunnerRunning())
 
-    def _note_generation_finished(self) -> None:
+    def _note_generation_finished(self) -> bool:
+        """Drop the in-flight count; return True if this drained to idle (0)."""
         with self._status_lock:
             self._inflight = max(0, self._inflight - 1)
             # Last in-flight generation flips Running -> Ready. A shutdown in
             # progress (ShuttingDown/Shutdown) is left alone.
             if self._inflight == 0 and isinstance(self.current_status, RunnerRunning):
                 self.update_status(RunnerReady())
+            return self._inflight == 0
 
     def _inflight_count(self) -> int:
         with self._status_lock:

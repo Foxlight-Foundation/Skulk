@@ -382,9 +382,19 @@ def test_main_broadcasts_ready_after_load_model() -> None:
     # DIRECT ASSIGNMENT (no event). Without the broadcast the runner loads but
     # never announces Ready, so the worker never dispatches a generation to it.
     # (Caught live: a probe saw statuses stop at [Idle, Loading] though the server
-    # loaded fine.) This drives the real main() loop over genuine mp channels.
-    from skulk.shared.types.events import Event, RunnerStatusUpdated
-    from skulk.shared.types.tasks import LoadModel, Shutdown, Task
+    # loaded fine.)
+    #
+    # ORDER is also load-bearing and asserted here: RunnerSupervisor._forward_events
+    # asserts the runner is in an active state (Loading/Running/...) when a terminal
+    # task status arrives, so the LoadModel Complete must precede the RunnerReady
+    # broadcast (Loading -> Complete -> Ready), not follow it. This drives the real
+    # main() loop over genuine mp channels.
+    from skulk.shared.types.events import (
+        Event,
+        RunnerStatusUpdated,
+        TaskStatusUpdated,
+    )
+    from skulk.shared.types.tasks import LoadModel, Shutdown, Task, TaskStatus
     from skulk.shared.types.worker.instances import InstanceId
     from skulk.shared.types.worker.runners import RunnerId, RunnerIdle
     from skulk.utils.channels import mp_channel
@@ -420,19 +430,33 @@ def test_main_broadcasts_ready_after_load_model() -> None:
     try:
         iid = InstanceId("probe-inst")
         task_s.send(LoadModel(instance_id=iid))
-        saw_ready = False
+        load_complete_at: int | None = None
+        ready_at: int | None = None
+        seq = 0
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and ready_at is None:
             try:
                 event = evt_r.receive_timeout(0.5)
             except Exception:
                 continue
+            seq += 1
+            if (
+                isinstance(event, TaskStatusUpdated)
+                and event.task_status is TaskStatus.Complete
+                and load_complete_at is None
+            ):
+                load_complete_at = seq
             if isinstance(event, RunnerStatusUpdated) and isinstance(
                 event.runner_status, RunnerReady
             ):
-                saw_ready = True
-                break
-        assert saw_ready, "runner never broadcast RunnerReady after LoadModel"
+                ready_at = seq
+        assert ready_at is not None, "runner never broadcast RunnerReady after LoadModel"
+        assert load_complete_at is not None, "LoadModel never reported Complete"
+        # Ready must come AFTER the terminal Complete (the supervisor assertion).
+        assert load_complete_at < ready_at, (
+            "RunnerReady was broadcast before the LoadModel Complete; the supervisor "
+            "asserts an active runner state on terminal task status"
+        )
     finally:
         task_s.send(
             Shutdown(instance_id=InstanceId("probe-inst"), runner_id=runner.runner_id)
