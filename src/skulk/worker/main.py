@@ -23,9 +23,11 @@ from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
+    KV_CONTEXT_BUDGET_TOKENS,
     UMA_GPU_OS_HEADROOM,
     estimate_shard_footprint,
     gpu_working_set_ceiling,
+    shard_preallocates_kv_upfront,
 )
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -316,16 +318,21 @@ def _local_usable_vram() -> Memory | None:
         # against VRAM would falsely refuse CPU placements that fit.
         from skulk.shared.backends import probe_node_backends
 
-        # Gated on the node advertising a CUDA GPU-offload backend. Both the
-        # in-process llama.cpp runner AND the vLLM served engine allocate weights
-        # + KV from VRAM (`vllm-` joins the GPU-offload prefixes in placement, so
-        # the master admits vLLM against VRAM), so a vLLM-only CUDA node
-        # (`vllm-cuda` advertised, `llama_cpp-cuda` not) must also size the local
-        # guard against VRAM -- else it would refuse the very placement the master
-        # admitted against VRAM. A node advertising only `*-cpu` was admitted
-        # against system RAM and correctly keeps the RAM path.
+        # Gated on the node advertising a CUDA GPU-offload backend. All three CUDA
+        # served/in-process engines allocate weights + KV from VRAM (they join the
+        # GPU-offload prefixes in placement, so the master admits them against VRAM):
+        # the in-process llama.cpp runner (`llama_cpp-cuda`), the served llama-server
+        # engine (`llama_server-cuda`, launched `-ngl 99`), and vLLM (`vllm-cuda`).
+        # A node advertising any of them -- even a SERVED-only CUDA node that lacks
+        # the in-process llama_cpp binding -- must size the local guard against VRAM,
+        # else it would refuse the very placement the master admitted against VRAM
+        # (made worse now that the guard sizes to the full stamped context). A node
+        # advertising only `*-cpu` was admitted against system RAM and keeps it.
         backends = probe_node_backends()
-        if not any(tag in backends for tag in ("llama_cpp-cuda", "vllm-cuda")):
+        if not any(
+            tag in backends
+            for tag in ("llama_cpp-cuda", "llama_server-cuda", "vllm-cuda")
+        ):
             return None
         nvml = load_nvml()
         if nvml is None or not has_nvidia_gpu(nvml):
@@ -763,7 +770,9 @@ class Worker:
             return (shard.end_layer - shard.start_layer) / shard.n_layers
         return 1.0 / shard.world_size if shard.world_size > 0 else 1.0
 
-    def _local_shard_fit_error(self, shard: ShardMetadata) -> str | None:
+    def _local_shard_fit_error(
+        self, shard: ShardMetadata, context_token_limit: int | None = None
+    ) -> str | None:
         """Reason this node cannot hold ``shard``, or ``None`` if it fits.
 
         Last-resort guard using *local, current* memory, not the master's
@@ -777,9 +786,31 @@ class Worker:
         OOM-abort, which on an abnormal Metal termination leaks wired GPU
         memory reclaimable only by reboot (the GLM-4.7-Flash class,
         2026-06-08).
+
+        ``context_token_limit`` is the instance's stamped served window. A served
+        engine that commits a fixed window at load (in-process ``llama_cpp`` and
+        ``llama_server`` allocate the KV cache up front; ``vllm`` passes it as
+        ``--max-model-len``), identified by ``shard_preallocates_kv_upfront``, must
+        have the guard size the footprint to that window, not the fixed
+        ``KV_CONTEXT_BUDGET_TOKENS``: with the memory-fit lift a stamped 32k window
+        would otherwise pass an 8192-sized guard and then OOM / fail to load if live
+        VRAM has dropped since placement (stale telemetry, a concurrently loaded
+        instance). MLX grows KV lazily (no up-front window), so the budget floor is
+        the correct estimate there.
         """
+        kv_context = (
+            context_token_limit
+            if (
+                shard_preallocates_kv_upfront(shard)
+                and context_token_limit
+                and context_token_limit > 0
+            )
+            else KV_CONTEXT_BUDGET_TOKENS
+        )
         footprint = estimate_shard_footprint(
-            shard.model_card, self._shard_memory_fraction(shard)
+            shard.model_card,
+            self._shard_memory_fraction(shard),
+            context_budget=kv_context,
         )
         # On a discrete-GPU node the engine allocates from VRAM, not system RAM,
         # so size the guard against local usable VRAM or it would falsely refuse
@@ -1877,7 +1908,8 @@ class Worker:
                         None
                         if isinstance(task.bound_instance.instance, LlamaRpcInstance)
                         else self._local_shard_fit_error(
-                            task.bound_instance.bound_shard
+                            task.bound_instance.bound_shard,
+                            task.bound_instance.instance.context_token_limit,
                         )
                     )
                     if fit_error is not None:
@@ -2281,7 +2313,9 @@ class Worker:
                 # has loaded, so this is the last accurate point - current free
                 # memory now reflects those other loads - to refuse before the
                 # runner allocates and risks an OOM-abort that leaks GPU memory.
-                fit_error = self._local_shard_fit_error(shard)
+                fit_error = self._local_shard_fit_error(
+                    shard, instance.context_token_limit
+                )
                 if fit_error is not None:
                     logger.error(fit_error)
                     await self.event_sender.send(
