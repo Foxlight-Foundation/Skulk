@@ -1124,6 +1124,13 @@ telemetry heartbeat, ordinary telemetry fallback, and `lastSeen`. The
 be stale for a healthy node; it must not be interpreted as a heartbeat. A node
 with no problems reports `level: "ok"` with an empty `reasons` list.
 
+When known live node identities report different Skulk package versions or
+source commits, every topology entry receives the warning-level
+`version_mismatch` reason. This marks a staggered deployment as degraded until
+all nodes converge. Operational visibility remains available, but events,
+commands, state, and inference are not cross-version-compatible; finish the
+deployment before starting new inference work.
+
 The response carries a live `nodeResources` map as well. Each node entry includes
 its placement `backends`, declared `participation`, and resolved `dataTransport`
 (`gossipsub` or `zenoh`). A live fleet that advertises both transports receives
@@ -1224,7 +1231,12 @@ Behavior notes:
   unroutable address cannot stall the response. Every topology member appears
   in `nodes`: peers with no reachable API route are explicit `ok: false`
   entries with a `no reachable API route` error rather than being omitted, so
-  an overlay-joined node always has an observability presence.
+  an overlay-joined node always has an observability presence. Peer diagnostic
+  reads ignore unknown additive fields recursively and use compatibility
+  defaults for additive counters. The response returns aggregate
+  `versionStatus` (`consistent`, `mixed`, or `unknown`) and per-node
+  `versionStatus` (`current`, `version_mismatch`, or `unknown`). This tolerance
+  applies only to operational diagnostics, not correctness-bearing wire types.
 - `GET /v1/diagnostics/cluster/timeline` stitches every reachable node's
   runner-supervisor diagnostics into one cross-rank chronological view. The
   response carries a per-runner synopsis sorted by `(modelId, deviceRank)`
