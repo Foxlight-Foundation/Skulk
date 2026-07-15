@@ -9464,7 +9464,12 @@ class API:
         if rank_zero is None:
             return None
         rank_zero_runner, rank_zero_shard = rank_zero
-        backend = rank_zero_shard.resolved_backend or ""
+        backend = rank_zero_shard.resolved_backend
+        if backend is None:
+            # The master has not stamped the resolved backend yet (node resources
+            # had not gossiped at placement). Skip rather than collapse different
+            # actual serving backends under one empty-backend key.
+            return None
         quantization = rank_zero_shard.model_card.quantization
         node_id = next(
             (

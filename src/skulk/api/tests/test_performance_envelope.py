@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from skulk.api.performance_envelope import (
+    _MAX_CONCURRENCY_BUCKET,
     _MAX_ENVELOPES,
     PerformanceEnvelopeRegistry,
     _knee,
@@ -134,6 +135,19 @@ def test_envelope_cap_drops_new_keys_but_keeps_existing() -> None:
                decode_tps=10.0, outcome="success")
     m0 = next(e for e in reg.snapshot().envelopes if e.model_id == "m0")
     assert {b.concurrency for b in m0.buckets} == {1, 2}
+
+
+def test_concurrency_clamped_to_max_bucket() -> None:
+    reg = _registry()
+    # A single hot model hammered above the cap must not create unbounded
+    # buckets: everything above _MAX_CONCURRENCY_BUCKET folds into the top bucket.
+    for concurrency in (_MAX_CONCURRENCY_BUCKET, _MAX_CONCURRENCY_BUCKET + 1, 5000):
+        reg.record(hardware_class="hw", model_id="m", backend="b", quantization="",
+                   concurrency=concurrency, ttft_seconds=0.2, decode_tps=10.0,
+                   outcome="success")
+    buckets = reg.snapshot().envelopes[0].buckets
+    assert [b.concurrency for b in buckets] == [_MAX_CONCURRENCY_BUCKET]
+    assert buckets[0].request_count == 3
 
 
 def test_empty_registry_snapshot() -> None:

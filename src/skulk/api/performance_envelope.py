@@ -47,6 +47,10 @@ _MAX_SAMPLES_PER_BUCKET = 256
 #: Cap on distinct envelope keys tracked at once (a busy mixed fleet is far
 #: below this; the cap is a runaway backstop, not an expected limit).
 _MAX_ENVELOPES = 512
+#: Highest distinct concurrency level given its own bucket. Concurrency above
+#: this folds into the top bucket, so a single hot model under a load test cannot
+#: create unbounded per-envelope buckets. Well above any realistic serving knee.
+_MAX_CONCURRENCY_BUCKET = 128
 
 
 @final
@@ -270,12 +274,15 @@ class PerformanceEnvelopeRegistry:
     ) -> None:
         """Fold one completed generation into its envelope's concurrency bucket.
 
-        ``concurrency`` is clamped to at least 1 (a request always includes
-        itself). A new envelope key is dropped silently once ``max_envelopes`` is
-        reached, so a pathological fan-out of keys cannot grow memory without
-        bound; existing envelopes keep updating.
+        ``concurrency`` is clamped to ``[1, _MAX_CONCURRENCY_BUCKET]`` (a request
+        always includes itself, and values above the cap fold into the top bucket
+        so one hot model cannot create unbounded buckets). A new envelope key is
+        dropped silently once ``max_envelopes`` is reached, so a pathological
+        fan-out of keys cannot grow memory without bound; existing envelopes keep
+        updating. Together these bound the registry to ``max_envelopes ×
+        _MAX_CONCURRENCY_BUCKET`` buckets.
         """
-        concurrency = max(1, concurrency)
+        concurrency = max(1, min(concurrency, _MAX_CONCURRENCY_BUCKET))
         key = (hardware_class, model_id, backend, quantization)
         envelope = self._envelopes.get(key)
         if envelope is None:
