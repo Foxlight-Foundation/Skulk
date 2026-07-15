@@ -43,6 +43,7 @@ from skulk.shared.types.events import (
     IndexedEvent,
     NodeTimedOut,
     RunnerStatusUpdated,
+    TaskFailed,
     TaskStatusUpdated,
 )
 from skulk.shared.types.memory import Memory
@@ -279,6 +280,48 @@ async def test_runner_ready_event_resynchronizes_realtime_stt_advertisement(
         "stt.realtime",
         "vad",
     }
+
+
+@pytest.mark.anyio
+async def test_realtime_task_failed_event_releases_provider_waiter() -> None:
+    """Authoritative TaskFailed is terminal for provider admission cleanup."""
+
+    api, _, event_sender = _build_api()
+    card = _realtime_card()
+    state = _local_state(card)
+    command_id = CommandId("failed-realtime-command")
+    task = RealtimeAudioTranscriptionTask(
+        task_id=TaskId("failed-realtime-task"),
+        instance_id=InstanceId("speech-instance"),
+        command_id=command_id,
+        owner_node=NodeId("api-node"),
+        task_status=TaskStatus.Running,
+        task_params=RealtimeAudioTranscriptionTaskParams(
+            model=card.model_id,
+            input_sample_rate=16000,
+        ),
+    )
+    api.state = state.model_copy(update={"tasks": {task.task_id: task}})
+    release_event = anyio.Event()
+    api._realtime_task_release_events[command_id] = release_event
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(api._apply_state)
+        await event_sender.send(
+            IndexedEvent(
+                idx=0,
+                event=TaskFailed(
+                    task_id=task.task_id,
+                    error_type="realtime_decode_failed",
+                    error_message="decode failed",
+                ),
+            )
+        )
+        with anyio.fail_after(1.0):
+            await release_event.wait()
+        task_group.cancel_scope.cancel()
+
+    assert api.state.tasks[task.task_id].task_status is TaskStatus.Failed
 
 
 def test_realtime_stt_discovery_rejects_multi_host_instance(

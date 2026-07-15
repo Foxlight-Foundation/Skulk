@@ -6834,8 +6834,11 @@ class API:
                 if isinstance(event, TaskDeleted):
                     released_task = previous_tasks.get(event.task_id)
                 elif (
-                    isinstance(event, TaskStatusUpdated)
-                    and event.task_status in _TERMINAL_TASK_STATUSES
+                    isinstance(event, TaskFailed)
+                    or (
+                        isinstance(event, TaskStatusUpdated)
+                        and event.task_status in _TERMINAL_TASK_STATUSES
+                    )
                 ):
                     released_task = self.state.tasks.get(event.task_id)
                 if isinstance(
