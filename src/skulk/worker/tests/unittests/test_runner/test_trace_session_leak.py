@@ -4,8 +4,8 @@
 Before the fix, an exception inside ``self.generator.step()`` would bubble
 out of ``handle_generation_tasks`` without flushing any active traced
 tasks. The runner would leak ``_trace_sessions`` entries, and — worse —
-the master would wait forever for ``TracesCollected`` from this rank,
-leaving the cluster trace in ``_pending_traces`` permanently.
+the owning API would never receive this rank's terminal trace payload,
+leaving its bounded trace assembly incomplete until expiry.
 
 This test exercises the helper directly without standing up the heavy
 runner constructor: the contract is that for every traced active task,

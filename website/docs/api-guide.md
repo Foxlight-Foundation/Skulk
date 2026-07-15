@@ -638,16 +638,23 @@ Response formats:
 | `vtt` | `text/vtt` | WebVTT subtitle output from model segments |
 | `ndjson` | `application/x-ndjson` | One JSON line per transcription chunk |
 
-The endpoint never accepts server-local file paths. The API reads the multipart
-upload, chunks the base64 payload through Skulk's command/input-chunk pipeline,
-and the worker writes a temporary local audio file only inside the serving
-runner process. With `stream=true`, supported models yield their actual decoded
-text deltas. The default `text/event-stream` response emits typed
+The endpoint never accepts server-local file paths. The API retains the bounded
+multipart upload until the master selects the authoritative task placement,
+then sends raw audio frames directly to the selected worker over
+`SPEECH_MEDIA`. Only control-sized metadata and the task lifecycle enter the
+ordered event log. The worker verifies the owner, frame count, and SHA-256
+before injecting the payload into the serving runner; the runner writes a
+temporary local audio file only while inference executes. With `stream=true`,
+supported models yield their actual decoded text deltas. The default
+`text/event-stream` response emits typed
 `transcription.delta`, `transcription.completed`, `transcription.usage`, and
 `transcription.error` events. Disconnecting before a terminal event cancels the
 core command and releases its bounded output queue. An explicit
 `response_format=ndjson` streams the existing per-chunk JSON shape one line at
 a time. Cards without proven streaming support fail before response headers.
+On Zenoh, upload frames are addressed to the selected worker. The gossipsub
+fallback broadcasts target-tagged frames across the trusted cluster fabric;
+non-target workers discard them before speech assembly.
 
 ## OpenAI Audio Translations API
 

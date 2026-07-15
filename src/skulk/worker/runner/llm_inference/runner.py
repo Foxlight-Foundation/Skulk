@@ -510,10 +510,9 @@ class Runner:
         Runs on the exception/abort path of ``handle_generation_tasks``. Without
         it, a raised ``generator.step()`` (parsing exception, model error,
         Shutdown received mid-flight) would leave ``_trace_sessions`` entries
-        behind on the runner *and* cause the master to wait forever for
-        ``TracesCollected`` from this rank — leaking the cluster trace into
-        ``_pending_traces`` permanently. The aborted marker tells the
-        downstream merge that this rank's trace is not a clean completion.
+        behind on the runner and prevent this rank's owner-addressed trace
+        packet from being emitted. The aborted marker tells the API-side merge
+        that this rank's trace is not a clean completion.
         """
         for task_id, task in list(self.active_tasks.items()):
             if not task.trace_enabled:
@@ -547,8 +546,8 @@ class Runner:
             return self._run_generation_loop()
         finally:
             # Flush traces on every exit path including exceptions —
-            # without this the master's _pending_traces leaks forever for
-            # any task that was traced when step() raised.
+            # without this the owning API never receives this rank's terminal
+            # trace payload for a task whose step() raised.
             self._flush_unfinished_trace_sessions()
 
     def _run_generation_loop(self) -> "ExitCode":

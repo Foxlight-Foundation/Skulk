@@ -30,7 +30,6 @@ from skulk.shared.models.memory_estimate import (
     estimate_shard_footprint,
     shard_fraction_of_model,
 )
-from skulk.shared.types.chunks import AudioInputChunk, InputImageChunk
 from skulk.shared.types.commands import (
     AddCustomModelCard,
     AudioTranscription,
@@ -62,7 +61,6 @@ from skulk.shared.types.events import (
     Event,
     GlobalForwarderEvent,
     IndexedEvent,
-    InputChunkReceived,
     InstanceDeleted,
     LocalForwarderEvent,
     NodeDownloadProgress,
@@ -75,10 +73,8 @@ from skulk.shared.types.events import (
     TaskDeleted,
     TaskFailed,
     TaskStatusUpdated,
-    TraceEventData,
-    TracesCollected,
-    TracesMerged,
     TracingStateChanged,
+    is_persistable_control_event,
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import MemoryUsage
@@ -549,8 +545,6 @@ class Master:
         # transition makes a 10-second planning loop emit one warning and one
         # recovery message instead of repeating the same warning indefinitely.
         self._heartbeat_gap_warned_nodes: set[NodeId] = set()
-        self._pending_traces: dict[TaskId, dict[int, list[TraceEventData]]] = {}
-        self._expected_ranks: dict[TaskId, set[int]] = {}
         # Instance ids whose memory-refusal re-placement has already been
         # initiated (#290). The command processor generates events but does not
         # apply them — self.state only updates when they round-trip through
@@ -689,26 +683,6 @@ class Master:
         )
         return memory, vram
 
-    def _configure_expected_trace_ranks(
-        self, task_id: TaskId, instance_id: InstanceId, *, trace_enabled: bool
-    ) -> None:
-        """Track which device ranks must report traces for a newly traced task."""
-
-        if not trace_enabled:
-            return
-
-        selected_instance = self.state.instances.get(instance_id)
-        if selected_instance is None:
-            logger.warning(
-                f"Unable to configure trace ranks for task {task_id}; instance {instance_id} not found"
-            )
-            return
-
-        self._expected_ranks[task_id] = {
-            shard.device_rank
-            for shard in selected_instance.shard_assignments.runner_to_shard.values()
-        }
-
     async def _index_seed_event(self) -> None:
         """Index the failover seed as the first event of this session (#273).
 
@@ -823,11 +797,6 @@ class Master:
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
-                            self._configure_expected_trace_ranks(
-                                task_id,
-                                selected_instance_id,
-                                trace_enabled=trace_enabled,
-                            )
                         case ImageGeneration():
                             for instance in self.state.instances.values():
                                 if (
@@ -874,11 +843,6 @@ class Master:
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
-                            self._configure_expected_trace_ranks(
-                                task_id,
-                                selected_instance_id,
-                                trace_enabled=trace_enabled,
-                            )
                         case ImageEdits():
                             for instance in self.state.instances.values():
                                 if (
@@ -925,11 +889,6 @@ class Master:
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
-                            self._configure_expected_trace_ranks(
-                                task_id,
-                                selected_instance_id,
-                                trace_enabled=trace_enabled,
-                            )
                         case TextEmbedding():
                             for instance in self.state.instances.values():
                                 if (
@@ -976,11 +935,6 @@ class Master:
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
-                            self._configure_expected_trace_ranks(
-                                task_id,
-                                selected_instance_id,
-                                trace_enabled=trace_enabled,
-                            )
                         case SpeechSynthesis():
                             if command.task_params.reference_audio_data is not None:
                                 raise ValueError(
@@ -1054,12 +1008,6 @@ class Master:
                                         ),
                                     )
                                 )
-                            else:
-                                self._configure_expected_trace_ranks(
-                                    task_id,
-                                    selected_instance_id,
-                                    trace_enabled=trace_enabled,
-                                )
                         case AudioTranscription():
                             for instance in self.state.instances.values():
                                 if (
@@ -1106,11 +1054,6 @@ class Master:
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
-                            self._configure_expected_trace_ranks(
-                                task_id,
-                                selected_instance_id,
-                                trace_enabled=trace_enabled,
-                            )
                         case RealtimeAudioTranscription():
                             instance = self.state.instances.get(
                                 command.target_instance_id
@@ -1428,17 +1371,10 @@ class Master:
                                 self.state.instances, placement, self.state.tasks
                             )
                             generated_events.extend(transition_events)
-                        case SendInputChunk(chunk=AudioInputChunk() as chunk):
-                            generated_events.append(
-                                InputChunkReceived(
-                                    command_id=chunk.command_id,
-                                    chunk=chunk,
-                                )
-                            )
                         case SendInputChunk():
                             logger.warning(
-                                "Rejected legacy image input command; vision media "
-                                "must use the node-addressed data transport"
+                                "Rejected legacy payload input command; media must "
+                                "use a node-addressed data transport"
                             )
                         case TaskCancelled():
                             self._realtime_instance_by_command.pop(
@@ -1774,12 +1710,10 @@ class Master:
                 # Discard all events not from our session
                 if local_event.session != self.session_id:
                     continue
-                if isinstance(local_event.event, InputChunkReceived) and isinstance(
-                    local_event.event.chunk, InputImageChunk
-                ):
+                if not is_persistable_control_event(local_event.event):
                     logger.warning(
-                        "Rejected legacy image input event before ordering/indexing; "
-                        "vision media must use the node-addressed data transport"
+                        "Rejected non-control event before ordering/indexing: "
+                        f"{type(local_event.event).__name__}"
                     )
                     self._multi_buffer.skip(
                         local_event.origin_idx, local_event.origin
@@ -1791,10 +1725,6 @@ class Master:
                         local_event.origin,
                     )
                 for event in self._multi_buffer.drain():
-                    if isinstance(event, TracesCollected):
-                        await self._handle_traces_collected(event)
-                        continue
-
                     if isinstance(event, TaskDeleted):
                         for command_id, task_id in list(
                             self.command_task_mapping.items()
@@ -1962,32 +1892,6 @@ class Master:
                 event=event.event,
             )
         )
-
-    async def _handle_traces_collected(self, event: TracesCollected) -> None:
-        task_id = event.task_id
-        if task_id not in self._pending_traces:
-            self._pending_traces[task_id] = {}
-        self._pending_traces[task_id][event.rank] = event.traces
-
-        if (
-            task_id in self._expected_ranks
-            and set(self._pending_traces[task_id].keys())
-            >= self._expected_ranks[task_id]
-        ):
-            await self._merge_and_save_traces(task_id)
-
-    async def _merge_and_save_traces(self, task_id: TaskId) -> None:
-        all_trace_data: list[TraceEventData] = []
-        for trace_data in self._pending_traces[task_id].values():
-            all_trace_data.extend(trace_data)
-
-        await self.event_sender.send(
-            TracesMerged(task_id=task_id, traces=all_trace_data)
-        )
-
-        del self._pending_traces[task_id]
-        if task_id in self._expected_ranks:
-            del self._expected_ranks[task_id]
 
     async def _state_sync_processor(self) -> None:
         with self.state_sync_receiver as messages:

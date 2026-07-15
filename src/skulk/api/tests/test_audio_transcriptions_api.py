@@ -1,7 +1,6 @@
 # pyright: reportPrivateUsage=false
 """API coverage for OpenAI-compatible speech-to-text serving."""
 
-import base64
 import hashlib
 import io
 import json
@@ -15,6 +14,7 @@ from starlette.datastructures import Headers
 
 import skulk.api.main as api_main
 from skulk.api.main import API
+from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.shared.election import ElectionMessage
 from skulk.shared.experimental import EXPERIMENTAL_MODE_ENV_VAR
 from skulk.shared.models.model_cards import (
@@ -24,12 +24,11 @@ from skulk.shared.models.model_cards import (
     ModelId,
     ModelTask,
 )
-from skulk.shared.types.chunks import AudioInputChunk, TranscriptionChunk
+from skulk.shared.types.chunks import TranscriptionChunk
 from skulk.shared.types.commands import (
     AudioTranscription,
     ForwarderCommand,
     ForwarderDownloadCommand,
-    SendInputChunk,
 )
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import IndexedEvent
@@ -37,7 +36,13 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import AudioTranscription as AudioTranscriptionTask
 from skulk.shared.types.tasks import TaskId, TaskStatus
-from skulk.shared.types.worker.instances import InstanceId
+from skulk.shared.types.worker.instances import (
+    InstanceId,
+    MlxRingInstance,
+    ShardAssignments,
+)
+from skulk.shared.types.worker.runners import RunnerId
+from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.channels import channel
 
 
@@ -48,6 +53,7 @@ def _build_api() -> API:
     download_sender, _ = channel[ForwarderDownloadCommand]()
     _, event_receiver = channel[IndexedEvent]()
     _, election_receiver = channel[ElectionMessage]()
+    speech_media_sender, _ = channel[SpeechMediaPacket](64)
     return API(
         NodeId("api-node"),
         port=52415,
@@ -55,6 +61,7 @@ def _build_api() -> API:
         command_sender=command_sender,
         download_command_sender=download_sender,
         election_receiver=election_receiver,
+        speech_media_packet_sender=speech_media_sender,
         enable_event_log=False,
         mount_dashboard=False,
     )
@@ -71,6 +78,78 @@ def _upload(
         file=io.BytesIO(audio_bytes),
         headers=Headers({"content-type": content_type}),
     )
+
+
+@pytest.mark.asyncio
+async def test_batch_audio_dispatches_to_selected_worker_off_control_plane() -> None:
+    """Task placement should release raw audio only on SPEECH_MEDIA."""
+
+    api = _build_api()
+    media_sender, media_receiver = channel[SpeechMediaPacket](4)
+    api._speech_media_packet_sender = media_sender
+    model_id = ModelId("mlx-community/stt-media-test")
+    node_id = NodeId("speech-worker")
+    runner_id = RunnerId("speech-runner")
+    instance_id = InstanceId("speech-instance")
+    card = ModelCard(
+        model_id=model_id,
+        storage_size=Memory.from_mb(100),
+        n_layers=1,
+        hidden_size=1024,
+        supports_tensor=False,
+        tasks=[ModelTask.SpeechToText],
+        audio=AudioCardConfig(kind=AudioCardKind.SpeechToText),
+    )
+    instance = MlxRingInstance(
+        instance_id=instance_id,
+        shard_assignments=ShardAssignments(
+            model_id=model_id,
+            runner_to_shard={
+                runner_id: PipelineShardMetadata(
+                    model_card=card,
+                    device_rank=0,
+                    world_size=1,
+                    start_layer=0,
+                    end_layer=1,
+                    n_layers=1,
+                )
+            },
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=0,
+    )
+    api.state = State(instances={instance_id: instance})
+    audio = b"RIFFtestWAVE"
+    task = AudioTranscriptionTask(
+        task_id=TaskId("speech-task"),
+        instance_id=instance_id,
+        task_status=TaskStatus.Pending,
+        command_id=api_main.CommandId("speech-command"),
+        owner_node=api.node_id,
+        task_params=api_main.AudioTranscriptionTaskParams(
+            model=model_id,
+            total_input_chunks=1,
+            audio_sha256=hashlib.sha256(audio).hexdigest(),
+        ),
+    )
+    api._stage_audio_transcription_media(task.command_id, task.task_params, audio)
+    chunk: SpeechMediaPacket | None = None
+    completed: SpeechMediaPacket | None = None
+
+    async with api._tg as task_group:
+        api._dispatch_pending_speech_media(task)
+        chunk = await media_receiver.receive()
+        completed = await media_receiver.receive()
+        task_group.cancel_scope.cancel()
+
+    assert chunk is not None
+    assert completed is not None
+    assert chunk.purpose == "transcription_audio"
+    assert chunk.target_node == node_id
+    assert chunk.data == audio
+    assert completed.kind == "completed"
+    assert completed.sha256 == hashlib.sha256(audio).hexdigest()
 
 
 def test_audio_transcriptions_route_is_documented_in_openapi() -> None:
@@ -544,7 +623,7 @@ async def test_audio_transcriptions_rejects_non_audio_upload(
 
 
 @pytest.mark.anyio
-async def test_audio_transcriptions_sends_input_chunks_and_returns_verbose_json(
+async def test_audio_transcriptions_stages_media_and_returns_verbose_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A non-streaming STT request should return the final transcript."""
@@ -552,7 +631,7 @@ async def test_audio_transcriptions_sends_input_chunks_and_returns_verbose_json(
     api = _build_api()
     model_id = ModelId("mlx-community/whisper-test")
     audio_bytes = b"RIFFtestWAVE"
-    sent_input_chunks: list[AudioInputChunk] = []
+    staged_audio: list[bytes] = []
     sent_commands: list[AudioTranscription] = []
 
     async def _validate_model(self: API, requested_model: ModelId) -> ModelId:
@@ -561,11 +640,11 @@ async def test_audio_transcriptions_sends_input_chunks_and_returns_verbose_json(
         return model_id
 
     async def _send(command: object) -> None:
-        if isinstance(command, SendInputChunk):
-            assert isinstance(command.chunk, AudioInputChunk)
-            sent_input_chunks.append(command.chunk)
         if isinstance(command, AudioTranscription):
             sent_commands.append(command)
+            staged_audio.append(
+                api._pending_speech_media[command.command_id].data
+            )
             await api._audio_transcription_queues[command.command_id].send(
                 TranscriptionChunk(
                     model=model_id,
@@ -605,19 +684,12 @@ async def test_audio_transcriptions_sends_input_chunks_and_returns_verbose_json(
     assert command.owner_node == api.node_id
     assert command.task_params.model == model_id
     assert command.task_params.language == "en"
-    assert command.task_params.total_input_chunks == len(sent_input_chunks)
+    assert command.task_params.total_input_chunks == 1
     assert command.task_params.audio_sha256 == hashlib.sha256(audio_bytes).hexdigest()
     assert command.task_params.audio_data is None
     assert command.task_params.timestamp_granularities == ("segment",)
-    assert len(sent_input_chunks) == 1
-    input_chunk = sent_input_chunks[0]
-    assert input_chunk.command_id == command.command_id
-    assert input_chunk.content_type == "audio/wav"
-    assert input_chunk.filename == "sample.wav"
-    assert (
-        base64.b64decode(input_chunk.data.encode("ascii"), validate=True)
-        == audio_bytes
-    )
+    assert staged_audio == [audio_bytes]
+    assert command.model_dump_json().find("RIFFtestWAVE") == -1
     assert command.command_id not in api._audio_transcription_queues
 
 

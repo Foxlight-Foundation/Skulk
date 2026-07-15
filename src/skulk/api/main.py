@@ -250,6 +250,7 @@ from skulk.master.placement_utils import usable_vram_by_node
 from skulk.routing.provider_streams import ProviderStreamPacket
 from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.routing.speech_media import SpeechMediaPacket
+from skulk.routing.trace_data import TraceDataPacket
 from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.apply import apply
 from skulk.shared.constants import (
@@ -293,7 +294,6 @@ from skulk.shared.types.audio import (
 )
 from skulk.shared.types.chunks import (
     AudioChunk,
-    AudioInputChunk,
     DataChunk,
     EmbeddingChunk,
     ErrorChunk,
@@ -320,7 +320,6 @@ from skulk.shared.types.commands import (
     ImageGeneration,
     PlaceInstance,
     RealtimeAudioTranscription,
-    SendInputChunk,
     SetTracingEnabled,
     SpeechSynthesis,
     StartDownload,
@@ -371,7 +370,7 @@ from skulk.shared.types.events import (
     TaskDeleted,
     TaskFailed,
     TaskStatusUpdated,
-    TracesMerged,
+    TraceEventData,
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
@@ -590,14 +589,6 @@ async def _read_audio_upload(file: StarletteUploadFile) -> bytes:
     return audio_bytes
 
 
-def _chunk_base64_payload(encoded: str) -> list[str]:
-    """Split a base64 payload into command input chunks."""
-    return [
-        encoded[index : index + SKULK_MAX_CHUNK_SIZE]
-        for index in range(0, len(encoded), SKULK_MAX_CHUNK_SIZE)
-    ] or [""]
-
-
 def _decode_audio_chunk_data(chunk: AudioChunk) -> bytes:
     """Decode one independently base64-encoded audio output chunk."""
     try:
@@ -766,6 +757,11 @@ _VISION_MEDIA_PENDING_TOTAL_BYTES = 512 * 1024 * 1024
 _VISION_MEDIA_PENDING_TTL_SECONDS = 5 * 60.0
 _VISION_MEDIA_ACK_TIMEOUT_SECONDS = 5 * 60.0
 _VISION_MEDIA_RAW_IMAGE_BYTES = (_VISION_MEDIA_PENDING_COMMAND_BYTES // 4) * 3
+_SPEECH_MEDIA_PENDING_COMMANDS = 64
+_SPEECH_MEDIA_PENDING_TOTAL_BYTES = 512 * 1024 * 1024
+_SPEECH_MEDIA_PENDING_TTL_SECONDS = 5 * 60.0
+_TRACE_DATA_PENDING_TASKS = 256
+_TRACE_DATA_PENDING_TTL_SECONDS = 5 * 60.0
 
 
 @dataclass
@@ -828,6 +824,27 @@ class _PendingVisionMedia:
         """Return serialized media bytes retained by this request."""
 
         return sum(len(data) for _, data in self.chunks)
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingSpeechMedia:
+    """Request-scoped batch audio awaiting authoritative task placement."""
+
+    model: ModelId
+    data: bytes
+    filename: str | None
+    content_type: str | None
+    sha256: str
+    created_at: float
+
+
+@dataclass(slots=True)
+class _PendingTraceData:
+    """Bounded owner-side assembly for one multi-rank task trace."""
+
+    expected_ranks: frozenset[int]
+    traces_by_rank: dict[int, tuple[TraceEventData, ...]]
+    updated_at: float
 
 
 # Task statuses for which the runner has stopped producing — a mid-stream idle
@@ -1179,6 +1196,7 @@ class API:
         realtime_audio_packet_receiver: "Receiver[RealtimeAudioPacket] | None" = None,
         speech_media_packet_sender: "Sender[SpeechMediaPacket] | None" = None,
         speech_media_packet_receiver: "Receiver[SpeechMediaPacket] | None" = None,
+        trace_data_receiver: "Receiver[TraceDataPacket] | None" = None,
         vision_media_packet_sender: "Sender[VisionMediaPacket] | None" = None,
         vision_media_packet_receiver: "Receiver[VisionMediaPacket] | None" = None,
         data_plane_zenoh: bool = False,
@@ -1260,6 +1278,11 @@ class API:
         self._speech_media_packet_receiver = speech_media_packet_receiver
         self._speech_media_commands: set[CommandId] = set()
         self._speech_media_targets: dict[CommandId, NodeId] = {}
+        self._transcription_media_targets: dict[CommandId, tuple[NodeId, ...]] = {}
+        self._pending_speech_media: dict[CommandId, _PendingSpeechMedia] = {}
+        self._pending_speech_media_bytes = 0
+        self._trace_data_receiver = trace_data_receiver
+        self._pending_trace_data: dict[task_types.TaskId, _PendingTraceData] = {}
         self._vision_media_packet_sender = vision_media_packet_sender
         self._vision_media_packet_receiver = vision_media_packet_receiver
         self._pending_vision_media: dict[CommandId, _PendingVisionMedia] = {}
@@ -1542,6 +1565,12 @@ class API:
         for release_event in self._realtime_task_release_events.values():
             release_event.set()
         self._realtime_task_release_events = {}
+        self._speech_media_commands = set()
+        self._speech_media_targets = {}
+        self._transcription_media_targets = {}
+        self._pending_speech_media = {}
+        self._pending_speech_media_bytes = 0
+        self._pending_trace_data = {}
         self._pending_vision_media = {}
         self._pending_vision_media_bytes = 0
         self._active_vision_media_bytes = {}
@@ -2841,6 +2870,8 @@ class API:
         self._realtime_audio_transcription_commands.discard(command_id)
         self._speech_media_commands.discard(command_id)
         self._speech_media_targets.pop(command_id, None)
+        self._transcription_media_targets.pop(command_id, None)
+        self._take_pending_speech_media(command_id)
         self._take_pending_vision_media(command_id)
         self._release_active_vision_media(command_id)
         self._vision_media_commands.discard(command_id)
@@ -3193,6 +3224,182 @@ class API:
             ).items()
         }
         return payload
+
+    def _stage_audio_transcription_media(
+        self,
+        command_id: CommandId,
+        task_params: AudioTranscriptionTaskParams,
+        audio_bytes: bytes,
+    ) -> None:
+        """Retain bounded batch audio until the master selects its worker."""
+
+        if self._speech_media_packet_sender is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Speech media transport is unavailable on this node",
+            )
+        pending = _PendingSpeechMedia(
+            model=task_params.model,
+            data=audio_bytes,
+            filename=task_params.filename,
+            content_type=task_params.content_type,
+            sha256=hashlib.sha256(audio_bytes).hexdigest(),
+            created_at=time.monotonic(),
+        )
+        if (
+            len(self._pending_speech_media) >= _SPEECH_MEDIA_PENDING_COMMANDS
+            or self._pending_speech_media_bytes + len(audio_bytes)
+            > _SPEECH_MEDIA_PENDING_TOTAL_BYTES
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="Speech media admission capacity is exhausted",
+            )
+        self._pending_speech_media[command_id] = pending
+        self._pending_speech_media_bytes += len(audio_bytes)
+        self._speech_media_commands.add(command_id)
+
+    def _take_pending_speech_media(
+        self, command_id: CommandId
+    ) -> _PendingSpeechMedia | None:
+        """Release one pending batch upload from API admission accounting."""
+
+        pending = self._pending_speech_media.pop(command_id, None)
+        if pending is not None:
+            self._pending_speech_media_bytes = max(
+                0, self._pending_speech_media_bytes - len(pending.data)
+            )
+        return pending
+
+    def _dispatch_pending_speech_media(self, task: task_types.Task) -> None:
+        """Send batch STT audio after authoritative task placement replicates."""
+
+        if not isinstance(task, task_types.AudioTranscription):
+            return
+        pending = self._take_pending_speech_media(task.command_id)
+        if pending is None:
+            return
+        instance = self.state.instances.get(task.instance_id)
+        if instance is None:
+            self._tg.start_soon(
+                self._fail_audio_transcription_media,
+                task.command_id,
+                "The selected model instance disappeared before audio upload",
+            )
+            return
+        targets = tuple(sorted(instance.shard_assignments.node_to_runner, key=str))
+        if not targets:
+            self._tg.start_soon(
+                self._fail_audio_transcription_media,
+                task.command_id,
+                "The selected model instance has no worker participants",
+            )
+            return
+        self._transcription_media_targets[task.command_id] = targets
+        self._tg.start_soon(
+            self._send_audio_transcription_media,
+            task.command_id,
+            pending,
+            targets,
+        )
+
+    async def _send_audio_transcription_media(
+        self,
+        command_id: CommandId,
+        pending: _PendingSpeechMedia,
+        targets: tuple[NodeId, ...],
+    ) -> None:
+        """Fan one bounded raw-audio stream to the task's selected workers."""
+
+        sender = self._speech_media_packet_sender
+        if sender is None:
+            await self._fail_audio_transcription_media(
+                command_id, "Speech media transport is unavailable"
+            )
+            return
+        total_chunks = max(
+            1,
+            (len(pending.data) + _SPEECH_MEDIA_CHUNK_BYTES - 1)
+            // _SPEECH_MEDIA_CHUNK_BYTES,
+        )
+        try:
+            for target in targets:
+                for sequence, offset in enumerate(
+                    range(0, len(pending.data), _SPEECH_MEDIA_CHUNK_BYTES)
+                ):
+                    if command_id not in self._speech_media_commands:
+                        return
+                    await sender.send(
+                        SpeechMediaPacket(
+                            source_node=self.node_id,
+                            target_node=target,
+                            command_id=command_id,
+                            sequence=sequence,
+                            kind="chunk",
+                            purpose="transcription_audio",
+                            filename=pending.filename,
+                            content_type=pending.content_type,
+                            data=pending.data[
+                                offset : offset + _SPEECH_MEDIA_CHUNK_BYTES
+                            ],
+                        )
+                    )
+                await sender.send(
+                    SpeechMediaPacket(
+                        source_node=self.node_id,
+                        target_node=target,
+                        command_id=command_id,
+                        sequence=total_chunks,
+                        kind="completed",
+                        purpose="transcription_audio",
+                        filename=pending.filename,
+                        content_type=pending.content_type,
+                        sha256=pending.sha256,
+                    )
+                )
+        except anyio.get_cancelled_exc_class():
+            raise
+        except Exception as exception:  # noqa: BLE001 - transport boundary
+            logger.opt(exception=exception).warning(
+                f"Speech media upload failed for command {command_id}"
+            )
+            await self._fail_audio_transcription_media(
+                command_id,
+                "Speech media transport failed while uploading transcription input",
+            )
+
+    async def _fail_audio_transcription_media(
+        self, command_id: CommandId, message: str
+    ) -> None:
+        """Fail one batch STT upload without disturbing unrelated streams."""
+
+        if command_id not in self._speech_media_commands:
+            return
+        self._speech_media_commands.discard(command_id)
+        self._take_pending_speech_media(command_id)
+        await self._dispatch_generation_chunk(
+            command_id,
+            ErrorChunk(model=ModelId("unknown"), error_message=message),
+        )
+        await self._cancel_audio_transcription_command(command_id)
+        self._cancelled_command_ids.discard(command_id)
+
+    async def _sweep_pending_speech_media(self) -> None:
+        """Fail batch uploads that never acquire authoritative placement."""
+
+        while True:
+            await anyio.sleep(5)
+            cutoff = time.monotonic() - _SPEECH_MEDIA_PENDING_TTL_SECONDS
+            expired = [
+                command_id
+                for command_id, pending in self._pending_speech_media.items()
+                if pending.created_at <= cutoff
+            ]
+            for command_id in expired:
+                await self._fail_audio_transcription_media(
+                    command_id,
+                    "Speech media timed out waiting for authoritative placement",
+                )
 
     def _stage_vision_media(
         self,
@@ -6800,7 +7007,10 @@ class API:
                 tg.start_soon(self._apply_provider_data)
                 tg.start_soon(self._apply_realtime_audio_transport)
                 tg.start_soon(self._apply_speech_media_transport)
+                tg.start_soon(self._apply_trace_data)
                 tg.start_soon(self._apply_vision_media_transport)
+                tg.start_soon(self._sweep_pending_speech_media)
+                tg.start_soon(self._sweep_pending_trace_data)
                 tg.start_soon(self._sweep_pending_vision_media)
                 tg.start_soon(self._sweep_provider_stream_receivers)
                 # Releases reorder gaps stuck on a chunk dropped by the
@@ -6848,8 +7058,8 @@ class API:
 
         Every few thousand appends, check the active file size; past the
         budget, compact away everything but the most recent tail. The log
-        only backs GET /events, so old history is droppable — and without
-        this it grows per generated token for the life of the session.
+        only backs GET /events, so old diagnostic history is droppable even
+        though payload events no longer enter it.
         """
         if self._event_log is None:
             return
@@ -6915,6 +7125,7 @@ class API:
                 record_membership_from_event(self._telemetry_view, event)
 
                 if isinstance(event, TaskCreated):
+                    self._dispatch_pending_speech_media(event.task)
                     self._dispatch_pending_vision_media(event.task)
 
                 # Output chunks no longer travel the event log — they arrive on
@@ -6938,9 +7149,6 @@ class API:
                         event.task_id,
                         "The request was cancelled because its instance was deleted",
                     )
-                if isinstance(event, TracesMerged):
-                    self._save_merged_trace(event)
-
     async def _apply_data(self) -> None:
         """Consume the data plane (#279 Phase 2): per-command output chunks.
 
@@ -7087,21 +7295,85 @@ class API:
                     or packet.command_id not in self._speech_media_commands
                 ):
                     continue
+                message = packet.error_message or "speech media transport failed"
                 await self._dispatch_generation_chunk(
                     packet.command_id,
-                    ErrorChunk(
-                        model=ModelId("unknown"),
-                        error_message=(
-                            packet.error_message or "speech media transport failed"
-                        ),
-                    ),
+                    ErrorChunk(model=ModelId("unknown"), error_message=message),
                 )
-                await self._cancel_audio_speech_command(packet.command_id)
+                if packet.purpose == "transcription_audio":
+                    await self._cancel_audio_transcription_command(packet.command_id)
+                else:
+                    await self._cancel_audio_speech_command(packet.command_id)
                 # Unlike a client disconnect, a transport rejection is already
                 # terminal from the caller's perspective. Allow finalization to
                 # notify the master after cancellation stops the runner, or the
                 # command-to-task mapping remains orphaned indefinitely.
                 self._cancelled_command_ids.discard(packet.command_id)
+
+    async def _apply_trace_data(self) -> None:
+        """Merge node-addressed runner traces without involving the master."""
+
+        if self._trace_data_receiver is None:
+            return
+        with self._trace_data_receiver as packets:
+            async for packet in packets:
+                if packet.owner_node != self.node_id:
+                    continue
+                expected_ranks = frozenset(packet.expected_ranks)
+                if packet.rank not in expected_ranks:
+                    logger.warning(
+                        f"Ignoring trace rank {packet.rank} outside its expected set"
+                    )
+                    continue
+                pending = self._pending_trace_data.get(packet.task_id)
+                if pending is None:
+                    if len(self._pending_trace_data) >= _TRACE_DATA_PENDING_TASKS:
+                        oldest_task_id = min(
+                            self._pending_trace_data,
+                            key=lambda task_id: self._pending_trace_data[
+                                task_id
+                            ].updated_at,
+                        )
+                        self._pending_trace_data.pop(oldest_task_id, None)
+                        logger.warning(
+                            "Evicted the oldest incomplete trace assembly at the "
+                            "owner-side capacity limit"
+                        )
+                    pending = _PendingTraceData(
+                        expected_ranks=expected_ranks,
+                        traces_by_rank={},
+                        updated_at=time.monotonic(),
+                    )
+                    self._pending_trace_data[packet.task_id] = pending
+                elif pending.expected_ranks != expected_ranks:
+                    logger.warning(
+                        f"Ignoring inconsistent expected ranks for trace {packet.task_id}"
+                    )
+                    continue
+                pending.traces_by_rank.setdefault(packet.rank, packet.traces)
+                pending.updated_at = time.monotonic()
+                if set(pending.traces_by_rank) >= pending.expected_ranks:
+                    traces = [
+                        trace
+                        for rank in sorted(pending.expected_ranks)
+                        for trace in pending.traces_by_rank[rank]
+                    ]
+                    self._pending_trace_data.pop(packet.task_id, None)
+                    self._save_trace(packet.task_id, traces)
+
+    async def _sweep_pending_trace_data(self) -> None:
+        """Bound incomplete trace assemblies whose ranks never all report."""
+
+        while True:
+            await anyio.sleep(30)
+            cutoff = time.monotonic() - _TRACE_DATA_PENDING_TTL_SECONDS
+            for task_id in [
+                task_id
+                for task_id, pending in self._pending_trace_data.items()
+                if pending.updated_at <= cutoff
+            ]:
+                self._pending_trace_data.pop(task_id, None)
+                logger.warning(f"Expired incomplete trace assembly for {task_id}")
 
     async def _apply_vision_media_transport(self) -> None:
         """Apply worker verification or failure to the source image request."""
@@ -7622,7 +7894,11 @@ class API:
                 except (BrokenResourceError, ClosedResourceError):
                     queue_map.pop(task.command_id, None)
 
-    def _save_merged_trace(self, event: TracesMerged) -> None:
+    def _save_trace(
+        self, task_id: task_types.TaskId, trace_data: Sequence[TraceEventData]
+    ) -> None:
+        """Persist one completely assembled task trace on its owning API node."""
+
         traces = [
             TraceEvent(
                 name=t.name,
@@ -7636,11 +7912,11 @@ class API:
                 tags=tuple(t.tags),
                 attrs=t.attrs,
             )
-            for t in event.traces
+            for t in trace_data
         ]
-        output_path = SKULK_TRACING_CACHE_DIR / f"trace_{event.task_id}.json"
+        output_path = SKULK_TRACING_CACHE_DIR / f"trace_{task_id}.json"
         export_trace(traces, output_path)
-        logger.debug(f"Saved merged trace to {output_path}")
+        logger.debug(f"Saved assembled trace to {output_path}")
 
     async def _pause_on_new_election(self):
         with self.election_receiver as ems:
@@ -10494,6 +10770,20 @@ class API:
         if command_id in self._cancelled_command_ids:
             return
         self._cancelled_command_ids.add(command_id)
+        sender = self._speech_media_packet_sender
+        if sender is not None:
+            for target_node in self._transcription_media_targets.get(command_id, ()):
+                with contextlib.suppress(Exception):
+                    await sender.send(
+                        SpeechMediaPacket(
+                            source_node=self.node_id,
+                            target_node=target_node,
+                            command_id=command_id,
+                            sequence=0,
+                            kind="cancelled",
+                            purpose="transcription_audio",
+                        )
+                    )
         await self.command_sender.send(
             ForwarderCommand(
                 origin=self._system_id,
@@ -11751,15 +12041,14 @@ class API:
         """Submit one bounded batch-file STT command before response admission."""
 
         audio_sha256 = hashlib.sha256(audio_bytes).hexdigest()
-        audio_chunks = _chunk_base64_payload(
-            base64.b64encode(audio_bytes).decode("ascii")
+        total_chunks = max(
+            1,
+            (len(audio_bytes) + _SPEECH_MEDIA_CHUNK_BYTES - 1)
+            // _SPEECH_MEDIA_CHUNK_BYTES,
         )
-        # Keep REST and Fabric on one authoritative batch runner path. The
-        # event-sourced input hop is legacy and documented as retained data;
-        # replacing it requires a worker-addressed immutable-media service.
         params = task_params.model_copy(
             update={
-                "total_input_chunks": len(audio_chunks),
+                "total_input_chunks": total_chunks,
                 "audio_sha256": audio_sha256,
             }
         )
@@ -11769,23 +12058,11 @@ class API:
             self._audio_transcription_queues[command_id], recv = channel[
                 TranscriptionChunk | ErrorChunk
             ]()
-            for chunk_index, chunk_data in enumerate(audio_chunks):
-                await self._send(
-                    SendInputChunk(
-                        chunk=AudioInputChunk(
-                            model=params.model,
-                            command_id=command_id,
-                            data=chunk_data,
-                            chunk_index=chunk_index,
-                            total_chunks=len(audio_chunks),
-                            filename=params.filename,
-                            content_type=params.content_type,
-                            audio_sha256=audio_sha256,
-                        )
-                    )
-                )
+            self._stage_audio_transcription_media(command_id, params, audio_bytes)
             await self._send(command)
         except BaseException:
+            self._speech_media_commands.discard(command_id)
+            self._take_pending_speech_media(command_id)
             await self._finalize_command_stream(
                 command_id,
                 cast(

@@ -17,8 +17,8 @@ from skulk.shared.types.tasks import (
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.shared.types.worker.instances import InstanceId
 from skulk.worker.main import (
-    _audio_input_cleanup_command_id,
     _realtime_input_cleanup_command_id,
+    _speech_media_cleanup_command_id,
 )
 
 
@@ -59,7 +59,7 @@ def test_audio_input_cleanup_follows_terminal_transcription_status() -> None:
     task = _transcription_task(command_id)
 
     assert (
-        _audio_input_cleanup_command_id(
+        _speech_media_cleanup_command_id(
             TaskStatusUpdated(
                 task_id=task.task_id,
                 task_status=TaskStatus.Complete,
@@ -82,7 +82,7 @@ def test_audio_input_cleanup_follows_transcription_task_delete() -> None:
     task = _transcription_task(command_id)
 
     assert (
-        _audio_input_cleanup_command_id(
+        _speech_media_cleanup_command_id(
             TaskDeleted(task_id=task.task_id),
             {task.task_id: task},
             {},
@@ -107,7 +107,7 @@ def test_audio_input_cleanup_ignores_non_transcription_tasks() -> None:
     )
 
     assert (
-        _audio_input_cleanup_command_id(
+        _speech_media_cleanup_command_id(
             TaskStatusUpdated(task_id=task_id, task_status=TaskStatus.Complete),
             {task_id: task},
             {task_id: task.model_copy(update={"task_status": TaskStatus.Complete})},

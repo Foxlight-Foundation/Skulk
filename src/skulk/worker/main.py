@@ -18,6 +18,7 @@ from skulk.download.download_utils import resolve_model_in_path
 from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.routing.router import TelemetrySender
 from skulk.routing.speech_media import SpeechMediaPacket
+from skulk.routing.trace_data import TraceDataPacket
 from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
@@ -36,7 +37,7 @@ from skulk.shared.models.model_cards import (
     delete_custom_card,
 )
 from skulk.shared.types.audio import RealtimeAudioInputFrame
-from skulk.shared.types.chunks import AudioInputChunk, DataChunk, InputImageChunk
+from skulk.shared.types.chunks import DataChunk, InputImageChunk
 from skulk.shared.types.commands import (
     DeleteInstance,
     ForwarderCommand,
@@ -56,7 +57,6 @@ from skulk.shared.types.events import (
     CustomModelCardDeleted,
     Event,
     IndexedEvent,
-    InputChunkReceived,
     NodeDownloadProgress,
     NodeGatheredInfo,
     StagedModelEvicted,
@@ -469,27 +469,6 @@ def _inject_assembled_image_edit(task: ImageEdits, assembled_image: str) -> Imag
     )
 
 
-def _audio_input_cleanup_command_id(
-    event: Event,
-    previous_tasks: Mapping[TaskId, Task],
-    current_tasks: Mapping[TaskId, Task],
-) -> CommandId | None:
-    """Return the STT command whose uploaded chunks can be released."""
-    task: Task | None = None
-    if isinstance(event, TaskDeleted):
-        task = previous_tasks.get(event.task_id)
-    elif isinstance(event, TaskStatusUpdated) and event.task_status in {
-        TaskStatus.Cancelled,
-        TaskStatus.Complete,
-        TaskStatus.Failed,
-        TaskStatus.TimedOut,
-    }:
-        task = current_tasks.get(event.task_id) or previous_tasks.get(event.task_id)
-    if isinstance(task, AudioTranscription):
-        return task.command_id
-    return None
-
-
 def _realtime_input_cleanup_command_id(
     event: Event,
     previous_tasks: Mapping[TaskId, Task],
@@ -517,7 +496,7 @@ def _speech_media_cleanup_command_id(
     previous_tasks: Mapping[TaskId, Task],
     current_tasks: Mapping[TaskId, Task],
 ) -> CommandId | None:
-    """Return the TTS command whose ephemeral reference media can be released."""
+    """Return the speech command whose ephemeral input can be released."""
 
     task: Task | None = None
     if isinstance(event, TaskDeleted):
@@ -529,7 +508,7 @@ def _speech_media_cleanup_command_id(
         TaskStatus.TimedOut,
     }:
         task = current_tasks.get(event.task_id) or previous_tasks.get(event.task_id)
-    if isinstance(task, SpeechSynthesis):
+    if isinstance(task, (SpeechSynthesis, AudioTranscription)):
         return task.command_id
     return None
 
@@ -642,6 +621,7 @@ class Worker:
         telemetry_view: TelemetryView | None = None,
         data_transport: NodeDataTransport = "gossipsub",
         data_sender: Sender[DataChunk] | None = None,
+        trace_data_sender: Sender[TraceDataPacket] | None = None,
         realtime_audio_receiver: Receiver[RealtimeAudioInputFrame] | None = None,
         realtime_audio_packet_receiver: Receiver[RealtimeAudioPacket] | None = None,
         speech_media_packet_receiver: Receiver[SpeechMediaPacket] | None = None,
@@ -662,6 +642,7 @@ class Worker:
         # event log. Threaded into each RunnerSupervisor. None falls back to the
         # event path (no DATA topic wired / tests).
         self._data_sender = data_sender
+        self._trace_data_sender = trace_data_sender
         self._realtime_audio_receiver = realtime_audio_receiver
         self._realtime_audio_packet_receiver = realtime_audio_packet_receiver
         self._speech_media_packet_receiver = speech_media_packet_receiver
@@ -701,12 +682,11 @@ class Worker:
         # Buffer for input image chunks (for image editing)
         self.input_chunk_buffer: dict[CommandId, dict[int, InputImageChunk]] = {}
         self.input_chunk_counts: dict[CommandId, int] = {}
-        self.input_audio_chunk_buffer: dict[CommandId, dict[int, AudioInputChunk]] = {}
-        self.input_audio_chunk_counts: dict[CommandId, int] = {}
         self._speech_media_chunks: dict[
             CommandId, dict[int, SpeechMediaPacket]
         ] = {}
         self._speech_media_completed: dict[CommandId, SpeechMediaPacket] = {}
+        self._speech_media_ready: set[CommandId] = set()
         self._speech_media_pending_bytes: dict[CommandId, int] = {}
         self._speech_media_pending_since: dict[CommandId, float] = {}
         self._vision_media_chunks: dict[
@@ -980,7 +960,7 @@ class Worker:
                 await self._route_realtime_audio_frame(packet.to_input_frame())
 
     async def _speech_media_packet_ingress(self) -> None:
-        """Collect bounded node-addressed reference audio outside State."""
+        """Collect bounded node-addressed speech input outside State."""
 
         assert self._speech_media_packet_receiver is not None
         with self._speech_media_packet_receiver as packets:
@@ -991,32 +971,68 @@ class Worker:
                 if packet.kind in ("cancelled",):
                     self._clear_speech_media(command_id)
                     continue
+                existing = self._speech_media_completed.get(command_id) or next(
+                    iter(self._speech_media_chunks.get(command_id, {}).values()),
+                    None,
+                )
+                if existing is not None and existing.purpose != packet.purpose:
+                    await self._reject_speech_media(command_id)
+                    continue
                 self._speech_media_pending_since.setdefault(
                     command_id, time.monotonic()
                 )
                 if packet.kind == "completed":
+                    if (
+                        packet.sequence <= 0
+                        or packet.sequence > _SPEECH_MEDIA_PENDING_FRAMES
+                    ):
+                        await self._reject_speech_media(command_id)
+                        continue
                     self._speech_media_completed[command_id] = packet
+                    self._refresh_speech_media_ready(command_id)
                     continue
                 chunks = self._speech_media_chunks.setdefault(command_id, {})
                 pending_bytes = self._speech_media_pending_bytes.get(command_id, 0)
                 if packet.sequence in chunks:
                     continue
                 if (
+                    packet.sequence >= _SPEECH_MEDIA_PENDING_FRAMES
+                    or
                     len(chunks) >= _SPEECH_MEDIA_PENDING_FRAMES
                     or pending_bytes + len(packet.data) > _SPEECH_MEDIA_PENDING_BYTES
                 ):
-                    self._clear_speech_media(command_id)
-                    await self.command_sender.send(
-                        ForwarderCommand(
-                            origin=self._system_id,
-                            command=TaskCancelled(cancelled_command_id=command_id),
-                        )
-                    )
+                    await self._reject_speech_media(command_id)
                     continue
                 chunks[packet.sequence] = packet
                 self._speech_media_pending_bytes[command_id] = (
                     pending_bytes + len(packet.data)
                 )
+                self._refresh_speech_media_ready(command_id)
+
+    def _refresh_speech_media_ready(self, command_id: CommandId) -> None:
+        """Mark a speech stream ready only after every declared chunk arrives."""
+
+        completed = self._speech_media_completed.get(command_id)
+        chunks = self._speech_media_chunks.get(command_id, {})
+        if (
+            completed is not None
+            and len(chunks) == completed.sequence
+            and set(chunks) == set(range(completed.sequence))
+        ):
+            self._speech_media_ready.add(command_id)
+        else:
+            self._speech_media_ready.discard(command_id)
+
+    async def _reject_speech_media(self, command_id: CommandId) -> None:
+        """Drop an invalid media stream and cancel its owning command."""
+
+        self._clear_speech_media(command_id)
+        await self.command_sender.send(
+            ForwarderCommand(
+                origin=self._system_id,
+                command=TaskCancelled(cancelled_command_id=command_id),
+            )
+        )
 
     async def _vision_media_packet_ingress(self) -> None:
         """Collect ordered node-addressed image input outside replicated State."""
@@ -1525,17 +1541,24 @@ class Worker:
 
         self._speech_media_chunks.pop(command_id, None)
         self._speech_media_completed.pop(command_id, None)
+        self._speech_media_ready.discard(command_id)
         self._speech_media_pending_bytes.pop(command_id, None)
         self._speech_media_pending_since.pop(command_id, None)
 
-    async def _fail_speech_media_task(self, task: SpeechSynthesis, message: str) -> None:
-        """Terminate a synthesis task whose request-scoped media is invalid."""
+    async def _fail_speech_media_task(
+        self, task: SpeechSynthesis | AudioTranscription, message: str
+    ) -> None:
+        """Terminate a speech task whose request-scoped media is invalid."""
 
         self._clear_speech_media(task.command_id)
         await self.event_sender.send(
             TaskFailed(
                 task_id=task.task_id,
-                error_type="invalid_reference_audio",
+                error_type=(
+                    "invalid_reference_audio"
+                    if isinstance(task, SpeechSynthesis)
+                    else "invalid_transcription_audio"
+                ),
                 error_message=message,
             )
         )
@@ -1716,21 +1739,6 @@ class Worker:
                 if self._telemetry_view is not None:
                     record_membership_from_event(self._telemetry_view, event)
 
-                # Batch STT still uses the legacy event-sourced input path.
-                # Vision payloads arrive on VISION_MEDIA and never enter State.
-                if isinstance(event, InputChunkReceived) and isinstance(
-                    event.chunk, AudioInputChunk
-                ):
-                    cmd_id = event.command_id
-                    if cmd_id not in self.input_audio_chunk_buffer:
-                        self.input_audio_chunk_buffer[cmd_id] = {}
-                        self.input_audio_chunk_counts[cmd_id] = (
-                            event.chunk.total_chunks
-                        )
-                    self.input_audio_chunk_buffer[cmd_id][event.chunk.chunk_index] = (
-                        event.chunk
-                    )
-
                 if isinstance(event, TaskCreated) and isinstance(
                     event.task, (TextGeneration, ImageEdits)
                 ):
@@ -1751,14 +1759,6 @@ class Worker:
                             self._acknowledge_vision_media_if_admitted,
                             event.task.command_id,
                         )
-
-                if (
-                    cleanup_cmd_id := _audio_input_cleanup_command_id(
-                        event, previous_tasks, self.state.tasks
-                    )
-                ) is not None:
-                    self.input_audio_chunk_buffer.pop(cleanup_cmd_id, None)
-                    self.input_audio_chunk_counts.pop(cleanup_cmd_id, None)
 
                 if (
                     realtime_cleanup_cmd_id := _realtime_input_cleanup_command_id(
@@ -1880,8 +1880,7 @@ class Worker:
                 self.state.runners,
                 self.state.tasks,
                 self.input_chunk_buffer,
-                self.input_audio_chunk_buffer,
-                self._speech_media_completed,
+                self._speech_media_ready,
             )
             if task is None:
                 continue
@@ -2216,7 +2215,16 @@ class Worker:
                     command_id = task.command_id
                     chunks = self._speech_media_chunks.get(command_id, {})
                     completed = self._speech_media_completed.get(command_id)
-                    if completed is None:
+                    if (
+                        completed is None
+                        or completed.purpose != "reference_audio"
+                        or task.owner_node is None
+                        or completed.source_node != task.owner_node
+                    ):
+                        await self._fail_speech_media_task(
+                            task,
+                            "Reference audio does not match the admitted task",
+                        )
                         continue
                     try:
                         reference_audio = b"".join(
@@ -2252,9 +2260,23 @@ class Worker:
                     await self._start_runner_task(modified_task)
                 case AudioTranscription() if task.task_params.total_input_chunks > 0:
                     cmd_id = task.command_id
-                    chunks = self.input_audio_chunk_buffer.get(cmd_id, {})
+                    chunks = self._speech_media_chunks.get(cmd_id, {})
+                    completed = self._speech_media_completed.get(cmd_id)
+                    if (
+                        completed is None
+                        or completed.purpose != "transcription_audio"
+                        or task.owner_node is None
+                        or completed.source_node != task.owner_node
+                        or completed.sequence != task.task_params.total_input_chunks
+                        or completed.sha256 != task.task_params.audio_sha256
+                    ):
+                        await self._fail_speech_media_task(
+                            task,
+                            "Transcription audio does not match the admitted task",
+                        )
+                        continue
                     try:
-                        assembled = "".join(
+                        audio_bytes = b"".join(
                             chunks[i].data
                             for i in range(task.task_params.total_input_chunks)
                         )
@@ -2264,15 +2286,18 @@ class Worker:
                             f"audio chunk {exc.args[0]} "
                             f"(task_id={task.task_id}, command_id={cmd_id})"
                         )
-                        self.input_audio_chunk_buffer.pop(cmd_id, None)
-                        self.input_audio_chunk_counts.pop(cmd_id, None)
-                        await self.event_sender.send(
-                            TaskStatusUpdated(
-                                task_id=task.task_id,
-                                task_status=TaskStatus.Failed,
-                            )
+                        await self._fail_speech_media_task(
+                            task,
+                            f"Transcription audio is missing chunk {exc.args[0]}",
                         )
                         continue
+                    if hashlib.sha256(audio_bytes).hexdigest() != completed.sha256:
+                        await self._fail_speech_media_task(
+                            task,
+                            "Transcription audio checksum mismatch",
+                        )
+                        continue
+                    assembled = base64.b64encode(audio_bytes).decode("ascii")
                     logger.info(
                         f"Assembled speech input from {len(chunks)} chunks, "
                         f"base64 size: {len(assembled)} bytes"
@@ -2284,8 +2309,7 @@ class Worker:
                             )
                         }
                     )
-                    self.input_audio_chunk_buffer.pop(cmd_id, None)
-                    self.input_audio_chunk_counts.pop(cmd_id, None)
+                    self._clear_speech_media(cmd_id)
                     await self._start_runner_task(modified_task)
                 case task:
                     await self._start_runner_task(task)
@@ -2403,6 +2427,9 @@ class Worker:
             context_token_limit=context_token_limit,
             data_sender=self._data_sender.clone()
             if self._data_sender is not None
+            else None,
+            trace_sender=self._trace_data_sender.clone()
+            if self._trace_data_sender is not None
             else None,
         )
         self.runners[task.bound_instance.bound_runner_id] = runner

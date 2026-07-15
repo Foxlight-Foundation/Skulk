@@ -16,7 +16,7 @@ _MAX_HEADER_BYTES = 16_384
 
 
 class SpeechMediaPacket(CamelCaseModel):
-    """One bounded reference-audio frame or source-routed transport failure."""
+    """One bounded speech-input frame or source-routed transport failure."""
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
@@ -25,7 +25,7 @@ class SpeechMediaPacket(CamelCaseModel):
     command_id: CommandId
     sequence: int = Field(ge=0)
     kind: Literal["chunk", "completed", "cancelled", "transport_failed"]
-    purpose: Literal["reference_audio"] = "reference_audio"
+    purpose: Literal["reference_audio", "transcription_audio"] = "reference_audio"
     data: bytes = Field(default=b"", max_length=MAX_INLINE_MEDIA_BYTES)
     filename: str | None = Field(default=None, max_length=255)
     content_type: str | None = Field(default=None, max_length=255)

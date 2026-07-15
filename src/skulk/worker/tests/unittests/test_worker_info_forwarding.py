@@ -227,7 +227,7 @@ async def test_remote_realtime_audio_packet_for_other_node_is_ignored() -> None:
 
 @pytest.mark.asyncio
 async def test_speech_media_packet_is_bounded_and_completed_off_state() -> None:
-    """Reference media is retained only in worker-local request buffers."""
+    """Out-of-order STT media becomes ready only in worker-local buffers."""
 
     _, indexed_event_receiver = channel[IndexedEvent]()
     event_sender, _ = channel[Event]()
@@ -252,9 +252,10 @@ async def test_speech_media_packet_is_bounded_and_completed_off_state() -> None:
                 source_node=NodeId("api-node"),
                 target_node=NodeId("worker-node"),
                 command_id=command_id,
-                sequence=0,
-                kind="chunk",
-                data=payload,
+                sequence=1,
+                kind="completed",
+                purpose="transcription_audio",
+                sha256=hashlib.sha256(payload).hexdigest(),
             )
         )
         await packet_sender.send(
@@ -262,17 +263,19 @@ async def test_speech_media_packet_is_bounded_and_completed_off_state() -> None:
                 source_node=NodeId("api-node"),
                 target_node=NodeId("worker-node"),
                 command_id=command_id,
-                sequence=1,
-                kind="completed",
-                sha256=hashlib.sha256(payload).hexdigest(),
+                sequence=0,
+                kind="chunk",
+                purpose="transcription_audio",
+                data=payload,
             )
         )
-        while command_id not in worker._speech_media_completed:  # pyright: ignore[reportPrivateUsage]
+        while command_id not in worker._speech_media_ready:  # pyright: ignore[reportPrivateUsage]
             await anyio.sleep(0)
         task_group.cancel_scope.cancel()
 
     assert worker._speech_media_chunks[command_id][0].data == payload  # pyright: ignore[reportPrivateUsage]
     assert command_id in worker._speech_media_completed  # pyright: ignore[reportPrivateUsage]
+    assert command_id in worker._speech_media_ready  # pyright: ignore[reportPrivateUsage]
     assert worker.state.tasks == {}
 
 

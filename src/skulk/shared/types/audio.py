@@ -55,9 +55,9 @@ class SpeechSynthesisTaskParams(BaseModel, frozen=True):
 class AudioTranscriptionTaskParams(BaseModel, frozen=True):
     """Internal task params for speech-to-text inference.
 
-    The API receives multipart audio bytes, sends them through command-owned
-    input chunks, and the worker injects the assembled base64 payload before
-    dispatching the task to the speech runner.
+    The API retains multipart audio until authoritative task placement, sends
+    raw bytes over the node-addressed speech-media data topic, and the selected
+    worker injects the verified base64 payload before runner dispatch.
     """
 
     model: ModelId

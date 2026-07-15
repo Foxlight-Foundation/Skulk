@@ -1,9 +1,9 @@
 # pyright: reportUnusedImport = false
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 
 from skulk.shared.models.capabilities import is_gemma4_family
-from skulk.shared.types.chunks import AudioInputChunk, InputImageChunk
+from skulk.shared.types.chunks import InputImageChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.tasks import (
     AudioTranscription,
@@ -69,10 +69,7 @@ def plan(
     all_runners: Mapping[RunnerId, RunnerStatus],  # all global
     tasks: Mapping[TaskId, Task],
     input_chunk_buffer: Mapping[CommandId, Mapping[int, InputImageChunk]] | None = None,
-    input_audio_chunk_buffer: Mapping[
-        CommandId, Mapping[int, AudioInputChunk]
-    ] | None = None,
-    speech_media_completed: Mapping[CommandId, object] | None = None,
+    speech_media_ready: Set[CommandId] | None = None,
 ) -> Task | None:
     # Python short circuiting OR logic should evaluate these sequentially.
     return (
@@ -92,8 +89,7 @@ def plan(
             tasks,
             all_runners,
             input_chunk_buffer or {},
-            input_audio_chunk_buffer or {},
-            speech_media_completed or {},
+            speech_media_ready or set(),
         )
     )
 
@@ -375,10 +371,7 @@ def _pending_tasks(
     tasks: Mapping[TaskId, Task],
     all_runners: Mapping[RunnerId, RunnerStatus],
     input_chunk_buffer: Mapping[CommandId, Mapping[int, InputImageChunk]] | None,
-    input_audio_chunk_buffer: Mapping[
-        CommandId, Mapping[int, AudioInputChunk]
-    ] | None,
-    speech_media_completed: Mapping[CommandId, object] | None = None,
+    speech_media_ready: Set[CommandId],
 ) -> Task | None:
     for task in tasks.values():
         # Forward inference tasks to runners
@@ -409,21 +402,16 @@ def _pending_tasks(
             if received < expected_image_chunks:
                 continue  # Wait for all chunks to arrive
 
-        expected_audio_chunks = 0
-        if isinstance(task, AudioTranscription):
-            expected_audio_chunks = task.task_params.total_input_chunks
-        if expected_audio_chunks > 0:
-            assert input_audio_chunk_buffer is not None
-            cmd_id = task.command_id
-            received = len(input_audio_chunk_buffer.get(cmd_id, {}))
-            if received < expected_audio_chunks:
-                continue  # Wait for the complete uploaded audio payload
-
         if (
-            isinstance(task, SpeechSynthesis)
-            and task.task_params.reference_audio_present
-            and task.command_id not in (speech_media_completed or {})
-        ):
+            (
+                isinstance(task, SpeechSynthesis)
+                and task.task_params.reference_audio_present
+            )
+            or (
+                isinstance(task, AudioTranscription)
+                and task.task_params.total_input_chunks > 0
+            )
+        ) and task.command_id not in speech_media_ready:
             continue
 
         for runner in runners.values():

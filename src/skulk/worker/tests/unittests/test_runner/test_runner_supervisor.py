@@ -6,6 +6,7 @@ import pytest
 from anyio import to_thread
 
 from skulk.api.types import ImageGenerationTaskParams
+from skulk.routing.trace_data import TraceDataPacket
 from skulk.shared.models.model_cards import ModelId, ModelTask
 from skulk.shared.types.audio import (
     AudioTranscriptionTaskParams,
@@ -27,6 +28,8 @@ from skulk.shared.types.events import (
     TaskDeleted,
     TaskFailed,
     TaskStatusUpdated,
+    TraceEventData,
+    TracesCollected,
 )
 from skulk.shared.types.tasks import (
     AudioTranscription,
@@ -68,6 +71,59 @@ class _DeadProcess:
 
     def kill(self) -> None:
         return None
+
+
+@pytest.mark.asyncio
+async def test_trace_payload_routes_directly_to_owning_api() -> None:
+    """Per-rank trace data must never fall back to the event sender."""
+
+    trace_sender, trace_receiver = channel[TraceDataPacket](1)
+    event_sender, event_receiver = channel[Event](1)
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    _, event_process_receiver = mp_channel[Event]()
+    _, diagnostics_receiver = mp_channel[RunnerDiagnosticUpdate]()
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("trace-instance"),
+        model_id=ModelId("mlx-community/trace-test"),
+        runner_id=RunnerId("trace-runner"),
+        node_id=NodeId("trace-worker"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=event_process_receiver,
+        _diag_recv=diagnostics_receiver,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+        _trace_sender=trace_sender,
+    )
+    task_id = TaskId("trace-task")
+    supervisor._trace_routes[task_id] = (  # pyright: ignore[reportPrivateUsage]
+        NodeId("api-owner"),
+        (0,),
+        0.0,
+    )
+    trace = TraceEventData(
+        name="decode",
+        start_us=1,
+        duration_us=2,
+        rank=0,
+        category="inference",
+    )
+
+    await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
+        TracesCollected(task_id=task_id, rank=0, traces=[trace])
+    )
+    packet = await trace_receiver.receive()
+
+    assert packet.owner_node == NodeId("api-owner")
+    assert packet.source_node == NodeId("trace-worker")
+    assert packet.traces == (trace,)
+    assert event_receiver.collect() == []
 
 
 class _ReapTrackingProcess:

@@ -5,7 +5,6 @@ from skulk.shared.types.audio import (
     AudioTranscriptionTaskParams,
     RealtimeAudioTranscriptionTaskParams,
 )
-from skulk.shared.types.chunks import AudioInputChunk
 from skulk.shared.types.tasks import (
     AudioTranscription,
     RealtimeAudioTranscription,
@@ -286,8 +285,8 @@ def test_plan_returns_none_when_nothing_to_do():
     assert result is None
 
 
-def test_plan_waits_for_audio_chunks_before_forwarding_transcription():
-    """STT tasks must wait for the complete uploaded audio payload."""
+def test_plan_waits_for_verified_speech_media_before_forwarding_transcription():
+    """STT tasks must wait for the complete verified data-plane payload."""
 
     shard = get_pipeline_shard_metadata(model_id=MODEL_A_ID, device_rank=0)
     instance = get_mlx_ring_instance(
@@ -314,23 +313,6 @@ def test_plan_waits_for_audio_chunks_before_forwarding_transcription():
         ),
     )
 
-    first_chunk = AudioInputChunk(
-        model=MODEL_A_ID,
-        command_id=COMMAND_1_ID,
-        data="UklG",
-        chunk_index=0,
-        total_chunks=2,
-        audio_sha256="abc123",
-    )
-    second_chunk = AudioInputChunk(
-        model=MODEL_A_ID,
-        command_id=COMMAND_1_ID,
-        data="Rk8=",
-        chunk_index=1,
-        total_chunks=2,
-        audio_sha256="abc123",
-    )
-
     missing_result = plan_mod.plan(
         node_id=NODE_A,
         runners={RUNNER_1_ID: local_runner},  # type: ignore
@@ -338,7 +320,7 @@ def test_plan_waits_for_audio_chunks_before_forwarding_transcription():
         instances={INSTANCE_1_ID: instance},
         all_runners={RUNNER_1_ID: RunnerReady()},
         tasks={TASK_1_ID: task},
-        input_audio_chunk_buffer={COMMAND_1_ID: {0: first_chunk}},
+        speech_media_ready=set(),
     )
     ready_result = plan_mod.plan(
         node_id=NODE_A,
@@ -347,7 +329,7 @@ def test_plan_waits_for_audio_chunks_before_forwarding_transcription():
         instances={INSTANCE_1_ID: instance},
         all_runners={RUNNER_1_ID: RunnerReady()},
         tasks={TASK_1_ID: task},
-        input_audio_chunk_buffer={COMMAND_1_ID: {0: first_chunk, 1: second_chunk}},
+        speech_media_ready={COMMAND_1_ID},
     )
 
     assert missing_result is None
