@@ -9508,20 +9508,26 @@ class API:
         """Record one performance-envelope observation per completed generation.
 
         Observe-only and fully guarded: any failure here disturbs neither the
-        stream nor the response. The in-flight concurrency at admission and the
-        time-to-first-token clock are captured EAGERLY here (at dispatch), not
-        lazily on first iteration -- a plain ``async def`` tap would defer both to
-        the first ``__anext__``, so a late-scheduled stream would misattribute the
-        concurrency bucket and start the TTFT timer late. An aborted stream
-        (client disconnect, no terminal chunk) is not recorded, matching the
-        field-telemetry tap.
+        stream nor the response. The concurrency VALUE recorded for this request
+        and the time-to-first-token clock are snapshotted EAGERLY here (at
+        dispatch, pure reads with no shared mutation) so they reflect admission
+        time rather than the first ``__anext__``. The shared ``_envelope_inflight``
+        counter, by contrast, is incremented and decremented BALANCED inside the
+        generator body: closing an async generator that never started does not run
+        its ``finally``, so an eager increment out here could strand the counter
+        forever (permanently inflating later observations) if the client
+        disconnects before the body iterates. An aborted stream (no terminal
+        chunk) is not recorded, matching the field-telemetry tap.
         """
         key = str(model_id)
+        # Snapshot for THIS request's recorded bucket: current in-flight plus self.
         concurrency = self._envelope_inflight.get(key, 0) + 1
-        self._envelope_inflight[key] = concurrency
         started = time.monotonic()
 
         async def _recording() -> AsyncGenerator[_EnvelopeChunk, None]:
+            # Increment on first run and decrement in finally, always paired: a
+            # never-started generation mutates nothing, so the counter cannot leak.
+            self._envelope_inflight[key] = self._envelope_inflight.get(key, 0) + 1
             ttft_seconds: float | None = None
             decode_tps: float | None = None
             outcome: GenerationOutcome = "cancelled"

@@ -144,32 +144,54 @@ async def test_cluster_fanout_reports_local_first_and_peer_failure() -> None:
     assert peer.error
 
 
-async def test_concurrency_captured_eagerly_at_dispatch() -> None:
+async def test_concurrency_snapshot_reflects_in_flight() -> None:
+    import asyncio
+
     api = _build_api()
     object.__setattr__(
         api, "_resolve_envelope_context", lambda _model: ("hw", "b", "")
     )
-    # Two taps created (dispatched) but not yet iterated: the eager increment
-    # must already reflect both, proving concurrency is captured at admission and
-    # not deferred to the first stream iteration.
-    gen1 = api._tap_performance_envelope(
-        ModelId("m"), _one_stream([_chunk("", "stop", 10.0)])
-    )
+    gate = asyncio.Event()
+
+    async def _blocking() -> AsyncGenerator[Any, None]:
+        yield _chunk("hi", None, None)
+        await gate.wait()
+        yield _chunk("", "stop", 10.0)
+
+    gen1 = api._tap_performance_envelope(ModelId("m"), _blocking())
+    task1 = asyncio.create_task(_drain(gen1))
+    # Let gen1 start (its balanced increment brings the counter to 1) and block.
+    await asyncio.sleep(0.05)
+    assert api._envelope_inflight["m"] == 1
+    # gen2 dispatched WHILE gen1 is in flight: its eager snapshot must be 2.
     gen2 = api._tap_performance_envelope(
         ModelId("m"), _one_stream([_chunk("", "stop", 10.0)])
     )
-    assert api._envelope_inflight["m"] == 2
-
-    await _drain(gen1)
     await _drain(gen2)
-    # Drains to zero and the idle key is dropped.
-    assert api._envelope_inflight.get("m", 0) == 0
+    gate.set()
+    await task1
+
     concurrencies = {
         b.concurrency
         for b in api._performance_envelopes.snapshot().envelopes[0].buckets
     }
-    # The second dispatch saw the first in flight, so a concurrency-2 bucket exists.
     assert 2 in concurrencies
+    assert api._envelope_inflight.get("m", 0) == 0
+
+
+async def test_never_started_generation_does_not_leak_inflight() -> None:
+    api = _build_api()
+    object.__setattr__(
+        api, "_resolve_envelope_context", lambda _model: ("hw", "b", "")
+    )
+    # Closing a tap that never advanced into its body (client disconnect before
+    # the response iterates) must mutate nothing: no counter leak, no record.
+    gen = api._tap_performance_envelope(
+        ModelId("m"), _one_stream([_chunk("", "stop", 10.0)])
+    )
+    await gen.aclose()
+    assert api._envelope_inflight.get("m", 0) == 0
+    assert api._performance_envelopes.snapshot().envelopes == []
 
 
 async def _one_stream(chunks: list[Any]) -> AsyncGenerator[Any, None]:
