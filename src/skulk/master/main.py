@@ -108,7 +108,7 @@ from skulk.shared.types.tasks import (
 from skulk.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
 )
-from skulk.shared.types.telemetry import TelemetryView
+from skulk.shared.types.telemetry import TelemetryView, record_membership_from_event
 from skulk.shared.types.worker.downloads import (
     DownloadAttemptId,
     DownloadFailed,
@@ -584,6 +584,12 @@ class Master:
 
         return self._telemetry_view.effective_downloads(self.state.downloads)
 
+    def _apply_indexed_event(self, indexed: IndexedEvent) -> None:
+        """Apply one durable event and synchronize the master's telemetry view."""
+
+        self.state = apply(self.state, indexed)
+        record_membership_from_event(self._telemetry_view, indexed.event)
+
     def _record_freed_instance(self, instance: Instance) -> None:
         """Record a deleted instance's per-node footprint for the grace window.
 
@@ -721,7 +727,7 @@ class Master:
         # collected as state evolves past it.
         self._seed_state = None
         indexed = IndexedEvent(event=StateSnapshotHydrated(state=seed), idx=idx)
-        self.state = apply(self.state, indexed)
+        self._apply_indexed_event(indexed)
         self._append_event_log(indexed.event)
         await self._send_event(indexed)
         logger.info(
@@ -1817,7 +1823,7 @@ class Master:
 
                     logger.debug(f"Master indexing event: {str(event)[:100]}")
                     indexed = IndexedEvent(event=event, idx=len(self._event_log))
-                    self.state = apply(self.state, indexed)
+                    self._apply_indexed_event(indexed)
 
                     event._master_time_stamp = datetime.now(tz=timezone.utc)  # pyright: ignore[reportPrivateUsage]
                     if isinstance(event, NodeGatheredInfo):

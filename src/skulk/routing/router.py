@@ -112,6 +112,7 @@ class _PendingTelemetry:
 
     item: NodeTelemetry
     enqueued_at: float
+    local_published: bool = False
 
 
 class TelemetrySender:
@@ -353,17 +354,64 @@ class TelemetryTopicRouter(TopicRouter[NodeTelemetry]):
         with suppress(WouldBlock):
             self._wake_send.send_nowait(None)
 
+    def _send_out_nowait(self, item: NodeTelemetry) -> bool:
+        """Offer one telemetry packet without coupling local delivery to egress.
+
+        Returns:
+            ``True`` when the reading was queued or cannot be retried. ``False``
+            when bounded network capacity is full and the latest value must stay
+            pending for the egress loop's next wakeup.
+        """
+
+        try:
+            serialized = self.topic.serialize(item)
+        except Exception as exception:  # noqa: BLE001 - wire boundary containment
+            self._observer.record_publish_failure()
+            logger.opt(exception=exception).warning(
+                "Dropping unserializable message on isolated telemetry egress"
+            )
+            return True
+        packet = OutboundPacket(
+            topic=str(self.topic.topic),
+            routing_key=None,
+            stream_key=None,
+            is_terminal=False,
+            data=serialized,
+        )
+        try:
+            self.networking_sender.send_nowait(packet)
+        except WouldBlock:
+            return False
+        except (BrokenResourceError, ClosedResourceError):
+            self._observer.record_publish_failure()
+        return True
+
+    def wake_egress(self) -> None:
+        """Wake pending latest values after one network packet leaves the queue."""
+
+        with suppress(ClosedResourceError, WouldBlock):
+            self._wake_send.send_nowait(None)
+
     async def run(self) -> None:
         """Drain admitted latest values while producers continue to coalesce."""
 
         logger.debug(f"Telemetry Topic Router {self.topic} ready to send")
         with self._wake_recv as wakeups:
             async for _ in wakeups:
-                while self._pending:
-                    _, pending = self._pending.popitem(last=False)
+                # Process each value present at wake time at most once. Values
+                # that cannot enter the one-packet network queue stay pending,
+                # but every newly offered value still reaches local readers.
+                for _ in range(len(self._pending)):
+                    key, pending = self._pending.popitem(last=False)
                     # Local readers never wait for a remote peer or transport queue.
-                    await self.publish(pending.item, origin=None)
-                    await self._send_out(pending.item)
+                    if not pending.local_published:
+                        await self.publish(pending.item, origin=None)
+                    if not self._send_out_nowait(pending.item):
+                        self._pending[key] = _PendingTelemetry(
+                            item=pending.item,
+                            enqueued_at=pending.enqueued_at,
+                            local_published=True,
+                        )
 
     async def shutdown(self) -> None:
         """Close telemetry admission and inherited local receivers."""
@@ -739,6 +787,10 @@ class Router:
                     logger.opt(exception=exception).warning(
                         "Isolated telemetry publish failed; latest values remain lossy"
                     )
+                finally:
+                    router = self.topic_routers.get(TELEMETRY.topic)
+                    if isinstance(router, TelemetryTopicRouter):
+                        router.wake_egress()
 
     async def _publish_gossipsub_packet(
         self, packet: OutboundPacket, *, telemetry: bool = False

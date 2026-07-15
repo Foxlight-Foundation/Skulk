@@ -88,6 +88,9 @@ class DownloadCoordinator:
     _last_progress_fraction: dict[ModelId, float] = field(default_factory=dict)
     _attempt_ids: dict[ModelId, DownloadAttemptId] = field(default_factory=dict)
     _suppressed_progress: set[ModelId] = field(default_factory=set)
+    _pending_download_starts: dict[ModelId, ShardMetadata] = field(
+        default_factory=dict
+    )
 
     # Emit an in_progress update only after the download advances this fraction
     # (so ~20 readings total), never faster than the min interval (no bursts on a
@@ -448,7 +451,18 @@ class DownloadCoordinator:
     async def _start_download(self, shard: ShardMetadata) -> None:
         model_id = shard.model_card.model_id
 
-        if model_id in self.active_downloads:
+        active_scope = self.active_downloads.get(model_id)
+        if active_scope is not None:
+            if active_scope.cancel_called:
+                # Cancellation cleanup can outlive the command-loop tick that
+                # requested it. Retain the replacement command so the active
+                # task's finally block can start it after releasing ownership.
+                self._pending_download_starts[model_id] = shard
+                logger.info(
+                    f"DownloadCoordinator: queued restart for {model_id} until "
+                    "the cancelled download task finishes"
+                )
+                return
             logger.info(
                 f"DownloadCoordinator: {model_id} still has an active download task"
             )
@@ -614,6 +628,9 @@ class DownloadCoordinator:
                 pass
             finally:
                 self.active_downloads.pop(model_id, None)
+                pending_start = self._pending_download_starts.pop(model_id, None)
+                if pending_start is not None:
+                    await self._start_download(pending_start)
 
         scope = anyio.CancelScope()
         self._tg.start_soon(download_wrapper, scope)

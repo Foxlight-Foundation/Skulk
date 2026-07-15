@@ -117,6 +117,7 @@ async def test_saturated_telemetry_cannot_delay_control_egress() -> None:
     await router.register_topic(TELEMETRY)
     telemetry_sender = router.telemetry_sender()
     telemetry_router = router.topic_routers[TELEMETRY.topic]
+    local_receiver = router.receiver(TELEMETRY)
     ordinary_sender = router.networking_receiver.clone_sender()
 
     async with anyio.create_task_group() as task_group:
@@ -141,6 +142,16 @@ async def test_saturated_telemetry_cannot_delay_control_egress() -> None:
                     info=MiscData(friendly_name=f"reading-{index}"),
                 )
             )
+
+        local_messages: list[NodeTelemetry] = []
+        with anyio.fail_after(0.5):
+            while not any(
+                isinstance(message.info, MiscData)
+                and message.info.friendly_name == latest_name
+                for message in local_messages
+            ):
+                local_messages.extend(local_receiver.collect())
+                await anyio.sleep(0)
 
         for topic in (
             COMMANDS.topic,
