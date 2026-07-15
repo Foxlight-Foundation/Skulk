@@ -168,8 +168,12 @@ class CapabilityStreamHandler(Protocol):
         Skulk emits ``started`` at sequence zero after admission. The handler
         therefore begins at sequence one, yields zero or more ``chunk`` frames,
         and finishes with exactly one ``completed``, ``failed``, or
-        ``cancelled`` frame. Skulk validates identity, sequence, chunk schema,
-        and terminal ownership before publishing any handler frame.
+        ``cancelled`` frame, then returns. Skulk withholds the terminal until
+        the iterator reaches exhaustion so handler ``finally`` cleanup is
+        complete before callers can begin dependent work. It validates
+        identity, sequence, chunk schema, and terminal ownership before
+        publishing any handler frame. Malformed output closes a closable
+        iterator before Skulk publishes its synthetic failure terminal.
         """
 
         ...
@@ -191,7 +195,8 @@ class CapabilityInputStreamHandler(Protocol):
         ``completed``, ``failed``, or ``cancelled`` frame. Caller ``completed``
         is a half-close, not cancellation. Provider output follows the same
         sequence-one-through-terminal contract as
-        :class:`CapabilityStreamHandler` because Skulk owns output ``started``.
+        :class:`CapabilityStreamHandler` because Skulk owns output ``started``;
+        its terminal is likewise withheld until the output iterator returns.
         """
 
         ...

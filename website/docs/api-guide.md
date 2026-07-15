@@ -1448,10 +1448,14 @@ and creates no stream.
 
 Output is **not** an HTTP response stream. After admission, the provider emits
 `started`, ordered `chunk` frames, and exactly one `completed`, `failed`, or
-`cancelled` terminal on the provider DATA topic. Structured frame metadata is
-JSON-schema validated against `output_chunk_schema`; realtime media is an
-optional raw binary attachment capped at 1 MiB per frame, while large immutable
-results use staged blob references. The topic is node-addressed to
+`cancelled` terminal on the provider DATA topic. The handler must return after
+yielding that terminal; Skulk withholds it until iterator exhaustion so handler
+cleanup finishes before dependent calls can observe completion. Malformed or
+trailing handler output closes a closable iterator before Skulk publishes its
+synthetic failure terminal. Structured frame metadata is JSON-schema validated
+against `output_chunk_schema`; realtime media is an optional raw binary
+attachment capped at 1 MiB per frame, while large immutable results use staged
+blob references. The topic is node-addressed to
 `caller_node`, short-circuits same-node calls, and uses the DATA plane's bounded
 per-owner/call/direction Zenoh queues for remote calls. Extensions consume the
 flow through `ExtensionContext.stream_capability(...)`, which returns a
@@ -1551,7 +1555,9 @@ on `format: "pcm_s16le"`, `sample_rate`, and `channels: 1`. The input sink's
 `complete()` method half-closes audio input and lets final decoding finish.
 Provider output `chunk` frames contain `model`, transcript `text`, and
 `is_partial: true`; the `completed` payload contains the accumulated final text
-with `is_partial: false`.
+with `is_partial: false`. Skulk withholds that terminal until core cleanup has
+sent `TaskFinished` and replicated state reports the task terminal or deleted,
+so a following turn cannot be rejected against stale busy state.
 
 Admission pins a `RealtimeAudioTranscription` task to one selected single-host
 model instance, and the master reserves that instance against concurrent

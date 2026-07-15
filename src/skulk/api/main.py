@@ -358,6 +358,7 @@ from skulk.shared.types.events import (
     RunnerStatusUpdated,
     StateSnapshotHydrated,
     TaskCreated,
+    TaskDeleted,
     TaskFailed,
     TaskStatusUpdated,
     TracesMerged,
@@ -455,6 +456,13 @@ _API_EVENT_LOG_CHECK_INTERVAL_APPENDS = 4096
 # are explicitly NOT treated as output and do not arm the timer). So this only
 # fires on a genuine mid-stream stall, e.g. a dropped data-plane chunk.
 _STREAM_IDLE_TIMEOUT_SECONDS = 120.0
+
+# A completed realtime STT provider call must not release its client-visible
+# terminal while authoritative state can still reject the next turn as busy.
+# Normal control-plane propagation is sub-second; this bound turns a lost
+# terminal/delete event into a typed provider failure instead of an indefinite
+# resource hold.
+_REALTIME_TASK_RELEASE_TIMEOUT_SECONDS = 10.0
 
 # Largest per-command data-plane reorder window (#279 Phase 2b). The DATA topic
 # is best-effort: a genuinely dropped chunk would otherwise stall the reorder
@@ -1394,6 +1402,7 @@ class API:
             CommandId, Sender[TranscriptionChunk | ErrorChunk]
         ] = {}
         self._realtime_audio_transcription_commands: set[CommandId] = set()
+        self._realtime_task_release_events: dict[CommandId, anyio.Event] = {}
         self._cancelled_command_ids: set[CommandId] = set()
         # Per-command data-plane reorder buffers (#279 Phase 2b). The DATA gossip
         # topic has no total order (unlike the master event idx it replaced), so
@@ -1519,6 +1528,9 @@ class API:
         self._audio_speech_queues = {}
         self._audio_transcription_queues = {}
         self._realtime_audio_transcription_commands = set()
+        for release_event in self._realtime_task_release_events.values():
+            release_event.set()
+        self._realtime_task_release_events = {}
         self._pending_vision_media = {}
         self._pending_vision_media_bytes = 0
         self._active_vision_media_bytes = {}
@@ -4746,6 +4758,27 @@ class API:
             next_sequence += 1
             terminal_sent = True
 
+        async def close_provider_output(
+            stream: AsyncIterator[CapabilityStreamFrame],
+        ) -> None:
+            """Run iterator cleanup before exposing a synthetic failure."""
+
+            close = cast(
+                Callable[[], Awaitable[None]] | None,
+                getattr(stream, "aclose", None),
+            )
+            if close is None:
+                return
+            try:
+                await close()
+            except anyio.get_cancelled_exc_class():
+                raise
+            except Exception as exc:  # noqa: BLE001 - provider boundary
+                logger.opt(exception=exc).warning(
+                    f"capability stream handler '{extension_name}' for "
+                    f"{descriptor.qualified_id} raised during iterator cleanup"
+                )
+
         try:
             with anyio.CancelScope() as cancel_scope:
                 try:
@@ -4789,12 +4822,14 @@ class API:
                             stream = self._empty_capability_stream()
                         async for frame in stream:
                             if active.input_failure is not None:
+                                await close_provider_output(stream)
                                 await fail(
                                     active.input_failure.code,
                                     active.input_failure.message,
                                 )
                                 break
                             if not isinstance(frame, CapabilityStreamFrame):  # pyright: ignore[reportUnnecessaryIsInstance]
+                                await close_provider_output(stream)
                                 await fail(
                                     "invalid_frame",
                                     f"provider yielded {type(frame).__name__}, "
@@ -4807,6 +4842,7 @@ class API:
                                 or frame.sequence != next_sequence
                                 or frame.kind == "started"
                             ):
+                                await close_provider_output(stream)
                                 await fail(
                                     "invalid_frame",
                                     "provider yielded a frame with invalid "
@@ -4836,12 +4872,14 @@ class API:
                                     RecursionError,
                                     OverflowError,
                                 ) as exc:
+                                    await close_provider_output(stream)
                                     await fail(
                                         "invalid_frame",
                                         f"provider chunk payload is not JSON: {exc}",
                                     )
                                     break
                                 if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
+                                    await close_provider_output(stream)
                                     await fail(
                                         "invalid_frame",
                                         "provider chunk payload exceeds 1 MiB",
@@ -4853,6 +4891,7 @@ class API:
                                     else descriptor.output_schema
                                 )
                                 if output_schema is None:
+                                    await close_provider_output(stream)
                                     await fail(
                                         "invalid_frame",
                                         "provider output carries data without a "
@@ -4869,7 +4908,39 @@ class API:
                                     ),
                                 )
                                 if schema_error is not None:
+                                    await close_provider_output(stream)
                                     await fail("invalid_frame", schema_error)
+                                    break
+                            if frame.is_terminal:
+                                # A provider terminal is not observable until the
+                                # handler has actually returned. Built-in speech
+                                # handlers release core commands in ``finally``;
+                                # stopping at the yielded terminal would leave
+                                # that cleanup to nondeterministic async-generator
+                                # finalization and could retain runner admission.
+                                try:
+                                    trailing_frame = await anext(stream)
+                                except StopAsyncIteration:
+                                    pass
+                                else:
+                                    await close_provider_output(stream)
+                                    await fail(
+                                        "invalid_frame",
+                                        "provider yielded a frame after its terminal",
+                                    )
+                                    logger.warning(
+                                        "provider stream handler "
+                                        f"'{extension_name}' for "
+                                        f"{descriptor.qualified_id} yielded "
+                                        "after its terminal: "
+                                        f"{type(trailing_frame).__name__}"
+                                    )
+                                    break
+                                if active.input_failure is not None:
+                                    await fail(
+                                        active.input_failure.code,
+                                        active.input_failure.message,
+                                    )
                                     break
                             await emit(frame)
                             next_sequence += 1
@@ -6751,12 +6822,29 @@ class API:
         with self.event_receiver as events:
             async for i_event in events:
                 event = i_event.event
+                previous_tasks = self.state.tasks
                 if self._event_log is not None and not isinstance(
                     event, StateSnapshotHydrated
                 ):
                     self._event_log.append(event)
                     self._maybe_compact_event_log()
                 self.state = apply(self.state, i_event)
+
+                released_task: task_types.Task | None = None
+                if isinstance(event, TaskDeleted):
+                    released_task = previous_tasks.get(event.task_id)
+                elif (
+                    isinstance(event, TaskFailed)
+                    or (
+                        isinstance(event, TaskStatusUpdated)
+                        and event.task_status in _TERMINAL_TASK_STATUSES
+                    )
+                ):
+                    released_task = self.state.tasks.get(event.task_id)
+                if isinstance(
+                    released_task, task_types.RealtimeAudioTranscription
+                ):
+                    self._mark_realtime_task_released(released_task.command_id)
 
                 if isinstance(
                     event,
@@ -10285,9 +10373,11 @@ class API:
         )
         self._audio_transcription_queues[command_id] = output_sender
         self._realtime_audio_transcription_commands.add(command_id)
+        self._realtime_task_release_events[command_id] = anyio.Event()
         try:
             await self._send(command)
         except Exception:
+            self._realtime_task_release_events.pop(command_id, None)
             await self._finalize_command_stream(
                 command_id,
                 cast(
@@ -10297,6 +10387,13 @@ class API:
             )
             raise
         return command_id, output_sender, output_receiver
+
+    def _mark_realtime_task_released(self, command_id: CommandId) -> None:
+        """Wake a provider waiting for authoritative realtime task release."""
+
+        release_event = self._realtime_task_release_events.get(command_id)
+        if release_event is not None:
+            release_event.set()
 
     async def _cancel_audio_transcription_command(
         self, command_id: CommandId
@@ -10510,21 +10607,37 @@ class API:
                     sequence += 1
         finally:
             input_cancel_scope.cancel()
-            with anyio.CancelScope(shield=True):
-                with anyio.move_on_after(1.0):
-                    await input_done.wait()
-                if (
-                    not terminal_received
-                    and not self._command_task_is_terminal(command_id)
-                ):
-                    await self._cancel_audio_transcription_command(command_id)
-                await self._finalize_command_stream(
-                    command_id,
-                    cast(
-                        dict[CommandId, Sender[object]],
-                        self._audio_transcription_queues,
-                    ),
-                )
+            try:
+                with anyio.CancelScope(shield=True):
+                    with anyio.move_on_after(1.0):
+                        await input_done.wait()
+                    if (
+                        not terminal_received
+                        and not self._command_task_is_terminal(command_id)
+                    ):
+                        await self._cancel_audio_transcription_command(command_id)
+                    await self._finalize_command_stream(
+                        command_id,
+                        cast(
+                            dict[CommandId, Sender[object]],
+                            self._audio_transcription_queues,
+                        ),
+                    )
+                    release_event = self._realtime_task_release_events.get(
+                        command_id
+                    )
+                    if terminal_received and release_event is not None:
+                        with anyio.move_on_after(
+                            _REALTIME_TASK_RELEASE_TIMEOUT_SECONDS
+                        ) as release_scope:
+                            await release_event.wait()
+                        if release_scope.cancelled_caught:
+                            raise RuntimeError(
+                                "Core realtime STT task did not reach authoritative "
+                                "terminal state"
+                            )
+            finally:
+                self._realtime_task_release_events.pop(command_id, None)
 
     async def _open_realtime_transcription_session(
         self,

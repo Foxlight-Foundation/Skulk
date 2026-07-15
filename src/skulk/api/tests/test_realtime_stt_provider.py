@@ -39,7 +39,13 @@ from skulk.shared.types.commands import (
     TaskFinished,
 )
 from skulk.shared.types.common import CommandId, NodeId
-from skulk.shared.types.events import IndexedEvent, NodeTimedOut, RunnerStatusUpdated
+from skulk.shared.types.events import (
+    IndexedEvent,
+    NodeTimedOut,
+    RunnerStatusUpdated,
+    TaskFailed,
+    TaskStatusUpdated,
+)
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import (
@@ -276,6 +282,48 @@ async def test_runner_ready_event_resynchronizes_realtime_stt_advertisement(
     }
 
 
+@pytest.mark.anyio
+async def test_realtime_task_failed_event_releases_provider_waiter() -> None:
+    """Authoritative TaskFailed is terminal for provider admission cleanup."""
+
+    api, _, event_sender = _build_api()
+    card = _realtime_card()
+    state = _local_state(card)
+    command_id = CommandId("failed-realtime-command")
+    task = RealtimeAudioTranscriptionTask(
+        task_id=TaskId("failed-realtime-task"),
+        instance_id=InstanceId("speech-instance"),
+        command_id=command_id,
+        owner_node=NodeId("api-node"),
+        task_status=TaskStatus.Running,
+        task_params=RealtimeAudioTranscriptionTaskParams(
+            model=card.model_id,
+            input_sample_rate=16000,
+        ),
+    )
+    api.state = state.model_copy(update={"tasks": {task.task_id: task}})
+    release_event = anyio.Event()
+    api._realtime_task_release_events[command_id] = release_event
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(api._apply_state)
+        await event_sender.send(
+            IndexedEvent(
+                idx=0,
+                event=TaskFailed(
+                    task_id=task.task_id,
+                    error_type="realtime_decode_failed",
+                    error_message="decode failed",
+                ),
+            )
+        )
+        with anyio.fail_after(1.0):
+            await release_event.wait()
+        task_group.cancel_scope.cancel()
+
+    assert api.state.tasks[task.task_id].task_status is TaskStatus.Failed
+
+
 def test_realtime_stt_discovery_rejects_multi_host_instance(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -439,18 +487,34 @@ async def test_realtime_stt_provider_forwards_pcm_and_streams_transcript(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    api, realtime_receiver, _ = _build_api()
+    api, realtime_receiver, event_sender = _build_api()
     card = _realtime_card()
     api.state = _local_state(card)
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
     _write_legacy_disabled_realtime_config(api, tmp_path)
     api._sync_builtin_speech_capability()
-    commands: list[RealtimeAudioTranscription] = []
+    commands: list[object] = []
     input_frames: list[RealtimeAudioInputFrame] = []
+    finished_sent = anyio.Event()
+    stream_finished = anyio.Event()
+    task_id = TaskId("active-realtime-task")
 
     async def send(command: object) -> None:
+        commands.append(command)
         if isinstance(command, RealtimeAudioTranscription):
-            commands.append(command)
+            task = RealtimeAudioTranscriptionTask(
+                task_id=task_id,
+                instance_id=command.target_instance_id,
+                command_id=command.command_id,
+                owner_node=command.owner_node,
+                task_status=TaskStatus.Running,
+                task_params=command.task_params,
+            )
+            api.state = api.state.model_copy(
+                update={"tasks": {task.task_id: task}}
+            )
+        elif isinstance(command, TaskFinished):
+            finished_sent.set()
 
     async def emulate_worker() -> None:
         while True:
@@ -458,7 +522,11 @@ async def test_realtime_stt_provider_forwards_pcm_and_streams_transcript(
             input_frames.append(frame)
             if frame.kind != "completed":
                 continue
-            command = commands[0]
+            command = next(
+                command
+                for command in commands
+                if isinstance(command, RealtimeAudioTranscription)
+            )
             output = api._audio_transcription_queues[command.command_id]
             assert output.statistics().max_buffer_size == 256
             await output.send(
@@ -480,6 +548,7 @@ async def test_realtime_stt_provider_forwards_pcm_and_streams_transcript(
     monkeypatch.setattr(api, "_send", send)
     frames: list[CapabilityStreamFrame] = []
     async with api._tg as task_group:
+        task_group.start_soon(api._apply_state)
         task_group.start_soon(api._apply_provider_data)
         task_group.start_soon(emulate_worker)
         session = await api._extension_context.stream_capability(
@@ -512,11 +581,38 @@ async def test_realtime_stt_provider_forwards_pcm_and_streams_transcript(
             ),
         )
         await session.input.complete()
-        frames = [frame async for frame in session.frames]
+
+        async def collect_frames() -> None:
+            frames.extend([frame async for frame in session.frames])
+            stream_finished.set()
+
+        task_group.start_soon(collect_frames)
+        with anyio.fail_after(1.0):
+            await finished_sent.wait()
+        assert stream_finished.is_set() is False
+        await event_sender.send(
+            IndexedEvent(
+                idx=0,
+                event=TaskStatusUpdated(
+                    task_id=task_id,
+                    task_status=TaskStatus.Complete,
+                ),
+            )
+        )
+        with anyio.fail_after(1.0):
+            await stream_finished.wait()
         task_group.cancel_scope.cancel()
 
-    assert len(commands) == 1
-    assert commands[0].target_instance_id == InstanceId("speech-instance")
+    transcription_command = next(
+        command
+        for command in commands
+        if isinstance(command, RealtimeAudioTranscription)
+    )
+    finished_command = next(
+        command for command in commands if isinstance(command, TaskFinished)
+    )
+    assert transcription_command.target_instance_id == InstanceId("speech-instance")
+    assert finished_command.finished_command_id == transcription_command.command_id
     assert [frame.kind for frame in input_frames] == ["chunk", "completed"]
     assert [frame.sequence for frame in input_frames] == [1, 2]
     assert input_frames[0].data == b"\x00\x00\x01\x00"
@@ -552,6 +648,8 @@ async def test_realtime_stt_provider_routes_pcm_to_remote_serving_node(
     async def send(command: object) -> None:
         if isinstance(command, RealtimeAudioTranscription):
             commands.append(command)
+        elif isinstance(command, TaskFinished):
+            api._mark_realtime_task_released(command.finished_command_id)
 
     async def emulate_remote_worker() -> None:
         while True:
@@ -739,6 +837,8 @@ async def test_realtime_stt_runner_error_finishes_command_without_cancelling(
 
     async def send(command: object) -> None:
         commands.append(command)
+        if isinstance(command, TaskFinished):
+            api._mark_realtime_task_released(command.finished_command_id)
 
     async def emulate_worker() -> None:
         while True:
