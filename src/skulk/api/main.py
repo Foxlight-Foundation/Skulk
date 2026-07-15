@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
 
 import anyio
@@ -84,12 +84,20 @@ from skulk.api.adapters.responses import (
 from skulk.api.data_plane import DataPlaneObserver
 from skulk.api.field_telemetry import (
     FieldTelemetryCollector,
+    hardware_class,
     prepare_telemetry_config_update,
     tap_generation_stream,
 )
 from skulk.api.keepalive import with_sse_keepalive
 from skulk.api.model_search import search_hugging_face_models
 from skulk.api.node_health import compute_node_health
+from skulk.api.performance_envelope import (
+    ClusterPerformanceEnvelopes,
+    GenerationOutcome,
+    NodePerformanceEnvelopes,
+    PerformanceEnvelopeRegistry,
+    PerformanceEnvelopeReport,
+)
 from skulk.api.provider_diagnostics import ProviderObserver
 from skulk.api.realtime import (
     REALTIME_WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -383,7 +391,7 @@ from skulk.shared.types.worker.instances import (
     instance_meta_of,
 )
 from skulk.shared.types.worker.runners import RunnerId, RunnerReady, RunnerRunning
-from skulk.shared.types.worker.shards import Sharding
+from skulk.shared.types.worker.shards import Sharding, ShardMetadata
 from skulk.shared.version import get_skulk_version, get_skulk_version_label
 from skulk.store.config import (
     TelemetryConfig,
@@ -416,6 +424,10 @@ from skulk.store.staging_eviction import list_staged_models
 
 JsonObject = dict[str, object]
 _DEFAULT_OPTIMIZER_CANDIDATE_BITS = [4, 8]
+
+#: Chunk type flowing through the performance-envelope tap (duck-typed on
+#: ``text`` / ``stats`` / ``finish_reason``, like the field-telemetry tap).
+_EnvelopeChunk = TypeVar("_EnvelopeChunk")
 
 
 class _HypercornServe(Protocol):
@@ -1308,6 +1320,17 @@ class API:
             config_provider=self._current_telemetry_config,
             hardware_provider=self._telemetry_hardware_snapshot,
         )
+        # Observe-only performance envelopes (adaptive concurrency, Phase 0): the
+        # throughput/latency-vs-concurrency curve per (hardware x model x engine x
+        # quant), fed one observation per completed generation. In-memory,
+        # bounded, off State/event-log/telemetry-plane; exposed only via a
+        # read-only diagnostics endpoint.
+        self._performance_envelopes = PerformanceEnvelopeRegistry(
+            now=lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        )
+        # This API node's outstanding requests per model, the concurrency signal
+        # captured at each request's admission.
+        self._envelope_inflight: dict[str, int] = {}
         self._model_optimizer: "ModelOptimizer | None" = None
         self._runner_diagnostics_provider: (
             Callable[[], Sequence[RunnerSupervisorDiagnostics]] | None
@@ -2119,6 +2142,28 @@ class API:
                 "publish metrics for this node's isolated telemetry transport."
             ),
         )(self.get_telemetry_plane_diagnostics)
+        self.app.get(
+            "/v1/diagnostics/performance-envelopes",
+            tags=["Diagnostics"],
+            summary="Get this node's performance envelopes",
+            description=(
+                "Return the observe-only throughput-and-latency-versus-concurrency "
+                "curve this API node has measured for each (hardware class x model "
+                "x engine x quantization) it has served, including a simple knee "
+                "estimate. Adaptive-concurrency Phase 0: data only, no behavior "
+                "change."
+            ),
+        )(self.get_performance_envelopes)
+        self.app.get(
+            "/v1/diagnostics/performance-envelopes/cluster",
+            tags=["Diagnostics"],
+            summary="Get performance envelopes across the cluster",
+            description=(
+                "Fan out to every reachable cluster member and return each one's "
+                "performance-envelope report. Unreachable members appear as "
+                "explicit failures rather than vanishing."
+            ),
+        )(self.get_cluster_performance_envelopes)
         self.app.post(
             "/v1/diagnostics/node/runners/{runner_id}/cancel",
             tags=["Diagnostics"],
@@ -3593,6 +3638,10 @@ class API:
             None,
             chunk_stream,
         )
+        # Observe-only performance envelope (adaptive concurrency, Phase 0): a
+        # plain passthrough that records one throughput/latency observation per
+        # completed generation. Always on, fully guarded, no behavior change.
+        chunk_stream = self._tap_performance_envelope(resolved_model, chunk_stream)
         if self._extensions is not None and self._extensions.has_chat_middleware:
             chunk_stream = self._extensions.tap_chat_stream(
                 self._extension_context, task_params, chunk_stream
@@ -8519,6 +8568,54 @@ class API:
             return TelemetryPlaneDiagnostics.empty()
         return self._telemetry_plane_provider()
 
+    async def get_performance_envelopes(self) -> PerformanceEnvelopeReport:
+        """Return this node's observe-only performance-envelope report."""
+
+        return self._performance_envelopes.snapshot()
+
+    async def get_cluster_performance_envelopes(self) -> ClusterPerformanceEnvelopes:
+        """Return performance envelopes gathered from every reachable member.
+
+        The local report is always first; each reachable peer contributes its
+        own, and a member with no reachable API route appears as an explicit
+        failure so the fleet view never silently omits a node.
+        """
+
+        local = self._performance_envelopes.snapshot()
+        nodes = [
+            NodePerformanceEnvelopes(
+                node_id=str(self.node_id), url=None, ok=True, report=local
+            )
+        ]
+        peer_urls = await self._reachable_peer_api_urls(fail_fast=True)
+        timeout = httpx.Timeout(timeout=10.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            for node_id, base_url in peer_urls.items():
+                try:
+                    response = await client.get(
+                        f"{base_url}/v1/diagnostics/performance-envelopes"
+                    )
+                    response.raise_for_status()
+                    report = PerformanceEnvelopeReport.model_validate(response.json())
+                    nodes.append(
+                        NodePerformanceEnvelopes(
+                            node_id=node_id, url=base_url, ok=True, report=report
+                        )
+                    )
+                except (httpx.HTTPError, ValueError) as exc:
+                    nodes.append(
+                        NodePerformanceEnvelopes(
+                            node_id=node_id,
+                            url=base_url,
+                            ok=False,
+                            error=f"{exc.__class__.__name__}: {exc}",
+                        )
+                    )
+        return ClusterPerformanceEnvelopes(
+            generated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            nodes=nodes,
+        )
+
     @staticmethod
     def _proxy_error_detail(response: httpx.Response) -> str:
         """Extract one user-facing error message from a proxied API response."""
@@ -9265,6 +9362,113 @@ class API:
                 memory.ram_total.in_bytes if memory is not None else None,
             )
         return snapshot
+
+    def _resolve_envelope_context(
+        self, model_id: ModelId
+    ) -> tuple[str, str, str] | None:
+        """Resolve ``(hardware_class, backend, quantization)`` for a served model.
+
+        Uses the rank-0 shard's node for the hardware class (a multi-node
+        instance spans hardware; rank 0 is the deterministic representative) and
+        that shard's resolved backend and card quantization. Returns ``None`` when
+        no instance or node telemetry is available, so an observation is skipped
+        rather than recorded against a wrong key. Assumes a single active
+        instance per model on this API node; replica-aware attribution is a
+        follow-on, tracked with the engine-reported batch-size accuracy work.
+        """
+        instance = next(
+            (
+                candidate
+                for candidate in self.state.instances.values()
+                if candidate.shard_assignments.model_id == model_id
+            ),
+            None,
+        )
+        if instance is None:
+            return None
+        rank_zero: tuple[RunnerId, ShardMetadata] | None = None
+        for runner_id, shard in instance.shard_assignments.runner_to_shard.items():
+            if rank_zero is None or shard.device_rank < rank_zero[1].device_rank:
+                rank_zero = (runner_id, shard)
+        if rank_zero is None:
+            return None
+        rank_zero_runner, rank_zero_shard = rank_zero
+        backend = rank_zero_shard.resolved_backend or ""
+        quantization = rank_zero_shard.model_card.quantization
+        node_id = next(
+            (
+                node
+                for node, runner in instance.shard_assignments.node_to_runner.items()
+                if runner == rank_zero_runner
+            ),
+            None,
+        )
+        if node_id is None:
+            return None
+        profile = self._telemetry_view.node_system.get(node_id)
+        memory = self._telemetry_view.node_memory.get(node_id)
+        accelerator = profile.accelerator if profile is not None else None
+        node_hardware = hardware_class(
+            accelerator.vendor if accelerator is not None else None,
+            accelerator.name if accelerator is not None else None,
+            memory.ram_total.in_bytes if memory is not None else None,
+        )
+        return (node_hardware, backend, quantization)
+
+    async def _tap_performance_envelope(
+        self, model_id: ModelId, stream: AsyncIterator[_EnvelopeChunk]
+    ) -> AsyncGenerator[_EnvelopeChunk, None]:
+        """Record one performance-envelope observation per completed generation.
+
+        Observe-only and fully guarded: any failure here disturbs neither the
+        stream nor the response. Captures the in-flight concurrency at admission
+        (this API node's outstanding requests to the model, including this one),
+        the time-to-first-token, and the steady-state decode rate; an aborted
+        stream (client disconnect, no terminal chunk) is not recorded, matching
+        the field-telemetry tap.
+        """
+        key = str(model_id)
+        concurrency = self._envelope_inflight.get(key, 0) + 1
+        self._envelope_inflight[key] = concurrency
+        started = time.monotonic()
+        ttft_seconds: float | None = None
+        decode_tps: float | None = None
+        outcome: GenerationOutcome = "cancelled"
+        try:
+            async for chunk in stream:
+                if ttft_seconds is None and getattr(chunk, "text", None):
+                    ttft_seconds = time.monotonic() - started
+                stats = cast("object | None", getattr(chunk, "stats", None))
+                if stats is not None:
+                    tps = cast("float | None", getattr(stats, "generation_tps", None))
+                    if tps is not None:
+                        decode_tps = float(tps)
+                finish = cast("str | None", getattr(chunk, "finish_reason", None))
+                if finish == "error":
+                    outcome = "error"
+                elif finish is not None:
+                    outcome = "success"
+                yield chunk
+        finally:
+            try:
+                self._envelope_inflight[key] = max(
+                    0, self._envelope_inflight.get(key, 1) - 1
+                )
+                context = self._resolve_envelope_context(model_id)
+                if context is not None and outcome != "cancelled":
+                    node_hardware, backend, quantization = context
+                    self._performance_envelopes.record(
+                        hardware_class=node_hardware,
+                        model_id=key,
+                        backend=backend,
+                        quantization=quantization,
+                        concurrency=concurrency,
+                        ttft_seconds=ttft_seconds,
+                        decode_tps=decode_tps,
+                        outcome=outcome,
+                    )
+            except Exception as exc:  # noqa: BLE001 - observability must not propagate
+                logger.debug(f"performance-envelope record failed: {exc}")
 
     async def get_telemetry_preview(self) -> JSONResponse:
         """Return consent state and the exact pending telemetry batch."""

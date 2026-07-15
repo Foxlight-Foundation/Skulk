@@ -143,6 +143,8 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `GET /v1/traces/cluster/{task_id}/raw`
 - `GET /v1/diagnostics/node`
 - `GET /v1/diagnostics/telemetry`
+- `GET /v1/diagnostics/performance-envelopes`
+- `GET /v1/diagnostics/performance-envelopes/cluster`
 - `POST /v1/diagnostics/node/capture`
 - `POST /v1/diagnostics/node/runners/{runner_id}/cancel`
 - `GET /v1/diagnostics/cluster`
@@ -1142,6 +1144,8 @@ Returns stored events from the API-side event log.
 
 - `GET /v1/diagnostics/node`
 - `GET /v1/diagnostics/telemetry`
+- `GET /v1/diagnostics/performance-envelopes`
+- `GET /v1/diagnostics/performance-envelopes/cluster`
 - `POST /v1/diagnostics/node/capture`
 - `POST /v1/diagnostics/node/runners/{runner_id}/cancel`
 - `GET /v1/diagnostics/cluster`
@@ -1164,6 +1168,20 @@ Behavior notes:
   counters; this endpoint is deliberately separate from the node diagnostics
   bundle so additive telemetry instrumentation does not change that bundle's
   rolling-window schema.
+- `GET /v1/diagnostics/performance-envelopes` returns this node's observe-only
+  performance envelopes: for each `(hardware class, model, engine+backend,
+  quantization)` it has served, a throughput-and-latency-versus-concurrency
+  curve. Each envelope lists per-concurrency buckets (request count, mean/p50
+  decode tokens/second, aggregate decode tokens/second, p50/p90 time-to-first
+  -token) and a simple `kneeConcurrency` estimate: the concurrency past which
+  aggregate throughput stops rising. It is data only (no serving behavior is
+  driven from it), kept in bounded memory, and never touches State, the event
+  log, or the telemetry gossip plane. Concurrency is measured from this API
+  node's outstanding requests to the instance; with one API node that is the
+  instance's concurrency, and across several each sees only its own share.
+  `GET /v1/diagnostics/performance-envelopes/cluster` fans out to every
+  reachable member and returns each one's report, with unreachable members
+  listed as explicit failures. The dashboard's Performance tab renders these.
 - `GET /v1/diagnostics/node` returns the local node's runtime/config facts,
   resources, process tree, live runner-supervisor state, flight-recorder phase
   state, placement analysis, and `dataPlane` plus `provider` blocks. DATA diagnostics include
