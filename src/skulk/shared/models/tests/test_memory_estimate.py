@@ -107,8 +107,11 @@ def test_shard_preallocates_kv_upfront_uses_resolved_backend():
     assert shard_preallocates_kv_upfront(
         _shard(_card(1).model_copy(update={"placement": _backends("llama_cpp-cuda")}), None)
     )
-    assert not shard_preallocates_kv_upfront(_shard(_card(1), None))  # default mlx
-    assert not shard_preallocates_kv_upfront(_shard(hybrid, None))  # mlx-capable
+    assert not shard_preallocates_kv_upfront(_shard(_card(1), None))  # mlx-only
+    # Unresolved fallback is CONSERVATIVE: a hybrid card (mlx + llama.cpp) counts as
+    # preallocating when we can't prove it will run MLX (non-Darwin nodes won't
+    # advertise MLX and may dispatch it to llama.cpp -> OOM if unclamped).
+    assert shard_preallocates_kv_upfront(_shard(hybrid, None))
 
 
 def test_instance_limit_unpinned_gguf_non_vram_clamps_to_floor():

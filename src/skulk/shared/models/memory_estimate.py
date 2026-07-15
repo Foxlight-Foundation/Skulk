@@ -179,10 +179,18 @@ def shard_preallocates_kv_upfront(shard: ShardMetadata) -> bool:
     this shard actually runs on) when available, which is the precise per-placement
     signal: a hybrid card that also allows MLX but resolves to ``llama_cpp`` on a
     non-MLX node is correctly treated as preallocating, and the same card resolving
-    to ``mlx`` is not. It falls back to the card only when the backend is
-    unresolved (a node absent from the master's telemetry): the gguf pin, or a
-    ``compatible_backends`` set that targets llama.cpp and NOT mlx (so an UNPINNED
-    gguf card, where the runner scans for a ``.gguf`` at load, is still covered).
+    to ``mlx`` is not -- no MLX regression in the common (resolved) case.
+
+    When the backend is UNRESOLVED (an exact ``CreateInstance`` payload, or a
+    placement made before ``NodeResources`` gossiped, where the worker later falls
+    back to its own local backend probe) it is CONSERVATIVE: any gguf pin OR any
+    ``llama_cpp`` / ``llama_server`` compatible-backend tag makes it preallocating,
+    even for a card that ALSO lists MLX. We cannot prove such a shard will run MLX,
+    and on a non-Darwin node the local probe won't advertise MLX and may dispatch
+    it to llama.cpp -- so an OOM-kill from an unclamped up-front KV allocation is
+    the worse outcome than a conservatively floored context in that transient,
+    rare window. MLX-only cards (no llama.cpp tag) still grow KV lazily and are not
+    clamped.
     """
     resolved = shard.resolved_backend
     if resolved is not None:
@@ -190,12 +198,10 @@ def shard_preallocates_kv_upfront(shard: ShardMetadata) -> bool:
     card = shard.model_card
     if card.gguf_file:
         return True
-    backends = card.placement.compatible_backends
-    targets_llama = any(
-        tag.startswith(("llama_cpp", "llama_server")) for tag in backends
+    return any(
+        tag.startswith(("llama_cpp", "llama_server"))
+        for tag in card.placement.compatible_backends
     )
-    targets_mlx = any(tag == "mlx" or tag.startswith("mlx-") for tag in backends)
-    return targets_llama and not targets_mlx
 
 
 def per_token_kv_bytes(model_card: ModelCard) -> int:
