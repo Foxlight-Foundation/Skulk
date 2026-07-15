@@ -80,32 +80,35 @@ def test_shard_footprint_zero_fraction_is_zero():
     assert estimate_shard_footprint(_card(8), 0.0).in_bytes == 0
 
 
-def test_preallocates_kv_upfront_covers_unpinned_gguf():
-    from skulk.shared.models.memory_estimate import preallocates_kv_upfront
+def test_shard_preallocates_kv_upfront_uses_resolved_backend():
+    from skulk.shared.models.memory_estimate import shard_preallocates_kv_upfront
     from skulk.shared.models.model_cards import PlacementCardConfig
+
+    def _shard(card: ModelCard, backend: str | None) -> PipelineShardMetadata:
+        s = _pipeline_shard(card, start=0, end=4)
+        return s.model_copy(update={"resolved_backend": backend})
 
     def _backends(*tags: str) -> PlacementCardConfig:
         return PlacementCardConfig(compatible_backends=frozenset(tags))
 
-    # Pinned gguf: preallocating.
-    assert preallocates_kv_upfront(_card(1, gguf_file="m.gguf"))
-    # Unpinned but llama.cpp/llama-server-only backends: still preallocating (the
-    # runner scans for a .gguf at load).
-    assert preallocates_kv_upfront(
-        _card(1).model_copy(update={"placement": _backends("llama_cpp-cuda")})
+    hybrid = _card(1).model_copy(
+        update={"placement": _backends("mlx", "llama_cpp-cuda")}
     )
-    assert preallocates_kv_upfront(
-        _card(1).model_copy(update={"placement": _backends("llama_server-cuda")})
+    # Resolved backend is the precise signal: a HYBRID card resolving to llama.cpp
+    # on a non-MLX node IS preallocating (the reviewer's bypass case); the same
+    # card resolving to mlx is NOT (grows KV lazily, no force-clamp).
+    assert shard_preallocates_kv_upfront(_shard(hybrid, "llama_cpp-cuda"))
+    assert not shard_preallocates_kv_upfront(_shard(hybrid, "mlx-metal"))
+    assert shard_preallocates_kv_upfront(_shard(_card(1), "llama_server-cuda"))
+    assert not shard_preallocates_kv_upfront(_shard(_card(1), "vllm-cuda"))
+    # Fallback when the backend is unresolved (node absent from telemetry): pinned
+    # gguf and unpinned llama.cpp-only cards are preallocating; mlx-capable is not.
+    assert shard_preallocates_kv_upfront(_shard(_card(1, gguf_file="m.gguf"), None))
+    assert shard_preallocates_kv_upfront(
+        _shard(_card(1).model_copy(update={"placement": _backends("llama_cpp-cuda")}), None)
     )
-    # MLX-capable card: NOT force-clamped (grows KV lazily on an mlx placement).
-    assert not preallocates_kv_upfront(_card(1))  # default mlx
-    assert not preallocates_kv_upfront(
-        _card(1).model_copy(update={"placement": _backends("mlx", "llama_cpp-cuda")})
-    )
-    # vLLM is excluded (clean startup error, discrete-VRAM only).
-    assert not preallocates_kv_upfront(
-        _card(1).model_copy(update={"placement": _backends("vllm-cuda")})
-    )
+    assert not shard_preallocates_kv_upfront(_shard(_card(1), None))  # default mlx
+    assert not shard_preallocates_kv_upfront(_shard(hybrid, None))  # mlx-capable
 
 
 def test_instance_limit_unpinned_gguf_non_vram_clamps_to_floor():

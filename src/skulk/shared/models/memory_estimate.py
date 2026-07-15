@@ -167,23 +167,30 @@ def gpu_working_set_ceiling(ram_total: Memory) -> Memory:
     return ram_total * GPU_WORKING_SET_FRACTION
 
 
-def preallocates_kv_upfront(model_card: ModelCard) -> bool:
-    """Whether the card's served engine allocates its whole KV cache up front.
+def shard_preallocates_kv_upfront(shard: ShardMetadata) -> bool:
+    """Whether the runner for THIS shard allocates its whole KV cache up front.
 
     llama.cpp / llama-server preallocate ``n_ctx`` of KV at load and OOM-KILL the
     node on overflow, so the served-context clamps and the worker fit-guard must
-    size to the real window for these. This covers a PINNED gguf card AND an
-    UNPINNED one (``gguf_file=None``, where the runner scans for a ``.gguf`` at
-    load): both preallocate. Detected via the gguf pin, or a ``compatible_backends``
-    set that targets ``llama_cpp`` / ``llama_server`` and NOT ``mlx`` -- an
-    mlx-capable card grows KV lazily on an mlx placement, so it must not be
-    force-clamped (that would regress MLX context). vLLM is excluded: it validates
-    its window against the KV pool at startup (a clean error, not an OOM-kill) and
-    runs only on discrete-VRAM nodes.
+    size to the real window for these; MLX grows KV lazily, so it must not be
+    force-clamped (that would regress MLX context).
+
+    Keys off the placement-RESOLVED backend (``shard.resolved_backend``, the engine
+    this shard actually runs on) when available, which is the precise per-placement
+    signal: a hybrid card that also allows MLX but resolves to ``llama_cpp`` on a
+    non-MLX node is correctly treated as preallocating, and the same card resolving
+    to ``mlx`` is not. It falls back to the card only when the backend is
+    unresolved (a node absent from the master's telemetry): the gguf pin, or a
+    ``compatible_backends`` set that targets llama.cpp and NOT mlx (so an UNPINNED
+    gguf card, where the runner scans for a ``.gguf`` at load, is still covered).
     """
-    if model_card.gguf_file:
+    resolved = shard.resolved_backend
+    if resolved is not None:
+        return resolved.startswith(("llama_cpp", "llama_server"))
+    card = shard.model_card
+    if card.gguf_file:
         return True
-    backends = model_card.placement.compatible_backends
+    backends = card.placement.compatible_backends
     targets_llama = any(
         tag.startswith(("llama_cpp", "llama_server")) for tag in backends
     )
@@ -268,6 +275,14 @@ def instance_context_token_limit(
         break
     if model_card is None:
         return None
+    # Whether this placement is served by a KV-preallocating engine (llama.cpp /
+    # llama-server), keyed off the resolved backend per shard. Gates the load-time
+    # OOM clamps below. All shards of an instance share the engine, so any shard
+    # that preallocates makes the instance preallocating.
+    served_preallocates = any(
+        shard_preallocates_kv_upfront(shard)
+        for shard in shard_assignments.runner_to_shard.values()
+    )
 
     whole_model_token_bytes = per_token_kv_bytes(model_card)
     if whole_model_token_bytes > 0:
@@ -302,7 +317,7 @@ def instance_context_token_limit(
     # ram_total-sized window could OOM the node on load. Keep gguf on non-VRAM
     # nodes at the budget floor; the memory-fit lift applies to discrete-VRAM (GPU)
     # nodes. ``node_vram`` membership is static per node, so this stays deterministic.
-    if preallocates_kv_upfront(model_card) and memory_limit is not None:
+    if served_preallocates and memory_limit is not None:
         hosting_nodes = shard_assignments.node_to_runner
         if not all(node_vram.get(node_id) is not None for node_id in hosting_nodes):
             memory_limit = min(memory_limit, KV_CONTEXT_BUDGET_TOKENS)
@@ -345,7 +360,7 @@ def instance_context_token_limit(
     # KV dtype (#584): the fit assumes fp16 KV (KV_DTYPE_BYTES); enabling KV-cache
     # quantization must feed the estimate the quantized bytes-per-token or this
     # ceiling would be sized against the wrong footprint.
-    if preallocates_kv_upfront(model_card) and memory_limit is None:
+    if served_preallocates and memory_limit is None:
         limit = (
             KV_CONTEXT_BUDGET_TOKENS
             if limit is None

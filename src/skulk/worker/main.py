@@ -25,7 +25,7 @@ from skulk.shared.models.memory_estimate import (
     UMA_GPU_OS_HEADROOM,
     estimate_shard_footprint,
     gpu_working_set_ceiling,
-    preallocates_kv_upfront,
+    shard_preallocates_kv_upfront,
 )
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -731,7 +731,7 @@ class Worker:
         kv_context = (
             context_token_limit
             if (
-                preallocates_kv_upfront(shard.model_card)
+                shard_preallocates_kv_upfront(shard)
                 and context_token_limit
                 and context_token_limit > 0
             )
