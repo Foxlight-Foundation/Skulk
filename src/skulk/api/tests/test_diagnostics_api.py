@@ -32,6 +32,7 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import NodeResources
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import StartWarmup, TaskId, TaskStatus
+from skulk.shared.types.telemetry import NodeTelemetry
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
 from skulk.shared.types.worker.runners import (
     RunnerId,
@@ -172,14 +173,24 @@ def test_node_diagnostics_warns_about_split_data_transports() -> None:
     local_node = NodeId("local-node")
     peer_node = NodeId("peer-node")
     now = datetime.now(tz=timezone.utc)
-    api.state = api.state.model_copy(
-        update={"last_seen": {local_node: now, peer_node: now}}
+    api.state = api.state.model_copy(update={"last_seen": {peer_node: now}})
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=local_node,
+            info=NodeResources(
+                backends=frozenset(),
+                participation="management",
+                data_transport="zenoh",
+            ),
+        ),
+        received_at=now,
     )
-    api._telemetry_view.node_resources.update(  # pyright: ignore[reportPrivateUsage]
-        {
-            local_node: NodeResources(data_transport="zenoh"),
-            peer_node: NodeResources(data_transport="gossipsub"),
-        }
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=peer_node,
+            info=NodeResources(data_transport="gossipsub"),
+        ),
+        received_at=now,
     )
     client = TestClient(api.app)
 

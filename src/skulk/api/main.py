@@ -3063,6 +3063,24 @@ class API:
         ]
         return max(limits) if limits else None
 
+    def _live_node_timestamps(self) -> dict[NodeId, datetime]:
+        """Return peer membership plus this API process when telemetry is live.
+
+        Replicated ``State.last_seen`` tracks peer activity and can omit the
+        local process, especially on ``--no-worker`` API nodes. Local telemetry
+        is positive evidence that this process is live, so include its latest
+        receipt for API-side health and resource filtering.
+
+        Returns:
+            Live-node timestamps suitable for telemetry filtering and health
+            derivation on this API process.
+        """
+        live = dict(self.state.last_seen)
+        local_seen = self._telemetry_view.last_liveness_receipt(self.node_id)
+        if local_seen is not None:
+            live[self.node_id] = local_seen
+        return live
+
     async def get_cluster_state(self) -> dict[str, object]:
         """Cluster state for ``GET /state``: event-sourced ``State`` plus live
         telemetry (per-node memory, system profile, and resources) merged back in.
@@ -3081,7 +3099,7 @@ class API:
         There is no ``await`` here, so the comprehensions run atomically wrt
         those same-loop mutators.
         """
-        live = self.state.last_seen
+        live = self._live_node_timestamps()
         effective_downloads = self._telemetry_view.effective_downloads(
             self.state.downloads
         )
@@ -8489,7 +8507,7 @@ class API:
         if leak is not None:
             warnings.add(leak)
         fleet_data_transports = live_data_transports(
-            live_nodes=self.state.last_seen,
+            live_nodes=self._live_node_timestamps(),
             node_resources=self._telemetry_view.node_resources,
         )
         if len(fleet_data_transports) > 1:

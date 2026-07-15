@@ -1128,7 +1128,8 @@ its placement `backends`, declared `participation`, and resolved `dataTransport`
 the error-level `data_transport_mismatch` reason in every `nodeHealth` entry.
 Mixed DATA transports are unsupported: the signal is diagnostic and does not
 bridge traffic. Configure and restart every node uniformly before serving
-inference.
+inference. The API includes its own node after receiving local telemetry even
+when replicated peer membership does not carry a self-entry.
 
 Operational note:
 

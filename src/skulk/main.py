@@ -86,7 +86,7 @@ def _derive_zenoh_namespace(raw: str) -> str:
 # the OVERRIDE_VERSION_ENV_VAR name used to build the libp2p private-network key.
 _LIBP2P_NETWORK_VERSION = "v0.0.1"
 _LIBP2P_NAMESPACE_ENV_VAR = "SKULK_LIBP2P_NAMESPACE"
-_NODE_RESOURCES_POLL_INTERVAL_SECONDS = 60.0
+_NODE_RESOURCES_POLL_INTERVAL_SECONDS = 2.0
 
 
 async def _publish_management_node_resources(
@@ -106,7 +106,9 @@ async def _publish_management_node_resources(
         node_id: Stable identity attached to the telemetry reading.
         data_transport: DATA transport already resolved during node startup.
         telemetry_sender: Existing latest-value telemetry admission handle.
-        poll_interval: Seconds between repeated advertisements for late joiners.
+        poll_interval: Seconds between repeated advertisements for late joiners
+            and fallback liveness. The default matches the worker heartbeat
+            cadence and stays below the node-health warning threshold.
 
     Side effects:
         Publishes one immediate and then periodic ``NodeResources`` reading until

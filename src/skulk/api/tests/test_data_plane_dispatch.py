@@ -30,6 +30,7 @@ from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadComma
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import IndexedEvent
 from skulk.shared.types.profiling import NodeResources
+from skulk.shared.types.telemetry import NodeTelemetry
 from skulk.utils.channels import channel
 
 
@@ -81,22 +82,33 @@ async def test_state_surfaces_split_data_transport_health() -> None:
     local_node = NodeId("api-node")
     peer_node = NodeId("peer-node")
     now = datetime.now(tz=timezone.utc)
-    api.state = api.state.model_copy(
-        update={"last_seen": {local_node: now, peer_node: now}}
+    # Replicated membership tracks the peer but can omit the local API process.
+    api.state = api.state.model_copy(update={"last_seen": {peer_node: now}})
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=local_node,
+            info=NodeResources(
+                backends=frozenset(),
+                participation="management",
+                data_transport="zenoh",
+            ),
+        ),
+        received_at=now,
     )
-    api._telemetry_view.node_resources.update(  # pyright: ignore[reportPrivateUsage]
-        {
-            local_node: NodeResources(data_transport="zenoh"),
-            peer_node: NodeResources(data_transport="gossipsub"),
-        }
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=peer_node,
+            info=NodeResources(data_transport="gossipsub"),
+        ),
+        received_at=now,
     )
 
     payload = await api.get_cluster_state()
 
     assert payload["nodeResources"] == {
         "api-node": {
-            "backends": ["mlx"],
-            "participation": "full",
+            "backends": [],
+            "participation": "management",
             "dataTransport": "zenoh",
         },
         "peer-node": {
