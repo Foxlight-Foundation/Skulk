@@ -401,6 +401,50 @@ async def test_vision_media_accepts_sparse_new_index_with_cached_image() -> None
 
 
 @pytest.mark.asyncio
+async def test_accepted_vision_media_ignores_late_duplicate_frames() -> None:
+    worker, packet_sender, _ = _worker_with_vision_transport()
+    command_id = CommandId("already-running")
+    probe_command_id = CommandId("ingress-probe")
+    payload = b"aGVsbG8="
+    worker._vision_media_accepted.add(command_id)  # pyright: ignore[reportPrivateUsage]
+    completion = VisionMediaPacket(
+        source_node=NodeId("api-node"),
+        target_node=NodeId("worker-node"),
+        command_id=command_id,
+        model=ModelId("org/vlm"),
+        sequence=2,
+        kind="completed",
+        total_chunks=1,
+        image_count=1,
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(worker._vision_media_packet_ingress)  # pyright: ignore[reportPrivateUsage]
+        await packet_sender.send(_open(command_id, 1))
+        await packet_sender.send(
+            _packet(
+                command_id=command_id,
+                sequence=1,
+                data=payload,
+                image_index=0,
+                total_chunks=1,
+            )
+        )
+        await packet_sender.send(completion)
+        await packet_sender.send(_open(probe_command_id, 1))
+        while probe_command_id not in worker._vision_media_pending_since:  # pyright: ignore[reportPrivateUsage]
+            await anyio.sleep(0)
+        task_group.cancel_scope.cancel()
+
+    assert command_id not in worker._vision_media_pending_since  # pyright: ignore[reportPrivateUsage]
+    assert command_id not in worker._vision_media_opened  # pyright: ignore[reportPrivateUsage]
+    assert command_id not in worker._vision_media_chunks  # pyright: ignore[reportPrivateUsage]
+    assert command_id not in worker._vision_media_completed  # pyright: ignore[reportPrivateUsage]
+    assert command_id not in worker._vision_media_verified  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
 async def test_vision_media_acknowledgement_can_retry_after_send_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

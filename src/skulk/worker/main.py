@@ -1028,7 +1028,10 @@ class Worker:
                         continue
                     self._clear_vision_media(command_id)
                     continue
-                if command_id in self._vision_media_verified:
+                if (
+                    command_id in self._vision_media_verified
+                    or command_id in self._vision_media_accepted
+                ):
                     # The complete verified payload is immutable; late duplicate
                     # network frames cannot reopen or replace it.
                     continue
