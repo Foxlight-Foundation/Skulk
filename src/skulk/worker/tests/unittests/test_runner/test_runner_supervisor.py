@@ -312,6 +312,108 @@ async def test_emit_stamps_owner_node_on_every_lifecycle_frame() -> None:
 
 
 @pytest.mark.asyncio
+async def test_only_rank_zero_emits_multi_rank_data_lifecycle() -> None:
+    """A non-output rank cannot terminate a remote stream before rank zero."""
+
+    from skulk.shared.types.chunks import DataChunk
+
+    data_sender, data_receiver = channel[DataChunk]()
+    event_sender, _ = channel[Event]()
+    model_id = ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit")
+    rank_zero_bound = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-multi-rank"),
+        model_id=model_id,
+        runner_id=RunnerId("runner-zero"),
+        node_id=NodeId("node-zero"),
+    )
+    rank_one_bound = BoundInstance(
+        instance=rank_zero_bound.instance,
+        bound_runner_id=RunnerId("other_runner"),
+        bound_node_id=NodeId("other_node"),
+    )
+
+    def supervisor(bound_instance: BoundInstance) -> RunnerSupervisor:
+        task_sender, _ = mp_channel[Task]()
+        cancel_sender, _ = mp_channel[TaskId]()
+        _, event_receiver = mp_channel[Event]()
+        _, diagnostic_receiver = mp_channel[RunnerDiagnosticUpdate]()
+        return RunnerSupervisor(
+            shard_metadata=bound_instance.bound_shard,
+            bound_instance=bound_instance,
+            runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+            initialize_timeout=400,
+            _ev_recv=event_receiver,
+            _diag_recv=diagnostic_receiver,
+            _task_sender=task_sender,
+            _event_sender=event_sender,
+            _cancel_sender=cancel_sender,
+            _data_sender=data_sender,
+        )
+
+    rank_zero = supervisor(rank_zero_bound)
+    rank_one = supervisor(rank_one_bound)
+    command_id = CommandId("cmd-multi-rank")
+    owner_node = NodeId("remote-api-owner")
+
+    def generation_task(task_id: str, bound: BoundInstance) -> TextGeneration:
+        return TextGeneration(
+            task_id=TaskId(task_id),
+            instance_id=bound.instance.instance_id,
+            command_id=command_id,
+            owner_node=owner_node,
+            task_params=TextGenerationTaskParams(
+                model=model_id,
+                input=[InputMessage(role="user", content="hi")],
+                stream=True,
+            ),
+        )
+
+    rank_zero_task = generation_task("task-zero", rank_zero_bound)
+    rank_one_task = generation_task("task-one", rank_one_bound)
+    rank_zero._command_owner[command_id] = owner_node  # pyright: ignore[reportPrivateUsage]
+
+    await rank_one._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(
+            command_id=command_id,
+            chunk=TokenChunk(
+                model=model_id,
+                text="ignored",
+                token_id=0,
+                usage=None,
+                finish_reason=None,
+            ),
+        )
+    )
+    await rank_one._finish_data_stream(  # pyright: ignore[reportPrivateUsage]
+        rank_one_task, TaskStatus.Complete
+    )
+    await rank_zero._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(
+            command_id=command_id,
+            chunk=TokenChunk(
+                model=model_id,
+                text="blue",
+                token_id=0,
+                usage=None,
+                finish_reason=None,
+            ),
+        )
+    )
+    await rank_zero._finish_data_stream(  # pyright: ignore[reportPrivateUsage]
+        rank_zero_task, TaskStatus.Complete
+    )
+
+    frames = [data_receiver.receive_nowait() for _ in range(3)]
+    assert [frame.kind for frame in frames] == ["started", "chunk", "completed"]
+    assert [frame.sequence for frame in frames] == [0, 1, 2]
+    assert isinstance(frames[1].chunk, TokenChunk)
+    assert frames[1].chunk.text == "blue"
+    assert command_id not in rank_one._chunk_sequence  # pyright: ignore[reportPrivateUsage]
+    data_sender.close()
+    event_sender.close()
+
+
+@pytest.mark.asyncio
 async def test_check_runner_emits_errors_for_inflight_generation_and_realtime() -> None:
     event_sender, event_receiver = channel[Event]()
     task_sender, _ = mp_channel[Task]()

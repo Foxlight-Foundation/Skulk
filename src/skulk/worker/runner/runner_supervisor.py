@@ -288,6 +288,8 @@ class RunnerSupervisor:
         the event sender when no data sender is wired (tests / no DATA topic).
         """
         if isinstance(event, ChunkGenerated) and self._data_sender is not None:
+            if not self._owns_data_stream():
+                return
             if event.command_id not in self._stream_started:
                 await self._send_data_frame(event.command_id, "started")
             await self._send_data_frame(
@@ -326,17 +328,21 @@ class RunnerSupervisor:
     async def _finish_data_stream(self, task: Task, status: TaskStatus) -> None:
         """Emit a terminal lifecycle frame when task status closes the stream."""
 
-        if self._data_sender is None or not isinstance(
-            task,
-            (
-                TextGeneration,
-                ImageGeneration,
-                ImageEdits,
-                TextEmbedding,
-                SpeechSynthesis,
-                AudioTranscription,
-                RealtimeAudioTranscription,
-            ),
+        if (
+            self._data_sender is None
+            or not self._owns_data_stream()
+            or not isinstance(
+                task,
+                (
+                    TextGeneration,
+                    ImageGeneration,
+                    ImageEdits,
+                    TextEmbedding,
+                    SpeechSynthesis,
+                    AudioTranscription,
+                    RealtimeAudioTranscription,
+                ),
+            )
         ):
             return
         command_id = task.command_id
@@ -371,6 +377,17 @@ class RunnerSupervisor:
         self._command_owner.pop(command_id, None)
         self._stream_started.discard(command_id)
         self._stream_terminal.discard(command_id)
+
+    def _owns_data_stream(self) -> bool:
+        """Return whether this runner is the instance's sole DATA producer.
+
+        Distributed ranks execute the command in lockstep, but independent
+        network publishers cannot preserve cross-rank lifecycle order. A
+        non-output rank must therefore never race rank zero's payload with an
+        early terminal frame.
+        """
+
+        return self.shard_metadata.device_rank == 0
 
     async def run(self):
         self._record_milestone("process_start_requested")
@@ -485,6 +502,7 @@ class RunnerSupervisor:
                 ),
             )
             and task.owner_node is not None
+            and self._owns_data_stream()
         ):
             self._command_owner[task.command_id] = task.owner_node
         self._last_task_sent_at = _now_utc_iso()
