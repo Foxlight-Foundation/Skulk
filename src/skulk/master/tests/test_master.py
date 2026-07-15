@@ -88,6 +88,12 @@ async def test_master_never_emits_or_retains_vision_input_payloads() -> None:
         state_sync_sender=state_sync_sender,
         download_command_sender=download_sender,
     )
+    should_warn = master._should_warn_for_non_control_event  # pyright: ignore[reportPrivateUsage]
+    warning_origin = SystemId("warning-source")
+    assert should_warn(warning_origin, InputChunkReceived, now=100.0)
+    assert not should_warn(warning_origin, InputChunkReceived, now=101.0)
+    assert should_warn(warning_origin, ChunkGenerated, now=101.0)
+    assert should_warn(warning_origin, InputChunkReceived, now=160.0)
     command_id = CommandId("media-census")
     image_payload = "aW1hZ2UtcGF5bG9hZA=="
     indexed_after_legacy: GlobalForwarderEvent | None = None
@@ -105,7 +111,7 @@ async def test_master_never_emits_or_retains_vision_input_payloads() -> None:
                         chunk_index=0,
                         total_chunks=1,
                     )
-                ),
+                )
             )
         )
         await command_sender.send(
@@ -120,7 +126,7 @@ async def test_master_never_emits_or_retains_vision_input_payloads() -> None:
                         total_chunks=1,
                         audio_sha256="0" * 64,
                     )
-                ),
+                )
             )
         )
         await local_event_sender.send(

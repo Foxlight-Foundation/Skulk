@@ -135,6 +135,8 @@ REPLAY_TAIL_RETENTION_EVENTS = SNAPSHOT_EVENT_CADENCE
 EVENT_LOG_GROWTH_WINDOW_SECONDS = 60.0
 EVENT_LOG_IDLE_GROWTH_WARNING_EVENTS_PER_MINUTE = 60.0
 EVENT_LOG_GROWTH_WARNING_COOLDOWN_SECONDS = 300.0
+NON_CONTROL_EVENT_WARNING_COOLDOWN_SECONDS = 60.0
+NON_CONTROL_EVENT_WARNING_KEY_LIMIT = 256
 
 
 @final
@@ -541,6 +543,9 @@ class Master:
         self._active_replay_next_idx: int | None = None
         self._active_replay_end_idx: int | None = None
         self._event_log_growth_monitor = EventLogGrowthMonitor()
+        self._non_control_event_warning_times: dict[
+            tuple[SystemId, type[Event]], float
+        ] = {}
         # Nodes with an active dedicated-heartbeat gap warning. Tracking the
         # transition makes a 10-second planning loop emit one warning and one
         # recovery message instead of repeating the same warning indefinitely.
@@ -581,6 +586,36 @@ class Master:
         """Return durable outcomes overlaid with live download telemetry."""
 
         return self._telemetry_view.effective_downloads(self.state.downloads)
+
+    def _should_warn_for_non_control_event(
+        self,
+        origin: SystemId,
+        event_type: type[Event],
+        *,
+        now: float,
+    ) -> bool:
+        """Rate-limit rejected-event warnings without weakening fail-closed ingest."""
+
+        key = (origin, event_type)
+        last_warning_at = self._non_control_event_warning_times.get(key)
+        if (
+            last_warning_at is not None
+            and now - last_warning_at < NON_CONTROL_EVENT_WARNING_COOLDOWN_SECONDS
+        ):
+            return False
+
+        if (
+            key not in self._non_control_event_warning_times
+            and len(self._non_control_event_warning_times)
+            >= NON_CONTROL_EVENT_WARNING_KEY_LIMIT
+        ):
+            oldest_key = min(
+                self._non_control_event_warning_times,
+                key=self._non_control_event_warning_times.__getitem__,
+            )
+            self._non_control_event_warning_times.pop(oldest_key)
+        self._non_control_event_warning_times[key] = now
+        return True
 
     def _apply_indexed_event(self, indexed: IndexedEvent) -> None:
         """Apply one durable event and synchronize the master's telemetry view."""
@@ -1711,10 +1746,15 @@ class Master:
                 if local_event.session != self.session_id:
                     continue
                 if not is_persistable_control_event(local_event.event):
-                    logger.warning(
-                        "Rejected non-control event before ordering/indexing: "
-                        f"{type(local_event.event).__name__}"
-                    )
+                    if self._should_warn_for_non_control_event(
+                        local_event.origin,
+                        type(local_event.event),
+                        now=time.monotonic(),
+                    ):
+                        logger.warning(
+                            "Rejected non-control event before ordering/indexing: "
+                            f"{type(local_event.event).__name__}"
+                        )
                     self._multi_buffer.skip(
                         local_event.origin_idx, local_event.origin
                     )

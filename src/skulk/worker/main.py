@@ -60,6 +60,7 @@ from skulk.shared.types.events import (
     NodeDownloadProgress,
     NodeGatheredInfo,
     StagedModelEvicted,
+    StateSnapshotHydrated,
     TaskCreated,
     TaskDeleted,
     TaskFailed,
@@ -1546,6 +1547,22 @@ class Worker:
         self._speech_media_pending_bytes.pop(command_id, None)
         self._speech_media_pending_since.pop(command_id, None)
 
+    def _track_pending_transcription_media(
+        self, task: AudioTranscription
+    ) -> None:
+        """Start the media deadline for one active local batch STT task."""
+
+        instance = self.state.instances.get(task.instance_id)
+        if (
+            task.task_status in {TaskStatus.Pending, TaskStatus.Running}
+            and task.task_params.total_input_chunks > 0
+            and instance is not None
+            and self.node_id in instance.shard_assignments.node_to_runner
+        ):
+            self._speech_media_pending_since.setdefault(
+                task.command_id, time.monotonic()
+            )
+
     async def _fail_speech_media_task(
         self, task: SpeechSynthesis | AudioTranscription, message: str
     ) -> None:
@@ -1783,19 +1800,18 @@ class Worker:
                 if isinstance(event, TaskCreated) and isinstance(
                     event.task, AudioTranscription
                 ):
-                    instance = self.state.instances.get(event.task.instance_id)
-                    if (
-                        event.task.task_params.total_input_chunks > 0
-                        and instance is not None
-                        and self.node_id in instance.shard_assignments.node_to_runner
-                    ):
-                        # Batch STT is deliberately task-first: the API can only
-                        # address media after authoritative placement. Start the
-                        # deadline from that placement event so an API failure
-                        # before packet zero cannot leave a permanent pending task.
-                        self._speech_media_pending_since.setdefault(
-                            event.task.command_id, time.monotonic()
-                        )
+                    # Batch STT is deliberately task-first: the API can only
+                    # address media after authoritative placement. Start the
+                    # deadline from that placement event so an API failure
+                    # before packet zero cannot leave a permanent pending task.
+                    self._track_pending_transcription_media(event.task)
+                elif isinstance(event, StateSnapshotHydrated):
+                    # Snapshot bootstrap bypasses the live TaskCreated branch.
+                    # Rebuild request-local deadlines so a restarted worker still
+                    # terminates an orphaned task when its media never arrives.
+                    for task in self.state.tasks.values():
+                        if isinstance(task, AudioTranscription):
+                            self._track_pending_transcription_media(task)
 
                 if (
                     realtime_cleanup_cmd_id := _realtime_input_cleanup_command_id(

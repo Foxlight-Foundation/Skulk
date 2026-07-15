@@ -21,6 +21,7 @@ from skulk.shared.types.events import (
     Event,
     IndexedEvent,
     NodeGatheredInfo,
+    StateSnapshotHydrated,
     TaskCreated,
     TaskFailed,
 )
@@ -235,6 +236,65 @@ async def test_speech_media_janitor_fails_placed_stt_before_first_packet(
     assert failure.task_id == task.task_id
     assert failure.error_type == "invalid_transcription_audio"
     assert task.command_id not in worker._speech_media_pending_since  # pyright: ignore[reportPrivateUsage]
+    indexed_event_sender.close()
+    event_sender.close()
+    command_sender.close()
+    download_sender.close()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_hydration_restores_pending_stt_media_deadline() -> None:
+    """A restarted worker must still expire a task whose media never arrives."""
+
+    worker_node = NodeId("speech-worker")
+    instance_id = InstanceId("speech-instance")
+    runner_id = RunnerId("speech-runner")
+    model_id = ModelId("mlx-community/speech-test")
+    instance = get_mlx_ring_instance(
+        instance_id=instance_id,
+        model_id=model_id,
+        node_to_runner={worker_node: runner_id},
+        runner_to_shard={runner_id: get_pipeline_shard_metadata(model_id, 0, 1)},
+    )
+    task = AudioTranscription(
+        task_id=TaskId("speech-task"),
+        command_id=CommandId("speech-command"),
+        owner_node=NodeId("api-node"),
+        instance_id=instance_id,
+        task_params=AudioTranscriptionTaskParams(
+            model=model_id,
+            total_input_chunks=1,
+            audio_sha256="abc123",
+        ),
+    )
+    snapshot = State(
+        last_event_applied_idx=0,
+        instances={instance_id: instance},
+        tasks={task.task_id: task},
+    )
+    indexed_event_sender, indexed_event_receiver = channel[IndexedEvent]()
+    event_sender, _ = channel[Event]()
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    worker = Worker(
+        node_id=worker_node,
+        event_receiver=indexed_event_receiver,
+        event_sender=event_sender,
+        command_sender=command_sender,
+        download_command_sender=download_sender,
+    )
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(worker._event_applier)  # pyright: ignore[reportPrivateUsage]
+        await indexed_event_sender.send(
+            IndexedEvent(idx=0, event=StateSnapshotHydrated(state=snapshot))
+        )
+        with anyio.fail_after(2):
+            while task.command_id not in worker._speech_media_pending_since:  # pyright: ignore[reportPrivateUsage]
+                await anyio.sleep(0)
+        task_group.cancel_scope.cancel()
+
+    assert task.command_id in worker._speech_media_pending_since  # pyright: ignore[reportPrivateUsage]
     indexed_event_sender.close()
     event_sender.close()
     command_sender.close()
