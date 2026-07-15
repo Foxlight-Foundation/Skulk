@@ -485,6 +485,7 @@
   "performance.col.ttftP50": "TTFT p50 (s)",
   "performance.col.ttftP90": "TTFT p90 (s)",
   "performance.empty": "No performance envelopes yet. Serve some requests and the fabric will start measuring its throughput-vs-concurrency curve per hardware, model, and engine.",
+  "performance.loadFailed": "Could not load performance envelopes.",
   "performance.nodeUnreachable": "Unreachable",
   "observability.traceWaterfall.ariaLabel": "Trace waterfall",
   "observability.traceWaterfall.clusterTitleMultipleCategories": "{count} events · {duration} total · {categoryCount} categories: {categories}",

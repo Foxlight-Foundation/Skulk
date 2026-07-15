@@ -127,6 +127,23 @@ async def test_tap_records_error_outcome() -> None:
     assert bucket.success_count == 0
 
 
+async def test_cluster_fanout_reports_local_first_and_peer_failure() -> None:
+    api = _build_api("local-node")
+
+    async def _fake_peers(fail_fast: bool = False) -> dict[str, str]:
+        # An unreachable peer (discard port) exercises the ok=false failure path.
+        return {"peer-1": "http://127.0.0.1:9"}
+
+    object.__setattr__(api, "_reachable_peer_api_urls", _fake_peers)
+    result = await api.get_cluster_performance_envelopes()
+
+    assert result.nodes[0].node_id == "local-node"
+    assert result.nodes[0].ok
+    peer = next(n for n in result.nodes if n.node_id == "peer-1")
+    assert not peer.ok
+    assert peer.error
+
+
 async def _one_stream(chunks: list[Any]) -> AsyncGenerator[Any, None]:
     for chunk in chunks:
         yield chunk

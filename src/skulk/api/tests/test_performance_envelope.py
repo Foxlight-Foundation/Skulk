@@ -68,8 +68,8 @@ def test_concurrency_clamped_to_one() -> None:
 def test_curve_and_knee_across_concurrency_levels() -> None:
     reg = _registry()
     # Aggregate throughput rises then plateaus: per-request tps 40 at c=1 (agg
-    # 40), 30 at c=2 (agg 60), 15 at c=4 (agg 60). Knee is c=2 (peak aggregate,
-    # ties broken toward the observed max).
+    # 40), 30 at c=2 (agg 60), 15 at c=4 (agg 60). Knee is c=2: argmax over
+    # ascending concurrency returns the LOWEST concurrency that hits the peak.
     for _ in range(5):
         reg.record(hardware_class="hw", model_id="m", backend="vllm-cuda",
                    quantization="", concurrency=1, ttft_seconds=0.2,

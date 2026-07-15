@@ -3678,7 +3678,10 @@ class API:
         # Observe-only performance envelope (adaptive concurrency, Phase 0): a
         # plain passthrough that records one throughput/latency observation per
         # completed generation. Always on, fully guarded, no behavior change.
-        chunk_stream = self._tap_performance_envelope(resolved_model, chunk_stream)
+        # Use the POST-transform model: chat middleware may rewrite/route
+        # task_params.model, and the observation must be attributed to the model
+        # actually dispatched, not the caller's requested one.
+        chunk_stream = self._tap_performance_envelope(task_params.model, chunk_stream)
         if self._extensions is not None and self._extensions.has_chat_middleware:
             chunk_stream = self._extensions.tap_chat_stream(
                 self._extension_context, task_params, chunk_stream
@@ -8658,6 +8661,27 @@ class API:
                             error=f"{exc.__class__.__name__}: {exc}",
                         )
                     )
+        # A topology member with no reachable API route must appear as an
+        # explicit failure rather than vanish, matching get_cluster_diagnostics
+        # and this endpoint's documented contract (an overlay-joined node whose
+        # advertised addresses its peers cannot route otherwise has no
+        # observability presence at all).
+        reported = {entry.node_id for entry in nodes}
+        for topology_node_id in self.state.topology.list_nodes():
+            normalized = str(topology_node_id)
+            if normalized in reported:
+                continue
+            nodes.append(
+                NodePerformanceEnvelopes(
+                    node_id=normalized,
+                    url=None,
+                    ok=False,
+                    error=(
+                        "no reachable API route among the node's advertised "
+                        "addresses"
+                    ),
+                )
+            )
         return ClusterPerformanceEnvelopes(
             generated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             nodes=nodes,

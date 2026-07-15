@@ -1181,8 +1181,8 @@ Behavior notes:
   performance envelopes: for each `(hardware class, model, engine+backend,
   quantization)` it has served, a throughput-and-latency-versus-concurrency
   curve. Each envelope lists per-concurrency buckets (request count, mean/p50
-  decode tokens/second, aggregate decode tokens/second, p50/p90 time-to-first
-  -token) and a simple `kneeConcurrency` estimate: the concurrency past which
+  decode tokens/second, aggregate decode tokens/second, p50/p90
+  time-to-first-token) and a simple `kneeConcurrency` estimate: the concurrency past which
   aggregate throughput stops rising. It is data only (no serving behavior is
   driven from it), kept in bounded memory, and never touches State, the event
   log, or the telemetry gossip plane. Concurrency is measured from this API

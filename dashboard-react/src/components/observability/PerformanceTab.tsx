@@ -178,12 +178,23 @@ export function PerformanceTab() {
   const { t } = useSkulkTranslation();
   // Poll while the tab is mounted; the panel unmounts inactive tabs, so this
   // stops when the operator switches away.
-  const { data, isLoading } = useGetClusterPerformanceEnvelopesQuery(undefined, {
+  const { data, isLoading, isError } = useGetClusterPerformanceEnvelopesQuery(undefined, {
     pollingInterval: 5000,
   });
 
   if (isLoading) {
     return <CenteredSpinner />;
+  }
+
+  // A failed fetch must not masquerade as "no data yet"; surface it distinctly.
+  if (isError) {
+    return (
+      <Wrap>
+        <Empty>
+          {t('performance.loadFailed', 'Could not load performance envelopes.')}
+        </Empty>
+      </Wrap>
+    );
   }
 
   const nodesWithData = (data?.nodes ?? []).filter(

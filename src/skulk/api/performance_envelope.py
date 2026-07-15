@@ -10,8 +10,9 @@ would target. This module is the data asset. It changes no behavior.
 The registry lives on the API node and is fed one observation per completed
 generation by a stream tap (mirroring the field-telemetry tap). Each
 observation carries the envelope key, the in-flight concurrency the instance was
-already serving when this request was admitted, and the request's time-to-first
--token and steady-state decode rate. The registry keeps a bounded reservoir of
+already serving when this request was admitted, and the request's
+time-to-first-token and steady-state decode rate. The registry keeps a bounded
+reservoir of
 recent samples per concurrency bucket and, on read, computes summary statistics
 and a simple knee estimate.
 
@@ -55,7 +56,8 @@ class ConcurrencyBucketSummary(CamelCaseModel):
     Attributes:
         concurrency: In-flight requests the instance was already serving when a
             request in this bucket was admitted (1 for the single-stream engines).
-        request_count: Observations folded into this bucket's reservoir.
+        request_count: Observations recorded in this bucket across ALL outcomes
+            (the latency/throughput reservoirs below hold successes only).
         success_count: Observations that finished cleanly.
         error_count: Observations that ended in a generation error.
         ttft_seconds_p50: Median time-to-first-token over the reservoir.
@@ -154,7 +156,7 @@ class ClusterPerformanceEnvelopes(CamelCaseModel):
 
 
 def _percentile(sorted_values: list[float], fraction: float) -> float:
-    """Nearest-rank percentile of an already-sorted, non-empty list."""
+    """Linear-interpolation percentile of an already-sorted, non-empty list."""
     if not sorted_values:
         raise ValueError("percentile of empty sequence")
     if len(sorted_values) == 1:
