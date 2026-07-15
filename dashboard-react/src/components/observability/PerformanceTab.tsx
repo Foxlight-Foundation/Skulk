@@ -221,7 +221,8 @@ export function PerformanceTab() {
           <NodeHeading>{node.nodeId}</NodeHeading>
           {!node.ok ? (
             <Failure>
-              {t('performance.nodeUnreachable', 'Unreachable')}: {node.error ?? 'unknown'}
+              {t('performance.nodeUnreachable', 'Unreachable')}:{' '}
+              {node.error ?? t('common.unknownLower', 'unknown')}
             </Failure>
           ) : (
             (node.report?.envelopes ?? []).map((envelope) => (

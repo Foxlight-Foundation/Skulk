@@ -9527,6 +9527,15 @@ class API:
         self._envelope_inflight[key] = concurrency
         started = time.monotonic()
         released = False
+        # Resolve the serving context ONCE at dispatch and reuse it when
+        # recording, so a mid-stream placement change (a same-model replica added
+        # or removed while this response is still open) cannot drop the sample or
+        # attribute it to a different instance's hardware/backend. Guarded: a
+        # resolution failure must never break the response.
+        try:
+            envelope_context = self._resolve_envelope_context(model_id)
+        except Exception:  # noqa: BLE001 - observability must not propagate
+            envelope_context = None
 
         def _release() -> None:
             # Idempotent single decrement, called from the generator finally
@@ -9570,9 +9579,8 @@ class API:
             finally:
                 try:
                     _release()
-                    context = self._resolve_envelope_context(model_id)
-                    if context is not None and outcome != "cancelled":
-                        node_hardware, backend, quantization = context
+                    if envelope_context is not None and outcome != "cancelled":
+                        node_hardware, backend, quantization = envelope_context
                         self._performance_envelopes.record(
                             hardware_class=node_hardware,
                             model_id=key,
@@ -9596,8 +9604,12 @@ class API:
         # Safety net: if the response is discarded before the body ever iterates
         # (client disconnect after dispatch, before the first SSE payload), the
         # generator's finally never runs, so decrement on GC instead. Idempotent
-        # with the finally, so the common path decrements exactly once.
-        weakref.finalize(recording, _release)
+        # with the finally, so the common path decrements exactly once. Guarded so
+        # observability never breaks the response.
+        try:
+            weakref.finalize(recording, _release)
+        except Exception as exc:  # noqa: BLE001 - observability must not propagate
+            logger.debug(f"performance-envelope finalizer setup failed: {exc}")
         return recording
 
     async def get_telemetry_preview(self) -> JSONResponse:
