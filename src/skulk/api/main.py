@@ -9443,20 +9443,21 @@ class API:
         instance spans hardware; rank 0 is the deterministic representative) and
         that shard's resolved backend and card quantization. Returns ``None`` when
         no instance or node telemetry is available, so an observation is skipped
-        rather than recorded against a wrong key. Assumes a single active
-        instance per model on this API node; replica-aware attribution is a
-        follow-on, tracked with the engine-reported batch-size accuracy work.
+        rather than recorded against a wrong key. Records only when EXACTLY one
+        instance serves the model: with replicas, attributing to an arbitrary one
+        could mis-key hardware/backend/quantization, so skip until replica-aware
+        attribution lands (the engine-reported batch-size accuracy follow-on).
         """
-        instance = next(
-            (
-                candidate
-                for candidate in self.state.instances.values()
-                if candidate.shard_assignments.model_id == model_id
-            ),
-            None,
-        )
-        if instance is None:
+        matching = [
+            candidate
+            for candidate in self.state.instances.values()
+            if candidate.shard_assignments.model_id == model_id
+        ]
+        if len(matching) != 1:
+            # Zero: not served here. More than one: replicas, and an arbitrary
+            # pick could corrupt the envelope key. Skip rather than mis-attribute.
             return None
+        instance = matching[0]
         rank_zero: tuple[RunnerId, ShardMetadata] | None = None
         for runner_id, shard in instance.shard_assignments.runner_to_shard.items():
             if rank_zero is None or shard.device_rank < rank_zero[1].device_rank:
