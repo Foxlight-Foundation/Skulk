@@ -250,11 +250,10 @@ def _gen_params() -> "TextGenerationTaskParams":
 
 def _bare_runner(max_concurrency: int = 4) -> Any:
     runner: Any = VllmRunner.__new__(VllmRunner)
-    runner._status_lock = threading.Lock()
-    runner._cancel_lock = threading.Lock()
-    runner._inflight = 0
-    runner._max_concurrency = max_concurrency
-    runner._dispatch_permits = threading.Semaphore(max_concurrency)
+    # The concurrent-dispatch state (locks, in-flight counter, permit semaphore,
+    # thread-name prefix) is owned by ServedConcurrentDispatch; initialize it the
+    # same way the real __init__ does so these tests drive the shared loop.
+    runner._init_concurrent_dispatch(max_concurrency, "vllm-gen")
     runner.cancelled_tasks = set()
     runner.seen = set()
     runner.current_status = RunnerReady()
@@ -414,10 +413,7 @@ def test_main_broadcasts_ready_after_load_model() -> None:
     from skulk.utils.channels import mp_channel
 
     runner: Any = VllmRunner.__new__(VllmRunner)
-    runner._status_lock = threading.Lock()
-    runner._cancel_lock = threading.Lock()
-    runner._inflight = 0
-    runner._max_concurrency = 2
+    runner._init_concurrent_dispatch(2, "vllm-gen")
     runner.cancelled_tasks = set()
     runner.seen = set()
     runner.runner_id = RunnerId("vllm-test")
@@ -490,11 +486,7 @@ def test_main_backpressure_caps_submitted_generations() -> None:
     from skulk.utils.channels import mp_channel
 
     runner: Any = VllmRunner.__new__(VllmRunner)
-    runner._status_lock = threading.Lock()
-    runner._cancel_lock = threading.Lock()
-    runner._inflight = 0
-    runner._max_concurrency = 2
-    runner._dispatch_permits = threading.Semaphore(2)
+    runner._init_concurrent_dispatch(2, "vllm-gen")
     runner.cancelled_tasks = set()
     runner.seen = set()
     runner.runner_id = RunnerId("vllm-bp")
