@@ -558,9 +558,14 @@ def serving_n_ctx(context_token_limit: int | None, logits_all: bool) -> int:
     that fits the hosting node's working set after weights and overhead, capped at
     the model's own advertised maximum. Because placement admits a node against the
     SAME working set (VRAM on a GPU node) that this ceiling is derived from, loading
-    the whole KV cache at this window fits by construction -- and it is always at
-    least ``KV_CONTEXT_BUDGET_TOKENS`` (the admission floor placement enforces), so
-    it never serves a smaller window than before.
+    the whole KV cache at this window fits by construction. On an admitted node the
+    fit is >= ``KV_CONTEXT_BUDGET_TOKENS`` (the admission floor), so the window is
+    too -- EXCEPT when the model's own advertised max context is smaller, in which
+    case it serves that smaller max (a 4k-context model serves 4k). When the fit is
+    uncomputable for a gguf card (no ``num_key_value_heads``, missing memory, or an
+    RPC-donor shard), ``instance_context_token_limit`` clamps the stamped ceiling
+    back to the budget floor so this never preallocates a fictitious window and
+    OOMs the node on load.
 
     This replaces the previous fixed clamp to ``KV_CONTEXT_BUDGET_TOKENS`` (8192),
     which made a served model unusable for real-context work (a whole codebase does

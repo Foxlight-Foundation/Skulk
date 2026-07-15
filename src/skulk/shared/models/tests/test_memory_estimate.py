@@ -253,17 +253,48 @@ def test_instance_limit_gguf_not_capped_to_kv_budget():
     assert limit <= 131072  # never above the card's advertised max
 
 
-def test_instance_limit_gguf_no_info_returns_none():
-    # A bare GGUF card with neither node memory nor an advertised context has no
-    # memory-fit ceiling to compute, so the limit is None -- the runner's
-    # serving_n_ctx applies the KV_CONTEXT_BUDGET_TOKENS floor at load. GGUF is no
-    # longer special-cased to a fixed 8192 stamp; it matches every other engine's
-    # no-info behavior.
+def test_instance_limit_gguf_no_info_clamps_to_floor():
+    # A bare GGUF card with neither node memory nor an advertised context has an
+    # uncomputable memory fit. llama.cpp preallocates KV up front, so the stamp
+    # must be a SAFE preallocation size: it clamps to the KV_CONTEXT_BUDGET_TOKENS
+    # floor rather than None (which the runner would also floor) or the card max.
     card = _card(4, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf")
     assignments = _assignments(
         card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
     )
-    assert instance_context_token_limit(assignments, {}) is None
+    assert instance_context_token_limit(assignments, {}) == KV_CONTEXT_BUDGET_TOKENS
+
+
+def test_instance_limit_gguf_uncomputable_kv_cost_clamps_to_floor():
+    # A GGUF card with no num_key_value_heads => per_token_kv_bytes is 0 => the
+    # memory fit is uncomputable (memory_limit None) even with plenty of node
+    # memory and a large advertised context. Without the clamp the stamp would be
+    # the card's 128k max and llama.cpp would preallocate a fictitious window and
+    # OOM on load; instead it clamps to the budget floor. (P1 review catch, #585.)
+    card = _card(1, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
+        update={"context_length": 131072}
+    )
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    assert (
+        instance_context_token_limit(assignments, {NodeId("n0"): Memory.from_gb(64)})
+        == KV_CONTEXT_BUDGET_TOKENS
+    )
+
+
+def test_instance_limit_non_gguf_uncomputable_kv_cost_keeps_card_limit():
+    # The uncomputable-fit clamp is gguf-only: MLX grows KV lazily (no up-front
+    # preallocation), so a non-gguf card with unknown KV cost keeps its advertised
+    # max rather than being floored.
+    card = _card(1, n_layers=32).model_copy(update={"context_length": 131072})
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    assert (
+        instance_context_token_limit(assignments, {NodeId("n0"): Memory.from_gb(64)})
+        == 131072
+    )
 
 
 def test_instance_limit_gguf_below_budget_unchanged():

@@ -278,17 +278,35 @@ def instance_context_token_limit(
 
     # This ceiling is now the value the runner actually serves: a served engine
     # (llama.cpp / vLLM) loads its KV cache at ``serving_n_ctx(context_token_limit)``,
-    # i.e. this memory-fit window (capped at the card's max), not a fixed 8192. The
-    # ceiling and the runner window moved off the shared constant together, as the
-    # previous fixed-clamp comment anticipated: placement's per-node fit is derived
-    # from the same working set as this ceiling, so a node admitted at the
-    # KV_CONTEXT_BUDGET_TOKENS floor can hold the KV for this larger window (see
-    # filter_cycles_by_memory and serving_n_ctx). The old fixed 8192 clamp made
-    # served models unusable for real-context work (a codebase does not fit in 8192
-    # tokens); the memory/card fit is the honest ceiling, and it is always at least
-    # the admission floor so it never regresses below the old behavior.
+    # i.e. this memory-fit window, not a fixed 8192. The ceiling and the runner
+    # window moved off the shared constant together, as the previous fixed-clamp
+    # comment anticipated: placement's per-node fit is derived from the same working
+    # set as this ceiling, so a node admitted at the KV_CONTEXT_BUDGET_TOKENS floor
+    # can hold the KV for this larger window (see filter_cycles_by_memory and
+    # serving_n_ctx). The old fixed 8192 clamp made served models unusable for
+    # real-context work (a codebase does not fit in 8192 tokens). On an admitted
+    # node the memory fit is >= the floor, so the window is too -- EXCEPT when the
+    # model's own advertised max context is smaller, in which case it serves that
+    # smaller max (a 4k-context model serves 4k, not 8k).
+    #
+    # SAFETY (gguf, load-time OOM): llama.cpp allocates the whole KV cache up front,
+    # so its window MUST be a real memory-fit value. When the fit is uncomputable
+    # (the card has no ``num_key_value_heads`` so ``per_token_kv_bytes`` is 0, or
+    # node memory is missing, or an RPC-donor / CFG shard has no ``shard_fraction``),
+    # ``memory_limit`` is None and the branch above would fall back to the card's
+    # advertised max -- which for a 128k gguf would preallocate a fictitious window
+    # and OOM the node on load. In that uncomputable case only, clamp a gguf ceiling
+    # back to the budget floor (the old safety the fixed clamp used to provide for
+    # every gguf). vLLM/MLX are unaffected: MLX grows KV lazily, and vLLM validates
+    # its window against the KV pool at startup (a clean error, not an OOM-kill).
     #
     # KV dtype (#584): the fit assumes fp16 KV (KV_DTYPE_BYTES); enabling KV-cache
     # quantization must feed the estimate the quantized bytes-per-token or this
     # ceiling would be sized against the wrong footprint.
+    if model_card.gguf_file and memory_limit is None:
+        limit = (
+            KV_CONTEXT_BUDGET_TOKENS
+            if limit is None
+            else min(limit, KV_CONTEXT_BUDGET_TOKENS)
+        )
     return limit

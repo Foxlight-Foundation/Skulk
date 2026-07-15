@@ -15,6 +15,7 @@ from skulk.master.tests.conftest import (
     create_rdma_connection,
     create_socket_connection,
 )
+from skulk.shared.models.memory_estimate import KV_CONTEXT_BUDGET_TOKENS
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import CreateInstance, PlaceInstance
@@ -876,6 +877,37 @@ def test_legacy_instance_backfills_context_token_limit_from_card() -> None:
         # context_token_limit deliberately omitted (the legacy/None case)
     )
     assert instance.context_token_limit == 8192
+
+
+def test_legacy_gguf_instance_backfill_clamped_to_budget_floor() -> None:
+    # A legacy GGUF instance hydrated without a stamped ceiling must NOT backfill
+    # to the card's large advertised context: the served llama.cpp engine loads
+    # the whole KV cache up front from this value, so a 128k backfill would
+    # preallocate a fictitious window and OOM the node on load. The backfill is
+    # clamped to the KV_CONTEXT_BUDGET_TOKENS floor for gguf. (P1 review, #585.)
+    node_id = NodeId()
+    runner_id = RunnerId()
+    card = ModelCard(
+        model_id=ModelId("legacy-gguf"),
+        storage_size=Memory.from_gb(1),
+        n_layers=10,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        context_length=131072,
+        gguf_file="legacy-Q4_K_M.gguf",
+    )
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=ModelId("legacy-gguf"),
+            runner_to_shard={runner_id: _make_shard_metadata(card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+    )
+    assert instance.context_token_limit == KV_CONTEXT_BUDGET_TOKENS
 
 
 def test_create_instance_restamps_context_token_limit() -> None:
