@@ -307,10 +307,11 @@ def instance_context_token_limit(
         break
     if model_card is None:
         return None
-    # Whether this placement is served by a KV-preallocating engine (llama.cpp /
-    # llama-server), keyed off the resolved backend per shard. Gates the load-time
-    # OOM clamps below. All shards of an instance share the engine, so any shard
-    # that preallocates makes the instance preallocating.
+    # Whether this placement is served by a window-committing engine (llama.cpp /
+    # llama-server / vLLM, per shard_preallocates_kv_upfront), keyed off the resolved
+    # backend per shard. Gates the load-time OOM/spawn-failure clamps below. All
+    # shards of an instance share the engine, so any window-committing shard makes
+    # the instance window-committing.
     served_preallocates = any(
         shard_preallocates_kv_upfront(shard)
         for shard in shard_assignments.runner_to_shard.values()
@@ -339,21 +340,21 @@ def instance_context_token_limit(
                 node_tokens if memory_limit is None else min(memory_limit, node_tokens)
             )
 
-    # gguf served context is PREALLOCATED up front (serving_n_ctx), so it must fit
-    # the memory actually available at load. On a discrete-VRAM node the fit above
-    # is derived from VRAM -- the same pool placement admits against -- so the lift
-    # is safe (and validated on GPU hardware). On a node WITHOUT discrete VRAM the
-    # fit is derived from static ``ram_total`` (for cross-rank determinism), but
-    # load-time preallocation competes with live ``ram_available`` (which placement
+    # A window-committing served engine commits this context at load (serving_n_ctx),
+    # so it must fit the memory actually available then. On a discrete-VRAM node the
+    # fit above is derived from VRAM -- the same pool placement admits against -- so
+    # the lift is safe (and validated on GPU hardware). On a node WITHOUT discrete
+    # VRAM the fit is derived from static ``ram_total`` (for cross-rank determinism),
+    # but the load-time window competes with live ``ram_available`` (which placement
     # admits against and which can be far lower under memory pressure), so a
-    # ram_total-sized window could OOM the node on load. Keep gguf on non-VRAM
-    # nodes at the budget floor; the memory-fit lift applies to discrete-VRAM (GPU)
-    # nodes. ``node_vram`` membership is static per node, so this stays deterministic.
+    # ram_total-sized window could OOM the node on load. Keep such placements at the
+    # budget floor; the memory-fit lift applies to discrete-VRAM (GPU) nodes.
+    # ``node_vram`` membership is static per node, so this stays deterministic.
     if served_preallocates and memory_limit is not None:
-        # Keep the lift only where the served window is preallocated in DISCRETE
-        # VRAM (the pool placement admitted against): every hosting shard must both
-        # resolve to a GPU-offload backend (``-cuda`` / ``-rocm``; a ``-cpu`` / bare
-        # tag runs ``-ngl 0`` and preallocates in SYSTEM RAM, which competes with
+        # Keep the lift only where the served window lands in DISCRETE VRAM (the pool
+        # placement admitted against): every hosting shard must both resolve to a
+        # GPU-offload backend (``-cuda`` / ``-rocm``; a ``-cpu`` / bare tag does not
+        # offload to the GPU and commits the window in SYSTEM RAM, which competes with
         # live ram_available) AND run on a node reporting discrete VRAM (a
         # ram_total-derived fit likewise competes with ram_available). Anything
         # else -- CPU-resolved on a GPU node, a non-VRAM node, or an unresolved
@@ -376,9 +377,9 @@ def instance_context_token_limit(
     else:
         limit = min(memory_limit, card_limit)
 
-    # This ceiling is now the value the runner actually serves: the served
-    # llama.cpp engines (llama_cpp / llama_server, the runners that call
-    # ``serving_n_ctx``) load their KV cache up front at
+    # This ceiling is now the value the runner actually serves: the window-committing
+    # served engines (llama_cpp / llama_server / vllm, the runners that call
+    # ``serving_n_ctx``) commit their load-time context window at
     # ``serving_n_ctx(context_token_limit)``, i.e. this memory-fit window, not a
     # fixed 8192. The ceiling and the runner
     # window moved off the shared constant together, as the previous fixed-clamp
