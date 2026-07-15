@@ -40,6 +40,7 @@ from skulk.shared.types.events import (
     RunnerStatusUpdated,
     TaskAcknowledged,
     TaskDeleted,
+    TaskFailed,
     TaskStatusUpdated,
 )
 from skulk.shared.types.streaming import StreamFrameKind, is_terminal_stream_frame_kind
@@ -75,6 +76,7 @@ from skulk.worker.runner.bootstrap import (
     WEDGE_FAILURE_MARKER,
     entrypoint,
 )
+from skulk.worker.runner.image_models.output import is_primary_image_output_node
 
 PREFILL_TIMEOUT_SECONDS = 60
 DECODE_TIMEOUT_SECONDS = 5
@@ -288,6 +290,8 @@ class RunnerSupervisor:
         the event sender when no data sender is wired (tests / no DATA topic).
         """
         if isinstance(event, ChunkGenerated) and self._data_sender is not None:
+            if not self._owns_data_stream():
+                return
             if event.command_id not in self._stream_started:
                 await self._send_data_frame(event.command_id, "started")
             await self._send_data_frame(
@@ -326,17 +330,21 @@ class RunnerSupervisor:
     async def _finish_data_stream(self, task: Task, status: TaskStatus) -> None:
         """Emit a terminal lifecycle frame when task status closes the stream."""
 
-        if self._data_sender is None or not isinstance(
-            task,
-            (
-                TextGeneration,
-                ImageGeneration,
-                ImageEdits,
-                TextEmbedding,
-                SpeechSynthesis,
-                AudioTranscription,
-                RealtimeAudioTranscription,
-            ),
+        if (
+            self._data_sender is None
+            or not self._owns_data_stream()
+            or not isinstance(
+                task,
+                (
+                    TextGeneration,
+                    ImageGeneration,
+                    ImageEdits,
+                    TextEmbedding,
+                    SpeechSynthesis,
+                    AudioTranscription,
+                    RealtimeAudioTranscription,
+                ),
+            )
         ):
             return
         command_id = task.command_id
@@ -371,6 +379,20 @@ class RunnerSupervisor:
         self._command_owner.pop(command_id, None)
         self._stream_started.discard(command_id)
         self._stream_terminal.discard(command_id)
+
+    def _owns_data_stream(self) -> bool:
+        """Return whether this runner is the instance's sole DATA producer.
+
+        Distributed ranks execute the command in lockstep, but independent
+        network publishers cannot preserve cross-rank lifecycle order. Only
+        the runner that emits this model family's output may therefore publish
+        lifecycle or payload frames. Text-family runners emit on rank zero;
+        image runners emit on their primary terminal pipeline stage.
+        """
+
+        if self.bound_instance.is_image_model:
+            return is_primary_image_output_node(self.shard_metadata)
+        return self.shard_metadata.device_rank == 0
 
     async def run(self):
         self._record_milestone("process_start_requested")
@@ -485,6 +507,7 @@ class RunnerSupervisor:
                 ),
             )
             and task.owner_node is not None
+            and self._owns_data_stream()
         ):
             self._command_owner[task.command_id] = task.owner_node
         self._last_task_sent_at = _now_utc_iso()
@@ -703,19 +726,30 @@ class RunnerSupervisor:
                     RealtimeAudioTranscription,
                 ),
             ):
+                failure_message = f"Runner shutdown before completing command ({cause})"
                 with anyio.CancelScope(shield=True):
-                    await self._emit(
-                        ChunkGenerated(
-                            command_id=task.command_id,
-                            chunk=ErrorChunk(
-                                model=self.shard_metadata.model_card.model_id,
-                                error_message=(
-                                    "Runner shutdown before completing command "
-                                    f"({cause})"
-                                ),
-                            ),
+                    if self._data_sender is not None and not self._owns_data_stream():
+                        # A non-output rank must not become a competing DATA
+                        # publisher, but its death still invalidates the whole
+                        # distributed task. Fail it on the ordered control plane
+                        # so every owning API terminates the command promptly.
+                        await self._event_sender.send(
+                            TaskFailed(
+                                task_id=task.task_id,
+                                error_type="runner_terminated",
+                                error_message=failure_message,
+                            )
                         )
-                    )
+                    else:
+                        await self._emit(
+                            ChunkGenerated(
+                                command_id=task.command_id,
+                                chunk=ErrorChunk(
+                                    model=self.shard_metadata.model_card.model_id,
+                                    error_message=failure_message,
+                                ),
+                            )
+                        )
                 self._clear_data_stream(task.command_id)
 
         try:
