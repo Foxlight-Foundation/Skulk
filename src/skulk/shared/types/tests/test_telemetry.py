@@ -29,6 +29,7 @@ from skulk.shared.types.telemetry import (
 from skulk.shared.types.worker.downloads import (
     DownloadAttemptId,
     DownloadCompleted,
+    DownloadFailed,
     DownloadOngoing,
     DownloadPending,
     DownloadProgressData,
@@ -199,6 +200,37 @@ def test_pending_telemetry_can_establish_new_attempt_before_control_event() -> N
     view.record_download_event(NodeDownloadProgress(download_progress=pending))
 
     assert view.effective_downloads({})[node] == [pending]
+
+
+def test_legacy_terminal_replay_preserves_identified_live_attempt() -> None:
+    """An ambiguous legacy terminal cannot erase newer identified progress."""
+
+    node = NodeId("node-a")
+    shard = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=1)
+    attempt = DownloadAttemptId("attempt-current")
+    pending = DownloadPending(
+        node_id=node,
+        shard_metadata=shard,
+        attempt_id=attempt,
+    )
+    view = TelemetryView()
+    view.apply(NodeTelemetry(node_id=node, info=pending))
+
+    legacy_terminals = (
+        DownloadCompleted(
+            node_id=node,
+            shard_metadata=shard,
+            total=Memory.from_mb(100),
+        ),
+        DownloadFailed(
+            node_id=node,
+            shard_metadata=shard,
+            error_message="legacy failure",
+        ),
+    )
+    for terminal in legacy_terminals:
+        view.record_download_event(NodeDownloadProgress(download_progress=terminal))
+        assert view.effective_downloads({node: [terminal]})[node] == [pending]
 
 
 def test_heartbeat_and_fallback_receipts_remain_independent() -> None:

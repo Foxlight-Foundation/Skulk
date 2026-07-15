@@ -397,6 +397,11 @@ class TelemetryView:
             # emit it on the ordered event plane.
             return
         current_attempt = self._node_download_attempts.get(key)
+        if progress.attempt_id is None and current_attempt is not None:
+            # Legacy terminal events cannot be ordered against an identified
+            # live attempt. Preserve the explicit attempt rather than letting
+            # an ambiguous replay hide current progress.
+            return
         if (
             progress.attempt_id is not None
             and current_attempt is not None
