@@ -144,52 +144,49 @@ async def test_cluster_fanout_reports_local_first_and_peer_failure() -> None:
     assert peer.error
 
 
-async def test_concurrency_snapshot_reflects_in_flight() -> None:
-    import asyncio
-
+async def test_concurrency_incremented_eagerly_at_dispatch() -> None:
     api = _build_api()
     object.__setattr__(
         api, "_resolve_envelope_context", lambda _model: ("hw", "b", "")
     )
-    gate = asyncio.Event()
-
-    async def _blocking() -> AsyncGenerator[Any, None]:
-        yield _chunk("hi", None, None)
-        await gate.wait()
-        yield _chunk("", "stop", 10.0)
-
-    gen1 = api._tap_performance_envelope(ModelId("m"), _blocking())
-    task1 = asyncio.create_task(_drain(gen1))
-    # Let gen1 start (its balanced increment brings the counter to 1) and block.
-    await asyncio.sleep(0.05)
+    # Eager increment: a request admitted during the window before an earlier
+    # response iterates must still observe it, or concurrent bursts under-count.
+    gen1 = api._tap_performance_envelope(
+        ModelId("m"), _one_stream([_chunk("", "stop", 10.0)])
+    )
     assert api._envelope_inflight["m"] == 1
-    # gen2 dispatched WHILE gen1 is in flight: its eager snapshot must be 2.
     gen2 = api._tap_performance_envelope(
         ModelId("m"), _one_stream([_chunk("", "stop", 10.0)])
     )
-    await _drain(gen2)
-    gate.set()
-    await task1
+    assert api._envelope_inflight["m"] == 2
 
+    await _drain(gen1)
+    await _drain(gen2)
+    assert api._envelope_inflight.get("m", 0) == 0
     concurrencies = {
         b.concurrency
         for b in api._performance_envelopes.snapshot().envelopes[0].buckets
     }
     assert 2 in concurrencies
-    assert api._envelope_inflight.get("m", 0) == 0
 
 
 async def test_never_started_generation_does_not_leak_inflight() -> None:
+    import gc
+
     api = _build_api()
     object.__setattr__(
         api, "_resolve_envelope_context", lambda _model: ("hw", "b", "")
     )
-    # Closing a tap that never advanced into its body (client disconnect before
-    # the response iterates) must mutate nothing: no counter leak, no record.
     gen = api._tap_performance_envelope(
         ModelId("m"), _one_stream([_chunk("", "stop", 10.0)])
     )
-    await gen.aclose()
+    # Eager increment took effect at dispatch.
+    assert api._envelope_inflight["m"] == 1
+    # Discard the response without ever iterating (client disconnect before the
+    # first payload): the weakref finalizer must decrement on GC, so no leak and
+    # no bogus record.
+    del gen
+    gc.collect()
     assert api._envelope_inflight.get("m", 0) == 0
     assert api._performance_envelopes.snapshot().envelopes == []
 

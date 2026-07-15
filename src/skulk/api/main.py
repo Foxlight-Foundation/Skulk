@@ -10,6 +10,7 @@ import random
 import shutil
 import socket
 import time
+import weakref
 from collections.abc import (
     AsyncGenerator,
     AsyncIterator,
@@ -9508,26 +9509,41 @@ class API:
         """Record one performance-envelope observation per completed generation.
 
         Observe-only and fully guarded: any failure here disturbs neither the
-        stream nor the response. The concurrency VALUE recorded for this request
-        and the time-to-first-token clock are snapshotted EAGERLY here (at
-        dispatch, pure reads with no shared mutation) so they reflect admission
-        time rather than the first ``__anext__``. The shared ``_envelope_inflight``
-        counter, by contrast, is incremented and decremented BALANCED inside the
-        generator body: closing an async generator that never started does not run
-        its ``finally``, so an eager increment out here could strand the counter
-        forever (permanently inflating later observations) if the client
-        disconnects before the body iterates. An aborted stream (no terminal
-        chunk) is not recorded, matching the field-telemetry tap.
+        stream nor the response. The in-flight counter is incremented EAGERLY at
+        dispatch so a request admitted during the window before this response's
+        body starts iterating still sees it (a lazy, in-generator increment would
+        under-count concurrent bursts and corrupt the knee). The matching
+        decrement runs at most once, from the generator's ``finally`` on the
+        common path AND from a ``weakref.finalize`` safety net: closing an async
+        generator that never started does not run its ``finally``, so without the
+        finalizer a client that disconnects before the body iterates would strand
+        the counter forever. An aborted stream (no terminal chunk) is not
+        recorded, matching the field-telemetry tap.
         """
         key = str(model_id)
-        # Snapshot for THIS request's recorded bucket: current in-flight plus self.
+        # Eager increment: the concurrency this and later requests observe must
+        # include this one from the moment it is dispatched.
         concurrency = self._envelope_inflight.get(key, 0) + 1
+        self._envelope_inflight[key] = concurrency
         started = time.monotonic()
+        released = False
+
+        def _release() -> None:
+            # Idempotent single decrement, called from the generator finally
+            # (common path) or the finalizer (never-started path), whichever runs.
+            nonlocal released
+            if released:
+                return
+            released = True
+            remaining = self._envelope_inflight.get(key, 1) - 1
+            if remaining > 0:
+                self._envelope_inflight[key] = remaining
+            else:
+                # Drop the key at zero so a long-lived API node serving many
+                # distinct models does not accumulate idle entries.
+                self._envelope_inflight.pop(key, None)
 
         async def _recording() -> AsyncGenerator[_EnvelopeChunk, None]:
-            # Increment on first run and decrement in finally, always paired: a
-            # never-started generation mutates nothing, so the counter cannot leak.
-            self._envelope_inflight[key] = self._envelope_inflight.get(key, 0) + 1
             ttft_seconds: float | None = None
             decode_tps: float | None = None
             outcome: GenerationOutcome = "cancelled"
@@ -9550,13 +9566,7 @@ class API:
                     yield chunk
             finally:
                 try:
-                    remaining = self._envelope_inflight.get(key, 1) - 1
-                    if remaining > 0:
-                        self._envelope_inflight[key] = remaining
-                    else:
-                        # Drop the key at zero so a long-lived API node serving
-                        # many distinct models does not accumulate idle entries.
-                        self._envelope_inflight.pop(key, None)
+                    _release()
                     context = self._resolve_envelope_context(model_id)
                     if context is not None and outcome != "cancelled":
                         node_hardware, backend, quantization = context
@@ -9573,7 +9583,13 @@ class API:
                 except Exception as exc:  # noqa: BLE001 - must not propagate
                     logger.debug(f"performance-envelope record failed: {exc}")
 
-        return _recording()
+        recording = _recording()
+        # Safety net: if the response is discarded before the body ever iterates
+        # (client disconnect after dispatch, before the first SSE payload), the
+        # generator's finally never runs, so decrement on GC instead. Idempotent
+        # with the finally, so the common path decrements exactly once.
+        weakref.finalize(recording, _release)
+        return recording
 
     async def get_telemetry_preview(self) -> JSONResponse:
         """Return consent state and the exact pending telemetry batch."""

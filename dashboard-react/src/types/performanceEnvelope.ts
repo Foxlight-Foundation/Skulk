@@ -7,7 +7,7 @@
 
 /** Aggregated performance at one in-flight-concurrency level. */
 export interface ConcurrencyBucketSummary {
-  /** In-flight requests the instance was already serving at admission. */
+  /** Total in-flight requests INCLUDING this one at admission (a lone request is 1). */
   concurrency: number;
   /** Observations folded into this bucket. */
   requestCount: number;
