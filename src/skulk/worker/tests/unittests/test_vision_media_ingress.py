@@ -342,6 +342,9 @@ async def test_vision_media_acknowledges_authoritative_task_owner() -> None:
     assert command_id in worker._vision_media_accepted  # pyright: ignore[reportPrivateUsage]
     assert command_id not in worker._vision_media_pending_since  # pyright: ignore[reportPrivateUsage]
     assert command_id in worker.input_chunk_buffer
+    diagnostics = worker.collect_vision_media_ingress_diagnostics()
+    assert diagnostics.active_streams == 1
+    assert diagnostics.retained_bytes == len(payload)
 
 
 @pytest.mark.asyncio

@@ -1459,7 +1459,10 @@ class Worker:
             active_api_commands=0,
             active_api_bytes=0,
             pending_worker_acknowledgements=0,
-            active_streams=len(self._vision_media_pending_since),
+            active_streams=len(
+                self._vision_media_pending_since.keys()
+                | self._vision_media_accepted
+            ),
             pending_frames=sum(
                 len(chunks) for chunks in self._vision_media_chunks.values()
             ),
