@@ -379,6 +379,11 @@ class DownloadCoordinator:
 
     async def _purge_staging_cache(self, model_id: ModelId | None) -> None:
         """Remove staged and downloaded model files from the local node."""
+        if model_id is None:
+            self._pending_download_starts.clear()
+        else:
+            self._pending_download_starts.pop(model_id, None)
+
         # Collect all directories to purge: staging cache + standard models dir
         purge_dirs: list[tuple[Path, str]] = []
         if self.staging_cache_path is not None:
@@ -637,6 +642,10 @@ class DownloadCoordinator:
         self.active_downloads[model_id] = scope
 
     async def _delete_download(self, model_id: ModelId) -> None:
+        # Delete is authoritative over an earlier replacement start that was
+        # waiting for cancellation cleanup to release task ownership.
+        self._pending_download_starts.pop(model_id, None)
+
         # Protect read-only models (from SKULK_MODELS_PATH) from deletion
         if model_id in self.download_status:
             current = self.download_status[model_id]

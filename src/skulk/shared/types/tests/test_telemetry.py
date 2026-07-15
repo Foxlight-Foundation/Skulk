@@ -135,6 +135,74 @@ def test_live_download_progress_round_trips_and_terminal_wins() -> None:
     assert view.effective_downloads({})[node] == [pending]
 
 
+def test_live_download_statuses_share_one_coalescing_key() -> None:
+    """Pending and Ongoing replace each other before telemetry egress."""
+
+    node = NodeId("node-a")
+    shard = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=1)
+    attempt = DownloadAttemptId("attempt-a")
+    pending = DownloadPending(
+        node_id=node,
+        shard_metadata=shard,
+        attempt_id=attempt,
+    )
+    ongoing = DownloadOngoing(
+        node_id=node,
+        shard_metadata=shard,
+        attempt_id=attempt,
+        download_progress=DownloadProgressData(
+            total=Memory.from_mb(100),
+            downloaded=Memory.from_mb(50),
+            downloaded_this_session=Memory.from_mb(50),
+            completed_files=1,
+            total_files=2,
+            speed=1.0,
+            eta_ms=1_000,
+            files={},
+        ),
+    )
+
+    assert NodeTelemetry(node_id=node, info=pending).coalescing_key() == NodeTelemetry(
+        node_id=node, info=ongoing
+    ).coalescing_key()
+
+
+def test_delayed_pending_cannot_replace_newer_attempt_progress() -> None:
+    """Only ordered Pending may advance or replace a download attempt."""
+
+    node = NodeId("node-a")
+    shard = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=1)
+    old_pending = DownloadPending(
+        node_id=node,
+        shard_metadata=shard,
+        attempt_id=DownloadAttemptId("attempt-old"),
+    )
+    new_attempt = DownloadAttemptId("attempt-new")
+    new_pending = old_pending.model_copy(update={"attempt_id": new_attempt})
+    new_ongoing = DownloadOngoing(
+        node_id=node,
+        shard_metadata=shard,
+        attempt_id=new_attempt,
+        download_progress=DownloadProgressData(
+            total=Memory.from_mb(100),
+            downloaded=Memory.from_mb(50),
+            downloaded_this_session=Memory.from_mb(50),
+            completed_files=1,
+            total_files=2,
+            speed=1.0,
+            eta_ms=1_000,
+            files={},
+        ),
+    )
+    view = TelemetryView()
+    view.record_download_event(NodeDownloadProgress(download_progress=new_pending))
+    view.apply(NodeTelemetry(node_id=node, info=new_ongoing))
+
+    view.apply(NodeTelemetry(node_id=node, info=old_pending))
+
+    assert view.effective_downloads({})[node] == [new_ongoing]
+
+
 def test_eviction_tombstones_model_before_any_download_is_observed() -> None:
     """Fleet-wide eviction rejects delayed telemetry for an unknown model key."""
 

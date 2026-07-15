@@ -281,6 +281,66 @@ async def test_start_during_cancellation_runs_after_cleanup() -> None:
             await coordinator_task
 
 
+async def test_delete_clears_restart_queued_during_cancellation() -> None:
+    """An explicit delete must invalidate a replacement start awaiting cleanup."""
+
+    cmd_send, cmd_recv = channel[ForwarderDownloadCommand]()
+    event_send, _ = channel[Event]()
+    telemetry_send, _ = channel[NodeTelemetry]()
+    downloader = SlowCancellationShardDownloader()
+    coordinator = DownloadCoordinator(
+        node_id=NODE_ID,
+        shard_downloader=downloader,
+        download_command_receiver=cmd_recv,
+        event_sender=event_send,
+        telemetry_sender=telemetry_send,
+    )
+    shard = _make_shard()
+    origin = SystemId("test")
+    delete_processed = anyio.Event()
+
+    async def record_delete(_model_id: ModelId) -> bool:
+        delete_processed.set()
+        return True
+
+    coordinator_task = asyncio.create_task(coordinator.run())
+    with patch("skulk.download.coordinator.delete_model", side_effect=record_delete):
+        try:
+            await cmd_send.send(
+                ForwarderDownloadCommand(
+                    origin=origin,
+                    command=StartDownload(
+                        target_node_id=NODE_ID, shard_metadata=shard
+                    ),
+                )
+            )
+            with anyio.fail_after(2):
+                await downloader.first_started.wait()
+
+            for command in (
+                CancelDownload(target_node_id=NODE_ID, model_id=MODEL_ID),
+                StartDownload(target_node_id=NODE_ID, shard_metadata=shard),
+                DeleteDownload(target_node_id=NODE_ID, model_id=MODEL_ID),
+            ):
+                await cmd_send.send(
+                    ForwarderDownloadCommand(origin=origin, command=command)
+                )
+            with anyio.fail_after(2):
+                await delete_processed.wait()
+
+            downloader.release_cleanup.set()
+            await anyio.sleep(0.05)
+
+            assert downloader.ensure_calls == 1
+            assert not downloader.restarted.is_set()
+        finally:
+            downloader.release_cleanup.set()
+            await coordinator.shutdown()
+            coordinator_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await coordinator_task
+
+
 async def _wait_for_download_completed(
     event_recv: Receiver[Event], model_id: ModelId, timeout: float = 2.0
 ) -> DownloadCompleted | None:

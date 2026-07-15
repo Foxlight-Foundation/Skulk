@@ -111,10 +111,10 @@ class NodeTelemetry(CamelCaseModel):
             Stable process-local key used only by bounded admission.
         """
 
-        suffix = ""
         if isinstance(self.info, (DownloadPending, DownloadOngoing)):
-            suffix = f":{self.info.shard_metadata.model_card.model_id}"
-        return f"{self.node_id}:{type(self.info).__name__}{suffix}"
+            model_id = self.info.shard_metadata.model_card.model_id
+            return f"{self.node_id}:LiveDownloadProgress:{model_id}"
+        return f"{self.node_id}:{type(self.info).__name__}"
 
 
 class TelemetryView:
@@ -306,6 +306,12 @@ class TelemetryView:
                     if info.attempt_id is None or info.attempt_id == terminal_attempt:
                         return
                     self._node_download_terminal_attempts.pop(key, None)
+                elif current_attempt is not None and info.attempt_id != current_attempt:
+                    # A distinct Pending may begin a new attempt after a
+                    # terminal outcome even if telemetry wins the protocol race.
+                    # Without that terminal boundary, only ordered Pending may
+                    # advance the identity; delayed telemetry cannot roll it back.
+                    return
 
             if info.attempt_id is not None:
                 self._node_download_attempts[key] = info.attempt_id
