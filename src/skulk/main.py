@@ -13,6 +13,7 @@ from typing import Final, Self
 
 import anyio
 import psutil
+from anyio import BrokenResourceError, ClosedResourceError
 from loguru import logger
 from pydantic import PositiveInt
 
@@ -28,7 +29,7 @@ from skulk.download.impl_shard_downloader import skulk_shard_downloader
 from skulk.extensions import load_extensions
 from skulk.master.main import Master
 from skulk.routing.event_router import EventRouter
-from skulk.routing.router import Router, get_node_id_keypair
+from skulk.routing.router import Router, TelemetrySender, get_node_id_keypair
 from skulk.shared.constants import SKULK_LOG
 from skulk.shared.election import Election, ElectionResult
 from skulk.shared.logging import (
@@ -40,6 +41,7 @@ from skulk.shared.session_carryover import seed_state_for_new_session
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.commands import ForwarderDownloadCommand, SyncConfig
 from skulk.shared.types.common import NodeId, SessionId, SystemId
+from skulk.shared.types.profiling import NodeDataTransport, NodeResources
 from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
 from skulk.startup_recovery import preflight_api_port
@@ -53,7 +55,7 @@ from skulk.store.config import (
 from skulk.store.model_store import ModelStore
 from skulk.store.model_store_client import ModelStoreClient, ModelStoreDownloader
 from skulk.store.model_store_server import ModelStoreServer
-from skulk.utils.channels import Receiver, channel
+from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.pydantic_ext import CamelCaseModel
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.main import Worker
@@ -84,6 +86,50 @@ def _derive_zenoh_namespace(raw: str) -> str:
 # the OVERRIDE_VERSION_ENV_VAR name used to build the libp2p private-network key.
 _LIBP2P_NETWORK_VERSION = "v0.0.1"
 _LIBP2P_NAMESPACE_ENV_VAR = "SKULK_LIBP2P_NAMESPACE"
+_NODE_RESOURCES_POLL_INTERVAL_SECONDS = 60.0
+
+
+async def _publish_management_node_resources(
+    node_id: NodeId,
+    data_transport: NodeDataTransport,
+    telemetry_sender: TelemetrySender | Sender[NodeTelemetry],
+    poll_interval: float = _NODE_RESOURCES_POLL_INTERVAL_SECONDS,
+) -> None:
+    """Advertise resource truth for a node started without a worker.
+
+    A management/API-only node still owns DATA receivers and must participate in
+    fleet transport consistency checks. It advertises no inference backends and
+    effective management-only participation so the same reading cannot make it
+    eligible for placement.
+
+    Args:
+        node_id: Stable identity attached to the telemetry reading.
+        data_transport: DATA transport already resolved during node startup.
+        telemetry_sender: Existing latest-value telemetry admission handle.
+        poll_interval: Seconds between repeated advertisements for late joiners.
+
+    Side effects:
+        Publishes one immediate and then periodic ``NodeResources`` reading until
+        the owning task is cancelled or telemetry admission closes.
+    """
+    resources = NodeResources(
+        backends=frozenset(),
+        participation="management",
+        data_transport=data_transport,
+    )
+    while True:
+        try:
+            await telemetry_sender.send(
+                NodeTelemetry(node_id=node_id, info=resources)
+            )
+        except (ClosedResourceError, BrokenResourceError):
+            return
+        except Exception as error:
+            logger.warning(
+                "Management-node resource advertisement failed: "
+                f"{type(error).__name__}: {error}"
+            )
+        await anyio.sleep(poll_interval)
 
 
 def _libp2p_namespace_token(environ: Mapping[str, str]) -> str:
@@ -704,6 +750,13 @@ class Node:
             tg.start_soon(self.event_router.run)
             tg.start_soon(self.election.run)
             tg.start_soon(self._run_telemetry)
+            if self.worker is None:
+                tg.start_soon(
+                    _publish_management_node_resources,
+                    self.node_id,
+                    "zenoh" if self.data_plane_zenoh else "gossipsub",
+                    self.router.telemetry_sender(),
+                )
             if self.store_server:
                 tg.start_soon(self.store_server.start)
             if self.download_coordinator:
