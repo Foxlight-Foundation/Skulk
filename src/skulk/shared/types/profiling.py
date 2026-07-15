@@ -285,19 +285,24 @@ participation model, #149/#286):
   attention); not yet honored by the planner.
 """
 
+NodeDataTransport = Literal["gossipsub", "zenoh"]
+"""Resolved transport used for node-addressed DATA-plane traffic."""
+
 
 class NodeResources(CamelCaseModel):
-    """Inference-relevant capability and policy a node advertises to the planner.
+    """Inference capability, policy, and transport facts a node advertises.
 
     Mixes probed capability (``backends``) with operator-declared policy
-    (``participation``); both ride the same node-info gossip path. The planner
-    reads this to hard-filter placement candidates. Defaults describe a normal
-    Apple-Silicon full-participation node so pre-upgrade gossip and missing
-    entries stay non-breaking.
+    (``participation``) and the startup-resolved ``data_transport``; all ride the
+    same node-info telemetry path. The planner reads capability and policy to
+    hard-filter placement candidates, while cluster health compares transport
+    facts across live nodes. Defaults describe a normal Apple-Silicon
+    full-participation node so pre-upgrade telemetry stays non-breaking.
     """
 
     backends: frozenset[str] = frozenset({"mlx"})
     participation: NodeParticipation = "full"
+    data_transport: NodeDataTransport = "gossipsub"
 
     @field_validator("backends", mode="before")
     @classmethod
@@ -319,14 +324,29 @@ class NodeResources(CamelCaseModel):
         return sorted(value)
 
     @classmethod
-    async def gather(cls) -> "NodeResources":
-        """Probe backends and read the declared participation role at startup."""
+    async def gather(
+        cls, *, data_transport: NodeDataTransport = "gossipsub"
+    ) -> "NodeResources":
+        """Probe backends and read node policy plus the resolved DATA transport.
+
+        Args:
+            data_transport: Transport already resolved during node startup. Passing
+                the resolved value avoids reinterpreting environment configuration
+                independently from the router that actually owns DATA delivery.
+
+        Returns:
+            The capability and policy facts this node advertises to the fleet.
+        """
         backends = probe_node_backends()
         declared = os.environ.get("SKULK_NODE_PARTICIPATION", "full").strip().lower()
         participation: NodeParticipation = (
             declared if declared in ("full", "management", "ffn_only") else "full"
         )
-        return cls(backends=backends, participation=participation)
+        return cls(
+            backends=backends,
+            participation=participation,
+            data_transport=data_transport,
+        )
 
 
 class NodeNetworkInfo(CamelCaseModel):

@@ -89,7 +89,7 @@ from skulk.api.field_telemetry import (
 )
 from skulk.api.keepalive import with_sse_keepalive
 from skulk.api.model_search import search_hugging_face_models
-from skulk.api.node_health import compute_node_health
+from skulk.api.node_health import compute_node_health, live_data_transports
 from skulk.api.provider_diagnostics import ProviderObserver
 from skulk.api.realtime import (
     REALTIME_WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -371,6 +371,7 @@ from skulk.shared.types.profiling import (
 )
 from skulk.shared.types.state import State
 from skulk.shared.types.telemetry import (
+    NODE_LIVENESS_TIMEOUT,
     TelemetryView,
     record_membership_from_event,
 )
@@ -3063,17 +3064,47 @@ class API:
         ]
         return max(limits) if limits else None
 
+    def _live_node_timestamps(self) -> dict[NodeId, datetime]:
+        """Return replicated membership plus fresh telemetry-only participants.
+
+        Replicated ``State.last_seen`` tracks worker control-plane activity and
+        can omit local or remote ``--no-worker`` API nodes. Fresh telemetry is
+        positive liveness evidence for those management participants. Bound it
+        by the shared node timeout so a stopped telemetry-only node cannot
+        remain in API health and resource views indefinitely.
+
+        Returns:
+            Live-node timestamps suitable for telemetry filtering and health
+            derivation on this API process.
+        """
+        live = dict(self.state.last_seen)
+        now = datetime.now(tz=timezone.utc)
+        telemetry_nodes = set(self._telemetry_view.node_last_heartbeat) | set(
+            self._telemetry_view.node_last_telemetry
+        )
+        for node_id in telemetry_nodes - live.keys():
+            seen_at = self._telemetry_view.last_liveness_receipt(node_id)
+            if seen_at is None:
+                continue
+            aware_seen_at = (
+                seen_at
+                if seen_at.tzinfo is not None
+                else seen_at.replace(tzinfo=timezone.utc)
+            )
+            if now - aware_seen_at <= NODE_LIVENESS_TIMEOUT:
+                live[node_id] = seen_at
+        return live
+
     async def get_cluster_state(self) -> dict[str, object]:
         """Cluster state for ``GET /state``: event-sourced ``State`` plus live
-        telemetry (per-node memory + system profile) merged back in.
+        telemetry (per-node memory, system profile, and resources) merged back in.
 
-        ``node_memory`` and ``node_system`` moved off event-sourced ``State`` to
-        the telemetry plane (#279 slice 2), but ``/state`` is the dashboard's
-        single data source and still renders per-node memory/system. Merge the
-        ``TelemetryView`` maps in under their camelCase keys so the wire shape is
-        unchanged for the dashboard and any external consumer. The merge is
-        filtered to ``last_seen``-live nodes as defense-in-depth on top of the
-        worker's ``NodeTimedOut`` prune, so a dead node never shows as a ghost.
+        ``node_memory``, ``node_system``, and ``node_resources`` live on the
+        telemetry plane, but ``/state`` is the dashboard's single data source.
+        Merge the ``TelemetryView`` maps in under camelCase keys so the dashboard
+        and external consumers can observe those facts. The merge is filtered to
+        ``last_seen``-live nodes as defense-in-depth on top of the worker's
+        ``NodeTimedOut`` prune, so a dead node never shows as a ghost.
 
         Declared ``async`` so FastAPI serves it ON the event loop rather than a
         worker thread: the telemetry subscriber and the ``NodeTimedOut`` prune
@@ -3082,7 +3113,7 @@ class API:
         There is no ``await`` here, so the comprehensions run atomically wrt
         those same-loop mutators.
         """
-        live = self.state.last_seen
+        live = self._live_node_timestamps()
         effective_downloads = self._telemetry_view.effective_downloads(
             self.state.downloads
         )
@@ -3097,6 +3128,11 @@ class API:
         payload["nodeSystem"] = {
             str(node_id): profile.model_dump(mode="json", by_alias=True)
             for node_id, profile in self._telemetry_view.node_system.items()
+            if node_id in live
+        }
+        payload["nodeResources"] = {
+            str(node_id): resources.model_dump(mode="json", by_alias=True)
+            for node_id, resources in self._telemetry_view.node_resources.items()
             if node_id in live
         }
         # Observational readings moved to telemetry in #279 slice 3; merge them
@@ -3135,6 +3171,7 @@ class API:
                 live_nodes=live,
                 downloads=effective_downloads,
                 node_disk=self._telemetry_view.node_disk,
+                node_resources=self._telemetry_view.node_resources,
                 heartbeat_last_seen=self._telemetry_view.node_last_heartbeat,
                 telemetry_last_seen=self._telemetry_view.node_last_telemetry,
                 now=datetime.now(tz=timezone.utc),
@@ -8483,6 +8520,16 @@ class API:
         leak = _leaked_wired_warning(resources.current_wired, supervisor_runners)
         if leak is not None:
             warnings.add(leak)
+        fleet_data_transports = live_data_transports(
+            live_nodes=self._live_node_timestamps(),
+            node_resources=self._telemetry_view.node_resources,
+        )
+        if len(fleet_data_transports) > 1:
+            warnings.add(
+                "Fleet DATA transport mismatch: live nodes advertise "
+                f"{', '.join(sorted(fleet_data_transports))}. Cross-transport "
+                "inference output cannot be delivered."
+            )
         return NodeDiagnostics(
             generated_at=datetime.now(tz=timezone.utc).isoformat(),
             runtime=self._runtime_diagnostics(),

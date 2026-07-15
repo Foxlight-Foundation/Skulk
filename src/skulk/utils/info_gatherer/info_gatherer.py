@@ -25,6 +25,7 @@ from skulk.shared.types.profiling import (
     MachMemoryCategories,
     MemoryUsage,
     NetworkInterfaceInfo,
+    NodeDataTransport,
     NodeResources,
     ThunderboltBridgeStatus,
     parse_vm_stat_output,
@@ -566,6 +567,7 @@ GatheredInfo = (
 @dataclass
 class InfoGatherer:
     info_sender: Sender[GatheredInfo]
+    data_transport: NodeDataTransport = "gossipsub"
     heartbeat_poll_interval: float | None = 2
     interface_watcher_interval: float | None = 10
     misc_poll_interval: float | None = 60
@@ -686,7 +688,11 @@ class InfoGatherer:
         while True:
             try:
                 with fail_after(30):
-                    await self.info_sender.send(await NodeResources.gather())
+                    await self.info_sender.send(
+                        await NodeResources.gather(
+                            data_transport=self.data_transport
+                        )
+                    )
             except (ClosedResourceError, BrokenResourceError):
                 # Consumer gone: stop signal, not a fault. Escape the
                 # per-iteration catch-all so the loop cannot spin on a dead

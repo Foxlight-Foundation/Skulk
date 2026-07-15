@@ -11,7 +11,7 @@ from skulk.api.node_health import (
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.profiling import DiskUsage
+from skulk.shared.types.profiling import DiskUsage, NodeResources
 from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
     DownloadFailed,
@@ -263,3 +263,55 @@ def test_all_stale_liveness_signals_still_warn() -> None:
     node = health["node-a"]
     assert node.level == "warn"
     assert any(r.code == "unreachable" for r in node.reasons)
+
+
+def test_mixed_data_transports_are_error_on_every_live_node() -> None:
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_resources={
+            _NODE: NodeResources(data_transport="zenoh"),
+            other: NodeResources(data_transport="gossipsub"),
+        },
+        now=_NOW,
+    )
+
+    for node_id in ("node-a", "node-b"):
+        node = health[node_id]
+        assert node.level == "error"
+        reason = next(
+            reason
+            for reason in node.reasons
+            if reason.code == "data_transport_mismatch"
+        )
+        assert "gossipsub, zenoh" in reason.message
+        assert "Cross-transport inference output cannot be delivered" in reason.message
+
+
+def test_uniform_data_transport_is_healthy() -> None:
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_resources={
+            _NODE: NodeResources(data_transport="zenoh"),
+            other: NodeResources(data_transport="zenoh"),
+        },
+        now=_NOW,
+    )
+    assert all(node.level == "ok" for node in health.values())
+
+
+def test_missing_transport_telemetry_does_not_create_false_mismatch() -> None:
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_resources={_NODE: NodeResources(data_transport="zenoh")},
+        now=_NOW,
+    )
+    assert all(node.level == "ok" for node in health.values())

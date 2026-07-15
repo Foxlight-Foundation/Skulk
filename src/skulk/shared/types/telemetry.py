@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import (
@@ -61,6 +61,9 @@ from skulk.utils.info_gatherer.info_gatherer import (
 from skulk.utils.pydantic_ext import CamelCaseModel
 
 _DOWNLOAD_EVICTION_TOMBSTONE_CAPACITY = 4_096
+
+NODE_LIVENESS_TIMEOUT = timedelta(seconds=30)
+"""Maximum age for telemetry-only membership evidence."""
 
 # GatheredInfo variants that live on the telemetry plane (#279): gossiped
 # last-write-wins, never indexed or persisted. NodeResources (slice 1); memory +

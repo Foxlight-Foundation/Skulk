@@ -80,10 +80,14 @@ forces the choice either way.
 
 **Every node in a cluster must use the same data-plane transport.** Skulk does not
 bridge the two, so a partially configured fleet (Zenoh on some nodes, gossip on
-others) silently drops output for any request whose serving node and requesting
-node land on opposite transports, and that stream ends only by timeout. Configure
-the whole fleet the same way (the simplest rule: either set a Zenoh listen
-endpoint on every node, or on none).
+others) cannot deliver output for a request whose serving node and requesting
+node land on opposite transports. Each node advertises its resolved transport in
+`nodeResources`; `/state` marks every live node with the error-level
+`data_transport_mismatch` health reason when both transports are present, and the
+dashboard and node diagnostics show the same condition. This detection does not
+bridge the transports or make mixed operation safe. Configure the whole fleet the
+same way (the simplest rule: either set a Zenoh listen endpoint on every node, or
+on none), restart it, and confirm that `nodeResources` reports one transport.
 
 Zenoh sessions are kept isolated per cluster: each cluster prefixes its keys with
 a segment derived from its libp2p network namespace (`SKULK_LIBP2P_NAMESPACE`), so
