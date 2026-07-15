@@ -268,6 +268,21 @@ def instance_context_token_limit(
                 node_tokens if memory_limit is None else min(memory_limit, node_tokens)
             )
 
+    # gguf served context is PREALLOCATED up front (serving_n_ctx), so it must fit
+    # the memory actually available at load. On a discrete-VRAM node the fit above
+    # is derived from VRAM -- the same pool placement admits against -- so the lift
+    # is safe (and validated on GPU hardware). On a node WITHOUT discrete VRAM the
+    # fit is derived from static ``ram_total`` (for cross-rank determinism), but
+    # load-time preallocation competes with live ``ram_available`` (which placement
+    # admits against and which can be far lower under memory pressure), so a
+    # ram_total-sized window could OOM the node on load. Keep gguf on non-VRAM
+    # nodes at the budget floor; the memory-fit lift applies to discrete-VRAM (GPU)
+    # nodes. ``node_vram`` membership is static per node, so this stays deterministic.
+    if model_card.gguf_file and memory_limit is not None:
+        hosting_nodes = shard_assignments.node_to_runner
+        if not all(node_vram.get(node_id) is not None for node_id in hosting_nodes):
+            memory_limit = min(memory_limit, KV_CONTEXT_BUDGET_TOKENS)
+
     card_limit = model_card.context_length if model_card.context_length > 0 else None
     if memory_limit is None:
         limit = card_limit
@@ -277,10 +292,10 @@ def instance_context_token_limit(
         limit = min(memory_limit, card_limit)
 
     # This ceiling is now the value the runner actually serves: the served
-    # llama.cpp engines (llama_cpp / llama_server) load their KV cache up front at
+    # llama.cpp engines (llama_cpp / llama_server, the runners that call
+    # ``serving_n_ctx``) load their KV cache up front at
     # ``serving_n_ctx(context_token_limit)``, i.e. this memory-fit window, not a
-    # fixed 8192 (any other served engine that preallocates a fixed window follows
-    # the same contract). The ceiling and the runner
+    # fixed 8192. The ceiling and the runner
     # window moved off the shared constant together, as the previous fixed-clamp
     # comment anticipated: placement's per-node fit is derived from the same working
     # set as this ceiling, so a node admitted at the KV_CONTEXT_BUDGET_TOKENS floor
@@ -299,8 +314,9 @@ def instance_context_token_limit(
     # advertised max -- which for a 128k gguf would preallocate a fictitious window
     # and OOM the node on load. In that uncomputable case only, clamp a gguf ceiling
     # back to the budget floor (the old safety the fixed clamp used to provide for
-    # every gguf). vLLM/MLX are unaffected: MLX grows KV lazily, and vLLM validates
-    # its window against the KV pool at startup (a clean error, not an OOM-kill).
+    # every gguf). This gguf-only clamp does not affect MLX, which grows its KV
+    # cache lazily per request (no up-front preallocation) and keeps the full
+    # memory/card fit.
     #
     # KV dtype (#584): the fit assumes fp16 KV (KV_DTYPE_BYTES); enabling KV-cache
     # quantization must feed the estimate the quantized bytes-per-token or this

@@ -233,14 +233,52 @@ def test_instance_limit_none_when_nothing_enforceable():
     assert instance_context_token_limit(assignments, {}) is None
 
 
-def test_instance_limit_gguf_not_capped_to_kv_budget():
-    # The old fixed 8192 clamp on GGUF/llama.cpp instances is gone: a served model
-    # is now sized to the memory/card fit like every other engine (the runner
-    # serves that window via serving_n_ctx, and placement admits the node against
-    # the same working set the ceiling is derived from). Generous memory + a large
-    # advertised context -> well above the old budget, capped only by the card max.
-    # A fixed 8192 here made served models unusable for real-context work.
+def test_instance_limit_gguf_not_capped_to_kv_budget_on_vram_node():
+    # The old fixed 8192 clamp on GGUF/llama.cpp instances is gone on a discrete-
+    # VRAM node: the model is sized to the memory/card fit (the runner serves that
+    # window via serving_n_ctx, and placement admits the node against the same VRAM
+    # the ceiling is derived from). Generous VRAM + a large advertised context ->
+    # well above the old budget, capped only by the card max. A fixed 8192 made
+    # served models unusable for real-context work.
     card = _card(1, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
+        update={"context_length": 131072}
+    )
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    limit = instance_context_token_limit(
+        assignments,
+        {NodeId("n0"): Memory.from_gb(64)},
+        node_vram={NodeId("n0"): Memory.from_gb(48)},
+    )
+    assert limit is not None and limit > KV_CONTEXT_BUDGET_TOKENS
+    assert limit <= 131072  # never above the card's advertised max
+
+
+def test_instance_limit_gguf_non_vram_node_clamps_to_floor():
+    # The gguf lift applies only to discrete-VRAM nodes. On a node WITHOUT discrete
+    # VRAM the fit is derived from static ram_total, but llama.cpp preallocates the
+    # window up front against live ram_available (which placement admits on and can
+    # be far lower under memory pressure) -- so preallocating a ram_total-sized
+    # window could OOM. gguf on a non-VRAM node stays at the budget floor. (P1
+    # review, #585.)
+    card = _card(1, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
+        update={"context_length": 131072}
+    )
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    # Plenty of system RAM but NO discrete VRAM reported for the node.
+    assert (
+        instance_context_token_limit(assignments, {NodeId("n0"): Memory.from_gb(64)})
+        == KV_CONTEXT_BUDGET_TOKENS
+    )
+
+
+def test_instance_limit_mlx_non_vram_node_keeps_memory_fit():
+    # The non-VRAM clamp is gguf-only: MLX grows KV lazily (no up-front
+    # preallocation), so an MLX card on a non-VRAM node keeps the full memory fit.
+    card = _card(1, kv_heads=8, n_layers=32).model_copy(
         update={"context_length": 131072}
     )
     assignments = _assignments(
@@ -250,7 +288,6 @@ def test_instance_limit_gguf_not_capped_to_kv_budget():
         assignments, {NodeId("n0"): Memory.from_gb(64)}
     )
     assert limit is not None and limit > KV_CONTEXT_BUDGET_TOKENS
-    assert limit <= 131072  # never above the card's advertised max
 
 
 def test_instance_limit_gguf_no_info_clamps_to_floor():
