@@ -658,6 +658,74 @@ def test_cluster_diagnostics_marks_mixed_source_builds(
     assert nodes["peer-node"]["ok"] is True
 
 
+def test_cluster_diagnostics_accepts_prefix_equivalent_source_commits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Different Git abbreviation lengths still identify one deployed build."""
+
+    api = _build_api("local-node")
+    api._telemetry_view.node_identities[api.node_id] = NodeIdentity(  # pyright: ignore[reportPrivateUsage]
+        skulk_version="1.4.3",
+        skulk_commit="abcdef1",
+    )
+    client = TestClient(api.app)
+
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
+        return {"peer-node": "http://peer-node:52415"}
+
+    class _FakeAsyncClient:
+        async def __aenter__(self) -> "_FakeAsyncClient":
+            return self
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            return None
+
+        async def get(self, url: str) -> httpx.Response:
+            runtime = api._runtime_diagnostics().model_copy(  # pyright: ignore[reportPrivateUsage]
+                update={
+                    "node_id": "peer-node",
+                    "hostname": "peer-node.local",
+                    "skulk_commit": "abcdef123456",
+                }
+            )
+            diagnostics = NodeDiagnostics(
+                generated_at="2026-07-15T00:00:00+00:00",
+                runtime=runtime,
+                resources=api._resource_diagnostics(),  # pyright: ignore[reportPrivateUsage]
+                data_plane=api._data_plane_observer.snapshot(),  # pyright: ignore[reportPrivateUsage]
+            )
+            return httpx.Response(
+                200,
+                json=diagnostics.model_dump(mode="json", by_alias=True),
+                request=httpx.Request("GET", url),
+            )
+
+    def _build_async_client(*_args: object, **_kwargs: object) -> _FakeAsyncClient:
+        return _FakeAsyncClient()
+
+    monkeypatch.setattr(api, "_reachable_peer_api_urls", _reachable_peer_api_urls)
+    monkeypatch.setattr(api_main.httpx, "AsyncClient", _build_async_client)
+
+    response = client.get("/v1/diagnostics/cluster")
+
+    assert response.status_code == 200
+    body = _json_object(response)
+    assert body["versionStatus"] == "consistent"
+    nodes = {
+        str(node["nodeId"]): node
+        for node in (
+            _json_mapping(item) for item in _json_list(body["nodes"])
+        )
+    }
+    assert nodes["peer-node"]["versionStatus"] == "current"
+
+
 def test_cluster_diagnostics_marks_failed_routed_peer_version_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

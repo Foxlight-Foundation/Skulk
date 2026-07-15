@@ -20,6 +20,10 @@ from typing import Literal, final
 
 from pydantic import ConfigDict
 
+from skulk.api.build_identity import (
+    git_commit_identifiers_disagree,
+    known_build_identifier,
+)
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
@@ -155,22 +159,15 @@ def live_skulk_build_mismatch(
         if node_id in live_nodes
     )
     versions: set[str] = set()
-    commits: set[str] = set()
+    commits: list[str] = []
     for identity in identities:
-        version = _known_build_identifier(identity.skulk_version)
-        commit = _known_build_identifier(identity.skulk_commit)
+        version = known_build_identifier(identity.skulk_version)
+        commit = known_build_identifier(identity.skulk_commit)
         if version is not None:
             versions.add(version)
         if commit is not None:
-            commits.add(commit)
-    return len(versions) > 1 or len(commits) > 1
-
-
-def _known_build_identifier(value: str) -> str | None:
-    """Normalize one build identifier, excluding telemetry sentinels."""
-
-    normalized = value.strip().lower()
-    return None if normalized in {"", "unknown", "none", "null"} else normalized
+            commits.append(commit)
+    return len(versions) > 1 or git_commit_identifiers_disagree(commits)
 
 
 def _data_transport_mismatch_reason(

@@ -2,14 +2,16 @@
 
 from collections.abc import Sequence
 
+from skulk.api.build_identity import (
+    git_commit_identifiers_match,
+    known_build_identifier,
+)
 from skulk.shared.types.diagnostics import (
     ClusterDiagnosticsVersionStatus,
     NodeDiagnostics,
     NodeDiagnosticsVersionStatus,
     NodeRuntimeDiagnostics,
 )
-
-_UNKNOWN_BUILD_IDENTIFIERS = frozenset({"", "unknown", "none", "null"})
 
 
 def parse_peer_node_diagnostics(payload: object) -> NodeDiagnostics:
@@ -45,8 +47,8 @@ def compare_diagnostics_builds(
         available identifiers establish equality, otherwise ``unknown``.
     """
 
-    reference_version = _known_identifier(reference.skulk_version)
-    candidate_version = _known_identifier(candidate.skulk_version)
+    reference_version = known_build_identifier(reference.skulk_version)
+    candidate_version = known_build_identifier(candidate.skulk_version)
     if (
         reference_version is not None
         and candidate_version is not None
@@ -54,12 +56,12 @@ def compare_diagnostics_builds(
     ):
         return "version_mismatch"
 
-    reference_commit = _known_identifier(reference.skulk_commit)
-    candidate_commit = _known_identifier(candidate.skulk_commit)
+    reference_commit = known_build_identifier(reference.skulk_commit)
+    candidate_commit = known_build_identifier(candidate.skulk_commit)
     if (
         reference_commit is not None
         and candidate_commit is not None
-        and reference_commit != candidate_commit
+        and not git_commit_identifiers_match(reference_commit, candidate_commit)
     ):
         return "version_mismatch"
 
@@ -93,10 +95,3 @@ def aggregate_diagnostics_version_status(
     if statuses and all(status == "current" for status in statuses):
         return "consistent"
     return "unknown"
-
-
-def _known_identifier(value: str) -> str | None:
-    """Normalize one reported build identifier, excluding unknown sentinels."""
-
-    normalized = value.strip().lower()
-    return None if normalized in _UNKNOWN_BUILD_IDENTIFIERS else normalized

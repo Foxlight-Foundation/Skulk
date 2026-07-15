@@ -354,6 +354,27 @@ def test_uniform_source_build_is_healthy() -> None:
     assert all(node.level == "ok" for node in health.values())
 
 
+def test_prefix_equivalent_source_commits_are_healthy() -> None:
+    """Different Git abbreviation lengths do not create a rollout warning."""
+
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_identities={
+            _NODE: NodeIdentity(skulk_version="1.4.3", skulk_commit="abcdef1"),
+            other: NodeIdentity(
+                skulk_version="1.4.3",
+                skulk_commit="abcdef123456",
+            ),
+        },
+        now=_NOW,
+    )
+
+    assert all(node.level == "ok" for node in health.values())
+
+
 def test_unknown_build_identity_does_not_create_false_mismatch() -> None:
     """Startup gaps are not positive evidence of a mixed deployment."""
 
