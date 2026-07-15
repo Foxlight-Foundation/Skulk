@@ -9478,6 +9478,11 @@ class API:
             return None
         profile = self._telemetry_view.node_system.get(node_id)
         memory = self._telemetry_view.node_memory.get(node_id)
+        if profile is None and memory is None:
+            # No hardware telemetry for the serving node yet. Skip rather than
+            # record a bogus "unknown" hardware envelope that early traffic would
+            # create and later samples would have to correct.
+            return None
         accelerator = profile.accelerator if profile is not None else None
         node_hardware = hardware_class(
             accelerator.vendor if accelerator is not None else None,
@@ -9486,60 +9491,72 @@ class API:
         )
         return (node_hardware, backend, quantization)
 
-    async def _tap_performance_envelope(
+    def _tap_performance_envelope(
         self, model_id: ModelId, stream: AsyncIterator[_EnvelopeChunk]
     ) -> AsyncGenerator[_EnvelopeChunk, None]:
         """Record one performance-envelope observation per completed generation.
 
         Observe-only and fully guarded: any failure here disturbs neither the
-        stream nor the response. Captures the in-flight concurrency at admission
-        (this API node's outstanding requests to the model, including this one),
-        the time-to-first-token, and the steady-state decode rate; an aborted
-        stream (client disconnect, no terminal chunk) is not recorded, matching
-        the field-telemetry tap.
+        stream nor the response. The in-flight concurrency at admission and the
+        time-to-first-token clock are captured EAGERLY here (at dispatch), not
+        lazily on first iteration -- a plain ``async def`` tap would defer both to
+        the first ``__anext__``, so a late-scheduled stream would misattribute the
+        concurrency bucket and start the TTFT timer late. An aborted stream
+        (client disconnect, no terminal chunk) is not recorded, matching the
+        field-telemetry tap.
         """
         key = str(model_id)
         concurrency = self._envelope_inflight.get(key, 0) + 1
         self._envelope_inflight[key] = concurrency
         started = time.monotonic()
-        ttft_seconds: float | None = None
-        decode_tps: float | None = None
-        outcome: GenerationOutcome = "cancelled"
-        try:
-            async for chunk in stream:
-                if ttft_seconds is None and getattr(chunk, "text", None):
-                    ttft_seconds = time.monotonic() - started
-                stats = cast("object | None", getattr(chunk, "stats", None))
-                if stats is not None:
-                    tps = cast("float | None", getattr(stats, "generation_tps", None))
-                    if tps is not None:
-                        decode_tps = float(tps)
-                finish = cast("str | None", getattr(chunk, "finish_reason", None))
-                if finish == "error":
-                    outcome = "error"
-                elif finish is not None:
-                    outcome = "success"
-                yield chunk
-        finally:
+
+        async def _recording() -> AsyncGenerator[_EnvelopeChunk, None]:
+            ttft_seconds: float | None = None
+            decode_tps: float | None = None
+            outcome: GenerationOutcome = "cancelled"
             try:
-                self._envelope_inflight[key] = max(
-                    0, self._envelope_inflight.get(key, 1) - 1
-                )
-                context = self._resolve_envelope_context(model_id)
-                if context is not None and outcome != "cancelled":
-                    node_hardware, backend, quantization = context
-                    self._performance_envelopes.record(
-                        hardware_class=node_hardware,
-                        model_id=key,
-                        backend=backend,
-                        quantization=quantization,
-                        concurrency=concurrency,
-                        ttft_seconds=ttft_seconds,
-                        decode_tps=decode_tps,
-                        outcome=outcome,
-                    )
-            except Exception as exc:  # noqa: BLE001 - observability must not propagate
-                logger.debug(f"performance-envelope record failed: {exc}")
+                async for chunk in stream:
+                    if ttft_seconds is None and getattr(chunk, "text", None):
+                        ttft_seconds = time.monotonic() - started
+                    stats = cast("object | None", getattr(chunk, "stats", None))
+                    if stats is not None:
+                        tps = cast(
+                            "float | None", getattr(stats, "generation_tps", None)
+                        )
+                        if tps is not None:
+                            decode_tps = float(tps)
+                    finish = cast("str | None", getattr(chunk, "finish_reason", None))
+                    if finish == "error":
+                        outcome = "error"
+                    elif finish is not None:
+                        outcome = "success"
+                    yield chunk
+            finally:
+                try:
+                    remaining = self._envelope_inflight.get(key, 1) - 1
+                    if remaining > 0:
+                        self._envelope_inflight[key] = remaining
+                    else:
+                        # Drop the key at zero so a long-lived API node serving
+                        # many distinct models does not accumulate idle entries.
+                        self._envelope_inflight.pop(key, None)
+                    context = self._resolve_envelope_context(model_id)
+                    if context is not None and outcome != "cancelled":
+                        node_hardware, backend, quantization = context
+                        self._performance_envelopes.record(
+                            hardware_class=node_hardware,
+                            model_id=key,
+                            backend=backend,
+                            quantization=quantization,
+                            concurrency=concurrency,
+                            ttft_seconds=ttft_seconds,
+                            decode_tps=decode_tps,
+                            outcome=outcome,
+                        )
+                except Exception as exc:  # noqa: BLE001 - must not propagate
+                    logger.debug(f"performance-envelope record failed: {exc}")
+
+        return _recording()
 
     async def get_telemetry_preview(self) -> JSONResponse:
         """Return consent state and the exact pending telemetry batch."""

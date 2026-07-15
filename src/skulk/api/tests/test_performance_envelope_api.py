@@ -96,7 +96,7 @@ async def test_tap_records_on_completion() -> None:
     assert bucket.success_count == 1
     assert bucket.decode_tps_mean == 42.0
     # In-flight is released after completion.
-    assert api._envelope_inflight["m"] == 0
+    assert api._envelope_inflight.get("m", 0) == 0
 
 
 async def test_tap_skips_aborted_stream() -> None:
@@ -111,7 +111,7 @@ async def test_tap_skips_aborted_stream() -> None:
     await _drain(api._tap_performance_envelope(ModelId("m"), stream))
 
     assert api._performance_envelopes.snapshot().envelopes == []
-    assert api._envelope_inflight["m"] == 0
+    assert api._envelope_inflight.get("m", 0) == 0
 
 
 async def test_tap_records_error_outcome() -> None:
@@ -142,6 +142,34 @@ async def test_cluster_fanout_reports_local_first_and_peer_failure() -> None:
     peer = next(n for n in result.nodes if n.node_id == "peer-1")
     assert not peer.ok
     assert peer.error
+
+
+async def test_concurrency_captured_eagerly_at_dispatch() -> None:
+    api = _build_api()
+    object.__setattr__(
+        api, "_resolve_envelope_context", lambda _model: ("hw", "b", "")
+    )
+    # Two taps created (dispatched) but not yet iterated: the eager increment
+    # must already reflect both, proving concurrency is captured at admission and
+    # not deferred to the first stream iteration.
+    gen1 = api._tap_performance_envelope(
+        ModelId("m"), _one_stream([_chunk("", "stop", 10.0)])
+    )
+    gen2 = api._tap_performance_envelope(
+        ModelId("m"), _one_stream([_chunk("", "stop", 10.0)])
+    )
+    assert api._envelope_inflight["m"] == 2
+
+    await _drain(gen1)
+    await _drain(gen2)
+    # Drains to zero and the idle key is dropped.
+    assert api._envelope_inflight.get("m", 0) == 0
+    concurrencies = {
+        b.concurrency
+        for b in api._performance_envelopes.snapshot().envelopes[0].buckets
+    }
+    # The second dispatch saw the first in flight, so a concurrency-2 bucket exists.
+    assert 2 in concurrencies
 
 
 async def _one_stream(chunks: list[Any]) -> AsyncGenerator[Any, None]:
