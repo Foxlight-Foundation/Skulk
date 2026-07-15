@@ -787,14 +787,16 @@ class Worker:
         memory reclaimable only by reboot (the GLM-4.7-Flash class,
         2026-06-08).
 
-        ``context_token_limit`` is the instance's stamped served window. A gguf
-        engine allocates its whole KV cache up front at that window
-        (``serving_n_ctx``), so the guard must size the footprint to it, not the
-        fixed ``KV_CONTEXT_BUDGET_TOKENS``: with the memory-fit lift a stamped 32k
-        window would otherwise pass an 8192-sized guard and then OOM at load if
-        live VRAM has dropped since placement (stale telemetry, a concurrently
-        loaded instance). MLX grows KV lazily (no up-front preallocation), so the
-        budget floor is the correct estimate there; a non-gguf card keeps it.
+        ``context_token_limit`` is the instance's stamped served window. A served
+        engine that commits a fixed window at load (in-process ``llama_cpp`` and
+        ``llama_server`` allocate the KV cache up front; ``vllm`` passes it as
+        ``--max-model-len``), identified by ``shard_preallocates_kv_upfront``, must
+        have the guard size the footprint to that window, not the fixed
+        ``KV_CONTEXT_BUDGET_TOKENS``: with the memory-fit lift a stamped 32k window
+        would otherwise pass an 8192-sized guard and then OOM / fail to load if live
+        VRAM has dropped since placement (stale telemetry, a concurrently loaded
+        instance). MLX grows KV lazily (no up-front window), so the budget floor is
+        the correct estimate there.
         """
         kv_context = (
             context_token_limit

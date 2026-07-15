@@ -16,6 +16,7 @@ on real loads.
 """
 
 from collections.abc import Mapping
+from typing import Final
 
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.types.common import NodeId
@@ -167,39 +168,48 @@ def gpu_working_set_ceiling(ram_total: Memory) -> Memory:
     return ram_total * GPU_WORKING_SET_FRACTION
 
 
-def shard_preallocates_kv_upfront(shard: ShardMetadata) -> bool:
-    """Whether the runner for THIS shard allocates its whole KV cache up front.
+# The served engines that size a fixed context WINDOW at load from
+# ``serving_n_ctx``: in-process llama.cpp and llama-server allocate ``n_ctx`` of KV
+# up front (OOM-kill on overflow); vLLM passes it as ``vllm serve --max-model-len``
+# and validates it against its KV pool at startup. All three need the served-context
+# clamps and the worker fit-guard sized to the real window. MLX is NOT here: it
+# grows KV lazily per request, so it must not be force-clamped (that would regress
+# MLX context).
+_UPFRONT_WINDOW_ENGINE_PREFIXES: Final = ("llama_cpp", "llama_server", "vllm")
 
-    llama.cpp / llama-server preallocate ``n_ctx`` of KV at load and OOM-KILL the
-    node on overflow, so the served-context clamps and the worker fit-guard must
-    size to the real window for these; MLX grows KV lazily, so it must not be
-    force-clamped (that would regress MLX context).
+
+def shard_preallocates_kv_upfront(shard: ShardMetadata) -> bool:
+    """Whether the runner for THIS shard commits a fixed context window at load.
+
+    True for the served engines that size their load-time context from
+    ``serving_n_ctx`` (llama.cpp, llama-server, vLLM); false for MLX (lazy KV).
+    Those engines must have the served-context clamps and the worker fit-guard
+    sized to the real window, or a stamped 32k/64k context could exceed what loads.
 
     Keys off the placement-RESOLVED backend (``shard.resolved_backend``, the engine
     this shard actually runs on) when available, which is the precise per-placement
-    signal: a hybrid card that also allows MLX but resolves to ``llama_cpp`` on a
-    non-MLX node is correctly treated as preallocating, and the same card resolving
-    to ``mlx`` is not -- no MLX regression in the common (resolved) case.
+    signal: a hybrid card that also allows MLX but resolves to a served engine on a
+    non-MLX node is correctly treated as committing a window, and the same card
+    resolving to ``mlx`` is not -- no MLX regression in the common (resolved) case.
 
     When the backend is UNRESOLVED (an exact ``CreateInstance`` payload, or a
     placement made before ``NodeResources`` gossiped, where the worker later falls
     back to its own local backend probe) it is CONSERVATIVE: any gguf pin OR any
-    ``llama_cpp`` / ``llama_server`` compatible-backend tag makes it preallocating,
-    even for a card that ALSO lists MLX. We cannot prove such a shard will run MLX,
-    and on a non-Darwin node the local probe won't advertise MLX and may dispatch
-    it to llama.cpp -- so an OOM-kill from an unclamped up-front KV allocation is
-    the worse outcome than a conservatively floored context in that transient,
-    rare window. MLX-only cards (no llama.cpp tag) still grow KV lazily and are not
-    clamped.
+    served-engine compatible-backend tag makes it window-committing, even for a card
+    that ALSO lists MLX. We cannot prove such a shard will run MLX, and on a
+    non-Darwin node the local probe won't advertise MLX and may dispatch it to a
+    served engine -- so a load-time OOM / spawn failure from an unclamped window is
+    the worse outcome than a conservatively floored context in that transient, rare
+    window. MLX-only cards (no served tag) still grow KV lazily and are not clamped.
     """
     resolved = shard.resolved_backend
     if resolved is not None:
-        return resolved.startswith(("llama_cpp", "llama_server"))
+        return resolved.startswith(_UPFRONT_WINDOW_ENGINE_PREFIXES)
     card = shard.model_card
     if card.gguf_file:
         return True
     return any(
-        tag.startswith(("llama_cpp", "llama_server"))
+        tag.startswith(_UPFRONT_WINDOW_ENGINE_PREFIXES)
         for tag in card.placement.compatible_backends
     )
 
@@ -382,17 +392,17 @@ def instance_context_token_limit(
     # model's own advertised max context is smaller, in which case it serves that
     # smaller max (a 4k-context model serves 4k, not 8k).
     #
-    # SAFETY (gguf, load-time OOM): llama.cpp allocates the whole KV cache up front,
-    # so its window MUST be a real memory-fit value. When the fit is uncomputable
-    # (the card has no ``num_key_value_heads`` so ``per_token_kv_bytes`` is 0, or
-    # node memory is missing, or an RPC-donor / CFG shard has no ``shard_fraction``),
-    # ``memory_limit`` is None and the branch above would fall back to the card's
-    # advertised max -- which for a 128k gguf would preallocate a fictitious window
-    # and OOM the node on load. In that uncomputable case only, clamp a gguf ceiling
-    # back to the budget floor (the old safety the fixed clamp used to provide for
-    # every gguf). This gguf-only clamp does not affect MLX, which grows its KV
-    # cache lazily per request (no up-front preallocation) and keeps the full
-    # memory/card fit.
+    # SAFETY (served engine, load-time OOM): a window-committing served engine
+    # (llama.cpp / llama-server / vLLM, per shard_preallocates_kv_upfront) commits a
+    # fixed context window at load, so it MUST be a real memory-fit value. When the
+    # fit is uncomputable (the card has no ``num_key_value_heads`` so
+    # ``per_token_kv_bytes`` is 0, node memory is missing, or an RPC-donor / CFG
+    # shard has no ``shard_fraction``), ``memory_limit`` is None and the branch above
+    # would fall back to the card's advertised max -- which for a 128k model would
+    # commit a fictitious window and OOM / fail to load. In that uncomputable case
+    # only, clamp the ceiling back to the budget floor (the old safety the fixed
+    # clamp used to provide). This does not affect MLX, which grows its KV cache
+    # lazily per request (no up-front window) and keeps the full memory/card fit.
     #
     # KV dtype (#584): the fit assumes fp16 KV (KV_DTYPE_BYTES); enabling KV-cache
     # quantization must feed the estimate the quantized bytes-per-token or this

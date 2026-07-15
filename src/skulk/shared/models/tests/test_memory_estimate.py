@@ -100,7 +100,9 @@ def test_shard_preallocates_kv_upfront_uses_resolved_backend():
     assert shard_preallocates_kv_upfront(_shard(hybrid, "llama_cpp-cuda"))
     assert not shard_preallocates_kv_upfront(_shard(hybrid, "mlx-metal"))
     assert shard_preallocates_kv_upfront(_shard(_card(1), "llama_server-cuda"))
-    assert not shard_preallocates_kv_upfront(_shard(_card(1), "vllm-cuda"))
+    # vLLM also commits a fixed window at load (vllm serve --max-model-len from
+    # serving_n_ctx), so it IS window-committing.
+    assert shard_preallocates_kv_upfront(_shard(_card(1), "vllm-cuda"))
     # Fallback when the backend is unresolved (node absent from telemetry): pinned
     # gguf and unpinned llama.cpp-only cards are preallocating; mlx-capable is not.
     assert shard_preallocates_kv_upfront(_shard(_card(1, gguf_file="m.gguf"), None))
