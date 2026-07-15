@@ -133,11 +133,13 @@ class VisionMediaPacket(CamelCaseModel):
         )
 
     def transport_failure(self, message: str) -> "VisionMediaPacket":
-        """Build a terminal failure routed back to the source API node."""
+        """Build a terminal failure routed to the request's source API node."""
+
+        reverse_terminal = self.kind in ("accepted", "transport_failed")
 
         return VisionMediaPacket(
-            source_node=self.target_node,
-            target_node=self.source_node,
+            source_node=self.source_node if reverse_terminal else self.target_node,
+            target_node=self.target_node if reverse_terminal else self.source_node,
             command_id=self.command_id,
             model=self.model,
             sequence=self.sequence,

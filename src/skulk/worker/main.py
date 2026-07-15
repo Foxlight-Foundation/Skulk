@@ -1358,15 +1358,16 @@ class Worker:
             None,
         )
         if task is not None:
-            self._vision_media_failures.pop(command_id, None)
+            pending_failure = self._vision_media_failures.pop(command_id, None)
             self._vision_media_failure_since.pop(command_id, None)
-            await self.event_sender.send(
-                TaskFailed(
-                    task_id=task.task_id,
-                    error_type="invalid_vision_media",
-                    error_message=message,
+            if pending_failure is not None:
+                await self.event_sender.send(
+                    TaskFailed(
+                        task_id=task.task_id,
+                        error_type="invalid_vision_media",
+                        error_message=pending_failure,
+                    )
                 )
-            )
 
     def _clear_pending_vision_media(
         self,

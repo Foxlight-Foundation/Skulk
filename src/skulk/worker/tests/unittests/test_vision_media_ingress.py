@@ -9,7 +9,7 @@ from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.chunks import InputImageChunk
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
 from skulk.shared.types.common import CommandId, NodeId
-from skulk.shared.types.events import Event, IndexedEvent
+from skulk.shared.types.events import Event, IndexedEvent, TaskFailed
 from skulk.shared.types.state import State
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.shared.types.worker.instances import InstanceId
@@ -175,6 +175,56 @@ async def test_corrupt_vision_media_returns_source_routed_failure() -> None:
     assert diagnostics.active_streams == 0
     assert diagnostics.retained_bytes == 0
     assert diagnostics.rejected_streams == 1
+
+
+@pytest.mark.asyncio
+async def test_vision_media_rejection_race_emits_one_task_failure() -> None:
+    worker, _, _ = _worker_with_vision_transport()
+    command_id = CommandId("racing-rejection")
+    task = task_types.TextGeneration(
+        instance_id=InstanceId("vision-instance"),
+        command_id=command_id,
+        owner_node=NodeId("api-node"),
+        task_params=TextGenerationTaskParams(
+            model=ModelId("org/vlm"),
+            input=[InputMessage(role="user", content="describe")],
+            total_input_chunks=1,
+            image_count=1,
+        ),
+    )
+    event_sender, event_receiver = channel[Event](2)
+    worker.event_sender = event_sender
+    blocked_sender, blocked_receiver = channel[VisionMediaPacket](0)
+    worker._vision_media_packet_sender = blocked_sender  # pyright: ignore[reportPrivateUsage]
+    rejection_finished = anyio.Event()
+
+    async def reject() -> None:
+        await worker._reject_vision_media(  # pyright: ignore[reportPrivateUsage]
+            _open(command_id, 1), "checksum mismatch"
+        )
+        rejection_finished.set()
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(reject)
+        while command_id not in worker._vision_media_failures:  # pyright: ignore[reportPrivateUsage]
+            await anyio.sleep(0)
+
+        worker.state = State(tasks={task.task_id: task})
+        pending_failure = worker._vision_media_failures.pop(command_id)  # pyright: ignore[reportPrivateUsage]
+        worker._vision_media_failure_since.pop(command_id)  # pyright: ignore[reportPrivateUsage]
+        await event_sender.send(
+            TaskFailed(
+                task_id=task.task_id,
+                error_type="invalid_vision_media",
+                error_message=pending_failure,
+            )
+        )
+        assert (await blocked_receiver.receive()).kind == "transport_failed"
+        await rejection_finished.wait()
+        task_group.cancel_scope.cancel()
+
+    failures = event_receiver.collect()
+    assert len(failures) == 1
 
 
 @pytest.mark.asyncio

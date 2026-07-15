@@ -62,6 +62,23 @@ def test_vision_media_transport_failure_reverses_route() -> None:
     assert failed.error_message == "capacity exhausted"
 
 
+def test_vision_media_acceptance_failure_preserves_api_target() -> None:
+    accepted = VisionMediaPacket(
+        source_node=NodeId("worker-node"),
+        target_node=NodeId("api-node"),
+        command_id=CommandId("vision-command"),
+        model=ModelId("org/vlm"),
+        sequence=2,
+        kind="accepted",
+    )
+
+    failed = accepted.transport_failure("publish failed")
+
+    assert failed.source_node == NodeId("worker-node")
+    assert failed.target_node == NodeId("api-node")
+    assert failed.kind == "transport_failed"
+
+
 def test_vision_media_open_and_acceptance_define_explicit_lifecycle() -> None:
     opened = VisionMediaPacket(
         source_node=NodeId("api-node"),
