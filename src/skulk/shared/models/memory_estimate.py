@@ -276,9 +276,11 @@ def instance_context_token_limit(
     else:
         limit = min(memory_limit, card_limit)
 
-    # This ceiling is now the value the runner actually serves: a served engine
-    # (llama.cpp / vLLM) loads its KV cache at ``serving_n_ctx(context_token_limit)``,
-    # i.e. this memory-fit window, not a fixed 8192. The ceiling and the runner
+    # This ceiling is now the value the runner actually serves: the served
+    # llama.cpp engines (llama_cpp / llama_server) load their KV cache up front at
+    # ``serving_n_ctx(context_token_limit)``, i.e. this memory-fit window, not a
+    # fixed 8192 (any other served engine that preallocates a fixed window follows
+    # the same contract). The ceiling and the runner
     # window moved off the shared constant together, as the previous fixed-clamp
     # comment anticipated: placement's per-node fit is derived from the same working
     # set as this ceiling, so a node admitted at the KV_CONTEXT_BUDGET_TOKENS floor
