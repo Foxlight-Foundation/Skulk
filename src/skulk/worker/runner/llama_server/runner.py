@@ -37,7 +37,6 @@ from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple
 
 import httpx
-from anyio import ClosedResourceError, EndOfStream, WouldBlock
 
 from skulk.api.types import GenerationStats
 from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
@@ -53,9 +52,7 @@ from skulk.shared.types.events import (
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.tasks import (
-    CANCEL_ALL_TASKS,
     LoadModel,
-    Shutdown,
     Task,
     TaskId,
     TaskStatus,
@@ -66,7 +63,6 @@ from skulk.shared.types.worker.runners import (
     RunnerIdle,
     RunnerLoading,
     RunnerReady,
-    RunnerRunning,
     RunnerShutdown,
     RunnerShuttingDown,
     RunnerStatus,
@@ -92,6 +88,7 @@ from skulk.worker.runner.llama_cpp.runner import (
 from skulk.worker.runner.llama_server.channel_text_parser import (
     GemmaChannelTextParser,
 )
+from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 
 # Card ``served_spec_type`` value -> the ``llama-server --spec-type`` token.
 # ``draft_mtp`` uses the model's own built-in MTP heads (no draft model needed).
@@ -125,6 +122,43 @@ def _force_no_spec() -> bool:
         "yes",
         "on",
     )
+
+
+_LLAMA_SERVER_PARALLEL_ENV: Final = "SKULK_LLAMA_SERVER_PARALLEL"
+_DEFAULT_LLAMA_SERVER_PARALLEL: Final = 1
+
+
+def _llama_server_parallel() -> int:
+    """Number of parallel llama-server slots = concurrent generations in flight.
+
+    Concurrency is OPT-IN for the served llama.cpp engine (default 1, unchanged
+    behavior). Setting ``SKULK_LLAMA_SERVER_PARALLEL`` above 1 launches
+    ``llama-server --parallel N`` so its continuous batching engages, and the
+    runner keeps N generations in flight. llama-server SPLITS the total context
+    (``-c``) across the N slots, so each concurrent request gets ``n_ctx / N``
+    context; the total KV memory is unchanged (what placement reserved), which is
+    why this is opt-in rather than default-on -- unlike vLLM's paged pool, N-way
+    concurrency here trades per-request context. An unparseable or below-1 value
+    falls back to the default.
+    """
+    raw = os.environ.get(_LLAMA_SERVER_PARALLEL_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_LLAMA_SERVER_PARALLEL
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            f"{_LLAMA_SERVER_PARALLEL_ENV}={raw!r} is not an integer; "
+            f"using {_DEFAULT_LLAMA_SERVER_PARALLEL}"
+        )
+        return _DEFAULT_LLAMA_SERVER_PARALLEL
+    if value < 1:
+        logger.warning(
+            f"{_LLAMA_SERVER_PARALLEL_ENV}={value} is below 1; "
+            f"using {_DEFAULT_LLAMA_SERVER_PARALLEL}"
+        )
+        return _DEFAULT_LLAMA_SERVER_PARALLEL
+    return value
 
 
 def _draft_model_args(runtime: Any, spec_type: str) -> list[str] | None:
@@ -335,7 +369,7 @@ def _set_pdeathsig() -> None:
         pass
 
 
-class Runner:
+class Runner(ServedConcurrentDispatch):
     """Single-node served-backend runner that proxies an external ``llama-server``.
 
     Lifecycle mirrors the in-process llama.cpp runner: it skips the ring
@@ -394,6 +428,9 @@ class Runner:
         # itself (llama-server can't), splitting reasoning from the answer.
         self._uses_channel_parser: bool = False
         self.current_status: RunnerStatus = RunnerIdle()
+        # Concurrent dispatch state (shared mixin): up to N generations in flight,
+        # N = SKULK_LLAMA_SERVER_PARALLEL, matching the server's --parallel slots.
+        self._init_concurrent_dispatch(_llama_server_parallel(), "llama-gen")
         logger.info("llama-server runner created")
         self.update_status(RunnerIdle())
 
@@ -421,61 +458,12 @@ class Runner:
         )
         self.event_sender.send(TaskAcknowledged(task_id=task.task_id))
 
-    def _drain_cancellations(self) -> None:
-        while True:
-            try:
-                cancelled = self.cancel_receiver.receive_nowait()
-            except WouldBlock:
-                break
-            self.cancelled_tasks.add(cancelled)
-
-    def _is_cancelled(self, task_id: TaskId) -> bool:
-        self._drain_cancellations()
-        return (
-            task_id in self.cancelled_tasks or CANCEL_ALL_TASKS in self.cancelled_tasks
-        )
-
     def main(self) -> None:
-        try:
-            with self.task_receiver as tasks:
-                while True:
-                    try:
-                        task = tasks.receive_timeout(_LIVENESS_POLL_S)
-                    except WouldBlock:
-                        # No task within the poll window: verify the server
-                        # subprocess is still alive. Without this a llama-server
-                        # that dies BETWEEN requests (e.g. SIGABRT when an RPC
-                        # donor vanishes) leaves the runner gossiping Ready
-                        # forever while every future request 500s.
-                        self._ensure_server_alive()
-                        continue
-                    except (EndOfStream, ClosedResourceError):
-                        # receive_timeout raises ClosedResourceError when the
-                        # sender closed before the end-of-stream sentinel was
-                        # drained (the shared closed flag is checked first);
-                        # treat it like EndOfStream: clean loop exit.
-                        break
-                    if task.task_id in self.seen:
-                        logger.warning("repeat task - potential error")
-                    self.seen.add(task.task_id)
-                    self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
-                    self.send_task_status(task, TaskStatus.Running)
-                    self.handle_task(task)
-                    was_cancelled = (
-                        task.task_id in self.cancelled_tasks
-                        or CANCEL_ALL_TASKS in self.cancelled_tasks
-                    )
-                    self.send_task_status(
-                        task,
-                        TaskStatus.Cancelled if was_cancelled else TaskStatus.Complete,
-                    )
-                    self.update_status(self.current_status)
-                    if isinstance(self.current_status, RunnerShutdown):
-                        break
-        finally:
-            # Never leave the server subprocess running past the runner loop, even
-            # on an unexpected exit (PR_SET_PDEATHSIG is the SIGKILL backstop).
-            self._teardown_server()
+        # Concurrent dispatch: keeps up to SKULK_LLAMA_SERVER_PARALLEL generations
+        # in flight so llama-server's continuous batching engages (the shared loop
+        # streams each request on its own thread). LoadModel / Shutdown run inline
+        # on the dispatch thread. Logic lives in ServedConcurrentDispatch.
+        self.run_dispatch_loop()
 
     def _ensure_server_alive(self) -> None:
         """Raise if the spawned llama-server exited behind our back.
@@ -501,27 +489,12 @@ class Runner:
             )
 
     def handle_task(self, task: Task) -> None:
+        # TextGeneration and Shutdown are handled directly by the concurrent
+        # dispatch loop (ServedConcurrentDispatch); this serves the inline
+        # lifecycle path (LoadModel).
         match task:
             case LoadModel() if isinstance(self.current_status, RunnerIdle):
                 self._load_model(task)
-            case TextGeneration() if isinstance(self.current_status, RunnerReady):
-                self._generate(task)
-            case Shutdown():
-                logger.info("llama-server runner shutting down")
-                record_runner_phase(
-                    "shutdown_cleanup",
-                    event="runner_shutdown_requested",
-                    task_id=task.task_id,
-                )
-                self.update_status(RunnerShuttingDown())
-                self.acknowledge_task(task)
-                self._teardown_server()
-                record_runner_phase(
-                    "shutdown_cleanup",
-                    event="server_teardown_complete",
-                    task_id=task.task_id,
-                )
-                self.current_status = RunnerShutdown()
             case _:
                 raise RuntimeError(
                     f"llama-server runner received unsupported task "
@@ -620,6 +593,12 @@ class Runner:
             n_gpu_layers,
             "-c",
             str(n_ctx),
+            # Parallel slots for continuous batching. N = the runner's dispatch
+            # concurrency (SKULK_LLAMA_SERVER_PARALLEL), so the server accepts as
+            # many concurrent requests as the runner streams. llama-server splits
+            # -c across these slots (n_ctx/N per slot); total KV is unchanged.
+            "--parallel",
+            str(self._max_concurrency),
             "--host",
             "127.0.0.1",
             "--port",
@@ -770,9 +749,11 @@ class Runner:
     # --- generation: proxy the server's OpenAI streaming API ------------------
 
     def _generate(self, task: Task) -> None:
+        # Runs on a pool worker thread. Runner status (Running/Ready) is owned by
+        # the dispatch loop's in-flight counter, and the task was already
+        # acknowledged at acceptance in the loop (before backpressure), so neither
+        # is touched here.
         assert isinstance(task, TextGeneration)
-        self.update_status(RunnerRunning())
-        self.acknowledge_task(task)
         assert self.base_url is not None
 
         model_id = self.shard_metadata.model_card.model_id
@@ -830,20 +811,19 @@ class Runner:
                 )
             )
         else:
-            # Only cancellations OBSERVED during execution: draining the cancel
-            # pipe here would retroactively flip a finished task (see main()).
-            was_cancelled = (
-                task.task_id in self.cancelled_tasks
-                or CANCEL_ALL_TASKS in self.cancelled_tasks
-            )
+            # Read the shared cancel set through the lock-guarded helper: generations
+            # run concurrently, so an unlocked membership read here races the pool
+            # workers mutating cancelled_tasks.
+            was_cancelled = self._was_cancelled(task.task_id)
             record_runner_phase(
                 "cancel_observed" if was_cancelled else "completion",
                 event="generation_finished",
                 task_id=task.task_id,
                 command_id=str(command_id),
             )
-        self.current_status = RunnerReady()
-        record_runner_phase("idle", event="runner_ready", task_id=task.task_id)
+        # Status is NOT flipped here: the dispatch loop returns the runner to Ready
+        # only when the LAST in-flight generation drains, so a peer generation still
+        # streaming keeps the runner Running.
 
     def _generate_streaming(
         self,
