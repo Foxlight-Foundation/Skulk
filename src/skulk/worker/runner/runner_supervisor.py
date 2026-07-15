@@ -70,7 +70,7 @@ from skulk.shared.types.worker.runners import (
     RunnerStatus,
     RunnerWarmingUp,
 )
-from skulk.shared.types.worker.shards import ShardMetadata
+from skulk.shared.types.worker.shards import RpcDonorShardMetadata, ShardMetadata
 from skulk.utils.channels import MpReceiver, MpSender, Sender, mp_channel
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.runner.bootstrap import (
@@ -91,6 +91,18 @@ _TERMINAL_TASK_STATUSES = {
     TaskStatus.Failed,
     TaskStatus.TimedOut,
 }
+
+
+def _trace_expected_ranks(bound_instance: BoundInstance) -> tuple[int, ...]:
+    """Return only ranks whose runners execute tasks and can emit traces."""
+
+    return tuple(
+        sorted(
+            shard.device_rank
+            for shard in bound_instance.instance.shard_assignments.runner_to_shard.values()
+            if not isinstance(shard, RpcDonorShardMetadata)
+        )
+    )
 
 
 def _stream_frame_kind(chunk: GenerationChunk) -> StreamFrameKind:
@@ -568,15 +580,9 @@ class RunnerSupervisor:
                 )
                 self._trace_routes.pop(oldest_task_id, None)
             if task.owner_node is not None:
-                expected_ranks = tuple(
-                    sorted(
-                        shard.device_rank
-                        for shard in self.bound_instance.instance.shard_assignments.runner_to_shard.values()
-                    )
-                )
                 self._trace_routes[task.task_id] = (
                     task.owner_node,
-                    expected_ranks,
+                    _trace_expected_ranks(self.bound_instance),
                     now,
                 )
         self._last_task_sent_at = _now_utc_iso()

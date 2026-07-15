@@ -980,9 +980,6 @@ class Worker:
                 if existing is not None and existing.purpose != packet.purpose:
                     await self._reject_speech_media(command_id)
                     continue
-                self._speech_media_pending_since.setdefault(
-                    command_id, time.monotonic()
-                )
                 if packet.kind == "completed":
                     if (
                         packet.sequence <= 0
@@ -990,6 +987,9 @@ class Worker:
                     ):
                         await self._reject_speech_media(command_id)
                         continue
+                    self._speech_media_pending_since.setdefault(
+                        command_id, time.monotonic()
+                    )
                     self._speech_media_completed[command_id] = packet
                     self._refresh_speech_media_ready(command_id)
                     continue
@@ -1005,6 +1005,9 @@ class Worker:
                 ):
                     await self._reject_speech_media(command_id)
                     continue
+                self._speech_media_pending_since.setdefault(
+                    command_id, time.monotonic()
+                )
                 chunks[packet.sequence] = packet
                 self._speech_media_pending_bytes[command_id] = (
                     pending_bytes + len(packet.data)
@@ -1022,6 +1025,7 @@ class Worker:
             and set(chunks) == set(range(completed.sequence))
         ):
             self._speech_media_ready.add(command_id)
+            self._speech_media_pending_since.pop(command_id, None)
         else:
             self._speech_media_ready.discard(command_id)
 
@@ -1558,6 +1562,7 @@ class Worker:
             and task.task_params.total_input_chunks > 0
             and instance is not None
             and self.node_id in instance.shard_assignments.node_to_runner
+            and task.command_id not in self._speech_media_ready
         ):
             self._speech_media_pending_since.setdefault(
                 task.command_id, time.monotonic()

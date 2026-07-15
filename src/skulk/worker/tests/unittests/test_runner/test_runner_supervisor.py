@@ -42,10 +42,23 @@ from skulk.shared.types.tasks import (
     TextGeneration,
 )
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
-from skulk.shared.types.worker.instances import BoundInstance, InstanceId
-from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerRunning
+from skulk.shared.types.worker.instances import (
+    BoundInstance,
+    InstanceId,
+    LlamaRpcInstance,
+)
+from skulk.shared.types.worker.runners import (
+    RunnerFailed,
+    RunnerId,
+    RunnerRunning,
+    ShardAssignments,
+)
+from skulk.shared.types.worker.shards import RpcDonorShardMetadata
 from skulk.utils.channels import MpSender, channel, mp_channel
-from skulk.worker.runner.runner_supervisor import RunnerSupervisor
+from skulk.worker.runner.runner_supervisor import (
+    RunnerSupervisor,
+    _trace_expected_ranks,  # pyright: ignore[reportPrivateUsage]
+)
 from skulk.worker.tests.unittests.conftest import (
     get_bound_mlx_ring_instance,
     get_mlx_ring_instance,
@@ -71,6 +84,48 @@ class _DeadProcess:
 
     def kill(self) -> None:
         return None
+
+
+def test_trace_expected_ranks_excludes_rpc_memory_donors() -> None:
+    """Trace assembly must wait only for runners that execute the task."""
+
+    model_id = ModelId("gguf/trace-test")
+    driver_node = NodeId("driver-node")
+    donor_node = NodeId("donor-node")
+    driver_runner = RunnerId("driver-runner")
+    donor_runner = RunnerId("donor-runner")
+    driver_shard = get_pipeline_shard_metadata(model_id, 0, 2)
+    donor_shard = RpcDonorShardMetadata(
+        model_card=driver_shard.model_card,
+        device_rank=1,
+        world_size=2,
+        start_layer=0,
+        end_layer=0,
+        n_layers=driver_shard.n_layers,
+    )
+    instance = LlamaRpcInstance(
+        instance_id=InstanceId("trace-rpc-instance"),
+        shard_assignments=ShardAssignments(
+            model_id=model_id,
+            node_to_runner={
+                driver_node: driver_runner,
+                donor_node: donor_runner,
+            },
+            runner_to_shard={
+                driver_runner: driver_shard,
+                donor_runner: donor_shard,
+            },
+        ),
+        driver_node=driver_node,
+        donor_endpoints={donor_node: "127.0.0.1:50052"},
+    )
+    bound_instance = BoundInstance(
+        instance=instance,
+        bound_runner_id=driver_runner,
+        bound_node_id=driver_node,
+    )
+
+    assert _trace_expected_ranks(bound_instance) == (0,)
 
 
 @pytest.mark.asyncio

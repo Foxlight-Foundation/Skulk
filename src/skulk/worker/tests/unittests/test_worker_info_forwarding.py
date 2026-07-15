@@ -383,31 +383,63 @@ async def test_remote_realtime_audio_packet_for_other_node_is_ignored() -> None:
 
 
 @pytest.mark.asyncio
-async def test_speech_media_packet_is_bounded_and_completed_off_state() -> None:
-    """Out-of-order STT media becomes ready only in worker-local buffers."""
+async def test_completed_speech_media_stays_ready_without_ingress_deadline() -> None:
+    """Completed STT media cannot regain an ingress deadline while queued."""
 
-    _, indexed_event_receiver = channel[IndexedEvent]()
+    worker_node = NodeId("worker-node")
+    instance_id = InstanceId("speech-instance")
+    runner_id = RunnerId("speech-runner")
+    model_id = ModelId("mlx-community/speech-test")
+    instance = get_mlx_ring_instance(
+        instance_id=instance_id,
+        model_id=model_id,
+        node_to_runner={worker_node: runner_id},
+        runner_to_shard={runner_id: get_pipeline_shard_metadata(model_id, 0, 1)},
+    )
+    indexed_event_sender, indexed_event_receiver = channel[IndexedEvent]()
     event_sender, _ = channel[Event]()
     command_sender, _ = channel[ForwarderCommand]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
     packet_sender, packet_receiver = channel[SpeechMediaPacket](4)
     worker = Worker(
-        node_id=NodeId("worker-node"),
+        node_id=worker_node,
         event_receiver=indexed_event_receiver,
         event_sender=event_sender,
         command_sender=command_sender,
         download_command_sender=download_sender,
         speech_media_packet_receiver=packet_receiver,
     )
+    worker.state = State(instances={instance_id: instance})
     command_id = CommandId("reference-command")
     payload = b"RIFF-reference"
+    task = AudioTranscription(
+        task_id=TaskId("speech-task"),
+        command_id=command_id,
+        owner_node=NodeId("api-node"),
+        instance_id=instance_id,
+        task_params=AudioTranscriptionTaskParams(
+            model=model_id,
+            total_input_chunks=1,
+            audio_sha256=hashlib.sha256(payload).hexdigest(),
+        ),
+    )
+    chunk = SpeechMediaPacket(
+        source_node=NodeId("api-node"),
+        target_node=worker_node,
+        command_id=command_id,
+        sequence=0,
+        kind="chunk",
+        purpose="transcription_audio",
+        data=payload,
+    )
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(worker._speech_media_packet_ingress)  # pyright: ignore[reportPrivateUsage]
+        task_group.start_soon(worker._event_applier)  # pyright: ignore[reportPrivateUsage]
         await packet_sender.send(
             SpeechMediaPacket(
                 source_node=NodeId("api-node"),
-                target_node=NodeId("worker-node"),
+                target_node=worker_node,
                 command_id=command_id,
                 sequence=1,
                 kind="completed",
@@ -415,25 +447,31 @@ async def test_speech_media_packet_is_bounded_and_completed_off_state() -> None:
                 sha256=hashlib.sha256(payload).hexdigest(),
             )
         )
-        await packet_sender.send(
-            SpeechMediaPacket(
-                source_node=NodeId("api-node"),
-                target_node=NodeId("worker-node"),
-                command_id=command_id,
-                sequence=0,
-                kind="chunk",
-                purpose="transcription_audio",
-                data=payload,
-            )
-        )
+        await packet_sender.send(chunk)
         while command_id not in worker._speech_media_ready:  # pyright: ignore[reportPrivateUsage]
             await anyio.sleep(0)
+        assert command_id not in worker._speech_media_pending_since  # pyright: ignore[reportPrivateUsage]
+
+        # DATA can beat the task event to the worker, and gossipsub fallback may
+        # redeliver a completed chunk. Neither may restart the ingress deadline.
+        await packet_sender.send(chunk)
+        with anyio.fail_after(2):
+            while packet_sender.statistics().current_buffer_used > 0:
+                await anyio.sleep(0)
+        assert command_id not in worker._speech_media_pending_since  # pyright: ignore[reportPrivateUsage]
+        await indexed_event_sender.send(
+            IndexedEvent(idx=0, event=TaskCreated(task_id=task.task_id, task=task))
+        )
+        with anyio.fail_after(2):
+            while task.task_id not in worker.state.tasks:
+                await anyio.sleep(0)
         task_group.cancel_scope.cancel()
 
     assert worker._speech_media_chunks[command_id][0].data == payload  # pyright: ignore[reportPrivateUsage]
     assert command_id in worker._speech_media_completed  # pyright: ignore[reportPrivateUsage]
     assert command_id in worker._speech_media_ready  # pyright: ignore[reportPrivateUsage]
-    assert worker.state.tasks == {}
+    assert command_id not in worker._speech_media_pending_since  # pyright: ignore[reportPrivateUsage]
+    assert worker.state.tasks[task.task_id] == task
 
 
 @pytest.mark.asyncio
