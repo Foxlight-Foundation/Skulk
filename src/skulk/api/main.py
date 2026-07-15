@@ -241,6 +241,7 @@ from skulk.master.placement_utils import usable_vram_by_node
 from skulk.routing.provider_streams import ProviderStreamPacket
 from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.routing.speech_media import SpeechMediaPacket
+from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.apply import apply
 from skulk.shared.constants import (
     DASHBOARD_DIR,
@@ -289,7 +290,6 @@ from skulk.shared.types.chunks import (
     ErrorChunk,
     GenerationChunk,
     ImageChunk,
-    InputImageChunk,
     PrefillProgressChunk,
     TokenChunk,
     ToolCallChunk,
@@ -347,6 +347,7 @@ from skulk.shared.types.diagnostics import (
     RunnerTaskCancelResponse,
     RunnerTaskDiagnostics,
     TelemetryPlaneDiagnostics,
+    VisionMediaIngressDiagnostics,
 )
 from skulk.shared.types.events import (
     Event,
@@ -356,6 +357,7 @@ from skulk.shared.types.events import (
     NodeTimedOut,
     RunnerStatusUpdated,
     StateSnapshotHydrated,
+    TaskCreated,
     TaskFailed,
     TaskStatusUpdated,
     TracesMerged,
@@ -738,6 +740,12 @@ def _encode_audio_transcription_sse(
 # the chunks behind it forever — and the stream's own idle backstop never arms
 # because nothing has been yielded yet. A periodic sweep flushes such gaps.
 _REORDER_GAP_FLUSH_SECONDS = 5.0
+_VISION_MEDIA_PENDING_COMMANDS = 64
+_VISION_MEDIA_PENDING_COMMAND_BYTES = 32 * 1024 * 1024
+_VISION_MEDIA_PENDING_TOTAL_BYTES = 512 * 1024 * 1024
+_VISION_MEDIA_PENDING_TTL_SECONDS = 5 * 60.0
+_VISION_MEDIA_ACK_TIMEOUT_SECONDS = 5 * 60.0
+_VISION_MEDIA_RAW_IMAGE_BYTES = (_VISION_MEDIA_PENDING_COMMAND_BYTES // 4) * 3
 
 
 @dataclass
@@ -783,6 +791,23 @@ class _ActiveProviderStream:
     input_lifecycle: CapabilityStreamReceiver | None = None
     input_failure: CapabilityStreamError | None = None
     reserved_instance_id: InstanceId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingVisionMedia:
+    """Request-scoped image chunks awaiting authoritative task placement."""
+
+    model: ModelId
+    chunks: tuple[tuple[int, bytes], ...]
+    image_count: int
+    sha256: str
+    created_at: float
+
+    @property
+    def byte_count(self) -> int:
+        """Return serialized media bytes retained by this request."""
+
+        return sum(len(data) for _, data in self.chunks)
 
 
 # Task statuses for which the runner has stopped producing — a mid-stream idle
@@ -1134,8 +1159,13 @@ class API:
         realtime_audio_packet_receiver: "Receiver[RealtimeAudioPacket] | None" = None,
         speech_media_packet_sender: "Sender[SpeechMediaPacket] | None" = None,
         speech_media_packet_receiver: "Receiver[SpeechMediaPacket] | None" = None,
+        vision_media_packet_sender: "Sender[VisionMediaPacket] | None" = None,
+        vision_media_packet_receiver: "Receiver[VisionMediaPacket] | None" = None,
         data_plane_zenoh: bool = False,
         data_plane_egress_provider: (
+            Callable[[], DataPlaneEgressDiagnostics] | None
+        ) = None,
+        vision_media_egress_provider: (
             Callable[[], DataPlaneEgressDiagnostics] | None
         ) = None,
         telemetry_plane_provider: (
@@ -1210,6 +1240,18 @@ class API:
         self._speech_media_packet_receiver = speech_media_packet_receiver
         self._speech_media_commands: set[CommandId] = set()
         self._speech_media_targets: dict[CommandId, NodeId] = {}
+        self._vision_media_packet_sender = vision_media_packet_sender
+        self._vision_media_packet_receiver = vision_media_packet_receiver
+        self._pending_vision_media: dict[CommandId, _PendingVisionMedia] = {}
+        self._pending_vision_media_bytes = 0
+        self._active_vision_media_bytes: dict[CommandId, int] = {}
+        self._active_vision_media_total_bytes = 0
+        self._vision_media_commands: set[CommandId] = set()
+        self._vision_media_targets: dict[CommandId, tuple[NodeId, ...]] = {}
+        self._vision_media_pending_acks: dict[CommandId, set[NodeId]] = {}
+        self._vision_media_ack_deadlines: dict[CommandId, float] = {}
+        self._vision_media_models: dict[CommandId, ModelId] = {}
+        self._vision_media_failures: dict[CommandId, ErrorChunk] = {}
         self._data_plane_zenoh = data_plane_zenoh
         self._provider_stream_receivers: dict[
             str, _ProviderStreamReceiveState
@@ -1264,6 +1306,9 @@ class API:
         self._runner_cancel_provider: (
             Callable[[RunnerId, task_types.TaskId], Awaitable[RunnerTaskCancelResponse]]
             | None
+        ) = None
+        self._vision_media_ingress_provider: (
+            Callable[[], VisionMediaIngressDiagnostics] | None
         ) = None
         self._sent_image_hashes: set[str] = set()
         # Initialize optimizer if store path is available
@@ -1400,6 +1445,7 @@ class API:
         )
         self._provider_observer = ProviderObserver()
         self._data_plane_egress_provider = data_plane_egress_provider
+        self._vision_media_egress_provider = vision_media_egress_provider
         self._telemetry_plane_provider = telemetry_plane_provider
         self._image_store = ImageStore(SKULK_IMAGE_CACHE_DIR)
         self._tg: TaskGroup = TaskGroup()
@@ -1423,6 +1469,35 @@ class API:
 
         self._runner_cancel_provider = provider
 
+    def set_vision_media_ingress_provider(
+        self,
+        provider: Callable[[], VisionMediaIngressDiagnostics] | None,
+    ) -> None:
+        """Attach local worker vision-ingress diagnostics to this API."""
+
+        self._vision_media_ingress_provider = provider
+
+    def _vision_media_ingress_diagnostics(self) -> VisionMediaIngressDiagnostics:
+        """Combine local API admission pressure with worker ingress occupancy."""
+
+        worker = (
+            self._vision_media_ingress_provider()
+            if self._vision_media_ingress_provider is not None
+            else VisionMediaIngressDiagnostics.empty()
+        )
+        return worker.model_copy(
+            update={
+                "pending_api_commands": len(self._pending_vision_media),
+                "pending_api_bytes": self._pending_vision_media_bytes,
+                "active_api_commands": len(self._active_vision_media_bytes),
+                "active_api_bytes": self._active_vision_media_total_bytes,
+                "pending_worker_acknowledgements": sum(
+                    len(targets)
+                    for targets in self._vision_media_pending_acks.values()
+                ),
+            }
+        )
+
     def reset(
         self,
         result_clock: int,
@@ -1443,6 +1518,16 @@ class API:
         self._audio_speech_queues = {}
         self._audio_transcription_queues = {}
         self._realtime_audio_transcription_commands = set()
+        self._pending_vision_media = {}
+        self._pending_vision_media_bytes = 0
+        self._active_vision_media_bytes = {}
+        self._active_vision_media_total_bytes = 0
+        self._vision_media_commands = set()
+        self._vision_media_targets = {}
+        self._vision_media_pending_acks = {}
+        self._vision_media_ack_deadlines = {}
+        self._vision_media_models = {}
+        self._vision_media_failures = {}
         self._cancelled_command_ids = set()
         self.unpause(result_clock, master_node_id=master_node_id)
         self.event_receiver.close()
@@ -2710,10 +2795,32 @@ class API:
         """
 
         should_send_finished = command_id not in self._cancelled_command_ids
+        vision_targets = self._vision_media_targets.get(command_id, ())
+        vision_model = self._vision_media_models.get(command_id)
+        if (
+            not should_send_finished
+            and vision_targets
+            and vision_model is not None
+            and self._vision_media_packet_sender is not None
+        ):
+            with anyio.move_on_after(2, shield=True):
+                await self._cancel_vision_media_transport(
+                    command_id,
+                    vision_model,
+                    vision_targets,
+                )
         self._cancelled_command_ids.discard(command_id)
         self._realtime_audio_transcription_commands.discard(command_id)
         self._speech_media_commands.discard(command_id)
         self._speech_media_targets.pop(command_id, None)
+        self._take_pending_vision_media(command_id)
+        self._release_active_vision_media(command_id)
+        self._vision_media_commands.discard(command_id)
+        self._vision_media_targets.pop(command_id, None)
+        self._vision_media_pending_acks.pop(command_id, None)
+        self._vision_media_ack_deadlines.pop(command_id, None)
+        self._vision_media_models.pop(command_id, None)
+        self._vision_media_failures.pop(command_id, None)
         if should_send_finished:
             await self._send(TaskFinished(finished_command_id=command_id))
         queue_map.pop(command_id, None)
@@ -2737,6 +2844,10 @@ class API:
             self._text_generation_queues[command_id], recv = channel[
                 TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk
             ]()
+
+            if pending_error := self._take_vision_media_failure(command_id):
+                yield pending_error
+                return
 
             with recv as token_chunks:
                 # Idle backstop (#279 Phase 2b): the DATA plane is best-effort, so
@@ -3018,6 +3129,315 @@ class API:
         }
         return payload
 
+    def _stage_vision_media(
+        self,
+        command_id: CommandId,
+        model: ModelId,
+        chunks: Sequence[tuple[int, str]],
+        image_count: int,
+    ) -> None:
+        """Retain bounded image chunks until the master selects an instance."""
+
+        if self._vision_media_packet_sender is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Vision media transport is unavailable on this node",
+            )
+        if not chunks:
+            raise HTTPException(
+                status_code=400,
+                detail="Image input must not be empty",
+            )
+        encoded_chunks = tuple(
+            (image_index, data.encode("ascii")) for image_index, data in chunks
+        )
+        pending = _PendingVisionMedia(
+            model=model,
+            chunks=encoded_chunks,
+            image_count=image_count,
+            sha256=hashlib.sha256(
+                b"".join(data for _, data in encoded_chunks)
+            ).hexdigest(),
+            created_at=time.monotonic(),
+        )
+        if pending.byte_count > _VISION_MEDIA_PENDING_COMMAND_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="Image input exceeds the per-request media limit",
+            )
+        if (
+            len(self._pending_vision_media) + len(self._active_vision_media_bytes)
+            >= _VISION_MEDIA_PENDING_COMMANDS
+            or self._pending_vision_media_bytes + pending.byte_count
+            + self._active_vision_media_total_bytes
+            > _VISION_MEDIA_PENDING_TOTAL_BYTES
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="Vision media admission capacity is exhausted",
+            )
+        self._pending_vision_media[command_id] = pending
+        self._pending_vision_media_bytes += pending.byte_count
+        self._vision_media_commands.add(command_id)
+        self._vision_media_models[command_id] = model
+
+    def _take_pending_vision_media(
+        self, command_id: CommandId
+    ) -> _PendingVisionMedia | None:
+        """Release one pending upload from API admission accounting."""
+
+        pending = self._pending_vision_media.pop(command_id, None)
+        if pending is not None:
+            self._pending_vision_media_bytes = max(
+                0, self._pending_vision_media_bytes - pending.byte_count
+            )
+        return pending
+
+    def _retain_active_vision_media(
+        self, command_id: CommandId, byte_count: int
+    ) -> None:
+        """Keep transferred bytes charged until all selected ranks verify them."""
+
+        previous = self._active_vision_media_bytes.get(command_id, 0)
+        self._active_vision_media_bytes[command_id] = byte_count
+        self._active_vision_media_total_bytes += byte_count - previous
+
+    def _release_active_vision_media(self, command_id: CommandId) -> None:
+        """Release source-side transfer accounting after terminal delivery."""
+
+        released = self._active_vision_media_bytes.pop(command_id, 0)
+        self._active_vision_media_total_bytes = max(
+            0, self._active_vision_media_total_bytes - released
+        )
+
+    def _dispatch_pending_vision_media(self, task: task_types.Task) -> None:
+        """Start direct upload after authoritative task placement is replicated."""
+
+        if not isinstance(task, (task_types.TextGeneration, task_types.ImageEdits)):
+            return
+        pending = self._take_pending_vision_media(task.command_id)
+        if pending is None:
+            return
+        self._retain_active_vision_media(task.command_id, pending.byte_count)
+        instance = self.state.instances.get(task.instance_id)
+        if instance is None:
+            self._tg.start_soon(
+                self._fail_vision_media_command,
+                task.command_id,
+                pending.model,
+                "The selected model instance disappeared before image upload",
+            )
+            return
+        targets = tuple(
+            sorted(instance.shard_assignments.node_to_runner, key=str)
+        )
+        if not targets:
+            self._tg.start_soon(
+                self._fail_vision_media_command,
+                task.command_id,
+                pending.model,
+                "The selected model instance has no worker participants",
+            )
+            return
+        self._vision_media_targets[task.command_id] = targets
+        self._vision_media_pending_acks[task.command_id] = set(targets)
+        self._vision_media_ack_deadlines[task.command_id] = (
+            time.monotonic() + _VISION_MEDIA_ACK_TIMEOUT_SECONDS
+        )
+        self._tg.start_soon(
+            self._send_vision_media_to_targets,
+            task.command_id,
+            pending,
+            targets,
+        )
+
+    async def _send_vision_media_to_targets(
+        self,
+        command_id: CommandId,
+        pending: _PendingVisionMedia,
+        targets: tuple[NodeId, ...],
+    ) -> None:
+        """Fan one ordered image stream directly to every selected rank."""
+
+        try:
+            async with anyio.create_task_group() as task_group:
+                for target in targets:
+                    task_group.start_soon(
+                        self._send_vision_media_to_target,
+                        command_id,
+                        pending,
+                        target,
+                    )
+        except anyio.get_cancelled_exc_class():
+            raise
+        except Exception as exception:  # noqa: BLE001 - transport boundary
+            logger.opt(exception=exception).warning(
+                f"Vision media upload failed for command {command_id}"
+            )
+            await self._fail_vision_media_command(
+                command_id,
+                pending.model,
+                "Vision media transport failed while uploading image input",
+            )
+
+    async def _send_vision_media_to_target(
+        self,
+        command_id: CommandId,
+        pending: _PendingVisionMedia,
+        target: NodeId,
+    ) -> None:
+        """Send one rank's explicit open, ordered chunks, and completion."""
+
+        sender = self._vision_media_packet_sender
+        if sender is None:
+            raise RuntimeError("vision media transport is unavailable")
+        total_chunks = len(pending.chunks)
+        if command_id not in self._vision_media_commands:
+            return
+        await sender.send(
+            VisionMediaPacket(
+                source_node=self.node_id,
+                target_node=target,
+                command_id=command_id,
+                model=pending.model,
+                sequence=0,
+                kind="opened",
+                total_chunks=total_chunks,
+                image_count=pending.image_count,
+            )
+        )
+        for sequence, (image_index, data) in enumerate(pending.chunks, start=1):
+            if command_id not in self._vision_media_commands:
+                return
+            await sender.send(
+                VisionMediaPacket(
+                    source_node=self.node_id,
+                    target_node=target,
+                    command_id=command_id,
+                    model=pending.model,
+                    sequence=sequence,
+                    kind="chunk",
+                    data=data,
+                    image_index=image_index,
+                    total_chunks=total_chunks,
+                )
+            )
+        if command_id not in self._vision_media_commands:
+            return
+        await sender.send(
+            VisionMediaPacket(
+                source_node=self.node_id,
+                target_node=target,
+                command_id=command_id,
+                model=pending.model,
+                sequence=total_chunks + 1,
+                kind="completed",
+                total_chunks=total_chunks,
+                image_count=pending.image_count,
+                sha256=pending.sha256,
+            )
+        )
+
+    async def _cancel_vision_media_transport(
+        self,
+        command_id: CommandId,
+        model: ModelId,
+        targets: tuple[NodeId, ...],
+    ) -> None:
+        """Send best-effort media cancellation to every selected worker."""
+
+        sender = self._vision_media_packet_sender
+        if sender is None:
+            return
+        for target in targets:
+            with contextlib.suppress(
+                BrokenResourceError, ClosedResourceError, WouldBlock
+            ):
+                await sender.send(
+                    VisionMediaPacket(
+                        source_node=self.node_id,
+                        target_node=target,
+                        command_id=command_id,
+                        model=model,
+                        sequence=0,
+                        kind="cancelled",
+                    )
+                )
+
+    async def _fail_vision_media_command(
+        self,
+        command_id: CommandId,
+        model: ModelId,
+        message: str,
+    ) -> None:
+        """Fail one upload without disturbing unrelated inference streams."""
+
+        if (
+            command_id not in self._vision_media_commands
+            or command_id in self._vision_media_failures
+        ):
+            return
+        error = ErrorChunk(model=model, error_message=message)
+        self._vision_media_failures[command_id] = error
+        self._vision_media_commands.discard(command_id)
+        self._release_active_vision_media(command_id)
+        self._vision_media_pending_acks.pop(command_id, None)
+        self._vision_media_ack_deadlines.pop(command_id, None)
+        await self._dispatch_generation_chunk(command_id, error)
+        self._close_command_queue(command_id)
+        self._cancelled_command_ids.add(command_id)
+        await self.command_sender.send(
+            ForwarderCommand(
+                origin=self._system_id,
+                command=TaskCancelled(cancelled_command_id=command_id),
+            )
+        )
+        # Transport rejection is terminal to the caller. Let stream finalization
+        # emit TaskFinished after cancellation so the master releases its mapping.
+        self._cancelled_command_ids.discard(command_id)
+
+    def _take_vision_media_failure(self, command_id: CommandId) -> ErrorChunk | None:
+        """Consume a transport error that arrived before its response queue."""
+
+        return self._vision_media_failures.pop(command_id, None)
+
+    async def _sweep_pending_vision_media(self) -> None:
+        """Fail uploads missing placement or worker verification acknowledgements."""
+
+        while True:
+            await anyio.sleep(5)
+            await self._expire_stale_vision_media(time.monotonic())
+
+    async def _expire_stale_vision_media(self, now: float) -> None:
+        """Fail placement and acknowledgement deadlines at one monotonic instant."""
+
+        cutoff = now - _VISION_MEDIA_PENDING_TTL_SECONDS
+        expired = [
+            (command_id, pending.model)
+            for command_id, pending in self._pending_vision_media.items()
+            if pending.created_at <= cutoff
+        ]
+        for command_id, model in expired:
+            self._take_pending_vision_media(command_id)
+            await self._fail_vision_media_command(
+                command_id,
+                model,
+                "Vision media timed out waiting for authoritative placement",
+            )
+        unacknowledged = [
+            command_id
+            for command_id, deadline in self._vision_media_ack_deadlines.items()
+            if deadline <= now
+        ]
+        for command_id in unacknowledged:
+            model = self._vision_media_models.get(command_id)
+            if model is not None:
+                await self._fail_vision_media_command(
+                    command_id,
+                    model,
+                    "Vision media timed out waiting for worker verification",
+                )
+
     async def _send_text_generation_with_images(
         self, task_params: TextGenerationTaskParams
     ) -> TextGeneration:
@@ -3109,22 +3529,19 @@ class API:
             }
         )
         command = TextGeneration(task_params=task_params, owner_node=self.node_id)
-
-        for global_idx, (img_idx, chunk_data) in enumerate(all_chunks):
-            await self._send(
-                SendInputChunk(
-                    chunk=InputImageChunk(
-                        model=task_params.model,
-                        command_id=command.command_id,
-                        data=chunk_data,
-                        chunk_index=global_idx,
-                        total_chunks=len(all_chunks),
-                        image_index=img_idx,
-                    )
-                )
-            )
-
-        await self._send(command)
+        self._stage_vision_media(
+            command.command_id,
+            task_params.model,
+            all_chunks,
+            len(new_images),
+        )
+        try:
+            await self._send(command)
+        except BaseException:
+            self._take_pending_vision_media(command.command_id)
+            self._vision_media_commands.discard(command.command_id)
+            self._vision_media_models.pop(command.command_id, None)
+            raise
         return command
 
     async def chat_completions(
@@ -5336,6 +5753,19 @@ class API:
                 ImageChunk | ErrorChunk
             ]()
 
+            if pending_error := self._take_vision_media_failure(command_id):
+                error_response = ErrorResponse(
+                    error=ErrorInfo(
+                        message=pending_error.error_message
+                        or "Vision media transport failed",
+                        type="InternalServerError",
+                        code=500,
+                    )
+                )
+                yield f"data: {error_response.model_dump_json()}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
             with recv as chunks:
                 async for chunk in chunks:
                     if chunk.finish_reason == "error":
@@ -5457,6 +5887,13 @@ class API:
             self._image_generation_queues[command_id], recv = channel[
                 ImageChunk | ErrorChunk
             ]()
+
+            if pending_error := self._take_vision_media_failure(command_id):
+                raise HTTPException(
+                    status_code=500,
+                    detail=pending_error.error_message
+                    or "Vision media transport failed",
+                )
 
             while images_complete < num_images:
                 with recv as chunks:
@@ -5611,7 +6048,12 @@ class API:
         resolved_model = await self._validate_image_model(model)
         advanced_params = _ensure_seed(advanced_params)
 
-        image_content = await image.read()
+        image_content = await image.read(_VISION_MEDIA_RAW_IMAGE_BYTES + 1)
+        if len(image_content) > _VISION_MEDIA_RAW_IMAGE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="Input image exceeds the per-request media limit",
+            )
         image_data = base64.b64encode(image_content).decode("utf-8")
 
         image_strength = 0.7 if input_fidelity == "high" else 0.3
@@ -5645,20 +6087,19 @@ class API:
         logger.info(
             f"Sending input image: {len(image_data)} bytes in {total_chunks} chunks"
         )
-        for chunk_index, chunk_data in enumerate(data_chunks):
-            await self._send(
-                SendInputChunk(
-                    chunk=InputImageChunk(
-                        model=resolved_model,
-                        command_id=command.command_id,
-                        data=chunk_data,
-                        chunk_index=chunk_index,
-                        total_chunks=total_chunks,
-                    )
-                )
-            )
-
-        await self._send(command)
+        self._stage_vision_media(
+            command.command_id,
+            resolved_model,
+            [(0, chunk_data) for chunk_data in data_chunks],
+            1,
+        )
+        try:
+            await self._send(command)
+        except BaseException:
+            self._take_pending_vision_media(command.command_id)
+            self._vision_media_commands.discard(command.command_id)
+            self._vision_media_models.pop(command.command_id, None)
+            raise
         return command
 
     async def image_edits(
@@ -6230,6 +6671,8 @@ class API:
                 tg.start_soon(self._apply_provider_data)
                 tg.start_soon(self._apply_realtime_audio_transport)
                 tg.start_soon(self._apply_speech_media_transport)
+                tg.start_soon(self._apply_vision_media_transport)
+                tg.start_soon(self._sweep_pending_vision_media)
                 tg.start_soon(self._sweep_provider_stream_receivers)
                 # Releases reorder gaps stuck on a chunk dropped by the
                 # best-effort DATA topic (#279 Phase 2b); lifetime-scoped like
@@ -6324,6 +6767,9 @@ class API:
                 # Prune telemetry for timed-out nodes from the API applier too,
                 # so a --no-worker node still tracks live membership (#279).
                 record_membership_from_event(self._telemetry_view, event)
+
+                if isinstance(event, TaskCreated):
+                    self._dispatch_pending_vision_media(event.task)
 
                 # Output chunks no longer travel the event log — they arrive on
                 # the data plane (#279 Phase 2), demuxed by _apply_data.
@@ -6510,6 +6956,43 @@ class API:
                 # notify the master after cancellation stops the runner, or the
                 # command-to-task mapping remains orphaned indefinitely.
                 self._cancelled_command_ids.discard(packet.command_id)
+
+    async def _apply_vision_media_transport(self) -> None:
+        """Apply worker verification or failure to the source image request."""
+
+        if self._vision_media_packet_receiver is None:
+            return
+        with self._vision_media_packet_receiver as packets:
+            async for packet in packets:
+                if (
+                    packet.target_node != self.node_id
+                    or packet.command_id not in self._vision_media_commands
+                ):
+                    continue
+                targets = self._vision_media_targets.get(packet.command_id, ())
+                model = self._vision_media_models.get(packet.command_id)
+                if packet.source_node not in targets or packet.model != model:
+                    logger.warning(
+                        "Ignoring vision media terminal from a node that does not "
+                        f"own command {packet.command_id}"
+                    )
+                    continue
+                if packet.kind == "accepted":
+                    pending = self._vision_media_pending_acks.get(packet.command_id)
+                    if pending is None:
+                        continue
+                    pending.discard(packet.source_node)
+                    if not pending:
+                        self._vision_media_pending_acks.pop(packet.command_id, None)
+                        self._vision_media_ack_deadlines.pop(packet.command_id, None)
+                        self._release_active_vision_media(packet.command_id)
+                    continue
+                if packet.kind == "transport_failed":
+                    await self._fail_vision_media_command(
+                        packet.command_id,
+                        packet.model,
+                        packet.error_message or "vision media transport failed",
+                    )
 
     def _apply_provider_input_frame(self, frame: CapabilityStreamFrame) -> None:
         """Validate and queue one caller frame for its active provider handler."""
@@ -7919,6 +8402,12 @@ class API:
                 if self._data_plane_egress_provider is not None
                 else None
             ),
+            vision_media_egress=(
+                self._vision_media_egress_provider()
+                if self._vision_media_egress_provider is not None
+                else DataPlaneEgressDiagnostics.empty()
+            ),
+            vision_media_ingress=self._vision_media_ingress_diagnostics(),
             provider=self._provider_observer.snapshot(
                 active_unary_calls=self._active_capability_calls,
                 stream_slots_in_use=len(self._active_capability_streams),

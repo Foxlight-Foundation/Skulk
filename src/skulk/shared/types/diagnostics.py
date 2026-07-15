@@ -704,6 +704,26 @@ class DataPlaneEgressDiagnostics(CamelCaseModel):
     remote_bytes_published: int = Field(
         description="Serialized DATA bytes successfully published over Zenoh."
     )
+    inbound_payload_queue_depth: int = Field(
+        default=0,
+        description="Payload frames waiting in an isolated network-ingress lane.",
+    )
+    inbound_payload_queue_capacity: int = Field(
+        default=0,
+        description="Hard capacity of the isolated payload ingress lane.",
+    )
+    inbound_terminal_queue_depth: int = Field(
+        default=0,
+        description="Terminal frames waiting in an isolated network-ingress lane.",
+    )
+    inbound_terminal_queue_capacity: int = Field(
+        default=0,
+        description="Hard capacity of the isolated terminal ingress lane.",
+    )
+    inbound_frames_dropped: int = Field(
+        default=0,
+        description="Network-ingress frames rejected by isolated lane bounds.",
+    )
     idle_stream_reclaims: int = Field(
         description="Remote command queues reclaimed after their idle lease expired."
     )
@@ -755,6 +775,71 @@ class DataPlaneEgressDiagnostics(CamelCaseModel):
             publish_latency_samples=0,
             publish_latency_seconds_average=None,
             publish_latency_seconds_max=None,
+        )
+
+
+class VisionMediaIngressDiagnostics(CamelCaseModel):
+    """API and worker bounded vision upload occupancy and lifecycle counters."""
+
+    pending_api_commands: int = Field(
+        description="Image commands retained by the API while awaiting placement."
+    )
+    pending_api_bytes: int = Field(
+        description="Image bytes retained by the API while awaiting placement."
+    )
+    active_api_commands: int = Field(
+        description="Image transfers sent and still awaiting worker verification."
+    )
+    active_api_bytes: int = Field(
+        description="Source image bytes charged to active transfer admission."
+    )
+    pending_worker_acknowledgements: int = Field(
+        description="Selected worker verifications still owed to the API."
+    )
+
+    active_streams: int = Field(
+        description="Incomplete or verified image streams retained by this worker."
+    )
+    pending_frames: int = Field(
+        description="Unverified image frames currently retained."
+    )
+    retained_bytes: int = Field(
+        description="Image bytes retained across pending and verified streams."
+    )
+    verified_streams: int = Field(
+        description="Verified streams waiting for runner dispatch."
+    )
+    pending_failures: int = Field(
+        description="Bounded rejected-stream failures awaiting task correlation."
+    )
+    completed_streams: int = Field(
+        description="Streams that passed integrity verification since process start."
+    )
+    rejected_streams: int = Field(
+        description="Streams rejected for bounds, metadata, or integrity failures."
+    )
+    expired_streams: int = Field(
+        description="Streams rejected after exceeding the ingress age limit."
+    )
+
+    @classmethod
+    def empty(cls) -> "VisionMediaIngressDiagnostics":
+        """Return a zeroed snapshot when no local worker is attached."""
+
+        return cls(
+            pending_api_commands=0,
+            pending_api_bytes=0,
+            active_api_commands=0,
+            active_api_bytes=0,
+            pending_worker_acknowledgements=0,
+            active_streams=0,
+            pending_frames=0,
+            retained_bytes=0,
+            verified_streams=0,
+            pending_failures=0,
+            completed_streams=0,
+            rejected_streams=0,
+            expired_streams=0,
         )
 
 
@@ -972,6 +1057,16 @@ class NodeDiagnostics(CamelCaseModel):
     )
     data_plane: DataPlaneDiagnostics = Field(
         description="Local DATA stream lifecycle, ordering, and timing metrics."
+    )
+    vision_media_egress: DataPlaneEgressDiagnostics = Field(
+        default_factory=DataPlaneEgressDiagnostics.empty,
+        description=(
+            "Isolated router egress pressure for inbound VLM and image-edit media."
+        ),
+    )
+    vision_media_ingress: VisionMediaIngressDiagnostics = Field(
+        default_factory=VisionMediaIngressDiagnostics.empty,
+        description="Bounded worker-side image upload occupancy and outcomes.",
     )
     provider: ProviderDiagnostics = Field(
         default_factory=ProviderDiagnostics.empty,

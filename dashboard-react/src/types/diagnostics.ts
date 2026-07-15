@@ -241,6 +241,11 @@ export interface DataPlaneEgressDiagnostics {
   remoteFramesDropped: number;
   remotePublishFailures: number;
   remoteBytesPublished: number;
+  inboundPayloadQueueDepth: number;
+  inboundPayloadQueueCapacity: number;
+  inboundTerminalQueueDepth: number;
+  inboundTerminalQueueCapacity: number;
+  inboundFramesDropped: number;
   enqueueLatencySamples: number;
   enqueueLatencySecondsAverage?: number | null;
   enqueueLatencySecondsMax?: number | null;
@@ -248,6 +253,23 @@ export interface DataPlaneEgressDiagnostics {
   publishLatencySecondsAverage?: number | null;
   publishLatencySecondsMax?: number | null;
   owners: Record<string, DataPlaneOwnerDiagnostics>;
+}
+
+/** Worker-side bounded vision upload occupancy and lifecycle metrics. */
+export interface VisionMediaIngressDiagnostics {
+  pendingApiCommands: number;
+  pendingApiBytes: number;
+  activeApiCommands: number;
+  activeApiBytes: number;
+  pendingWorkerAcknowledgements: number;
+  activeStreams: number;
+  pendingFrames: number;
+  retainedBytes: number;
+  verifiedStreams: number;
+  pendingFailures: number;
+  completedStreams: number;
+  rejectedStreams: number;
+  expiredStreams: number;
 }
 
 /** API and router metrics for ordered DATA stream lifecycle health. */
@@ -289,6 +311,8 @@ export interface NodeDiagnostics {
   supervisorRunners: RunnerSupervisorDiagnostics[];
   placements: InstancePlacementDiagnostics[];
   dataPlane: DataPlaneDiagnostics;
+  visionMediaEgress: DataPlaneEgressDiagnostics;
+  visionMediaIngress: VisionMediaIngressDiagnostics;
   warnings: string[];
   tailscale?: NodeTailscaleDiagnostics | null;
 }
