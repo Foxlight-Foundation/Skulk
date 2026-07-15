@@ -17,6 +17,7 @@ from skulk.routing.router import (
     _VISION_NETWORK_PAYLOAD_BUFFER,  # pyright: ignore[reportPrivateUsage]
     _ZENOH_DATA_OUTBOUND_BUFFER,  # pyright: ignore[reportPrivateUsage]
     _ZENOH_VISION_OUTBOUND_BUFFER,  # pyright: ignore[reportPrivateUsage]
+    _ZENOH_VISION_STREAM_BUFFER,  # pyright: ignore[reportPrivateUsage]
     OutboundPacket,
     Router,
 )
@@ -256,6 +257,62 @@ def test_vision_network_completion_stays_ordered_with_upload_payload() -> None:
         for _ in range(3)
     ]
     assert received == [opened, chunk, completed]
+
+
+def test_vision_transport_buffers_cover_maximum_upload() -> None:
+    """The documented 64-chunk request fits even before consumers run."""
+
+    maximum_frame_count = 1 + 64 + 1
+    assert maximum_frame_count <= _ZENOH_VISION_STREAM_BUFFER
+    assert maximum_frame_count <= _VISION_NETWORK_PAYLOAD_BUFFER
+
+    router = _router(zenoh=False)
+    packets = [
+        VisionMediaPacket(
+            source_node=NodeId("api-node"),
+            target_node=NodeId("test-node"),
+            command_id=CommandId("maximum-command"),
+            model=ModelId("org/model"),
+            sequence=0,
+            kind="opened",
+            total_chunks=64,
+            image_count=1,
+        ),
+        *[
+            VisionMediaPacket(
+                source_node=NodeId("api-node"),
+                target_node=NodeId("test-node"),
+                command_id=CommandId("maximum-command"),
+                model=ModelId("org/model"),
+                sequence=sequence,
+                kind="chunk",
+                data=b"image-data",
+                image_index=0,
+                total_chunks=64,
+            )
+            for sequence in range(1, 65)
+        ],
+        VisionMediaPacket(
+            source_node=NodeId("api-node"),
+            target_node=NodeId("test-node"),
+            command_id=CommandId("maximum-command"),
+            model=ModelId("org/model"),
+            sequence=65,
+            kind="completed",
+            total_chunks=64,
+            image_count=1,
+            sha256="0" * 64,
+        ),
+    ]
+
+    for packet in packets:
+        router._offer_vision_network_packet(  # pyright: ignore[reportPrivateUsage]
+            VISION_MEDIA.serialize(packet), None
+        )
+
+    diagnostics = router.vision_media_egress_diagnostics()
+    assert diagnostics.inbound_payload_queue_depth == maximum_frame_count
+    assert diagnostics.inbound_frames_dropped == 0
 
 
 async def test_election_egress_uses_a_dedicated_bounded_channel() -> None:

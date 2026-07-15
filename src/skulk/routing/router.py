@@ -92,17 +92,20 @@ _ZENOH_DATA_STREAM_IDLE_LEASE_SECONDS = 30 * 60.0
 # consume generated-output queue capacity. Small per-stream queues make the
 # sender absorb sustained pressure while bounding serialized media in memory.
 _ZENOH_VISION_OUTBOUND_BUFFER = 0
-_ZENOH_VISION_STREAM_BUFFER = 65
+# A maximum upload is open + 64 chunks + completion. All 66 frames must fit
+# before a newly scheduled per-stream publisher has a chance to drain.
+_ZENOH_VISION_STREAM_BUFFER = 66
 _ZENOH_VISION_MAX_STREAMS_PER_OWNER = 16
 _ZENOH_VISION_MAX_ACTIVE_STREAMS = 16
 _ZENOH_VISION_MAX_REJECTION_TASKS = 64
 _ZENOH_VISION_REJECTED_STREAM_TOMBSTONES = 512
 _ZENOH_VISION_STREAM_IDLE_LEASE_SECONDS = 5 * 60.0
 # Network receive loops hand vision input to dedicated bounded consumers. The
-# payload lane can retain one complete maximum-size stream (open plus 64 chunks)
-# while a prior frame is being delivered; the larger terminal lane carries only
-# metadata and keeps acknowledgements/failures progressive during upload bursts.
-_VISION_NETWORK_PAYLOAD_BUFFER = 65
+# payload lane can retain one complete maximum-size stream (open, 64 chunks, and
+# completion) while a prior frame is being delivered; the larger terminal lane
+# carries only metadata and keeps acknowledgements/failures progressive during
+# upload bursts.
+_VISION_NETWORK_PAYLOAD_BUFFER = 66
 _VISION_NETWORK_TERMINAL_BUFFER = 1024
 # Election egress owns a small bounded queue and publish loop so a burst on the
 # ordinary gossipsub topics cannot leave liveness traffic waiting in their FIFO.
