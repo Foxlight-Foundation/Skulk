@@ -4871,6 +4871,36 @@ class API:
                                 if schema_error is not None:
                                     await fail("invalid_frame", schema_error)
                                     break
+                            if frame.is_terminal:
+                                # A provider terminal is not observable until the
+                                # handler has actually returned. Built-in speech
+                                # handlers release core commands in ``finally``;
+                                # stopping at the yielded terminal would leave
+                                # that cleanup to nondeterministic async-generator
+                                # finalization and could retain runner admission.
+                                try:
+                                    trailing_frame = await anext(stream)
+                                except StopAsyncIteration:
+                                    pass
+                                else:
+                                    await fail(
+                                        "invalid_frame",
+                                        "provider yielded a frame after its terminal",
+                                    )
+                                    logger.warning(
+                                        "provider stream handler "
+                                        f"'{extension_name}' for "
+                                        f"{descriptor.qualified_id} yielded "
+                                        "after its terminal: "
+                                        f"{type(trailing_frame).__name__}"
+                                    )
+                                    break
+                                if active.input_failure is not None:
+                                    await fail(
+                                        active.input_failure.code,
+                                        active.input_failure.message,
+                                    )
+                                    break
                             await emit(frame)
                             next_sequence += 1
                             if frame.is_terminal:

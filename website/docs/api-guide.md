@@ -1448,10 +1448,12 @@ and creates no stream.
 
 Output is **not** an HTTP response stream. After admission, the provider emits
 `started`, ordered `chunk` frames, and exactly one `completed`, `failed`, or
-`cancelled` terminal on the provider DATA topic. Structured frame metadata is
-JSON-schema validated against `output_chunk_schema`; realtime media is an
-optional raw binary attachment capped at 1 MiB per frame, while large immutable
-results use staged blob references. The topic is node-addressed to
+`cancelled` terminal on the provider DATA topic. The handler must return after
+yielding that terminal; Skulk withholds it until iterator exhaustion so handler
+cleanup finishes before dependent calls can observe completion. Structured
+frame metadata is JSON-schema validated against `output_chunk_schema`; realtime
+media is an optional raw binary attachment capped at 1 MiB per frame, while
+large immutable results use staged blob references. The topic is node-addressed to
 `caller_node`, short-circuits same-node calls, and uses the DATA plane's bounded
 per-owner/call/direction Zenoh queues for remote calls. Extensions consume the
 flow through `ExtensionContext.stream_capability(...)`, which returns a

@@ -141,6 +141,27 @@ class _InvalidChunkProvider(_TtsProvider):
         )
 
 
+class _TrailingFrameProvider(_TtsProvider):
+    async def handle_stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        yield CapabilityStreamFrame(
+            call_id=call.call_id,
+            direction="provider_to_caller",
+            sequence=1,
+            kind="completed",
+        )
+        yield CapabilityStreamFrame(
+            call_id=call.call_id,
+            direction="provider_to_caller",
+            sequence=2,
+            kind="chunk",
+            payload={"format": "pcm_s16le"},
+        )
+
+
 class _RejectingTtsProvider(_TtsProvider):
     def __init__(self) -> None:
         self.handler_called = False
@@ -205,6 +226,36 @@ class _CancellableProvider(_TtsProvider):
             await anyio.sleep_forever()
         finally:
             self.cancelled.set()
+
+
+class _TerminalFinalizationProvider(_TtsProvider):
+    def __init__(self) -> None:
+        self.finalization_started = anyio.Event()
+        self.release_finalization = anyio.Event()
+        self.output_stream: AsyncIterator[CapabilityStreamFrame] | None = None
+
+    def handle_stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        self.output_stream = self._frames(call)
+        return self.output_stream
+
+    async def _frames(
+        self,
+        call: CapabilityCall,
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        try:
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="completed",
+            )
+        finally:
+            self.finalization_started.set()
+            await self.release_finalization.wait()
 
 
 class _BurstProvider(_TtsProvider):
@@ -419,6 +470,48 @@ async def test_local_provider_stream_preserves_lifecycle_and_binary_media() -> N
     assert tts.output_media_bytes == 4
     assert tts.completed_streams == 1
     assert tts.missing_terminal_streams == 0
+
+
+async def test_provider_terminal_waits_for_handler_finalization() -> None:
+    provider = _TerminalFinalizationProvider()
+    api = _build_api(provider)
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    terminal_received = anyio.Event()
+    terminal_frames: list[CapabilityStreamFrame] = []
+
+    async with api._tg as task_group:  # pyright: ignore[reportPrivateUsage]
+        task_group.start_soon(
+            api._apply_provider_data  # pyright: ignore[reportPrivateUsage]
+        )
+        session = await context.stream_capability(
+            NodeId("api-node"),
+            "tts",
+            "1.0.0",
+            _TTS_REVISION,
+            {"text": "finalize before terminal"},
+            timeout_seconds=2.0,
+        )
+        assert session.open_result.ok is True
+        iterator = session.frames.__aiter__()
+        assert (await iterator.__anext__()).kind == "started"
+
+        async def receive_terminal() -> None:
+            terminal_frames.append(await iterator.__anext__())
+            terminal_received.set()
+
+        task_group.start_soon(receive_terminal)
+        try:
+            with anyio.fail_after(1.0):
+                await provider.finalization_started.wait()
+        finally:
+            provider.release_finalization.set()
+        assert terminal_received.is_set() is False
+
+        with anyio.fail_after(1.0):
+            await terminal_received.wait()
+        task_group.cancel_scope.cancel()
+
+    assert [frame.kind for frame in terminal_frames] == ["completed"]
 
 
 async def test_mixed_provider_uses_descriptor_io_mode_for_handler() -> None:
@@ -869,6 +962,17 @@ async def test_remote_bidirectional_input_and_output_use_provider_data(
 async def test_invalid_provider_chunk_becomes_typed_failed_terminal() -> None:
     opened, frames = await _collect_local_stream(
         _build_api(_InvalidChunkProvider())
+    )
+
+    assert opened is True
+    assert [frame.kind for frame in frames] == ["started", "failed"]
+    assert frames[-1].error is not None
+    assert frames[-1].error.code == "invalid_frame"
+
+
+async def test_provider_frame_after_terminal_becomes_typed_failure() -> None:
+    opened, frames = await _collect_local_stream(
+        _build_api(_TrailingFrameProvider())
     )
 
     assert opened is True

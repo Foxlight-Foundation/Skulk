@@ -445,12 +445,11 @@ async def test_realtime_stt_provider_forwards_pcm_and_streams_transcript(
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
     _write_legacy_disabled_realtime_config(api, tmp_path)
     api._sync_builtin_speech_capability()
-    commands: list[RealtimeAudioTranscription] = []
+    commands: list[object] = []
     input_frames: list[RealtimeAudioInputFrame] = []
 
     async def send(command: object) -> None:
-        if isinstance(command, RealtimeAudioTranscription):
-            commands.append(command)
+        commands.append(command)
 
     async def emulate_worker() -> None:
         while True:
@@ -458,7 +457,11 @@ async def test_realtime_stt_provider_forwards_pcm_and_streams_transcript(
             input_frames.append(frame)
             if frame.kind != "completed":
                 continue
-            command = commands[0]
+            command = next(
+                command
+                for command in commands
+                if isinstance(command, RealtimeAudioTranscription)
+            )
             output = api._audio_transcription_queues[command.command_id]
             assert output.statistics().max_buffer_size == 256
             await output.send(
@@ -515,8 +518,16 @@ async def test_realtime_stt_provider_forwards_pcm_and_streams_transcript(
         frames = [frame async for frame in session.frames]
         task_group.cancel_scope.cancel()
 
-    assert len(commands) == 1
-    assert commands[0].target_instance_id == InstanceId("speech-instance")
+    transcription_command = next(
+        command
+        for command in commands
+        if isinstance(command, RealtimeAudioTranscription)
+    )
+    finished_command = next(
+        command for command in commands if isinstance(command, TaskFinished)
+    )
+    assert transcription_command.target_instance_id == InstanceId("speech-instance")
+    assert finished_command.finished_command_id == transcription_command.command_id
     assert [frame.kind for frame in input_frames] == ["chunk", "completed"]
     assert [frame.sequence for frame in input_frames] == [1, 2]
     assert input_frames[0].data == b"\x00\x00\x01\x00"

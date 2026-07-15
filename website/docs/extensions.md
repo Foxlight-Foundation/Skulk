@@ -301,7 +301,11 @@ bytes outside JSON and is capped at 1 MiB per frame. Use a staged
 Skulk enforces exact call identity and sequence, one deadline across admission
 and streaming, exactly one terminal, bounded reorder/gap handling, and explicit
 cancellation when the caller closes the iterator early. A raising or malformed
-handler fails only its own stream with a typed terminal.
+handler fails only its own stream with a typed terminal. After a handler yields
+its terminal it must return. Skulk advances the iterator to exhaustion and
+withholds that terminal from callers until the handler's `finally` cleanup has
+completed, so dependent work cannot race resources that the provider still
+owns.
 
 For `client_streaming` and `bidirectional`, the returned session has a
 `CapabilityStreamInput` sink. `send_chunk()` accepts schema-validated metadata
