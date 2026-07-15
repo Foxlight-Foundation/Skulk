@@ -591,6 +591,11 @@ class Runner:
     def _handle_shutdown(self, task: Task, pool: ThreadPoolExecutor) -> None:
         """Cancel in-flight generations, drain the pool, then tear down the server."""
         logger.info("vllm runner shutting down")
+        # Emit Running before the terminal Complete: the worker's task-lifecycle
+        # contract expects Running -> Complete for every task, shutdown included
+        # (the serial loop sent it around handle_task; the concurrent loop must
+        # keep that ordering for shutdown too).
+        self.send_task_status(task, TaskStatus.Running)
         record_runner_phase(
             "shutdown_cleanup",
             event="runner_shutdown_requested",
@@ -857,10 +862,10 @@ class Runner:
                 )
             )
         else:
-            was_cancelled = (
-                task.task_id in self.cancelled_tasks
-                or CANCEL_ALL_TASKS in self.cancelled_tasks
-            )
+            # Read the shared cancel set through the lock-guarded helper: generations
+            # run concurrently, so an unlocked membership read here races the pool
+            # workers mutating cancelled_tasks.
+            was_cancelled = self._was_cancelled(task.task_id)
             record_runner_phase(
                 "cancel_observed" if was_cancelled else "completion",
                 event="generation_finished",
