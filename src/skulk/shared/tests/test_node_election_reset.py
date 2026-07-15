@@ -91,6 +91,9 @@ class _FakeApi:
     def set_runner_cancel_provider(self, _provider: object) -> None:
         self._events.append("api.runner_cancel_provider")
 
+    def set_vision_media_ingress_provider(self, _provider: object) -> None:
+        self._events.append("api.vision_media_ingress_provider")
+
 
 @pytest.mark.asyncio
 async def test_election_restarts_event_router_after_receivers_are_rewired(
@@ -124,6 +127,9 @@ async def test_election_restarts_event_router_after_receivers_are_rewired(
             return []
 
         async def cancel_runner_task(self, *_args: Any, **_kwargs: Any) -> object:
+            return object()
+
+        def collect_vision_media_ingress_diagnostics(self) -> object:
             return object()
 
     monkeypatch.setattr("skulk.main.EventRouter", NewEventRouter)
@@ -214,6 +220,9 @@ async def test_new_master_does_not_wait_on_unavailable_state_sync_config(
             return []
 
         async def cancel_runner_task(self, *_args: Any, **_kwargs: Any) -> object:
+            return object()
+
+        def collect_vision_media_ingress_diagnostics(self) -> object:
             return object()
 
     monkeypatch.setattr("skulk.main.EventRouter", NewEventRouter)

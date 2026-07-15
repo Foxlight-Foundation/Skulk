@@ -30,6 +30,7 @@ from skulk.shared.models.memory_estimate import (
     estimate_shard_footprint,
     shard_fraction_of_model,
 )
+from skulk.shared.types.chunks import AudioInputChunk, InputImageChunk
 from skulk.shared.types.commands import (
     AddCustomModelCard,
     AudioTranscription,
@@ -1424,12 +1425,17 @@ class Master:
                                 self.state.instances, placement, self.state.tasks
                             )
                             generated_events.extend(transition_events)
-                        case SendInputChunk(chunk=chunk):
+                        case SendInputChunk(chunk=AudioInputChunk() as chunk):
                             generated_events.append(
                                 InputChunkReceived(
                                     command_id=chunk.command_id,
                                     chunk=chunk,
                                 )
+                            )
+                        case SendInputChunk():
+                            logger.warning(
+                                "Rejected legacy image input command; vision media "
+                                "must use the node-addressed data transport"
                             )
                         case TaskCancelled():
                             self._realtime_instance_by_command.pop(
@@ -1765,11 +1771,22 @@ class Master:
                 # Discard all events not from our session
                 if local_event.session != self.session_id:
                     continue
-                self._multi_buffer.ingest(
-                    local_event.origin_idx,
-                    local_event.event,
-                    local_event.origin,
-                )
+                if isinstance(local_event.event, InputChunkReceived) and isinstance(
+                    local_event.event.chunk, InputImageChunk
+                ):
+                    logger.warning(
+                        "Rejected legacy image input event before ordering/indexing; "
+                        "vision media must use the node-addressed data transport"
+                    )
+                    self._multi_buffer.skip(
+                        local_event.origin_idx, local_event.origin
+                    )
+                else:
+                    self._multi_buffer.ingest(
+                        local_event.origin_idx,
+                        local_event.event,
+                        local_event.origin,
+                    )
                 for event in self._multi_buffer.drain():
                     if isinstance(event, TracesCollected):
                         await self._handle_traces_collected(event)

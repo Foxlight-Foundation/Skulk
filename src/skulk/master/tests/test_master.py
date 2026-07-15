@@ -16,12 +16,14 @@ from skulk.master.tests.conftest import (
 from skulk.routing.router import get_node_id_keypair
 from skulk.shared.models.model_cards import ModelCard, ModelTask
 from skulk.shared.topology import Topology
+from skulk.shared.types.chunks import AudioInputChunk, InputImageChunk
 from skulk.shared.types.commands import (
     CommandId,
     ForwarderCommand,
     ForwarderDownloadCommand,
     PlaceInstance,
     RefuseInstancePlacement,
+    SendInputChunk,
     TextGeneration,
 )
 from skulk.shared.types.common import ModelId, NodeId, SessionId, SystemId
@@ -29,6 +31,7 @@ from skulk.shared.types.events import (
     Event,
     GlobalForwarderEvent,
     IndexedEvent,
+    InputChunkReceived,
     InstanceCreated,
     LocalForwarderEvent,
     NodeGatheredInfo,
@@ -36,6 +39,7 @@ from skulk.shared.types.events import (
     TaskDeleted,
     TaskFailed,
     TaskStatusUpdated,
+    TestEvent,
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
@@ -56,6 +60,106 @@ from skulk.shared.types.worker.instances import (
 )
 from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
 from skulk.utils.channels import channel
+
+
+@pytest.mark.asyncio
+async def test_master_never_emits_or_retains_vision_input_payloads() -> None:
+    """Image bytes bypass the ordered event log while batch STT remains legacy."""
+
+    node_id = NodeId(get_node_id_keypair().to_node_id())
+    session_id = SessionId(master_node_id=node_id, election_clock=0)
+    global_sender, global_receiver = channel[GlobalForwarderEvent]()
+    command_sender, command_receiver = channel[ForwarderCommand]()
+    local_event_sender, local_event_receiver = channel[LocalForwarderEvent]()
+    _, state_sync_receiver = channel[StateSyncMessage]()
+    state_sync_sender, _ = channel[StateSyncMessage]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    event_sender, event_receiver = channel[Event]()
+    master = Master(
+        node_id,
+        session_id,
+        event_sender=event_sender,
+        global_event_sender=global_sender,
+        local_event_receiver=local_event_receiver,
+        command_receiver=command_receiver,
+        state_sync_receiver=state_sync_receiver,
+        state_sync_sender=state_sync_sender,
+        download_command_sender=download_sender,
+    )
+    command_id = CommandId("media-census")
+    image_payload = "aW1hZ2UtcGF5bG9hZA=="
+    emitted: Event | None = None
+    indexed_after_legacy: GlobalForwarderEvent | None = None
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(master.run)
+        await command_sender.send(
+            ForwarderCommand(
+                origin=SystemId("API"),
+                command=SendInputChunk(
+                    chunk=InputImageChunk(
+                        model=ModelId("org/vlm"),
+                        command_id=command_id,
+                        data=image_payload,
+                        chunk_index=0,
+                        total_chunks=1,
+                    )
+                ),
+            )
+        )
+        await command_sender.send(
+            ForwarderCommand(
+                origin=SystemId("API"),
+                command=SendInputChunk(
+                    chunk=AudioInputChunk(
+                        model=ModelId("org/stt"),
+                        command_id=command_id,
+                        data="YXVkaW8=",
+                        chunk_index=0,
+                        total_chunks=1,
+                        audio_sha256="0" * 64,
+                    )
+                ),
+            )
+        )
+        emitted = await event_receiver.receive()
+        await local_event_sender.send(
+            LocalForwarderEvent(
+                origin=SystemId("legacy-worker"),
+                origin_idx=0,
+                session=session_id,
+                event=InputChunkReceived(
+                    command_id=command_id,
+                    chunk=InputImageChunk(
+                        model=ModelId("org/vlm"),
+                        command_id=command_id,
+                        data=image_payload,
+                        chunk_index=0,
+                        total_chunks=1,
+                    ),
+                ),
+            )
+        )
+        await local_event_sender.send(
+            LocalForwarderEvent(
+                origin=SystemId("legacy-worker"),
+                origin_idx=1,
+                session=session_id,
+                event=TestEvent(),
+            )
+        )
+        indexed_after_legacy = await global_receiver.receive()
+        task_group.cancel_scope.cancel()
+
+    assert isinstance(emitted, InputChunkReceived)
+    assert isinstance(emitted.chunk, AudioInputChunk)
+    assert event_receiver.collect() == []
+    assert indexed_after_legacy is not None
+    assert isinstance(indexed_after_legacy.event, TestEvent)
+    assert len(master._event_log) == 1  # pyright: ignore[reportPrivateUsage]
+    assert image_payload not in emitted.model_dump_json()
+    assert image_payload not in indexed_after_legacy.model_dump_json()
+    assert image_payload not in master.state.model_dump_json()
 
 
 @pytest.mark.asyncio

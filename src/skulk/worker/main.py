@@ -5,6 +5,7 @@ import sys
 import time
 from collections import defaultdict, deque
 from collections.abc import Container, Mapping
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from skulk.download.download_utils import resolve_model_in_path
 from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.routing.router import TelemetrySender
 from skulk.routing.speech_media import SpeechMediaPacket
+from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
 from skulk.shared.models.memory_estimate import (
@@ -47,6 +49,7 @@ from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.diagnostics import (
     RunnerSupervisorDiagnostics,
     RunnerTaskCancelResponse,
+    VisionMediaIngressDiagnostics,
 )
 from skulk.shared.types.events import (
     CustomModelCardAdded,
@@ -163,6 +166,12 @@ _REALTIME_FINISHED_COMMANDS = 1024
 _SPEECH_MEDIA_PENDING_FRAMES = 32
 _SPEECH_MEDIA_PENDING_BYTES = 25 * 1024 * 1024
 _SPEECH_MEDIA_PENDING_TTL_SECONDS = 30.0
+_VISION_MEDIA_PENDING_STREAMS = 64
+_VISION_MEDIA_PENDING_FRAMES = 64
+_VISION_MEDIA_PENDING_BYTES = 32 * 1024 * 1024
+_VISION_MEDIA_PENDING_TOTAL_BYTES = 512 * 1024 * 1024
+_VISION_MEDIA_PENDING_TTL_SECONDS = 5 * 60.0
+_VISION_MEDIA_ACK_SEND_TIMEOUT_SECONDS = 2.0
 
 
 _RUNNER_FIRST_REPORT_DEADLINE_SECONDS = 120.0
@@ -309,7 +318,16 @@ def _local_usable_vram() -> Memory | None:
         # against VRAM would falsely refuse CPU placements that fit.
         from skulk.shared.backends import probe_node_backends
 
-        if "llama_cpp-cuda" not in probe_node_backends():
+        # Gated on the node advertising a CUDA GPU-offload backend. Both the
+        # in-process llama.cpp runner AND the vLLM served engine allocate weights
+        # + KV from VRAM (`vllm-` joins the GPU-offload prefixes in placement, so
+        # the master admits vLLM against VRAM), so a vLLM-only CUDA node
+        # (`vllm-cuda` advertised, `llama_cpp-cuda` not) must also size the local
+        # guard against VRAM -- else it would refuse the very placement the master
+        # admitted against VRAM. A node advertising only `*-cpu` was admitted
+        # against system RAM and correctly keeps the RAM path.
+        backends = probe_node_backends()
+        if not any(tag in backends for tag in ("llama_cpp-cuda", "vllm-cuda")):
             return None
         nvml = load_nvml()
         if nvml is None or not has_nvidia_gpu(nvml):
@@ -511,6 +529,28 @@ def _speech_media_cleanup_command_id(
     return None
 
 
+def _vision_media_cleanup_command_id(
+    event: Event,
+    previous_tasks: Mapping[TaskId, Task],
+    current_tasks: Mapping[TaskId, Task],
+) -> CommandId | None:
+    """Return the vision command whose ephemeral input can be released."""
+
+    task: Task | None = None
+    if isinstance(event, TaskDeleted):
+        task = previous_tasks.get(event.task_id)
+    elif isinstance(event, TaskStatusUpdated) and event.task_status in {
+        TaskStatus.Cancelled,
+        TaskStatus.Complete,
+        TaskStatus.Failed,
+        TaskStatus.TimedOut,
+    }:
+        task = current_tasks.get(event.task_id) or previous_tasks.get(event.task_id)
+    if isinstance(task, (TextGeneration, ImageEdits)):
+        return task.command_id
+    return None
+
+
 def _log_image_transport(message: str) -> None:
     """Emit image transport logs only at INFO when explicitly requested.
 
@@ -599,6 +639,8 @@ class Worker:
         realtime_audio_receiver: Receiver[RealtimeAudioInputFrame] | None = None,
         realtime_audio_packet_receiver: Receiver[RealtimeAudioPacket] | None = None,
         speech_media_packet_receiver: Receiver[SpeechMediaPacket] | None = None,
+        vision_media_packet_sender: Sender[VisionMediaPacket] | None = None,
+        vision_media_packet_receiver: Receiver[VisionMediaPacket] | None = None,
         store_client: ModelStoreClient | None = None,
         staging_config: StagingNodeConfig | None = None,
     ):
@@ -616,6 +658,8 @@ class Worker:
         self._realtime_audio_receiver = realtime_audio_receiver
         self._realtime_audio_packet_receiver = realtime_audio_packet_receiver
         self._speech_media_packet_receiver = speech_media_packet_receiver
+        self._vision_media_packet_sender = vision_media_packet_sender
+        self._vision_media_packet_receiver = vision_media_packet_receiver
         # Shared, Node-owned telemetry view (#279). The worker prunes a node's
         # telemetry here when it sees NodeTimedOut, because the worker runs on
         # EVERY node regardless of role - so a --no-api node (or a --no-api
@@ -658,6 +702,25 @@ class Worker:
         self._speech_media_completed: dict[CommandId, SpeechMediaPacket] = {}
         self._speech_media_pending_bytes: dict[CommandId, int] = {}
         self._speech_media_pending_since: dict[CommandId, float] = {}
+        self._vision_media_chunks: dict[
+            CommandId, dict[int, VisionMediaPacket]
+        ] = {}
+        self._vision_media_opened: dict[CommandId, VisionMediaPacket] = {}
+        self._vision_media_completed: dict[CommandId, VisionMediaPacket] = {}
+        self._vision_media_verified: dict[CommandId, VisionMediaPacket] = {}
+        self._vision_media_verified_chunks: dict[
+            CommandId, dict[int, InputImageChunk]
+        ] = {}
+        self._vision_media_accepted: set[CommandId] = set()
+        self._vision_media_ack_inflight: set[CommandId] = set()
+        self._vision_media_failures: dict[CommandId, str] = {}
+        self._vision_media_failure_since: dict[CommandId, float] = {}
+        self._vision_media_pending_bytes: dict[CommandId, int] = {}
+        self._vision_media_pending_total_bytes = 0
+        self._vision_media_pending_since: dict[CommandId, float] = {}
+        self._vision_media_completed_streams = 0
+        self._vision_media_rejected_streams = 0
+        self._vision_media_expired_streams = 0
         self._realtime_audio_pending: dict[
             CommandId, list[RealtimeAudioInputFrame]
         ] = {}
@@ -870,6 +933,9 @@ class Worker:
                 if self._speech_media_packet_receiver is not None:
                     tg.start_soon(self._speech_media_packet_ingress)
                     tg.start_soon(self._speech_media_janitor)
+                if self._vision_media_packet_receiver is not None:
+                    tg.start_soon(self._vision_media_packet_ingress)
+                    tg.start_soon(self._vision_media_janitor)
                 if (
                     self._realtime_audio_receiver is not None
                     or self._realtime_audio_packet_receiver is not None
@@ -941,6 +1007,508 @@ class Worker:
                 self._speech_media_pending_bytes[command_id] = (
                     pending_bytes + len(packet.data)
                 )
+
+    async def _vision_media_packet_ingress(self) -> None:
+        """Collect ordered node-addressed image input outside replicated State."""
+
+        assert self._vision_media_packet_receiver is not None
+        with self._vision_media_packet_receiver as packets:
+            async for packet in packets:
+                if packet.target_node != self.node_id or packet.kind in (
+                    "accepted",
+                    "transport_failed",
+                ):
+                    continue
+                command_id = packet.command_id
+                if packet.kind == "cancelled":
+                    source_packet = (
+                        self._vision_media_opened.get(command_id)
+                        or self._vision_media_verified.get(command_id)
+                        or self._vision_media_completed.get(command_id)
+                        or next(
+                            iter(
+                                self._vision_media_chunks.get(
+                                    command_id, {}
+                                ).values()
+                            ),
+                            None,
+                        )
+                    )
+                    task = next(
+                        (
+                            candidate
+                            for candidate in self.state.tasks.values()
+                            if isinstance(candidate, (TextGeneration, ImageEdits))
+                            and candidate.command_id == command_id
+                        ),
+                        None,
+                    )
+                    expected_source = (
+                        source_packet.source_node
+                        if source_packet is not None
+                        else task.owner_node
+                        if task is not None
+                        else None
+                    )
+                    if (
+                        expected_source is not None
+                        and expected_source != packet.source_node
+                    ):
+                        logger.warning(
+                            "Ignoring vision media cancellation from a source that "
+                            f"does not own command {command_id}"
+                        )
+                        continue
+                    self._clear_vision_media(command_id)
+                    continue
+                if (
+                    command_id in self._vision_media_verified
+                    or command_id in self._vision_media_accepted
+                ):
+                    # The complete verified payload is immutable; late duplicate
+                    # network frames cannot reopen or replace it.
+                    continue
+                if packet.kind == "opened":
+                    existing_open = self._vision_media_opened.get(command_id)
+                    if existing_open is not None:
+                        if existing_open != packet:
+                            await self._reject_vision_media(
+                                packet,
+                                "Vision media open metadata changed in flight",
+                            )
+                        continue
+                    if (
+                        packet.total_chunks is None
+                        or packet.total_chunks > _VISION_MEDIA_PENDING_FRAMES
+                        or packet.image_count is None
+                        or packet.image_count > packet.total_chunks
+                    ):
+                        await self._reject_vision_media(
+                            packet, "Vision media open exceeds declared bounds"
+                        )
+                        continue
+                    buffered_completion = self._vision_media_completed.get(command_id)
+                    buffered_chunks = self._vision_media_chunks.get(command_id, {})
+                    buffered_packets = [
+                        *buffered_chunks.values(),
+                        *(
+                            [buffered_completion]
+                            if buffered_completion is not None
+                            else []
+                        ),
+                    ]
+                    if any(
+                        buffered.source_node != packet.source_node
+                        or buffered.model != packet.model
+                        or buffered.total_chunks != packet.total_chunks
+                        for buffered in buffered_packets
+                    ) or (
+                        buffered_completion is not None
+                        and buffered_completion.image_count != packet.image_count
+                    ):
+                        await self._reject_vision_media(
+                            packet,
+                            "Vision media open does not match buffered stream metadata",
+                        )
+                        continue
+                    if command_id not in self._vision_media_pending_since:
+                        if len(self._vision_media_pending_since) >= (
+                            _VISION_MEDIA_PENDING_STREAMS
+                        ):
+                            await self._reject_vision_media(
+                                packet,
+                                "Vision media ingress rejected the stream because "
+                                "worker capacity is exhausted",
+                            )
+                            continue
+                        self._vision_media_pending_since[command_id] = time.monotonic()
+                    self._vision_media_opened[command_id] = packet
+                    await self._finalize_vision_media(command_id)
+                    continue
+
+                opened = self._vision_media_opened.get(command_id)
+                if (
+                    packet.total_chunks is None
+                    or packet.total_chunks > _VISION_MEDIA_PENDING_FRAMES
+                    or (
+                        packet.kind == "completed"
+                        and (
+                            packet.image_count is None
+                            or packet.image_count > packet.total_chunks
+                        )
+                    )
+                ):
+                    await self._reject_vision_media(
+                        packet, "Vision media frame exceeds declared bounds"
+                    )
+                    continue
+                if command_id not in self._vision_media_pending_since:
+                    if len(self._vision_media_pending_since) >= (
+                        _VISION_MEDIA_PENDING_STREAMS
+                    ):
+                        await self._reject_vision_media(
+                            packet,
+                            "Vision media ingress rejected the stream because worker "
+                            "capacity is exhausted",
+                        )
+                        continue
+                    self._vision_media_pending_since[command_id] = time.monotonic()
+                existing_completion = self._vision_media_completed.get(command_id)
+                existing_chunks = self._vision_media_chunks.get(command_id, {})
+                reference = opened or existing_completion or next(
+                    iter(existing_chunks.values()), None
+                )
+                if (
+                    reference is not None
+                    and (
+                        packet.source_node != reference.source_node
+                        or packet.model != reference.model
+                        or packet.total_chunks != reference.total_chunks
+                    )
+                ):
+                    await self._reject_vision_media(
+                        packet, "Vision media frame metadata changed in flight"
+                    )
+                    continue
+                if packet.kind == "completed":
+                    if opened is not None and packet.image_count != opened.image_count:
+                        await self._reject_vision_media(
+                            packet, "Vision media completion does not match its open"
+                        )
+                        continue
+                    if existing_completion is not None and existing_completion != packet:
+                        await self._reject_vision_media(
+                            packet, "Vision media completion metadata changed in flight"
+                        )
+                        continue
+                    self._vision_media_completed[command_id] = packet
+                    await self._finalize_vision_media(command_id)
+                    continue
+
+                chunks = self._vision_media_chunks.setdefault(
+                    command_id, existing_chunks
+                )
+                existing = chunks.get(packet.sequence)
+                if existing is not None:
+                    if existing != packet:
+                        await self._reject_vision_media(
+                            packet, "Vision media sequence was reused with different data"
+                        )
+                    continue
+                pending_bytes = self._vision_media_pending_bytes.get(command_id, 0)
+                packet_bytes = len(packet.data)
+                if (
+                    len(chunks) >= _VISION_MEDIA_PENDING_FRAMES
+                    or pending_bytes + packet_bytes > _VISION_MEDIA_PENDING_BYTES
+                    or self._vision_media_pending_total_bytes + packet_bytes
+                    > _VISION_MEDIA_PENDING_TOTAL_BYTES
+                ):
+                    await self._reject_vision_media(
+                        packet, "Vision media ingress exceeded its bounded capacity"
+                    )
+                    continue
+                chunks[packet.sequence] = packet
+                self._vision_media_pending_bytes[command_id] = (
+                    pending_bytes + packet_bytes
+                )
+                self._vision_media_pending_total_bytes += packet_bytes
+                await self._finalize_vision_media(command_id)
+
+    async def _finalize_vision_media(self, command_id: CommandId) -> None:
+        """Expose a stream to planning only after count and hash verification."""
+
+        completed = self._vision_media_completed.get(command_id)
+        opened = self._vision_media_opened.get(command_id)
+        if completed is None or opened is None or completed.total_chunks is None:
+            return
+        chunks = self._vision_media_chunks.get(command_id, {})
+        if len(chunks) < completed.total_chunks:
+            return
+        if set(chunks) != set(range(1, completed.total_chunks + 1)):
+            await self._reject_vision_media(
+                completed, "Vision media stream has missing or out-of-range sequences"
+            )
+            return
+        ordered = [chunks[index] for index in range(1, completed.total_chunks + 1)]
+        if any(
+            packet.source_node != opened.source_node
+            or packet.model != opened.model
+            or packet.total_chunks != opened.total_chunks
+            for packet in ordered
+        ):
+            await self._reject_vision_media(
+                completed, "Vision media completion does not match its chunks"
+            )
+            return
+        payload = b"".join(packet.data for packet in ordered)
+        if hashlib.sha256(payload).hexdigest() != completed.sha256:
+            await self._reject_vision_media(
+                completed, "Vision media failed SHA-256 integrity verification"
+            )
+            return
+        try:
+            verified_chunks = {
+                packet.sequence - 1: InputImageChunk(
+                    model=packet.model,
+                    command_id=packet.command_id,
+                    data=packet.data.decode("ascii"),
+                    chunk_index=packet.sequence - 1,
+                    total_chunks=completed.total_chunks,
+                    image_index=packet.image_index or 0,
+                )
+                for packet in ordered
+            }
+        except UnicodeDecodeError:
+            await self._reject_vision_media(
+                completed, "Vision media input is not ASCII base64 data"
+            )
+            return
+        self._vision_media_verified_chunks[command_id] = verified_chunks
+        self._vision_media_verified[command_id] = completed
+        self._vision_media_completed_streams += 1
+        self._clear_pending_vision_media(
+            command_id,
+            release_bytes=False,
+            clear_age=False,
+        )
+        await self._acknowledge_vision_media_if_admitted(command_id)
+
+    async def _acknowledge_vision_media_if_admitted(
+        self, command_id: CommandId
+    ) -> None:
+        """Acknowledge verified bytes only after matching authoritative task input."""
+
+        if (
+            command_id in self._vision_media_accepted
+            or command_id in self._vision_media_ack_inflight
+        ):
+            return
+        completed = self._vision_media_verified.get(command_id)
+        if completed is None:
+            return
+        task = next(
+            (
+                candidate
+                for candidate in self.state.tasks.values()
+                if isinstance(candidate, (TextGeneration, ImageEdits))
+                and candidate.command_id == command_id
+            ),
+            None,
+        )
+        if task is None:
+            return
+        chunks = self._vision_media_verified_chunks.get(command_id, {})
+        image_indexes = {chunk.image_index for chunk in chunks.values()}
+        if isinstance(task, ImageEdits):
+            matches_task = (
+                completed.model == ModelId(task.task_params.model)
+                and task.owner_node is not None
+                and completed.source_node == task.owner_node
+                and completed.total_chunks == task.task_params.total_input_chunks
+                and completed.image_count == 1
+                and image_indexes == {0}
+            )
+        else:
+            cached_image_indexes = set(task.task_params.image_hashes)
+            all_image_indexes = set(
+                range(task.task_params.image_count + len(cached_image_indexes))
+            )
+            matches_task = (
+                completed.model == task.task_params.model
+                and task.owner_node is not None
+                and completed.source_node == task.owner_node
+                and completed.total_chunks == task.task_params.total_input_chunks
+                and completed.image_count is not None
+                and completed.image_count == task.task_params.image_count
+                and len(image_indexes) == completed.image_count
+                and image_indexes.isdisjoint(cached_image_indexes)
+                and image_indexes | cached_image_indexes == all_image_indexes
+            )
+        if not matches_task:
+            await self._reject_vision_media(
+                completed,
+                "Verified vision input does not match the authoritative task",
+            )
+            return
+        sender = self._vision_media_packet_sender
+        if sender is None:
+            await self._reject_vision_media(
+                completed, "Vision media acknowledgement transport is unavailable"
+            )
+            return
+        self._vision_media_ack_inflight.add(command_id)
+        try:
+            try:
+                with anyio.move_on_after(
+                    _VISION_MEDIA_ACK_SEND_TIMEOUT_SECONDS, shield=True
+                ) as acknowledgement_scope:
+                    await sender.send(completed.accepted())
+            except (BrokenResourceError, ClosedResourceError):
+                return
+            if (
+                not acknowledgement_scope.cancel_called
+                and command_id in self._vision_media_verified
+            ):
+                verified_chunks = self._vision_media_verified_chunks.get(command_id)
+                if verified_chunks is None:
+                    return
+                self.input_chunk_buffer[command_id] = verified_chunks
+                self.input_chunk_counts[command_id] = len(verified_chunks)
+                self._vision_media_accepted.add(command_id)
+                self._vision_media_pending_since.pop(command_id, None)
+        finally:
+            self._vision_media_ack_inflight.discard(command_id)
+
+    async def _reject_vision_media(
+        self, packet: VisionMediaPacket, message: str
+    ) -> None:
+        """Reject one malformed stream and report a typed source-side failure."""
+
+        command_id = packet.command_id
+        self._vision_media_rejected_streams += 1
+        self._clear_vision_media(command_id)
+        if (
+            command_id not in self._vision_media_failures
+            and len(self._vision_media_failures) >= _VISION_MEDIA_PENDING_STREAMS
+        ):
+            oldest_failure = min(
+                self._vision_media_failure_since,
+                key=self._vision_media_failure_since.__getitem__,
+            )
+            self._vision_media_failures.pop(oldest_failure, None)
+            self._vision_media_failure_since.pop(oldest_failure, None)
+        self._vision_media_failures[command_id] = message
+        self._vision_media_failure_since[command_id] = time.monotonic()
+        sender = self._vision_media_packet_sender
+        if sender is not None:
+            with suppress(BrokenResourceError, ClosedResourceError):
+                with anyio.move_on_after(2, shield=True):
+                    await sender.send(packet.transport_failure(message))
+        task = next(
+            (
+                task
+                for task in self.state.tasks.values()
+                if isinstance(task, (TextGeneration, ImageEdits))
+                and task.command_id == command_id
+            ),
+            None,
+        )
+        if task is not None:
+            pending_failure = self._vision_media_failures.pop(command_id, None)
+            self._vision_media_failure_since.pop(command_id, None)
+            if pending_failure is not None:
+                await self.event_sender.send(
+                    TaskFailed(
+                        task_id=task.task_id,
+                        error_type="invalid_vision_media",
+                        error_message=pending_failure,
+                    )
+                )
+
+    def _clear_pending_vision_media(
+        self,
+        command_id: CommandId,
+        *,
+        release_bytes: bool = True,
+        clear_age: bool = True,
+    ) -> None:
+        """Delete unverified packet storage while preserving assembled input."""
+
+        self._vision_media_opened.pop(command_id, None)
+        self._vision_media_chunks.pop(command_id, None)
+        self._vision_media_completed.pop(command_id, None)
+        if release_bytes:
+            released = self._vision_media_pending_bytes.pop(command_id, 0)
+            self._vision_media_pending_total_bytes = max(
+                0, self._vision_media_pending_total_bytes - released
+            )
+        if clear_age:
+            self._vision_media_pending_since.pop(command_id, None)
+
+    def _clear_vision_media(self, command_id: CommandId) -> None:
+        """Delete all request-scoped vision input retained for one command."""
+
+        self._clear_pending_vision_media(command_id)
+        self._vision_media_verified.pop(command_id, None)
+        self._vision_media_verified_chunks.pop(command_id, None)
+        self._vision_media_accepted.discard(command_id)
+        self._vision_media_failures.pop(command_id, None)
+        self._vision_media_failure_since.pop(command_id, None)
+        self.input_chunk_buffer.pop(command_id, None)
+        self.input_chunk_counts.pop(command_id, None)
+
+    async def _vision_media_janitor(self) -> None:
+        """Reject incomplete image streams after their bounded lifetime."""
+
+        while True:
+            await anyio.sleep(5)
+            for command_id in tuple(self._vision_media_verified):
+                if (
+                    command_id not in self._vision_media_accepted
+                    and command_id not in self._vision_media_ack_inflight
+                ):
+                    self._tg.start_soon(
+                        self._acknowledge_vision_media_if_admitted,
+                        command_id,
+                    )
+            cutoff = time.monotonic() - _VISION_MEDIA_PENDING_TTL_SECONDS
+            expired = [
+                command_id
+                for command_id, started_at in self._vision_media_pending_since.items()
+                if started_at <= cutoff
+            ]
+            for command_id in expired:
+                packet = self._vision_media_completed.get(command_id)
+                if packet is None:
+                    packet = self._vision_media_verified.get(command_id)
+                if packet is None:
+                    packet = next(
+                        iter(self._vision_media_chunks.get(command_id, {}).values()),
+                        None,
+                    )
+                if packet is None:
+                    packet = self._vision_media_opened.get(command_id)
+                if packet is not None:
+                    self._vision_media_expired_streams += 1
+                    await self._reject_vision_media(
+                        packet, "Vision media ingress timed out before completion"
+                    )
+                else:
+                    self._clear_vision_media(command_id)
+            expired_failures = [
+                command_id
+                for command_id, failed_at in self._vision_media_failure_since.items()
+                if failed_at <= cutoff
+            ]
+            for command_id in expired_failures:
+                self._vision_media_failures.pop(command_id, None)
+                self._vision_media_failure_since.pop(command_id, None)
+
+    def collect_vision_media_ingress_diagnostics(
+        self,
+    ) -> VisionMediaIngressDiagnostics:
+        """Return bounded worker-side image upload occupancy and outcomes."""
+
+        return VisionMediaIngressDiagnostics(
+            pending_api_commands=0,
+            pending_api_bytes=0,
+            active_api_commands=0,
+            active_api_bytes=0,
+            pending_worker_acknowledgements=0,
+            active_streams=len(
+                self._vision_media_pending_since.keys()
+                | self._vision_media_accepted
+            ),
+            pending_frames=sum(
+                len(chunks) for chunks in self._vision_media_chunks.values()
+            ),
+            retained_bytes=self._vision_media_pending_total_bytes,
+            verified_streams=len(self._vision_media_verified),
+            pending_failures=len(self._vision_media_failures),
+            completed_streams=self._vision_media_completed_streams,
+            rejected_streams=self._vision_media_rejected_streams,
+            expired_streams=self._vision_media_expired_streams,
+        )
 
     def _clear_speech_media(self, command_id: CommandId) -> None:
         """Delete all request-scoped media retained for one command."""
@@ -1138,26 +1706,40 @@ class Worker:
                 if self._telemetry_view is not None:
                     record_membership_from_event(self._telemetry_view, event)
 
-                # Buffer input media chunks until the worker can dispatch the
-                # task with a complete payload to its local runner.
-                if isinstance(event, InputChunkReceived):
+                # Batch STT still uses the legacy event-sourced input path.
+                # Vision payloads arrive on VISION_MEDIA and never enter State.
+                if isinstance(event, InputChunkReceived) and isinstance(
+                    event.chunk, AudioInputChunk
+                ):
                     cmd_id = event.command_id
-                    if isinstance(event.chunk, AudioInputChunk):
-                        if cmd_id not in self.input_audio_chunk_buffer:
-                            self.input_audio_chunk_buffer[cmd_id] = {}
-                            self.input_audio_chunk_counts[cmd_id] = (
-                                event.chunk.total_chunks
-                            )
-                        self.input_audio_chunk_buffer[cmd_id][
-                            event.chunk.chunk_index
-                        ] = event.chunk
-                    else:
-                        if cmd_id not in self.input_chunk_buffer:
-                            self.input_chunk_buffer[cmd_id] = {}
-                            self.input_chunk_counts[cmd_id] = event.chunk.total_chunks
+                    if cmd_id not in self.input_audio_chunk_buffer:
+                        self.input_audio_chunk_buffer[cmd_id] = {}
+                        self.input_audio_chunk_counts[cmd_id] = (
+                            event.chunk.total_chunks
+                        )
+                    self.input_audio_chunk_buffer[cmd_id][event.chunk.chunk_index] = (
+                        event.chunk
+                    )
 
-                        self.input_chunk_buffer[cmd_id][event.chunk.chunk_index] = (
-                            event.chunk
+                if isinstance(event, TaskCreated) and isinstance(
+                    event.task, (TextGeneration, ImageEdits)
+                ):
+                    vision_failure = self._vision_media_failures.pop(
+                        event.task.command_id, None
+                    )
+                    self._vision_media_failure_since.pop(event.task.command_id, None)
+                    if vision_failure is not None:
+                        await self.event_sender.send(
+                            TaskFailed(
+                                task_id=event.task.task_id,
+                                error_type="invalid_vision_media",
+                                error_message=vision_failure,
+                            )
+                        )
+                    else:
+                        self._tg.start_soon(
+                            self._acknowledge_vision_media_if_admitted,
+                            event.task.command_id,
                         )
 
                 if (
@@ -1181,6 +1763,13 @@ class Worker:
                     )
                 ) is not None:
                     self._clear_speech_media(speech_cleanup_cmd_id)
+
+                if (
+                    vision_cleanup_cmd_id := _vision_media_cleanup_command_id(
+                        event, previous_tasks, self.state.tasks
+                    )
+                ) is not None:
+                    self._clear_vision_media(vision_cleanup_cmd_id)
 
                 if isinstance(event, CustomModelCardAdded):
                     try:
@@ -1459,6 +2048,29 @@ class Worker:
                     # Assemble image from chunks and inject into task
                     cmd_id = task.command_id
                     chunks = self.input_chunk_buffer.get(cmd_id, {})
+                    completed = self._vision_media_verified.get(cmd_id)
+                    if (
+                        completed is None
+                        or completed.model != ModelId(task.task_params.model)
+                        or task.owner_node is None
+                        or completed.source_node != task.owner_node
+                        or completed.total_chunks
+                        != task.task_params.total_input_chunks
+                        or completed.image_count != 1
+                        or {chunk.image_index for chunk in chunks.values()} != {0}
+                    ):
+                        self._clear_vision_media(cmd_id)
+                        await self.event_sender.send(
+                            TaskFailed(
+                                task_id=task.task_id,
+                                error_type="invalid_vision_media",
+                                error_message=(
+                                    "Verified image-edit input does not match the "
+                                    "admitted task"
+                                ),
+                            )
+                        )
+                        continue
                     assembled = "".join(chunks[i].data for i in range(len(chunks)))
                     logger.info(
                         f"Assembled input image from {len(chunks)} chunks, "
@@ -1476,6 +2088,9 @@ class Worker:
                         del self.input_chunk_buffer[cmd_id]
                     if cmd_id in self.input_chunk_counts:
                         del self.input_chunk_counts[cmd_id]
+                    self._vision_media_verified.pop(cmd_id, None)
+                    self._vision_media_verified_chunks.pop(cmd_id, None)
+                    self._clear_pending_vision_media(cmd_id)
                     await self._start_runner_task(modified_task)
 
                 case TextGeneration() if (
@@ -1498,8 +2113,7 @@ class Worker:
                             f"(task_id={task.task_id}, command_id={cmd_id}, "
                             f"model={task.task_params.model}, missing={missing})"
                         )
-                        self.input_chunk_buffer.pop(cmd_id, None)
-                        self.input_chunk_counts.pop(cmd_id, None)
+                        self._clear_vision_media(cmd_id)
                         await self.event_sender.send(
                             TaskStatusUpdated(
                                 task_id=task.task_id,
@@ -1510,6 +2124,44 @@ class Worker:
 
                     if task.task_params.total_input_chunks > 0:
                         chunk_buffer = self.input_chunk_buffer.get(cmd_id, {})
+                        completed = self._vision_media_verified.get(cmd_id)
+                        received_image_indexes = {
+                            chunk.image_index for chunk in chunk_buffer.values()
+                        }
+                        cached_image_indexes = set(task.task_params.image_hashes)
+                        all_image_indexes = set(
+                            range(
+                                task.task_params.image_count
+                                + len(cached_image_indexes)
+                            )
+                        )
+                        if (
+                            completed is None
+                            or completed.model != task.task_params.model
+                            or task.owner_node is None
+                            or completed.source_node != task.owner_node
+                            or completed.total_chunks
+                            != task.task_params.total_input_chunks
+                            or completed.image_count != task.task_params.image_count
+                            or len(received_image_indexes) != completed.image_count
+                            or not received_image_indexes.isdisjoint(
+                                cached_image_indexes
+                            )
+                            or received_image_indexes | cached_image_indexes
+                            != all_image_indexes
+                        ):
+                            self._clear_vision_media(cmd_id)
+                            await self.event_sender.send(
+                                TaskFailed(
+                                    task_id=task.task_id,
+                                    error_type="invalid_vision_media",
+                                    error_message=(
+                                        "Verified VLM image input does not match "
+                                        "the admitted task"
+                                    ),
+                                )
+                            )
+                            continue
                         per_image: defaultdict[int, list[InputImageChunk]] = (
                             defaultdict(list)
                         )
@@ -1546,6 +2198,9 @@ class Worker:
                         del self.input_chunk_buffer[cmd_id]
                     if cmd_id in self.input_chunk_counts:
                         del self.input_chunk_counts[cmd_id]
+                    self._vision_media_verified.pop(cmd_id, None)
+                    self._vision_media_verified_chunks.pop(cmd_id, None)
+                    self._clear_pending_vision_media(cmd_id)
                     await self._start_runner_task(modified_task)
                 case SpeechSynthesis() if task.task_params.reference_audio_present:
                     command_id = task.command_id

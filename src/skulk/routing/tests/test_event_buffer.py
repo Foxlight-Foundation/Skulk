@@ -90,6 +90,38 @@ async def test_fill_gap_and_drain_remaining(buffer: OrderedBuffer[Event]):
 
 
 @pytest.mark.asyncio
+async def test_skip_advances_order_without_retaining_rejected_payload(
+    buffer: OrderedBuffer[Event],
+) -> None:
+    """A rejected index releases later events without entering drained output."""
+
+    event1 = make_indexed_event(1)
+    buffer.ingest(*event1)
+    buffer.skip(0)
+
+    assert buffer.drain_indexed() == [event1]
+    assert buffer.next_idx_to_release == 2
+    assert not buffer.store
+    assert not buffer.skipped
+
+
+@pytest.mark.asyncio
+async def test_skip_cannot_erase_an_already_buffered_event(
+    buffer: OrderedBuffer[Event],
+) -> None:
+    """A later rejected duplicate index preserves the first accepted payload."""
+
+    event0 = make_indexed_event(0)
+    event1 = make_indexed_event(1)
+    buffer.ingest(*event1)
+    buffer.skip(1)
+    buffer.ingest(*event0)
+
+    assert buffer.drain_indexed() == [event0, event1]
+    assert buffer.next_idx_to_release == 2
+
+
+@pytest.mark.asyncio
 async def test_ingest_drops_duplicate_indices(buffer: OrderedBuffer[Event]):
     """Tests that if multiple events for the same index are ingested, the first one wins."""
     event2_first = make_indexed_event(1)

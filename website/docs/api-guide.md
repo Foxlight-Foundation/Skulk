@@ -302,6 +302,12 @@ Notes:
 - inline `data:` URLs are supported for image inputs
 - Anthropic-compatible requests can also carry image content for multimodal models
 - image understanding depends on the selected model exposing the `vision` capability
+- request-scoped encoded image media is limited to 32 MiB; multipart image-edit
+  uploads are read through the corresponding 24 MiB raw-image limit
+- image bytes are sent only after authoritative task placement, directly to the
+  selected worker rank or ranks; they are bounded, integrity-checked, and each
+  rank must acknowledge task-owner verification before the transfer deadline
+- image bytes are never written to the event log or replicated `State`
 
 ### Finish Reasons
 

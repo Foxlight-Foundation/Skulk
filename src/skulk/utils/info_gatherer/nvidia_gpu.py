@@ -41,6 +41,9 @@ class NvmlLike(Protocol):
     def nvmlDeviceGetPowerUsage(self, handle: object) -> int: ...  # noqa: N802
     def nvmlDeviceGetTemperature(self, handle: object, sensor: int) -> int: ...  # noqa: N802
     def nvmlDeviceGetClockInfo(self, handle: object, clock: int) -> int: ...  # noqa: N802
+    def nvmlDeviceGetCudaComputeCapability(  # noqa: N802
+        self, handle: object
+    ) -> tuple[int, int]: ...
 
 
 #: Mixed-GPU hosts (e.g. AMD iGPU + NVIDIA dGPU): single-adapter telemetry
@@ -116,6 +119,28 @@ class _UtilizationLike:
     gpu: int
 
 
+def _compute_capability(
+    nvml: NvmlLike, handle: object
+) -> tuple[str | None, bool | None, bool | None]:
+    """Read the CUDA compute capability and derive native FP4/FP8 support.
+
+    Returns ``(capability, native_fp4, native_fp8)`` as
+    ``("<major>.<minor>", bool, bool)`` or ``(None, None, None)`` when the query
+    fails. Native-format support is a fixed function of the SM level: FP4 lands on
+    Blackwell (sm100+, i.e. capability >= 10.0) and FP8 on Ada/Hopper (sm89/sm90,
+    i.e. >= 8.9). Deriving at the collector boundary keeps the placement side free
+    of per-architecture tables.
+    """
+    try:
+        major, minor = nvml.nvmlDeviceGetCudaComputeCapability(handle)
+    except Exception as exc:  # noqa: BLE001 - per-field degradation
+        logger.debug(f"NVML compute-capability query failed: {exc}")
+        return (None, None, None)
+    capability = f"{int(major)}.{int(minor)}"
+    version = (int(major), int(minor))
+    return (capability, version >= (10, 0), version >= (8, 9))
+
+
 def read_accelerator_metrics(nvml: NvmlLike) -> AcceleratorMetrics:
     """Read normalized metrics from NVML device 0.
 
@@ -174,6 +199,8 @@ def read_accelerator_metrics(nvml: NvmlLike) -> AcceleratorMetrics:
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"NVML clock query failed: {exc}")
 
+    compute_capability, native_fp4, native_fp8 = _compute_capability(nvml, handle)
+
     return AcceleratorMetrics(
         vendor="nvidia",
         name=name,
@@ -183,6 +210,9 @@ def read_accelerator_metrics(nvml: NvmlLike) -> AcceleratorMetrics:
         power_watts=power_watts,
         temperature_celsius=temperature_celsius,
         clock_mhz=clock_mhz,
+        compute_capability=compute_capability,
+        native_fp4=native_fp4,
+        native_fp8=native_fp8,
     )
 
 
