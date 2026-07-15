@@ -67,11 +67,23 @@ class BaseInstance(TaggedModel):
             # All shards of an instance share one model card, so any shard's
             # context_length is authoritative; take the first.
             shard = next(iter(self.shard_assignments.runner_to_shard.values()), None)
-            if shard is not None and shard.model_card.context_length > 0:
-                limit = shard.model_card.context_length
-                if shard.model_card.gguf_file:
-                    limit = min(limit, KV_CONTEXT_BUDGET_TOKENS)
-                self.context_token_limit = limit
+            if shard is not None:
+                card = shard.model_card
+                if card.gguf_file:
+                    # A legacy gguf instance ALWAYS needs a ceiling, even when the
+                    # card's context_length is unknown (0): the served llama.cpp
+                    # engine still preallocates a KV cache at KV_CONTEXT_BUDGET_TOKENS
+                    # (serving_n_ctx falls back to the floor for a None ceiling), so
+                    # leaving context_token_limit=None would let the API admit
+                    # requests larger than the runner serves. Fall back to the floor
+                    # (a known context_length is additionally bounded by it).
+                    self.context_token_limit = (
+                        min(card.context_length, KV_CONTEXT_BUDGET_TOKENS)
+                        if card.context_length > 0
+                        else KV_CONTEXT_BUDGET_TOKENS
+                    )
+                elif card.context_length > 0:
+                    self.context_token_limit = card.context_length
         return self
 
 

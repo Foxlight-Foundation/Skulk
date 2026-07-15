@@ -910,6 +910,36 @@ def test_legacy_gguf_instance_backfill_clamped_to_budget_floor() -> None:
     assert instance.context_token_limit == KV_CONTEXT_BUDGET_TOKENS
 
 
+def test_legacy_gguf_instance_backfill_floor_when_context_length_unknown() -> None:
+    # A gguf card's context_length is best-effort and can be 0 (unknown). A legacy
+    # gguf instance must STILL get a ceiling (the runner preallocates KV at the
+    # floor via serving_n_ctx), so it backfills to KV_CONTEXT_BUDGET_TOKENS rather
+    # than None -- else the API would admit requests larger than the runner serves.
+    node_id = NodeId()
+    runner_id = RunnerId()
+    card = ModelCard(
+        model_id=ModelId("legacy-gguf-noctx"),
+        storage_size=Memory.from_gb(1),
+        n_layers=10,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="legacy-Q4_K_M.gguf",
+        # context_length omitted -> defaults to 0 (unknown)
+    )
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=ModelId("legacy-gguf-noctx"),
+            runner_to_shard={runner_id: _make_shard_metadata(card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+    )
+    assert instance.context_token_limit == KV_CONTEXT_BUDGET_TOKENS
+
+
 def test_create_instance_restamps_context_token_limit() -> None:
     # The exact-control POST /instance path must stamp the master's
     # memory-derived ceiling too (#292 review) — runners trust the stamped
