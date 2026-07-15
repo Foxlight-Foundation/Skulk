@@ -5,14 +5,15 @@ import anyio
 import pytest
 from anyio import to_thread
 
-from skulk.shared.models.model_cards import ModelId
+from skulk.api.types import ImageGenerationTaskParams
+from skulk.shared.models.model_cards import ModelId, ModelTask
 from skulk.shared.types.audio import (
     AudioTranscriptionTaskParams,
     RealtimeAudioInputFrame,
     RealtimeAudioTranscriptionTaskParams,
     SpeechSynthesisTaskParams,
 )
-from skulk.shared.types.chunks import ErrorChunk, TokenChunk
+from skulk.shared.types.chunks import ErrorChunk, ImageChunk, TokenChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.diagnostics import (
     RunnerDiagnosticContext,
@@ -28,6 +29,7 @@ from skulk.shared.types.events import (
 )
 from skulk.shared.types.tasks import (
     AudioTranscription,
+    ImageGeneration,
     RealtimeAudioTranscription,
     SpeechSynthesis,
     Task,
@@ -40,7 +42,11 @@ from skulk.shared.types.worker.instances import BoundInstance, InstanceId
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerRunning
 from skulk.utils.channels import MpSender, channel, mp_channel
 from skulk.worker.runner.runner_supervisor import RunnerSupervisor
-from skulk.worker.tests.unittests.conftest import get_bound_mlx_ring_instance
+from skulk.worker.tests.unittests.conftest import (
+    get_bound_mlx_ring_instance,
+    get_mlx_ring_instance,
+    get_pipeline_shard_metadata,
+)
 
 
 class _DeadProcess:
@@ -409,6 +415,122 @@ async def test_only_rank_zero_emits_multi_rank_data_lifecycle() -> None:
     assert isinstance(frames[1].chunk, TokenChunk)
     assert frames[1].chunk.text == "blue"
     assert command_id not in rank_one._chunk_sequence  # pyright: ignore[reportPrivateUsage]
+    data_sender.close()
+    event_sender.close()
+
+
+@pytest.mark.asyncio
+async def test_image_data_lifecycle_uses_primary_output_rank() -> None:
+    """Image DATA follows the terminal pipeline stage that emits image chunks."""
+
+    from skulk.shared.types.chunks import DataChunk
+
+    data_sender, data_receiver = channel[DataChunk]()
+    event_sender, _ = channel[Event]()
+    model_id = ModelId("exolabs/test-image-model")
+    rank_zero_runner = RunnerId("image-runner-zero")
+    output_runner = RunnerId("image-runner-output")
+    rank_zero_node = NodeId("image-node-zero")
+    output_node = NodeId("image-node-output")
+
+    def image_shard(device_rank: int):
+        shard = get_pipeline_shard_metadata(model_id, device_rank, world_size=2)
+        image_card = shard.model_card.model_copy(
+            update={"tasks": [ModelTask.TextToImage]}
+        )
+        return shard.model_copy(update={"model_card": image_card})
+
+    instance = get_mlx_ring_instance(
+        instance_id=InstanceId("image-instance"),
+        model_id=model_id,
+        node_to_runner={
+            rank_zero_node: rank_zero_runner,
+            output_node: output_runner,
+        },
+        runner_to_shard={
+            rank_zero_runner: image_shard(0),
+            output_runner: image_shard(1),
+        },
+    )
+    rank_zero_bound = BoundInstance(
+        instance=instance,
+        bound_runner_id=rank_zero_runner,
+        bound_node_id=rank_zero_node,
+    )
+    output_bound = BoundInstance(
+        instance=instance,
+        bound_runner_id=output_runner,
+        bound_node_id=output_node,
+    )
+
+    def supervisor(bound_instance: BoundInstance) -> RunnerSupervisor:
+        task_sender, _ = mp_channel[Task]()
+        cancel_sender, _ = mp_channel[TaskId]()
+        _, event_receiver = mp_channel[Event]()
+        _, diagnostic_receiver = mp_channel[RunnerDiagnosticUpdate]()
+        return RunnerSupervisor(
+            shard_metadata=bound_instance.bound_shard,
+            bound_instance=bound_instance,
+            runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+            initialize_timeout=400,
+            _ev_recv=event_receiver,
+            _diag_recv=diagnostic_receiver,
+            _task_sender=task_sender,
+            _event_sender=event_sender,
+            _cancel_sender=cancel_sender,
+            _data_sender=data_sender,
+        )
+
+    rank_zero = supervisor(rank_zero_bound)
+    output_rank = supervisor(output_bound)
+    command_id = CommandId("cmd-image-output-rank")
+    owner_node = NodeId("remote-image-api-owner")
+
+    def image_task(task_id: str, bound: BoundInstance) -> ImageGeneration:
+        return ImageGeneration(
+            task_id=TaskId(task_id),
+            instance_id=bound.instance.instance_id,
+            command_id=command_id,
+            owner_node=owner_node,
+            task_params=ImageGenerationTaskParams(
+                prompt="a blue square",
+                model=model_id,
+            ),
+        )
+
+    rank_zero_task = image_task("image-task-zero", rank_zero_bound)
+    output_task = image_task("image-task-output", output_bound)
+    output_rank._command_owner[command_id] = owner_node  # pyright: ignore[reportPrivateUsage]
+
+    def image_chunk(data: str) -> ImageChunk:
+        return ImageChunk(
+            model=model_id,
+            data=data,
+            chunk_index=0,
+            total_chunks=1,
+            image_index=0,
+            format="png",
+        )
+
+    await rank_zero._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(command_id=command_id, chunk=image_chunk("ignored"))
+    )
+    await rank_zero._finish_data_stream(  # pyright: ignore[reportPrivateUsage]
+        rank_zero_task, TaskStatus.Complete
+    )
+    await output_rank._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(command_id=command_id, chunk=image_chunk("image-data"))
+    )
+    await output_rank._finish_data_stream(  # pyright: ignore[reportPrivateUsage]
+        output_task, TaskStatus.Complete
+    )
+
+    frames = [data_receiver.receive_nowait() for _ in range(3)]
+    assert [frame.kind for frame in frames] == ["started", "chunk", "completed"]
+    assert [frame.sequence for frame in frames] == [0, 1, 2]
+    assert isinstance(frames[1].chunk, ImageChunk)
+    assert frames[1].chunk.data == "image-data"
+    assert command_id not in rank_zero._chunk_sequence  # pyright: ignore[reportPrivateUsage]
     data_sender.close()
     event_sender.close()
 

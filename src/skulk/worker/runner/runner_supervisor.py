@@ -75,6 +75,7 @@ from skulk.worker.runner.bootstrap import (
     WEDGE_FAILURE_MARKER,
     entrypoint,
 )
+from skulk.worker.runner.image_models.output import is_primary_image_output_node
 
 PREFILL_TIMEOUT_SECONDS = 60
 DECODE_TIMEOUT_SECONDS = 5
@@ -382,11 +383,14 @@ class RunnerSupervisor:
         """Return whether this runner is the instance's sole DATA producer.
 
         Distributed ranks execute the command in lockstep, but independent
-        network publishers cannot preserve cross-rank lifecycle order. A
-        non-output rank must therefore never race rank zero's payload with an
-        early terminal frame.
+        network publishers cannot preserve cross-rank lifecycle order. Only
+        the runner that emits this model family's output may therefore publish
+        lifecycle or payload frames. Text-family runners emit on rank zero;
+        image runners emit on their primary terminal pipeline stage.
         """
 
+        if self.bound_instance.is_image_model:
+            return is_primary_image_output_node(self.shard_metadata)
         return self.shard_metadata.device_rank == 0
 
     async def run(self):

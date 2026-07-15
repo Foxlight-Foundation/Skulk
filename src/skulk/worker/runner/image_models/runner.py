@@ -55,11 +55,7 @@ from skulk.shared.types.worker.runners import (
     RunnerStatus,
     RunnerWarmingUp,
 )
-from skulk.shared.types.worker.shards import (
-    CfgShardMetadata,
-    PipelineShardMetadata,
-    ShardMetadata,
-)
+from skulk.shared.types.worker.shards import ShardMetadata
 from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.engines.image import (
     DistributedImageModel,
@@ -71,22 +67,7 @@ from skulk.worker.engines.mlx.utils_mlx import (
     initialize_mlx,
 )
 from skulk.worker.runner.bootstrap import logger
-
-
-def _is_primary_output_node(shard_metadata: ShardMetadata) -> bool:
-    """Check if this node is the primary output node for image generation.
-
-    For CFG models: the last pipeline stage in CFG group 0 (positive prompt).
-    For non-CFG models: the last pipeline stage.
-    """
-    if isinstance(shard_metadata, CfgShardMetadata):
-        is_pipeline_last = (
-            shard_metadata.pipeline_rank == shard_metadata.pipeline_world_size - 1
-        )
-        return is_pipeline_last and shard_metadata.cfg_rank == 0
-    elif isinstance(shard_metadata, PipelineShardMetadata):
-        return shard_metadata.device_rank == shard_metadata.world_size - 1
-    return False
+from skulk.worker.runner.image_models.output import is_primary_image_output_node
 
 
 def _process_image_response(
@@ -344,7 +325,7 @@ class Runner:
                         for response in generate_image(
                             model=self.image_model, task=task_params
                         ):
-                            is_primary_output = _is_primary_output_node(
+                            is_primary_output = is_primary_image_output_node(
                                 self.shard_metadata
                             )
 
@@ -381,7 +362,7 @@ class Runner:
                             tags=["error"],
                             attrs={"message": str(e)},
                         )
-                    if _is_primary_output_node(self.shard_metadata):
+                    if is_primary_image_output_node(self.shard_metadata):
                         self.event_sender.send(
                             ChunkGenerated(
                                 command_id=command_id,
@@ -438,7 +419,7 @@ class Runner:
                         for response in generate_image(
                             model=self.image_model, task=task_params
                         ):
-                            if _is_primary_output_node(self.shard_metadata):
+                            if is_primary_image_output_node(self.shard_metadata):
                                 match response:
                                     case PartialImageResponse():
                                         logger.info(
@@ -470,7 +451,7 @@ class Runner:
                             tags=["error"],
                             attrs={"message": str(e)},
                         )
-                    if _is_primary_output_node(self.shard_metadata):
+                    if is_primary_image_output_node(self.shard_metadata):
                         self.event_sender.send(
                             ChunkGenerated(
                                 command_id=command_id,
