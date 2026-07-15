@@ -639,8 +639,9 @@ class Worker:
         self._data_transport: NodeDataTransport = data_transport
         # Data plane (#279 Phase 2): per-token output chunks stream direct to the
         # owning API node via this sender (DATA topic), bypassing the master's
-        # event log. Threaded into each RunnerSupervisor. None falls back to the
-        # event path (no DATA topic wired / tests).
+        # event log. Threaded into each RunnerSupervisor. A missing sender is a
+        # local wiring failure: generated payload is logged and dropped rather
+        # than crossing onto the control event sender.
         self._data_sender = data_sender
         self._trace_data_sender = trace_data_sender
         self._realtime_audio_receiver = realtime_audio_receiver
@@ -1564,7 +1565,7 @@ class Worker:
         )
 
     async def _speech_media_janitor(self) -> None:
-        """Cancel reference media that never acquires a serving task."""
+        """Terminate speech media or tasks that exceed their ingress deadline."""
 
         while True:
             await anyio.sleep(5)
@@ -1575,13 +1576,32 @@ class Worker:
                 if started_at <= cutoff
             ]
             for command_id in expired:
-                self._clear_speech_media(command_id)
-                await self.command_sender.send(
-                    ForwarderCommand(
-                        origin=self._system_id,
-                        command=TaskCancelled(cancelled_command_id=command_id),
-                    )
+                task = next(
+                    (
+                        task
+                        for task in self.state.tasks.values()
+                        if isinstance(task, (SpeechSynthesis, AudioTranscription))
+                        and task.command_id == command_id
+                    ),
+                    None,
                 )
+                if task is not None and task.task_status in {
+                    TaskStatus.Pending,
+                    TaskStatus.Running,
+                }:
+                    await self._fail_speech_media_task(
+                        task,
+                        "Speech media ingress timed out before completion",
+                    )
+                    continue
+                self._clear_speech_media(command_id)
+                if task is None:
+                    await self.command_sender.send(
+                        ForwarderCommand(
+                            origin=self._system_id,
+                            command=TaskCancelled(cancelled_command_id=command_id),
+                        )
+                    )
 
     async def _route_realtime_audio_frame(
         self, frame: RealtimeAudioInputFrame
@@ -1758,6 +1778,23 @@ class Worker:
                         self._tg.start_soon(
                             self._acknowledge_vision_media_if_admitted,
                             event.task.command_id,
+                        )
+
+                if isinstance(event, TaskCreated) and isinstance(
+                    event.task, AudioTranscription
+                ):
+                    instance = self.state.instances.get(event.task.instance_id)
+                    if (
+                        event.task.task_params.total_input_chunks > 0
+                        and instance is not None
+                        and self.node_id in instance.shard_assignments.node_to_runner
+                    ):
+                        # Batch STT is deliberately task-first: the API can only
+                        # address media after authoritative placement. Start the
+                        # deadline from that placement event so an API failure
+                        # before packet zero cannot leave a permanent pending task.
+                        self._speech_media_pending_since.setdefault(
+                            event.task.command_id, time.monotonic()
                         )
 
                 if (

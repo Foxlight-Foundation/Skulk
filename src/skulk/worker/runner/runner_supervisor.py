@@ -316,7 +316,13 @@ class RunnerSupervisor:
                     traces=tuple(event.traces),
                 )
             )
-        elif isinstance(event, ChunkGenerated) and self._data_sender is not None:
+        elif isinstance(event, ChunkGenerated):
+            if self._data_sender is None:
+                logger.error(
+                    "Dropping generated output because the DATA sender is unavailable "
+                    f"(command_id={event.command_id})"
+                )
+                return
             if not self._owns_data_stream():
                 return
             if event.command_id not in self._stream_started:

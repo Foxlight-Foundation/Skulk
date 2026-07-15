@@ -6,18 +6,35 @@ import pytest
 from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.shared.models.model_cards import AudioResponseFormat, ModelId
-from skulk.shared.types.audio import RealtimeAudioInputFrame, SpeechSynthesisTaskParams
+from skulk.shared.types.audio import (
+    AudioTranscriptionTaskParams,
+    RealtimeAudioInputFrame,
+    SpeechSynthesisTaskParams,
+)
 from skulk.shared.types.commands import (
     ForwarderCommand,
     ForwarderDownloadCommand,
     TaskCancelled,
 )
 from skulk.shared.types.common import CommandId, NodeId
-from skulk.shared.types.events import Event, IndexedEvent, NodeGatheredInfo, TaskFailed
+from skulk.shared.types.events import (
+    Event,
+    IndexedEvent,
+    NodeGatheredInfo,
+    TaskCreated,
+    TaskFailed,
+)
 from skulk.shared.types.profiling import NetworkInterfaceInfo
-from skulk.shared.types.tasks import SpeechSynthesis, TaskId, TaskStatus
+from skulk.shared.types.state import State
+from skulk.shared.types.tasks import (
+    AudioTranscription,
+    SpeechSynthesis,
+    TaskId,
+    TaskStatus,
+)
 from skulk.shared.types.telemetry import NodeTelemetry
 from skulk.shared.types.worker.instances import InstanceId
+from skulk.shared.types.worker.runners import RunnerId
 from skulk.utils.channels import channel
 from skulk.utils.info_gatherer.info_gatherer import (
     GatheredInfo,
@@ -27,6 +44,10 @@ from skulk.utils.info_gatherer.info_gatherer import (
 )
 from skulk.worker import main as worker_main
 from skulk.worker.main import Worker
+from skulk.worker.tests.unittests.conftest import (
+    get_mlx_ring_instance,
+    get_pipeline_shard_metadata,
+)
 
 
 @pytest.mark.asyncio
@@ -138,6 +159,82 @@ async def test_realtime_audio_janitor_expires_undispatched_input(
     assert command_id not in worker._realtime_audio_pending  # pyright: ignore[reportPrivateUsage]
     assert command_id not in worker._realtime_audio_pending_bytes  # pyright: ignore[reportPrivateUsage]
     assert command_id not in worker._realtime_audio_pending_since  # pyright: ignore[reportPrivateUsage]
+    indexed_event_sender.close()
+    event_sender.close()
+    command_sender.close()
+    download_sender.close()
+
+
+@pytest.mark.asyncio
+async def test_speech_media_janitor_fails_placed_stt_before_first_packet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A task-first STT upload cannot remain pending after its API disappears."""
+
+    worker_node = NodeId("speech-worker")
+    instance_id = InstanceId("speech-instance")
+    runner_id = RunnerId("speech-runner")
+    model_id = ModelId("mlx-community/speech-test")
+    instance = get_mlx_ring_instance(
+        instance_id=instance_id,
+        model_id=model_id,
+        node_to_runner={worker_node: runner_id},
+        runner_to_shard={runner_id: get_pipeline_shard_metadata(model_id, 0, 1)},
+    )
+    indexed_event_sender, indexed_event_receiver = channel[IndexedEvent]()
+    event_sender, event_receiver = channel[Event]()
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    worker = Worker(
+        node_id=worker_node,
+        event_receiver=indexed_event_receiver,
+        event_sender=event_sender,
+        command_sender=command_sender,
+        download_command_sender=download_sender,
+    )
+    worker.state = State(instances={instance_id: instance})
+    task = AudioTranscription(
+        task_id=TaskId("speech-task"),
+        command_id=CommandId("speech-command"),
+        owner_node=NodeId("api-node"),
+        instance_id=instance_id,
+        task_params=AudioTranscriptionTaskParams(
+            model=model_id,
+            total_input_chunks=1,
+            audio_sha256="abc123",
+        ),
+    )
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(worker._event_applier)  # pyright: ignore[reportPrivateUsage]
+        await indexed_event_sender.send(
+            IndexedEvent(idx=0, event=TaskCreated(task_id=task.task_id, task=task))
+        )
+        while task.command_id not in worker._speech_media_pending_since:  # pyright: ignore[reportPrivateUsage]
+            await anyio.sleep(0)
+        task_group.cancel_scope.cancel()
+
+    worker._speech_media_pending_since[task.command_id] = 0.0  # pyright: ignore[reportPrivateUsage]
+    original_sleep = anyio.sleep
+    sleep_count = 0
+
+    async def immediate_first_sleep(_seconds: float) -> None:
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count > 1:
+            await original_sleep(60)
+
+    monkeypatch.setattr(worker_main.anyio, "sleep", immediate_first_sleep)
+    failure: Event | None = None
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(worker._speech_media_janitor)  # pyright: ignore[reportPrivateUsage]
+        failure = await event_receiver.receive()
+        task_group.cancel_scope.cancel()
+
+    assert isinstance(failure, TaskFailed)
+    assert failure.task_id == task.task_id
+    assert failure.error_type == "invalid_transcription_audio"
+    assert task.command_id not in worker._speech_media_pending_since  # pyright: ignore[reportPrivateUsage]
     indexed_event_sender.close()
     event_sender.close()
     command_sender.close()

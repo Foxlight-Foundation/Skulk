@@ -126,6 +126,49 @@ async def test_trace_payload_routes_directly_to_owning_api() -> None:
     assert event_receiver.collect() == []
 
 
+@pytest.mark.asyncio
+async def test_generated_output_without_data_sender_never_uses_control_sender() -> None:
+    """A local wiring defect must not put payload onto the control plane."""
+
+    event_sender, event_receiver = channel[Event](1)
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    _, event_process_receiver = mp_channel[Event]()
+    _, diagnostics_receiver = mp_channel[RunnerDiagnosticUpdate]()
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("missing-data-instance"),
+        model_id=ModelId("mlx-community/data-test"),
+        runner_id=RunnerId("missing-data-runner"),
+        node_id=NodeId("missing-data-worker"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=event_process_receiver,
+        _diag_recv=diagnostics_receiver,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+    )
+
+    await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(
+            command_id=CommandId("missing-data-command"),
+            chunk=TokenChunk(
+                model=ModelId("mlx-community/data-test"),
+                text="must not cross planes",
+                token_id=0,
+                usage=None,
+                finish_reason=None,
+            ),
+        )
+    )
+
+    assert event_receiver.collect() == []
+
+
 class _ReapTrackingProcess:
     """A live process stub that records whether it was reaped.
 
@@ -594,7 +637,10 @@ async def test_image_data_lifecycle_uses_primary_output_rank() -> None:
 
 @pytest.mark.asyncio
 async def test_check_runner_emits_errors_for_inflight_generation_and_realtime() -> None:
+    from skulk.shared.types.chunks import DataChunk
+
     event_sender, event_receiver = channel[Event]()
+    data_sender, data_receiver = channel[DataChunk]()
     task_sender, _ = mp_channel[Task]()
     cancel_sender, _ = mp_channel[TaskId]()
     _, ev_recv = mp_channel[Event]()
@@ -617,6 +663,7 @@ async def test_check_runner_emits_errors_for_inflight_generation_and_realtime() 
         _task_sender=task_sender,
         _event_sender=event_sender,
         _cancel_sender=cancel_sender,
+        _data_sender=data_sender,
     )
 
     command_id = CommandId("cmd-a")
@@ -647,27 +694,41 @@ async def test_check_runner_emits_errors_for_inflight_generation_and_realtime() 
 
     await supervisor._check_runner(RuntimeError("boom"))  # pyright: ignore[reportPrivateUsage]
 
-    got_chunk = await event_receiver.receive()
-    got_realtime_chunk = await event_receiver.receive()
     got_status = await event_receiver.receive()
+    frames = [data_receiver.receive_nowait() for _ in range(4)]
 
-    assert isinstance(got_chunk, ChunkGenerated)
-    assert got_chunk.command_id == command_id
-    assert isinstance(got_chunk.chunk, ErrorChunk)
-    assert "Runner shutdown before completing command" in got_chunk.chunk.error_message
-
-    assert isinstance(got_realtime_chunk, ChunkGenerated)
-    assert got_realtime_chunk.command_id == realtime_command_id
-    assert isinstance(got_realtime_chunk.chunk, ErrorChunk)
+    assert [frame.command_id for frame in frames] == [
+        command_id,
+        command_id,
+        realtime_command_id,
+        realtime_command_id,
+    ]
+    assert [frame.kind for frame in frames] == [
+        "started",
+        "failed",
+        "started",
+        "failed",
+    ]
+    assert all(frame.chunk is None for frame in frames[::2])
+    assert all(isinstance(frame.chunk, ErrorChunk) for frame in frames[1::2])
+    generation_error = frames[1].chunk
+    realtime_error = frames[3].chunk
+    assert isinstance(generation_error, ErrorChunk)
+    assert isinstance(realtime_error, ErrorChunk)
     assert (
         "Runner shutdown before completing command"
-        in got_realtime_chunk.chunk.error_message
+        in generation_error.error_message
+    )
+    assert (
+        "Runner shutdown before completing command"
+        in realtime_error.error_message
     )
 
     assert isinstance(got_status, RunnerStatusUpdated)
     assert isinstance(got_status.runner_status, RunnerFailed)
 
     event_sender.close()
+    data_sender.close()
     with anyio.move_on_after(0.1):
         await event_receiver.aclose()
 
