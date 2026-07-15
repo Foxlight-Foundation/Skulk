@@ -7,6 +7,7 @@ SSE parser, and the GPU-memory-utilization knob.
 """
 
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -373,3 +374,67 @@ def test_inflight_never_goes_negative() -> None:
     runner._note_generation_finished()
     assert runner._inflight == 0
     assert isinstance(runner.current_status, RunnerReady)
+
+
+def test_main_broadcasts_ready_after_load_model() -> None:
+    # Regression: the concurrent main() must re-broadcast the runner status after
+    # a lifecycle task, because _load_model sets current_status = RunnerReady() by
+    # DIRECT ASSIGNMENT (no event). Without the broadcast the runner loads but
+    # never announces Ready, so the worker never dispatches a generation to it.
+    # (Caught live: a probe saw statuses stop at [Idle, Loading] though the server
+    # loaded fine.) This drives the real main() loop over genuine mp channels.
+    from skulk.shared.types.events import Event, RunnerStatusUpdated
+    from skulk.shared.types.tasks import LoadModel, Shutdown, Task
+    from skulk.shared.types.worker.instances import InstanceId
+    from skulk.shared.types.worker.runners import RunnerId, RunnerIdle
+    from skulk.utils.channels import mp_channel
+
+    runner: Any = VllmRunner.__new__(VllmRunner)
+    runner._status_lock = threading.Lock()
+    runner._cancel_lock = threading.Lock()
+    runner._inflight = 0
+    runner._max_concurrency = 2
+    runner.cancelled_tasks = set()
+    runner.seen = set()
+    runner.runner_id = RunnerId("vllm-test")
+    runner.current_status = RunnerIdle()
+
+    evt_s, evt_r = mp_channel[Event]()
+    task_s, task_r = mp_channel[Task]()
+    _cancel_s, cancel_r = mp_channel[TaskId]()
+    runner.event_sender = evt_s
+    runner.task_receiver = task_r
+    runner.cancel_receiver = cancel_r
+
+    # Fakes for the lifecycle path: no real vllm serve. _load_model mimics the
+    # real one's direct assignment (the exact behavior that made the bug latent).
+    def fake_load(_task: Any) -> None:
+        runner.current_status = RunnerReady()
+
+    runner._load_model = fake_load
+    runner._teardown_server = lambda: None
+    runner._ensure_server_alive = lambda: None
+
+    thread = threading.Thread(target=runner.main, daemon=True)
+    thread.start()
+    try:
+        iid = InstanceId("probe-inst")
+        task_s.send(LoadModel(instance_id=iid))
+        saw_ready = False
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                event = evt_r.receive_timeout(0.5)
+            except Exception:
+                continue
+            if isinstance(event, RunnerStatusUpdated) and isinstance(
+                event.runner_status, RunnerReady
+            ):
+                saw_ready = True
+                break
+        assert saw_ready, "runner never broadcast RunnerReady after LoadModel"
+    finally:
+        task_s.send(
+            Shutdown(instance_id=InstanceId("probe-inst"), runner_id=runner.runner_id)
+        )
+        thread.join(timeout=5)

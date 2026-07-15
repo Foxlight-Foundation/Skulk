@@ -498,6 +498,14 @@ class Runner:
                             # before any generation, so serial handling is correct.
                             self.send_task_status(task, TaskStatus.Running)
                             self.handle_task(task)
+                            # _load_model sets current_status = RunnerReady() by
+                            # direct assignment; broadcast it as a status event so
+                            # the worker learns the runner is ready to serve. The
+                            # serial loop did this via update_status(current_status)
+                            # after every task; without it the runner loads but
+                            # never announces Ready and no generation is ever
+                            # dispatched to it.
+                            self.update_status(self.current_status)
                             self.send_task_status(task, TaskStatus.Complete)
         finally:
             # Drain in-flight generations, then stop the server. Shutdown already
