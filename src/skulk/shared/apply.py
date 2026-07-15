@@ -41,7 +41,13 @@ from skulk.shared.types.profiling import (
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import Task, TaskId, TaskStatus
 from skulk.shared.types.topology import Connection, RDMAConnection
-from skulk.shared.types.worker.downloads import DownloadProgress
+from skulk.shared.types.worker.downloads import (
+    DownloadCompleted,
+    DownloadFailed,
+    DownloadOngoing,
+    DownloadPending,
+    DownloadProgress,
+)
 from skulk.shared.types.worker.instances import Instance, InstanceId
 from skulk.shared.types.worker.runners import RunnerId, RunnerShutdown, RunnerStatus
 from skulk.utils.info_gatherer.info_gatherer import (
@@ -106,13 +112,30 @@ def event_apply(event: Event, state: State) -> State:
         case TracingStateChanged():
             return state.model_copy(update={"tracing_enabled": event.enabled})
         case StateSnapshotHydrated():
-            return event.state
+            return _sanitize_snapshot_downloads(event.state)
+
+
+def _sanitize_snapshot_downloads(snapshot: State) -> State:
+    """Remove legacy transient download progress from one durable snapshot."""
+
+    downloads = {
+        node_id: [
+            progress
+            for progress in progresses
+            if isinstance(progress, (DownloadCompleted, DownloadFailed))
+        ]
+        for node_id, progresses in snapshot.downloads.items()
+    }
+    downloads = {
+        node_id: progresses for node_id, progresses in downloads.items() if progresses
+    }
+    return snapshot.model_copy(update={"downloads": downloads})
 
 
 def apply(state: State, event: IndexedEvent) -> State:
     if isinstance(event.event, StateSnapshotHydrated):
         assert event.event.state.last_event_applied_idx == event.idx
-        return event.event.state
+        return _sanitize_snapshot_downloads(event.event.state)
 
     # Just to test that events are only applied in correct order
     if state.last_event_applied_idx != event.idx - 1:
@@ -125,13 +148,36 @@ def apply(state: State, event: IndexedEvent) -> State:
 
 
 def apply_node_download_progress(event: NodeDownloadProgress, state: State) -> State:
-    """
-    Update or add a node download progress to state.
+    """Apply only durable download outcomes to event-sourced state.
+
+    ``DownloadOngoing`` is accepted solely for replay compatibility with older
+    logs and has no state effect. ``DownloadPending`` represents a rare durable
+    reset/start decision and removes an older terminal outcome. Current progress
+    itself lives in ``TelemetryView``.
     """
     dp = event.download_progress
     node_id = dp.node_id
 
     current = list(state.downloads.get(node_id, ()))
+
+    if isinstance(dp, DownloadOngoing):
+        return state
+    if isinstance(dp, DownloadPending):
+        retained = [
+            existing_dp
+            for existing_dp in current
+            if existing_dp.shard_metadata.model_card.model_id
+            != dp.shard_metadata.model_card.model_id
+        ]
+        if len(retained) == len(current):
+            return state
+        new_downloads = dict(state.downloads)
+        if retained:
+            new_downloads[node_id] = retained
+        else:
+            new_downloads.pop(node_id, None)
+        return state.model_copy(update={"downloads": new_downloads})
+    assert isinstance(dp, (DownloadCompleted, DownloadFailed))
 
     replaced = False
     for i, existing_dp in enumerate(current):

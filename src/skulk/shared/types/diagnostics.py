@@ -48,6 +48,7 @@ RunnerTaskCancelStatus = Literal[
     "already_completed",
 ]
 DataPlaneTransport = Literal["disabled", "gossipsub", "zenoh"]
+TelemetryPlaneTransport = Literal["isolated_gossipsub"]
 
 
 class MlxMemorySnapshot(CamelCaseModel):
@@ -758,6 +759,74 @@ class DataPlaneEgressDiagnostics(CamelCaseModel):
 
 
 DataPlaneDiagnostics.model_rebuild()
+
+
+class TelemetryPlaneDiagnostics(CamelCaseModel):
+    """Bounded telemetry admission and isolated egress diagnostics."""
+
+    transport: TelemetryPlaneTransport = Field(
+        description="Transport used for telemetry independently of control traffic."
+    )
+    admission_capacity: int = Field(
+        description="Maximum distinct latest-value readings awaiting admission."
+    )
+    pending_readings: int = Field(
+        description="Distinct latest-value readings currently awaiting egress."
+    )
+    network_queue_capacity: int = Field(
+        description="Maximum serialized telemetry packets queued for network publish."
+    )
+    network_queue_depth: int = Field(
+        description="Serialized telemetry packets currently queued for network publish."
+    )
+    max_queue_depth: int = Field(
+        description="Highest combined pending and network queue depth observed."
+    )
+    readings_offered: int = Field(
+        description="Telemetry readings offered by local producers."
+    )
+    readings_coalesced: int = Field(
+        description="Stale pending readings replaced by a newer value for the same key."
+    )
+    readings_dropped: int = Field(
+        description="Pending readings evicted to preserve the fixed admission bound."
+    )
+    readings_published: int = Field(
+        description="Telemetry packets successfully handed to isolated gossipsub."
+    )
+    publish_failures: int = Field(
+        description="Telemetry publishes rejected by transport pressure or size limits."
+    )
+    bytes_published: int = Field(
+        description="Serialized telemetry bytes successfully published."
+    )
+    oldest_pending_age_seconds: float | None = Field(
+        default=None,
+        description="Age of the oldest latest-value reading still awaiting egress.",
+    )
+    last_successful_publish_age_seconds: float | None = Field(
+        default=None,
+        description="Age of the most recent successful telemetry publish.",
+    )
+
+    @classmethod
+    def empty(cls) -> "TelemetryPlaneDiagnostics":
+        """Return zeroed diagnostics when no router provider is wired."""
+
+        return cls(
+            transport="isolated_gossipsub",
+            admission_capacity=0,
+            pending_readings=0,
+            network_queue_capacity=0,
+            network_queue_depth=0,
+            max_queue_depth=0,
+            readings_offered=0,
+            readings_coalesced=0,
+            readings_dropped=0,
+            readings_published=0,
+            publish_failures=0,
+            bytes_published=0,
+        )
 
 
 class ProviderCapabilityDiagnostics(CamelCaseModel):

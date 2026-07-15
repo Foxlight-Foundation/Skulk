@@ -19,6 +19,7 @@ from skulk.download.download_utils import (
     resolve_model_in_path,
 )
 from skulk.download.shard_downloader import ShardDownloader
+from skulk.routing.router import TelemetrySender
 from skulk.shared.constants import SKULK_MODELS_DIR
 from skulk.shared.models.model_cards import ModelId, get_model_cards
 from skulk.shared.types.commands import (
@@ -35,7 +36,9 @@ from skulk.shared.types.events import (
     Event,
     NodeDownloadProgress,
 )
+from skulk.shared.types.telemetry import NodeTelemetry
 from skulk.shared.types.worker.downloads import (
+    DownloadAttemptId,
     DownloadCompleted,
     DownloadFailed,
     DownloadOngoing,
@@ -64,6 +67,7 @@ class DownloadCoordinator:
     shard_downloader: ShardDownloader
     download_command_receiver: Receiver[ForwarderDownloadCommand]
     event_sender: Sender[Event]
+    telemetry_sender: TelemetrySender | Sender[NodeTelemetry]
     offline: bool = False
     staging_cache_path: Path | None = None
     config_applied_callback: Callable[[], None] | None = None
@@ -75,26 +79,24 @@ class DownloadCoordinator:
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
     _stopped: anyio.Event = field(init=False, default_factory=anyio.Event)
 
-    # Per-model throttle for in-progress download events. Each emission is a
-    # FULL ordered event (master indexes it, appends the event log, persists a
-    # snapshot, and rebroadcasts to every node), so the in_progress stream must be
-    # bounded by total count, not by rate: the raw downloader fires per 8MB chunk
-    # across parallel files (thousands of callbacks for a large model), and a
-    # pure time gate still scales event volume with download DURATION, which
-    # saturates the gossip send queue and can drop the terminal DownloadCompleted
-    # so a placement wedges in RunnerLoading (#364). The fraction-delta gate caps
-    # a download to ~ (1 / _PROGRESS_STEP) in_progress events regardless of size
-    # or duration; the heartbeat still shows life on a slow download; terminal
-    # complete/failed transitions always pass.
+    # Per-model throttle for in-progress download readings. Raw downloaders fire
+    # once per chunk across parallel files, so admitting every callback would
+    # continuously replace telemetry and waste serialization/transport work even
+    # though only the latest value matters. The fraction-delta gate bounds useful
+    # samples independently of model size; terminal transitions bypass it.
     _last_progress_time: dict[ModelId, float] = field(default_factory=dict)
     _last_progress_fraction: dict[ModelId, float] = field(default_factory=dict)
+    _attempt_ids: dict[ModelId, DownloadAttemptId] = field(default_factory=dict)
+    _suppressed_progress: set[ModelId] = field(default_factory=set)
+    _pending_download_starts: dict[ModelId, ShardMetadata] = field(
+        default_factory=dict
+    )
 
     # Emit an in_progress update only after the download advances this fraction
-    # (so ~20 events total), never faster than the min interval (no bursts on a
+    # (so ~20 readings total), never faster than the min interval (no bursts on a
     # fast/cached download), and at least once per heartbeat (so a slow download
-    # still updates). Dropping intermediate updates is loss-free: apply()
-    # overwrites the per-(node, model) download entry, so only the dashboard
-    # progress bar is coarser.
+    # still updates). Dropping intermediate updates is loss-free because the
+    # telemetry view itself retains only the latest per-(node, model) status.
     _PROGRESS_STEP: ClassVar[float] = 0.05
     _MIN_INTERVAL_SECS: ClassVar[float] = 1.0
     _HEARTBEAT_SECS: ClassVar[float] = 30.0
@@ -111,8 +113,71 @@ class DownloadCoordinator:
         self._last_progress_time.pop(model_id, None)
         self._last_progress_fraction.pop(model_id, None)
 
+    def _begin_attempt(self, model_id: ModelId) -> DownloadAttemptId:
+        """Create and retain a fresh ordering identity for one download attempt."""
+
+        attempt_id = DownloadAttemptId()
+        self._attempt_ids[model_id] = attempt_id
+        self._suppressed_progress.discard(model_id)
+        return attempt_id
+
+    def _begin_reset(self, model_id: ModelId) -> DownloadAttemptId:
+        """Create a reset boundary and suppress tail samples from prior work."""
+
+        attempt_id = DownloadAttemptId()
+        self._attempt_ids[model_id] = attempt_id
+        self._suppressed_progress.add(model_id)
+        return attempt_id
+
+    def _attempt_for(self, model_id: ModelId) -> DownloadAttemptId:
+        """Return the current attempt identity, creating one for discovered work."""
+
+        return self._attempt_ids.setdefault(model_id, DownloadAttemptId())
+
+    def _prepare_status(self, status: DownloadProgress) -> DownloadProgress:
+        """Attach one stable attempt identity and retain the prepared local status."""
+
+        model_id = status.shard_metadata.model_card.model_id
+        prepared = status.model_copy(
+            update={"attempt_id": status.attempt_id or self._attempt_for(model_id)}
+        )
+        self.download_status[model_id] = prepared
+        return prepared
+
+    async def _emit_status(self, status: DownloadProgress) -> DownloadProgress:
+        """Route transient status to telemetry and decisions to the event log."""
+
+        prepared = self._prepare_status(status)
+        if isinstance(prepared, DownloadOngoing):
+            await self.telemetry_sender.send(
+                NodeTelemetry(node_id=self.node_id, info=prepared)
+            )
+        elif isinstance(prepared, DownloadPending):
+            # Pending is both the live initial state and the rare durable decision
+            # that clears an older terminal outcome before a new attempt.
+            await self.event_sender.send(
+                NodeDownloadProgress(download_progress=prepared)
+            )
+            await self.telemetry_sender.send(
+                NodeTelemetry(node_id=self.node_id, info=prepared)
+            )
+        else:
+            await self.event_sender.send(
+                NodeDownloadProgress(download_progress=prepared)
+            )
+        return prepared
+
+    def _emit_ongoing_nowait(self, status: DownloadOngoing) -> DownloadOngoing:
+        """Offer initial live progress from the synchronous task-start path."""
+
+        prepared = cast(DownloadOngoing, self._prepare_status(status))
+        self.telemetry_sender.send_nowait(
+            NodeTelemetry(node_id=self.node_id, info=prepared)
+        )
+        return prepared
+
     def _should_emit_in_progress(self, model_id: ModelId, fraction: float) -> bool:
-        """Whether to emit an in_progress event given how far the download advanced.
+        """Whether to emit an in-progress reading given download advancement.
 
         Bounds the high-frequency in_progress stream so it cannot saturate the
         ordered control plane (#364): emit on a fraction-delta step (rate-floored
@@ -146,6 +211,8 @@ class DownloadCoordinator:
         self, callback_shard: ShardMetadata, progress: RepoDownloadProgress
     ) -> None:
         model_id = callback_shard.model_card.model_id
+        if model_id in self._suppressed_progress:
+            return
 
         if progress.status == "complete":
             completed = DownloadCompleted(
@@ -154,10 +221,7 @@ class DownloadCoordinator:
                 total=progress.total,
                 model_directory=self._model_dir(model_id),
             )
-            self.download_status[model_id] = completed
-            await self.event_sender.send(
-                NodeDownloadProgress(download_progress=completed)
-            )
+            await self._emit_status(completed)
             self._reset_progress_throttle(model_id)
         elif progress.status == "in_progress":
             total_bytes = progress.total.in_bytes
@@ -174,10 +238,7 @@ class DownloadCoordinator:
                 ),
                 model_directory=self._model_dir(model_id),
             )
-            self.download_status[model_id] = ongoing
-            await self.event_sender.send(
-                NodeDownloadProgress(download_progress=ongoing)
-            )
+            await self._emit_status(ongoing)
 
     async def run(self) -> None:
         logger.info(
@@ -233,16 +294,14 @@ class DownloadCoordinator:
             logger.info(f"Cancelling download for {model_id}")
             self.active_downloads[model_id].cancel()
             self._reset_progress_throttle(model_id)
+            self._begin_reset(model_id)
             current_status = self.download_status[model_id]
             pending = DownloadPending(
                 shard_metadata=current_status.shard_metadata,
                 node_id=self.node_id,
                 model_directory=self._model_dir(model_id),
             )
-            self.download_status[model_id] = pending
-            await self.event_sender.send(
-                NodeDownloadProgress(download_progress=pending)
-            )
+            await self._emit_status(pending)
 
     async def _restart_node(self) -> None:
         """Restart this node by replacing the current process image (in-place restart)."""
@@ -320,6 +379,11 @@ class DownloadCoordinator:
 
     async def _purge_staging_cache(self, model_id: ModelId | None) -> None:
         """Remove staged and downloaded model files from the local node."""
+        if model_id is None:
+            self._pending_download_starts.clear()
+        else:
+            self._pending_download_starts.pop(model_id, None)
+
         # Collect all directories to purge: staging cache + standard models dir
         purge_dirs: list[tuple[Path, str]] = []
         if self.staging_cache_path is not None:
@@ -347,14 +411,13 @@ class DownloadCoordinator:
                     found = True
             if found and model_id in self.download_status:
                 current = self.download_status[model_id]
+                self._begin_reset(model_id)
                 pending = DownloadPending(
                     shard_metadata=current.shard_metadata,
                     node_id=self.node_id,
                     model_directory=self._model_dir(model_id),
                 )
-                await self.event_sender.send(
-                    NodeDownloadProgress(download_progress=pending)
-                )
+                await self._emit_status(pending)
                 del self.download_status[model_id]
             elif not found:
                 logger.info(f"PurgeStagingCache: model {model_id} not found")
@@ -379,20 +442,36 @@ class DownloadCoordinator:
             # Reset all download statuses (including read-only entries —
             # their files have been deleted so they are no longer valid)
             for mid, status in list(self.download_status.items()):
+                self._begin_reset(mid)
                 pending = DownloadPending(
                     shard_metadata=status.shard_metadata,
                     node_id=self.node_id,
                     model_directory=self._model_dir(mid),
                 )
-                await self.event_sender.send(
-                    NodeDownloadProgress(download_progress=pending)
-                )
+                await self._emit_status(pending)
                 del self.download_status[mid]
 
             logger.info(f"PurgeStagingCache: purged {total_purged} model directories")
 
     async def _start_download(self, shard: ShardMetadata) -> None:
         model_id = shard.model_card.model_id
+
+        active_scope = self.active_downloads.get(model_id)
+        if active_scope is not None:
+            if active_scope.cancel_called:
+                # Cancellation cleanup can outlive the command-loop tick that
+                # requested it. Retain the replacement command so the active
+                # task's finally block can start it after releasing ownership.
+                self._pending_download_starts[model_id] = shard
+                logger.info(
+                    f"DownloadCoordinator: queued restart for {model_id} until "
+                    "the cancelled download task finishes"
+                )
+                return
+            logger.info(
+                f"DownloadCoordinator: {model_id} still has an active download task"
+            )
+            return
 
         # Check if already downloading, complete, or recently failed
         if model_id in self.download_status:
@@ -412,18 +491,16 @@ class DownloadCoordinator:
                     logger.info(
                         f"DownloadCoordinator: {model_id} already DownloadCompleted, re-emitting"
                     )
-                    await self.event_sender.send(
-                        NodeDownloadProgress(download_progress=status)
-                    )
+                    await self._emit_status(status)
                     return
             elif isinstance(status, (DownloadOngoing, DownloadFailed)):
                 logger.info(
                     f"DownloadCoordinator: {model_id} already {type(status).__name__}, re-emitting"
                 )
-                await self.event_sender.send(
-                    NodeDownloadProgress(download_progress=status)
-                )
+                await self._emit_status(status)
                 return
+
+        self._begin_attempt(model_id)
 
         # Check SKULK_MODELS_PATH for pre-downloaded models. A base model on
         # disk does NOT make the download complete when the card declares a
@@ -459,10 +536,7 @@ class DownloadCoordinator:
                 model_directory=str(found_path),
                 read_only=True,
             )
-            self.download_status[model_id] = completed
-            await self.event_sender.send(
-                NodeDownloadProgress(download_progress=completed)
-            )
+            await self._emit_status(completed)
             return
 
         # Emit pending status
@@ -471,8 +545,7 @@ class DownloadCoordinator:
             node_id=self.node_id,
             model_directory=self._model_dir(model_id),
         )
-        self.download_status[model_id] = progress
-        await self.event_sender.send(NodeDownloadProgress(download_progress=progress))
+        await self._emit_status(progress)
 
         # Check initial status from downloader
         initial_progress = (
@@ -486,10 +559,7 @@ class DownloadCoordinator:
                 total=initial_progress.total,
                 model_directory=self._model_dir(model_id),
             )
-            self.download_status[model_id] = completed
-            await self.event_sender.send(
-                NodeDownloadProgress(download_progress=completed)
-            )
+            await self._emit_status(completed)
             return
 
         if self.offline:
@@ -502,8 +572,7 @@ class DownloadCoordinator:
                 error_message=f"Model files not found locally in offline mode: {model_id}",
                 model_directory=self._model_dir(model_id),
             )
-            self.download_status[model_id] = failed
-            await self.event_sender.send(NodeDownloadProgress(download_progress=failed))
+            await self._emit_status(failed)
             return
 
         # Start actual download
@@ -524,8 +593,7 @@ class DownloadCoordinator:
             ),
             model_directory=self._model_dir(model_id),
         )
-        self.download_status[model_id] = status
-        self.event_sender.send_nowait(NodeDownloadProgress(download_progress=status))
+        self._emit_ongoing_nowait(status)
 
         async def download_wrapper(cancel_scope: anyio.CancelScope) -> None:
             try:
@@ -549,10 +617,7 @@ class DownloadCoordinator:
                                 read_only=existing.read_only,
                                 model_directory=actual_dir,
                             )
-                            self.download_status[model_id] = corrected
-                            await self.event_sender.send(
-                                NodeDownloadProgress(download_progress=corrected)
-                            )
+                            await self._emit_status(corrected)
             except Exception as e:
                 logger.error(f"Download failed for {model_id}: {e}")
                 self._reset_progress_throttle(model_id)
@@ -562,21 +627,25 @@ class DownloadCoordinator:
                     error_message=str(e),
                     model_directory=self._model_dir(model_id),
                 )
-                self.download_status[model_id] = failed
-                await self.event_sender.send(
-                    NodeDownloadProgress(download_progress=failed)
-                )
+                await self._emit_status(failed)
             except anyio.get_cancelled_exc_class():
                 # ignore cancellation - let cleanup do its thing
                 pass
             finally:
                 self.active_downloads.pop(model_id, None)
+                pending_start = self._pending_download_starts.pop(model_id, None)
+                if pending_start is not None:
+                    await self._start_download(pending_start)
 
         scope = anyio.CancelScope()
         self._tg.start_soon(download_wrapper, scope)
         self.active_downloads[model_id] = scope
 
     async def _delete_download(self, model_id: ModelId) -> None:
+        # Delete is authoritative over an earlier replacement start that was
+        # waiting for cancellation cleanup to release task ownership.
+        self._pending_download_starts.pop(model_id, None)
+
         # Protect read-only models (from SKULK_MODELS_PATH) from deletion
         if model_id in self.download_status:
             current = self.download_status[model_id]
@@ -616,14 +685,13 @@ class DownloadCoordinator:
         # Emit pending status to reset UI state, then remove from local tracking
         if model_id in self.download_status:
             current_status = self.download_status[model_id]
+            self._begin_reset(model_id)
             pending = DownloadPending(
                 shard_metadata=current_status.shard_metadata,
                 node_id=self.node_id,
                 model_directory=self._model_dir(model_id),
             )
-            await self.event_sender.send(
-                NodeDownloadProgress(download_progress=pending)
-            )
+            await self._emit_status(pending)
             del self.download_status[model_id]
 
     async def _emit_existing_download_progress(self) -> None:
@@ -691,12 +759,7 @@ class DownloadCoordinator:
                         else:
                             continue
 
-                        self.download_status[progress.shard.model_card.model_id] = (
-                            status
-                        )
-                        await self.event_sender.send(
-                            NodeDownloadProgress(download_progress=status)
-                        )
+                        await self._emit_status(status)
 
                 # Scan SKULK_MODELS_PATH for pre-downloaded models (runs every
                 # cycle). Log the search path once — repeating the full tuple
@@ -739,6 +802,7 @@ class DownloadCoordinator:
                             end_layer=card.n_layers,
                             n_layers=card.n_layers,
                         )
+                        self._begin_attempt(mid)
                         path_completed: DownloadProgress = DownloadCompleted(
                             node_id=self.node_id,
                             shard_metadata=path_shard,
@@ -746,10 +810,7 @@ class DownloadCoordinator:
                             model_directory=str(found),
                             read_only=True,
                         )
-                        self.download_status[mid] = path_completed
-                        await self.event_sender.send(
-                            NodeDownloadProgress(download_progress=path_completed)
-                        )
+                        await self._emit_status(path_completed)
 
             except Exception as e:
                 logger.error(

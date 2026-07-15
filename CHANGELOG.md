@@ -21,6 +21,15 @@ This project records release notes here and mirrors public-facing notes in
   telemetry and control events as fallbacks, and records every deciding signal
   age in `NodeTimedOut` so a removal remains explainable after replay (#448).
 
+- **Telemetry can no longer congest correctness-critical control traffic.**
+  Local producers enter a bounded latest-value admission map and telemetry uses
+  its own Python egress loop plus a dedicated gossipsub protocol and per-peer
+  handler queues. Intermediate download progress now rides this lossy plane;
+  only completed and failed outcomes remain in event-sourced `State`, with
+  attempt identities preventing a late progress sample from overriding a
+  terminal or reset decision. `GET /v1/diagnostics/telemetry` reports aggregate
+  admission, coalescing, drop, queue, failure, byte, and age metrics (#565).
+
 - **Placement previews expose every valid host, not just the ranking
   winner.** `GET /instance/previews` now includes per-host single-node
   previews marked `alternative: true` for each host that passes admission

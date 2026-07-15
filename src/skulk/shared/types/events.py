@@ -130,6 +130,13 @@ class NodeGatheredInfo(BaseEvent):
 
 
 class NodeDownloadProgress(BaseEvent):
+    """Durable download outcome or reset decision.
+
+    Current producers emit only ``DownloadCompleted``/``DownloadFailed`` and
+    rare ``DownloadPending`` reset decisions here. ``DownloadOngoing`` remains
+    decodable for replay of older event logs but is ignored by current apply.
+    """
+
     download_progress: DownloadProgress
 
 

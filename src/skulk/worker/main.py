@@ -15,6 +15,7 @@ from PIL import Image
 
 from skulk.download.download_utils import resolve_model_in_path
 from skulk.routing.realtime_audio import RealtimeAudioPacket
+from skulk.routing.router import TelemetrySender
 from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
@@ -89,9 +90,11 @@ from skulk.shared.types.telemetry import (
 )
 from skulk.shared.types.topology import Connection, SocketConnection
 from skulk.shared.types.worker.downloads import (
+    DownloadAttemptId,
     DownloadCompleted,
     DownloadOngoing,
     DownloadPending,
+    DownloadProgress,
 )
 from skulk.shared.types.worker.instances import InstanceId, LlamaRpcInstance
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerStatus
@@ -588,7 +591,7 @@ class Worker:
         # but I think it's the correct way to be thinking about commands
         command_sender: Sender[ForwarderCommand],
         download_command_sender: Sender[ForwarderDownloadCommand],
-        telemetry_sender: Sender[NodeTelemetry] | None = None,
+        telemetry_sender: TelemetrySender | Sender[NodeTelemetry] | None = None,
         telemetry_view: TelemetryView | None = None,
         data_sender: Sender[DataChunk] | None = None,
         realtime_audio_receiver: Receiver[RealtimeAudioInputFrame] | None = None,
@@ -672,6 +675,16 @@ class Worker:
             _RUNNER_CRASH_THRESHOLD, _RUNNER_CRASH_WINDOW_SECONDS
         )
         self._stopped: anyio.Event = anyio.Event()
+
+    def _effective_downloads(self) -> dict[NodeId, list[DownloadProgress]]:
+        """Return durable outcomes overlaid with live download telemetry."""
+
+        if self._telemetry_view is None:
+            return {
+                node_id: list(progresses)
+                for node_id, progresses in self.state.downloads.items()
+            }
+        return self._telemetry_view.effective_downloads(self.state.downloads)
 
     def _shard_memory_fraction(self, shard: ShardMetadata) -> float:
         """Fraction of a model's memory this node's shard holds.
@@ -1239,7 +1252,7 @@ class Worker:
             task: Task | None = plan(
                 self.node_id,
                 self.runners,
-                self.state.downloads,
+                self._effective_downloads(),
                 self.state.instances,
                 self.state.runners,
                 self.state.tasks,
@@ -1404,6 +1417,7 @@ class Worker:
                                         node_id=self.node_id,
                                         shard_metadata=shard_for_eviction,
                                         model_directory="",
+                                        attempt_id=DownloadAttemptId(),
                                     )
                                 )
                             )
@@ -1779,7 +1793,7 @@ class Worker:
         # staging directory but no runner exists yet - a concurrent
         # teardown's budget pass must not delete a directory that is
         # actively being written.
-        for progress in self.state.downloads.get(self.node_id, []):
+        for progress in self._effective_downloads().get(self.node_id, []):
             if isinstance(progress, DownloadOngoing):
                 _add_card(progress.shard_metadata.model_card)
         return frozenset(in_use)
@@ -1857,7 +1871,7 @@ class Worker:
             staging_directory_name(
                 str(progress.shard_metadata.model_card.model_id)
             ): progress.shard_metadata
-            for progress in self.state.downloads.get(self.node_id, [])
+            for progress in self._effective_downloads().get(self.node_id, [])
         }
         deactivated_directory = staging_directory_name(
             str(deactivated_shard.model_card.model_id)
@@ -1878,6 +1892,7 @@ class Worker:
                 shard_metadata=shard_metadata,
                 node_id=self.node_id,
                 model_directory=str(cache_path / evicted_model_id.replace("/", "--")),
+                attempt_id=DownloadAttemptId(),
             )
             await self.event_sender.send(
                 NodeDownloadProgress(download_progress=pending)
@@ -1991,6 +2006,7 @@ class Worker:
                 shard_metadata=progress.shard_metadata,
                 node_id=self.node_id,
                 model_directory=str(staged_dir),
+                attempt_id=DownloadAttemptId(),
             )
             await self.event_sender.send(
                 NodeDownloadProgress(download_progress=pending)

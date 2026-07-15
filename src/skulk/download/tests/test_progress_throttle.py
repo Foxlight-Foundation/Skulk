@@ -1,26 +1,34 @@
 # pyright: reportPrivateUsage=false
-"""Download-progress throttle bounds the in_progress event stream (#364).
+"""Download-progress throttle bounds the in-progress telemetry stream (#364).
 
 A large download fires a progress callback per 8MB chunk across parallel files,
-and each emitted ``NodeDownloadProgress`` is a full ordered event (master indexes
-it, appends the event log, persists a snapshot, and rebroadcasts to every node).
-So the in_progress stream must be bounded by total count, not by rate -- a pure
-time gate still scales event volume with download duration, which saturated the
-gossip send queue and dropped the terminal ``DownloadCompleted`` so placements
-wedged in RunnerLoading. The fraction-delta gate caps a download to roughly
-``1 / _PROGRESS_STEP`` in_progress events regardless of size or duration.
+so even lossy latest-value admission should avoid pointless serialization work.
+The fraction-delta gate caps a download to roughly ``1 / _PROGRESS_STEP`` useful
+readings regardless of size or duration; completion and failure still use the
+ordered event plane.
 """
 
 from pathlib import Path
 from typing import cast
 
 import pytest
+from anyio import WouldBlock
 
 from skulk.download import coordinator as coordinator_mod
 from skulk.download.coordinator import DownloadCoordinator
 from skulk.shared.models.model_cards import ModelId
+from skulk.shared.tests.conftest import get_pipeline_shard_metadata
 from skulk.shared.types.common import NodeId
+from skulk.shared.types.events import Event, NodeDownloadProgress
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.telemetry import NodeTelemetry
+from skulk.shared.types.worker.downloads import (
+    DownloadCompleted,
+    DownloadOngoing,
+    DownloadProgressData,
+)
 from skulk.utils.channels import channel
+from skulk.worker.tests.constants import MODEL_A_ID
 
 
 class _FakeDownloader:
@@ -31,11 +39,13 @@ class _FakeDownloader:
 def _make_coordinator() -> DownloadCoordinator:
     _, cmd_recv = channel[object]()
     event_send, _ = channel[object]()
+    telemetry_send, _ = channel[NodeTelemetry]()
     return DownloadCoordinator(
         node_id=NodeId("n1"),
         shard_downloader=cast("object", _FakeDownloader()),  # pyright: ignore[reportArgumentType]
         download_command_receiver=cast("object", cmd_recv),  # pyright: ignore[reportArgumentType]
         event_sender=cast("object", event_send),  # pyright: ignore[reportArgumentType]
+        telemetry_sender=telemetry_send,
     )
 
 
@@ -156,3 +166,50 @@ def test_in_progress_throttle_bounds_event_count_for_a_long_download(
     # the callbacks and near the step/heartbeat budget.
     assert emitted <= 30, f"expected a small bounded count, got {emitted}"
     assert emitted >= 1
+
+
+async def test_transient_progress_bypasses_event_log_but_terminal_is_durable() -> None:
+    """Coordinator routing keeps progress lossy and completion ordered."""
+
+    _, command_receiver = channel[object]()
+    event_sender, event_receiver = channel[Event]()
+    telemetry_sender, telemetry_receiver = channel[NodeTelemetry]()
+    coordinator = DownloadCoordinator(
+        node_id=NodeId("node-a"),
+        shard_downloader=cast("object", _FakeDownloader()),  # pyright: ignore[reportArgumentType]
+        download_command_receiver=cast("object", command_receiver),  # pyright: ignore[reportArgumentType]
+        event_sender=event_sender,
+        telemetry_sender=telemetry_sender,
+    )
+    shard = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=1)
+    ongoing = DownloadOngoing(
+        node_id=NodeId("node-a"),
+        shard_metadata=shard,
+        download_progress=DownloadProgressData(
+            total=Memory.from_mb(10),
+            downloaded=Memory.from_mb(1),
+            downloaded_this_session=Memory.from_mb(1),
+            completed_files=0,
+            total_files=1,
+            speed=1.0,
+            eta_ms=1,
+            files={},
+        ),
+    )
+
+    emitted_ongoing = await coordinator._emit_status(ongoing)
+    telemetry = telemetry_receiver.receive_nowait()
+    assert telemetry.info == emitted_ongoing
+    with pytest.raises(WouldBlock):
+        event_receiver.receive_nowait()
+
+    completed = DownloadCompleted(
+        node_id=NodeId("node-a"),
+        shard_metadata=shard,
+        total=Memory.from_mb(10),
+    )
+    emitted_completed = await coordinator._emit_status(completed)
+    event = event_receiver.receive_nowait()
+    assert isinstance(event, NodeDownloadProgress)
+    assert event.download_progress == emitted_completed
+    assert emitted_completed.attempt_id == emitted_ongoing.attempt_id
