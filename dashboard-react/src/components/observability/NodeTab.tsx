@@ -673,6 +673,26 @@ export function NodeTab({ nodeId }: NodeTabProps) {
                 <Key>{t('observability.node.egressOutcomes', 'Egress outcomes')}</Key>
                 <Value $warn={diagnostics.dataPlane.egress.remoteFramesDropped + diagnostics.dataPlane.egress.remotePublishFailures > 0}>{diagnostics.dataPlane.egress.remoteFramesPublished} {t('observability.node.publishedLower', 'published')} · {diagnostics.dataPlane.egress.remoteFramesDropped} {t('observability.node.droppedLower', 'dropped')} · {diagnostics.dataPlane.egress.remotePublishFailures} {t('observability.node.publishFailures', 'publish failures')}</Value>
               </Row>
+              <Row>
+                <Key>{t('observability.node.visionIngress', 'Vision ingress')}</Key>
+                <Value>{diagnostics.visionMediaIngress.activeStreams} {t('observability.node.activeLower', 'active')} · {diagnostics.visionMediaIngress.verifiedStreams} {t('observability.node.verifiedLower', 'verified')} · {formatBytes(diagnostics.visionMediaIngress.retainedBytes)} {t('observability.node.retainedLower', 'retained')}</Value>
+              </Row>
+              <Row>
+                <Key>{t('observability.node.visionAdmission', 'Vision admission')}</Key>
+                <Value>{diagnostics.visionMediaIngress.pendingApiCommands} {t('observability.node.pendingLower', 'pending')} / {diagnostics.visionMediaIngress.activeApiCommands} {t('observability.node.activeLower', 'active')} · {formatBytes(diagnostics.visionMediaIngress.pendingApiBytes + diagnostics.visionMediaIngress.activeApiBytes)} · {diagnostics.visionMediaIngress.pendingWorkerAcknowledgements} {t('observability.node.acksOwed', 'acks owed')}</Value>
+              </Row>
+              <Row>
+                <Key>{t('observability.node.visionOutcomes', 'Vision outcomes')}</Key>
+                <Value $warn={diagnostics.visionMediaIngress.rejectedStreams + diagnostics.visionMediaIngress.expiredStreams > 0}>{diagnostics.visionMediaIngress.completedStreams} {t('observability.node.completedLower', 'completed')} · {diagnostics.visionMediaIngress.rejectedStreams} {t('observability.node.rejectedLower', 'rejected')} · {diagnostics.visionMediaIngress.expiredStreams} {t('observability.node.expiredLower', 'expired')} · {diagnostics.visionMediaIngress.pendingFailures} {t('observability.node.pendingFailureReports', 'pending failure reports')}</Value>
+              </Row>
+              <Row>
+                <Key>{t('observability.node.visionEgress', 'Vision egress')}</Key>
+                <Value $warn={diagnostics.visionMediaEgress.remoteFramesDropped + diagnostics.visionMediaEgress.remotePublishFailures > 0}>{diagnostics.visionMediaEgress.queueDepth} {t('observability.node.currentLower', 'current')} · {diagnostics.visionMediaEgress.maxQueueDepth} {t('observability.node.peakLower', 'peak')} · {diagnostics.visionMediaEgress.remoteFramesDropped + diagnostics.visionMediaEgress.remotePublishFailures} {t('observability.node.failuresLower', 'failures')}</Value>
+              </Row>
+              <Row>
+                <Key>{t('observability.node.visionNetworkIngress', 'Vision network ingress')}</Key>
+                <Value $warn={diagnostics.visionMediaEgress.inboundFramesDropped > 0}>{diagnostics.visionMediaEgress.inboundPayloadQueueDepth} / {diagnostics.visionMediaEgress.inboundPayloadQueueCapacity} {t('observability.node.payloadQueued', 'payload queued')} · {diagnostics.visionMediaEgress.inboundTerminalQueueDepth} / {diagnostics.visionMediaEgress.inboundTerminalQueueCapacity} {t('observability.node.terminalsQueued', 'terminals queued')} · {diagnostics.visionMediaEgress.inboundFramesDropped} {t('observability.node.droppedLower', 'dropped')}</Value>
+              </Row>
             </Section>
 
             <Section>

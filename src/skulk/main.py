@@ -462,6 +462,7 @@ class Node:
         await router.register_topic(topics.DATA)
         await router.register_topic(topics.PROVIDER_DATA)
         await router.register_topic(topics.REALTIME_AUDIO)
+        await router.register_topic(topics.VISION_MEDIA)
         if _zenoh_on:
             await router.register_topic(topics.SPEECH_MEDIA)
         telemetry_view = TelemetryView()
@@ -580,11 +581,16 @@ class Node:
                 speech_media_packet_receiver=(
                     router.receiver(topics.SPEECH_MEDIA) if _zenoh_on else None
                 ),
+                vision_media_packet_sender=router.sender(topics.VISION_MEDIA),
+                vision_media_packet_receiver=router.receiver(topics.VISION_MEDIA),
                 realtime_audio_sender=(
                     None if args.no_worker else realtime_audio_sender
                 ),
                 data_plane_zenoh=_zenoh_on,
                 data_plane_egress_provider=router.data_plane_egress_diagnostics,
+                vision_media_egress_provider=(
+                    router.vision_media_egress_diagnostics
+                ),
                 telemetry_plane_provider=router.telemetry_plane_diagnostics,
                 # Installed plugins (skulk.extensions entry points), discovered
                 # once per process. First-party provider facades are registered
@@ -628,12 +634,17 @@ class Node:
                 speech_media_packet_receiver=(
                     router.receiver(topics.SPEECH_MEDIA) if _zenoh_on else None
                 ),
+                vision_media_packet_sender=router.sender(topics.VISION_MEDIA),
+                vision_media_packet_receiver=router.receiver(topics.VISION_MEDIA),
                 store_client=worker_store_client,
                 staging_config=worker_staging_cfg,
             )
             if api is not None:
                 api.set_runner_diagnostics_provider(worker.collect_runner_diagnostics)
                 api.set_runner_cancel_provider(worker.cancel_runner_task)
+                api.set_vision_media_ingress_provider(
+                    worker.collect_vision_media_ingress_diagnostics
+                )
         else:
             worker = None
 
@@ -1037,6 +1048,12 @@ class Node:
                                 if self.data_plane_zenoh
                                 else None
                             ),
+                            vision_media_packet_sender=self.router.sender(
+                                topics.VISION_MEDIA
+                            ),
+                            vision_media_packet_receiver=self.router.receiver(
+                                topics.VISION_MEDIA
+                            ),
                         )
                         self._tg.start_soon(self.worker.run)
                         if self.api is not None:
@@ -1045,6 +1062,9 @@ class Node:
                             )
                             self.api.set_runner_cancel_provider(
                                 self.worker.cancel_runner_task
+                            )
+                            self.api.set_vision_media_ingress_provider(
+                                self.worker.collect_vision_media_ingress_diagnostics
                             )
                     if self.api:
                         self.api.reset(

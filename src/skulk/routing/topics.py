@@ -18,6 +18,11 @@ from skulk.routing.speech_media import (
     decode_speech_media_packet,
     encode_speech_media_packet,
 )
+from skulk.routing.vision_media import (
+    VisionMediaPacket,
+    decode_vision_media_packet,
+    encode_vision_media_packet,
+)
 from skulk.shared.election import ElectionMessage
 from skulk.shared.types.chunks import DataChunk
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
@@ -154,4 +159,18 @@ SPEECH_MEDIA = TypedTopic(
     is_terminal=lambda packet: packet.is_terminal,
     serializer=encode_speech_media_packet,
     deserializer=decode_speech_media_packet,
+)
+
+VISION_MEDIA = TypedTopic(
+    "vision_media",
+    PublishPolicy.Always,
+    VisionMediaPacket,
+    routing_key=lambda packet: str(packet.target_node),
+    # The reverse acknowledgement path has one producer per selected rank. Keep
+    # those terminals in distinct egress queues so one rank cannot close another
+    # rank's acknowledgement before it is published.
+    stream_key=lambda packet: f"{packet.command_id}:{packet.source_node}",
+    is_terminal=lambda packet: packet.is_terminal,
+    serializer=encode_vision_media_packet,
+    deserializer=decode_vision_media_packet,
 )

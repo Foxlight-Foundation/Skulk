@@ -171,6 +171,11 @@ Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `COMMANDS`: Workers/API send commands to master
 - `ELECTION_MESSAGES`: Election protocol messages
 - `CONNECTION_MESSAGES`: libp2p connection updates
+- `DATA`: Generated model output sent directly to the owning API node
+- `VISION_MEDIA`: Bounded VLM/image-edit input sent directly from the owning API
+  to the worker ranks selected by authoritative task placement; payloads never
+  enter the master event log or replicated `State`, and every selected rank must
+  acknowledge verified input before the transfer deadline
 - `SPEECH_MEDIA`: node-addressed ephemeral TTS reference audio over Zenoh
 
 ### Event Sourcing

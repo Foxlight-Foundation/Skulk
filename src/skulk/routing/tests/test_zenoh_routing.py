@@ -8,12 +8,16 @@ opening a network session.
 
 from typing import Literal, cast
 
+import anyio
 import pytest
 from skulk_pyo3_bindings import NetworkingHandle, ZenohHandle
 
 from skulk.routing.router import (
     _ELECTION_OUTBOUND_BUFFER,  # pyright: ignore[reportPrivateUsage]
+    _VISION_NETWORK_PAYLOAD_BUFFER,  # pyright: ignore[reportPrivateUsage]
     _ZENOH_DATA_OUTBOUND_BUFFER,  # pyright: ignore[reportPrivateUsage]
+    _ZENOH_VISION_OUTBOUND_BUFFER,  # pyright: ignore[reportPrivateUsage]
+    _ZENOH_VISION_STREAM_BUFFER,  # pyright: ignore[reportPrivateUsage]
     OutboundPacket,
     Router,
 )
@@ -24,7 +28,11 @@ from skulk.routing.topics import (
     GLOBAL_EVENTS,
     PROVIDER_DATA,
     REALTIME_AUDIO,
+    VISION_MEDIA,
 )
+from skulk.routing.vision_media import VisionMediaPacket
+from skulk.shared.models.model_cards import ModelId
+from skulk.shared.types.common import CommandId, NodeId
 
 
 def _router(*, zenoh: bool) -> Router:
@@ -41,6 +49,7 @@ def test_data_routes_over_zenoh_when_enabled() -> None:
     assert router.uses_zenoh(DATA.topic) is True
     assert router.uses_zenoh(PROVIDER_DATA.topic) is True
     assert router.uses_zenoh(REALTIME_AUDIO.topic) is True
+    assert router.uses_zenoh(VISION_MEDIA.topic) is True
     # Control/telemetry/election planes stay on gossipsub even with zenoh on.
     assert router.uses_zenoh(COMMANDS.topic) is False
     assert router.uses_zenoh(GLOBAL_EVENTS.topic) is False
@@ -62,6 +71,248 @@ def test_zenoh_outbound_channel_is_bounded() -> None:
     assert stats.max_buffer_size == _ZENOH_DATA_OUTBOUND_BUFFER
     # Sanity: a finite (non-inf) bound.
     assert stats.max_buffer_size < float("inf")
+
+
+@pytest.mark.parametrize("zenoh", [False, True])
+async def test_vision_ingress_has_an_independent_bounded_channel(
+    zenoh: bool,
+) -> None:
+    """Uploads cannot consume control or generated-output queue capacity."""
+
+    router = _router(zenoh=zenoh)
+    await router.register_topic(VISION_MEDIA)
+    local_receiver = router.receiver(VISION_MEDIA)
+    assert local_receiver.statistics().max_buffer_size == 0
+    assert router._zenoh_vision_out_send is not None  # pyright: ignore[reportPrivateUsage]
+    vision_stats = router._zenoh_vision_out_send.statistics()  # pyright: ignore[reportPrivateUsage]
+    assert vision_stats.max_buffer_size == _ZENOH_VISION_OUTBOUND_BUFFER
+    packet = OutboundPacket(
+        topic=VISION_MEDIA.topic,
+        routing_key="remote-node",
+        stream_key="vision-command",
+        is_terminal=False,
+        data=b"vision",
+    )
+    received: OutboundPacket | None = None
+
+    async with (
+        router._zenoh_vision_out_send as sender,  # pyright: ignore[reportPrivateUsage]
+        anyio.create_task_group() as task_group,
+    ):
+        task_group.start_soon(sender.send, packet)
+        received = await router._zenoh_vision_out_recv.receive()  # pyright: ignore[reportPrivateUsage]
+        task_group.cancel_scope.cancel()
+
+    assert received == packet
+    assert router.networking_receiver.collect() == []
+    if zenoh:
+        assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
+        assert router._zenoh_vision_out_send is not router._zenoh_out_send  # pyright: ignore[reportPrivateUsage]
+
+
+def test_vision_acknowledgements_from_multiple_ranks_use_distinct_streams() -> None:
+    """One rank's terminal acknowledgement cannot close another rank's queue."""
+
+    assert VISION_MEDIA.stream_key is not None
+    command_id = CommandId("multi-rank-command")
+    first = VisionMediaPacket(
+        source_node=NodeId("worker-1"),
+        target_node=NodeId("api-node"),
+        command_id=command_id,
+        model=ModelId("org/model"),
+        sequence=2,
+        kind="accepted",
+    )
+    second = first.model_copy(update={"source_node": NodeId("worker-2")})
+
+    assert VISION_MEDIA.routing_key is not None
+    assert VISION_MEDIA.routing_key(first) == VISION_MEDIA.routing_key(second)
+    assert VISION_MEDIA.stream_key(first) != VISION_MEDIA.stream_key(second)
+
+
+def test_vision_network_ingress_is_bounded_and_source_routes_overflow() -> None:
+    """Upload pressure cannot block shared receive or fail without a terminal."""
+
+    router = _router(zenoh=False)
+    for index in range(_VISION_NETWORK_PAYLOAD_BUFFER):
+        packet = VisionMediaPacket(
+            source_node=NodeId(f"api-{index}"),
+            target_node=NodeId("test-node"),
+            command_id=CommandId(f"command-{index}"),
+            model=ModelId("org/model"),
+            sequence=0,
+            kind="opened",
+            total_chunks=1,
+            image_count=1,
+        )
+        router._offer_vision_network_packet(  # pyright: ignore[reportPrivateUsage]
+            VISION_MEDIA.serialize(packet), None
+        )
+
+    rejected = VisionMediaPacket(
+        source_node=NodeId("overflow-api"),
+        target_node=NodeId("test-node"),
+        command_id=CommandId("overflow-command"),
+        model=ModelId("org/model"),
+        sequence=0,
+        kind="opened",
+        total_chunks=1,
+        image_count=1,
+    )
+    router._offer_vision_network_packet(  # pyright: ignore[reportPrivateUsage]
+        VISION_MEDIA.serialize(rejected), None
+    )
+
+    terminal = router._vision_network_terminal_recv.receive_nowait()  # pyright: ignore[reportPrivateUsage]
+    assert terminal.outbound is True
+    assert terminal.packet.kind == "transport_failed"
+    assert terminal.packet.source_node == NodeId("test-node")
+    assert terminal.packet.target_node == NodeId("overflow-api")
+    diagnostics = router.vision_media_egress_diagnostics()
+    assert diagnostics.inbound_payload_queue_depth == _VISION_NETWORK_PAYLOAD_BUFFER
+    assert diagnostics.inbound_payload_queue_capacity == _VISION_NETWORK_PAYLOAD_BUFFER
+    assert diagnostics.inbound_frames_dropped == 1
+
+
+def test_vision_network_terminal_lane_bypasses_full_payload_lane() -> None:
+    """Worker acknowledgements remain progressive during a saturated upload lane."""
+
+    router = _router(zenoh=False)
+    for index in range(_VISION_NETWORK_PAYLOAD_BUFFER):
+        opened = VisionMediaPacket(
+            source_node=NodeId(f"api-{index}"),
+            target_node=NodeId("test-node"),
+            command_id=CommandId(f"command-{index}"),
+            model=ModelId("org/model"),
+            sequence=0,
+            kind="opened",
+            total_chunks=1,
+            image_count=1,
+        )
+        router._offer_vision_network_packet(  # pyright: ignore[reportPrivateUsage]
+            VISION_MEDIA.serialize(opened), None
+        )
+    accepted = VisionMediaPacket(
+        source_node=NodeId("worker-node"),
+        target_node=NodeId("test-node"),
+        command_id=CommandId("accepted-command"),
+        model=ModelId("org/model"),
+        sequence=2,
+        kind="accepted",
+    )
+
+    router._offer_vision_network_packet(  # pyright: ignore[reportPrivateUsage]
+        VISION_MEDIA.serialize(accepted), None
+    )
+
+    terminal = router._vision_network_terminal_recv.receive_nowait()  # pyright: ignore[reportPrivateUsage]
+    assert terminal.outbound is False
+    assert terminal.packet == accepted
+
+
+def test_vision_network_completion_stays_ordered_with_upload_payload() -> None:
+    """Completion cannot overtake the open and chunk frames it verifies."""
+
+    router = _router(zenoh=False)
+    opened = VisionMediaPacket(
+        source_node=NodeId("api-node"),
+        target_node=NodeId("test-node"),
+        command_id=CommandId("ordered-command"),
+        model=ModelId("org/model"),
+        sequence=0,
+        kind="opened",
+        total_chunks=1,
+        image_count=1,
+    )
+    chunk = VisionMediaPacket(
+        source_node=opened.source_node,
+        target_node=opened.target_node,
+        command_id=opened.command_id,
+        model=opened.model,
+        sequence=1,
+        kind="chunk",
+        data=b"image-data",
+        image_index=0,
+        total_chunks=1,
+    )
+    completed = VisionMediaPacket(
+        source_node=opened.source_node,
+        target_node=opened.target_node,
+        command_id=opened.command_id,
+        model=opened.model,
+        sequence=2,
+        kind="completed",
+        total_chunks=1,
+        image_count=1,
+        sha256="0" * 64,
+    )
+
+    for packet in (opened, chunk, completed):
+        router._offer_vision_network_packet(  # pyright: ignore[reportPrivateUsage]
+            VISION_MEDIA.serialize(packet), None
+        )
+
+    received = [
+        router._vision_network_ingress_recv.receive_nowait().packet  # pyright: ignore[reportPrivateUsage]
+        for _ in range(3)
+    ]
+    assert received == [opened, chunk, completed]
+
+
+def test_vision_transport_buffers_cover_maximum_upload() -> None:
+    """The documented 64-chunk request fits even before consumers run."""
+
+    maximum_frame_count = 1 + 64 + 1
+    assert maximum_frame_count <= _ZENOH_VISION_STREAM_BUFFER
+    assert maximum_frame_count <= _VISION_NETWORK_PAYLOAD_BUFFER
+
+    router = _router(zenoh=False)
+    packets = [
+        VisionMediaPacket(
+            source_node=NodeId("api-node"),
+            target_node=NodeId("test-node"),
+            command_id=CommandId("maximum-command"),
+            model=ModelId("org/model"),
+            sequence=0,
+            kind="opened",
+            total_chunks=64,
+            image_count=1,
+        ),
+        *[
+            VisionMediaPacket(
+                source_node=NodeId("api-node"),
+                target_node=NodeId("test-node"),
+                command_id=CommandId("maximum-command"),
+                model=ModelId("org/model"),
+                sequence=sequence,
+                kind="chunk",
+                data=b"image-data",
+                image_index=0,
+                total_chunks=64,
+            )
+            for sequence in range(1, 65)
+        ],
+        VisionMediaPacket(
+            source_node=NodeId("api-node"),
+            target_node=NodeId("test-node"),
+            command_id=CommandId("maximum-command"),
+            model=ModelId("org/model"),
+            sequence=65,
+            kind="completed",
+            total_chunks=64,
+            image_count=1,
+            sha256="0" * 64,
+        ),
+    ]
+
+    for packet in packets:
+        router._offer_vision_network_packet(  # pyright: ignore[reportPrivateUsage]
+            VISION_MEDIA.serialize(packet), None
+        )
+
+    diagnostics = router.vision_media_egress_diagnostics()
+    assert diagnostics.inbound_payload_queue_depth == maximum_frame_count
+    assert diagnostics.inbound_frames_dropped == 0
 
 
 async def test_election_egress_uses_a_dedicated_bounded_channel() -> None:
