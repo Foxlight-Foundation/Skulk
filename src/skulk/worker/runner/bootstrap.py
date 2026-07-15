@@ -565,6 +565,22 @@ def entrypoint(
                     context_token_limit=context_token_limit,
                 )
                 runner.main()
+            elif resolved_text_engine == "vllm":
+                # Served-backend text generation via vLLM: the worker launches an
+                # external `vllm serve` subprocess and proxies its OpenAI API.
+                # Selected when the card's compatible backends resolve to the vllm
+                # engine on this node (SKULK_VLLM_BIN set). The GPU-serving fast
+                # path (continuous batching); single-node only in this slice.
+                from skulk.worker.runner.vllm.runner import Runner as VllmRunner
+
+                runner = VllmRunner(
+                    bound_instance,
+                    event_sender,
+                    task_receiver,
+                    cancel_receiver,
+                    context_token_limit=context_token_limit,
+                )
+                runner.main()
             else:
                 from skulk.worker.engines.mlx.patches import apply_mlx_patches
                 from skulk.worker.runner.llm_inference.runner import Runner

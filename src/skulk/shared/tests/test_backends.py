@@ -15,6 +15,8 @@ from skulk.shared.backends import (
     LLAMA_CPP_BACKENDS_ENV,
     LLAMA_SERVER_BACKENDS_ENV,
     LLAMA_SERVER_BIN_ENV,
+    VLLM_BACKENDS_ENV,
+    VLLM_BIN_ENV,
     engine_of,
     engine_supports_multi_node,
     make_backend_tag,
@@ -42,7 +44,9 @@ def test_make_backend_tag_is_compound() -> None:
         ("llama_cpp-vulkan", "llama_cpp"),
         ("llama_cpp-rocm", "llama_cpp"),
         ("cuda", None),  # bare compute, no engine
-        ("vllm-cuda", None),  # unknown engine
+        ("vllm", "vllm"),
+        ("vllm-cuda", "vllm"),
+        ("bogus-cuda", None),  # unknown engine
         ("", None),
     ],
 )
@@ -186,6 +190,56 @@ def test_served_probe_defaults_to_cpu(
     assert backends._probe_served_backends() == frozenset(
         {"llama_server", "llama_server-cpu"}
     )
+
+
+def test_vllm_probe_empty_without_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No SKULK_VLLM_BIN => the node does not advertise the vLLM engine.
+    monkeypatch.delenv(VLLM_BIN_ENV, raising=False)
+    assert backends._probe_vllm_backends() == frozenset()
+
+
+def test_vllm_probe_empty_when_binary_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(VLLM_BIN_ENV, str(tmp_path / "nope" / "vllm"))
+    assert backends._probe_vllm_backends() == frozenset()
+
+
+def test_vllm_probe_reads_declared_gpu_backends(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    binary = _make_executable(tmp_path / "vllm")
+    monkeypatch.setenv(VLLM_BIN_ENV, str(binary))
+    # Only GPU computes are honored; metal/vulkan/cpu are ignored for vLLM.
+    monkeypatch.setenv(VLLM_BACKENDS_ENV, "cuda, vulkan , metal, cpu")
+    tags = backends._probe_vllm_backends()
+    assert tags == frozenset({"vllm", "vllm-cuda"})
+
+
+def test_vllm_probe_falls_back_to_server_then_llama_cpp_backends(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # No dedicated VLLM_BACKENDS: reuse the node's llama.cpp GPU declaration
+    # (same GPU, whichever engine drives it).
+    binary = _make_executable(tmp_path / "vllm")
+    monkeypatch.setenv(VLLM_BIN_ENV, str(binary))
+    monkeypatch.delenv(VLLM_BACKENDS_ENV, raising=False)
+    monkeypatch.delenv(LLAMA_SERVER_BACKENDS_ENV, raising=False)
+    monkeypatch.setenv(LLAMA_CPP_BACKENDS_ENV, "rocm")
+    assert backends._probe_vllm_backends() == frozenset({"vllm", "vllm-rocm"})
+
+
+def test_vllm_probe_empty_with_no_gpu_backend_declared(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Unlike the llama_server probe there is no cpu fallback: a vLLM node with no
+    # declared GPU backend is not a useful placement target, so it advertises nothing.
+    binary = _make_executable(tmp_path / "vllm")
+    monkeypatch.setenv(VLLM_BIN_ENV, str(binary))
+    monkeypatch.delenv(VLLM_BACKENDS_ENV, raising=False)
+    monkeypatch.delenv(LLAMA_SERVER_BACKENDS_ENV, raising=False)
+    monkeypatch.delenv(LLAMA_CPP_BACKENDS_ENV, raising=False)
+    assert backends._probe_vllm_backends() == frozenset()
 
 
 def _fake_llama_cpp(gpu_offload: bool | None) -> object:

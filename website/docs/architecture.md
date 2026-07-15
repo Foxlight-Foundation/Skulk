@@ -231,8 +231,8 @@ GGUF, but some speculative modes need a separate small draft model: a card names
 with `served_spec_draft_repo` / `served_spec_draft_file` and the worker downloads it
 as a companion and passes it to the server as `--model-draft` (this is how Gemma 4
 runs MTP, via its assistant as the draft model). The engine coexists with the
-in-process llama.cpp runner; the same managed-server-plus-proxy shape is the
-intended on-ramp for vLLM later. See the setup notes for a non-Mac node in
+in-process llama.cpp runner; the same managed-server-plus-proxy shape carries the
+`vllm` engine described next. See the setup notes for a non-Mac node in
 [AMD / Strix Halo nodes](amd-strix-halo-nodes) and the env vars
 `SKULK_LLAMA_SERVER_BIN` / `SKULK_LLAMA_SERVER_BACKENDS`. A node-local
 `SKULK_LLAMA_SERVER_FORCE_NO_SPEC=1` forces speculative decoding off even for a
@@ -240,7 +240,34 @@ card that asks for it, so the same GGUF can be served in plain decode as an
 apples-to-apples MTP-off baseline (a benchmarking and diagnostics knob, not for
 normal operation).
 
-The served engine is also how a GGUF model larger than any single GPU node gets
+A second served-backend engine, `vllm`, reuses that same shape with a `vllm serve`
+process instead of `llama-server`. vLLM is the **GPU-serving fast path**: its
+continuous batching and paged attention keep latency low and grow aggregate
+throughput as concurrent requests pile up, exactly where the single-stream engines
+fall over. A head-to-head on a rented A100 (same gpt-oss-120B weights on both
+engines) made the trade-off concrete: under 64 simultaneous requests llama.cpp's
+time-to-first-token blew out to about 31 seconds while vLLM stayed near half a
+second, and vLLM's total throughput kept climbing where llama.cpp flattened; but
+for a *single* request llama.cpp was faster, because that particular A100 has no
+native FP4 hardware and vLLM had to emulate the model's 4-bit format (a gap that
+closes on newer Blackwell GPUs). So vLLM does not replace the in-process engines,
+it **coexists** with them, and the planner chooses per model by the node's hardware
+and how much concurrent load it expects. A node offers vLLM when `SKULK_VLLM_BIN`
+points at the `vllm` CLI (it advertises `vllm-cuda` / `vllm-rocm`, GPU-only), and a
+card opts in through `compatible_backends`. Because the right engine now depends on
+the GPU *generation* (FP4 support and all), each node also reports its GPU compute
+capability in telemetry, so placement can eventually route a model to the metal
+that serves it best. Unlike the in-process runners, which serve one request at a
+time, the vLLM runner keeps several generations in flight at once (one streaming
+HTTP request per worker thread, bounded by `SKULK_VLLM_MAX_CONCURRENT_REQUESTS`) so
+the server actually *sees* concurrent requests and its continuous batching engages
+— without that the batching benefit never appears. The runner reports itself
+running while any generation is in flight and returns to ready only when the last
+one drains. This first slice is single-node text generation; tool calling,
+logprobs, vLLM's own multi-GPU parallelism, and vLLM-aware memory admission are
+follow-ups.
+
+The `llama_server` engine is also how a GGUF model larger than any single GPU node gets
 served: **multi-node memory pooling over llama.cpp's RPC backend**. When a model
 fits no single node but fits the combined GPU memory of several `llama_server`
 nodes, the planner places an asymmetric pair of roles instead of a ring: one
