@@ -2,7 +2,10 @@ from enum import Enum
 
 from pydantic import model_validator
 
-from skulk.shared.models.memory_estimate import KV_CONTEXT_BUDGET_TOKENS
+from skulk.shared.models.memory_estimate import (
+    KV_CONTEXT_BUDGET_TOKENS,
+    preallocates_kv_upfront,
+)
 from skulk.shared.models.model_cards import ModelTask
 from skulk.shared.types.common import Host, Id, NodeId
 from skulk.shared.types.worker.runners import RunnerId, ShardAssignments, ShardMetadata
@@ -69,7 +72,7 @@ class BaseInstance(TaggedModel):
             shard = next(iter(self.shard_assignments.runner_to_shard.values()), None)
             if shard is not None:
                 card = shard.model_card
-                if card.gguf_file:
+                if preallocates_kv_upfront(card):
                     # A legacy gguf instance ALWAYS needs a ceiling, even when the
                     # card's context_length is unknown (0): the served llama.cpp
                     # engine still preallocates a KV cache at KV_CONTEXT_BUDGET_TOKENS

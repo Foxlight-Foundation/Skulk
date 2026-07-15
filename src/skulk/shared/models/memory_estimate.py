@@ -167,6 +167,30 @@ def gpu_working_set_ceiling(ram_total: Memory) -> Memory:
     return ram_total * GPU_WORKING_SET_FRACTION
 
 
+def preallocates_kv_upfront(model_card: ModelCard) -> bool:
+    """Whether the card's served engine allocates its whole KV cache up front.
+
+    llama.cpp / llama-server preallocate ``n_ctx`` of KV at load and OOM-KILL the
+    node on overflow, so the served-context clamps and the worker fit-guard must
+    size to the real window for these. This covers a PINNED gguf card AND an
+    UNPINNED one (``gguf_file=None``, where the runner scans for a ``.gguf`` at
+    load): both preallocate. Detected via the gguf pin, or a ``compatible_backends``
+    set that targets ``llama_cpp`` / ``llama_server`` and NOT ``mlx`` -- an
+    mlx-capable card grows KV lazily on an mlx placement, so it must not be
+    force-clamped (that would regress MLX context). vLLM is excluded: it validates
+    its window against the KV pool at startup (a clean error, not an OOM-kill) and
+    runs only on discrete-VRAM nodes.
+    """
+    if model_card.gguf_file:
+        return True
+    backends = model_card.placement.compatible_backends
+    targets_llama = any(
+        tag.startswith(("llama_cpp", "llama_server")) for tag in backends
+    )
+    targets_mlx = any(tag == "mlx" or tag.startswith("mlx-") for tag in backends)
+    return targets_llama and not targets_mlx
+
+
 def per_token_kv_bytes(model_card: ModelCard) -> int:
     """Whole-model KV-cache bytes consumed by ONE token of context.
 
@@ -278,7 +302,7 @@ def instance_context_token_limit(
     # ram_total-sized window could OOM the node on load. Keep gguf on non-VRAM
     # nodes at the budget floor; the memory-fit lift applies to discrete-VRAM (GPU)
     # nodes. ``node_vram`` membership is static per node, so this stays deterministic.
-    if model_card.gguf_file and memory_limit is not None:
+    if preallocates_kv_upfront(model_card) and memory_limit is not None:
         hosting_nodes = shard_assignments.node_to_runner
         if not all(node_vram.get(node_id) is not None for node_id in hosting_nodes):
             memory_limit = min(memory_limit, KV_CONTEXT_BUDGET_TOKENS)
@@ -321,7 +345,7 @@ def instance_context_token_limit(
     # KV dtype (#584): the fit assumes fp16 KV (KV_DTYPE_BYTES); enabling KV-cache
     # quantization must feed the estimate the quantized bytes-per-token or this
     # ceiling would be sized against the wrong footprint.
-    if model_card.gguf_file and memory_limit is None:
+    if preallocates_kv_upfront(model_card) and memory_limit is None:
         limit = (
             KV_CONTEXT_BUDGET_TOKENS
             if limit is None

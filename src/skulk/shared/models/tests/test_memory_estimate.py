@@ -80,6 +80,57 @@ def test_shard_footprint_zero_fraction_is_zero():
     assert estimate_shard_footprint(_card(8), 0.0).in_bytes == 0
 
 
+def test_preallocates_kv_upfront_covers_unpinned_gguf():
+    from skulk.shared.models.memory_estimate import preallocates_kv_upfront
+    from skulk.shared.models.model_cards import PlacementCardConfig
+
+    def _backends(*tags: str) -> PlacementCardConfig:
+        return PlacementCardConfig(compatible_backends=frozenset(tags))
+
+    # Pinned gguf: preallocating.
+    assert preallocates_kv_upfront(_card(1, gguf_file="m.gguf"))
+    # Unpinned but llama.cpp/llama-server-only backends: still preallocating (the
+    # runner scans for a .gguf at load).
+    assert preallocates_kv_upfront(
+        _card(1).model_copy(update={"placement": _backends("llama_cpp-cuda")})
+    )
+    assert preallocates_kv_upfront(
+        _card(1).model_copy(update={"placement": _backends("llama_server-cuda")})
+    )
+    # MLX-capable card: NOT force-clamped (grows KV lazily on an mlx placement).
+    assert not preallocates_kv_upfront(_card(1))  # default mlx
+    assert not preallocates_kv_upfront(
+        _card(1).model_copy(update={"placement": _backends("mlx", "llama_cpp-cuda")})
+    )
+    # vLLM is excluded (clean startup error, discrete-VRAM only).
+    assert not preallocates_kv_upfront(
+        _card(1).model_copy(update={"placement": _backends("vllm-cuda")})
+    )
+
+
+def test_instance_limit_unpinned_gguf_non_vram_clamps_to_floor():
+    # An UNPINNED gguf card (no gguf_file, llama.cpp backends) on a non-VRAM node
+    # is still clamped to the floor -- the safety must not be bypassable by leaving
+    # the gguf pin unset. (P2 review, #585.)
+    from skulk.shared.models.model_cards import PlacementCardConfig
+
+    card = _card(1, kv_heads=8, n_layers=32).model_copy(
+        update={
+            "context_length": 131072,
+            "placement": PlacementCardConfig(
+                compatible_backends=frozenset({"llama_cpp-cuda"})
+            ),
+        }
+    )
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    assert (
+        instance_context_token_limit(assignments, {NodeId("n0"): Memory.from_gb(64)})
+        == KV_CONTEXT_BUDGET_TOKENS
+    )
+
+
 def test_shard_footprint_scales_with_context_budget():
     # The worker's pre-load fit guard now sizes KV to the stamped served window
     # (context_token_limit) for gguf instead of a fixed 8192, so a larger window
