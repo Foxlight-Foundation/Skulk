@@ -1125,11 +1125,12 @@ def test_cluster_diagnostics_reports_unreachable_topology_members(
     response = client.get("/v1/diagnostics/cluster")
 
     assert response.status_code == 200
+    body = _json_object(response)
+    assert body["versionStatus"] == "consistent"
     nodes = {
         str(node["nodeId"]): node
         for node in (
-            _json_mapping(item)
-            for item in _json_list(_json_object(response)["nodes"])
+            _json_mapping(item) for item in _json_list(body["nodes"])
         )
     }
     assert nodes["local-node"]["ok"] is True

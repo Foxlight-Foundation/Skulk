@@ -8965,7 +8965,7 @@ class API:
             local_node_id=str(self.node_id),
             master_node_id=str(self._master_node_id),
             version_status=aggregate_diagnostics_version_status(
-                [entry.version_status for entry in nodes]
+                [entry.version_status for entry in nodes if entry.ok]
             ),
             nodes=nodes,
         )
