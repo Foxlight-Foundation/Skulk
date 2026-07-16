@@ -1504,6 +1504,13 @@ async def download_shard(
     final_repo_progress = calculate_repo_progress(
         shard, shard.model_card.model_id, revision, file_progress, all_start_time
     )
+    if skip_download and replacing_revision and final_repo_progress.status == "complete":
+        # All replacement bytes may have landed before a restart, but they are
+        # not loadable until the normal ensure path validates and atomically
+        # installs the replacement at the canonical cache path.
+        final_repo_progress = final_repo_progress.model_copy(
+            update={"status": "in_progress"}
+        )
     if not skip_download:
         await asyncio.to_thread(
             write_source_revision_marker,
