@@ -45,6 +45,7 @@ from skulk.shared.types.worker.downloads import (
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
+_MODEL_SWAP_BACKUP_SUFFIX = ".skulk-swap-backup"
 
 
 class HuggingFaceAuthenticationError(Exception):
@@ -146,6 +147,49 @@ def _write_source_revision(path: Path, source_revision: str | None) -> None:
             marker.unlink()
         return
     marker.write_text(f"{source_revision}\n")
+
+
+def _replacement_model_dir(target_dir: Path, source_revision: str | None) -> Path:
+    """Return the resumable sibling directory for a replacement revision."""
+
+    revision = source_revision or "main"
+    return target_dir.with_name(f".{target_dir.name}.revision-{revision}.partial")
+
+
+def _recover_interrupted_model_swap(target_dir: Path) -> None:
+    """Restore or clean the backup left by an interrupted directory swap."""
+
+    backup_dir = target_dir.with_name(f".{target_dir.name}{_MODEL_SWAP_BACKUP_SUFFIX}")
+    if not backup_dir.exists():
+        return
+    if target_dir.exists():
+        shutil.rmtree(backup_dir)
+        return
+    backup_dir.rename(target_dir)
+
+
+def _commit_replacement_model_dir(replacement_dir: Path, target_dir: Path) -> None:
+    """Install a complete replacement while retaining a recoverable old copy."""
+
+    _recover_interrupted_model_swap(target_dir)
+    backup_dir = target_dir.with_name(f".{target_dir.name}{_MODEL_SWAP_BACKUP_SUFFIX}")
+    if not target_dir.exists():
+        replacement_dir.rename(target_dir)
+        return
+
+    target_dir.rename(backup_dir)
+    try:
+        replacement_dir.rename(target_dir)
+    except BaseException:
+        backup_dir.rename(target_dir)
+        raise
+    try:
+        shutil.rmtree(backup_dir)
+    except Exception as error:
+        logger.warning(
+            f"Installed replacement model at {target_dir}, but could not remove "
+            f"the prior cache backup at {backup_dir}: {error}"
+        )
 
 
 def resolve_model_in_path(
@@ -1176,14 +1220,26 @@ async def download_shard(
         logger.debug(f"Downloading {shard.model_card.model_id=}")
 
     revision = shard.model_card.source_revision or "main"
-    target_dir = await ensure_models_dir() / str(shard.model_card.model_id).replace(
+    canonical_target_dir = await ensure_models_dir() / str(
+        shard.model_card.model_id
+    ).replace(
         "/", "--"
     )
+    target_dir = canonical_target_dir
+    replacing_revision = False
     if not skip_download:
-        if target_dir.exists() and not _source_revision_matches(
-            target_dir, shard.model_card.source_revision
-        ):
-            await asyncio.to_thread(shutil.rmtree, target_dir)
+        await asyncio.to_thread(
+            _recover_interrupted_model_swap, canonical_target_dir
+        )
+        replacing_revision = canonical_target_dir.exists() and not (
+            _source_revision_matches(
+                canonical_target_dir, shard.model_card.source_revision
+            )
+        )
+        if replacing_revision:
+            target_dir = _replacement_model_dir(
+                canonical_target_dir, shard.model_card.source_revision
+            )
         await aios.makedirs(target_dir, exist_ok=True)
 
     if not allow_patterns:
@@ -1216,7 +1272,7 @@ async def download_shard(
             status="not_started",
             file_progress={},
         )
-        return target_dir, not_started_progress
+        return canonical_target_dir, not_started_progress
     filtered_file_list = list(
         filter_repo_objects(
             file_list,
@@ -1395,6 +1451,11 @@ async def download_shard(
         await asyncio.to_thread(
             _write_source_revision, target_dir, shard.model_card.source_revision
         )
+        if replacing_revision:
+            await asyncio.to_thread(
+                _commit_replacement_model_dir, target_dir, canonical_target_dir
+            )
+            target_dir = canonical_target_dir
     await on_progress(shard, final_repo_progress)
     if gguf := next((f for f in filtered_file_list if f.path.endswith(".gguf")), None):
         return target_dir / gguf.path, final_repo_progress
