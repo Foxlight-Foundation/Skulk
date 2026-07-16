@@ -245,14 +245,13 @@ class ServedConcurrentDispatch:
             with self._cancel_lock:
                 self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
         self.send_task_status(task, TaskStatus.Running)
-        self._note_generation_started()
-        # Capture the admission concurrency here, on the single dispatch thread,
-        # the instant AFTER this generation is counted in-flight (#596). This is
-        # its true position in a burst (1, 2, ... N as the loop admits them); the
-        # worker thread that later runs it cannot sample this without racing.
-        # Sample _inflight_count() first (it takes _status_lock), then store under
-        # _admission_lock, so the two locks are never nested.
-        admitted = self._inflight_count()
+        # Capture the admission concurrency atomically with the increment (#596):
+        # _note_generation_started returns the post-increment count from inside
+        # _status_lock, so no peer can decrement between counting this request in
+        # flight and recording its admission bucket. This is its true position in
+        # a burst (1, 2, ... N as the loop admits them). Store under _admission_lock
+        # (never nested with _status_lock, which is already released here).
+        admitted = self._note_generation_started()
         with self._admission_lock:
             self._admission_inflight[task.task_id] = admitted
         try:
@@ -329,11 +328,20 @@ class ServedConcurrentDispatch:
             # Release the backpressure slot this generation held.
             self._dispatch_permits.release()
 
-    def _note_generation_started(self) -> None:
+    def _note_generation_started(self) -> int:
+        """Count a generation in flight; return the post-increment count (#596).
+
+        The count is returned from inside the ``_status_lock`` hold so the caller
+        can record this request's admission concurrency atomically with the
+        increment. Reading it in a separate ``_inflight_count()`` acquisition would
+        leave a window in which a peer's ``_note_generation_finished`` could
+        decrement first, filing the sample into a too-low concurrency bucket.
+        """
         with self._status_lock:
             self._inflight += 1
             if self._inflight == 1 and isinstance(self.current_status, RunnerReady):
                 self.update_status(RunnerRunning())
+            return self._inflight
 
     def _note_generation_finished(self) -> bool:
         """Drop the in-flight count; return True if this drained to idle (0)."""
