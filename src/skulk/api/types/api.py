@@ -695,6 +695,25 @@ class GenerationStats(BaseModel):
     prompt_tokens: int
     generation_tokens: int
     peak_memory_usage: Memory
+    # Runner-reported ground truth for the performance-envelope tap (#596). A
+    # served runner stamps these from its own state so the envelope is attributed
+    # to the serving instance with the true in-flight concurrency, immune to which
+    # API node dispatched the request. None for engines that do not report them
+    # (in-process MLX / llama.cpp), where the API falls back to its own
+    # outstanding-request count.
+    serving_node: str | None = None
+    """Node id of the node whose runner produced this generation (for the API to
+    resolve the hardware class from telemetry)."""
+    serving_backend: str | None = None
+    """The resolved engine+backend tag the runner actually ran (e.g. vllm-cuda);
+    can differ per node on a heterogeneous cluster, so it must come from the
+    serving instance, not the model."""
+    in_flight_at_admission: int | None = None
+    """Requests this instance's runner was serving when this one started (>= 1)."""
+    serving_batches: bool | None = None
+    """Whether the serving engine decodes concurrent requests together (its
+    configured max concurrency > 1), so aggregate throughput scales with
+    concurrency. Distinguishes a parallel llama-server from a serial one."""
 
 
 class ImageGenerationStats(BaseModel):

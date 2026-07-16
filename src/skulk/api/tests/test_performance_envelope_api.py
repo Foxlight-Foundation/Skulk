@@ -44,6 +44,27 @@ def _chunk(text: str | None, finish_reason: str | None, tps: float | None) -> An
     return SimpleNamespace(text=text, finish_reason=finish_reason, stats=stats)
 
 
+def _served_chunk(
+    text: str | None,
+    finish_reason: str | None,
+    tps: float | None,
+    *,
+    node: str | None,
+    backend: str | None,
+    in_flight: int | None,
+    batches: bool | None,
+) -> Any:
+    """A chunk whose stats carry the runner-reported serving fields (#596)."""
+    stats = SimpleNamespace(
+        generation_tps=tps,
+        serving_node=node,
+        serving_backend=backend,
+        in_flight_at_admission=in_flight,
+        serving_batches=batches,
+    )
+    return SimpleNamespace(text=text, finish_reason=finish_reason, stats=stats)
+
+
 async def _drain(gen: Any) -> None:
     async for _ in gen:
         pass
@@ -126,6 +147,94 @@ async def test_tap_records_error_outcome() -> None:
     bucket = api._performance_envelopes.snapshot().envelopes[0].buckets[0]
     assert bucket.error_count == 1
     assert bucket.success_count == 0
+
+
+async def test_tap_prefers_runner_reported_context() -> None:
+    api = _build_api()
+    # Runner-reported path (#596): the served runner stamps the serving node,
+    # backend, in-flight-at-admission, and batching mode onto the terminal
+    # stats. The tap must key the envelope from those, NOT from the API's own
+    # dispatch-time offered count -- so it is correct across replicas and when
+    # several API nodes drive one instance. Stub the two resolvers so the test
+    # needs no live telemetry/state.
+    object.__setattr__(api, "_hardware_class_for_node", lambda _n: "nvidia-a100-80gb")
+    object.__setattr__(api, "_model_quantization", lambda _m: "4bit")
+
+    def _fallback_boom(_model: Any) -> Any:
+        raise AssertionError("fallback context must not be used when the runner reports")
+
+    object.__setattr__(api, "_resolve_envelope_context", _fallback_boom)
+
+    stream = _one_stream(
+        [
+            _served_chunk(
+                "hi", None, None,
+                node="n1", backend="vllm-cuda", in_flight=5, batches=True,
+            ),
+            _served_chunk(
+                "", "stop", 42.0,
+                node="n1", backend="vllm-cuda", in_flight=5, batches=True,
+            ),
+        ]
+    )
+    await _drain(api._tap_performance_envelope(ModelId("m"), stream))
+
+    env = api._performance_envelopes.snapshot().envelopes[0]
+    assert env.hardware_class == "nvidia-a100-80gb"
+    assert env.backend == "vllm-cuda"
+    assert env.quantization == "4bit"
+    assert env.batches is True
+    bucket = env.buckets[0]
+    # Concurrency is the RUNNER's in-flight (5), not the API's offered count (1).
+    assert bucket.concurrency == 5
+    assert bucket.success_count == 1
+
+
+async def test_tap_runner_reported_unblinds_replicas() -> None:
+    api = _build_api()
+    # With two instances serving the same model the fallback path skips (it
+    # records only when EXACTLY one instance serves, to avoid mis-keying). The
+    # runner-reported path is per-instance, so it records anyway.
+    object.__setattr__(api, "_hardware_class_for_node", lambda _n: "hw")
+    object.__setattr__(api, "_model_quantization", lambda _m: "4bit")
+    object.__setattr__(api, "_resolve_envelope_context", lambda _model: None)
+
+    stream = _one_stream(
+        [
+            _served_chunk(
+                "", "stop", 30.0,
+                node="n2", backend="llama_server-vulkan", in_flight=1, batches=False,
+            )
+        ]
+    )
+    await _drain(api._tap_performance_envelope(ModelId("m"), stream))
+
+    env = api._performance_envelopes.snapshot().envelopes[0]
+    assert env.backend == "llama_server-vulkan"
+    assert env.batches is False
+    assert env.buckets[0].concurrency == 1
+
+
+async def test_tap_runner_reported_skips_when_node_hardware_unknown() -> None:
+    api = _build_api()
+    # A stamped serving node whose telemetry has not populated yet must be
+    # skipped rather than recorded under an incomplete key.
+    object.__setattr__(api, "_hardware_class_for_node", lambda _n: None)
+    object.__setattr__(api, "_model_quantization", lambda _m: "4bit")
+    object.__setattr__(api, "_resolve_envelope_context", lambda _model: None)
+
+    stream = _one_stream(
+        [
+            _served_chunk(
+                "", "stop", 30.0,
+                node="n3", backend="vllm-cuda", in_flight=2, batches=True,
+            )
+        ]
+    )
+    await _drain(api._tap_performance_envelope(ModelId("m"), stream))
+
+    assert api._performance_envelopes.snapshot().envelopes == []
+    assert api._envelope_inflight.get("m", 0) == 0
 
 
 async def test_cluster_fanout_reports_local_first_and_peer_failure() -> None:

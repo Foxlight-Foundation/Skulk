@@ -11,7 +11,7 @@ backpressure, and cancellation.
 
 import threading
 import time
-from typing import Any
+from typing import Any, cast
 
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
@@ -277,3 +277,54 @@ def test_stale_cancel_all_cleared_on_drain() -> None:
     assert CANCEL_ALL_TASKS not in host.cancelled_tasks
     assert host._inflight == 0
     assert isinstance(host.current_status, RunnerReady)
+
+
+def _base_stats() -> Any:
+    from skulk.api.types import GenerationStats
+    from skulk.shared.types.memory import Memory
+
+    return GenerationStats(
+        prompt_tps=1.0,
+        generation_tps=2.0,
+        prompt_tokens=3,
+        generation_tokens=4,
+        peak_memory_usage=Memory(in_bytes=0),
+    )
+
+
+def test_stamp_runner_stats_records_serving_ground_truth() -> None:
+    """A batching served runner stamps its node, backend, in-flight, and mode."""
+    from skulk.shared.types.common import NodeId
+
+    host = _FakeHost(max_concurrency=4)
+    host.bound_instance = cast(
+        Any, type("B", (), {"bound_node_id": NodeId("node-7")})()
+    )
+    host.shard_metadata = cast(Any, type("S", (), {"resolved_backend": "vllm-cuda"})())
+
+    stamped = host.stamp_runner_stats(_base_stats(), in_flight_at_admission=3)
+
+    assert stamped.serving_node == "node-7"
+    assert stamped.serving_backend == "vllm-cuda"
+    assert stamped.in_flight_at_admission == 3
+    assert stamped.serving_batches is True  # max_concurrency 4 > 1
+    # The engine's own measurements survive the stamp.
+    assert stamped.generation_tps == 2.0
+
+
+def test_stamp_runner_stats_serial_reports_not_batching_and_floors_inflight() -> None:
+    """A serial served runner reports batches=False and floors in-flight to 1."""
+    from skulk.shared.types.common import NodeId
+
+    host = _FakeHost(max_concurrency=1)
+    host.bound_instance = cast(
+        Any, type("B", (), {"bound_node_id": NodeId("node-1")})()
+    )
+    host.shard_metadata = cast(
+        Any, type("S", (), {"resolved_backend": "llama_server-vulkan"})()
+    )
+
+    stamped = host.stamp_runner_stats(_base_stats(), in_flight_at_admission=0)
+
+    assert stamped.serving_batches is False  # max_concurrency 1
+    assert stamped.in_flight_at_admission == 1  # floored to >= 1

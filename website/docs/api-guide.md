@@ -1199,9 +1199,11 @@ Behavior notes:
   time-to-first-token) and a simple `kneeConcurrency` estimate: the concurrency past which
   aggregate throughput stops rising. It is data only (no serving behavior is
   driven from it), kept in bounded memory, and never touches State, the event
-  log, or the telemetry gossip plane. Concurrency is measured from this API
-  node's outstanding requests to the instance; with one API node that is the
-  instance's concurrency, and across several each sees only its own share.
+  log, or the telemetry gossip plane. Concurrency is the serving instance's own
+  in-flight load when a generation began: the served engines (llama.cpp server,
+  vLLM) report their true in-flight count, so the curve is accurate across
+  replicas and when several API nodes drive one instance; the single-stream
+  engines report none and fall back to this API node's outstanding-request count.
   `GET /v1/diagnostics/performance-envelopes/cluster` fans out to every
   reachable member and returns each one's report, with unreachable members
   listed as explicit failures. The dashboard's Performance tab renders these.

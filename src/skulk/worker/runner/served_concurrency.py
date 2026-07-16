@@ -25,6 +25,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 
 from anyio import ClosedResourceError, EndOfStream, WouldBlock
 
+from skulk.api.types import GenerationStats
 from skulk.shared.types.chunks import ErrorChunk
 from skulk.shared.types.events import ChunkGenerated, Event
 from skulk.shared.types.tasks import (
@@ -35,6 +36,7 @@ from skulk.shared.types.tasks import (
     TaskStatus,
     TextGeneration,
 )
+from skulk.shared.types.worker.instances import BoundInstance
 from skulk.shared.types.worker.runners import (
     RunnerReady,
     RunnerRunning,
@@ -67,6 +69,7 @@ class ServedConcurrentDispatch:
     task_receiver: MpReceiver[Task]
     cancel_receiver: MpReceiver[TaskId]
     shard_metadata: ShardMetadata
+    bound_instance: BoundInstance
     seen: set[TaskId]
     cancelled_tasks: set[TaskId]
     current_status: RunnerStatus
@@ -319,6 +322,28 @@ class ServedConcurrentDispatch:
     def _inflight_count(self) -> int:
         with self._status_lock:
             return self._inflight
+
+    def stamp_runner_stats(
+        self, stats: GenerationStats, in_flight_at_admission: int
+    ) -> GenerationStats:
+        """Stamp runner ground truth onto a generation's stats (#596).
+
+        The performance-envelope tap on the API attributes each generation to the
+        serving instance using these fields, so the envelope reflects the true
+        per-instance in-flight concurrency (immune to which API node dispatched
+        the request) and the correct batching classification. ``in_flight_at
+        admission`` is the runner's own in-flight count sampled when this
+        generation began; a serial served config reports 1, a batching one
+        reports up to its parallelism.
+        """
+        return stats.model_copy(
+            update={
+                "serving_node": str(self.bound_instance.bound_node_id),
+                "serving_backend": self.shard_metadata.resolved_backend,
+                "in_flight_at_admission": max(1, in_flight_at_admission),
+                "serving_batches": self._max_concurrency > 1,
+            }
+        )
 
     def _handle_shutdown(self, task: Task, pool: ThreadPoolExecutor) -> None:
         """Cancel in-flight generations, drain the pool, then tear down the server."""
