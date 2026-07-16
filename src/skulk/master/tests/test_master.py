@@ -16,7 +16,7 @@ from skulk.master.tests.conftest import (
 from skulk.routing.router import get_node_id_keypair
 from skulk.shared.models.model_cards import ModelCard, ModelTask
 from skulk.shared.topology import Topology
-from skulk.shared.types.chunks import AudioInputChunk, InputImageChunk
+from skulk.shared.types.chunks import AudioInputChunk, InputImageChunk, TokenChunk
 from skulk.shared.types.commands import (
     CommandId,
     ForwarderCommand,
@@ -28,6 +28,7 @@ from skulk.shared.types.commands import (
 )
 from skulk.shared.types.common import ModelId, NodeId, SessionId, SystemId
 from skulk.shared.types.events import (
+    ChunkGenerated,
     Event,
     GlobalForwarderEvent,
     IndexedEvent,
@@ -60,11 +61,12 @@ from skulk.shared.types.worker.instances import (
 )
 from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
 from skulk.utils.channels import channel
+from skulk.utils.info_gatherer.info_gatherer import NodeNetworkInterfaces
 
 
 @pytest.mark.asyncio
 async def test_master_never_emits_or_retains_vision_input_payloads() -> None:
-    """Image bytes bypass the ordered event log while batch STT remains legacy."""
+    """Legacy payload commands and events are rejected before persistence."""
 
     node_id = NodeId(get_node_id_keypair().to_node_id())
     session_id = SessionId(master_node_id=node_id, election_clock=0)
@@ -86,9 +88,14 @@ async def test_master_never_emits_or_retains_vision_input_payloads() -> None:
         state_sync_sender=state_sync_sender,
         download_command_sender=download_sender,
     )
+    should_warn = master._should_warn_for_non_control_event  # pyright: ignore[reportPrivateUsage]
+    warning_origin = SystemId("warning-source")
+    assert should_warn(warning_origin, InputChunkReceived, now=100.0)
+    assert not should_warn(warning_origin, InputChunkReceived, now=101.0)
+    assert should_warn(warning_origin, ChunkGenerated, now=101.0)
+    assert should_warn(warning_origin, InputChunkReceived, now=160.0)
     command_id = CommandId("media-census")
     image_payload = "aW1hZ2UtcGF5bG9hZA=="
-    emitted: Event | None = None
     indexed_after_legacy: GlobalForwarderEvent | None = None
 
     async with anyio.create_task_group() as task_group:
@@ -104,7 +111,7 @@ async def test_master_never_emits_or_retains_vision_input_payloads() -> None:
                         chunk_index=0,
                         total_chunks=1,
                     )
-                ),
+                )
             )
         )
         await command_sender.send(
@@ -119,10 +126,9 @@ async def test_master_never_emits_or_retains_vision_input_payloads() -> None:
                         total_chunks=1,
                         audio_sha256="0" * 64,
                     )
-                ),
+                )
             )
         )
-        emitted = await event_receiver.receive()
         await local_event_sender.send(
             LocalForwarderEvent(
                 origin=SystemId("legacy-worker"),
@@ -145,21 +151,54 @@ async def test_master_never_emits_or_retains_vision_input_payloads() -> None:
                 origin=SystemId("legacy-worker"),
                 origin_idx=1,
                 session=session_id,
+                event=InputChunkReceived(
+                    command_id=command_id,
+                    chunk=AudioInputChunk(
+                        model=ModelId("org/stt"),
+                        command_id=command_id,
+                        data="YXVkaW8=",
+                        chunk_index=0,
+                        total_chunks=1,
+                        audio_sha256="0" * 64,
+                    ),
+                ),
+            )
+        )
+        await local_event_sender.send(
+            LocalForwarderEvent(
+                origin=SystemId("legacy-worker"),
+                origin_idx=2,
+                session=session_id,
+                event=ChunkGenerated(
+                    command_id=command_id,
+                    chunk=TokenChunk(
+                        model=ModelId("org/text"),
+                        text="payload-token",
+                        token_id=1,
+                        usage=None,
+                    ),
+                ),
+            )
+        )
+        await local_event_sender.send(
+            LocalForwarderEvent(
+                origin=SystemId("legacy-worker"),
+                origin_idx=3,
+                session=session_id,
                 event=TestEvent(),
             )
         )
         indexed_after_legacy = await global_receiver.receive()
         task_group.cancel_scope.cancel()
 
-    assert isinstance(emitted, InputChunkReceived)
-    assert isinstance(emitted.chunk, AudioInputChunk)
     assert event_receiver.collect() == []
     assert indexed_after_legacy is not None
     assert isinstance(indexed_after_legacy.event, TestEvent)
     assert len(master._event_log) == 1  # pyright: ignore[reportPrivateUsage]
-    assert image_payload not in emitted.model_dump_json()
     assert image_payload not in indexed_after_legacy.model_dump_json()
     assert image_payload not in master.state.model_dump_json()
+    assert "YXVkaW8=" not in master.state.model_dump_json()
+    assert "payload-token" not in master.state.model_dump_json()
 
 
 @pytest.mark.asyncio
@@ -219,7 +258,7 @@ async def test_master():
         tg.start_soon(master.run)
         tg.start_soon(mock_event_router)
 
-        # inject a NodeGatheredInfo event
+        # inject a control-plane topology reading
         logger.info("inject a NodeGatheredInfo event")
         await local_event_sender.send(
             LocalForwarderEvent(
@@ -230,19 +269,15 @@ async def test_master():
                     NodeGatheredInfo(
                         when=str(datetime.now(tz=timezone.utc)),
                         node_id=node_id,
-                        info=MemoryUsage(
-                            ram_total=Memory.from_bytes(678948 * 1024),
-                            ram_available=Memory.from_bytes(678948 * 1024),
-                            swap_total=Memory.from_bytes(0),
-                            swap_available=Memory.from_bytes(0),
+                        info=NodeNetworkInterfaces(
+                            ifaces=create_node_network().interfaces
                         ),
                     )
                 ),
             )
         )
 
-        # wait for initial topology event (the NodeGatheredInfo above still
-        # builds topology + last_seen even though its memory now rides telemetry)
+        # wait for the indexed topology reading
         logger.info("wait for initial topology event")
         while len(list(master.state.topology.list_nodes())) == 0:
             await anyio.sleep(0.001)

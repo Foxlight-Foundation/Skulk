@@ -1,7 +1,6 @@
 # pyright: reportPrivateUsage=false
 """Built-in bounded batch STT provider facade coverage."""
 
-import base64
 from collections.abc import AsyncIterator
 
 import pytest
@@ -14,6 +13,7 @@ from skulk.extensions import (
     descriptor_revision,
 )
 from skulk.routing.provider_streams import ProviderStreamPacket
+from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.shared.election import ElectionMessage
 from skulk.shared.models.model_cards import (
     AudioCardConfig,
@@ -22,12 +22,11 @@ from skulk.shared.models.model_cards import (
     ModelId,
     ModelTask,
 )
-from skulk.shared.types.chunks import AudioInputChunk, TranscriptionChunk
+from skulk.shared.types.chunks import TranscriptionChunk
 from skulk.shared.types.commands import (
     AudioTranscription,
     ForwarderCommand,
     ForwarderDownloadCommand,
-    SendInputChunk,
 )
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import IndexedEvent
@@ -100,6 +99,7 @@ def _build_api() -> API:
     _, event_receiver = channel[IndexedEvent]()
     _, election_receiver = channel[ElectionMessage]()
     provider_sender, provider_receiver = channel[ProviderStreamPacket](32)
+    speech_media_sender, _ = channel[SpeechMediaPacket](64)
     return API(
         NodeId("api-node"),
         port=52415,
@@ -112,6 +112,7 @@ def _build_api() -> API:
         telemetry_view=TelemetryView(),
         provider_stream_sender=provider_sender,
         provider_stream_receiver=provider_receiver,
+        speech_media_packet_sender=speech_media_sender,
         enable_builtin_providers=True,
     )
 
@@ -139,15 +140,13 @@ async def test_batch_stt_provider_transcribes_binary_input_after_half_close(
     card = _stt_card()
     api.state = _state(card)
     api._sync_builtin_speech_capability()
-    input_chunks: list[AudioInputChunk] = []
+    staged_audio: list[bytes] = []
     commands: list[AudioTranscription] = []
 
     async def send(command: object) -> None:
-        if isinstance(command, SendInputChunk):
-            assert isinstance(command.chunk, AudioInputChunk)
-            input_chunks.append(command.chunk)
-        elif isinstance(command, AudioTranscription):
+        if isinstance(command, AudioTranscription):
             commands.append(command)
+            staged_audio.append(api._pending_speech_media[command.command_id].data)
             await api._audio_transcription_queues[command.command_id].send(
                 TranscriptionChunk(
                     model=card.model_id,
@@ -185,9 +184,7 @@ async def test_batch_stt_provider_transcribes_binary_input_after_half_close(
 
     assert len(commands) == 1
     assert commands[0].task_params.content_type == "audio/wav"
-    assert b"".join(
-        base64.b64decode(chunk.data.encode("ascii")) for chunk in input_chunks
-    ) == audio
+    assert staged_audio == [audio]
     assert [frame.kind for frame in frames] == ["started", "completed"]
     assert frames[-1].payload == {
         "model": str(card.model_id),

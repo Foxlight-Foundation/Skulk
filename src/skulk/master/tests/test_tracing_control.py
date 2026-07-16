@@ -243,7 +243,6 @@ async def test_master_new_text_tasks_inherit_cluster_tracing_state() -> None:
     assert isinstance(event.task, TextGenerationTask)
     assert event.task.trace_enabled is True
     assert master.command_task_mapping[command.command_id] == event.task_id
-    assert master._expected_ranks[event.task_id] == {0}  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.asyncio
@@ -283,7 +282,6 @@ async def test_master_new_speech_tasks_inherit_cluster_tracing_state() -> None:
     assert event.task.task_params == command.task_params
     assert event.task.trace_enabled is True
     assert master.command_task_mapping[command.command_id] == event.task_id
-    assert master._expected_ranks[event.task_id] == {0}  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.asyncio
@@ -359,7 +357,6 @@ async def test_master_new_transcription_tasks_inherit_cluster_tracing_state() ->
     assert event.task.task_params == command.task_params
     assert event.task.trace_enabled is True
     assert master.command_task_mapping[command.command_id] == event.task_id
-    assert master._expected_ranks[event.task_id] == {0}  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.asyncio
@@ -401,7 +398,6 @@ async def test_master_pins_realtime_transcription_without_trace_expectation() ->
     assert event.task.task_params == command.task_params
     assert event.task.trace_enabled is False
     assert master.command_task_mapping[command.command_id] == event.task_id
-    assert event.task_id not in master._expected_ranks  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.asyncio

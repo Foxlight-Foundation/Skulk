@@ -18,6 +18,7 @@ from skulk.routing.speech_media import (
     decode_speech_media_packet,
     encode_speech_media_packet,
 )
+from skulk.routing.trace_data import TraceDataPacket
 from skulk.routing.vision_media import (
     VisionMediaPacket,
     decode_vision_media_packet,
@@ -44,10 +45,19 @@ class PublishPolicy(str, Enum):
     """Always publish to the network"""
 
 
+class MessagePlane(str, Enum):
+    """Runtime isolation boundary assigned to one transport topic."""
+
+    Control = "control"
+    Telemetry = "telemetry"
+    Data = "data"
+
+
 @dataclass  # (frozen=True)
 class TypedTopic[T: CamelCaseModel]:
     topic: str
     publish_policy: PublishPolicy
+    plane: MessagePlane
 
     model_type: type[
         T
@@ -76,24 +86,35 @@ class TypedTopic[T: CamelCaseModel]:
         return self.model_type.model_validate_json(b.decode("utf-8"))
 
 
-GLOBAL_EVENTS = TypedTopic("global_events", PublishPolicy.Always, GlobalForwarderEvent)
-LOCAL_EVENTS = TypedTopic("local_events", PublishPolicy.Always, LocalForwarderEvent)
-COMMANDS = TypedTopic("commands", PublishPolicy.Always, ForwarderCommand)
+GLOBAL_EVENTS = TypedTopic(
+    "global_events", PublishPolicy.Always, MessagePlane.Control, GlobalForwarderEvent
+)
+LOCAL_EVENTS = TypedTopic(
+    "local_events", PublishPolicy.Always, MessagePlane.Control, LocalForwarderEvent
+)
+COMMANDS = TypedTopic(
+    "commands", PublishPolicy.Always, MessagePlane.Control, ForwarderCommand
+)
 ELECTION_MESSAGES = TypedTopic(
-    "election_messages", PublishPolicy.Always, ElectionMessage
+    "election_messages", PublishPolicy.Always, MessagePlane.Control, ElectionMessage
 )
 CONNECTION_MESSAGES = TypedTopic(
-    "connection_messages", PublishPolicy.Never, ConnectionMessage
+    "connection_messages", PublishPolicy.Never, MessagePlane.Control, ConnectionMessage
 )
 DOWNLOAD_COMMANDS = TypedTopic(
-    "download_commands", PublishPolicy.Always, ForwarderDownloadCommand
+    "download_commands",
+    PublishPolicy.Always,
+    MessagePlane.Control,
+    ForwarderDownloadCommand,
 )
 STATE_SYNC_MESSAGES = TypedTopic(
-    "state_sync_messages", PublishPolicy.Always, StateSyncMessage
+    "state_sync_messages", PublishPolicy.Always, MessagePlane.Control, StateSyncMessage
 )
 # Telemetry plane (#279): per-node live readings and the explicit heartbeat,
 # gossiped last-write-wins off the event log.
-TELEMETRY = TypedTopic("telemetry", PublishPolicy.Always, NodeTelemetry)
+TELEMETRY = TypedTopic(
+    "telemetry", PublishPolicy.Always, MessagePlane.Telemetry, NodeTelemetry
+)
 # Data plane (#279 Phase 2): per-token generation output chunks streamed
 # directly from the serving rank-0 worker to the owning API node, off the event
 # log entirely. The master never sees these — no indexing, no disk, no
@@ -112,6 +133,7 @@ def _data_owner_key(chunk: DataChunk) -> str | None:
 DATA = TypedTopic(
     "data",
     PublishPolicy.Always,
+    MessagePlane.Data,
     DataChunk,
     routing_key=_data_owner_key,
     stream_key=lambda chunk: str(chunk.command_id),
@@ -128,6 +150,7 @@ def _provider_owner_key(packet: ProviderStreamPacket) -> str:
 PROVIDER_DATA = TypedTopic(
     "provider_data",
     PublishPolicy.Always,
+    MessagePlane.Data,
     ProviderStreamPacket,
     routing_key=_provider_owner_key,
     stream_key=lambda packet: (
@@ -142,6 +165,7 @@ PROVIDER_DATA = TypedTopic(
 REALTIME_AUDIO = TypedTopic(
     "realtime_audio",
     PublishPolicy.Always,
+    MessagePlane.Data,
     RealtimeAudioPacket,
     routing_key=lambda packet: str(packet.target_node),
     stream_key=lambda packet: str(packet.command_id),
@@ -153,6 +177,7 @@ REALTIME_AUDIO = TypedTopic(
 SPEECH_MEDIA = TypedTopic(
     "speech_media",
     PublishPolicy.Always,
+    MessagePlane.Data,
     SpeechMediaPacket,
     routing_key=lambda packet: str(packet.target_node),
     stream_key=lambda packet: str(packet.command_id),
@@ -161,9 +186,20 @@ SPEECH_MEDIA = TypedTopic(
     deserializer=decode_speech_media_packet,
 )
 
+TRACE_DATA = TypedTopic(
+    "trace_data",
+    PublishPolicy.Always,
+    MessagePlane.Data,
+    TraceDataPacket,
+    routing_key=lambda packet: str(packet.owner_node),
+    stream_key=lambda packet: f"{packet.task_id}:{packet.rank}",
+    is_terminal=lambda _packet: True,
+)
+
 VISION_MEDIA = TypedTopic(
     "vision_media",
     PublishPolicy.Always,
+    MessagePlane.Data,
     VisionMediaPacket,
     routing_key=lambda packet: str(packet.target_node),
     # The reverse acknowledgement path has one producer per selected rank. Keep
@@ -174,3 +210,25 @@ VISION_MEDIA = TypedTopic(
     serializer=encode_vision_media_packet,
     deserializer=decode_vision_media_packet,
 )
+
+
+TOPIC_PLANE_CENSUS = {
+    topic.topic: topic.plane
+    for topic in (
+        GLOBAL_EVENTS,
+        LOCAL_EVENTS,
+        COMMANDS,
+        ELECTION_MESSAGES,
+        CONNECTION_MESSAGES,
+        DOWNLOAD_COMMANDS,
+        STATE_SYNC_MESSAGES,
+        TELEMETRY,
+        DATA,
+        PROVIDER_DATA,
+        REALTIME_AUDIO,
+        SPEECH_MEDIA,
+        TRACE_DATA,
+        VISION_MEDIA,
+    )
+}
+"""Complete machine-checked runtime topic-to-plane assignment."""

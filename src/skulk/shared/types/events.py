@@ -16,10 +16,21 @@ from skulk.shared.types.common import (
 )
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import Task, TaskId, TaskStatus
-from skulk.shared.types.worker.downloads import DownloadProgress
+from skulk.shared.types.worker.downloads import (
+    DownloadCompleted,
+    DownloadFailed,
+    DownloadPending,
+    DownloadProgress,
+)
 from skulk.shared.types.worker.instances import Instance, InstanceId
 from skulk.shared.types.worker.runners import RunnerId, RunnerStatus
-from skulk.utils.info_gatherer.info_gatherer import GatheredInfo
+from skulk.utils.info_gatherer.info_gatherer import (
+    GatheredInfo,
+    MacThunderboltConnections,
+    MacThunderboltIdentifiers,
+    NodeNetworkInterfaces,
+    ThunderboltBridgeInfo,
+)
 from skulk.utils.pydantic_ext import CamelCaseModel, FrozenModel, TaggedModel
 
 
@@ -244,6 +255,52 @@ Event = (
     | StagedModelEvicted
     | StateSnapshotHydrated
 )
+
+
+_PERSISTED_CONTROL_EVENT_TYPES: tuple[type[BaseEvent], ...] = (
+    TestEvent,
+    TaskCreated,
+    TaskStatusUpdated,
+    TaskFailed,
+    TaskDeleted,
+    TaskAcknowledged,
+    InstanceCreated,
+    InstanceDeleted,
+    RunnerStatusUpdated,
+    NodeTimedOut,
+    TopologyEdgeCreated,
+    TopologyEdgeDeleted,
+    TracingStateChanged,
+    CustomModelCardAdded,
+    CustomModelCardDeleted,
+    StagedModelEvicted,
+    StateSnapshotHydrated,
+)
+
+_CONTROL_TOPOLOGY_INFO_TYPES = (
+    NodeNetworkInterfaces,
+    MacThunderboltIdentifiers,
+    MacThunderboltConnections,
+    ThunderboltBridgeInfo,
+)
+
+
+def is_persistable_control_event(event: Event) -> bool:
+    """Return whether an event is a durable control-plane decision or fact.
+
+    Payload-bearing runner IPC events and observational telemetry remain
+    decodable for compatibility, but the master must reject them before
+    ordering, indexing, persistence, replay, or global broadcast.
+    """
+
+    if isinstance(event, NodeGatheredInfo):
+        return isinstance(event.info, _CONTROL_TOPOLOGY_INFO_TYPES)
+    if isinstance(event, NodeDownloadProgress):
+        return isinstance(
+            event.download_progress,
+            (DownloadPending, DownloadCompleted, DownloadFailed),
+        )
+    return isinstance(event, _PERSISTED_CONTROL_EVENT_TYPES)
 
 
 class IndexedEvent(CamelCaseModel):

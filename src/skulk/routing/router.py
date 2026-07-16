@@ -62,6 +62,7 @@ from .topics import (
     REALTIME_AUDIO,
     SPEECH_MEDIA,
     TELEMETRY,
+    TRACE_DATA,
     VISION_MEDIA,
     PublishPolicy,
     TypedTopic,
@@ -597,6 +598,7 @@ class Router:
             PROVIDER_DATA.topic,
             REALTIME_AUDIO.topic,
             SPEECH_MEDIA.topic,
+            TRACE_DATA.topic,
             VISION_MEDIA.topic,
         )
 

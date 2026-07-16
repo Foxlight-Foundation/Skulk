@@ -243,8 +243,10 @@ forwards to VictoriaLogs + Grafana. The full stack setup is in the
 
 ### Event-log retention and the free-space floor
 
-The API-side **event log** records per-token chunk events and backs only the
-`GET /events` diagnostic. It now has retention so it cannot eat the disk:
+The API-side **event log** records the replicated durable control stream and
+backs only the `GET /events` diagnostic. Generated output, request media,
+telemetry, and trace payloads stay off this log. It has retention so a burst of
+control history still cannot eat the disk:
 
 - it **ring-compacts past 256 MiB**, keeping the most recent 20k events;
 - archive rotation is capped by total bytes (**1 GiB**) on top of the count

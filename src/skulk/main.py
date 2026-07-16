@@ -510,9 +510,9 @@ class Node:
         await router.register_topic(topics.DATA)
         await router.register_topic(topics.PROVIDER_DATA)
         await router.register_topic(topics.REALTIME_AUDIO)
+        await router.register_topic(topics.SPEECH_MEDIA)
+        await router.register_topic(topics.TRACE_DATA)
         await router.register_topic(topics.VISION_MEDIA)
-        if _zenoh_on:
-            await router.register_topic(topics.SPEECH_MEDIA)
         telemetry_view = TelemetryView()
         realtime_audio_sender, realtime_audio_receiver = channel[
             RealtimeAudioInputFrame
@@ -623,12 +623,9 @@ class Node:
                 realtime_audio_packet_receiver=router.receiver(
                     topics.REALTIME_AUDIO
                 ),
-                speech_media_packet_sender=(
-                    router.sender(topics.SPEECH_MEDIA) if _zenoh_on else None
-                ),
-                speech_media_packet_receiver=(
-                    router.receiver(topics.SPEECH_MEDIA) if _zenoh_on else None
-                ),
+                speech_media_packet_sender=router.sender(topics.SPEECH_MEDIA),
+                speech_media_packet_receiver=router.receiver(topics.SPEECH_MEDIA),
+                trace_data_receiver=router.receiver(topics.TRACE_DATA),
                 vision_media_packet_sender=router.sender(topics.VISION_MEDIA),
                 vision_media_packet_receiver=router.receiver(topics.VISION_MEDIA),
                 realtime_audio_sender=(
@@ -676,13 +673,12 @@ class Node:
                 telemetry_view=telemetry_view,
                 data_transport="zenoh" if _zenoh_on else "gossipsub",
                 data_sender=router.sender(topics.DATA),
+                trace_data_sender=router.sender(topics.TRACE_DATA),
                 realtime_audio_receiver=realtime_audio_receiver,
                 realtime_audio_packet_receiver=router.receiver(
                     topics.REALTIME_AUDIO
                 ),
-                speech_media_packet_receiver=(
-                    router.receiver(topics.SPEECH_MEDIA) if _zenoh_on else None
-                ),
+                speech_media_packet_receiver=router.receiver(topics.SPEECH_MEDIA),
                 vision_media_packet_sender=router.sender(topics.VISION_MEDIA),
                 vision_media_packet_receiver=router.receiver(topics.VISION_MEDIA),
                 store_client=worker_store_client,
@@ -1099,13 +1095,12 @@ class Node:
                             # plane — which the API no longer routes (#279 Phase
                             # 2a) — and every completion stream hangs forever.
                             data_sender=self.router.sender(topics.DATA),
+                            trace_data_sender=self.router.sender(topics.TRACE_DATA),
                             realtime_audio_packet_receiver=self.router.receiver(
                                 topics.REALTIME_AUDIO
                             ),
-                            speech_media_packet_receiver=(
-                                self.router.receiver(topics.SPEECH_MEDIA)
-                                if self.data_plane_zenoh
-                                else None
+                            speech_media_packet_receiver=self.router.receiver(
+                                topics.SPEECH_MEDIA
                             ),
                             vision_media_packet_sender=self.router.sender(
                                 topics.VISION_MEDIA

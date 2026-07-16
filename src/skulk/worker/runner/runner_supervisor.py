@@ -15,6 +15,7 @@ from anyio import (
 )
 from loguru import logger
 
+from skulk.routing.trace_data import TraceDataPacket
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.chunks import (
@@ -42,6 +43,7 @@ from skulk.shared.types.events import (
     TaskDeleted,
     TaskFailed,
     TaskStatusUpdated,
+    TracesCollected,
 )
 from skulk.shared.types.streaming import StreamFrameKind, is_terminal_stream_frame_kind
 from skulk.shared.types.tasks import (
@@ -68,7 +70,7 @@ from skulk.shared.types.worker.runners import (
     RunnerStatus,
     RunnerWarmingUp,
 )
-from skulk.shared.types.worker.shards import ShardMetadata
+from skulk.shared.types.worker.shards import RpcDonorShardMetadata, ShardMetadata
 from skulk.utils.channels import MpReceiver, MpSender, Sender, mp_channel
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.runner.bootstrap import (
@@ -78,6 +80,9 @@ from skulk.worker.runner.bootstrap import (
 )
 from skulk.worker.runner.image_models.output import is_primary_image_output_node
 
+_TRACE_ROUTE_CAPACITY = 256
+_TRACE_ROUTE_TTL_SECONDS = 5 * 60.0
+
 PREFILL_TIMEOUT_SECONDS = 60
 DECODE_TIMEOUT_SECONDS = 5
 _TERMINAL_TASK_STATUSES = {
@@ -86,6 +91,18 @@ _TERMINAL_TASK_STATUSES = {
     TaskStatus.Failed,
     TaskStatus.TimedOut,
 }
+
+
+def _trace_expected_ranks(bound_instance: BoundInstance) -> tuple[int, ...]:
+    """Return only ranks whose runners execute tasks and can emit traces."""
+
+    return tuple(
+        sorted(
+            shard.device_rank
+            for shard in bound_instance.instance.shard_assignments.runner_to_shard.values()
+            if not isinstance(shard, RpcDonorShardMetadata)
+        )
+    )
 
 
 def _stream_frame_kind(chunk: GenerationChunk) -> StreamFrameKind:
@@ -139,9 +156,10 @@ class RunnerSupervisor:
     _realtime_audio_sender: MpSender[RealtimeAudioInputFrame] | None = None
     # Data plane (#279 Phase 2): generation output chunks (ChunkGenerated) are
     # diverted here and streamed direct to the owning API node instead of the
-    # event log. None falls back to the event path (tests / a node with no DATA
-    # topic wired), preserving the pre-Phase-2 behavior.
+    # event log. Production wiring always supplies both senders; the master
+    # independently rejects payload events if a malformed participant sends one.
     _data_sender: "Sender[DataChunk] | None" = None
+    _trace_sender: "Sender[TraceDataPacket] | None" = None
     _tg: TaskGroup = field(default_factory=TaskGroup, init=False)
     status: RunnerStatus = field(default_factory=RunnerIdle, init=False)
     pending: dict[TaskId, anyio.Event] = field(default_factory=dict, init=False)
@@ -173,6 +191,9 @@ class RunnerSupervisor:
     # ignored (the bare topic broadcasts). Entries are absent only for tasks that
     # carry no owner_node at all.
     _command_owner: dict[CommandId, NodeId] = field(default_factory=dict, init=False)
+    _trace_routes: dict[TaskId, tuple[NodeId, tuple[int, ...], float]] = field(
+        default_factory=dict, init=False
+    )
     _cancel_watch_runner: anyio.CancelScope = field(
         default_factory=anyio.CancelScope, init=False
     )
@@ -232,6 +253,7 @@ class RunnerSupervisor:
         initialize_timeout: float = 400,
         context_token_limit: int | None = None,
         data_sender: "Sender[DataChunk] | None" = None,
+        trace_sender: "Sender[TraceDataPacket] | None" = None,
     ) -> Self:
         """Spawn the runner subprocess for one shard of a placed instance.
 
@@ -276,6 +298,7 @@ class RunnerSupervisor:
             _realtime_audio_sender=realtime_audio_sender,
             _event_sender=event_sender,
             _data_sender=data_sender,
+            _trace_sender=trace_sender,
         )
 
         return self
@@ -283,13 +306,35 @@ class RunnerSupervisor:
     async def _emit(self, event: Event) -> None:
         """Forward one runner event to the right plane (#279 Phase 2).
 
-        Generation output chunks (``ChunkGenerated``) are diverted to the data
-        plane (``DATA`` topic, direct to the owning API node) so they never hit
-        the master's event log; every other event (task status, acks, runner
-        status) stays on the ordered control-plane event sender. Falls back to
-        the event sender when no data sender is wired (tests / no DATA topic).
+        Generation output and trace payloads are diverted to node-addressed data
+        topics so they never hit the master's event log. Task lifecycle and
+        runner status remain on the ordered control-plane event sender.
         """
-        if isinstance(event, ChunkGenerated) and self._data_sender is not None:
+        if isinstance(event, TracesCollected):
+            route = self._trace_routes.pop(event.task_id, None)
+            if route is None or self._trace_sender is None:
+                logger.warning(
+                    f"Dropping trace payload without an owner route for {event.task_id}"
+                )
+                return
+            owner_node, expected_ranks, _created_at = route
+            await self._trace_sender.send(
+                TraceDataPacket(
+                    owner_node=owner_node,
+                    source_node=self.bound_instance.bound_node_id,
+                    task_id=event.task_id,
+                    rank=event.rank,
+                    expected_ranks=expected_ranks,
+                    traces=tuple(event.traces),
+                )
+            )
+        elif isinstance(event, ChunkGenerated):
+            if self._data_sender is None:
+                logger.error(
+                    "Dropping generated output because the DATA sender is unavailable "
+                    f"(command_id={event.command_id})"
+                )
+                return
             if not self._owns_data_stream():
                 return
             if event.command_id not in self._stream_started:
@@ -510,6 +555,36 @@ class RunnerSupervisor:
             and self._owns_data_stream()
         ):
             self._command_owner[task.command_id] = task.owner_node
+        if isinstance(
+            task,
+            (
+                TextGeneration,
+                ImageGeneration,
+                ImageEdits,
+                TextEmbedding,
+                SpeechSynthesis,
+                AudioTranscription,
+            ),
+        ) and task.trace_enabled:
+            now = time.monotonic()
+            for stale_task_id in [
+                task_id
+                for task_id, (_owner, _ranks, created_at) in self._trace_routes.items()
+                if created_at <= now - _TRACE_ROUTE_TTL_SECONDS
+            ]:
+                self._trace_routes.pop(stale_task_id, None)
+            if len(self._trace_routes) >= _TRACE_ROUTE_CAPACITY:
+                oldest_task_id = min(
+                    self._trace_routes,
+                    key=lambda task_id: self._trace_routes[task_id][2],
+                )
+                self._trace_routes.pop(oldest_task_id, None)
+            if task.owner_node is not None:
+                self._trace_routes[task.task_id] = (
+                    task.owner_node,
+                    _trace_expected_ranks(self.bound_instance),
+                    now,
+                )
         self._last_task_sent_at = _now_utc_iso()
         self._record_milestone(
             "task_sent",

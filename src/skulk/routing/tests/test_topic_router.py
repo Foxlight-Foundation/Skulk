@@ -3,7 +3,7 @@
 import anyio
 
 from skulk.routing.router import OutboundPacket, TopicRouter
-from skulk.routing.topics import DATA, PublishPolicy, TypedTopic
+from skulk.routing.topics import DATA, MessagePlane, PublishPolicy, TypedTopic
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.chunks import DataChunk, TokenChunk
 from skulk.shared.types.common import CommandId, NodeId
@@ -24,8 +24,12 @@ class _SchemaV2(CamelCaseModel):
     extra: list[str] = []
 
 
-_TOPIC_V1 = TypedTopic("schema_compat_test", PublishPolicy.Always, _SchemaV1)
-_TOPIC_V2 = TypedTopic("schema_compat_test", PublishPolicy.Always, _SchemaV2)
+_TOPIC_V1 = TypedTopic(
+    "schema_compat_test", PublishPolicy.Always, MessagePlane.Control, _SchemaV1
+)
+_TOPIC_V2 = TypedTopic(
+    "schema_compat_test", PublishPolicy.Always, MessagePlane.Control, _SchemaV2
+)
 
 
 async def test_publish_bytes_drops_unknown_field_payload_without_raising():
@@ -64,6 +68,7 @@ async def test_outbound_serialization_failure_does_not_stop_topic_router() -> No
     topic = TypedTopic(
         "serializer_containment_test",
         PublishPolicy.Always,
+        MessagePlane.Control,
         _SchemaV1,
         serializer=serialize,
     )
