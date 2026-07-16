@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 """Tests that re-downloading a previously deleted model completes successfully."""
 
 import asyncio
@@ -25,7 +26,7 @@ from skulk.shared.types.common import NodeId, SystemId
 from skulk.shared.types.events import Event, NodeDownloadProgress
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.telemetry import NodeTelemetry
-from skulk.shared.types.worker.downloads import DownloadCompleted
+from skulk.shared.types.worker.downloads import DownloadCompleted, DownloadFailed
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 from skulk.utils.channels import Receiver, Sender, channel
 
@@ -33,7 +34,10 @@ NODE_ID = NodeId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 MODEL_ID = ModelId("test-org/test-model")
 
 
-def _make_shard(model_id: ModelId = MODEL_ID) -> ShardMetadata:
+def _make_shard(
+    model_id: ModelId = MODEL_ID,
+    source_revision: str | None = None,
+) -> ShardMetadata:
     return PipelineShardMetadata(
         model_card=ModelCard(
             model_id=model_id,
@@ -42,6 +46,7 @@ def _make_shard(model_id: ModelId = MODEL_ID) -> ShardMetadata:
             hidden_size=1024,
             supports_tensor=False,
             tasks=[ModelTask.TextGeneration],
+            source_revision=source_revision,
         ),
         device_rank=0,
         world_size=1,
@@ -135,6 +140,7 @@ class SlowCancellationShardDownloader(FakeShardDownloader):
     def __init__(self) -> None:
         super().__init__()
         self.ensure_calls = 0
+        self.ensure_revisions: list[str | None] = []
         self.first_started = anyio.Event()
         self.release_cleanup = anyio.Event()
         self.restarted = anyio.Event()
@@ -145,6 +151,7 @@ class SlowCancellationShardDownloader(FakeShardDownloader):
         config_only: bool = False,  # noqa: ARG002
     ) -> Path:
         self.ensure_calls += 1
+        self.ensure_revisions.append(shard.model_card.source_revision)
         if self.ensure_calls == 1:
             self.first_started.set()
             try:
@@ -154,6 +161,96 @@ class SlowCancellationShardDownloader(FakeShardDownloader):
                     await self.release_cleanup.wait()
         self.restarted.set()
         return await super().ensure_shard(shard)
+
+
+async def test_revision_change_restarts_failed_download_state() -> None:
+    """A failed attempt for an old pin must not suppress a corrected pin."""
+
+    _command_send, command_receive = channel[ForwarderDownloadCommand]()
+    event_send, _event_receive = channel[Event]()
+    telemetry_send, _telemetry_receive = channel[NodeTelemetry]()
+    coordinator = DownloadCoordinator(
+        node_id=NODE_ID,
+        shard_downloader=FakeShardDownloader(),
+        download_command_receiver=command_receive,
+        event_sender=event_send,
+        telemetry_sender=telemetry_send,
+        offline=True,
+    )
+    old_shard = _make_shard(source_revision="0" * 40)
+    new_shard = _make_shard(source_revision="1" * 40)
+    coordinator.download_status[MODEL_ID] = DownloadFailed(
+        shard_metadata=old_shard,
+        node_id=NODE_ID,
+        error_message="old revision failed",
+        model_directory="/missing",
+    )
+
+    await coordinator._start_download(new_shard)
+
+    status = coordinator.download_status[MODEL_ID]
+    assert isinstance(status, DownloadFailed)
+    assert status.shard_metadata.model_card.source_revision == "1" * 40
+
+
+async def test_revision_change_replaces_active_download_after_cleanup() -> None:
+    """A corrected pin must cancel and replace an active old-pin download."""
+
+    command_send, command_receive = channel[ForwarderDownloadCommand]()
+    event_send, event_receive = channel[Event]()
+    telemetry_send, _telemetry_receive = channel[NodeTelemetry]()
+    downloader = SlowCancellationShardDownloader()
+    coordinator = DownloadCoordinator(
+        node_id=NODE_ID,
+        shard_downloader=downloader,
+        download_command_receiver=command_receive,
+        event_sender=event_send,
+        telemetry_sender=telemetry_send,
+    )
+    old_revision = "0" * 40
+    new_revision = "1" * 40
+    old_shard = _make_shard(source_revision=old_revision)
+    new_shard = _make_shard(source_revision=new_revision)
+    origin = SystemId("test")
+    coordinator_task = asyncio.create_task(coordinator.run())
+
+    try:
+        await command_send.send(
+            ForwarderDownloadCommand(
+                origin=origin,
+                command=StartDownload(
+                    target_node_id=NODE_ID, shard_metadata=old_shard
+                ),
+            )
+        )
+        with anyio.fail_after(2):
+            await downloader.first_started.wait()
+
+        await command_send.send(
+            ForwarderDownloadCommand(
+                origin=origin,
+                command=StartDownload(
+                    target_node_id=NODE_ID, shard_metadata=new_shard
+                ),
+            )
+        )
+        await anyio.sleep(0)
+        assert downloader.ensure_calls == 1
+
+        downloader.release_cleanup.set()
+        with anyio.fail_after(2):
+            await downloader.restarted.wait()
+        completed = await _wait_for_download_completed(event_receive, MODEL_ID)
+
+        assert completed is not None
+        assert completed.shard_metadata.model_card.source_revision == new_revision
+        assert downloader.ensure_revisions == [old_revision, new_revision]
+    finally:
+        downloader.release_cleanup.set()
+        await coordinator.shutdown()
+        coordinator_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await coordinator_task
 
 
 async def test_re_download_after_delete_completes() -> None:

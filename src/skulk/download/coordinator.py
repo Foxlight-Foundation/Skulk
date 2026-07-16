@@ -455,6 +455,12 @@ class DownloadCoordinator:
 
     async def _start_download(self, shard: ShardMetadata) -> None:
         model_id = shard.model_card.model_id
+        status = self.download_status.get(model_id)
+        revision_changed = (
+            status is not None
+            and status.shard_metadata.model_card.source_revision
+            != shard.model_card.source_revision
+        )
 
         active_scope = self.active_downloads.get(model_id)
         if active_scope is not None:
@@ -468,27 +474,40 @@ class DownloadCoordinator:
                     "the cancelled download task finishes"
                 )
                 return
+            if revision_changed:
+                self._begin_reset(model_id)
+                self._pending_download_starts[model_id] = shard
+                active_scope.cancel()
+                logger.info(
+                    f"DownloadCoordinator: replacing active download for {model_id} "
+                    "because its source revision changed"
+                )
+                return
             logger.info(
                 f"DownloadCoordinator: {model_id} still has an active download task"
             )
             return
 
         # Check if already downloading, complete, or recently failed
-        if model_id in self.download_status:
-            status = self.download_status[model_id]
+        if status is not None:
+            if revision_changed:
+                logger.info(
+                    f"DownloadCoordinator: {model_id} has stale "
+                    f"{type(status).__name__} state from another source revision; "
+                    "starting a fresh download"
+                )
+                del self.download_status[model_id]
             # If marked completed but model directory no longer exists on disk,
             # clear the stale status and re-download from scratch.
-            if isinstance(status, DownloadCompleted) and status.model_directory:
+            elif isinstance(status, DownloadCompleted) and status.model_directory:
                 model_dir = Path(status.model_directory)
-                status_revision = status.shard_metadata.model_card.source_revision
                 if (
-                    status_revision != shard.model_card.source_revision
-                    or not model_dir.is_dir()
+                    not model_dir.is_dir()
                     or not (model_dir / "config.json").exists()
                 ):
                     logger.info(
                         f"DownloadCoordinator: {model_id} was DownloadCompleted but "
-                        "its directory or source revision is stale; re-downloading"
+                        "its directory is stale; re-downloading"
                     )
                     del self.download_status[model_id]
                     # Fall through to fresh download below
