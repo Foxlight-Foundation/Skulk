@@ -54,7 +54,7 @@ class _FakeHost(ServedConcurrentDispatch):
         self.started = threading.Semaphore(0)
         self.peak_inflight = 0
         self.admission_samples: list[int] = []
-        self._admission_lock = threading.Lock()
+        self._samples_lock = threading.Lock()
         evt_s, self._evt_r = mp_channel[Event]()
         task_s, task_r = mp_channel[Task]()
         cancel_s, cancel_r = mp_channel[TaskId]()
@@ -74,7 +74,7 @@ class _FakeHost(ServedConcurrentDispatch):
     def _generate(self, task: Task) -> None:
         # Record the ADMISSION concurrency (#596): read from the dispatch-loop
         # capture, not the live count, mirroring what the real served runners do.
-        with self._admission_lock:
+        with self._samples_lock:
             self.admission_samples.append(self._admission_concurrency(task.task_id))
         self.started.release()
         self.peak_inflight = max(self.peak_inflight, self._inflight_count())
@@ -205,7 +205,7 @@ def test_admission_concurrency_captures_true_burst_spread() -> None:
         for _ in range(4):
             assert host.started.acquire(timeout=10)
         _wait_inflight(host, 4)
-        with host._admission_lock:
+        with host._samples_lock:
             samples = sorted(host.admission_samples)
         # Distinct 1..4: each task was counted in-flight at its own admission.
         assert samples == [1, 2, 3, 4], samples

@@ -121,8 +121,12 @@ class ServedConcurrentDispatch:
         # race the pool: under a burst every worker could observe the peak count
         # and file all envelope samples into one concurrency bucket, erasing the
         # 1..N throughput-vs-concurrency curve. Keyed by task; dropped when the
-        # generation finishes.
+        # generation finishes. Written on the dispatch thread and popped/read on
+        # worker threads (the Future done-callback and the engine's stamp), so it
+        # is guarded by its own lock -- matching the discipline used for the other
+        # cross-thread state above, and never held while acquiring another lock.
         self._admission_inflight: dict[TaskId, int] = {}
+        self._admission_lock = threading.Lock()
 
     # --- cancellation ---------------------------------------------------------
 
@@ -246,7 +250,11 @@ class ServedConcurrentDispatch:
         # the instant AFTER this generation is counted in-flight (#596). This is
         # its true position in a burst (1, 2, ... N as the loop admits them); the
         # worker thread that later runs it cannot sample this without racing.
-        self._admission_inflight[task.task_id] = self._inflight_count()
+        # Sample _inflight_count() first (it takes _status_lock), then store under
+        # _admission_lock, so the two locks are never nested.
+        admitted = self._inflight_count()
+        with self._admission_lock:
+            self._admission_inflight[task.task_id] = admitted
         try:
             future = pool.submit(self._run_one_generation, task)
         except RuntimeError as exc:
@@ -266,7 +274,8 @@ class ServedConcurrentDispatch:
             )
             self.send_task_status(task, TaskStatus.Failed)
             self._note_generation_finished()
-            self._admission_inflight.pop(task.task_id, None)
+            with self._admission_lock:
+                self._admission_inflight.pop(task.task_id, None)
             self._dispatch_permits.release()
             return
         future.add_done_callback(lambda f: self._finish_generation(task, f))
@@ -303,7 +312,8 @@ class ServedConcurrentDispatch:
                 TaskStatus.Cancelled if was_cancelled else TaskStatus.Complete,
             )
         finally:
-            self._admission_inflight.pop(task.task_id, None)
+            with self._admission_lock:
+                self._admission_inflight.pop(task.task_id, None)
             drained_to_idle = self._note_generation_finished()
             # Clear a stale cluster-wide cancel the moment the last in-flight
             # generation drains, so a CANCEL_ALL that arrived while requests were in
@@ -343,9 +353,13 @@ class ServedConcurrentDispatch:
         Read by the engine-specific ``_generate`` when stamping its stats. Falls
         back to the live in-flight count if the admission capture is missing
         (defensive; should not happen for a dispatched task), so a stamp is never
-        keyed to 0.
+        keyed to 0. The map read is under ``_admission_lock``; the fallback
+        ``_inflight_count()`` (which takes ``_status_lock``) runs outside it so
+        the two locks are never nested.
         """
-        return self._admission_inflight.get(task_id, self._inflight_count())
+        with self._admission_lock:
+            captured = self._admission_inflight.get(task_id)
+        return captured if captured is not None else self._inflight_count()
 
     def stamp_runner_stats(
         self, stats: GenerationStats, in_flight_at_admission: int

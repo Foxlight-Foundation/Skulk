@@ -76,6 +76,7 @@ def test_tool_call_generation_stamps_runner_attribution(monkeypatch: Any) -> Non
     runner.bound_instance = SimpleNamespace(bound_node_id=NodeId("node-9"))
     runner.shard_metadata = SimpleNamespace(resolved_backend="llama_server-vulkan")
     runner._admission_inflight = {task.task_id: 3}
+    runner._admission_lock = threading.Lock()
     runner._status_lock = threading.Lock()
     runner._inflight = 0
     runner._uses_channel_parser = False
@@ -132,6 +133,7 @@ def test_prose_answer_via_tool_path_stamps_terminal_stats(monkeypatch: Any) -> N
     runner.bound_instance = SimpleNamespace(bound_node_id=NodeId("node-2"))
     runner.shard_metadata = SimpleNamespace(resolved_backend="llama_server-vulkan")
     runner._admission_inflight = {task.task_id: 1}
+    runner._admission_lock = threading.Lock()
     runner._status_lock = threading.Lock()
     runner._inflight = 0
     runner._uses_channel_parser = False
