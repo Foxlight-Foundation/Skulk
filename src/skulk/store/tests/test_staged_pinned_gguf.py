@@ -141,3 +141,40 @@ async def test_different_staged_quant_is_replaced_from_store(tmp_path: Path) -> 
     assert store.download_requests == [(_MODEL_ID, "model-IQ3_XXS.gguf")]
     assert store.stage_calls == 1
     assert (staged / "model-IQ3_XXS.gguf").is_file()
+
+
+@pytest.mark.anyio
+async def test_staging_disabled_direct_load_does_not_probe_http(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A complete local canonical model must not depend on store HTTP health."""
+
+    direct_path = tmp_path / "canonical"
+    direct_path.mkdir()
+    (direct_path / "model-IQ3_XXS.gguf").write_bytes(b"weights")
+    client = ModelStoreClient("localhost", local_store_path=tmp_path)
+
+    async def local_model_path(
+        model_id: str, source_revision: str | None
+    ) -> Path | None:
+        assert model_id == _MODEL_ID
+        assert source_revision is None
+        return direct_path
+
+    async def unexpected_availability_probe(
+        _model_id: str, _source_revision: str | None = None
+    ) -> bool:
+        raise AssertionError("local direct loads must not probe store HTTP")
+
+    monkeypatch.setattr(client, "local_model_path", local_model_path)
+    monkeypatch.setattr(client, "is_model_available", unexpected_availability_probe)
+    downloader = ModelStoreDownloader(
+        inner=_UnusedInnerDownloader(),
+        store_client=client,
+        staging_config=StagingNodeConfig(enabled=False),
+    )
+
+    path = await downloader.ensure_shard(_shard("model-IQ3_XXS.gguf"))
+
+    assert path == direct_path

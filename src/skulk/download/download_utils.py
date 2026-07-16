@@ -132,10 +132,9 @@ def map_repo_download_progress_to_download_progress_data(
 def _source_revision_matches(path: Path, source_revision: str | None) -> bool:
     """Return whether ``path`` is qualified for an optional source revision."""
 
-    if source_revision is None:
-        return True
     marker = path / _SOURCE_REVISION_MARKER
-    return marker.is_file() and marker.read_text().strip() == source_revision
+    actual_revision = marker.read_text().strip() if marker.is_file() else None
+    return actual_revision == source_revision
 
 
 def _write_source_revision(path: Path, source_revision: str | None) -> None:

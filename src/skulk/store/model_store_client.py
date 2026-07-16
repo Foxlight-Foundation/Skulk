@@ -1272,9 +1272,6 @@ class ModelStoreDownloader(ShardDownloader):
                     and not _staged_pinned_gguf_missing(shard, direct_path)
                     and not _staged_vision_projector_missing(shard, direct_path)
                     and not _staged_same_repo_draft_missing(shard, direct_path)
-                    and await self._store_client.is_model_available(
-                        model_id, shard.model_card.source_revision
-                    )
                 ):
                     logger.info(
                         f"ModelStoreDownloader: staging disabled — loading {model_id} directly from store at {direct_path}"
