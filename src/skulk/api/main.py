@@ -3171,7 +3171,9 @@ class API:
                     finish_reason=finish_reason,
                 )
             ],
-            generation_stats=stats,
+            # Redact internal runner attribution (#596): the envelope-tap-only
+            # serving node / backend / in-flight fields are not client output.
+            generation_stats=stats.redacted_for_client() if stats else None,
             power_usage=sampler.result(),
         )
 

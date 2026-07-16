@@ -337,7 +337,13 @@ async def generate_chat_stream(
                 )
                 yield f"data: {tool_response.model_dump_json()}\n\n"
                 if chunk.stats is not None:
-                    yield f": generation_stats {chunk.stats.model_dump_json()}\n\n"
+                    # Redact internal runner attribution (#596) before it reaches
+                    # the client: node id / backend / live in-flight are for the
+                    # API's envelope tap only.
+                    yield (
+                        ": generation_stats "
+                        f"{chunk.stats.redacted_for_client().model_dump_json()}\n\n"
+                    )
                 yield "data: [DONE]\n\n"
                 return
 
@@ -353,7 +359,12 @@ async def generate_chat_stream(
 
                 if chunk.finish_reason is not None:
                     if chunk.stats is not None:
-                        yield f": generation_stats {chunk.stats.model_dump_json()}\n\n"
+                        # Redact internal runner attribution (#596) before the
+                        # client sees it (envelope-tap-only fields).
+                        yield (
+                            ": generation_stats "
+                            f"{chunk.stats.redacted_for_client().model_dump_json()}\n\n"
+                        )
                     yield "data: [DONE]\n\n"
                     return
 

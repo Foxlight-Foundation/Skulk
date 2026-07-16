@@ -301,6 +301,43 @@ async def test_never_started_generation_does_not_leak_inflight() -> None:
     assert api._performance_envelopes.snapshot().envelopes == []
 
 
+def test_generation_stats_redacted_for_client_strips_runner_attribution() -> None:
+    from skulk.api.types import GenerationStats
+    from skulk.shared.types.memory import Memory
+
+    stats = GenerationStats(
+        prompt_tps=1.0,
+        generation_tps=2.0,
+        prompt_tokens=3,
+        generation_tokens=4,
+        peak_memory_usage=Memory(in_bytes=123),
+        serving_node="node-7",
+        serving_backend="vllm-cuda",
+        in_flight_at_admission=5,
+        serving_batches=True,
+    )
+
+    client = stats.redacted_for_client()
+
+    # Internal runner attribution (#596) is cleared for client serialization.
+    assert client.serving_node is None
+    assert client.serving_backend is None
+    assert client.in_flight_at_admission is None
+    assert client.serving_batches is None
+    # The client-facing measurements are preserved.
+    assert client.generation_tps == 2.0
+    assert client.prompt_tokens == 3
+    assert client.peak_memory_usage.in_bytes == 123
+    # The dumped JSON a client sees carries none of the internal VALUES (the
+    # node id, backend tag, and live in-flight count). The keys may remain as
+    # nulls; what must not leak is the data.
+    dumped = client.model_dump_json()
+    assert "node-7" not in dumped
+    assert "vllm-cuda" not in dumped
+    # The original is untouched (model_copy, not mutation).
+    assert stats.serving_node == "node-7"
+
+
 async def _one_stream(chunks: list[Any]) -> AsyncGenerator[Any, None]:
     for chunk in chunks:
         yield chunk
