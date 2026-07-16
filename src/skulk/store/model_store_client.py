@@ -80,7 +80,11 @@ import aiofiles.os as aios
 import aiohttp
 from loguru import logger
 
-from skulk.download.download_utils import companion_download_specs, create_http_session
+from skulk.download.download_utils import (
+    companion_download_specs,
+    create_http_session,
+    same_repo_served_draft_files,
+)
 from skulk.download.shard_downloader import ShardDownloader
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.downloads import RepoDownloadProgress
@@ -300,14 +304,7 @@ def _same_repo_draft_files(card: "ModelCard") -> list[str]:
     separate-repo draft has its own ``model_id`` / staging dir and is handled by
     the normal companion path, so it is not returned here.
     """
-    runtime = card.runtime
-    if (
-        runtime is not None
-        and runtime.served_spec_draft_repo == str(card.model_id)
-        and runtime.served_spec_draft_file
-    ):
-        return [runtime.served_spec_draft_file]
-    return []
+    return same_repo_served_draft_files(card)
 
 
 def _staged_same_repo_draft_missing(shard: ShardMetadata, directory: Path) -> bool:
@@ -451,19 +448,20 @@ class ModelStoreClient:
     async def stage_shard(
         self,
         model_id: str,
-        dest_path: Path,
+        staging_root: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
         source_revision: str | None = None,
     ) -> Path:
-        """Copy all model files for *model_id* into *dest_path*.
+        """Copy all model files for *model_id* into its staging directory.
 
         Dispatches to :meth:`_stage_local` (``shutil.copy2``) on the store
         host, or :meth:`_stage_http` (HTTP with resume support) on workers.
+        The destination is derived from ``staging_root`` and ``model_id`` so
+        revision replacement can never recursively delete an arbitrary path.
 
         Args:
             model_id: HuggingFace-style model ID.
-            dest_path: Directory to write staged files into.  Created if it
-                does not exist.
+            staging_root: Root of the node-local model staging cache.
             on_progress: Optional async callback ``(bytes_done, total_bytes)``
                 called after each file is staged.
             source_revision: Full immutable Hugging Face commit to stage, or
@@ -476,6 +474,7 @@ class ModelStoreClient:
             :class:`ModelNotInStoreError`: If the model is not found in the
                 store (should only happen if the store index is stale).
         """
+        dest_path = _staging_dir(str(staging_root), model_id)
         if dest_path.exists() and not _staged_source_revision_matches(
             dest_path, source_revision
         ):
@@ -1326,7 +1325,7 @@ class ModelStoreDownloader(ShardDownloader):
             try:
                 path = await self._store_client.stage_shard(
                     model_id,
-                    dest_path,
+                    Path(self._staging_config.node_cache_path),
                     on_progress=lambda downloaded, total: self._emit_progress(
                         shard,
                         status="in_progress",
@@ -1374,7 +1373,7 @@ class ModelStoreDownloader(ShardDownloader):
             # Model now in store — stage it
             path = await self._store_client.stage_shard(
                 model_id,
-                dest_path,
+                Path(self._staging_config.node_cache_path),
                 on_progress=lambda downloaded, total: self._emit_progress(
                     shard,
                     status="in_progress",

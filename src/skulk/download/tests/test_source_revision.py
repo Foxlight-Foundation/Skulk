@@ -65,6 +65,45 @@ def test_unpinned_resolution_rejects_pinned_cache(
 
 
 @pytest.mark.asyncio
+async def test_preflight_rejects_complete_cache_from_another_revision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Status probes must not report stale same-sized artifacts as complete."""
+
+    canonical = tmp_path / "org--model"
+    canonical.mkdir()
+    (canonical / "model.gguf").write_bytes(b"weights")
+    (canonical / ".skulk-source-revision").write_text(f"{_OLD_REVISION}\n")
+
+    async def file_list(*_args: object, **_kwargs: object) -> list[FileListEntry]:
+        return [FileListEntry(type="file", path="model.gguf", size=7)]
+
+    terminal_progress: list[RepoDownloadProgress] = []
+
+    async def collect_progress(
+        _shard: ShardMetadata, progress: RepoDownloadProgress
+    ) -> None:
+        terminal_progress.append(progress)
+
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", file_list)
+
+    model_path, progress = await download_shard(
+        _shard(_NEW_REVISION),
+        collect_progress,
+        skip_download=True,
+        allow_patterns=["*"],
+    )
+
+    assert model_path != canonical / "model.gguf"
+    assert progress.status == "not_started"
+    assert progress.downloaded.in_bytes == 0
+    assert terminal_progress[-1].status == "not_started"
+    assert (canonical / "model.gguf").read_bytes() == b"weights"
+
+
+@pytest.mark.asyncio
 async def test_revision_download_failure_preserves_previous_cache(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

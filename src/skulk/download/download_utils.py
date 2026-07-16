@@ -343,11 +343,17 @@ def companion_download_specs(
                 False,
             )
         )
-    # Served-engine draft GGUF (`--model-draft`): a separate small draft model
-    # (draft_simple / draft_eagle3) or a Gemma-4 assistant-as-MTP draft. Fetch only
-    # the pinned draft GGUF file (its shard group); it may live in the same repo as
-    # the base (then it lands in the base's dir) or a separate repo.
-    if runtime and runtime.served_spec_draft_repo and runtime.served_spec_draft_file:
+    # A same-repo served draft is part of the base repository transaction and
+    # is included by resolve_allow_patterns(). Treating it as a recursive bare
+    # companion loses the base card's revision identity and can replace a
+    # pinned cache with mutable-main bytes. Only separate repositories belong
+    # in the companion path.
+    if (
+        runtime
+        and runtime.served_spec_draft_repo
+        and runtime.served_spec_draft_repo != str(model_card.model_id)
+        and runtime.served_spec_draft_file
+    ):
         # Just the pinned draft file -- a draft GGUF is single-file and is not a
         # vision model, so do not pull mmproj projectors or sibling quants.
         specs.append(
@@ -358,6 +364,19 @@ def companion_download_specs(
             )
         )
     return specs
+
+
+def same_repo_served_draft_files(model_card: ModelCard) -> list[str]:
+    """Return served draft GGUFs that share the base model repository."""
+
+    runtime = model_card.runtime
+    if (
+        runtime is not None
+        and runtime.served_spec_draft_repo == str(model_card.model_id)
+        and runtime.served_spec_draft_file
+    ):
+        return [runtime.served_spec_draft_file]
+    return []
 
 
 def model_companions_present_on_disk(
@@ -1199,7 +1218,10 @@ async def resolve_allow_patterns(shard: ShardMetadata) -> list[str]:
     if gguf_file:
         from skulk.shared.models.model_cards import gguf_allow_patterns
 
-        return [*gguf_allow_patterns(gguf_file), "config.json"]
+        patterns = [*gguf_allow_patterns(gguf_file), "config.json"]
+        for draft_file in same_repo_served_draft_files(shard.model_card):
+            patterns.extend(gguf_allow_patterns(draft_file))
+        return list(dict.fromkeys(patterns))
     # Non-GGUF (safetensors/MLX): 'Smart' downloads stay disabled because
     #  (i) we don't handle all kinds of files; (ii) no sticky sessions;
     #  (iii) tensor parallel requires all files.
@@ -1245,21 +1267,21 @@ async def download_shard(
     ).replace(
         "/", "--"
     )
-    target_dir = canonical_target_dir
-    replacing_revision = False
     if not skip_download:
         await asyncio.to_thread(
             _recover_interrupted_model_swap, canonical_target_dir
         )
-        replacing_revision = canonical_target_dir.exists() and not (
-            _source_revision_matches(
-                canonical_target_dir, shard.model_card.source_revision
-            )
+    replacing_revision = canonical_target_dir.exists() and not (
+        _source_revision_matches(
+            canonical_target_dir, shard.model_card.source_revision
         )
-        if replacing_revision:
-            target_dir = _replacement_model_dir(
-                canonical_target_dir, shard.model_card.source_revision
-            )
+    )
+    target_dir = (
+        _replacement_model_dir(canonical_target_dir, shard.model_card.source_revision)
+        if replacing_revision
+        else canonical_target_dir
+    )
+    if not skip_download:
         await aios.makedirs(target_dir, exist_ok=True)
 
     if not allow_patterns:

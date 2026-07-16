@@ -78,7 +78,7 @@ class _RecordingStoreClient:
     async def stage_shard(
         self,
         model_id: str,
-        dest_path: Path,
+        staging_root: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
         source_revision: str | None = None,
     ) -> Path:
@@ -86,6 +86,7 @@ class _RecordingStoreClient:
         if model_id in self.fail_staging:
             raise RuntimeError(f"simulated staging failure for {model_id}")
         self.staged.append(model_id)
+        dest_path = staging_root / model_id.replace("/", "--")
         dest_path.mkdir(parents=True, exist_ok=True)
         (dest_path / "weights.safetensors").write_bytes(b"fake")
         return dest_path
@@ -221,14 +222,14 @@ async def test_terminal_progress_waits_for_companions(tmp_path: Path) -> None:
 
     async def _recording_stage(
         model_id: str,
-        dest_path: Path,
+        staging_root: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
         source_revision: str | None = None,
     ) -> Path:
         ordering.append(f"staged:{model_id}")
         return await original_stage(
             model_id,
-            dest_path,
+            staging_root,
             on_progress=on_progress,
             source_revision=source_revision,
         )

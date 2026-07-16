@@ -77,13 +77,14 @@ class _RecordingStoreClient:
     async def stage_shard(
         self,
         model_id: str,
-        dest_path: Path,
+        staging_root: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
         source_revision: str | None = None,
     ) -> Path:
         assert model_id == _MODEL_ID
         assert source_revision is None
         self.stage_calls += 1
+        dest_path = staging_root / model_id.replace("/", "--")
         dest_path.mkdir(parents=True, exist_ok=True)
         (dest_path / "model-IQ3_XXS.gguf").write_bytes(b"selected")
         return dest_path

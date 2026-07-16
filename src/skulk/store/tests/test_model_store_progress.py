@@ -54,7 +54,7 @@ class _FakeStoreClient:
     async def stage_shard(
         self,
         model_id: str,
-        dest_path: Path,
+        staging_root: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
         source_revision: str | None = None,
     ) -> Path:
@@ -63,7 +63,7 @@ class _FakeStoreClient:
         assert on_progress is not None
         await on_progress(512, 2048)
         await on_progress(2048, 2048)
-        return dest_path
+        return staging_root.expanduser() / model_id.replace("/", "--")
 
 
 class _FakeRegistryResponse:

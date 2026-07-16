@@ -51,6 +51,9 @@ async def test_staging_replaces_files_from_another_revision(
     destination.mkdir()
     (destination / ".skulk-source-revision").write_text(f"{_OLD_REVISION}\n")
     (destination / "model.gguf").write_bytes(b"old")
+    unrelated = tmp_path / "unrelated-cache-root"
+    unrelated.mkdir()
+    (unrelated / "sentinel").write_text("preserve")
 
     async def fake_stage_http(
         _self: ModelStoreClient,
@@ -69,12 +72,13 @@ async def test_staging_replaces_files_from_another_revision(
 
     staged = await client.stage_shard(
         "org/model",
-        destination,
+        tmp_path,
         source_revision=_NEW_REVISION,
     )
 
     assert (staged / "model.gguf").read_bytes() == b"new"
     assert (staged / ".skulk-source-revision").read_text().strip() == _NEW_REVISION
+    assert (unrelated / "sentinel").read_text() == "preserve"
 
 
 async def test_request_rechecks_revision_after_waiting_for_download_lock(
