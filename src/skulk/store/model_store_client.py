@@ -41,10 +41,10 @@ Store host optimisation
 -----------------------
 When this node IS the store host (``local_store_path`` is set in the
 constructor), ``stage_shard()`` uses ``shutil.copy2()`` for a local
-filesystem copy instead of making an HTTP round-trip over loopback.  If
-``node_cache_path`` in ``skulk.yaml`` is set to the same path as ``store_path``
-for the store host, ``shutil.copy2()`` still runs but is effectively a no-op
-(same inode, copy skipped by size check).
+filesystem copy instead of making an HTTP round-trip over loopback. If
+``node_cache_path`` in ``skulk.yaml`` is the same path as ``store_path``, a
+pinned model is loaded directly from its revision-qualified canonical directory
+so pinned bytes never occupy mutable-main's normalized path.
 
 Eviction
 --------
@@ -505,12 +505,28 @@ class ModelStoreClient:
                 ``None`` for the mutable-main entry.
 
         Returns:
-            *dest_path* (unchanged) after all files have been staged.
+            The local directory containing the requested model revision. On a
+            store host with a shared store/staging root, a pinned model returns
+            its revision-qualified canonical store directory directly.
 
         Raises:
             :class:`ModelNotInStoreError`: If the model is not found in the
                 store (should only happen if the store index is stale).
         """
+        if (
+            source_revision is not None
+            and self._local_store_path is not None
+            and staging_root.expanduser().resolve()
+            == self._local_store_path.expanduser().resolve()
+        ):
+            canonical_path = await self.local_model_path(model_id, source_revision)
+            if canonical_path is None or not canonical_path.is_dir():
+                raise ModelNotInStoreError(
+                    f"Model {model_id} is not registered at source revision "
+                    f"{source_revision}"
+                )
+            return canonical_path
+
         dest_path = _staging_dir(str(staging_root), model_id)
         if dest_path.exists():
             final_revision_matches = _staged_source_revision_matches(

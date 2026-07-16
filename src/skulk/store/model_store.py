@@ -74,6 +74,9 @@ from pydantic import BaseModel, ConfigDict
 
 from skulk.shared.types.worker.downloads import FileListEntry
 
+_SOURCE_REVISION_MARKER = ".skulk-source-revision"
+_SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
+
 
 def select_store_gguf_download_files(
     file_list: list[FileListEntry],
@@ -717,11 +720,11 @@ class ModelStore:
         """Return the download status for *model_id*, or None."""
         if model_id in self._active_downloads:
             return self._active_downloads[model_id]
-        if self.is_in_store(model_id):
-            entry = self.get_entry(model_id)
+        entry = self.get_entry(model_id)
+        if entry is not None:
             return StoreDownloadStatus(
                 model_id=model_id,
-                source_revision=entry.source_revision if entry is not None else None,
+                source_revision=entry.source_revision,
                 status="complete",
                 progress=1.0,
             )
@@ -769,6 +772,18 @@ class ModelStore:
         )
 
         try:
+            if source_revision is None and (
+                (target_dir / _SOURCE_REVISION_MARKER).exists()
+                or (target_dir / _SOURCE_REVISION_STAGING_MARKER).exists()
+            ):
+                # Older shared-root staging placed pinned bytes in mutable-main's
+                # normalized directory. Never let size-based resume reuse those
+                # bytes after an operator removes the pin.
+                logger.warning(
+                    f"ModelStore: clearing revision-qualified staging residue "
+                    f"before downloading mutable main for {model_id}"
+                )
+                await asyncio.to_thread(shutil.rmtree, target_dir)
             await aios.makedirs(str(target_dir), exist_ok=True)
 
             repo_file_list = await fetch_file_list_with_cache(

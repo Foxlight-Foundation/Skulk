@@ -171,6 +171,88 @@ async def test_staging_replaces_files_from_another_revision(
     assert (unrelated / "sentinel").read_text() == "preserve"
 
 
+async def test_pinned_store_host_shared_root_uses_canonical_revision_path(
+    tmp_path: Path,
+) -> None:
+    """Pinned store-host staging must not populate mutable-main's directory."""
+
+    store = ModelStore(tmp_path)
+    model_id = "org/model"
+    canonical_path = tmp_path / f"org--model--revision-{_NEW_REVISION}"
+    canonical_path.mkdir()
+    (canonical_path / "model.gguf").write_bytes(b"pinned")
+    store.register_model(
+        model_id,
+        canonical_path,
+        ["model.gguf"],
+        len(b"pinned"),
+        source_revision=_NEW_REVISION,
+    )
+    client = ModelStoreClient("localhost", local_store_path=tmp_path)
+
+    staged = await client.stage_shard(
+        model_id,
+        tmp_path,
+        source_revision=_NEW_REVISION,
+    )
+
+    assert staged == canonical_path.resolve()
+    assert not (tmp_path / "org--model").exists()
+    assert (staged / "model.gguf").read_bytes() == b"pinned"
+
+
+async def test_mutable_main_download_clears_old_pinned_staging_residue(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An upgrade must not reuse pinned bytes left in mutable-main's path."""
+
+    store = ModelStore(tmp_path)
+    model_id = "org/model"
+    target_dir = tmp_path / "org--model"
+    target_dir.mkdir()
+    (target_dir / "model.gguf").write_bytes(b"pinned")
+    (target_dir / ".skulk-source-revision").write_text(f"{_NEW_REVISION}\n")
+    store._active_downloads[model_id] = StoreDownloadStatus(
+        model_id=model_id,
+        source_revision=None,
+    )
+
+    async def file_list(
+        _model_id: ModelId,
+        revision: str,
+        recursive: bool,
+    ) -> list[FileListEntry]:
+        assert revision == "main"
+        assert recursive is True
+        return [FileListEntry(type="file", path="model.gguf", size=7)]
+
+    async def download_file(
+        _model_id: ModelId,
+        revision: str,
+        path: str,
+        download_dir: Path,
+        on_progress: Callable[[int, int, bool], None],
+        on_connection_lost: Callable[[], None] = lambda: None,
+        skip_internet: bool = False,
+    ) -> Path:
+        del on_connection_lost, skip_internet
+        assert revision == "main"
+        assert not (download_dir / path).exists()
+        target = download_dir / path
+        target.write_bytes(b"mutable")
+        on_progress(7, 7, True)
+        return target
+
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", file_list)
+    monkeypatch.setattr(download_utils, "download_file_with_retry", download_file)
+
+    await store._do_download(model_id)
+
+    assert (target_dir / "model.gguf").read_bytes() == b"mutable"
+    assert not (target_dir / ".skulk-source-revision").exists()
+
+
 async def test_staging_recovers_from_corrupted_revision_marker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
