@@ -161,7 +161,13 @@ def _llama_server_parallel() -> int:
     return value
 
 
-def _draft_model_args(runtime: Any, spec_type: str) -> list[str] | None:
+def _draft_model_args(
+    runtime: Any,
+    spec_type: str,
+    *,
+    base_model_id: ModelId | None = None,
+    source_revision: str | None = None,
+) -> list[str] | None:
     """Resolve the ``--model-draft`` args for a served spec mode.
 
     When the card declares a draft GGUF (``served_spec_draft_repo`` +
@@ -180,7 +186,20 @@ def _draft_model_args(runtime: Any, spec_type: str) -> list[str] | None:
     ``ngram``); the caller still passes ``--spec-type`` for those. Modes in
     ``_DRAFT_MODEL_REQUIRED`` with no draft declared at all are a card
     misconfiguration and still raise loudly. Pure except for the on-disk path
-    resolution, so the validation branches are unit-testable.
+    resolution, so the validation branches are unit-testable. A draft sharing
+    the base repository inherits the base card's immutable source revision;
+    separate-repository drafts retain their own unpinned lookup contract.
+
+    Args:
+        runtime: Resolved runtime capability section from the base model card.
+        spec_type: Served speculative-decoding mode.
+        base_model_id: Base repository identifier, used to identify a bundled
+            same-repository draft.
+        source_revision: Immutable base repository revision, when pinned.
+
+    Returns:
+        ``--model-draft`` arguments, an empty list for draft-free modes, or
+        ``None`` when a declared best-effort draft is unavailable.
     """
     draft_repo = getattr(runtime, "served_spec_draft_repo", None) if runtime else None
     draft_file = getattr(runtime, "served_spec_draft_file", None) if runtime else None
@@ -196,8 +215,13 @@ def _draft_model_args(runtime: Any, spec_type: str) -> list[str] | None:
             return None
         from skulk.download.download_utils import build_model_path
 
+        draft_revision = (
+            source_revision
+            if base_model_id is not None and draft_repo == str(base_model_id)
+            else None
+        )
         try:
-            draft_dir = build_model_path(ModelId(draft_repo))
+            draft_dir = build_model_path(ModelId(draft_repo), draft_revision)
         except FileNotFoundError:
             logger.warning(
                 f"Served {spec_type} draft repo {draft_repo!r} is not on disk; "
@@ -649,7 +673,13 @@ class Runner(ServedConcurrentDispatch):
                 # None => the declared draft is unavailable; _draft_model_args
                 # has already logged the specific reason, so drop the spec
                 # silently (serve plain decode). Otherwise pass the spec + draft.
-                draft_args = _draft_model_args(runtime, spec_type)
+                card = self.shard_metadata.model_card
+                draft_args = _draft_model_args(
+                    runtime,
+                    spec_type,
+                    base_model_id=card.model_id,
+                    source_revision=card.source_revision,
+                )
                 if draft_args is not None:
                     cmd += ["--spec-type", flag]
                     n_max = getattr(runtime, "served_spec_n_max", None)
