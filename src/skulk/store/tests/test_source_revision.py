@@ -11,7 +11,10 @@ from skulk.download import download_utils
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.worker.downloads import FileListEntry
 from skulk.store.model_store import ModelStore, StoreDownloadStatus
-from skulk.store.model_store_client import ModelStoreClient
+from skulk.store.model_store_client import (
+    ModelStoreClient,
+    _staged_source_revision_matches,
+)
 
 _OLD_REVISION = "0" * 40
 _NEW_REVISION = "1" * 40
@@ -223,6 +226,44 @@ async def test_pinned_staging_retry_preserves_partial_files(
     assert attempts == 2
     assert (staged / "model.gguf").read_bytes() == b"partial"
     assert (staged / ".skulk-source-revision").read_text().strip() == _NEW_REVISION
+    assert not (staged / ".skulk-source-revision-staging").exists()
+
+
+async def test_unpinned_staging_rejects_interrupted_pinned_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Mutable-main staging must not reuse files from an interrupted pin."""
+
+    destination = tmp_path / "org--model"
+    destination.mkdir()
+    (destination / "model.gguf").write_bytes(b"pinned")
+    (destination / ".skulk-source-revision-staging").write_text(
+        f"{_NEW_REVISION}\n"
+    )
+
+    assert not _staged_source_revision_matches(destination, None)
+
+    async def fake_stage_http(
+        _self: ModelStoreClient,
+        _model_id: str,
+        dest_path: Path,
+        _on_progress: Callable[[int, int], Awaitable[None]] | None,
+        source_revision: str | None,
+    ) -> Path:
+        assert source_revision is None
+        assert not (dest_path / "model.gguf").exists()
+        assert not (dest_path / ".skulk-source-revision-staging").exists()
+        (dest_path / "model.gguf").write_bytes(b"mutable-main")
+        return dest_path
+
+    monkeypatch.setattr(ModelStoreClient, "_stage_http", fake_stage_http)
+    client = ModelStoreClient(store_host="store.local", store_port=58080)
+
+    staged = await client.stage_shard("org/model", tmp_path)
+
+    assert (staged / "model.gguf").read_bytes() == b"mutable-main"
+    assert not (staged / ".skulk-source-revision").exists()
     assert not (staged / ".skulk-source-revision-staging").exists()
 
 

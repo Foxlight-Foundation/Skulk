@@ -140,6 +140,9 @@ def _staged_source_revision_matches(
     """Return whether a staged directory represents the requested revision."""
 
     marker = staged_path / _SOURCE_REVISION_MARKER
+    staging_marker = staged_path / _SOURCE_REVISION_STAGING_MARKER
+    if source_revision is None and staging_marker.exists():
+        return False
     try:
         actual_revision = marker.read_text().strip() if marker.is_file() else None
     except (OSError, UnicodeError):
