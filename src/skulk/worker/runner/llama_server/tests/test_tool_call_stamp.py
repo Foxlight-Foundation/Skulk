@@ -48,7 +48,9 @@ class _FakeClient:
     def __exit__(self, *_exc: object) -> None:
         return None
 
-    def post(self, _url: str, json: dict[str, Any]) -> _FakeResponse:  # noqa: A002
+    def post(self, _url: str, **_kwargs: Any) -> _FakeResponse:
+        # Accept the real call's `json=` (and any future headers/timeout) without
+        # binding an unused named parameter.
         return _FakeResponse(self._payload)
 
 

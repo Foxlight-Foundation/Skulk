@@ -3101,7 +3101,7 @@ class API:
         return chunk_stream
 
     async def _collect_text_generation_with_stats(
-        self, command_id: CommandId
+        self, command_id: CommandId, model_id: ModelId
     ) -> BenchChatCompletionResponse:
         sampler = PowerSampler(
             get_node_system=lambda: {
@@ -3120,7 +3120,13 @@ class API:
         async with anyio.create_task_group() as tg:
             tg.start_soon(sampler.run)
 
-            async for chunk in self._token_chunk_stream(command_id):
+            # Route the bench collector through the same taps as every other text
+            # surface (#596): /bench/chat/completions is the concurrency load
+            # generator this envelope is meant to learn from (the harness
+            # `concurrent` suite is its offline mirror), so its completed
+            # generations must feed the envelope and field telemetry, not bypass
+            # them. No task_params here, so the extension chat tap is skipped.
+            async for chunk in self._tapped_text_stream(command_id, model_id):
                 if isinstance(chunk, PrefillProgressChunk):
                     continue
 
@@ -3981,7 +3987,9 @@ class API:
 
         command = await self._send_text_generation_with_images(task_params)
 
-        return await self._collect_text_generation_with_stats(command.command_id)
+        return await self._collect_text_generation_with_stats(
+            command.command_id, task_params.model
+        )
 
     async def _resolve_and_validate_text_model(self, model_id: ModelId) -> ModelId:
         """Validate a mounted model supports text generation.
