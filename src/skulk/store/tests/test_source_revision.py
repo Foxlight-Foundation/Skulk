@@ -172,6 +172,60 @@ async def test_staging_recovers_from_corrupted_revision_marker(
     assert (staged / ".skulk-source-revision").read_text().strip() == _NEW_REVISION
 
 
+async def test_pinned_staging_retry_preserves_partial_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A retry for the same pinned revision must retain resumable bytes."""
+
+    attempts = 0
+
+    async def fake_stage_http(
+        _self: ModelStoreClient,
+        _model_id: str,
+        dest_path: Path,
+        _on_progress: Callable[[int, int], Awaitable[None]] | None,
+        source_revision: str | None,
+    ) -> Path:
+        nonlocal attempts
+        attempts += 1
+        assert source_revision == _NEW_REVISION
+        partial = dest_path / "model.gguf.partial"
+        if attempts == 1:
+            partial.write_bytes(b"partial")
+            raise ConnectionError("transfer interrupted")
+        assert partial.read_bytes() == b"partial"
+        partial.replace(dest_path / "model.gguf")
+        return dest_path
+
+    monkeypatch.setattr(ModelStoreClient, "_stage_http", fake_stage_http)
+    client = ModelStoreClient(store_host="store.local", store_port=58080)
+
+    with pytest.raises(ConnectionError, match="transfer interrupted"):
+        await client.stage_shard(
+            "org/model",
+            tmp_path,
+            source_revision=_NEW_REVISION,
+        )
+
+    destination = tmp_path / "org--model"
+    assert (destination / "model.gguf.partial").read_bytes() == b"partial"
+    assert (
+        destination / ".skulk-source-revision-staging"
+    ).read_text().strip() == _NEW_REVISION
+
+    staged = await client.stage_shard(
+        "org/model",
+        tmp_path,
+        source_revision=_NEW_REVISION,
+    )
+
+    assert attempts == 2
+    assert (staged / "model.gguf").read_bytes() == b"partial"
+    assert (staged / ".skulk-source-revision").read_text().strip() == _NEW_REVISION
+    assert not (staged / ".skulk-source-revision-staging").exists()
+
+
 async def test_request_rechecks_revision_after_waiting_for_download_lock(
     tmp_path: Path,
 ) -> None:

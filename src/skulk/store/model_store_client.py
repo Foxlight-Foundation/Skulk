@@ -103,6 +103,7 @@ _STORE_HTTP_RETRY_BASE_SECONDS = 0.5
 _STORE_HTTP_RETRY_MAX_DELAY_SECONDS = 8.0
 _T = TypeVar("_T")
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
+_SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
 
 
 class ModelNotInStoreError(Exception):
@@ -152,9 +153,38 @@ def _write_staged_source_revision(
     """Persist or clear the source-revision marker after successful staging."""
 
     marker = staged_path / _SOURCE_REVISION_MARKER
+    staging_marker = staged_path / _SOURCE_REVISION_STAGING_MARKER
     if source_revision is None:
         marker.unlink(missing_ok=True)
+        staging_marker.unlink(missing_ok=True)
         return
+    temporary_marker = marker.with_suffix(f"{marker.suffix}.partial")
+    temporary_marker.write_text(f"{source_revision}\n")
+    temporary_marker.replace(marker)
+    staging_marker.unlink(missing_ok=True)
+
+
+def _staged_source_revision_staging_matches(
+    staged_path: Path, source_revision: str | None
+) -> bool:
+    """Return whether an interrupted staging attempt can resume safely."""
+
+    if source_revision is None:
+        return False
+    marker = staged_path / _SOURCE_REVISION_STAGING_MARKER
+    try:
+        actual_revision = marker.read_text().strip() if marker.is_file() else None
+    except (OSError, UnicodeError):
+        return False
+    return actual_revision == source_revision
+
+
+def _write_staged_source_revision_staging(
+    staged_path: Path, source_revision: str
+) -> None:
+    """Mark a directory as resumable only for one immutable revision."""
+
+    marker = staged_path / _SOURCE_REVISION_STAGING_MARKER
     temporary_marker = marker.with_suffix(f"{marker.suffix}.partial")
     temporary_marker.write_text(f"{source_revision}\n")
     temporary_marker.replace(marker)
@@ -479,11 +509,25 @@ class ModelStoreClient:
                 store (should only happen if the store index is stale).
         """
         dest_path = _staging_dir(str(staging_root), model_id)
-        if dest_path.exists() and not _staged_source_revision_matches(
-            dest_path, source_revision
-        ):
-            await asyncio.to_thread(shutil.rmtree, dest_path)
+        if dest_path.exists():
+            final_revision_matches = _staged_source_revision_matches(
+                dest_path, source_revision
+            )
+            resumable_staging_matches = (
+                not (dest_path / _SOURCE_REVISION_MARKER).exists()
+                and _staged_source_revision_staging_matches(
+                    dest_path, source_revision
+                )
+            )
+            if not final_revision_matches and not resumable_staging_matches:
+                await asyncio.to_thread(shutil.rmtree, dest_path)
         await aios.makedirs(dest_path, exist_ok=True)
+        if source_revision is not None:
+            await asyncio.to_thread(
+                _write_staged_source_revision_staging,
+                dest_path,
+                source_revision,
+            )
 
         if self._local_store_path is not None:
             staged_path = await self._stage_local(
