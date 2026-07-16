@@ -262,6 +262,7 @@ from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.routing.trace_data import TraceDataPacket
 from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.apply import apply
+from skulk.shared.backends import engine_of
 from skulk.shared.constants import (
     DASHBOARD_DIR,
     SKULK_CACHE_HOME,
@@ -3056,8 +3057,52 @@ class API:
                 ),
             )
 
+    def _tapped_text_stream(
+        self,
+        command_id: CommandId,
+        model_id: ModelId,
+        *,
+        task_params: TextGenerationTaskParams | None = None,
+    ) -> AsyncGenerator[
+        TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None
+    ]:
+        """Wrap the raw token stream with the standard observation taps.
+
+        Every text-generation surface (chat completions, the Claude/Responses
+        adapters, the Ollama endpoints, realtime assistant turns) routes through
+        here so throughput/latency learning and field telemetry are not confined
+        to ``/v1/chat/completions``. Applies, in order: field telemetry (a plain
+        passthrough unless the operator opted in), the observe-only performance
+        envelope (adaptive concurrency, Phase 0), and -- when ``task_params`` is
+        given and chat middleware is loaded -- the extension chat-summary tap.
+        All three are fully guarded and never alter token delivery.
+
+        ``model_id`` must be the POST-transform model actually dispatched (chat
+        middleware may reroute it), so observations attribute to the served
+        model, not the caller's requested alias.
+        """
+        chunk_stream: AsyncGenerator[
+            TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None
+        ] = self._token_chunk_stream(command_id)
+        chunk_stream = tap_generation_stream(
+            self._field_telemetry,
+            str(model_id),
+            None,
+            chunk_stream,
+        )
+        chunk_stream = self._tap_performance_envelope(model_id, chunk_stream)
+        if (
+            task_params is not None
+            and self._extensions is not None
+            and self._extensions.has_chat_middleware
+        ):
+            chunk_stream = self._extensions.tap_chat_stream(
+                self._extension_context, task_params, chunk_stream
+            )
+        return chunk_stream
+
     async def _collect_text_generation_with_stats(
-        self, command_id: CommandId
+        self, command_id: CommandId, model_id: ModelId
     ) -> BenchChatCompletionResponse:
         sampler = PowerSampler(
             get_node_system=lambda: {
@@ -3076,7 +3121,13 @@ class API:
         async with anyio.create_task_group() as tg:
             tg.start_soon(sampler.run)
 
-            async for chunk in self._token_chunk_stream(command_id):
+            # Route the bench collector through the same taps as every other text
+            # surface (#596): /bench/chat/completions is the concurrency load
+            # generator this envelope is meant to learn from (the harness
+            # `concurrent` suite is its offline mirror), so its completed
+            # generations must feed the envelope and field telemetry, not bypass
+            # them. No task_params here, so the extension chat tap is skipped.
+            async for chunk in self._tapped_text_stream(command_id, model_id):
                 if isinstance(chunk, PrefillProgressChunk):
                     continue
 
@@ -3127,7 +3178,9 @@ class API:
                     finish_reason=finish_reason,
                 )
             ],
-            generation_stats=stats,
+            # Redact internal runner attribution (#596): the envelope-tap-only
+            # serving node / backend / in-flight fields are not client output.
+            generation_stats=stats.redacted_for_client() if stats else None,
             power_usage=sampler.result(),
         )
 
@@ -3889,26 +3942,14 @@ class API:
 
         command = await self._send_text_generation_with_images(task_params)
 
-        chunk_stream = self._token_chunk_stream(command.command_id)
-        # Field telemetry (opt-in): consent-gated inside the collector, so
-        # this wrap is a plain passthrough when telemetry is off.
-        chunk_stream = tap_generation_stream(
-            self._field_telemetry,
-            str(task_params.model),
-            None,
-            chunk_stream,
+        # All observation taps (field telemetry, performance envelope, extension
+        # chat summary) applied through the shared helper. The POST-transform
+        # model is passed so observations attribute to the dispatched model.
+        chunk_stream = self._tapped_text_stream(
+            command.command_id,
+            task_params.model,
+            task_params=task_params,
         )
-        # Observe-only performance envelope (adaptive concurrency, Phase 0): a
-        # plain passthrough that records one throughput/latency observation per
-        # completed generation. Always on, fully guarded, no behavior change.
-        # Use the POST-transform model: chat middleware may rewrite/route
-        # task_params.model, and the observation must be attributed to the model
-        # actually dispatched, not the caller's requested one.
-        chunk_stream = self._tap_performance_envelope(task_params.model, chunk_stream)
-        if self._extensions is not None and self._extensions.has_chat_middleware:
-            chunk_stream = self._extensions.tap_chat_stream(
-                self._extension_context, task_params, chunk_stream
-            )
 
         if payload.stream:
             return StreamingResponse(
@@ -3947,7 +3988,9 @@ class API:
 
         command = await self._send_text_generation_with_images(task_params)
 
-        return await self._collect_text_generation_with_stats(command.command_id)
+        return await self._collect_text_generation_with_stats(
+            command.command_id, task_params.model
+        )
 
     async def _resolve_and_validate_text_model(self, model_id: ModelId) -> ModelId:
         """Validate a mounted model supports text generation.
@@ -6625,7 +6668,11 @@ class API:
                     generate_claude_stream(
                         command.command_id,
                         payload.model,
-                        self._token_chunk_stream(command.command_id),
+                        self._tapped_text_stream(
+                            command.command_id,
+                            task_params.model,
+                            task_params=task_params,
+                        ),
                     ),
                 ),
                 media_type="text/event-stream",
@@ -6640,7 +6687,11 @@ class API:
                 collect_claude_response(
                     command.command_id,
                     payload.model,
-                    self._token_chunk_stream(command.command_id),
+                    self._tapped_text_stream(
+                        command.command_id,
+                        task_params.model,
+                        task_params=task_params,
+                    ),
                 ),
                 media_type="application/json",
             )
@@ -6664,7 +6715,11 @@ class API:
                     generate_responses_stream(
                         command.command_id,
                         payload.model,
-                        self._token_chunk_stream(command.command_id),
+                        self._tapped_text_stream(
+                            command.command_id,
+                            task_params.model,
+                            task_params=task_params,
+                        ),
                     ),
                 ),
                 media_type="text/event-stream",
@@ -6680,7 +6735,11 @@ class API:
                 collect_responses_response(
                     command.command_id,
                     payload.model,
-                    self._token_chunk_stream(command.command_id),
+                    self._tapped_text_stream(
+                        command.command_id,
+                        task_params.model,
+                        task_params=task_params,
+                    ),
                 ),
                 media_type="application/json",
             )
@@ -6753,7 +6812,11 @@ class API:
             return StreamingResponse(
                 generate_ollama_chat_stream(
                     command.command_id,
-                    self._token_chunk_stream(command.command_id),
+                    self._tapped_text_stream(
+                        command.command_id,
+                        task_params.model,
+                        task_params=task_params,
+                    ),
                 ),
                 media_type="application/x-ndjson",
                 headers={
@@ -6766,7 +6829,11 @@ class API:
             return StreamingResponse(
                 collect_ollama_chat_response(
                     command.command_id,
-                    self._token_chunk_stream(command.command_id),
+                    self._tapped_text_stream(
+                        command.command_id,
+                        task_params.model,
+                        task_params=task_params,
+                    ),
                 ),
                 media_type="application/json",
             )
@@ -6790,7 +6857,11 @@ class API:
             return StreamingResponse(
                 generate_ollama_generate_stream(
                     command.command_id,
-                    self._token_chunk_stream(command.command_id),
+                    self._tapped_text_stream(
+                        command.command_id,
+                        task_params.model,
+                        task_params=task_params,
+                    ),
                 ),
                 media_type="application/x-ndjson",
                 headers={
@@ -6803,7 +6874,11 @@ class API:
             return StreamingResponse(
                 collect_ollama_generate_response(
                     command.command_id,
-                    self._token_chunk_stream(command.command_id),
+                    self._tapped_text_stream(
+                        command.command_id,
+                        task_params.model,
+                        task_params=task_params,
+                    ),
                 ),
                 media_type="application/json",
             )
@@ -9755,19 +9830,60 @@ class API:
             )
         return snapshot
 
+    def _hardware_class_for_node(self, node_id: NodeId) -> str | None:
+        """Return the envelope hardware class for one node, or ``None``.
+
+        Requires BOTH the node's system profile and memory reading before
+        answering. They populate independently (on Linux GPU nodes
+        ``LinuxGpuMetrics`` and ``MemoryUsage`` arrive separately), so answering
+        with one missing yields an incomplete class (a missing memory tier, or an
+        "unknown" accelerator) that later samples would correct -- splitting the
+        very envelope this feature is meant to learn. The accelerator within the
+        profile stays optional (a CPU-only node reports none).
+        """
+        profile = self._telemetry_view.node_system.get(node_id)
+        memory = self._telemetry_view.node_memory.get(node_id)
+        if profile is None or memory is None:
+            return None
+        accelerator = profile.accelerator
+        return hardware_class(
+            accelerator.vendor if accelerator is not None else None,
+            accelerator.name if accelerator is not None else None,
+            memory.ram_total.in_bytes,
+        )
+
+    def _model_quantization(self, model_id: ModelId) -> str | None:
+        """Return the card quantization for any instance serving ``model_id``.
+
+        Quantization is model truth: identical across replicas, so any serving
+        shard answers. Used by the runner-reported envelope path, where the
+        serving node/backend/concurrency come from the terminal stats but the
+        quantization still lives on the card. Returns ``None`` when the model is
+        not currently served here.
+        """
+        for instance in self.state.instances.values():
+            if instance.shard_assignments.model_id != model_id:
+                continue
+            for shard in instance.shard_assignments.runner_to_shard.values():
+                return shard.model_card.quantization
+        return None
+
     def _resolve_envelope_context(
         self, model_id: ModelId
     ) -> tuple[str, str, str] | None:
         """Resolve ``(hardware_class, backend, quantization)`` for a served model.
 
-        Uses the rank-0 shard's node for the hardware class (a multi-node
-        instance spans hardware; rank 0 is the deterministic representative) and
-        that shard's resolved backend and card quantization. Returns ``None`` when
-        no instance or node telemetry is available, so an observation is skipped
-        rather than recorded against a wrong key. Records only when EXACTLY one
-        instance serves the model: with replicas, attributing to an arbitrary one
-        could mis-key hardware/backend/quantization, so skip until replica-aware
-        attribution lands (the engine-reported batch-size accuracy follow-on).
+        The fallback path for in-process serial engines (MLX, in-process
+        llama.cpp) whose runner does not report a serving node. Uses the rank-0
+        shard's node for the hardware class (a multi-node instance spans hardware;
+        rank 0 is the deterministic representative) and that shard's resolved
+        backend and card quantization. Returns ``None`` when no instance or node
+        telemetry is available, so an observation is skipped rather than recorded
+        against a wrong key. Records only when EXACTLY one instance serves the
+        model: with replicas, attributing to an arbitrary one could mis-key
+        hardware/backend/quantization. The served engines (llama_server, vLLM)
+        instead stamp their own node/backend/concurrency onto the terminal stats,
+        so their observations are per-instance and replica-safe without this path.
         """
         matching = [
             candidate
@@ -9803,25 +9919,79 @@ class API:
         )
         if node_id is None:
             return None
-        profile = self._telemetry_view.node_system.get(node_id)
-        memory = self._telemetry_view.node_memory.get(node_id)
-        if profile is None or memory is None:
-            # Require BOTH readings before recording. They populate independently
-            # (e.g. on Linux GPU nodes LinuxGpuMetrics and MemoryUsage arrive
-            # separately), so recording with one missing yields an incomplete key
-            # (a missing memory tier, or an "unknown" accelerator) that later
-            # samples would correct -- splitting the very envelope this feature is
-            # meant to learn. Skip until the serving node's hardware is fully known.
+        node_hardware = self._hardware_class_for_node(node_id)
+        if node_hardware is None:
+            # Skip until the serving node's hardware is fully known (both system
+            # and memory readings), rather than record an incomplete key.
             return None
-        # Both readings are present (guarded above); accelerator within the
-        # system profile is still optional (a CPU-only node reports none).
-        accelerator = profile.accelerator
-        node_hardware = hardware_class(
-            accelerator.vendor if accelerator is not None else None,
-            accelerator.name if accelerator is not None else None,
-            memory.ram_total.in_bytes,
-        )
         return (node_hardware, backend, quantization)
+
+    def _envelope_record_args(
+        self,
+        *,
+        model_id: ModelId,
+        fallback_context: tuple[str, str, str] | None,
+        fallback_concurrency: int,
+        serving_node: str | None,
+        serving_backend: str | None,
+        in_flight_at_admission: int | None,
+        serving_batches: bool | None,
+    ) -> tuple[str, str, str, int, bool] | None:
+        """Resolve the envelope record args, preferring runner-reported context.
+
+        Returns ``(hardware_class, backend, quantization, concurrency, batches)``
+        or ``None`` when the serving context cannot be keyed (skip rather than
+        mis-attribute).
+
+        When the terminal stats carry a ``serving_node`` (the served engines
+        stamp it), the observation is per-instance: hardware comes from that
+        node's telemetry, the backend and batching mode from the runner, the
+        quantization from the model card, and the concurrency from the runner's
+        in-flight-at-admission count. This un-blinds replicas and is correct when
+        several API nodes drive one instance, because the count is the serving
+        process's own, not any single API node's offered load.
+
+        Absent a runner-reported node (in-process serial engines: MLX, in-process
+        llama.cpp), it falls back to the dispatch-time API context and this API
+        node's offered in-flight count -- correct for serial engines, which serve
+        one request at a time so the API's outstanding count is the load the
+        instance actually sees.
+        """
+        if serving_node is not None and serving_backend is not None:
+            hardware = self._hardware_class_for_node(NodeId(serving_node))
+            if hardware is None:
+                return None
+            quantization = self._model_quantization(model_id)
+            if quantization is None:
+                return None
+            # Runner reports its in-flight at admission; fall back to this API
+            # node's offered count if the field is absent (older stamp path).
+            concurrency = (
+                in_flight_at_admission
+                if in_flight_at_admission is not None
+                else fallback_concurrency
+            )
+            # The runner declares whether it batches concurrent requests
+            # (continuous batching); default to False (serial) when unstamped so
+            # aggregate throughput is never falsely scaled upward.
+            batches = serving_batches if serving_batches is not None else False
+            return (hardware, serving_backend, quantization, concurrency, batches)
+        if fallback_context is None:
+            return None
+        hardware, backend, quantization = fallback_context
+        # The fallback path is for the in-process serial engines (MLX, in-process
+        # llama.cpp): they never stamp and genuinely serve one request at a time,
+        # so batches=False is correct. A SERVED backend (llama_server, vLLM)
+        # reaching here means the stamp was MISSING -- most commonly a request
+        # that errored before terminal stats (an ErrorChunk carries no stats). We
+        # cannot know a served engine's batching mode without the stamp, and
+        # recording batches=False for it would flip the per-key batching
+        # classification (the registry stores it once per key), corrupting the
+        # knee for previously-stamped successful batching samples until the next
+        # success re-stamps it. Skip rather than corrupt.
+        if engine_of(backend) in ("llama_server", "vllm"):
+            return None
+        return (hardware, backend, quantization, fallback_concurrency, False)
 
     def _tap_performance_envelope(
         self, model_id: ModelId, stream: AsyncIterator[_EnvelopeChunk]
@@ -9876,6 +10046,16 @@ class API:
             ttft_seconds: float | None = None
             decode_tps: float | None = None
             outcome: GenerationOutcome = "cancelled"
+            # Runner-reported serving context, latched from the terminal stats.
+            # The served engines (llama_server, vLLM) stamp the actual serving
+            # node, backend, in-flight-at-admission, and batching mode onto their
+            # final GenerationStats, so their observations are per-instance and
+            # survive replicas and multiple API nodes. Absent (in-process serial
+            # engines) the tap falls back to the dispatch-time API context below.
+            serving_node: str | None = None
+            serving_backend: str | None = None
+            in_flight_at_admission: int | None = None
+            serving_batches: bool | None = None
             try:
                 async for chunk in stream:
                     if ttft_seconds is None and getattr(chunk, "text", None):
@@ -9887,6 +10067,21 @@ class API:
                         )
                         if tps is not None:
                             decode_tps = float(tps)
+                        node = cast(
+                            "str | None", getattr(stats, "serving_node", None)
+                        )
+                        if node is not None:
+                            serving_node = node
+                            serving_backend = cast(
+                                "str | None", getattr(stats, "serving_backend", None)
+                            )
+                            in_flight_at_admission = cast(
+                                "int | None",
+                                getattr(stats, "in_flight_at_admission", None),
+                            )
+                            serving_batches = cast(
+                                "bool | None", getattr(stats, "serving_batches", None)
+                            )
                     finish = cast("str | None", getattr(chunk, "finish_reason", None))
                     if finish == "error":
                         outcome = "error"
@@ -9899,24 +10094,31 @@ class API:
             finally:
                 try:
                     _release()
-                    if envelope_context is not None and outcome != "cancelled":
-                        node_hardware, backend, quantization = envelope_context
-                        self._performance_envelopes.record(
-                            hardware_class=node_hardware,
-                            model_id=key,
-                            backend=backend,
-                            quantization=quantization,
-                            concurrency=concurrency,
-                            ttft_seconds=ttft_seconds,
-                            decode_tps=decode_tps,
-                            outcome=outcome,
-                            # vLLM decodes concurrent requests together
-                            # (continuous batching); the single-stream engines and
-                            # llama_server at its default --parallel 1 queue them,
-                            # so only vLLM scales aggregate throughput with
-                            # concurrency. Conservative to avoid an upward knee bias.
-                            batches=backend.startswith("vllm"),
+                    if outcome != "cancelled":
+                        recorded = self._envelope_record_args(
+                            model_id=model_id,
+                            fallback_context=envelope_context,
+                            fallback_concurrency=concurrency,
+                            serving_node=serving_node,
+                            serving_backend=serving_backend,
+                            in_flight_at_admission=in_flight_at_admission,
+                            serving_batches=serving_batches,
                         )
+                        if recorded is not None:
+                            hardware, backend, quantization, obs_conc, batches = (
+                                recorded
+                            )
+                            self._performance_envelopes.record(
+                                hardware_class=hardware,
+                                model_id=key,
+                                backend=backend,
+                                quantization=quantization,
+                                concurrency=obs_conc,
+                                ttft_seconds=ttft_seconds,
+                                decode_tps=decode_tps,
+                                outcome=outcome,
+                                batches=batches,
+                            )
                 except Exception as exc:  # noqa: BLE001 - must not propagate
                     logger.debug(f"performance-envelope record failed: {exc}")
 
@@ -11374,19 +11576,11 @@ class API:
                 task_params,
             )
         command = await self._send_text_generation_with_images(task_params)
-        chunk_stream = self._token_chunk_stream(command.command_id)
-        chunk_stream = tap_generation_stream(
-            self._field_telemetry,
-            str(task_params.model),
-            None,
-            chunk_stream,
+        chunk_stream = self._tapped_text_stream(
+            command.command_id,
+            task_params.model,
+            task_params=task_params,
         )
-        if self._extensions is not None and self._extensions.has_chat_middleware:
-            chunk_stream = self._extensions.tap_chat_stream(
-                self._extension_context,
-                task_params,
-                chunk_stream,
-            )
         async for chunk in chunk_stream:
             if isinstance(chunk, PrefillProgressChunk):
                 continue

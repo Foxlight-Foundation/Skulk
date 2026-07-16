@@ -840,6 +840,12 @@ class Runner(ServedConcurrentDispatch):
         assert self.base_url is not None
         clock = StreamStatsClock()
         last_timings: dict[str, object] | None = None
+        # In-flight captured at THIS task's admission on the dispatch loop, for
+        # the performance-envelope tap (#596): the runner's own count is the true
+        # per-instance concurrency, and reading it from the admission capture
+        # (not live here on the worker thread) avoids a burst collapsing every
+        # sample into one concurrency bucket.
+        admission_in_flight = self._admission_concurrency(task.task_id)
 
         def final_stats() -> GenerationStats:
             # Prefer the engine's own measurements; fall back to proxy-side
@@ -848,12 +854,14 @@ class Runner(ServedConcurrentDispatch):
             if last_timings is not None:
                 from_timings = stats_from_llama_server_timings(last_timings)
                 if from_timings is not None:
-                    return from_timings.model_copy(
+                    base = from_timings.model_copy(
                         update={"peak_memory_usage": self._server_peak_memory()}
                     )
-            return clock.stats(
+                    return self.stamp_runner_stats(base, admission_in_flight)
+            base = clock.stats(
                 prompt_tokens=0, generation_tokens=clock.pieces
             ).model_copy(update={"peak_memory_usage": self._server_peak_memory()})
+            return self.stamp_runner_stats(base, admission_in_flight)
 
         emitted_finish = False
         # Gemma 4 emits its reasoning as literal <|channel> markers in content;
@@ -967,6 +975,13 @@ class Runner(ServedConcurrentDispatch):
             # The model lives in the server child; never report proxy RSS.
             stats = stats.model_copy(
                 update={"peak_memory_usage": self._server_peak_memory()}
+            )
+            # Stamp runner attribution (#596) so tool-call generations feed the
+            # per-instance performance envelope exactly like the streaming path;
+            # otherwise tool workloads (the agentic served audience) would fall
+            # back to the API's ambiguous offered-count attribution.
+            stats = self.stamp_runner_stats(
+                stats, self._admission_concurrency(task.task_id)
             )
         tool_calls = tool_calls_from_message(message)
         if tool_calls:

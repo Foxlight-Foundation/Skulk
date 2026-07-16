@@ -698,14 +698,21 @@ class Runner(ServedConcurrentDispatch):
         body["stream"] = True
         assert self.base_url is not None
         clock = StreamStatsClock()
+        # In-flight captured at THIS task's admission on the dispatch loop, for
+        # the performance-envelope tap (#596): the runner's own count is the true
+        # per-instance concurrency (vLLM's continuous batching decodes these
+        # together). Read from the admission capture, not live here on the worker
+        # thread, so a burst does not collapse every sample into one bucket.
+        admission_in_flight = self._admission_concurrency(task.task_id)
 
         def final_stats() -> GenerationStats:
             # Peak memory always comes from the server child (weights + KV live
             # there), never this proxy. Prompt count is unknowable from the SSE
             # stream, reported as 0 (a zero reads as "unmeasured").
-            return clock.stats(
+            base = clock.stats(
                 prompt_tokens=0, generation_tokens=clock.pieces
             ).model_copy(update={"peak_memory_usage": self._server_peak_memory()})
+            return self.stamp_runner_stats(base, admission_in_flight)
 
         emitted_finish = False
         # No read timeout: generation can pause between tokens on a busy GPU. The

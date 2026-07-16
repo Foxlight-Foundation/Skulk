@@ -348,8 +348,11 @@ async def test_bench_chat_completions_uses_running_model_card(monkeypatch: pytes
             task_params=task_params,
         )
 
-    async def _collect_stats(command_id: CommandId) -> BenchChatCompletionResponse:
+    async def _collect_stats(
+        command_id: CommandId, model_id: ModelId
+    ) -> BenchChatCompletionResponse:
         captured["command_id"] = command_id
+        captured["collect_model"] = model_id
         return BenchChatCompletionResponse(
             id=str(command_id),
             created=0,
@@ -377,4 +380,6 @@ async def test_bench_chat_completions_uses_running_model_card(monkeypatch: pytes
     assert captured["request_model"] == running_card.model_id
     assert captured["model_card"] == running_card
     assert captured["command_id"] == CommandId("cmd-1")
+    # The resolved model is threaded to the collector for the envelope tap (#596).
+    assert captured["collect_model"] == running_card.model_id
     assert response.model == str(running_card.model_id)

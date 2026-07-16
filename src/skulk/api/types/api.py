@@ -695,6 +695,47 @@ class GenerationStats(BaseModel):
     prompt_tokens: int
     generation_tokens: int
     peak_memory_usage: Memory
+    # Runner-reported ground truth for the performance-envelope tap (#596). A
+    # served runner stamps these from its own state so the envelope is attributed
+    # to the serving instance with the true in-flight concurrency, immune to which
+    # API node dispatched the request. None for engines that do not report them
+    # (in-process MLX / llama.cpp), where the API falls back to its own
+    # outstanding-request count.
+    serving_node: str | None = None
+    """Node id of the node whose runner produced this generation (for the API to
+    resolve the hardware class from telemetry)."""
+    serving_backend: str | None = None
+    """The resolved engine+backend tag the runner actually ran (e.g. vllm-cuda);
+    can differ per node on a heterogeneous cluster, so it must come from the
+    serving instance, not the model."""
+    in_flight_at_admission: int | None = None
+    """Requests this instance's runner was serving when this one started (>= 1)."""
+    serving_batches: bool | None = None
+    """Whether the serving engine decodes concurrent requests together (its
+    configured max concurrency > 1), so aggregate throughput scales with
+    concurrency. Distinguishes a parallel llama-server from a serial one."""
+
+    def redacted_for_client(self) -> "GenerationStats":
+        """Return a copy with the internal runner-attribution fields cleared.
+
+        The four ``serving_*`` / ``in_flight_at_admission`` fields exist only to
+        feed the API's performance-envelope tap over the DATA plane (#596); an
+        API client has no need for them and must not see internal cluster
+        topology (node id), the serving backend, or the instance's live in-flight
+        load. Both the DATA-plane transport and client responses serialize this
+        model with the same ``model_dump_json()``, so the fields cannot simply be
+        excluded (that would strip them from the worker-to-API payload too).
+        Client-facing serializers (the chat SSE ``generation_stats`` comment, the
+        bench response) call this to emit a client-safe view instead.
+        """
+        return self.model_copy(
+            update={
+                "serving_node": None,
+                "serving_backend": None,
+                "in_flight_at_admission": None,
+                "serving_batches": None,
+            }
+        )
 
 
 class ImageGenerationStats(BaseModel):

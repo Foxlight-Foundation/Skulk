@@ -25,6 +25,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 
 from anyio import ClosedResourceError, EndOfStream, WouldBlock
 
+from skulk.api.types import GenerationStats
 from skulk.shared.types.chunks import ErrorChunk
 from skulk.shared.types.events import ChunkGenerated, Event
 from skulk.shared.types.tasks import (
@@ -35,6 +36,7 @@ from skulk.shared.types.tasks import (
     TaskStatus,
     TextGeneration,
 )
+from skulk.shared.types.worker.instances import BoundInstance
 from skulk.shared.types.worker.runners import (
     RunnerReady,
     RunnerRunning,
@@ -67,6 +69,7 @@ class ServedConcurrentDispatch:
     task_receiver: MpReceiver[Task]
     cancel_receiver: MpReceiver[TaskId]
     shard_metadata: ShardMetadata
+    bound_instance: BoundInstance
     seen: set[TaskId]
     cancelled_tasks: set[TaskId]
     current_status: RunnerStatus
@@ -113,6 +116,17 @@ class ServedConcurrentDispatch:
         self._cancel_lock = threading.Lock()
         self._inflight: int = 0
         self._dispatch_permits = threading.Semaphore(max_concurrency)
+        # In-flight count captured at each task's ADMISSION, on the single
+        # dispatch-loop thread (#596). Sampling in the worker thread instead would
+        # race the pool: under a burst every worker could observe the peak count
+        # and file all envelope samples into one concurrency bucket, erasing the
+        # 1..N throughput-vs-concurrency curve. Keyed by task; dropped when the
+        # generation finishes. Written on the dispatch thread and popped/read on
+        # worker threads (the Future done-callback and the engine's stamp), so it
+        # is guarded by its own lock -- matching the discipline used for the other
+        # cross-thread state above, and never held while acquiring another lock.
+        self._admission_inflight: dict[TaskId, int] = {}
+        self._admission_lock = threading.Lock()
 
     # --- cancellation ---------------------------------------------------------
 
@@ -231,7 +245,15 @@ class ServedConcurrentDispatch:
             with self._cancel_lock:
                 self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
         self.send_task_status(task, TaskStatus.Running)
-        self._note_generation_started()
+        # Capture the admission concurrency atomically with the increment (#596):
+        # _note_generation_started returns the post-increment count from inside
+        # _status_lock, so no peer can decrement between counting this request in
+        # flight and recording its admission bucket. This is its true position in
+        # a burst (1, 2, ... N as the loop admits them). Store under _admission_lock
+        # (never nested with _status_lock, which is already released here).
+        admitted = self._note_generation_started()
+        with self._admission_lock:
+            self._admission_inflight[task.task_id] = admitted
         try:
             future = pool.submit(self._run_one_generation, task)
         except RuntimeError as exc:
@@ -251,6 +273,8 @@ class ServedConcurrentDispatch:
             )
             self.send_task_status(task, TaskStatus.Failed)
             self._note_generation_finished()
+            with self._admission_lock:
+                self._admission_inflight.pop(task.task_id, None)
             self._dispatch_permits.release()
             return
         future.add_done_callback(lambda f: self._finish_generation(task, f))
@@ -287,6 +311,8 @@ class ServedConcurrentDispatch:
                 TaskStatus.Cancelled if was_cancelled else TaskStatus.Complete,
             )
         finally:
+            with self._admission_lock:
+                self._admission_inflight.pop(task.task_id, None)
             drained_to_idle = self._note_generation_finished()
             # Clear a stale cluster-wide cancel the moment the last in-flight
             # generation drains, so a CANCEL_ALL that arrived while requests were in
@@ -302,11 +328,20 @@ class ServedConcurrentDispatch:
             # Release the backpressure slot this generation held.
             self._dispatch_permits.release()
 
-    def _note_generation_started(self) -> None:
+    def _note_generation_started(self) -> int:
+        """Count a generation in flight; return the post-increment count (#596).
+
+        The count is returned from inside the ``_status_lock`` hold so the caller
+        can record this request's admission concurrency atomically with the
+        increment. Reading it in a separate ``_inflight_count()`` acquisition would
+        leave a window in which a peer's ``_note_generation_finished`` could
+        decrement first, filing the sample into a too-low concurrency bucket.
+        """
         with self._status_lock:
             self._inflight += 1
             if self._inflight == 1 and isinstance(self.current_status, RunnerReady):
                 self.update_status(RunnerRunning())
+            return self._inflight
 
     def _note_generation_finished(self) -> bool:
         """Drop the in-flight count; return True if this drained to idle (0)."""
@@ -319,6 +354,44 @@ class ServedConcurrentDispatch:
     def _inflight_count(self) -> int:
         with self._status_lock:
             return self._inflight
+
+    def _admission_concurrency(self, task_id: TaskId) -> int:
+        """In-flight count captured when ``task_id`` was admitted (#596).
+
+        Read by the engine-specific ``_generate`` when stamping its stats. Falls
+        back to the live in-flight count if the admission capture is missing
+        (defensive; should not happen for a dispatched task), so a stamp is never
+        keyed to 0. The map read is under ``_admission_lock``; the fallback
+        ``_inflight_count()`` (which takes ``_status_lock``) runs outside it so
+        the two locks are never nested.
+        """
+        with self._admission_lock:
+            captured = self._admission_inflight.get(task_id)
+        return captured if captured is not None else self._inflight_count()
+
+    def stamp_runner_stats(
+        self, stats: GenerationStats, in_flight_at_admission: int
+    ) -> GenerationStats:
+        """Stamp runner ground truth onto a generation's stats (#596).
+
+        The performance-envelope tap on the API attributes each generation to the
+        serving instance using these fields, so the envelope reflects the true
+        per-instance in-flight concurrency (immune to which API node dispatched
+        the request) and the correct batching classification.
+        ``in_flight_at_admission`` is the count captured on the dispatch loop when
+        this generation was admitted (see ``_admission_concurrency``), so a burst
+        of N requests yields the true 1..N spread rather than all landing on N; a
+        serial served config reports 1, a batching one reports up to its
+        parallelism.
+        """
+        return stats.model_copy(
+            update={
+                "serving_node": str(self.bound_instance.bound_node_id),
+                "serving_backend": self.shard_metadata.resolved_backend,
+                "in_flight_at_admission": max(1, in_flight_at_admission),
+                "serving_batches": self._max_concurrency > 1,
+            }
+        )
 
     def _handle_shutdown(self, task: Task, pool: ThreadPoolExecutor) -> None:
         """Cancel in-flight generations, drain the pool, then tear down the server."""

@@ -11,7 +11,7 @@ backpressure, and cancellation.
 
 import threading
 import time
-from typing import Any
+from typing import Any, cast
 
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
@@ -53,6 +53,8 @@ class _FakeHost(ServedConcurrentDispatch):
         self.generate_gate: threading.Event | None = None
         self.started = threading.Semaphore(0)
         self.peak_inflight = 0
+        self.admission_samples: list[int] = []
+        self._samples_lock = threading.Lock()
         evt_s, self._evt_r = mp_channel[Event]()
         task_s, task_r = mp_channel[Task]()
         cancel_s, cancel_r = mp_channel[TaskId]()
@@ -70,6 +72,10 @@ class _FakeHost(ServedConcurrentDispatch):
 
     # engine hooks
     def _generate(self, task: Task) -> None:
+        # Record the ADMISSION concurrency (#596): read from the dispatch-loop
+        # capture, not the live count, mirroring what the real served runners do.
+        with self._samples_lock:
+            self.admission_samples.append(self._admission_concurrency(task.task_id))
         self.started.release()
         self.peak_inflight = max(self.peak_inflight, self._inflight_count())
         if self.generate_gate is not None:
@@ -181,6 +187,39 @@ def test_dispatch_runs_generations_concurrently() -> None:
         t.join(timeout=5)
 
 
+def test_admission_concurrency_captures_true_burst_spread() -> None:
+    """A burst of N yields the 1..N admission spread, not all-N (#596).
+
+    The dispatch loop captures each task's in-flight count at admission, so the
+    envelope buckets the true concurrency curve. Sampling live in the worker
+    thread would race the pool and collapse every sample onto N.
+    """
+    host = _FakeHost(max_concurrency=4)
+    _load_ready(host)
+    host.generate_gate = threading.Event()  # hold every generation in _generate
+    t = host.start()
+    try:
+        for _ in range(4):
+            host.send(_gen())
+        # All four admitted and blocked in _generate before any finishes.
+        for _ in range(4):
+            assert host.started.acquire(timeout=10)
+        _wait_inflight(host, 4)
+        with host._samples_lock:
+            samples = sorted(host.admission_samples)
+        # Distinct 1..4: each task was counted in-flight at its own admission.
+        assert samples == [1, 2, 3, 4], samples
+        host.generate_gate.set()
+        # Each generation pops its admission entry before it decrements the
+        # in-flight count, so draining to 0 guarantees the map is empty (no leak).
+        _wait_inflight(host, 0, timeout=10)
+        assert host._admission_inflight == {}
+    finally:
+        host.generate_gate.set()
+        host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+        t.join(timeout=5)
+
+
 def test_backpressure_caps_submitted() -> None:
     host = _FakeHost(max_concurrency=2)
     _load_ready(host)
@@ -277,3 +316,54 @@ def test_stale_cancel_all_cleared_on_drain() -> None:
     assert CANCEL_ALL_TASKS not in host.cancelled_tasks
     assert host._inflight == 0
     assert isinstance(host.current_status, RunnerReady)
+
+
+def _base_stats() -> Any:
+    from skulk.api.types import GenerationStats
+    from skulk.shared.types.memory import Memory
+
+    return GenerationStats(
+        prompt_tps=1.0,
+        generation_tps=2.0,
+        prompt_tokens=3,
+        generation_tokens=4,
+        peak_memory_usage=Memory(in_bytes=0),
+    )
+
+
+def test_stamp_runner_stats_records_serving_ground_truth() -> None:
+    """A batching served runner stamps its node, backend, in-flight, and mode."""
+    from skulk.shared.types.common import NodeId
+
+    host = _FakeHost(max_concurrency=4)
+    host.bound_instance = cast(
+        Any, type("B", (), {"bound_node_id": NodeId("node-7")})()
+    )
+    host.shard_metadata = cast(Any, type("S", (), {"resolved_backend": "vllm-cuda"})())
+
+    stamped = host.stamp_runner_stats(_base_stats(), in_flight_at_admission=3)
+
+    assert stamped.serving_node == "node-7"
+    assert stamped.serving_backend == "vllm-cuda"
+    assert stamped.in_flight_at_admission == 3
+    assert stamped.serving_batches is True  # max_concurrency 4 > 1
+    # The engine's own measurements survive the stamp.
+    assert stamped.generation_tps == 2.0
+
+
+def test_stamp_runner_stats_serial_reports_not_batching_and_floors_inflight() -> None:
+    """A serial served runner reports batches=False and floors in-flight to 1."""
+    from skulk.shared.types.common import NodeId
+
+    host = _FakeHost(max_concurrency=1)
+    host.bound_instance = cast(
+        Any, type("B", (), {"bound_node_id": NodeId("node-1")})()
+    )
+    host.shard_metadata = cast(
+        Any, type("S", (), {"resolved_backend": "llama_server-vulkan"})()
+    )
+
+    stamped = host.stamp_runner_stats(_base_stats(), in_flight_at_admission=0)
+
+    assert stamped.serving_batches is False  # max_concurrency 1
+    assert stamped.in_flight_at_admission == 1  # floored to >= 1
