@@ -122,6 +122,14 @@ class ModelListModel(BaseModel):
     family: str = Field(default="")
     quantization: str = Field(default="")
     base_model: str = Field(default="")
+    source_revision: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{40}$",
+        description=(
+            "Immutable Hugging Face source commit used for this model's "
+            "qualified artifacts, or null when the card follows mutable main."
+        ),
+    )
     capabilities: list[str] = Field(
         default_factory=list,
         description="Coarse catalog capability labels such as text, vision, thinking, or embedding.",
@@ -782,6 +790,7 @@ class AddCustomModelParams(BaseModel):
             "example": {
                 "model_id": "bartowski/my-custom-model-GGUF",
                 "gguf_file": "my-custom-model-Q4_K_M.gguf",
+                "source_revision": "0123456789abcdef0123456789abcdef01234567",
             }
         }
     )
@@ -794,6 +803,14 @@ class AddCustomModelParams(BaseModel):
             "adding a multi-quant repository. Split weights are normalized to "
             "their first shard for backend loading. Omit for non-GGUF "
             "repositories or default selection."
+        ),
+    )
+    source_revision: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{40}$",
+        description=(
+            "Immutable Hugging Face commit to inspect and persist on the custom "
+            "card. Omit to follow the repository's mutable main branch."
         ),
     )
 
@@ -824,6 +841,14 @@ class StoreDownloadRequest(BaseModel):
         description=(
             "Exact repo-relative GGUF file whose shard group the store should "
             "download. Omit to use the repository's default quant selection."
+        ),
+    )
+    source_revision: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{40}$",
+        description=(
+            "Immutable Hugging Face commit to download. Omit to resolve the "
+            "repository's mutable main branch."
         ),
     )
 

@@ -75,6 +75,7 @@ def test_model_list_entry_exposes_declared_and_resolved_capabilities() -> None:
         tasks=[ModelTask.TextGeneration],
         capabilities=["text", "vision", "thinking"],
         family="gemma",
+        source_revision="0123456789abcdef0123456789abcdef01234567",
         reasoning=ReasoningCardConfig(
             supports_toggle=True,
             format=ReasoningFormat.ChannelDelimited,
@@ -88,6 +89,7 @@ def test_model_list_entry_exposes_declared_and_resolved_capabilities() -> None:
     entry = API._model_list_entry(card)
 
     assert entry.reasoning is not None
+    assert entry.source_revision == "0123456789abcdef0123456789abcdef01234567"
     assert entry.reasoning.supports_toggle is True
     assert entry.runtime is not None
     assert entry.runtime.prompt_renderer == "gemma4"

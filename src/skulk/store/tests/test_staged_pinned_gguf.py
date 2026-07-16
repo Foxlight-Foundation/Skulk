@@ -52,8 +52,11 @@ class _RecordingStoreClient:
         self.download_requests: list[tuple[str, str | None]] = []
         self.stage_calls = 0
 
-    async def is_model_available(self, model_id: str) -> bool:
+    async def is_model_available(
+        self, model_id: str, source_revision: str | None = None
+    ) -> bool:
         assert model_id == _MODEL_ID
+        assert source_revision is None
         self.availability_checks += 1
         return True
 
@@ -63,8 +66,10 @@ class _RecordingStoreClient:
         *,
         pinned_gguf: str | None = None,
         extra_pinned_gguf: list[str] | None = None,
+        source_revision: str | None = None,
     ) -> bool:
         assert not extra_pinned_gguf
+        assert source_revision is None
         self.download_requests.append((model_id, pinned_gguf))
         return True
 
@@ -73,8 +78,10 @@ class _RecordingStoreClient:
         model_id: str,
         dest_path: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+        source_revision: str | None = None,
     ) -> Path:
         assert model_id == _MODEL_ID
+        assert source_revision is None
         self.stage_calls += 1
         dest_path.mkdir(parents=True, exist_ok=True)
         (dest_path / "model-IQ3_XXS.gguf").write_bytes(b"selected")

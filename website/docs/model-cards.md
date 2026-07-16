@@ -70,6 +70,8 @@ node in a cluster must run the same Skulk version.
   - optional KV head count for tensor compatibility decisions
 - `gguf_file`
   - for GGUF (llama.cpp) models only: the repo-relative weights file the runner loads (the selected quant's first shard), resolved once at card creation; `null` for safetensors/MLX cards
+- `source_revision`
+  - optional full Hugging Face commit hash for the qualified model artifacts; when set, metadata, store downloads, direct downloads, and worker staging all use that immutable revision instead of the repository's mutable `main` branch
 - `components`
   - for multi-component models (such as a diffusion stack): the per-component weight layout; `null` for a single-weights model
 

@@ -69,7 +69,10 @@ class _RecordingStoreClient:
         self.fail_staging = fail_staging or set()
         self.staged: list[str] = []
 
-    async def is_model_available(self, model_id: str) -> bool:
+    async def is_model_available(
+        self, model_id: str, source_revision: str | None = None
+    ) -> bool:
+        assert source_revision is None
         return model_id in self.available
 
     async def stage_shard(
@@ -77,7 +80,9 @@ class _RecordingStoreClient:
         model_id: str,
         dest_path: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+        source_revision: str | None = None,
     ) -> Path:
+        assert source_revision is None
         if model_id in self.fail_staging:
             raise RuntimeError(f"simulated staging failure for {model_id}")
         self.staged.append(model_id)
@@ -218,9 +223,15 @@ async def test_terminal_progress_waits_for_companions(tmp_path: Path) -> None:
         model_id: str,
         dest_path: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+        source_revision: str | None = None,
     ) -> Path:
         ordering.append(f"staged:{model_id}")
-        return await original_stage(model_id, dest_path, on_progress=on_progress)
+        return await original_stage(
+            model_id,
+            dest_path,
+            on_progress=on_progress,
+            source_revision=source_revision,
+        )
 
     store.stage_shard = _recording_stage
     downloader.on_progress(_on_progress)

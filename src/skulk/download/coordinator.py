@@ -480,10 +480,15 @@ class DownloadCoordinator:
             # clear the stale status and re-download from scratch.
             if isinstance(status, DownloadCompleted) and status.model_directory:
                 model_dir = Path(status.model_directory)
-                if not model_dir.is_dir() or not (model_dir / "config.json").exists():
+                status_revision = status.shard_metadata.model_card.source_revision
+                if (
+                    status_revision != shard.model_card.source_revision
+                    or not model_dir.is_dir()
+                    or not (model_dir / "config.json").exists()
+                ):
                     logger.info(
                         f"DownloadCoordinator: {model_id} was DownloadCompleted but "
-                        f"model directory {status.model_directory} no longer exists, re-downloading"
+                        "its directory or source revision is stale; re-downloading"
                     )
                     del self.download_status[model_id]
                     # Fall through to fresh download below
@@ -509,7 +514,9 @@ class DownloadCoordinator:
         # models with speculative decoding silently unavailable (codex
         # review on the launch-smoke fix). Fall through to the download
         # path instead so the companion gets fetched.
-        found_path = resolve_model_in_path(model_id)
+        found_path = resolve_model_in_path(
+            model_id, shard.model_card.source_revision
+        )
         # In offline mode optional companions can never be fetched and the
         # runner degrades to run-without-speculation, so only load-bearing
         # companions (split vision weights) block the shortcut there —

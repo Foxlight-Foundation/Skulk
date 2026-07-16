@@ -44,6 +44,18 @@ for a vision model, rather than every quant in the repository. This keeps a
 single-quant download to roughly the size of that one file instead of the whole
 repo.
 
+### Qualified cards can pin immutable artifacts
+
+A model card may set `source_revision` to a full Hugging Face commit hash. The
+store records that revision with its registry entry and treats a different
+revision as a different artifact generation. If a card's pin changes, Skulk
+downloads and registers the replacement before removing the previous canonical
+copy. Worker staging also records the revision, so a cached directory from a
+different commit is replaced instead of being silently reused.
+
+Cards without `source_revision` retain the historical behavior and follow the
+repository's mutable `main` branch.
+
 ### The store host advertises a routable address
 
 The store host broadcasts the address other nodes use to reach it. Even when you

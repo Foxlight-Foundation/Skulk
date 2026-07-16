@@ -44,6 +44,8 @@ from skulk.shared.types.worker.downloads import (
 )
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 
+_SOURCE_REVISION_MARKER = ".skulk-source-revision"
+
 
 class HuggingFaceAuthenticationError(Exception):
     """Raised when HuggingFace returns 401/403 for a model download."""
@@ -127,12 +129,42 @@ def map_repo_download_progress_to_download_progress_data(
     )
 
 
-def resolve_model_in_path(model_id: ModelId) -> Path | None:
+def _source_revision_matches(path: Path, source_revision: str | None) -> bool:
+    """Return whether ``path`` is qualified for an optional source revision."""
+
+    if source_revision is None:
+        return True
+    marker = path / _SOURCE_REVISION_MARKER
+    return marker.is_file() and marker.read_text().strip() == source_revision
+
+
+def _write_source_revision(path: Path, source_revision: str | None) -> None:
+    """Persist the immutable revision used by a completed direct download."""
+
+    marker = path / _SOURCE_REVISION_MARKER
+    if source_revision is None:
+        if marker.exists():
+            marker.unlink()
+        return
+    marker.write_text(f"{source_revision}\n")
+
+
+def resolve_model_in_path(
+    model_id: ModelId, source_revision: str | None = None
+) -> Path | None:
     """Search SKULK_MODELS_PATH directories for a pre-existing model.
 
-    Checks each directory for the normalized name (org--model).  A candidate
-    is only returned if ``is_model_directory_complete`` confirms all weight
-    files are present.
+    Checks each directory for the normalized name (org--model). A candidate is
+    only returned if ``is_model_directory_complete`` confirms all weight files
+    are present and, when requested, its revision marker matches.
+
+    Args:
+        model_id: Model repository identifier to resolve.
+        source_revision: Full immutable Hugging Face commit required by the
+            card. When set, the directory must carry a matching revision marker.
+
+    Returns:
+        The first complete matching model directory, or ``None``.
 
     Reads the search path dynamically from ``skulk.shared.constants`` so that
     paths added at runtime (e.g. by the model store) are picked up.
@@ -143,7 +175,11 @@ def resolve_model_in_path(model_id: ModelId) -> Path | None:
     normalized = model_id.normalize()
     for search_dir in search_path:
         candidate = search_dir / normalized
-        if candidate.is_dir() and is_model_directory_complete(candidate):
+        if (
+            candidate.is_dir()
+            and is_model_directory_complete(candidate)
+            and _source_revision_matches(candidate, source_revision)
+        ):
             return candidate
     return None
 
@@ -1140,11 +1176,15 @@ async def download_shard(
     if not skip_download:
         logger.debug(f"Downloading {shard.model_card.model_id=}")
 
-    revision = "main"
+    revision = shard.model_card.source_revision or "main"
     target_dir = await ensure_models_dir() / str(shard.model_card.model_id).replace(
         "/", "--"
     )
     if not skip_download:
+        if target_dir.exists() and not _source_revision_matches(
+            target_dir, shard.model_card.source_revision
+        ):
+            await asyncio.to_thread(shutil.rmtree, target_dir)
         await aios.makedirs(target_dir, exist_ok=True)
 
     if not allow_patterns:
@@ -1352,6 +1392,10 @@ async def download_shard(
     final_repo_progress = calculate_repo_progress(
         shard, shard.model_card.model_id, revision, file_progress, all_start_time
     )
+    if not skip_download:
+        await asyncio.to_thread(
+            _write_source_revision, target_dir, shard.model_card.source_revision
+        )
     await on_progress(shard, final_repo_progress)
     if gguf := next((f for f in filtered_file_list if f.path.endswith(".gguf")), None):
         return target_dir / gguf.path, final_repo_progress

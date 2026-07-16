@@ -739,6 +739,18 @@ class ModelCard(CamelCaseModel):
     (preferring a quant over BF16) so the download fetches only that quant and the
     runner loads deterministically, instead of each layer re-globbing/guessing.
     ``None`` for non-GGUF (safetensors/MLX) cards."""
+    source_revision: Annotated[
+        str,
+        Field(pattern=r"^[0-9a-f]{40}$"),
+    ] | None = None
+    """Immutable Hugging Face commit for this card's model artifacts.
+
+    ``None`` preserves the historical behavior of resolving the repository's
+    mutable ``main`` branch. Curated or operator-authored cards should set this
+    to a full commit hash when the exact artifact has been qualified, so an
+    upstream file replacement cannot silently change what the store and workers
+    execute.
+    """
     capabilities: list[str] = []
     """Free-form capability tags carried for compatibility/auxiliary use; the
     structured ``reasoning``/``modalities``/``tooling`` configs are authoritative
@@ -826,6 +838,7 @@ class ModelCard(CamelCaseModel):
     async def fetch_from_hf(
         model_id: ModelId,
         gguf_file: str | None = None,
+        source_revision: str | None = None,
     ) -> "ModelCard":
         """Build a model card from Hugging Face metadata.
 
@@ -840,6 +853,8 @@ class ModelCard(CamelCaseModel):
         Args:
             model_id: Hugging Face repository identifier.
             gguf_file: Optional exact repo-relative GGUF path to pin.
+            source_revision: Optional immutable Hugging Face commit to inspect
+                and persist on the resulting card.
 
         Returns:
             A custom model card derived from repository metadata.
@@ -854,7 +869,7 @@ class ModelCard(CamelCaseModel):
         # therefore NOT block a safetensors card that could otherwise load from
         # cache: treat any probe failure as "not proven GGUF" and fall through.
         try:
-            gguf_files = gguf_weight_siblings(model_id)
+            gguf_files = gguf_weight_siblings(model_id, source_revision)
         except Exception as exc:  # noqa: BLE001  (best-effort probe, see above)
             logger.debug(f"GGUF probe for {model_id} failed ({exc}); assuming non-GGUF")
             gguf_files = []
@@ -863,6 +878,7 @@ class ModelCard(CamelCaseModel):
                 model_id,
                 gguf_files,
                 gguf_file=gguf_file,
+                source_revision=source_revision,
             )
         if gguf_file is not None:
             raise ValueError(
@@ -870,9 +886,17 @@ class ModelCard(CamelCaseModel):
             )
 
         # TODO: failure if files do not exist
-        config_data = await fetch_config_data(model_id)
+        config_data = (
+            await fetch_config_data(model_id, source_revision)
+            if source_revision is not None
+            else await fetch_config_data(model_id)
+        )
         num_layers = config_data.layer_count
-        mem_size_bytes = await fetch_safetensors_size(model_id)
+        mem_size_bytes = (
+            await fetch_safetensors_size(model_id, source_revision)
+            if source_revision is not None
+            else await fetch_safetensors_size(model_id)
+        )
 
         return ModelCard(
             model_id=ModelId(model_id),
@@ -883,6 +907,7 @@ class ModelCard(CamelCaseModel):
             num_key_value_heads=config_data.num_key_value_heads,
             context_length=config_data.max_position_embeddings or 0,
             tasks=[ModelTask.TextGeneration],
+            source_revision=source_revision,
             trust_remote_code=True,
             is_custom=True,
             vision=config_data.vision,
@@ -894,6 +919,7 @@ class ModelCard(CamelCaseModel):
         gguf_files: "list[tuple[str, int]]",
         *,
         gguf_file: str | None = None,
+        source_revision: str | None = None,
     ) -> "ModelCard":
         """Build a llama.cpp model card for a GGUF repo.
 
@@ -922,7 +948,11 @@ class ModelCard(CamelCaseModel):
         # auth / rate-limit / transient network errors are neither and propagate
         # unchanged instead of being mislabeled as "no config.json".
         try:
-            config_data = await fetch_config_data(model_id)
+            config_data = (
+                await fetch_config_data(model_id, source_revision)
+                if source_revision is not None
+                else await fetch_config_data(model_id)
+            )
         except (FileNotFoundError, ValidationError):
             config_data = None
 
@@ -945,7 +975,13 @@ class ModelCard(CamelCaseModel):
             from skulk.download.download_utils import range_read
 
             async def _fetch(offset: int, length: int) -> bytes:
-                return await range_read(model_id, "main", selected, offset, length)
+                return await range_read(
+                    model_id,
+                    source_revision or "main",
+                    selected,
+                    offset,
+                    length,
+                )
 
             fields = await read_gguf_structural_fields(_fetch)
             n_layers = fields.n_layers
@@ -963,7 +999,7 @@ class ModelCard(CamelCaseModel):
         # general multimodal handler. The mmproj weights are fetched via the
         # projector glob in gguf_allow_patterns, not from config.json.
         vision = getattr(config_data, "vision", None) if config_data is not None else None
-        if vision is None and gguf_repo_has_projector(model_id):
+        if vision is None and gguf_repo_has_projector(model_id, source_revision):
             logger.info(
                 f"GGUF repo {model_id} ships an mmproj projector but no vision "
                 "config; marking vision-capable with the general handler"
@@ -982,6 +1018,7 @@ class ModelCard(CamelCaseModel):
             tasks=[ModelTask.TextGeneration],
             quantization=_gguf_quant_label(selected),
             gguf_file=selected,
+            source_revision=source_revision,
             vision=vision,
             trust_remote_code=False,
             is_custom=True,
@@ -1103,18 +1140,29 @@ class ConfigData(BaseModel):
         return data
 
 
-async def fetch_config_data(model_id: ModelId) -> ConfigData:
-    """Downloads and parses config.json for a model."""
+def _metadata_directory_name(model_id: ModelId, source_revision: str | None) -> str:
+    """Return an isolated metadata cache directory name for one revision."""
+
+    suffix = f"--revision-{source_revision}" if source_revision else ""
+    return f"{model_id.normalize()}{suffix}"
+
+
+async def fetch_config_data(
+    model_id: ModelId, source_revision: str | None = None
+) -> ConfigData:
+    """Download and parse ``config.json`` at an optional immutable revision."""
     from skulk.download.download_utils import (
         download_file_with_retry,
         ensure_models_dir,
     )
 
-    target_dir = (await ensure_models_dir()) / model_id.normalize()
+    target_dir = (await ensure_models_dir()) / _metadata_directory_name(
+        model_id, source_revision
+    )
     await aios.makedirs(target_dir, exist_ok=True)
     config_path = await download_file_with_retry(
         model_id,
-        "main",
+        source_revision or "main",
         "config.json",
         target_dir,
         lambda curr_bytes, total_bytes, is_renamed: logger.debug(
@@ -1127,19 +1175,23 @@ async def fetch_config_data(model_id: ModelId) -> ConfigData:
         )
 
 
-async def fetch_safetensors_size(model_id: ModelId) -> Memory:
-    """Gets model size from safetensors index or falls back to HF API."""
+async def fetch_safetensors_size(
+    model_id: ModelId, source_revision: str | None = None
+) -> Memory:
+    """Get model size at an optional immutable revision."""
     from skulk.download.download_utils import (
         download_file_with_retry,
         ensure_models_dir,
     )
     from skulk.shared.types.worker.downloads import ModelSafetensorsIndex
 
-    target_dir = (await ensure_models_dir()) / model_id.normalize()
+    target_dir = (await ensure_models_dir()) / _metadata_directory_name(
+        model_id, source_revision
+    )
     await aios.makedirs(target_dir, exist_ok=True)
     index_path = await download_file_with_retry(
         model_id,
-        "main",
+        source_revision or "main",
         "model.safetensors.index.json",
         target_dir,
         lambda curr_bytes, total_bytes, is_renamed: logger.debug(
@@ -1153,13 +1205,19 @@ async def fetch_safetensors_size(model_id: ModelId) -> Memory:
     if metadata is not None:
         return Memory.from_bytes(metadata.total_size)
 
-    info = model_info(model_id)
+    info = (
+        model_info(model_id, revision=source_revision)
+        if source_revision is not None
+        else model_info(model_id)
+    )
     if info.safetensors is None:
         raise ValueError(f"No safetensors info found for {model_id}")
     return Memory.from_bytes(info.safetensors.total)
 
 
-def gguf_repo_has_projector(model_id: ModelId) -> bool:
+def gguf_repo_has_projector(
+    model_id: ModelId, source_revision: str | None = None
+) -> bool:
     """Whether a GGUF repo ships a multimodal projector (``*mmproj*.gguf``).
 
     A vision GGUF (LLaVA/Qwen-VL style) carries its projector as a separate
@@ -1169,7 +1227,13 @@ def gguf_repo_has_projector(model_id: ModelId) -> bool:
     ``False`` if the HF probe fails, so a transient error never misclassifies.
     """
     try:
-        info = model_info(model_id, files_metadata=True)
+        info = (
+            model_info(
+                model_id, revision=source_revision, files_metadata=True
+            )
+            if source_revision is not None
+            else model_info(model_id, files_metadata=True)
+        )
     except Exception:  # noqa: BLE001 - best-effort probe, mirror gguf_weight_siblings
         return False
     siblings = info.siblings or []
@@ -1179,14 +1243,20 @@ def gguf_repo_has_projector(model_id: ModelId) -> bool:
     )
 
 
-def gguf_weight_siblings(model_id: ModelId) -> "list[tuple[str, int]]":
+def gguf_weight_siblings(
+    model_id: ModelId, source_revision: str | None = None
+) -> "list[tuple[str, int]]":
     """List a repo's GGUF weight files (filename, size) via the HF API.
 
     Excludes multimodal projector files (``mmproj*``), which are not the LM
     weights. Returns an empty list for a non-GGUF repo, so callers use this as a
     "is this a GGUF model?" probe. Sizes are bytes (0 when HF omits the size).
     """
-    info = model_info(model_id, files_metadata=True)
+    info = (
+        model_info(model_id, revision=source_revision, files_metadata=True)
+        if source_revision is not None
+        else model_info(model_id, files_metadata=True)
+    )
     siblings = info.siblings or []
     return [
         (sibling.rfilename, sibling.size or 0)

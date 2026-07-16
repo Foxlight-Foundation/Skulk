@@ -73,7 +73,7 @@ from collections.abc import Awaitable
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, AsyncIterator, Callable, TypeVar, final
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import aiofiles
 import aiofiles.os as aios
@@ -98,6 +98,7 @@ _STORE_HTTP_RETRY_ATTEMPTS = 12
 _STORE_HTTP_RETRY_BASE_SECONDS = 0.5
 _STORE_HTTP_RETRY_MAX_DELAY_SECONDS = 8.0
 _T = TypeVar("_T")
+_SOURCE_REVISION_MARKER = ".skulk-source-revision"
 
 
 class ModelNotInStoreError(Exception):
@@ -118,6 +119,37 @@ def _sanitize_model_id(model_id: str) -> str:
     so that the staging layout is consistent with what users already expect.
     """
     return str(model_id).replace("/", "--")
+
+
+def _with_source_revision(url: str, source_revision: str | None) -> str:
+    """Attach an immutable source revision to a store read request."""
+
+    if source_revision is None:
+        return url
+    return f"{url}?{urlencode({'source_revision': source_revision})}"
+
+
+def _staged_source_revision_matches(
+    staged_path: Path, source_revision: str | None
+) -> bool:
+    """Return whether a staged directory represents the requested revision."""
+
+    marker = staged_path / _SOURCE_REVISION_MARKER
+    actual_revision = marker.read_text().strip() if marker.is_file() else None
+    return actual_revision == source_revision
+
+
+def _write_staged_source_revision(
+    staged_path: Path, source_revision: str | None
+) -> None:
+    """Persist or clear the source-revision marker after successful staging."""
+
+    marker = staged_path / _SOURCE_REVISION_MARKER
+    if source_revision is None:
+        if marker.exists():
+            marker.unlink()
+        return
+    marker.write_text(f"{source_revision}\n")
 
 
 def _staging_dir(node_cache_path: str, model_id: str) -> Path:
@@ -377,7 +409,9 @@ class ModelStoreClient:
             logger.debug(f"ModelStoreClient: health_check failed: {exc}")
             return None
 
-    async def is_model_available(self, model_id: str) -> bool:
+    async def is_model_available(
+        self, model_id: str, source_revision: str | None = None
+    ) -> bool:
         """Return ``True`` if *model_id* is available in the store.
 
         Uses ``GET /models/{model_id}/files`` — a 200 response means the
@@ -386,11 +420,16 @@ class ModelStoreClient:
 
         Args:
             model_id: HuggingFace-style model ID.
+            source_revision: Full immutable Hugging Face commit required by the
+                caller, or ``None`` for the store's mutable-main entry.
         """
-        url = _make_store_url(
-            self._store_host,
-            self._store_port,
-            f"/models/{quote(model_id, safe='')}/files",
+        url = _with_source_revision(
+            _make_store_url(
+                self._store_host,
+                self._store_port,
+                f"/models/{quote(model_id, safe='')}/files",
+            ),
+            source_revision,
         )
 
         async def _request() -> bool:
@@ -414,6 +453,7 @@ class ModelStoreClient:
         model_id: str,
         dest_path: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+        source_revision: str | None = None,
     ) -> Path:
         """Copy all model files for *model_id* into *dest_path*.
 
@@ -426,6 +466,8 @@ class ModelStoreClient:
                 does not exist.
             on_progress: Optional async callback ``(bytes_done, total_bytes)``
                 called after each file is staged.
+            source_revision: Full immutable Hugging Face commit to stage, or
+                ``None`` for the mutable-main entry.
 
         Returns:
             *dest_path* (unchanged) after all files have been staged.
@@ -434,11 +476,24 @@ class ModelStoreClient:
             :class:`ModelNotInStoreError`: If the model is not found in the
                 store (should only happen if the store index is stale).
         """
+        if dest_path.exists() and not _staged_source_revision_matches(
+            dest_path, source_revision
+        ):
+            await asyncio.to_thread(shutil.rmtree, dest_path)
         await aios.makedirs(dest_path, exist_ok=True)
 
         if self._local_store_path is not None:
-            return await self._stage_local(model_id, dest_path, on_progress)
-        return await self._stage_http(model_id, dest_path, on_progress)
+            staged_path = await self._stage_local(
+                model_id, dest_path, on_progress, source_revision
+            )
+        else:
+            staged_path = await self._stage_http(
+                model_id, dest_path, on_progress, source_revision
+            )
+        await asyncio.to_thread(
+            _write_staged_source_revision, staged_path, source_revision
+        )
+        return staged_path
 
     async def evict_shard(self, model_id: str, cache_path: Path) -> None:
         """Remove staged files for *model_id* from *cache_path*.
@@ -509,7 +564,33 @@ class ModelStoreClient:
             logger.debug(f"ModelStoreClient: fetch_registry failed: {exc}")
             return []
 
-    async def _fetch_model_total_bytes(self, model_id: str) -> int:
+    async def local_model_path(
+        self, model_id: str, source_revision: str | None
+    ) -> Path | None:
+        """Resolve a local canonical store path for one source revision."""
+
+        if self._local_store_path is None:
+            return None
+        entry = next(
+            (
+                item
+                for item in await self.fetch_registry()
+                if item.get("model_id") == model_id
+                and item.get("source_revision") == source_revision
+            ),
+            None,
+        )
+        store_path = entry.get("store_path") if isinstance(entry, dict) else None
+        if not isinstance(store_path, str):
+            return None
+        candidate = (self._local_store_path / store_path).resolve()
+        if not candidate.is_relative_to(self._local_store_path.resolve()):
+            raise RuntimeError(f"Store registry path escaped its root for {model_id}")
+        return candidate if candidate.is_dir() else None
+
+    async def _fetch_model_total_bytes(
+        self, model_id: str, source_revision: str | None = None
+    ) -> int:
         """Return the canonical registered byte total for one stored model."""
 
         url = _make_store_url(self._store_host, self._store_port, "/registry")
@@ -531,6 +612,11 @@ class ModelStoreClient:
                 for entry in data:
                     if not isinstance(entry, dict) or entry.get("model_id") != model_id:
                         continue
+                    if entry.get("source_revision") != source_revision:
+                        raise ModelNotInStoreError(
+                            f"Model {model_id} is not registered at source revision "
+                            f"{source_revision or 'main'}"
+                        )
                     total_bytes = entry.get("total_bytes")
                     if (
                         not isinstance(total_bytes, int)
@@ -573,8 +659,9 @@ class ModelStoreClient:
         self,
         model_id: str,
         gguf_file: str | None = None,
+        source_revision: str | None = None,
     ) -> dict[str, object]:
-        """Request a non-blocking store download, optionally pinning a GGUF."""
+        """Request a store download with optional file and revision pins."""
         url = _make_store_url(
             self._store_host,
             self._store_port,
@@ -582,11 +669,12 @@ class ModelStoreClient:
         )
         try:
             async with create_http_session(timeout_profile="short") as session:
-                request = (
-                    session.post(url, json={"gguf_file": gguf_file})
-                    if gguf_file is not None
-                    else session.post(url)
-                )
+                body: dict[str, object] = {}
+                if gguf_file is not None:
+                    body["gguf_file"] = gguf_file
+                if source_revision is not None:
+                    body["source_revision"] = source_revision
+                request = session.post(url, json=body) if body else session.post(url)
                 async with request as resp:
                     if resp.status not in (200, 201):
                         return {"status": "error", "error": f"HTTP {resp.status}"}
@@ -642,6 +730,7 @@ class ModelStoreClient:
         poll_interval: float = 5.0,
         pinned_gguf: str | None = None,
         extra_pinned_gguf: list[str] | None = None,
+        source_revision: str | None = None,
     ) -> bool:
         """Request the store host download a model from HuggingFace, then wait.
 
@@ -665,6 +754,8 @@ class ModelStoreClient:
                 bundled with the base) to co-fetch with the base quant, sent in
                 the POST body. ``None`` when the card declares no same-repo
                 companion. An older store host ignores the unknown field.
+            source_revision: Immutable Hugging Face commit required by the card,
+                or ``None`` to follow mutable ``main``.
 
         Returns:
             ``True`` if download completed successfully.
@@ -688,7 +779,11 @@ class ModelStoreClient:
             download_body["gguf_file"] = pinned_gguf
         if extra_pinned_gguf:
             download_body["extra_gguf_files"] = extra_pinned_gguf
-        post_kwargs: dict[str, object] = {"json": download_body} if download_body else {}
+        if source_revision:
+            download_body["source_revision"] = source_revision
+        post_kwargs: dict[str, object] = (
+            {"json": download_body} if download_body else {}
+        )
         async def _post_download_request() -> bool:
             async with (
                 create_http_session(timeout_profile="short") as session,
@@ -786,10 +881,20 @@ class ModelStoreClient:
         model_id: str,
         dest_path: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None,
+        source_revision: str | None = None,
     ) -> Path:
         """Stage by local file copy (store host only)."""
         assert self._local_store_path is not None
-        source_dir = self._local_store_path / _sanitize_model_id(model_id)
+        source_dir = await self.local_model_path(model_id, source_revision)
+        if source_dir is None and source_revision is None:
+            # Legacy unpinned stores always used the normalized directory and
+            # may be staged before the local HTTP registry is reachable.
+            source_dir = self._local_store_path / _sanitize_model_id(model_id)
+        if source_dir is None:
+            raise ModelNotInStoreError(
+                f"Model {model_id} is not registered at source revision "
+                f"{source_revision or 'main'}"
+            )
         if not source_dir.exists():
             raise ModelNotInStoreError(
                 f"Model {model_id} not found in local store at {source_dir}"
@@ -825,12 +930,17 @@ class ModelStoreClient:
     # HTTP staging path (worker → store host)
     # ------------------------------------------------------------------
 
-    async def _fetch_file_list(self, model_id: str) -> list[str]:
+    async def _fetch_file_list(
+        self, model_id: str, source_revision: str | None = None
+    ) -> list[str]:
         """Fetch the list of files for *model_id* from the store server."""
-        url = _make_store_url(
-            self._store_host,
-            self._store_port,
-            f"/models/{quote(model_id, safe='')}/files",
+        url = _with_source_revision(
+            _make_store_url(
+                self._store_host,
+                self._store_port,
+                f"/models/{quote(model_id, safe='')}/files",
+            ),
+            source_revision,
         )
 
         async def _request() -> list[str]:
@@ -864,6 +974,7 @@ class ModelStoreClient:
         on_progress: Callable[[int, int], Awaitable[None]] | None,
         total_bytes_offset: int,
         grand_total: int,
+        source_revision: str | None = None,
     ) -> int:
         """Download a single file from the store to ``dest_path / file_path``.
 
@@ -894,10 +1005,13 @@ class ModelStoreClient:
                     f"ModelStoreClient: resuming {file_path} from byte {resume_from:,}"
                 )
 
-            url = _make_store_url(
-                self._store_host,
-                self._store_port,
-                f"/models/{quote(model_id, safe='')}/{file_path}",
+            url = _with_source_revision(
+                _make_store_url(
+                    self._store_host,
+                    self._store_port,
+                    f"/models/{quote(model_id, safe='')}/{file_path}",
+                ),
+                source_revision,
             )
             timeout = aiohttp.ClientTimeout(
                 total=3600,
@@ -953,11 +1067,12 @@ class ModelStoreClient:
         model_id: str,
         dest_path: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None,
+        source_revision: str | None = None,
     ) -> Path:
         """Stage all files for *model_id* over HTTP."""
         file_list, grand_total = await asyncio.gather(
-            self._fetch_file_list(model_id),
-            self._fetch_model_total_bytes(model_id),
+            self._fetch_file_list(model_id, source_revision),
+            self._fetch_model_total_bytes(model_id, source_revision),
         )
 
         # Compute progress baseline from already-staged files
@@ -979,6 +1094,7 @@ class ModelStoreClient:
                 on_progress,
                 total_bytes_offset=bytes_done,
                 grand_total=grand_total,
+                source_revision=source_revision,
             )
             bytes_done += file_bytes
 
@@ -1147,15 +1263,18 @@ class ModelStoreDownloader(ShardDownloader):
             # path (i.e. this is the store host), serve directly from the
             # canonical store directory instead of re-downloading from HF.
             if self._store_client.local_store_path is not None:
-                direct_path = self._store_client.local_store_path / _sanitize_model_id(
-                    model_id
+                direct_path = await self._store_client.local_model_path(
+                    model_id, shard.model_card.source_revision
                 )
                 if (
-                    direct_path.exists()
+                    direct_path is not None
                     and _staged_directory_looks_complete(direct_path)
                     and not _staged_pinned_gguf_missing(shard, direct_path)
                     and not _staged_vision_projector_missing(shard, direct_path)
                     and not _staged_same_repo_draft_missing(shard, direct_path)
+                    and await self._store_client.is_model_available(
+                        model_id, shard.model_card.source_revision
+                    )
                 ):
                     logger.info(
                         f"ModelStoreDownloader: staging disabled — loading {model_id} directly from store at {direct_path}"
@@ -1178,6 +1297,9 @@ class ModelStoreDownloader(ShardDownloader):
             and not _staged_pinned_gguf_missing(shard, dest_path)
             and not _staged_vision_projector_missing(shard, dest_path)
             and not _staged_same_repo_draft_missing(shard, dest_path)
+            and _staged_source_revision_matches(
+                dest_path, shard.model_card.source_revision
+            )
         ):
             logger.info(
                 f"ModelStoreDownloader: {model_id} already staged at {dest_path} — skipping availability probe"
@@ -1185,11 +1307,17 @@ class ModelStoreDownloader(ShardDownloader):
             touch_last_used(dest_path)
             return dest_path
 
-        available = await self._store_client.is_model_available(model_id)
+        available = await self._store_client.is_model_available(
+            model_id, shard.model_card.source_revision
+        )
         same_repo_drafts = _same_repo_draft_files(shard.model_card)
 
         if available:
-            if shard.model_card.gguf_file or same_repo_drafts:
+            if (
+                shard.model_card.gguf_file
+                or same_repo_drafts
+                or shard.model_card.source_revision
+            ):
                 # A canonical entry may hold a different GGUF quant or predate a
                 # same-repo draft declaration. Ensure the store has every file
                 # selected by this card before staging; the request is idempotent
@@ -1199,6 +1327,7 @@ class ModelStoreDownloader(ShardDownloader):
                     model_id,
                     pinned_gguf=shard.model_card.gguf_file,
                     extra_pinned_gguf=same_repo_drafts,
+                    source_revision=shard.model_card.source_revision,
                 )
             logger.info(
                 f"ModelStoreDownloader: staging {model_id} from store → {dest_path}"
@@ -1213,6 +1342,7 @@ class ModelStoreDownloader(ShardDownloader):
                         downloaded_bytes=downloaded,
                         total_bytes=total,
                     ),
+                    source_revision=shard.model_card.source_revision,
                 )
                 touch_last_used(path)
                 return path
@@ -1244,6 +1374,7 @@ class ModelStoreDownloader(ShardDownloader):
                     # draft GGUF bundled with the base so it is co-fetched.
                     pinned_gguf=shard.model_card.gguf_file,
                     extra_pinned_gguf=same_repo_drafts,
+                    source_revision=shard.model_card.source_revision,
                 )
             except (RuntimeError, TimeoutError) as exc:
                 raise ModelNotInStoreError(
@@ -1259,6 +1390,7 @@ class ModelStoreDownloader(ShardDownloader):
                     downloaded_bytes=downloaded,
                     total_bytes=total,
                 ),
+                source_revision=shard.model_card.source_revision,
             )
             touch_last_used(path)
             return path
@@ -1305,7 +1437,7 @@ class ModelStoreDownloader(ShardDownloader):
         downloaded_memory = Memory.from_bytes(downloaded_bytes)
         progress = RepoDownloadProgress(
             repo_id=str(shard.model_card.model_id),
-            repo_revision="store",
+            repo_revision=shard.model_card.source_revision or "store-main",
             shard=shard,
             completed_files=1 if status == "complete" else 0,
             total_files=1,

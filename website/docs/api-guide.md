@@ -784,7 +784,8 @@ Behavior note:
 ```json
 {
   "model_id": "satgeze/Hy3-1M-GGUF",
-  "gguf_file": "hy3-1M-MTP-IQ3_XXS.gguf"
+  "gguf_file": "hy3-1M-MTP-IQ3_XXS.gguf",
+  "source_revision": "0123456789abcdef0123456789abcdef01234567"
 }
 ```
 
@@ -793,7 +794,9 @@ Fetches metadata and adds a custom model card to the cluster catalog. The
 an exact repo-relative GGUF weight path and the card pins that quant instead of
 using Skulk's default GGUF preference. If the selected quant is split, Skulk
 stores its first shard as the backend entrypoint while downloading the full
-shard group.
+shard group. `source_revision` is also optional; when supplied it must be a full
+40-character Hugging Face commit hash, and both card metadata and subsequent
+artifact downloads are pinned to that immutable revision.
 
 ### Per-node storage breakdown
 
@@ -965,12 +968,23 @@ Use this to inspect in-progress shared-store download activity.
 
 Use this when you want the store host to fetch and register a model.
 
-Optional JSON body `{"gguf_file": "<repo-relative path>"}` pins which GGUF quant
-the store fetches for a multi-quant GGUF repo (it downloads that file's shard
-group plus `config.json`). Omit the body to use the default quant preference.
-A pin naming a file not present in the repo falls back to the default at the
-store protocol layer; the `/models/add` card-building endpoint validates exact
-pins before requesting a download.
+The optional JSON body accepts `gguf_file` and `source_revision`:
+
+```json
+{
+  "gguf_file": "<repo-relative path>",
+  "source_revision": "0123456789abcdef0123456789abcdef01234567"
+}
+```
+
+`gguf_file` pins which quant the store fetches for a multi-quant GGUF repo (that
+file's shard group plus `config.json`). `source_revision` pins all repository
+reads to a full immutable Hugging Face commit. When either value is omitted and
+a curated model card declares it, the endpoint uses the card value. Otherwise,
+omitting `source_revision` follows mutable `main`. A GGUF pin naming a file not
+present in the selected revision falls back to the default at the store protocol
+layer; the `/models/add` card-building endpoint validates exact pins before
+requesting a download.
 
 ### Store download status
 
@@ -1006,7 +1020,8 @@ Use this for workflows such as model optimization or alternate artifact generati
 **GET** `/v1/models`
 
 Returns the known model catalog, including downloaded models and catalog-backed
-entries.
+entries. Each item includes nullable `source_revision` metadata identifying the
+qualified Hugging Face commit when its card pins immutable artifacts.
 
 Important fields:
 

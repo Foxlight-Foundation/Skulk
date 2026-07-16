@@ -44,7 +44,10 @@ class _FakeInnerDownloader(ShardDownloader):
 
 
 class _FakeStoreClient:
-    async def is_model_available(self, model_id: str) -> bool:
+    async def is_model_available(
+        self, model_id: str, source_revision: str | None = None
+    ) -> bool:
+        assert source_revision is None
         assert model_id == "mlx-community/gemma-4-26b-a4b-it-4bit"
         return True
 
@@ -53,7 +56,9 @@ class _FakeStoreClient:
         model_id: str,
         dest_path: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+        source_revision: str | None = None,
     ) -> Path:
+        assert source_revision is None
         assert model_id == "mlx-community/gemma-4-26b-a4b-it-4bit"
         assert on_progress is not None
         await on_progress(512, 2048)
@@ -151,10 +156,16 @@ async def test_http_stage_uses_registered_total_for_resumed_progress(
         "weights-2.safetensors": 450,
     }
 
-    async def fetch_file_list(_model_id: str) -> list[str]:
+    async def fetch_file_list(
+        _model_id: str, source_revision: str | None
+    ) -> list[str]:
+        assert source_revision is None
         return ["config.json", *download_sizes]
 
-    async def fetch_model_total_bytes(_model_id: str) -> int:
+    async def fetch_model_total_bytes(
+        _model_id: str, source_revision: str | None
+    ) -> int:
+        assert source_revision is None
         return 1_000
 
     async def download_store_file(
@@ -164,7 +175,9 @@ async def test_http_stage_uses_registered_total_for_resumed_progress(
         on_progress: Callable[[int, int], Awaitable[None]] | None,
         total_bytes_offset: int,
         grand_total: int,
+        source_revision: str | None,
     ) -> int:
+        assert source_revision is None
         size = download_sizes[file_path]
         assert on_progress is not None
         await on_progress(total_bytes_offset + size, grand_total)
@@ -181,6 +194,7 @@ async def test_http_stage_uses_registered_total_for_resumed_progress(
         model_id,
         dest_path,
         record_progress,
+        None,
     )
 
     assert path == dest_path
