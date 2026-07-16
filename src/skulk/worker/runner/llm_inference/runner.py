@@ -8,6 +8,7 @@ import mlx.core as mx
 from anyio import WouldBlock
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
+from skulk.api.types import GenerationStats
 from skulk.shared.models.capabilities import is_gemma4_family
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -654,6 +655,39 @@ class Runner:
 
         return ExitCode.AllTasksComplete
 
+    def _stamp_stats(
+        self, stats: GenerationStats | None, task_id: TaskId
+    ) -> GenerationStats | None:
+        """Stamp runner ground truth onto a generation's terminal stats (#596).
+
+        The in-process MLX runner batches concurrent requests on the batch
+        generator, so it must report its own serving node, backend, batching mode,
+        and in-flight-at-admission count exactly like the served runners do. Without
+        it the API's performance-envelope tap falls back to guessing and classifies
+        every MLX instance as serial (``batches=False``), which biases the
+        throughput-vs-concurrency knee for the batch path. ``None`` passes through
+        unchanged (only terminal chunks carry stats).
+        """
+        if stats is None:
+            return None
+        generator = self.generator
+        batches = (
+            generator.batches if isinstance(generator, InferenceGenerator) else False
+        )
+        in_flight = (
+            generator.admission_concurrency(task_id)
+            if isinstance(generator, InferenceGenerator)
+            else 1
+        )
+        return stats.model_copy(
+            update={
+                "serving_node": str(self.bound_instance.bound_node_id),
+                "serving_backend": self.shard_metadata.resolved_backend,
+                "in_flight_at_admission": max(1, in_flight),
+                "serving_batches": batches,
+            }
+        )
+
     def send_response(
         self,
         response: GenerationResponse | ToolCallResponse,
@@ -695,7 +729,7 @@ class Runner:
                                 token_id=response.token,
                                 usage=response.usage,
                                 finish_reason=response.finish_reason,
-                                stats=response.stats,
+                                stats=self._stamp_stats(response.stats, task.task_id),
                                 logprob=response.logprob,
                                 top_logprobs=response.top_logprobs,
                                 is_thinking=response.is_thinking,
@@ -720,7 +754,7 @@ class Runner:
                                 tool_calls=response.tool_calls,
                                 model=self.model_id,
                                 usage=response.usage,
-                                stats=response.stats,
+                                stats=self._stamp_stats(response.stats, task.task_id),
                             ),
                         )
                     )
