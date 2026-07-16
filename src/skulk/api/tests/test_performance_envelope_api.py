@@ -100,11 +100,14 @@ def test_endpoint_reflects_registry() -> None:
 
 async def test_tap_records_on_completion() -> None:
     api = _build_api()
-    # Stub context resolution so the test needs no live instance/telemetry.
+    # Stub context resolution so the test needs no live instance/telemetry. Use
+    # an in-process engine backend (mlx-metal): the fallback path records those,
+    # and only those (a served backend reaching the fallback is unstamped and
+    # skipped, so it must not appear here).
     object.__setattr__(
         api,
         "_resolve_envelope_context",
-        lambda _model: ("nvidia-a100-80gb", "vllm-cuda", "4bit"),
+        lambda _model: ("apple-metal-24gb", "mlx-metal", "4bit"),
     )
     stream = _one_stream(
         [_chunk("hi", None, None), _chunk("", "stop", 42.0)]
@@ -213,6 +216,46 @@ async def test_tap_runner_reported_unblinds_replicas() -> None:
     assert env.backend == "llama_server-vulkan"
     assert env.batches is False
     assert env.buckets[0].concurrency == 1
+
+
+def test_envelope_record_args_skips_unstamped_served_backend() -> None:
+    api = _build_api()
+    # A served generation that errors before stamping (ErrorChunk carries no
+    # stats) reaches the fallback with a served backend. Recording batches=False
+    # there would flip the per-key batching classification, so it must skip.
+    served = api._envelope_record_args(
+        model_id=ModelId("m"),
+        fallback_context=("hw", "vllm-cuda", "4bit"),
+        fallback_concurrency=2,
+        serving_node=None,
+        serving_backend=None,
+        in_flight_at_admission=None,
+        serving_batches=None,
+    )
+    assert served is None
+
+    served_llama = api._envelope_record_args(
+        model_id=ModelId("m"),
+        fallback_context=("hw", "llama_server-vulkan", "Q4_K_M"),
+        fallback_concurrency=1,
+        serving_node=None,
+        serving_backend=None,
+        in_flight_at_admission=None,
+        serving_batches=None,
+    )
+    assert served_llama is None
+
+    # An in-process serial engine still records via the fallback (batches False).
+    in_process = api._envelope_record_args(
+        model_id=ModelId("m"),
+        fallback_context=("hw", "mlx-metal", "4bit"),
+        fallback_concurrency=3,
+        serving_node=None,
+        serving_backend=None,
+        in_flight_at_admission=None,
+        serving_batches=None,
+    )
+    assert in_process == ("hw", "mlx-metal", "4bit", 3, False)
 
 
 async def test_tap_runner_reported_skips_when_node_hardware_unknown() -> None:

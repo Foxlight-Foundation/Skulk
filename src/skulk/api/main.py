@@ -262,6 +262,7 @@ from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.routing.trace_data import TraceDataPacket
 from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.apply import apply
+from skulk.shared.backends import engine_of
 from skulk.shared.constants import (
     DASHBOARD_DIR,
     SKULK_CACHE_HOME,
@@ -9978,10 +9979,18 @@ class API:
         if fallback_context is None:
             return None
         hardware, backend, quantization = fallback_context
-        # The in-process serial engines queue concurrent requests; only a batching
-        # backend scales aggregate throughput with concurrency. None reach this
-        # fallback path today (served engines stamp their node), so False is
-        # correct and conservative.
+        # The fallback path is for the in-process serial engines (MLX, in-process
+        # llama.cpp): they never stamp and genuinely serve one request at a time,
+        # so batches=False is correct. A SERVED backend (llama_server, vLLM)
+        # reaching here means the stamp was MISSING -- most commonly a request
+        # that errored before terminal stats (an ErrorChunk carries no stats). We
+        # cannot know a served engine's batching mode without the stamp, and
+        # recording batches=False for it would flip the per-key batching
+        # classification (the registry stores it once per key), corrupting the
+        # knee for previously-stamped successful batching samples until the next
+        # success re-stamps it. Skip rather than corrupt.
+        if engine_of(backend) in ("llama_server", "vllm"):
+            return None
         return (hardware, backend, quantization, fallback_concurrency, False)
 
     def _tap_performance_envelope(
