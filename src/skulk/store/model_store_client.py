@@ -139,7 +139,10 @@ def _staged_source_revision_matches(
     """Return whether a staged directory represents the requested revision."""
 
     marker = staged_path / _SOURCE_REVISION_MARKER
-    actual_revision = marker.read_text().strip() if marker.is_file() else None
+    try:
+        actual_revision = marker.read_text().strip() if marker.is_file() else None
+    except (OSError, UnicodeError):
+        return False
     return actual_revision == source_revision
 
 
@@ -150,10 +153,11 @@ def _write_staged_source_revision(
 
     marker = staged_path / _SOURCE_REVISION_MARKER
     if source_revision is None:
-        if marker.exists():
-            marker.unlink()
+        marker.unlink(missing_ok=True)
         return
-    marker.write_text(f"{source_revision}\n")
+    temporary_marker = marker.with_suffix(f"{marker.suffix}.partial")
+    temporary_marker.write_text(f"{source_revision}\n")
+    temporary_marker.replace(marker)
 
 
 def _staging_dir(node_cache_path: str, model_id: str) -> Path:

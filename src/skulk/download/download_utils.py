@@ -134,19 +134,29 @@ def _source_revision_matches(path: Path, source_revision: str | None) -> bool:
     """Return whether ``path`` is qualified for an optional source revision."""
 
     marker = path / _SOURCE_REVISION_MARKER
-    actual_revision = marker.read_text().strip() if marker.is_file() else None
+    try:
+        actual_revision = marker.read_text().strip() if marker.is_file() else None
+    except (OSError, UnicodeError):
+        return False
     return actual_revision == source_revision
 
 
-def _write_source_revision(path: Path, source_revision: str | None) -> None:
-    """Persist the immutable revision used by a completed direct download."""
+def write_source_revision_marker(path: Path, source_revision: str | None) -> None:
+    """Persist the immutable revision used by a completed model download.
+
+    Args:
+        path: Completed model directory that owns the marker.
+        source_revision: Full immutable Hugging Face commit, or ``None`` to
+            clear a marker for a mutable-main artifact.
+    """
 
     marker = path / _SOURCE_REVISION_MARKER
     if source_revision is None:
-        if marker.exists():
-            marker.unlink()
+        marker.unlink(missing_ok=True)
         return
-    marker.write_text(f"{source_revision}\n")
+    temporary_marker = marker.with_suffix(f"{marker.suffix}.partial")
+    temporary_marker.write_text(f"{source_revision}\n")
+    temporary_marker.replace(marker)
 
 
 def _replacement_model_dir(target_dir: Path, source_revision: str | None) -> Path:
@@ -197,9 +207,10 @@ def resolve_model_in_path(
 ) -> Path | None:
     """Search SKULK_MODELS_PATH directories for a pre-existing model.
 
-    Checks each directory for the normalized name (org--model). A candidate is
-    only returned if ``is_model_directory_complete`` confirms all weight files
-    are present and, when requested, its revision marker matches.
+    Checks each directory for the normalized name (org--model) and, for pinned
+    artifacts, the store's revision-qualified sibling name. A candidate is only
+    returned if ``is_model_directory_complete`` confirms all weight files are
+    present and its revision marker matches.
 
     Args:
         model_id: Model repository identifier to resolve.
@@ -216,14 +227,18 @@ def resolve_model_in_path(
 
     search_path: tuple[Path, ...] = _constants.SKULK_MODELS_PATH or ()
     normalized = model_id.normalize()
+    candidate_names = [normalized]
+    if source_revision is not None:
+        candidate_names.append(f"{normalized}--revision-{source_revision}")
     for search_dir in search_path:
-        candidate = search_dir / normalized
-        if (
-            candidate.is_dir()
-            and is_model_directory_complete(candidate)
-            and _source_revision_matches(candidate, source_revision)
-        ):
-            return candidate
+        for candidate_name in candidate_names:
+            candidate = search_dir / candidate_name
+            if (
+                candidate.is_dir()
+                and is_model_directory_complete(candidate)
+                and _source_revision_matches(candidate, source_revision)
+            ):
+                return candidate
     return None
 
 
@@ -1491,7 +1506,9 @@ async def download_shard(
     )
     if not skip_download:
         await asyncio.to_thread(
-            _write_source_revision, target_dir, shard.model_card.source_revision
+            write_source_revision_marker,
+            target_dir,
+            shard.model_card.source_revision,
         )
         if replacing_revision:
             await asyncio.to_thread(

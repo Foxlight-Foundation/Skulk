@@ -7,11 +7,68 @@ from pathlib import Path
 
 import pytest
 
-from skulk.store.model_store import ModelStore
+from skulk.download import download_utils
+from skulk.shared.models.model_cards import ModelId
+from skulk.shared.types.worker.downloads import FileListEntry
+from skulk.store.model_store import ModelStore, StoreDownloadStatus
 from skulk.store.model_store_client import ModelStoreClient
 
 _OLD_REVISION = "0" * 40
 _NEW_REVISION = "1" * 40
+
+
+async def test_pinned_store_download_writes_revision_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A qualified store entry must remain discoverable by generic runners."""
+
+    store = ModelStore(tmp_path)
+    model_id = "org/model"
+    store._active_downloads[model_id] = StoreDownloadStatus(
+        model_id=model_id,
+        source_revision=_NEW_REVISION,
+    )
+
+    async def file_list(
+        _model_id: ModelId,
+        revision: str,
+        recursive: bool,
+    ) -> list[FileListEntry]:
+        assert revision == _NEW_REVISION
+        assert recursive is True
+        return [FileListEntry(type="file", path="model.gguf", size=7)]
+
+    async def download_file(
+        _model_id: ModelId,
+        revision: str,
+        path: str,
+        target_dir: Path,
+        on_progress: Callable[[int, int, bool], None],
+        on_connection_lost: Callable[[], None] = lambda: None,
+        skip_internet: bool = False,
+    ) -> Path:
+        del on_connection_lost, skip_internet
+        assert revision == _NEW_REVISION
+        target = target_dir / path
+        target.write_bytes(b"weights")
+        on_progress(7, 7, True)
+        return target
+
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", file_list)
+    monkeypatch.setattr(download_utils, "download_file_with_retry", download_file)
+
+    await store._do_download(
+        model_id,
+        pinned_gguf="model.gguf",
+        source_revision=_NEW_REVISION,
+    )
+
+    entry = store.get_entry(model_id)
+    assert entry is not None
+    model_dir = tmp_path / entry.store_path
+    assert entry.source_revision == _NEW_REVISION
+    assert (model_dir / ".skulk-source-revision").read_text().strip() == _NEW_REVISION
 
 
 async def test_store_redownloads_when_registered_revision_differs(
@@ -79,6 +136,40 @@ async def test_staging_replaces_files_from_another_revision(
     assert (staged / "model.gguf").read_bytes() == b"new"
     assert (staged / ".skulk-source-revision").read_text().strip() == _NEW_REVISION
     assert (unrelated / "sentinel").read_text() == "preserve"
+
+
+async def test_staging_recovers_from_corrupted_revision_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A malformed staging marker is a mismatch, not a terminal load error."""
+
+    destination = tmp_path / "org--model"
+    destination.mkdir()
+    (destination / ".skulk-source-revision").write_bytes(b"\xff")
+    (destination / "model.gguf").write_bytes(b"old")
+
+    async def fake_stage_http(
+        _self: ModelStoreClient,
+        _model_id: str,
+        dest_path: Path,
+        _on_progress: Callable[[int, int], Awaitable[None]] | None,
+        _source_revision: str | None,
+    ) -> Path:
+        (dest_path / "model.gguf").write_bytes(b"new")
+        return dest_path
+
+    monkeypatch.setattr(ModelStoreClient, "_stage_http", fake_stage_http)
+    client = ModelStoreClient(store_host="store.local", store_port=58080)
+
+    staged = await client.stage_shard(
+        "org/model",
+        tmp_path,
+        source_revision=_NEW_REVISION,
+    )
+
+    assert (staged / "model.gguf").read_bytes() == b"new"
+    assert (staged / ".skulk-source-revision").read_text().strip() == _NEW_REVISION
 
 
 async def test_request_rechecks_revision_after_waiting_for_download_lock(

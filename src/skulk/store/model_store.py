@@ -747,6 +747,7 @@ class ModelStore:
         from skulk.download.download_utils import (
             download_file_with_retry,
             fetch_file_list_with_cache,
+            write_source_revision_marker,
         )
         from skulk.shared.models.model_cards import ModelId
 
@@ -817,6 +818,10 @@ class ModelStore:
                 )
                 downloaded_bytes += file_size
                 status.progress = downloaded_bytes / max(total_bytes, 1)
+
+            await asyncio.to_thread(
+                write_source_revision_marker, target_dir, source_revision
+            )
 
             # Register in the store
             files = [
