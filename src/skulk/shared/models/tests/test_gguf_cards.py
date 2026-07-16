@@ -6,15 +6,18 @@ from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from skulk.shared.models import model_cards
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
+    ModelTask,
     _gguf_shard_base,
     gguf_weight_siblings,
     select_requested_gguf,
 )
+from skulk.shared.types.memory import Memory
 
 # --- GGUF binary header builders (for #327 header-parse tests) --------------
 #
@@ -104,6 +107,19 @@ def test_non_gguf_repo_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
         _fake_model_info(["model.safetensors", "config.json"]),
     )
     assert gguf_weight_siblings(ModelId("some/mlx-repo")) == []
+
+
+def test_model_card_source_revision_requires_full_commit() -> None:
+    with pytest.raises(ValidationError):
+        ModelCard(
+            model_id=ModelId("some/model"),
+            storage_size=Memory.from_bytes(1),
+            n_layers=1,
+            hidden_size=1,
+            supports_tensor=False,
+            tasks=[ModelTask.TextGeneration],
+            source_revision="main",
+        )
 
 
 def test_shard_base_detection() -> None:

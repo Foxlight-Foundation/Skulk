@@ -63,6 +63,7 @@ Example requests::
 
 from __future__ import annotations
 
+import re
 import shutil
 from typing import cast, final
 
@@ -74,6 +75,7 @@ from loguru import logger
 from skulk.store.model_store import ModelStore
 
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB per streaming chunk
+_SOURCE_REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _sanitize_model_id(model_id: str) -> str:
@@ -84,6 +86,31 @@ def _sanitize_model_id(model_id: str) -> str:
     ``mlx-community%2FQwen3``.  This helper normalises it back.
     """
     return model_id.replace("%2F", "/")
+
+
+def _requested_source_revision(request: web.Request) -> str | None:
+    """Parse and validate an optional immutable source revision query value."""
+
+    source_revision = request.query.get("source_revision")
+    if source_revision is None:
+        return None
+    if _SOURCE_REVISION_PATTERN.fullmatch(source_revision) is None:
+        raise web.HTTPBadRequest(reason="source_revision must be a 40-character commit")
+    return source_revision
+
+
+def _require_store_revision(
+    store: ModelStore, model_id: str, source_revision: str | None
+) -> None:
+    """Reject reads when the canonical store entry is a different revision."""
+
+    if not store.entry_matches_revision(model_id, source_revision):
+        raise web.HTTPNotFound(
+            reason=(
+                f"Model {model_id} is not available at source revision "
+                f"{source_revision or 'main'}"
+            )
+        )
 
 
 @final
@@ -187,6 +214,8 @@ class ModelStoreServer:
     async def _handle_model_files(self, request: web.Request) -> web.Response:
         """``GET /models/{model_id}/files`` — file list for a model."""
         model_id = _sanitize_model_id(request.match_info["model_id"])
+        source_revision = _requested_source_revision(request)
+        _require_store_revision(self._store, model_id, source_revision)
         model_path = self._store.get_store_path(model_id)
         if model_path is None:
             raise web.HTTPNotFound(reason=f"Model not in store: {model_id}")
@@ -210,6 +239,8 @@ class ModelStoreServer:
     async def _handle_file(self, request: web.Request) -> web.StreamResponse:
         """``GET /models/{model_id}/{path}`` — file content with Range support."""
         model_id = _sanitize_model_id(request.match_info["model_id"])
+        source_revision = _requested_source_revision(request)
+        _require_store_revision(self._store, model_id, source_revision)
         file_rel = request.match_info["path"]
 
         model_path = self._store.get_store_path(model_id)
@@ -285,6 +316,7 @@ class ModelStoreServer:
             [
                 {
                     "modelId": d.model_id,
+                    "sourceRevision": d.source_revision,
                     "status": d.status,
                     "progress": d.progress,
                     "error": d.error,
@@ -308,13 +340,15 @@ class ModelStoreServer:
         shard group the store fetches, honoring a card's custom pin (#344).
         Optional ``{"extra_gguf_files": ["<path>", ...]}`` names same-repo
         companion GGUFs (a served-engine draft bundled with the base) to
-        co-fetch with the base quant. The body is optional: a request without it
-        (or a non-JSON body) falls back to the default quant preference and no
-        companions, preserving the prior contract.
+        co-fetch with the base quant. Optional ``source_revision`` pins every
+        repository read to a full immutable Hugging Face commit. The body is
+        optional: a request without it (or a non-JSON body) falls back to the
+        default quant preference, no companions, and mutable ``main``.
         """
         model_id = _sanitize_model_id(request.match_info["model_id"])
         pinned_gguf: str | None = None
         extra_pinned_gguf: list[str] | None = None
+        source_revision: str | None = None
         if request.can_read_body:
             try:
                 body: object = cast("object", await request.json())
@@ -334,12 +368,28 @@ class ModelStoreServer:
                     ]
                     if extras:
                         extra_pinned_gguf = extras
-        status = await self._store.request_download(
-            model_id, pinned_gguf, extra_pinned_gguf
-        )
+                raw_revision = body_dict.get("source_revision")
+                if isinstance(raw_revision, str) and raw_revision:
+                    if _SOURCE_REVISION_PATTERN.fullmatch(raw_revision) is None:
+                        raise web.HTTPBadRequest(
+                            reason=(
+                                "source_revision must be a 40-character commit"
+                            )
+                        )
+                    source_revision = raw_revision
+        try:
+            status = await self._store.request_download(
+                model_id,
+                pinned_gguf,
+                extra_pinned_gguf,
+                source_revision,
+            )
+        except ValueError as exc:
+            raise web.HTTPConflict(reason=str(exc)) from exc
         return web.json_response(
             {
                 "modelId": status.model_id,
+                "sourceRevision": status.source_revision,
                 "status": status.status,
                 "progress": status.progress,
             }
@@ -354,6 +404,7 @@ class ModelStoreServer:
         return web.json_response(
             {
                 "modelId": status.model_id,
+                "sourceRevision": status.source_revision,
                 "status": status.status,
                 "progress": status.progress,
                 "error": status.error,

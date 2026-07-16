@@ -254,6 +254,12 @@ Skulk now treats model capability handling as two layers:
 - **Resolved capability profiles**: normalized runtime behavior contracts derived from the card plus conservative family defaults
 
 This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, speech/TTS/STT metadata, and additive `/v1/models` metadata consumed by the dashboard.
+
+Model cards may pin qualified Hugging Face artifacts with `source_revision`, a
+full commit hash. Metadata probes, direct downloads, model-store registry
+entries, and worker staging must preserve that revision. Never collapse a
+pinned artifact back onto mutable `main`, and never treat a staged directory
+from another revision as a cache hit.
 TTS cards with fixed speakers may declare `audio.voices` plus a validated
 `audio.default_voice`, which the API applies only when callers omit `voice`.
 

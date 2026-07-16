@@ -471,7 +471,7 @@ class Runner(ServedConcurrentDispatch):
 
         card = self.shard_metadata.model_card
         model_id = card.model_id
-        model_dir = build_model_path(ModelId(model_id))
+        model_dir = build_model_path(ModelId(model_id), card.source_revision)
         n_ctx = serving_n_ctx(self.context_token_limit, logits_all=False)
         try:
             with runner_phase(

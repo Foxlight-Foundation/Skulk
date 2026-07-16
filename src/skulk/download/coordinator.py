@@ -455,6 +455,12 @@ class DownloadCoordinator:
 
     async def _start_download(self, shard: ShardMetadata) -> None:
         model_id = shard.model_card.model_id
+        status = self.download_status.get(model_id)
+        revision_changed = (
+            status is not None
+            and status.shard_metadata.model_card.source_revision
+            != shard.model_card.source_revision
+        )
 
         active_scope = self.active_downloads.get(model_id)
         if active_scope is not None:
@@ -468,22 +474,40 @@ class DownloadCoordinator:
                     "the cancelled download task finishes"
                 )
                 return
+            if revision_changed:
+                self._begin_reset(model_id)
+                self._pending_download_starts[model_id] = shard
+                active_scope.cancel()
+                logger.info(
+                    f"DownloadCoordinator: replacing active download for {model_id} "
+                    "because its source revision changed"
+                )
+                return
             logger.info(
                 f"DownloadCoordinator: {model_id} still has an active download task"
             )
             return
 
         # Check if already downloading, complete, or recently failed
-        if model_id in self.download_status:
-            status = self.download_status[model_id]
+        if status is not None:
+            if revision_changed:
+                logger.info(
+                    f"DownloadCoordinator: {model_id} has stale "
+                    f"{type(status).__name__} state from another source revision; "
+                    "starting a fresh download"
+                )
+                del self.download_status[model_id]
             # If marked completed but model directory no longer exists on disk,
             # clear the stale status and re-download from scratch.
-            if isinstance(status, DownloadCompleted) and status.model_directory:
+            elif isinstance(status, DownloadCompleted) and status.model_directory:
                 model_dir = Path(status.model_directory)
-                if not model_dir.is_dir() or not (model_dir / "config.json").exists():
+                if (
+                    not model_dir.is_dir()
+                    or not (model_dir / "config.json").exists()
+                ):
                     logger.info(
                         f"DownloadCoordinator: {model_id} was DownloadCompleted but "
-                        f"model directory {status.model_directory} no longer exists, re-downloading"
+                        "its directory is stale; re-downloading"
                     )
                     del self.download_status[model_id]
                     # Fall through to fresh download below
@@ -509,7 +533,9 @@ class DownloadCoordinator:
         # models with speculative decoding silently unavailable (codex
         # review on the launch-smoke fix). Fall through to the download
         # path instead so the companion gets fetched.
-        found_path = resolve_model_in_path(model_id)
+        found_path = resolve_model_in_path(
+            model_id, shard.model_card.source_revision
+        )
         # In offline mode optional companions can never be fetched and the
         # runner degrades to run-without-speculation, so only load-bearing
         # companions (split vision weights) block the shortcut there —
@@ -780,7 +806,7 @@ class DownloadCoordinator:
                         (DownloadCompleted, DownloadOngoing, DownloadFailed),
                     ):
                         continue
-                    found = resolve_model_in_path(mid)
+                    found = resolve_model_in_path(mid, card.source_revision)
                     if found is not None and not model_companions_present_on_disk(
                         card, required_only=self.offline
                     ):

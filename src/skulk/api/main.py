@@ -2361,7 +2361,9 @@ class API:
             summary="Request a store download",
             description=(
                 "Ask the shared model store to download and register a model by model ID. "
-                "An optional gguf_file request field pins one exact quant file."
+                "Optional gguf_file and source_revision fields pin one exact "
+                "quant and immutable Hugging Face commit; omitted values inherit "
+                "from a bundled model card when declared."
             ),
         )(self.request_store_download)
         self.app.get(
@@ -7045,6 +7047,7 @@ class API:
             family=card.family,
             quantization=card.quantization,
             base_model=card.base_model,
+            source_revision=card.source_revision,
             capabilities=card.capabilities,
             context_length=card.context_length,
             reasoning=ReasoningCapabilitySection.from_model_card(card),
@@ -7077,6 +7080,7 @@ class API:
             card = await ModelCard.fetch_from_hf(
                 payload.model_id,
                 gguf_file=payload.gguf_file,
+                source_revision=payload.source_revision,
             )
         except Exception as exc:
             raise HTTPException(
@@ -10425,12 +10429,23 @@ class API:
         model_id: str,
         payload: StoreDownloadRequest | None = None,
     ) -> JSONResponse:
-        """Request a store download, optionally pinning an exact GGUF file."""
+        """Request a store download with optional GGUF and source-revision pins."""
         if self._store_client is None:
             raise HTTPException(status_code=503, detail="Store not configured")
+        requested_model_id = ModelId(model_id)
+        card = get_card(requested_model_id)
+        if card is None:
+            await get_model_cards()
+            card = get_card(requested_model_id)
+        gguf_file = payload.gguf_file if payload is not None else None
+        source_revision = payload.source_revision if payload is not None else None
+        if card is not None:
+            gguf_file = gguf_file or card.gguf_file
+            source_revision = source_revision or card.source_revision
         result = await self._store_client.request_store_download(
             model_id,
-            gguf_file=payload.gguf_file if payload is not None else None,
+            gguf_file=gguf_file,
+            source_revision=source_revision,
         )
         return JSONResponse(result)
 

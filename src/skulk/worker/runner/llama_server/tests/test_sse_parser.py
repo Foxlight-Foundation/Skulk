@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from skulk.shared.types.common import ModelId
 from skulk.worker.runner.llama_server.runner import (
     _SPEC_TYPE_FLAG,
     _draft_model_args,
@@ -57,12 +58,43 @@ def test_draft_args_resolves_model_draft_path(
     (tmp_path / "draft.gguf").write_bytes(b"GGUF")
     import skulk.download.download_utils as du
 
-    def _fake_build_model_path(_model_id: object) -> Path:
+    def _fake_build_model_path(
+        _model_id: object, _source_revision: str | None = None
+    ) -> Path:
         return tmp_path
 
     monkeypatch.setattr(du, "build_model_path", _fake_build_model_path)
     args = _draft_model_args(_runtime(repo="org/draft-GGUF", file="draft.gguf"), "draft_mtp")
     assert args == ["--model-draft", str(tmp_path / "draft.gguf")]
+
+
+def test_same_repo_draft_inherits_pinned_base_revision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Bundled draft lookup must accept the base's qualified cache directory."""
+
+    revision = "1" * 40
+    (tmp_path / "draft.gguf").write_bytes(b"GGUF")
+    observed: list[tuple[object, str | None]] = []
+    import skulk.download.download_utils as du
+
+    def _fake_build_model_path(
+        model_id: object, source_revision: str | None = None
+    ) -> Path:
+        observed.append((model_id, source_revision))
+        return tmp_path
+
+    monkeypatch.setattr(du, "build_model_path", _fake_build_model_path)
+
+    args = _draft_model_args(
+        _runtime(repo="org/bundle", file="draft.gguf"),
+        "draft_mtp",
+        base_model_id=ModelId("org/bundle"),
+        source_revision=revision,
+    )
+
+    assert args == ["--model-draft", str(tmp_path / "draft.gguf")]
+    assert observed == [(ModelId("org/bundle"), revision)]
 
 
 def test_draft_args_missing_file_on_disk_degrades(
@@ -72,7 +104,9 @@ def test_draft_args_missing_file_on_disk_degrades(
     # decode (None), not crash (#574).
     import skulk.download.download_utils as du
 
-    def _fake_build_model_path(_model_id: object) -> Path:
+    def _fake_build_model_path(
+        _model_id: object, _source_revision: str | None = None
+    ) -> Path:
         return tmp_path
 
     monkeypatch.setattr(du, "build_model_path", _fake_build_model_path)
@@ -89,7 +123,7 @@ def test_draft_args_draft_dir_absent_degrades(monkeypatch: pytest.MonkeyPatch) -
     # runner at launch.
     import skulk.download.download_utils as du
 
-    def _raise(_model_id: object) -> Path:
+    def _raise(_model_id: object, _source_revision: str | None = None) -> Path:
         raise FileNotFoundError("Model org/draft-GGUF not found on disk")
 
     monkeypatch.setattr(du, "build_model_path", _raise)

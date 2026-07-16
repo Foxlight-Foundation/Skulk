@@ -756,8 +756,9 @@ class Runner:
 
         from skulk.download.download_utils import build_model_path
 
-        model_id = self.shard_metadata.model_card.model_id
-        model_dir = build_model_path(ModelId(model_id))
+        card = self.shard_metadata.model_card
+        model_id = card.model_id
+        model_dir = build_model_path(ModelId(model_id), card.source_revision)
         # Load the exact file the card pinned at creation (the selected quant);
         # fall back to scanning if it's absent (older card / manual staging), so
         # download, sizing, and loading stay in agreement.

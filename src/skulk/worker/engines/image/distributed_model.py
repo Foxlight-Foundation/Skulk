@@ -76,8 +76,9 @@ class DistributedImageModel:
     def from_bound_instance(
         cls, bound_instance: BoundInstance
     ) -> "DistributedImageModel":
-        model_id = bound_instance.bound_shard.model_card.model_id
-        model_path = build_model_path(model_id)
+        card = bound_instance.bound_shard.model_card
+        model_id = card.model_id
+        model_path = build_model_path(model_id, card.source_revision)
 
         shard_metadata = bound_instance.bound_shard
         if not isinstance(shard_metadata, (PipelineShardMetadata, CfgShardMetadata)):

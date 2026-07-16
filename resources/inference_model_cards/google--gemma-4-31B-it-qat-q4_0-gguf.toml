@@ -25,6 +25,9 @@ base_model = "Gemma 4 31B-it (QAT)"
 capabilities = ["text", "thinking"]
 context_length = 262144
 gguf_file = "gemma-4-31B_q4_0-it.gguf"
+# Qualified before the upstream 2026-07-15 GGUF rewrite introduced duplicate
+# vocabulary entries that llama.cpp rejects during startup.
+source_revision = "3374b395f6a01379f0dd4997b37aacaab77a3596"
 trust_remote_code = false
 
 [tooling]

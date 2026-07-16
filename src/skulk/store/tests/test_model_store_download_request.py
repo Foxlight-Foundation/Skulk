@@ -66,12 +66,16 @@ async def test_store_client_sends_requested_gguf_pin(
     result = await client.request_store_download(
         "org/model",
         gguf_file="model-IQ3_XXS.gguf",
+        source_revision="0123456789abcdef0123456789abcdef01234567",
     )
 
     assert result == {"status": "pending"}
     assert session.requests == [
         (
             "http://store.local:58080/models/org%2Fmodel/download",
-            {"gguf_file": "model-IQ3_XXS.gguf"},
+            {
+                "gguf_file": "model-IQ3_XXS.gguf",
+                "source_revision": "0123456789abcdef0123456789abcdef01234567",
+            },
         )
     ]
