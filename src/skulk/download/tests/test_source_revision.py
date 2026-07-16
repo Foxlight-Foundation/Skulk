@@ -64,6 +64,27 @@ def test_unpinned_resolution_rejects_pinned_cache(
     assert resolve_model_in_path(model_id) == model_dir
 
 
+def test_unpinned_resolution_rejects_interrupted_pinned_staging(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A staging marker keeps complete-looking pinned bytes non-loadable."""
+
+    model_id = ModelId("org/model")
+    model_dir = tmp_path / model_id.normalize()
+    model_dir.mkdir()
+    (model_dir / "model.gguf").write_bytes(b"weights")
+    (model_dir / ".skulk-source-revision-staging").write_text(
+        f"{_NEW_REVISION}\n"
+    )
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (tmp_path,))
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path)
+
+    assert resolve_model_in_path(model_id) is None
+    with pytest.raises(FileNotFoundError):
+        build_model_path(model_id)
+
+
 def test_corrupted_revision_marker_is_a_cache_miss(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

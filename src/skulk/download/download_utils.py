@@ -45,6 +45,7 @@ from skulk.shared.types.worker.downloads import (
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
+_SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
 _MODEL_SWAP_BACKUP_SUFFIX = ".skulk-swap-backup"
 
 
@@ -134,7 +135,10 @@ def _source_revision_matches(path: Path, source_revision: str | None) -> bool:
     """Return whether ``path`` is qualified for an optional source revision."""
 
     marker = path / _SOURCE_REVISION_MARKER
+    staging_marker = path / _SOURCE_REVISION_STAGING_MARKER
     try:
+        if staging_marker.exists():
+            return False
         actual_revision = marker.read_text().strip() if marker.is_file() else None
     except (OSError, UnicodeError):
         return False
