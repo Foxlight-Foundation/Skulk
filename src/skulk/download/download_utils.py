@@ -145,6 +145,32 @@ def _source_revision_matches(path: Path, source_revision: str | None) -> bool:
     return actual_revision == source_revision
 
 
+def _source_revision_staging_matches(
+    path: Path, source_revision: str | None
+) -> bool:
+    """Return whether ``path`` is an interrupted download of the revision."""
+
+    if source_revision is None:
+        return False
+    staging_marker = path / _SOURCE_REVISION_STAGING_MARKER
+    try:
+        actual_revision = (
+            staging_marker.read_text().strip() if staging_marker.is_file() else None
+        )
+    except (OSError, UnicodeError):
+        return False
+    return actual_revision == source_revision
+
+
+def _write_source_revision_staging_marker(path: Path, source_revision: str) -> None:
+    """Mark ``path`` as non-loadable while a pinned download is in progress."""
+
+    marker = path / _SOURCE_REVISION_STAGING_MARKER
+    temporary_marker = marker.with_suffix(f"{marker.suffix}.partial")
+    temporary_marker.write_text(f"{source_revision}\n")
+    temporary_marker.replace(marker)
+
+
 def write_source_revision_marker(path: Path, source_revision: str | None) -> None:
     """Persist the immutable revision used by a completed model download.
 
@@ -155,12 +181,18 @@ def write_source_revision_marker(path: Path, source_revision: str | None) -> Non
     """
 
     marker = path / _SOURCE_REVISION_MARKER
+    staging_marker = path / _SOURCE_REVISION_STAGING_MARKER
     if source_revision is None:
         marker.unlink(missing_ok=True)
+        staging_marker.unlink(missing_ok=True)
         return
     temporary_marker = marker.with_suffix(f"{marker.suffix}.partial")
     temporary_marker.write_text(f"{source_revision}\n")
     temporary_marker.replace(marker)
+    # Keep interrupted downloads non-loadable until the final marker is
+    # durable. A crash before this unlink leaves the conservative staging
+    # marker in place and the next attempt safely revalidates the files.
+    staging_marker.unlink(missing_ok=True)
 
 
 def _replacement_model_dir(target_dir: Path, source_revision: str | None) -> Path:
@@ -1290,10 +1322,15 @@ async def download_shard(
         await asyncio.to_thread(
             _recover_interrupted_model_swap, canonical_target_dir
         )
-    replacing_revision = canonical_target_dir.exists() and not (
-        _source_revision_matches(
+    resuming_staged_revision = (
+        canonical_target_dir.exists()
+        and _source_revision_staging_matches(
             canonical_target_dir, shard.model_card.source_revision
         )
+    )
+    replacing_revision = canonical_target_dir.exists() and not (
+        _source_revision_matches(canonical_target_dir, shard.model_card.source_revision)
+        or resuming_staged_revision
     )
     target_dir = (
         _replacement_model_dir(canonical_target_dir, shard.model_card.source_revision)
@@ -1302,6 +1339,15 @@ async def download_shard(
     )
     if not skip_download:
         await aios.makedirs(target_dir, exist_ok=True)
+        source_revision = shard.model_card.source_revision
+        if source_revision is not None and not _source_revision_matches(
+            target_dir, source_revision
+        ):
+            await asyncio.to_thread(
+                _write_source_revision_staging_marker,
+                target_dir,
+                source_revision,
+            )
 
     if not allow_patterns:
         allow_patterns = await resolve_allow_patterns(shard)
@@ -1508,7 +1554,11 @@ async def download_shard(
     final_repo_progress = calculate_repo_progress(
         shard, shard.model_card.model_id, revision, file_progress, all_start_time
     )
-    if skip_download and replacing_revision and final_repo_progress.status == "complete":
+    if (
+        skip_download
+        and (replacing_revision or resuming_staged_revision)
+        and final_repo_progress.status == "complete"
+    ):
         # All replacement bytes may have landed before a restart, but they are
         # not loadable until the normal ensure path validates and atomically
         # installs the replacement at the canonical cache path.

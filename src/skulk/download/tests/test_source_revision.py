@@ -85,6 +85,85 @@ def test_unpinned_resolution_rejects_interrupted_pinned_staging(
         build_model_path(model_id)
 
 
+@pytest.mark.asyncio
+async def test_interrupted_first_pinned_download_resumes_without_becoming_mutable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Pinned bytes stay non-loadable until the final revision marker lands."""
+
+    model_id = ModelId("org/model")
+    canonical = tmp_path / model_id.normalize()
+    attempts = 0
+
+    async def file_list(*_args: object, **_kwargs: object) -> list[FileListEntry]:
+        return [FileListEntry(type="file", path="model.gguf", size=7)]
+
+    async def interrupt_then_complete(
+        _model_id: ModelId,
+        _revision: str,
+        path: str,
+        target_dir: Path,
+        on_progress: Callable[[int, int, bool], None],
+        on_connection_lost: Callable[[], None],
+        skip_internet: bool,
+    ) -> Path:
+        nonlocal attempts
+        del on_connection_lost, skip_internet
+        attempts += 1
+        assert target_dir == canonical
+        assert (
+            target_dir / ".skulk-source-revision-staging"
+        ).read_text().strip() == _NEW_REVISION
+        target = target_dir / path
+        target.write_bytes(b"weights")
+        on_progress(7, 7, True)
+        if attempts == 1:
+            raise RuntimeError("interrupted after rename")
+        return target
+
+    async def ignore_progress(
+        _shard: ShardMetadata, _progress: RepoDownloadProgress
+    ) -> None:
+        pass
+
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (tmp_path,))
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", file_list)
+    monkeypatch.setattr(
+        download_utils, "download_file_with_retry", interrupt_then_complete
+    )
+
+    with pytest.raises(RuntimeError, match="interrupted after rename"):
+        await download_shard(
+            _shard(_NEW_REVISION), ignore_progress, allow_patterns=["*"]
+        )
+
+    assert resolve_model_in_path(model_id) is None
+    assert not (canonical / ".skulk-source-revision").exists()
+    assert (canonical / ".skulk-source-revision-staging").exists()
+
+    _, preflight = await download_shard(
+        _shard(_NEW_REVISION),
+        ignore_progress,
+        skip_download=True,
+        allow_patterns=["*"],
+    )
+    assert preflight.status == "in_progress"
+
+    model_path, progress = await download_shard(
+        _shard(_NEW_REVISION), ignore_progress, allow_patterns=["*"]
+    )
+
+    assert attempts == 2
+    assert model_path == canonical / "model.gguf"
+    assert progress.status == "complete"
+    assert (
+        canonical / ".skulk-source-revision"
+    ).read_text().strip() == _NEW_REVISION
+    assert not (canonical / ".skulk-source-revision-staging").exists()
+
+
 def test_corrupted_revision_marker_is_a_cache_miss(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
