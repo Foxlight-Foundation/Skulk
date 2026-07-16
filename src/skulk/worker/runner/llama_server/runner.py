@@ -976,6 +976,13 @@ class Runner(ServedConcurrentDispatch):
             stats = stats.model_copy(
                 update={"peak_memory_usage": self._server_peak_memory()}
             )
+            # Stamp runner attribution (#596) so tool-call generations feed the
+            # per-instance performance envelope exactly like the streaming path;
+            # otherwise tool workloads (the agentic served audience) would fall
+            # back to the API's ambiguous offered-count attribution.
+            stats = self.stamp_runner_stats(
+                stats, self._admission_concurrency(task.task_id)
+            )
         tool_calls = tool_calls_from_message(message)
         if tool_calls:
             self.event_sender.send(
