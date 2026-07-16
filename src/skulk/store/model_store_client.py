@@ -571,22 +571,16 @@ class ModelStoreClient:
 
         if self._local_store_path is None:
             return None
-        entry = next(
-            (
-                item
-                for item in await self.fetch_registry()
-                if item.get("model_id") == model_id
-                and item.get("source_revision") == source_revision
-            ),
-            None,
-        )
-        store_path = entry.get("store_path") if isinstance(entry, dict) else None
-        if not isinstance(store_path, str):
+        from skulk.store.model_store import ModelStore
+
+        local_store = ModelStore(self._local_store_path)
+        entry = await asyncio.to_thread(local_store.get_entry, model_id)
+        if entry is None or entry.source_revision != source_revision:
             return None
-        candidate = (self._local_store_path / store_path).resolve()
+        candidate = (self._local_store_path / entry.store_path).resolve()
         if not candidate.is_relative_to(self._local_store_path.resolve()):
             raise RuntimeError(f"Store registry path escaped its root for {model_id}")
-        return candidate if candidate.is_dir() else None
+        return candidate
 
     async def _fetch_model_total_bytes(
         self, model_id: str, source_revision: str | None = None

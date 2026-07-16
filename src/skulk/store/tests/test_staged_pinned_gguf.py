@@ -13,6 +13,7 @@ from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 from skulk.store.config import StagingNodeConfig
+from skulk.store.model_store import ModelStore
 from skulk.store.model_store_client import (
     ModelStoreClient,
     ModelStoreDownloader,
@@ -153,21 +154,23 @@ async def test_staging_disabled_direct_load_does_not_probe_http(
     direct_path = tmp_path / "canonical"
     direct_path.mkdir()
     (direct_path / "model-IQ3_XXS.gguf").write_bytes(b"weights")
+    ModelStore(tmp_path).register_model(
+        _MODEL_ID,
+        direct_path,
+        ["model-IQ3_XXS.gguf"],
+        len(b"weights"),
+    )
     client = ModelStoreClient("localhost", local_store_path=tmp_path)
 
-    async def local_model_path(
-        model_id: str, source_revision: str | None
-    ) -> Path | None:
-        assert model_id == _MODEL_ID
-        assert source_revision is None
-        return direct_path
+    async def unexpected_registry_fetch() -> list[dict[str, object]]:
+        raise AssertionError("local direct loads must read the local registry")
 
     async def unexpected_availability_probe(
         _model_id: str, _source_revision: str | None = None
     ) -> bool:
         raise AssertionError("local direct loads must not probe store HTTP")
 
-    monkeypatch.setattr(client, "local_model_path", local_model_path)
+    monkeypatch.setattr(client, "fetch_registry", unexpected_registry_fetch)
     monkeypatch.setattr(client, "is_model_available", unexpected_availability_probe)
     downloader = ModelStoreDownloader(
         inner=_UnusedInnerDownloader(),

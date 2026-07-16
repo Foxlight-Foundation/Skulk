@@ -576,9 +576,6 @@ class ModelStore:
             [pinned_gguf] if pinned_gguf is not None else [],
         )
         missing_companion = self.entry_missing_files(model_id, extra_pinned_gguf or [])
-        revision_mismatch = self.is_in_store(
-            model_id
-        ) and not self.entry_matches_revision(model_id, source_revision)
         async with self._download_lock:
             existing = self._active_downloads.get(model_id)
             if existing is not None:
@@ -617,6 +614,9 @@ class ModelStore:
                     del self._active_downloads[model_id]
                 else:
                     return existing
+            revision_mismatch = self.is_in_store(
+                model_id
+            ) and not self.entry_matches_revision(model_id, source_revision)
             if (
                 self.is_in_store(model_id)
                 and not missing_projector

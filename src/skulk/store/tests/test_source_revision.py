@@ -75,3 +75,44 @@ async def test_staging_replaces_files_from_another_revision(
 
     assert (staged / "model.gguf").read_bytes() == b"new"
     assert (staged / ".skulk-source-revision").read_text().strip() == _NEW_REVISION
+
+
+async def test_request_rechecks_revision_after_waiting_for_download_lock(
+    tmp_path: Path,
+) -> None:
+    """A lock wait must not reuse a stale pre-lock revision comparison."""
+
+    store = ModelStore(tmp_path)
+    model_id = "org/model"
+    model_dir = tmp_path / "org--model"
+    model_dir.mkdir()
+    (model_dir / "model.safetensors").write_bytes(b"weights")
+    store.register_model(
+        model_id,
+        model_dir,
+        ["model.safetensors"],
+        len(b"weights"),
+        source_revision=_NEW_REVISION,
+    )
+
+    await store._download_lock.acquire()
+    request = asyncio.create_task(
+        store.request_download(model_id, source_revision=_NEW_REVISION)
+    )
+    await asyncio.sleep(0)
+    store.register_model(
+        model_id,
+        model_dir,
+        ["model.safetensors"],
+        len(b"weights"),
+        source_revision=_OLD_REVISION,
+    )
+    store._download_lock.release()
+
+    status = await request
+
+    assert status.status in {"pending", "downloading"}
+    assert status.source_revision == _NEW_REVISION
+    for task in tuple(store._download_tasks):
+        task.cancel()
+    await asyncio.gather(*store._download_tasks, return_exceptions=True)
