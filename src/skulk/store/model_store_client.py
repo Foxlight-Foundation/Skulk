@@ -854,7 +854,16 @@ class ModelStoreClient:
                         f"Store download request failed: HTTP {resp.status}"
                     )
                 data: object = await resp.json()
-                return isinstance(data, dict) and data.get("status") == "complete"
+                if not isinstance(data, dict) or data.get("status") != "complete":
+                    return False
+                completed_revision = data.get("sourceRevision")
+                if completed_revision != source_revision:
+                    raise RuntimeError(
+                        f"Store reported {model_id} complete at source revision "
+                        f"{completed_revision or 'main'}, but revision "
+                        f"{source_revision or 'main'} was requested"
+                    )
+                return True
 
         if await _retry_store_http(
             _post_download_request,
@@ -892,6 +901,15 @@ class ModelStoreClient:
                             if on_progress is not None:
                                 await on_progress(progress)
                             if status == "complete":
+                                completed_revision = data.get("sourceRevision")
+                                if completed_revision != source_revision:
+                                    raise RuntimeError(
+                                        f"Store reported {model_id} complete at "
+                                        f"source revision "
+                                        f"{completed_revision or 'main'}, but "
+                                        f"revision {source_revision or 'main'} "
+                                        "was requested"
+                                    )
                                 return True
                             if status == "failed":
                                 raise RuntimeError(
