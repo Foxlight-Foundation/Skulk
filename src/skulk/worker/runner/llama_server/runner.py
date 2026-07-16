@@ -840,9 +840,12 @@ class Runner(ServedConcurrentDispatch):
         assert self.base_url is not None
         clock = StreamStatsClock()
         last_timings: dict[str, object] | None = None
-        # In-flight when THIS generation began, for the performance-envelope tap
-        # (#596): the runner's own count is the true per-instance concurrency.
-        admission_in_flight = self._inflight_count()
+        # In-flight captured at THIS task's admission on the dispatch loop, for
+        # the performance-envelope tap (#596): the runner's own count is the true
+        # per-instance concurrency, and reading it from the admission capture
+        # (not live here on the worker thread) avoids a burst collapsing every
+        # sample into one concurrency bucket.
+        admission_in_flight = self._admission_concurrency(task.task_id)
 
         def final_stats() -> GenerationStats:
             # Prefer the engine's own measurements; fall back to proxy-side

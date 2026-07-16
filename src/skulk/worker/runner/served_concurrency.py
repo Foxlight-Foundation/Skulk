@@ -116,6 +116,13 @@ class ServedConcurrentDispatch:
         self._cancel_lock = threading.Lock()
         self._inflight: int = 0
         self._dispatch_permits = threading.Semaphore(max_concurrency)
+        # In-flight count captured at each task's ADMISSION, on the single
+        # dispatch-loop thread (#596). Sampling in the worker thread instead would
+        # race the pool: under a burst every worker could observe the peak count
+        # and file all envelope samples into one concurrency bucket, erasing the
+        # 1..N throughput-vs-concurrency curve. Keyed by task; dropped when the
+        # generation finishes.
+        self._admission_inflight: dict[TaskId, int] = {}
 
     # --- cancellation ---------------------------------------------------------
 
@@ -235,6 +242,11 @@ class ServedConcurrentDispatch:
                 self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
         self.send_task_status(task, TaskStatus.Running)
         self._note_generation_started()
+        # Capture the admission concurrency here, on the single dispatch thread,
+        # the instant AFTER this generation is counted in-flight (#596). This is
+        # its true position in a burst (1, 2, ... N as the loop admits them); the
+        # worker thread that later runs it cannot sample this without racing.
+        self._admission_inflight[task.task_id] = self._inflight_count()
         try:
             future = pool.submit(self._run_one_generation, task)
         except RuntimeError as exc:
@@ -254,6 +266,7 @@ class ServedConcurrentDispatch:
             )
             self.send_task_status(task, TaskStatus.Failed)
             self._note_generation_finished()
+            self._admission_inflight.pop(task.task_id, None)
             self._dispatch_permits.release()
             return
         future.add_done_callback(lambda f: self._finish_generation(task, f))
@@ -290,6 +303,7 @@ class ServedConcurrentDispatch:
                 TaskStatus.Cancelled if was_cancelled else TaskStatus.Complete,
             )
         finally:
+            self._admission_inflight.pop(task.task_id, None)
             drained_to_idle = self._note_generation_finished()
             # Clear a stale cluster-wide cancel the moment the last in-flight
             # generation drains, so a CANCEL_ALL that arrived while requests were in
@@ -323,6 +337,16 @@ class ServedConcurrentDispatch:
         with self._status_lock:
             return self._inflight
 
+    def _admission_concurrency(self, task_id: TaskId) -> int:
+        """In-flight count captured when ``task_id`` was admitted (#596).
+
+        Read by the engine-specific ``_generate`` when stamping its stats. Falls
+        back to the live in-flight count if the admission capture is missing
+        (defensive; should not happen for a dispatched task), so a stamp is never
+        keyed to 0.
+        """
+        return self._admission_inflight.get(task_id, self._inflight_count())
+
     def stamp_runner_stats(
         self, stats: GenerationStats, in_flight_at_admission: int
     ) -> GenerationStats:
@@ -331,10 +355,12 @@ class ServedConcurrentDispatch:
         The performance-envelope tap on the API attributes each generation to the
         serving instance using these fields, so the envelope reflects the true
         per-instance in-flight concurrency (immune to which API node dispatched
-        the request) and the correct batching classification. ``in_flight_at
-        admission`` is the runner's own in-flight count sampled when this
-        generation began; a serial served config reports 1, a batching one
-        reports up to its parallelism.
+        the request) and the correct batching classification.
+        ``in_flight_at_admission`` is the count captured on the dispatch loop when
+        this generation was admitted (see ``_admission_concurrency``), so a burst
+        of N requests yields the true 1..N spread rather than all landing on N; a
+        serial served config reports 1, a batching one reports up to its
+        parallelism.
         """
         return stats.model_copy(
             update={

@@ -53,6 +53,8 @@ class _FakeHost(ServedConcurrentDispatch):
         self.generate_gate: threading.Event | None = None
         self.started = threading.Semaphore(0)
         self.peak_inflight = 0
+        self.admission_samples: list[int] = []
+        self._admission_lock = threading.Lock()
         evt_s, self._evt_r = mp_channel[Event]()
         task_s, task_r = mp_channel[Task]()
         cancel_s, cancel_r = mp_channel[TaskId]()
@@ -70,6 +72,10 @@ class _FakeHost(ServedConcurrentDispatch):
 
     # engine hooks
     def _generate(self, task: Task) -> None:
+        # Record the ADMISSION concurrency (#596): read from the dispatch-loop
+        # capture, not the live count, mirroring what the real served runners do.
+        with self._admission_lock:
+            self.admission_samples.append(self._admission_concurrency(task.task_id))
         self.started.release()
         self.peak_inflight = max(self.peak_inflight, self._inflight_count())
         if self.generate_gate is not None:
@@ -177,6 +183,39 @@ def test_dispatch_runs_generations_concurrently() -> None:
             time.sleep(0.02)
         assert host.task_statuses(TaskStatus.Complete) >= 3
     finally:
+        host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+        t.join(timeout=5)
+
+
+def test_admission_concurrency_captures_true_burst_spread() -> None:
+    """A burst of N yields the 1..N admission spread, not all-N (#596).
+
+    The dispatch loop captures each task's in-flight count at admission, so the
+    envelope buckets the true concurrency curve. Sampling live in the worker
+    thread would race the pool and collapse every sample onto N.
+    """
+    host = _FakeHost(max_concurrency=4)
+    _load_ready(host)
+    host.generate_gate = threading.Event()  # hold every generation in _generate
+    t = host.start()
+    try:
+        for _ in range(4):
+            host.send(_gen())
+        # All four admitted and blocked in _generate before any finishes.
+        for _ in range(4):
+            assert host.started.acquire(timeout=10)
+        _wait_inflight(host, 4)
+        with host._admission_lock:
+            samples = sorted(host.admission_samples)
+        # Distinct 1..4: each task was counted in-flight at its own admission.
+        assert samples == [1, 2, 3, 4], samples
+        host.generate_gate.set()
+        # Each generation pops its admission entry before it decrements the
+        # in-flight count, so draining to 0 guarantees the map is empty (no leak).
+        _wait_inflight(host, 0, timeout=10)
+        assert host._admission_inflight == {}
+    finally:
+        host.generate_gate.set()
         host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
         t.join(timeout=5)
 

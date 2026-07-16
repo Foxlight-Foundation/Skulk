@@ -698,10 +698,12 @@ class Runner(ServedConcurrentDispatch):
         body["stream"] = True
         assert self.base_url is not None
         clock = StreamStatsClock()
-        # In-flight when THIS generation began, for the performance-envelope tap
-        # (#596): the runner's own count is the true per-instance concurrency
-        # (vLLM's continuous batching decodes these together).
-        admission_in_flight = self._inflight_count()
+        # In-flight captured at THIS task's admission on the dispatch loop, for
+        # the performance-envelope tap (#596): the runner's own count is the true
+        # per-instance concurrency (vLLM's continuous batching decodes these
+        # together). Read from the admission capture, not live here on the worker
+        # thread, so a burst does not collapse every sample into one bucket.
+        admission_in_flight = self._admission_concurrency(task.task_id)
 
         def final_stats() -> GenerationStats:
             # Peak memory always comes from the server child (weights + KV live
