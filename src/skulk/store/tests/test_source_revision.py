@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import skulk.shared.constants as constants
 from skulk.download import download_utils
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.worker.downloads import FileListEntry
@@ -18,6 +19,35 @@ from skulk.store.model_store_client import (
 
 _OLD_REVISION = "0" * 40
 _NEW_REVISION = "1" * 40
+
+
+def test_external_pinned_registration_writes_loadable_revision_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Externally registered pins must satisfy runner path resolution."""
+
+    model_dir = tmp_path / "org--model"
+    model_dir.mkdir()
+    (model_dir / "model.gguf").write_bytes(b"weights")
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (tmp_path,))
+
+    store = ModelStore(tmp_path)
+    store.register_model(
+        "org/model",
+        model_dir,
+        ["model.gguf"],
+        7,
+        source_revision=_NEW_REVISION,
+    )
+
+    assert (
+        model_dir / ".skulk-source-revision"
+    ).read_text().strip() == _NEW_REVISION
+    assert (
+        download_utils.build_model_path(ModelId("org/model"), _NEW_REVISION)
+        == model_dir
+    )
 
 
 async def test_pinned_store_download_writes_revision_marker(

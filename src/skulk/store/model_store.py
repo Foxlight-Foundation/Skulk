@@ -438,8 +438,12 @@ class ModelStore:
             repo_has_projector: Whether the source repository contains a GGUF
                 vision projector, or ``None`` when not probed.
             source_revision: Full immutable Hugging Face commit represented by
-                this entry, or ``None`` for mutable ``main``.
+                this entry, or ``None`` for mutable ``main``. Registration
+                writes the matching filesystem marker before publishing the
+                registry entry so revision-aware runners resolve the same path.
         """
+        from skulk.download.download_utils import write_source_revision_marker
+
         resolved_root = self._store_path.resolve()
         resolved_model_path = model_path.resolve()
         if resolved_model_path == resolved_root or not resolved_model_path.is_relative_to(
@@ -456,6 +460,7 @@ class ModelStore:
             repo_has_projector=repo_has_projector,
             source_revision=source_revision,
         )
+        write_source_revision_marker(resolved_model_path, source_revision)
         self._write_registry_entry(entry)
         logger.info(
             f"ModelStore: registered {model_id} at {relative_path} "
