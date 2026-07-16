@@ -1996,7 +1996,9 @@ class Worker:
                     model_id = shard.model_card.model_id
                     self._download_backoff.record_attempt(model_id)
 
-                    found_path = resolve_model_in_path(model_id)
+                    found_path = resolve_model_in_path(
+                        model_id, shard.model_card.source_revision
+                    )
                     if found_path is not None:
                         logger.info(
                             f"Model {model_id} found in SKULK_MODELS_PATH at {found_path}"

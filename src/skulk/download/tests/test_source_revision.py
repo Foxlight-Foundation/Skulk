@@ -8,7 +8,11 @@ import pytest
 
 import skulk.shared.constants as constants
 from skulk.download import download_utils
-from skulk.download.download_utils import download_shard, resolve_model_in_path
+from skulk.download.download_utils import (
+    build_model_path,
+    download_shard,
+    resolve_model_in_path,
+)
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.downloads import FileListEntry, RepoDownloadProgress
@@ -54,6 +58,7 @@ def test_unpinned_resolution_rejects_pinned_cache(
     monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (tmp_path,))
 
     assert resolve_model_in_path(model_id) is None
+    assert build_model_path(model_id, _OLD_REVISION) == model_dir
 
     marker.unlink()
     assert resolve_model_in_path(model_id) == model_dir

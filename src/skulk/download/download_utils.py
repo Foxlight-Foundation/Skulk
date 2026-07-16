@@ -420,7 +420,14 @@ def model_companions_present_on_disk(
     # base's directory or live in its own repo dir).
     if runtime.served_spec_draft_repo and runtime.served_spec_draft_file:
         try:
-            draft_dir = build_model_path(ModelId(runtime.served_spec_draft_repo))
+            draft_revision = (
+                model_card.source_revision
+                if runtime.served_spec_draft_repo == str(model_card.model_id)
+                else None
+            )
+            draft_dir = build_model_path(
+                ModelId(runtime.served_spec_draft_repo), draft_revision
+            )
         except FileNotFoundError:
             return False
         if not (draft_dir / runtime.served_spec_draft_file).is_file():
@@ -428,15 +435,28 @@ def model_companions_present_on_disk(
     return True
 
 
-def build_model_path(model_id: ModelId) -> Path:
+def build_model_path(
+    model_id: ModelId, source_revision: str | None = None
+) -> Path:
     """Resolve a local filesystem path for *model_id*.
 
     Checks ``SKULK_MODELS_PATH`` (staging, store, etc.) first, then falls
     back to the standard ``SKULK_MODELS_DIR`` and the default staging
-    directory.  Raises ``FileNotFoundError`` if no valid model directory
-    is found.
+    directory. Raises ``FileNotFoundError`` if no valid model directory
+    matching the requested source revision is found.
+
+    Args:
+        model_id: Model repository identifier to resolve.
+        source_revision: Immutable source revision required by the model card,
+            or ``None`` for an unpinned mutable-main cache.
+
+    Returns:
+        The complete local model directory.
+
+    Raises:
+        FileNotFoundError: If no complete revision-matching directory exists.
     """
-    found = resolve_model_in_path(model_id)
+    found = resolve_model_in_path(model_id, source_revision)
     if found is not None:
         return found
     # A safetensors/MLX repo is identified by its config.json; a bare GGUF repo
@@ -446,7 +466,7 @@ def build_model_path(model_id: ModelId) -> Path:
     default = SKULK_MODELS_DIR / model_id.normalize()
     if default.is_dir() and (
         (default / "config.json").exists() or directory_has_gguf_weights(default)
-    ):
+    ) and _source_revision_matches(default, source_revision):
         return default
     # Fallback: check the default staging directory directly.
     # This covers cases where the staging path wasn't registered in
@@ -455,7 +475,7 @@ def build_model_path(model_id: ModelId) -> Path:
     if staging_fallback.is_dir() and (
         (staging_fallback / "config.json").exists()
         or directory_has_gguf_weights(staging_fallback)
-    ):
+    ) and _source_revision_matches(staging_fallback, source_revision):
         return staging_fallback
     raise FileNotFoundError(
         f"Model {model_id} not found on disk. "

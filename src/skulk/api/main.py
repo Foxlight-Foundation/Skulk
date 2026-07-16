@@ -10230,7 +10230,11 @@ class API:
         """Request a store download with optional GGUF and source-revision pins."""
         if self._store_client is None:
             raise HTTPException(status_code=503, detail="Store not configured")
-        card = get_card(ModelId(model_id))
+        requested_model_id = ModelId(model_id)
+        card = get_card(requested_model_id)
+        if card is None:
+            await get_model_cards()
+            card = get_card(requested_model_id)
         gguf_file = payload.gguf_file if payload is not None else None
         source_revision = payload.source_revision if payload is not None else None
         if card is not None:

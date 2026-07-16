@@ -787,7 +787,7 @@ class DownloadCoordinator:
                         (DownloadCompleted, DownloadOngoing, DownloadFailed),
                     ):
                         continue
-                    found = resolve_model_in_path(mid)
+                    found = resolve_model_in_path(mid, card.source_revision)
                     if found is not None and not model_companions_present_on_disk(
                         card, required_only=self.offline
                     ):

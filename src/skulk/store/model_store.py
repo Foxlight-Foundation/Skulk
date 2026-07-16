@@ -199,6 +199,16 @@ def has_gguf_projector(paths: Iterable[str]) -> bool:
     return False
 
 
+def _resolve_store_child_path(store_root: Path, registered_path: str) -> Path | None:
+    """Resolve a registry path only when it remains below the store root."""
+
+    resolved_root = store_root.resolve()
+    candidate = (resolved_root / registered_path).resolve()
+    if candidate == resolved_root or not candidate.is_relative_to(resolved_root):
+        return None
+    return candidate
+
+
 @final
 class StoreModelEntry(BaseModel):
     """Metadata for a single model in the store registry.
@@ -312,7 +322,13 @@ class ModelStore:
         entry = registry.get(model_id)
         if entry is None:
             return None
-        model_path = self._store_path / entry.store_path
+        model_path = _resolve_store_child_path(self._store_path, entry.store_path)
+        if model_path is None:
+            logger.warning(
+                f"ModelStore: ignoring unsafe registry path for {model_id}: "
+                f"{entry.store_path!r}"
+            )
+            return None
         if not model_path.exists():
             return None
         return model_path
@@ -321,7 +337,10 @@ class ModelStore:
         """Return one registered model entry, or ``None`` when unavailable."""
 
         entry = self._read_registry().get(model_id)
-        if entry is None or not (self._store_path / entry.store_path).exists():
+        if entry is None:
+            return None
+        model_path = _resolve_store_child_path(self._store_path, entry.store_path)
+        if model_path is None or not model_path.exists():
             return None
         return entry
 
@@ -343,7 +362,13 @@ class ModelStore:
         return [
             entry
             for entry in registry.values()
-            if (self._store_path / entry.store_path).exists()
+            if (
+                (model_path := _resolve_store_child_path(
+                    self._store_path, entry.store_path
+                ))
+                is not None
+                and model_path.exists()
+            )
         ]
 
     def delete_model(self, model_id: str) -> bool:
@@ -359,8 +384,13 @@ class ModelStore:
         if entry is None:
             return False
         # Remove files from disk
-        model_path = self._store_path / entry.store_path
-        if model_path.exists():
+        model_path = _resolve_store_child_path(self._store_path, entry.store_path)
+        if model_path is None:
+            logger.warning(
+                f"ModelStore: removed unsafe registry entry for {model_id} "
+                f"without deleting {entry.store_path!r}"
+            )
+        elif model_path.exists():
             shutil.rmtree(model_path, ignore_errors=True)
             logger.info(f"ModelStore: deleted {model_id} from {model_path}")
         # Update registry
@@ -410,7 +440,13 @@ class ModelStore:
             source_revision: Full immutable Hugging Face commit represented by
                 this entry, or ``None`` for mutable ``main``.
         """
-        relative_path = str(model_path.relative_to(self._store_path))
+        resolved_root = self._store_path.resolve()
+        resolved_model_path = model_path.resolve()
+        if resolved_model_path == resolved_root or not resolved_model_path.is_relative_to(
+            resolved_root
+        ):
+            raise ValueError(f"Model path must be contained by the store: {model_path}")
+        relative_path = str(resolved_model_path.relative_to(resolved_root))
         entry = StoreModelEntry(
             model_id=model_id,
             store_path=relative_path,
@@ -835,8 +871,16 @@ class ModelStore:
                 previous_entry is not None
                 and previous_entry.store_path != sanitized
             ):
-                previous_path = self._store_path / previous_entry.store_path
-                await asyncio.to_thread(shutil.rmtree, previous_path, True)
+                previous_path = _resolve_store_child_path(
+                    self._store_path, previous_entry.store_path
+                )
+                if previous_path is None:
+                    logger.warning(
+                        f"ModelStore: refusing to delete unsafe previous registry "
+                        f"path for {model_id}: {previous_entry.store_path!r}"
+                    )
+                else:
+                    await asyncio.to_thread(shutil.rmtree, previous_path, True)
 
             status.status = "complete"
             status.progress = 1.0

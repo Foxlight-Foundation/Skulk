@@ -801,7 +801,9 @@ class Runner:
         from skulk.download.download_utils import build_model_path
         from skulk.shared.types.common import ModelId
 
-        local_path = build_model_path(ModelId(model_id))
+        local_path = build_model_path(
+            ModelId(model_id), self.shard_metadata.model_card.source_revision
+        )
         self.local_model_path = local_path
         logger.info(f"loading speech model from local path: {local_path}")
         audio_config = self.shard_metadata.model_card.audio

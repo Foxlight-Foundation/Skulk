@@ -364,7 +364,7 @@ class TestGemma4ReferencePromptRenderer:
         (tmp_path / "config.json").write_text("{}", encoding="utf-8")
         monkeypatch.setattr(
             "skulk.worker.engines.mlx.vision.build_model_path",
-            lambda _model_id: tmp_path,
+            lambda _model_id, _source_revision=None: tmp_path,
         )
 
         config = VisionCardConfig(

@@ -512,7 +512,7 @@ class Runner(ServedConcurrentDispatch):
 
         card = self.shard_metadata.model_card
         model_id = card.model_id
-        model_dir = build_model_path(ModelId(model_id))
+        model_dir = build_model_path(ModelId(model_id), card.source_revision)
         # Load the file the card pinned (the selected quant); fall back to scanning
         # so download / sizing / loading stay in agreement. Reject an absolute or
         # ``..`` path that escapes the model dir.

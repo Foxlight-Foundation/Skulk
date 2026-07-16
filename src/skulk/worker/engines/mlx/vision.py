@@ -731,10 +731,20 @@ class VisionEncoder:
     feature tensors. Supports both bundled weights (loaded from the main
     model repo) and separate vision weight repos."""
 
-    def __init__(self, config: VisionCardConfig, model_id: ModelId):
+    def __init__(
+        self,
+        config: VisionCardConfig,
+        model_id: ModelId,
+        source_revision: str | None = None,
+    ):
         self._config = config
-        self._main_model_path = build_model_path(model_id)
-        self._model_path = build_model_path(ModelId(config.weights_repo))
+        self._main_model_path = build_model_path(model_id, source_revision)
+        weights_revision = (
+            source_revision if config.weights_repo == str(model_id) else None
+        )
+        self._model_path = build_model_path(
+            ModelId(config.weights_repo), weights_revision
+        )
         self._vision_tower: nn.Module | None = None
         self._projector: nn.Module | None = None
         self._processor: _ImageProcessorProtocol | None = None
@@ -1387,9 +1397,14 @@ class VisionProcessor:
     4. Provide media regions for prefix caching
     """
 
-    def __init__(self, config: VisionCardConfig, model_id: ModelId):
+    def __init__(
+        self,
+        config: VisionCardConfig,
+        model_id: ModelId,
+        source_revision: str | None = None,
+    ):
         self.vision_config = config
-        self._encoder = VisionEncoder(config, model_id)
+        self._encoder = VisionEncoder(config, model_id, source_revision)
         self._feature_cache: dict[str, tuple[mx.array, list[int]]] = {}
         self._feature_cache_max = 32
 

@@ -56,7 +56,9 @@ def test_sharded_gguf_incomplete_missing_shard(tmp_path: Path) -> None:
     assert not is_model_directory_complete(tmp_path)
 
 
-def _no_path_match(_model_id: ModelId) -> Path | None:
+def _no_path_match(
+    _model_id: ModelId, _source_revision: str | None = None
+) -> Path | None:
     """A resolve_model_in_path stub: no SKULK_MODELS_PATH hit."""
     return None
 
