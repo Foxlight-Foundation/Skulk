@@ -380,6 +380,43 @@ def test_platform_compatible_backends_gates_vision_off_served() -> None:
     )
 
 
+def test_vision_card_preferring_llama_server_still_resolves_to_llama_cpp() -> None:
+    # A vision GGUF card ships with a served-first backend_preference (MODEL
+    # truth: the model's artifacts run on llama_server too). On a node that
+    # advertises BOTH engines, the platform filter must still strip the served
+    # tags before resolution so the card lands on the in-process llama.cpp runner
+    # that can load its mmproj projector. This guards the card sweep that made
+    # every GGUF card prefer llama_server: the vision exception is owned entirely
+    # by code, so the served preference on a vision card is a safe no-op.
+    declared = frozenset(
+        {
+            "llama_cpp-vulkan",
+            "llama_cpp-cpu",
+            "llama_server-vulkan",
+            "llama_server-cpu",
+        }
+    )
+    served_first = (
+        "llama_server-vulkan",
+        "llama_server-cpu",
+        "llama_cpp-vulkan",
+        "llama_cpp-cpu",
+    )
+    node_backends = frozenset({"llama_server-vulkan", "llama_cpp-vulkan"})
+    platform_backends = platform_compatible_backends(
+        declared, card_serves_vision=True
+    )
+    assert "llama_server-vulkan" not in platform_backends
+    tag = resolve_node_backend(platform_backends, served_first, node_backends)
+    assert tag == "llama_cpp-vulkan"
+    # A text card on the same node honors the served preference (no gate applies).
+    text_backends = platform_compatible_backends(declared, card_serves_vision=False)
+    assert (
+        resolve_node_backend(text_backends, served_first, node_backends)
+        == "llama_server-vulkan"
+    )
+
+
 def test_platform_compatible_backends_gates_speech_to_mlx_audio() -> None:
     # Speech cards stay on the dedicated speech engine until another runner owns
     # the TTS/STT contract.
