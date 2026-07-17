@@ -20,7 +20,7 @@ trust_remote_code = false
 
 [placement]
 compatible_backends = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu", "llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu"]
-backend_preference = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"]
+backend_preference = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"]
 
 [storage_size]
 in_bytes = 807694368
