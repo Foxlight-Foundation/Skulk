@@ -93,6 +93,26 @@ class InferenceGenerator(ABC):
             or CANCEL_ALL_TASKS in self._cancelled_tasks
         )
 
+    @property
+    def batches(self) -> bool:
+        """Whether this generator decodes multiple requests together (#596).
+
+        The performance-envelope tap keys concurrency behavior on this: a
+        batching generator's aggregate throughput scales with concurrency, a
+        serial one's does not. Serial by default; ``BatchGenerator`` overrides it,
+        which is why MLX must report this rather than let the API guess (it cannot
+        know from the outside which generator an in-process instance is running).
+        """
+        return False
+
+    def admission_concurrency(self, task_id: TaskId) -> int:
+        """In-flight requests this instance was serving when ``task_id`` was
+        admitted (#596). 1 for a serial generator; ``BatchGenerator`` reports the
+        batch position captured at admission so a burst spreads across buckets
+        rather than collapsing onto the peak.
+        """
+        return 1
+
     @abstractmethod
     def warmup(self) -> None: ...
 
@@ -541,6 +561,24 @@ class BatchGenerator(InferenceGenerator):
     _logged_first_request_shape: bool = field(default=False, init=False)
     _decode_started_us: dict[TaskId, int] = field(default_factory=dict, init=False)
     _first_token_seen: set[TaskId] = field(default_factory=set, init=False)
+    # Batch position captured when each task was admitted, keyed by task (#596).
+    # The runner reads this when it stamps the terminal stats; entries are pruned
+    # at the top of the next step (see step()), by which point the runner has
+    # already emitted the completed task's terminal chunk.
+    _admission_concurrency: dict[TaskId, int] = field(
+        default_factory=dict, init=False
+    )
+
+    @property
+    def batches(self) -> bool:
+        return True
+
+    def admission_concurrency(self, task_id: TaskId) -> int:
+        # Fall back to the live batch size if the admission capture is missing
+        # (defensive; a dispatched task always has one), never below 1.
+        return self._admission_concurrency.get(
+            task_id, len(self._active_tasks) or 1
+        )
 
     def __post_init__(self) -> None:
         self._mlx_gen = SkulkBatchGenerator(
@@ -622,6 +660,19 @@ class BatchGenerator(InferenceGenerator):
     ) -> Iterable[
         tuple[TaskId, GenerationResponse | ToolCallResponse | Cancelled | Finished]
     ]:
+        # Drop admission records for tasks that completed or cancelled in the
+        # previous step (#596): the runner has already read them when it emitted
+        # those tasks' terminal chunks, so pruning here keeps the map bounded
+        # without racing the read. Tasks admitted later in THIS step are recorded
+        # after this prune, so they are unaffected.
+        active_task_ids = {
+            active.task.task_id for active in self._active_tasks.values()
+        }
+        self._admission_concurrency = {
+            task_id: count
+            for task_id, count in self._admission_concurrency.items()
+            if task_id in active_task_ids
+        }
         if not self._queue:
             self.agree_on_tasks()
 
@@ -690,6 +741,11 @@ class BatchGenerator(InferenceGenerator):
                     trace_task_id=task.task_id,
                     trace_rank=self.device_rank,
                 )
+            # Capture this task's concurrency AT ADMISSION (#596): its position in
+            # the batch is the current active count plus itself. Recording the
+            # live batch size later (at completion) would collapse a burst onto the
+            # peak; the admission value is the true throughput-vs-concurrency bucket.
+            self._admission_concurrency[task.task_id] = len(self._active_tasks) + 1
             self._active_tasks[uid] = _ActiveBatchTask(
                 task=task,
                 queue=queue,
