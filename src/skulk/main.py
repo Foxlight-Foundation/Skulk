@@ -1203,14 +1203,19 @@ def main():
     # the network (the air-gapped contract covers engine artifacts exactly
     # like model downloads) but still wire an already-provisioned managed
     # install from disk, so an offline restart keeps its served capability.
-    from skulk.facts import current_node_facts, refresh_node_facts
-    from skulk.provisioning import ensure_llama_server
+    # Management-only launches (--no-worker) skip entirely: they advertise no
+    # backends and must stay side-effect free.
+    if not args.no_worker:
+        from skulk.facts import current_node_facts, refresh_node_facts
+        from skulk.provisioning import ensure_llama_server
 
-    if (
-        ensure_llama_server(current_node_facts(), allow_download=not args.offline)
-        is not None
-    ):
-        refresh_node_facts()
+        if (
+            ensure_llama_server(
+                current_node_facts(), allow_download=not args.offline
+            )
+            is not None
+        ):
+            refresh_node_facts()
 
     if args.spawn_api:
         preflight_api_port(args.api_port)
