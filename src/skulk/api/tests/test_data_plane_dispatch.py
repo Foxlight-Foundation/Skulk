@@ -111,11 +111,13 @@ async def test_state_surfaces_split_data_transport_health() -> None:
             "backends": [],
             "participation": "management",
             "dataTransport": "zenoh",
+            "capabilityConflicts": [],
         },
         "worker-node": {
             "backends": ["mlx"],
             "participation": "full",
             "dataTransport": "gossipsub",
+            "capabilityConflicts": [],
         },
     }
     health = cast("dict[str, object]", payload["nodeHealth"])

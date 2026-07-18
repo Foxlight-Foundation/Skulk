@@ -26,6 +26,7 @@ from skulk.api.build_identity import (
 )
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.node_facts import CONFLICT_ERROR_CODES
 from skulk.shared.types.profiling import (
     DiskUsage,
     NodeDataTransport,
@@ -55,6 +56,13 @@ HealthCode = Literal[
     "disk_low",
     "disk_full",
     "unreachable",
+    # Capability conflicts from backend derivation (#614): observation vs
+    # declaration disagreements advertised on NodeResources. The codes are the
+    # CapabilityConflictCode vocabulary, mapped one-to-one.
+    "gpu_serving_disabled",
+    "gpu_detection_degraded",
+    "invalid_engine_binary",
+    "backend_override_conflict",
 ]
 
 # Severity rank so an aggregate level is the worst of a node's reasons.
@@ -100,13 +108,35 @@ def _aggregate_level(reasons: Sequence[NodeHealthReason]) -> HealthLevel:
     for reason in reasons:
         level: HealthLevel = (
             "error"
-            if reason.code
-            in ("data_transport_mismatch", "download_failed", "disk_full")
+            if reason.code in ("data_transport_mismatch", "download_failed", "disk_full")
+            or reason.code in CONFLICT_ERROR_CODES
             else "warn"
         )
         if _LEVEL_RANK[level] > _LEVEL_RANK[worst]:
             worst = level
     return worst
+
+
+def _capability_conflict_reasons(
+    resources: NodeResources | None,
+) -> list[NodeHealthReason]:
+    """Reasons for every capability conflict a node advertises (#614).
+
+    The conflict's message and remediation were composed on the node that owns
+    the facts (it knows its own paths and env), so this is a pure one-to-one
+    mapping: the conflict code is a ``HealthCode`` by construction and its
+    severity comes from the shared ``CONFLICT_ERROR_CODES`` source of truth.
+    """
+    if resources is None:
+        return []
+    return [
+        NodeHealthReason(
+            code=conflict.code,
+            message=conflict.message,
+            remediation=conflict.remediation,
+        )
+        for conflict in resources.capability_conflicts
+    ]
 
 
 def live_data_transports(
@@ -369,6 +399,7 @@ def compute_node_health(
                     node_identities=node_identities,
                 )
             )
+        reasons.extend(_capability_conflict_reasons(node_resources.get(node_id)))
         reasons.extend(_download_failure_reasons(downloads.get(node_id, ())))
         disk = node_disk.get(node_id)
         if disk is not None:

@@ -28,7 +28,6 @@ written against the original ``{"mlx"}`` vocabulary keep matching unchanged.
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 from typing import Final, Literal
 
@@ -148,7 +147,16 @@ def rpc_server_binary() -> str | None:
     """
     explicit = os.environ.get(RPC_SERVER_BIN_ENV, "").strip()
     if explicit:
-        return explicit if _is_executable_file(explicit) else None
+        if _is_executable_file(explicit):
+            return explicit
+        # #462: without this, a donor spawn failure on a node with a typo'd
+        # override reads exactly like the env var was never set.
+        logger.error(
+            f"{RPC_SERVER_BIN_ENV} is set to {explicit!r} but that path is not "
+            "an executable file; RPC donor spawns on this node will fail until "
+            "it is fixed or unset."
+        )
+        return None
     server = os.environ.get(LLAMA_SERVER_BIN_ENV, "").strip()
     if not server:
         return None
@@ -308,189 +316,33 @@ def resolve_node_engine(
     return engine_of(tag) if tag is not None else None
 
 
-def _llama_cpp_gpu_offload_supported() -> bool | None:
-    """Whether the installed llama-cpp-python build has GPU offload compiled in.
-
-    Returns the result of ``llama_cpp.llama_supports_gpu_offload()`` (a stable
-    llama.cpp C API), or ``None`` when the binding cannot be introspected so the
-    caller can treat it as "cannot verify" rather than "no GPU". A CPU-only wheel
-    -- e.g. the PyPI prebuilt that ``uv sync`` reinstalls over a source-built
-    Vulkan/ROCm wheel -- returns ``False`` here even on a GPU host, which is what
-    lets a node notice its GPU build was clobbered and stop over-claiming.
-    """
-    try:
-        import llama_cpp  # pyright: ignore[reportMissingImports]
-
-        # llama_cpp ships no type stubs, so the member + its result are Unknown.
-        return bool(llama_cpp.llama_supports_gpu_offload())  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-    except Exception:  # noqa: BLE001 -- any binding/ABI quirk means "unverifiable"
-        return None
-
-
-def _probe_llama_cpp_backends() -> frozenset[str]:
-    """Probe whether llama.cpp is usable here and which compute backends it offers.
-
-    Returns the bare ``llama_cpp`` tag plus one compound tag per advertised
-    compute backend. Compute backends come from ``SKULK_LLAMA_CPP_BACKENDS``
-    when set (authoritative, since the compiled build decides); otherwise we fall
-    back to the always-correct ``cpu`` tag so a node never over-claims GPU
-    capability it might not have built. Returns an empty set when the binding is
-    not importable, so a node without llama.cpp simply does not advertise it.
-
-    Declared GPU backends are cross-checked against the actual build: if an
-    operator declares e.g. ``vulkan`` but the installed wheel has no GPU offload
-    compiled in (the classic failure where ``uv sync`` restores the CPU-only PyPI
-    wheel over a source-built GPU wheel), the GPU tags are dropped and the node
-    advertises only ``llama_cpp-cpu``. That keeps GPU GGUF work from being routed
-    to a node that would silently run it on CPU or fail, until the build is
-    rebuilt (see ``deployment/rocm``).
-    """
-    try:
-        import llama_cpp  # noqa: F401  # pyright: ignore[reportMissingImports, reportUnusedImport]
-    except ImportError:
-        return frozenset()
-
-    tags: set[str] = {"llama_cpp"}
-    declared_tokens = {
-        token
-        for raw in os.environ.get(LLAMA_CPP_BACKENDS_ENV, "").split(",")
-        if (token := raw.strip())
-    }
-    # Intersect with the known compute backends (preserving our canonical order;
-    # order is irrelevant in the advertised set). ``metal`` is MLX-only, so it is
-    # never a valid llama.cpp compute backend even if an operator declares it.
-    computes: list[ComputeBackend] = [
-        cb for cb in _COMPUTE_BACKENDS if cb != "metal" and cb in declared_tokens
-    ]
-    if not computes:
-        # No operator declaration: claim only CPU, which any llama.cpp build can do.
-        computes = ["cpu"]
-
-    gpu_computes = [cb for cb in computes if cb != "cpu"]
-    if gpu_computes:
-        supported = _llama_cpp_gpu_offload_supported()
-        if supported is False:
-            logger.warning(
-                f"{LLAMA_CPP_BACKENDS_ENV} declares GPU backend(s) {gpu_computes} but the "
-                "installed llama-cpp-python has no GPU offload compiled in (likely a "
-                "CPU-only wheel that replaced a source-built GPU wheel, e.g. after "
-                "`uv sync`). Advertising llama_cpp-cpu only so GPU GGUF work is not "
-                "routed here; rebuild the GPU wheel (see deployment/rocm) to restore it."
-            )
-            computes = ["cpu"]
-        elif supported is None:
-            logger.warning(
-                "could not verify llama.cpp GPU offload support; trusting "
-                f"{LLAMA_CPP_BACKENDS_ENV}={gpu_computes}"
-            )
-
-    for compute in computes:
-        tags.add(make_backend_tag("llama_cpp", compute))
-    return frozenset(tags)
-
-
-def _probe_served_backends() -> frozenset[str]:
-    """Probe whether this node can serve models via the ``llama_server`` engine.
-
-    Returns the bare ``llama_server`` tag plus one compound tag per advertised
-    compute backend when ``SKULK_LLAMA_SERVER_BIN`` points at an existing
-    executable; otherwise an empty set (the node does not advertise the served
-    engine and is never a candidate for served-engine cards). Compute backends
-    come from ``SKULK_LLAMA_SERVER_BACKENDS``, falling back to the node's
-    ``SKULK_LLAMA_CPP_BACKENDS`` declaration (the GPU is the same whichever engine
-    drives it), then to ``cpu``. ``metal`` is MLX-only and never valid here.
-    """
-    binary = os.environ.get(LLAMA_SERVER_BIN_ENV, "").strip()
-    if not binary or not os.path.isfile(binary) or not os.access(binary, os.X_OK):
-        return frozenset()
-
-    declared = os.environ.get(LLAMA_SERVER_BACKENDS_ENV, "").strip() or os.environ.get(
-        LLAMA_CPP_BACKENDS_ENV, ""
-    )
-    declared_tokens = {token for raw in declared.split(",") if (token := raw.strip())}
-    computes: list[ComputeBackend] = [
-        cb for cb in _COMPUTE_BACKENDS if cb != "metal" and cb in declared_tokens
-    ]
-    if not computes:
-        computes = ["cpu"]
-
-    tags: set[str] = {"llama_server"}
-    for compute in computes:
-        tags.add(make_backend_tag("llama_server", compute))
-    return frozenset(tags)
-
-
-def _probe_vllm_backends() -> frozenset[str]:
-    """Probe whether this node can serve models via the ``vllm`` engine.
-
-    Returns the bare ``vllm`` tag plus one compound tag per advertised GPU compute
-    backend when ``SKULK_VLLM_BIN`` points at an existing executable (the ``vllm``
-    CLI); otherwise an empty set (the node does not advertise vLLM and is never a
-    candidate for vLLM cards). Compute backends come from ``SKULK_VLLM_BACKENDS``,
-    falling back to the node's ``SKULK_LLAMA_SERVER_BACKENDS`` then
-    ``SKULK_LLAMA_CPP_BACKENDS`` declaration (the GPU is the same whichever engine
-    drives it). Only ``cuda`` / ``rocm`` are honored; unlike the llama_server probe
-    there is deliberately no ``cpu`` fallback, since a vLLM node with no GPU backend
-    is not a useful placement target.
-    """
-    binary = os.environ.get(VLLM_BIN_ENV, "").strip()
-    if not binary or not _is_executable_file(binary):
-        return frozenset()
-
-    declared = (
-        os.environ.get(VLLM_BACKENDS_ENV, "").strip()
-        or os.environ.get(LLAMA_SERVER_BACKENDS_ENV, "").strip()
-        or os.environ.get(LLAMA_CPP_BACKENDS_ENV, "")
-    )
-    declared_tokens = {token for raw in declared.split(",") if (token := raw.strip())}
-    computes: list[ComputeBackend] = [
-        cb for cb in _VLLM_COMPUTE_BACKENDS if cb in declared_tokens
-    ]
-    if not computes:
-        return frozenset()
-
-    tags: set[str] = {"vllm"}
-    for compute in computes:
-        tags.add(make_backend_tag("vllm", compute))
-    return frozenset(tags)
-
-
-def _probe_mlx_audio_backends() -> frozenset[str]:
-    """Probe whether this macOS node can serve speech models via ``mlx_audio``.
-
-    Returns the bare ``mlx_audio`` tag plus ``mlx_audio-metal`` only when the
-    upstream ``mlx_audio`` package imports successfully on Darwin. Other
-    platforms advertise nothing until a non-Metal speech engine is implemented.
-    """
-    if sys.platform != "darwin":
-        return frozenset()
-    try:
-        import mlx_audio  # noqa: F401  # pyright: ignore[reportMissingTypeStubs, reportUnusedImport]
-    except Exception:  # noqa: BLE001
-        # Optional native wheels can fail during extension loading with OSError
-        # or ABI errors; backend probing must degrade to "unavailable".
-        return frozenset()
-    return frozenset({"mlx_audio", make_backend_tag("mlx_audio", "metal")})
-
-
 def probe_node_backends() -> frozenset[str]:
-    """Probe the backend tags this node can actually serve.
+    """Return the backend tags this node can actually serve.
 
-    macOS nodes (``sys.platform == "darwin"``) advertise ``{"mlx", "mlx-metal"}`` (the bare engine tag
-    is kept for backward compatibility with cards written against the original
-    ``{"mlx"}`` vocabulary). Any node with an importable ``llama_cpp`` adds its
-    llama.cpp tags; a node with ``SKULK_LLAMA_SERVER_BIN`` set adds its
-    ``llama_server`` tags; a GPU node with ``SKULK_VLLM_BIN`` set adds its
-    ``vllm`` tags. A macOS node with importable ``mlx_audio`` adds
-    ``{"mlx_audio", "mlx_audio-metal"}`` for single-node speech models. A bare
-    Linux node with none advertises an empty set and is therefore not a placement
-    candidate, which is the pre-existing behavior.
+    Backed by the Node Facts subsystem (#614): one probe pass per process
+    gathers what the node observes about its hardware, software, and declared
+    configuration (``skulk.facts.probe``), and a pure derivation turns that
+    into advertised tags (``skulk.facts.derive``). Detection creates
+    capability, ``SKULK_*_BACKENDS`` declarations override it, and every
+    disagreement between the two is a loud
+    :class:`~skulk.shared.types.node_facts.CapabilityConflict` (logged at
+    startup and advertised on ``NodeResources`` into ``nodeHealth``) -- never a
+    silent CPU default (#609, #612, #462).
+
+    macOS nodes advertise ``{"mlx", "mlx-metal"}`` (plus ``mlx_audio`` tags
+    when importable); any node with an importable ``llama_cpp`` adds its
+    llama.cpp tags; a node with ``SKULK_LLAMA_SERVER_BIN`` set adds served
+    tags derived from its declaration, the binary's own ``--list-devices``
+    report, or observed GPU hardware, in that order; a GPU node with
+    ``SKULK_VLLM_BIN`` set adds its ``vllm`` tags. A bare Linux node with none
+    advertises an empty set and is therefore not a placement candidate.
+
+    The result is cached for the process lifetime (the same contract as any
+    import-time capability): installing a dependency or changing an env var
+    requires a restart to notice, and every consumer reads the same snapshot.
     """
-    tags: set[str] = set()
-    if sys.platform == "darwin":
-        tags |= {"mlx", make_backend_tag("mlx", "metal")}
-    tags |= _probe_llama_cpp_backends()
-    tags |= _probe_served_backends()
-    tags |= _probe_vllm_backends()
-    tags |= _probe_mlx_audio_backends()
-    return frozenset(tags)
+    # Function-level import: skulk.facts imports this module for the tag
+    # vocabulary, so importing it at module level would be a cycle.
+    from skulk.facts import current_backend_derivation
+
+    return current_backend_derivation().backends
