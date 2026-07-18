@@ -101,3 +101,25 @@ def test_registry_docs_are_nonempty() -> None:
     for check in REGISTRY:
         assert check.docs.strip(), check.check_id
         assert check.title.strip(), check.check_id
+
+
+def test_disabled_vllm_binary_does_not_count_as_available() -> None:
+    # A vllm CLI on a GPU-less node derives no tags and serves nothing, so
+    # the availability check must FAIL, keeping --fix provisioning eligible
+    # (PR #615 review).
+    from skulk.facts.testing import ok_bin as _ok_bin
+
+    results = _check_engine_available(make_facts(vllm_bin=_ok_bin("SKULK_VLLM_BIN")))
+    assert [r.verdict for r in results] == ["fail"]
+
+
+def test_fix_not_promised_with_invalid_override() -> None:
+    # An invalid SKULK_LLAMA_SERVER_BIN is its own conflict; --fix will not
+    # provision over it, so the FAIL must not advertise fix_available.
+    from skulk.facts.testing import bad_bin as _bad_bin
+
+    results = _check_engine_available(
+        make_facts(llama_server_bin=_bad_bin("SKULK_LLAMA_SERVER_BIN"))
+    )
+    assert [r.verdict for r in results] == ["fail"]
+    assert results[0].fix_available is False

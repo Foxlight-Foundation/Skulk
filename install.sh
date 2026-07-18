@@ -156,7 +156,7 @@ if [[ "$WITH_VLLM" == "1" ]]; then
         # Skulk's own env pins transformers>=5, which vLLM cannot use yet, so
         # vLLM lives in its own venv and Skulk drives its CLI as an external
         # served engine (SKULK_VLLM_BIN).
-        VIRTUAL_ENV="$VLLM_ENV" uv pip install \
+        uv pip install --python "$VLLM_ENV/bin/python" \
             "vllm==0.11.0" "transformers<5" --torch-backend=cu128
         mkdir -p "$HOME/.skulk"
         if ! grep -q "SKULK_VLLM_BIN" "$HOME/.skulk/skulk.env" 2>/dev/null; then

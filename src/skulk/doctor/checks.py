@@ -96,20 +96,41 @@ def _ok(check_id: str, title: str, detail: str) -> CheckResult:
 # --- engine availability ---------------------------------------------------
 
 
+def _provisioning_fix_applicable(facts: NodeFacts) -> bool:
+    """Whether --fix can actually provision an engine on this node.
+
+    Mirrors ensure_llama_server's own gates so the doctor never promises a
+    remediation that would inevitably fail: Linux only, no explicit override
+    (valid or not; an invalid override is its own conflict, not something to
+    paper over), and auto-provisioning not opted out.
+    """
+    return (
+        facts.platform == "linux"
+        and facts.llama_server_binary.state == "not_configured"
+        and os.environ.get("SKULK_NO_ENGINE_AUTOPROVISION", "").strip() != "1"
+    )
+
+
 def _check_engine_available(facts: NodeFacts) -> Sequence[CheckResult]:
-    """At least one inference engine must be usable on this node."""
+    """At least one inference engine must be usable on this node.
+
+    Usability is judged from the derived backends, not raw binary presence:
+    a vllm CLI on a node with no GPU derives no tags and serves nothing, so
+    it must not count as an available engine.
+    """
     check_id = "engine-available"
     title = "Inference engine availability"
+    derived = derive_node_backends(facts).backends
     engines: list[str] = []
-    if facts.platform == "darwin":
+    if "mlx" in derived:
         engines.append("mlx (in-process)")
-        if facts.mlx_audio_importable:
-            engines.append("mlx_audio (speech)")
-    if facts.llama_cpp_importable:
+    if "mlx_audio" in derived:
+        engines.append("mlx_audio (speech)")
+    if "llama_cpp" in derived:
         engines.append("llama_cpp (in-process GGUF)")
-    if facts.llama_server_binary.state == "ok":
+    if "llama_server" in derived:
         engines.append(f"llama_server ({facts.llama_server_binary.configured_path})")
-    if facts.vllm_binary.state == "ok":
+    if "vllm" in derived:
         engines.append(f"vllm ({facts.vllm_binary.configured_path})")
     if engines:
         return [_ok(check_id, title, "available: " + ", ".join(engines))]
@@ -130,21 +151,17 @@ def _check_engine_available(facts: NodeFacts) -> Sequence[CheckResult]:
                 "SKULK_LLAMA_SERVER_BIN to a custom llama-server, or set "
                 "SKULK_VLLM_BIN to a vllm CLI"
             ),
-            fix_available=facts.platform == "linux",
+            fix_available=_provisioning_fix_applicable(facts),
         )
     ]
 
 
 def _fix_engine_available(facts: NodeFacts) -> str | None:
     """Provision the pinned llama-server build when no engine is available."""
-    if facts.platform != "linux":
+    if not _provisioning_fix_applicable(facts):
         return None
-    engine_present = (
-        facts.llama_cpp_importable
-        or facts.llama_server_binary.state == "ok"
-        or facts.vllm_binary.state == "ok"
-    )
-    if engine_present:
+    if derive_node_backends(facts).backends:
+        # Some engine already derives usable tags; nothing to provision.
         return None
     from skulk.provisioning import ensure_llama_server
 

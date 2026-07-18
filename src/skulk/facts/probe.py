@@ -341,13 +341,14 @@ def gather_node_facts(
     declared_llama_server = env.get(LLAMA_SERVER_BACKENDS_ENV)
     declared_vllm = env.get(VLLM_BACKENDS_ENV)
 
-    # Probe the binary's own device list only when there is a usable binary and
-    # no declaration already answers the question (declarations override, so
-    # spending a subprocess launch to learn something we will not use is waste).
+    # Probe the binary's own device list only when there is a usable binary
+    # and no SERVER-specific declaration answers the question. A llama.cpp
+    # declaration deliberately does NOT suppress the probe: it describes the
+    # in-process binding's build, not this binary, and using it to skip the
+    # probe would let e.g. a CUDA llama-cpp declaration mask a managed Vulkan
+    # server build that cannot actually drive the GPU (PR #615 review).
     device_probe = LlamaServerDeviceProbe()
-    declaration_answers = bool(
-        (declared_llama_server or "").strip() or (declared_llama_cpp or "").strip()
-    )
+    declaration_answers = bool((declared_llama_server or "").strip())
     if llama_server_binary.state == "ok" and not declaration_answers:
         assert llama_server_binary.configured_path is not None
         device_probe = probe_llama_server_devices(llama_server_binary.configured_path)

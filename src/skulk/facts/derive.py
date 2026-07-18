@@ -231,10 +231,14 @@ def _derive_llama_server(
 
     conflicts: list[CapabilityConflict] = []
     notes: list[str] = []
-    declared = _declared_tokens(
-        facts.declared_llama_server_backends
-    ) or _declared_tokens(facts.declared_llama_cpp_backends)
-    computes = [cb for cb in _SERVED_COMPUTES if cb in declared]
+    # Precedence: the SERVER-specific declaration wins; then the binary's own
+    # device list (ground truth for THIS binary, so it outranks the llama.cpp
+    # declaration, which describes a different build); then the llama.cpp
+    # declaration as legacy fallback; then hardware vendor inference. A
+    # ``devices`` probe with an empty list is a CPU-only build's truth and
+    # deliberately does NOT fall through to weaker evidence.
+    declared_server = _declared_tokens(facts.declared_llama_server_backends)
+    computes = [cb for cb in _SERVED_COMPUTES if cb in declared_server]
 
     if computes:
         conflicts.extend(
@@ -255,16 +259,28 @@ def _derive_llama_server(
                     "derived served backends from the binary's own device list"
                 )
         else:
-            if facts.gpus_of("nvidia"):
-                computes.append("cuda")
-            if facts.gpus_of("amd"):
-                computes.append("vulkan")
+            declared_cpp = _declared_tokens(facts.declared_llama_cpp_backends)
+            computes = [cb for cb in _SERVED_COMPUTES if cb in declared_cpp]
             if computes:
-                notes.append(
-                    "derived served backend(s) "
-                    f"{sorted(computes)} from observed GPU hardware "
-                    f"(--list-devices probe: {probe.outcome})"
+                conflicts.extend(
+                    _override_conflicts(
+                        computes,
+                        facts,
+                        env_var="SKULK_LLAMA_CPP_BACKENDS",
+                        engine="llama_server",
+                    )
                 )
+            else:
+                if facts.gpus_of("nvidia"):
+                    computes.append("cuda")
+                if facts.gpus_of("amd"):
+                    computes.append("vulkan")
+                if computes:
+                    notes.append(
+                        "derived served backend(s) "
+                        f"{sorted(computes)} from observed GPU hardware "
+                        f"(--list-devices probe: {probe.outcome})"
+                    )
 
     if not computes:
         computes = ["cpu"]

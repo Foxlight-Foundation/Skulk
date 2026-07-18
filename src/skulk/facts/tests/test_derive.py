@@ -412,3 +412,31 @@ def test_fresh_cuda_pod_with_bin_and_zero_backend_env_serves_gpu() -> None:
     derivation = derive_node_backends(facts)
     assert "llama_server-cuda" in derivation.backends
     assert derivation.conflicts == ()
+
+
+def test_served_device_probe_outranks_llama_cpp_declaration() -> None:
+    # A CUDA llama.cpp declaration describes the in-process binding, not the
+    # server binary: when the managed (e.g. Vulkan) server build positively
+    # reports no GPU devices, that truth must win over the cpp fallback and
+    # stay loud (PR #615 review).
+    facts = make_facts(
+        gpus=(NVIDIA_A40,),
+        llama_server_bin=ok_bin("SKULK_LLAMA_SERVER_BIN"),
+        declared_llama_cpp="cuda",
+        device_probe=LlamaServerDeviceProbe(outcome="devices", computes=()),
+    )
+    derivation = derive_node_backends(facts)
+    assert "llama_server-cuda" not in derivation.backends
+    assert "llama_server-cpu" in derivation.backends
+    assert "gpu_serving_disabled" in conflict_codes(facts)
+
+
+def test_served_cpp_declaration_still_falls_back_when_probe_inconclusive() -> None:
+    facts = make_facts(
+        gpus=(AMD_STRIX,),
+        llama_server_bin=ok_bin("SKULK_LLAMA_SERVER_BIN"),
+        declared_llama_cpp="vulkan",
+        device_probe=LlamaServerDeviceProbe(outcome="unsupported"),
+    )
+    derivation = derive_node_backends(facts)
+    assert "llama_server-vulkan" in derivation.backends

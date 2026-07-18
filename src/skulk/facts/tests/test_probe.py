@@ -243,3 +243,26 @@ def test_nvidia_smi_listing_a_device_is_presence(
 
     monkeypatch.setattr(probe.shutil, "which", _fake_which)
     assert probe.nvidia_device_visibly_present() is True
+
+
+def test_cpp_declaration_does_not_suppress_device_probe(tmp_path: Path) -> None:
+    # Only the SERVER-specific declaration answers for the server binary; a
+    # llama.cpp declaration must not skip the probe (PR #615 review).
+    binary = tmp_path / "llama-server"
+    binary.write_text(
+        "#!/bin/sh\n"
+        'echo "Available devices:"\n'
+        'echo "  Vulkan0: AMD Radeon Graphics (8192 MiB, 8000 MiB free)"\n'
+    )
+    binary.chmod(0o755)
+    facts = gather_node_facts(
+        env={
+            "SKULK_LLAMA_SERVER_BIN": str(binary),
+            "SKULK_LLAMA_CPP_BACKENDS": "cuda",
+        },
+        platform="linux",
+        nvidia_presence=False,
+        drm_root=tmp_path / "no-drm",
+    )
+    assert facts.llama_server_device_probe.outcome == "devices"
+    assert facts.llama_server_device_probe.computes == ("vulkan",)
