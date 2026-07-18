@@ -250,3 +250,42 @@ def test_interrupted_extraction_leaves_no_partial_install(
     _isolate_engines_dir(monkeypatch, tmp_path)
     _pin_fake_artifact(monkeypatch, _fake_archive())
     assert provision_llama_server("vulkan").is_file()
+
+
+def test_wheel_outranks_tarball_provisioning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The pip-installed CUDA wheel is the preferred managed source on NVIDIA
+    # nodes: no download may happen when it is present.
+    _isolate_engines_dir(monkeypatch, tmp_path)
+    shim = tmp_path / "llama-server-cuda"
+    shim.write_text("#!/bin/sh\n")
+    shim.chmod(0o755)
+    monkeypatch.setattr(provisioning, "wheel_llama_server", lambda: shim)
+
+    def _must_not_download(art: EngineArtifact, destination: Path) -> None:
+        raise AssertionError("downloaded despite an installed engine wheel")
+
+    monkeypatch.setattr(provisioning, "_download", _must_not_download)
+    monkeypatch.delenv(provisioning.AUTOPROVISION_OPT_OUT_ENV, raising=False)
+    monkeypatch.delenv(LLAMA_SERVER_BIN_ENV, raising=False)
+    wired = ensure_llama_server(make_facts(gpus=(NVIDIA_A40,)))
+    assert wired == shim
+    assert os.environ[LLAMA_SERVER_BIN_ENV] == str(shim)
+
+
+def test_wheel_ignored_on_amd_nodes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The wheel is CUDA-only; an AMD node must keep the Vulkan tarball path.
+    _isolate_engines_dir(monkeypatch, tmp_path)
+    shim = tmp_path / "llama-server-cuda"
+    shim.write_text("#!/bin/sh\n")
+    shim.chmod(0o755)
+    monkeypatch.setattr(provisioning, "wheel_llama_server", lambda: shim)
+    _pin_fake_artifact(monkeypatch, _fake_archive())
+    monkeypatch.delenv(provisioning.AUTOPROVISION_OPT_OUT_ENV, raising=False)
+    monkeypatch.delenv(LLAMA_SERVER_BIN_ENV, raising=False)
+    wired = ensure_llama_server(make_facts(gpus=(AMD_STRIX,)))
+    assert wired is not None
+    assert wired != shim

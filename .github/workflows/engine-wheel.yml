@@ -1,0 +1,119 @@
+# Builds the pip-installable CUDA llama-server wheel (skulk-llama-server-cuda,
+# packaging/skulk-llama-server-cuda) and publishes it to PyPI via trusted
+# publishing. Same principle as cuda-image.yml: nvcc compiles CUDA kernels on
+# plain amd64 runners without a GPU, inside the same CUDA devel container the
+# pod image uses, so the wheel's glibc/toolkit lineage is pinned and known.
+#
+# Build runs on dispatch and on packaging changes; PUBLISH runs only on manual
+# dispatch with publish=true (cutting a wheel release is a deliberate act).
+# One-time setup on PyPI (account owner): create the skulk-llama-server-cuda
+# project and register this repository + workflow as a trusted publisher.
+name: engine-wheel
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the built wheel to PyPI"
+        type: boolean
+        default: false
+  push:
+    branches: [dev]
+    paths:
+      - "packaging/skulk-llama-server-cuda/**"
+      - ".github/workflows/engine-wheel.yml"
+
+env:
+  # Must match src/skulk/provisioning/manifest.py LLAMA_SERVER_PIN and the
+  # packaging version (0.<build>.<rev>); the guard step enforces both.
+  LLAMA_CPP_PIN: b10068
+  CUDA_ARCHITECTURES: "80-real;86-real;89-real;90"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    container: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    steps:
+      - name: Install build prerequisites
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq git cmake build-essential libcurl4-openssl-dev curl ca-certificates binutils
+
+      - uses: actions/checkout@v4
+
+      - name: Guard pin agreement
+        run: |
+          set -euo pipefail
+          grep -q "LLAMA_SERVER_PIN: Final = \"$LLAMA_CPP_PIN\"" src/skulk/provisioning/manifest.py
+          BUILD_NUM="${LLAMA_CPP_PIN#b}"
+          grep -q "version = \"0.${BUILD_NUM}\." packaging/skulk-llama-server-cuda/pyproject.toml
+
+      - name: Build llama-server (CUDA)
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$LLAMA_CPP_PIN" \
+            https://github.com/ggml-org/llama.cpp /tmp/llama-cpp-src
+          cmake -S /tmp/llama-cpp-src -B /tmp/build \
+            -DGGML_CUDA=ON \
+            -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCHITECTURES" \
+            -DGGML_RPC=ON \
+            -DBUILD_SHARED_LIBS=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN' \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
+          cmake --build /tmp/build --target llama-server ggml-rpc-server -j"$(nproc)"
+
+      - name: Assemble wheel payload
+        run: |
+          set -euo pipefail
+          BIN=packaging/skulk-llama-server-cuda/src/skulk_llama_server_cuda/bin
+          mkdir -p "$BIN"
+          cp /tmp/build/bin/llama-server /tmp/build/bin/ggml-rpc-server "$BIN"/
+          cp /tmp/build/bin/*.so* "$BIN"/ 2>/dev/null || true
+          strip --strip-unneeded "$BIN"/llama-server "$BIN"/ggml-rpc-server "$BIN"/*.so* || true
+          ls -la "$BIN"/
+
+      - name: Install uv
+        run: |
+          curl -fsSL https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build wheel
+        run: |
+          set -euo pipefail
+          cd packaging/skulk-llama-server-cuda
+          uv build --wheel
+          ls -la dist/
+
+      - name: Smoke-test wheel (no GPU; exec + version only)
+        run: |
+          set -euo pipefail
+          uv venv /tmp/smoke --python 3.12
+          uv pip install --python /tmp/smoke/bin/python \
+            packaging/skulk-llama-server-cuda/dist/*.whl
+          /tmp/smoke/bin/llama-server-cuda --version
+          # --list-devices on a GPU-less runner legitimately reports no
+          # devices; the point is that the shim resolves and the binary execs.
+          /tmp/smoke/bin/llama-server-cuda --list-devices || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skulk-llama-server-cuda-wheel
+          path: packaging/skulk-llama-server-cuda/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: skulk-llama-server-cuda-wheel
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

@@ -502,8 +502,13 @@ upstream llama.cpp release with per-artifact SHA-256 checksums recorded in the
 repo, downloaded on demand and verified before use, so a new user never builds
 llama.cpp. At node startup on Linux, when no `SKULK_LLAMA_SERVER_BIN` override
 is set, Skulk installs the pinned build under `~/.local/share/skulk/engines`
-(`SKULK_ENGINES_DIR`) and exports the binary path for the process. A visible
-NVIDIA GPU tries variants in order: first a CUDA build (upstream publishes no
+(`SKULK_ENGINES_DIR`) and exports the binary path for the process. On NVIDIA
+nodes the preferred managed source is the pip-installable
+`skulk-llama-server-cuda` wheel: it carries the Foxlight-built CUDA binary,
+resolves the CUDA runtime from NVIDIA's official PyPI packages, installs
+through the same standard tooling as every other dependency, and is wired
+automatically when present. Failing that, a visible
+NVIDIA GPU tries tarball variants in order: first a CUDA build (upstream publishes no
 Linux CUDA prebuilt, so this slot is reserved for a Foxlight-built artifact
 and is skipped until one is pinned in the manifest), then the Vulkan build
 (NVIDIA's bare-metal driver ships a working Vulkan ICD; container GPU clouds

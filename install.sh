@@ -132,6 +132,16 @@ cd "$INSTALL_DIR"
 log "syncing the Python environment (first run compiles the Rust bindings; this can take a few minutes)"
 uv sync
 
+# --- CUDA engine wheel (NVIDIA Linux) --------------------------------------
+
+if [[ "$OS" == "Linux" ]] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q GPU; then
+    log "installing the CUDA llama-server engine wheel"
+    if ! uv pip install skulk-llama-server-cuda; then
+        warn "skulk-llama-server-cuda unavailable (not yet published or no network);"
+        warn "falling back to the managed Vulkan build; skulk doctor will report the outcome"
+    fi
+fi
+
 # --- dashboard (optional) --------------------------------------------------
 
 if [[ "$HEADLESS" == "1" ]]; then

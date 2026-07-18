@@ -24,8 +24,10 @@ from __future__ import annotations
 import hashlib
 import os
 import platform as platform_module
+import sys
 import tarfile
 import tempfile
+from importlib.util import find_spec
 from pathlib import Path
 
 import httpx
@@ -71,6 +73,26 @@ def select_variant(facts: NodeFacts) -> EngineVariant | None:
     """The preferred managed build variant for this node (first of the chain)."""
     chain = select_variant_chain(facts)
     return chain[0] if chain else None
+
+
+def wheel_llama_server() -> Path | None:
+    """The pip-installed CUDA engine wheel's shim, or ``None``.
+
+    The ``skulk-llama-server-cuda`` wheel (packaging/skulk-llama-server-cuda)
+    carries the Foxlight-built CUDA binary with NVIDIA's official runtime
+    wheels as dependencies; its ``llama-server-cuda`` console script wires the
+    loader path and execs the binary, so Skulk treats the shim exactly like
+    any other llama-server binary (the facts probe validates it via
+    ``--list-devices``). Installed via ordinary pip/uv, it is the preferred
+    managed source on NVIDIA nodes: standard tooling, ecosystem-verified
+    hashes, works offline once installed.
+    """
+    if find_spec("skulk_llama_server_cuda") is None:
+        return None
+    shim = Path(sys.executable).resolve().parent / "llama-server-cuda"
+    if shim.is_file() and os.access(shim, os.X_OK):
+        return shim
+    return None
 
 
 def managed_llama_server_path() -> Path | None:
@@ -218,6 +240,13 @@ def ensure_llama_server(
         return None
     if not select_variant_chain(facts):
         return None
+    if facts.gpus_of("nvidia"):
+        # The pip-installed CUDA wheel outranks tarball provisioning: it is
+        # the standard-tooling path and already on disk (works offline too).
+        wheel = wheel_llama_server()
+        if wheel is not None:
+            os.environ[LLAMA_SERVER_BIN_ENV] = str(wheel)
+            return wheel
     if not allow_download:
         # Prefer the same variant order a download would use: with multiple
         # variants on disk (a cpu install from a pre-GPU run plus a later
