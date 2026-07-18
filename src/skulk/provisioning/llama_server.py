@@ -174,7 +174,9 @@ def _binary_in(target_dir: Path) -> Path | None:
     return None
 
 
-def ensure_llama_server(facts: NodeFacts) -> Path | None:
+def ensure_llama_server(
+    facts: NodeFacts, *, allow_download: bool = True
+) -> Path | None:
     """Ensure a usable llama-server for this node, honoring overrides.
 
     Called at node startup (before the first serving decision) and by
@@ -184,11 +186,16 @@ def ensure_llama_server(facts: NodeFacts) -> Path | None:
 
     Args:
         facts: The current facts snapshot (decides variant and applicability).
+        allow_download: When ``False`` (an ``--offline`` node), never touch
+            the network: an already-provisioned managed install still wires,
+            so offline restarts keep their served GGUF capability, but a
+            missing build is simply absent.
 
     Returns:
         The managed binary path when provisioning happened or an existing
         managed install was wired, else ``None`` (override present, opted
-        out, non-Linux, or provisioning failed).
+        out, non-Linux, nothing on disk while offline, or provisioning
+        failed).
     """
     if os.environ.get(AUTOPROVISION_OPT_OUT_ENV, "").strip() == "1":
         return None
@@ -196,6 +203,14 @@ def ensure_llama_server(facts: NodeFacts) -> Path | None:
         # An explicit override (valid or not) wins; invalid ones stay loud
         # via the invalid_engine_binary conflict rather than being masked.
         return None
+    if not select_variant_chain(facts):
+        return None
+    if not allow_download:
+        existing = managed_llama_server_path()
+        if existing is None:
+            return None
+        os.environ[LLAMA_SERVER_BIN_ENV] = str(existing)
+        return existing
     binary: Path | None = None
     last_error: Exception | None = None
     for variant in select_variant_chain(facts):

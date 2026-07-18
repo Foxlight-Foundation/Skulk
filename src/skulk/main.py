@@ -1199,16 +1199,18 @@ def main():
     # ensure a Linux node without an explicit llama-server override has the
     # pinned managed build (fetch + checksum-verify on first run), then
     # re-derive capability facts so the advertised backends include it. macOS
-    # and opted-out nodes return immediately, and --offline nodes never reach
-    # for the network: the air-gapped contract covers engine artifacts exactly
-    # like model downloads (an already-provisioned managed build still wires,
-    # since provisioning short-circuits to the on-disk install).
-    if not args.offline:
-        from skulk.facts import current_node_facts, refresh_node_facts
-        from skulk.provisioning import ensure_llama_server
+    # and opted-out nodes return immediately. --offline nodes never reach for
+    # the network (the air-gapped contract covers engine artifacts exactly
+    # like model downloads) but still wire an already-provisioned managed
+    # install from disk, so an offline restart keeps its served capability.
+    from skulk.facts import current_node_facts, refresh_node_facts
+    from skulk.provisioning import ensure_llama_server
 
-        if ensure_llama_server(current_node_facts()) is not None:
-            refresh_node_facts()
+    if (
+        ensure_llama_server(current_node_facts(), allow_download=not args.offline)
+        is not None
+    ):
+        refresh_node_facts()
 
     if args.spawn_api:
         preflight_api_port(args.api_port)

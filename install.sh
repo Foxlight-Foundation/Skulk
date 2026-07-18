@@ -116,8 +116,10 @@ command -v uv >/dev/null 2>&1 || die "uv installation failed; see https://docs.a
 if [[ -d "$INSTALL_DIR/.git" ]]; then
     log "updating existing checkout at $INSTALL_DIR (ref: $INSTALL_REF)"
     git -C "$INSTALL_DIR" fetch origin "$INSTALL_REF"
-    git -C "$INSTALL_DIR" checkout "$INSTALL_REF"
-    git -C "$INSTALL_DIR" pull --ff-only origin "$INSTALL_REF" || true
+    # A tag or remote-only ref may not be checkout-able by name after a bare
+    # fetch; FETCH_HEAD always is, keeping re-runs idempotent for any ref.
+    git -C "$INSTALL_DIR" checkout "$INSTALL_REF" 2>/dev/null         || git -C "$INSTALL_DIR" checkout --detach FETCH_HEAD
+    git -C "$INSTALL_DIR" pull --ff-only origin "$INSTALL_REF" 2>/dev/null || true
 else
     log "cloning Skulk into $INSTALL_DIR (ref: $INSTALL_REF)"
     git clone --branch "$INSTALL_REF" \

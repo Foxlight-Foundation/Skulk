@@ -25,7 +25,10 @@ def _render_text(results: list[CheckResult], actions: list[str]) -> str:
     """Render the audit as the human-facing report."""
     lines: list[str] = ["skulk doctor: node environment audit", ""]
     for action in actions:
-        lines.append(f"  fixed: {action}")
+        # run_fixes() strings are self-describing ("[check] did X" or
+        # "[check] fix failed: ..."), so no "fixed:" prefix that would
+        # mislabel a failed remediation.
+        lines.append(f"  fix: {action}")
     if actions:
         lines.append("")
     for result in results:
