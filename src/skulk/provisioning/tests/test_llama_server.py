@@ -180,7 +180,6 @@ def test_ensure_offline_wires_existing_managed_install(
     _isolate_engines_dir(monkeypatch, tmp_path)
     _pin_fake_artifact(monkeypatch, _fake_archive())
     provisioned = provision_llama_server("vulkan")
-    monkeypatch.setattr(provisioning, "managed_llama_server_path", lambda: provisioned)
 
     def _must_not_download(art: EngineArtifact, destination: Path) -> None:
         raise AssertionError("offline ensure touched the network")
@@ -197,7 +196,6 @@ def test_ensure_offline_without_install_is_absent_not_downloading(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _isolate_engines_dir(monkeypatch, tmp_path)
-    monkeypatch.setattr(provisioning, "managed_llama_server_path", lambda: None)
 
     def _must_not_download(art: EngineArtifact, destination: Path) -> None:
         raise AssertionError("offline ensure touched the network")
@@ -208,3 +206,47 @@ def test_ensure_offline_without_install_is_absent_not_downloading(
         ensure_llama_server(make_facts(gpus=(NVIDIA_A40,)), allow_download=False)
         is None
     )
+
+
+def test_ensure_offline_prefers_capable_variant_over_cpu(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # With a stale cpu install AND a vulkan install on disk, an offline GPU
+    # node must wire the vulkan build, not the alphabetically-first cpu one
+    # (PR #615 review).
+    engines = _isolate_engines_dir(monkeypatch, tmp_path)
+    for variant in ("cpu", "vulkan"):
+        vdir = engines / "llama-server" / LLAMA_SERVER_PIN / variant
+        vdir.mkdir(parents=True)
+        binary = vdir / "llama-server"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+    monkeypatch.delenv(provisioning.AUTOPROVISION_OPT_OUT_ENV, raising=False)
+    monkeypatch.delenv(LLAMA_SERVER_BIN_ENV, raising=False)
+    wired = ensure_llama_server(make_facts(gpus=(NVIDIA_A40,)), allow_download=False)
+    assert wired is not None
+    assert "vulkan" in str(wired)
+
+
+def test_interrupted_extraction_leaves_no_partial_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # An extraction failure must not leave a partial variant dir that would
+    # satisfy the fast path unverified on the next start (PR #615 review).
+    engines = _isolate_engines_dir(monkeypatch, tmp_path)
+    _pin_fake_artifact(monkeypatch, _fake_archive())
+
+    def _boom(archive: Path, destination: Path) -> None:
+        (destination / "partial-file").write_text("half")
+        raise OSError("disk full mid-extract")
+
+    monkeypatch.setattr(provisioning, "_safe_extract", _boom)
+    with pytest.raises(OSError):
+        provision_llama_server("vulkan")
+    target = engines / "llama-server" / LLAMA_SERVER_PIN / "vulkan"
+    assert not target.exists()
+    # Recovery: a later attempt with a working extractor installs cleanly.
+    monkeypatch.undo()
+    _isolate_engines_dir(monkeypatch, tmp_path)
+    _pin_fake_artifact(monkeypatch, _fake_archive())
+    assert provision_llama_server("vulkan").is_file()

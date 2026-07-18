@@ -147,12 +147,25 @@ def provision_llama_server(variant: EngineVariant) -> Path:
         f"provisioning llama-server {LLAMA_SERVER_PIN} ({variant}) from "
         f"{artifact.url()}"
     )
-    target_dir.mkdir(parents=True, exist_ok=True)
+    # Download, verify, and extract into a staging directory, then rename it
+    # into place: the variant directory either exists complete or not at all,
+    # so an interrupted install can never satisfy the fast path above with a
+    # partial (unverified) tree on the next start.
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=target_dir.parent) as staging:
         archive = Path(staging) / artifact.asset_name
         _download(artifact, archive)
         _verify_sha256(archive, artifact.sha256)
-        _safe_extract(archive, target_dir)
+        extracted = Path(staging) / "extracted"
+        extracted.mkdir()
+        _safe_extract(archive, extracted)
+        if _binary_in(extracted) is None:
+            raise RuntimeError(
+                f"pinned archive {artifact.asset_name} contained no "
+                "llama-server binary; report this as a skulk bug"
+            )
+        if not target_dir.exists():
+            extracted.rename(target_dir)
     binary = _binary_in(target_dir)
     if binary is None:
         raise RuntimeError(
@@ -206,11 +219,18 @@ def ensure_llama_server(
     if not select_variant_chain(facts):
         return None
     if not allow_download:
-        existing = managed_llama_server_path()
-        if existing is None:
-            return None
-        os.environ[LLAMA_SERVER_BIN_ENV] = str(existing)
-        return existing
+        # Prefer the same variant order a download would use: with multiple
+        # variants on disk (a cpu install from a pre-GPU run plus a later
+        # vulkan/cuda one), an offline restart must not wire the weakest
+        # build just because it sorts first.
+        for variant in select_variant_chain(facts):
+            existing = _binary_in(
+                SKULK_ENGINES_DIR / "llama-server" / LLAMA_SERVER_PIN / variant
+            )
+            if existing is not None and os.access(existing, os.X_OK):
+                os.environ[LLAMA_SERVER_BIN_ENV] = str(existing)
+                return existing
+        return None
     binary: Path | None = None
     last_error: Exception | None = None
     for variant in select_variant_chain(facts):
