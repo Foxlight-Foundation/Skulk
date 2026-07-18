@@ -162,6 +162,9 @@ if [[ "$WITH_VLLM" == "1" ]]; then
         fi
         export SKULK_VLLM_BIN="$VLLM_ENV/bin/vllm"
         log "vLLM installed; SKULK_VLLM_BIN recorded in ~/.skulk/skulk.env"
+        log "The service wrappers (deployment/install) source that file; an"
+        log "interactive shell does not, so launch interactively with:"
+        log "    SKULK_VLLM_BIN=$VLLM_ENV/bin/vllm uv run skulk"
     fi
 fi
 

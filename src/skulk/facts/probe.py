@@ -114,10 +114,26 @@ def _nvidia_gpu_facts(nvml: NvmlLike | None) -> tuple[GpuDeviceFact, ...]:
 
 
 def nvidia_device_visibly_present() -> bool:
-    """Whether an NVIDIA device is visible without NVML (presence-only evidence)."""
+    """Whether an NVIDIA device is visible without NVML (presence-only evidence).
+
+    The driver's proc node and device nodes are direct evidence. ``nvidia-smi``
+    merely being on PATH is not (CUDA toolkit images run without a GPU, and
+    CPU dev boxes carry the tools): it counts only when it actually runs and
+    lists a device, so a GPU-less toolkit box cannot fabricate a presence fact
+    and cascade into false conflicts or a GPU engine download.
+    """
     if any(path.exists() for path in _NVIDIA_PRESENCE_PATHS):
         return True
-    return shutil.which("nvidia-smi") is not None
+    nvidia_smi = shutil.which("nvidia-smi")
+    if nvidia_smi is None:
+        return False
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed, known-safe command
+            [nvidia_smi, "-L"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0 and "GPU" in completed.stdout
 
 
 def _read_sysfs_int(path: Path) -> int | None:

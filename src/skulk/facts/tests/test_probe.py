@@ -211,3 +211,35 @@ def test_device_probe_crash_is_failed(tmp_path: Path) -> None:
     )
     assert facts.llama_server_device_probe.outcome == "failed"
     assert "boom" in facts.llama_server_device_probe.detail
+
+
+def test_nvidia_smi_on_path_without_gpu_is_not_presence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # CUDA toolkit images run without a GPU: nvidia-smi exists but cannot
+    # list a device, and must not fabricate a presence fact (PR #615 review).
+    fake_smi = tmp_path / "nvidia-smi"
+    fake_smi.write_text('#!/bin/sh\necho "Unable to determine the device handle" >&2\nexit 6\n')
+    fake_smi.chmod(0o755)
+
+    def _fake_which(name: str) -> str:
+        return str(fake_smi)
+
+    monkeypatch.setattr(probe.shutil, "which", _fake_which)
+    assert probe.nvidia_device_visibly_present() is False
+
+
+def test_nvidia_smi_listing_a_device_is_presence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_smi = tmp_path / "nvidia-smi"
+    fake_smi.write_text(
+        '#!/bin/sh\necho "GPU 0: NVIDIA A40 (UUID: GPU-abc)"\n'
+    )
+    fake_smi.chmod(0o755)
+
+    def _fake_which(name: str) -> str:
+        return str(fake_smi)
+
+    monkeypatch.setattr(probe.shutil, "which", _fake_which)
+    assert probe.nvidia_device_visibly_present() is True
