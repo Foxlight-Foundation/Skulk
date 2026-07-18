@@ -15,6 +15,7 @@ from skulk.provisioning.llama_server import (
     ensure_llama_server,
     provision_llama_server,
     select_variant,
+    select_variant_chain,
 )
 from skulk.provisioning.manifest import (
     LLAMA_SERVER_ARTIFACTS,
@@ -24,8 +25,13 @@ from skulk.provisioning.manifest import (
 from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
 
 
-def test_select_variant_prefers_vulkan_on_gpu_nodes() -> None:
-    assert select_variant(make_facts(gpus=(NVIDIA_A40,))) == "vulkan"
+def test_select_variant_chain_by_gpu_vendor() -> None:
+    # NVIDIA prefers the Foxlight CUDA build (container clouds have no usable
+    # Vulkan ICD) with Vulkan as the bare-metal-friendly fallback; AMD uses
+    # the fleet-proven RADV Vulkan path.
+    assert select_variant_chain(make_facts(gpus=(NVIDIA_A40,))) == ("cuda", "vulkan")
+    assert select_variant_chain(make_facts(gpus=(AMD_STRIX,))) == ("vulkan",)
+    assert select_variant(make_facts(gpus=(NVIDIA_A40,))) == "cuda"
     assert select_variant(make_facts(gpus=(AMD_STRIX,))) == "vulkan"
 
 

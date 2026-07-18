@@ -35,8 +35,15 @@ drive). Advance deliberately, re-recording checksums and re-running the
 fresh-box gauntlet.
 """
 
-EngineVariant = Literal["cpu", "vulkan", "rocm"]
-"""Compute variant of a managed llama-server build."""
+EngineVariant = Literal["cpu", "vulkan", "rocm", "cuda"]
+"""Compute variant of a managed llama-server build.
+
+``cuda`` has no upstream Linux prebuilt; it is reserved for the
+Foxlight-built artifact (see ``LLAMA_SERVER_ARTIFACTS``), which needs a
+hosting decision before it can ship in the manifest. Until then, NVIDIA
+nodes fall through the variant chain to ``vulkan`` (bare-metal drivers ship
+a working Vulkan ICD; container GPU clouds do not, and there vLLM is the
+serving path)."""
 
 
 @final
@@ -51,8 +58,15 @@ class EngineArtifact(CamelCaseModel):
     sha256: str
     """Hex SHA-256 of the archive; verification failure aborts provisioning."""
 
+    url_override: str | None = None
+    """Full download URL for artifacts not hosted on the upstream release
+    (e.g. the Foxlight-built Linux CUDA build, which upstream does not
+    publish). ``None`` resolves against the upstream llama.cpp release."""
+
     def url(self) -> str:
-        """The upstream release download URL for this artifact."""
+        """The download URL for this artifact."""
+        if self.url_override is not None:
+            return self.url_override
         return (
             "https://github.com/ggml-org/llama.cpp/releases/download/"
             f"{LLAMA_SERVER_PIN}/{self.asset_name}"

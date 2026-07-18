@@ -15,6 +15,26 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **Node Facts, derived capability, doctor, engine provisioning, and a
+  one-command installer (the "skulk just works" program, #614).** Detection
+  now creates serving capability and configuration overrides it, with every
+  disagreement loud. One probe pass per process gathers a typed record of
+  observed hardware (all GPUs, all vendors), observed software (importable
+  dependencies, engine binaries and what they can drive via
+  `llama-server --list-devices`), and declared `SKULK_*` configuration;
+  backend derivation consumes it and advertises capability conflicts on node
+  telemetry, `nodeHealth`, and the dashboard. A GPU node without backend env
+  no longer serves silently on CPU (#609); an NVIDIA node missing
+  `nvidia-ml-py` is loudly degraded and the binding is now a hard Linux
+  dependency (#612); an invalid engine-binary override is named instead of
+  read as unset (#462). `skulk doctor` runs the environment contract on
+  demand with consequence-stating verdicts and `--fix` remediation, and its
+  documentation is generated from the check registry. On Linux, Skulk
+  provisions a pinned, checksum-verified upstream llama-server build on
+  demand (`SKULK_LLAMA_SERVER_BIN` still overrides;
+  `SKULK_NO_ENGINE_AUTOPROVISION=1` opts out), and `install.sh` takes a
+  fresh macOS or Linux box to a working node in one command.
+
 - **Explicit, auditable cluster heartbeat.** Nodes now publish a dedicated
   telemetry heartbeat instead of making liveness an accidental side effect of
   collector cadence. The master warns before the prune window, retains ordinary

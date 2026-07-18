@@ -1154,8 +1154,17 @@ commands, state, and inference are not cross-version-compatible; finish the
 deployment before starting new inference work.
 
 The response carries a live `nodeResources` map as well. Each node entry includes
-its placement `backends`, declared `participation`, and resolved `dataTransport`
-(`gossipsub` or `zenoh`). A live fleet that advertises both transports receives
+its placement `backends`, declared `participation`, resolved `dataTransport`
+(`gossipsub` or `zenoh`), and `capabilityConflicts`: loud
+observation-vs-declaration disagreements from backend derivation, each with a
+`code`, `message`, and `remediation`. Conflicts also surface as `nodeHealth`
+reasons on the same response: `gpu_serving_disabled` (error level: a visible
+GPU that no engine would use, so serving would run far below hardware speed),
+and the warning-level `gpu_detection_degraded` (an NVIDIA device present but
+not fully detectable), `invalid_engine_binary` (an engine binary override
+pointing at an unusable path), and `backend_override_conflict` (a declared
+backend the observed hardware cannot support; the declaration is still
+honored). A live fleet that advertises both transports receives
 the error-level `data_transport_mismatch` reason in every `nodeHealth` entry.
 Mixed DATA transports are unsupported: the signal is diagnostic and does not
 bridge traffic. Configure and restart every node uniformly before serving

@@ -47,17 +47,30 @@ AUTOPROVISION_OPT_OUT_ENV = "SKULK_NO_ENGINE_AUTOPROVISION"
 _DOWNLOAD_TIMEOUT_SECONDS = 300.0
 
 
-def select_variant(facts: NodeFacts) -> EngineVariant | None:
-    """Pick the managed build variant for this node's observed hardware.
+def select_variant_chain(facts: NodeFacts) -> tuple[EngineVariant, ...]:
+    """Pick the managed build variants to try, most capable first.
 
-    A visible NVIDIA or AMD GPU selects the Vulkan build (RADV is the
-    fleet-proven AMD path, and NVIDIA's driver ships a Vulkan ICD); no GPU
-    selects the CPU build. Returns ``None`` off Linux: macOS serves through
-    in-process MLX and provisions nothing.
+    An NVIDIA GPU prefers the Foxlight-built CUDA build (container GPU clouds
+    inject compute-only driver stacks where the Vulkan ICD cannot create an
+    instance, so Vulkan-on-NVIDIA only works on bare metal with a full driver
+    install), falling back to Vulkan where the CUDA artifact is unavailable
+    for this architecture. An AMD GPU uses the Vulkan build (RADV is the
+    fleet-proven path). No GPU means the CPU build. Empty off Linux: macOS
+    serves through in-process MLX and provisions nothing.
     """
     if facts.platform != "linux":
-        return None
-    return "vulkan" if facts.has_serving_gpu else "cpu"
+        return ()
+    if facts.gpus_of("nvidia"):
+        return ("cuda", "vulkan")
+    if facts.gpus_of("amd"):
+        return ("vulkan",)
+    return ("cpu",)
+
+
+def select_variant(facts: NodeFacts) -> EngineVariant | None:
+    """The preferred managed build variant for this node (first of the chain)."""
+    chain = select_variant_chain(facts)
+    return chain[0] if chain else None
 
 
 def managed_llama_server_path() -> Path | None:
@@ -183,16 +196,22 @@ def ensure_llama_server(facts: NodeFacts) -> Path | None:
         # An explicit override (valid or not) wins; invalid ones stay loud
         # via the invalid_engine_binary conflict rather than being masked.
         return None
-    variant = select_variant(facts)
-    if variant is None:
-        return None
-    try:
-        binary = provision_llama_server(variant)
-    except Exception as error:  # noqa: BLE001 - a node must start without network
-        logger.warning(
-            f"engine provisioning unavailable ({error}); the node serves "
-            "GGUF models only if another engine is configured"
-        )
+    binary: Path | None = None
+    last_error: Exception | None = None
+    for variant in select_variant_chain(facts):
+        try:
+            binary = provision_llama_server(variant)
+            break
+        except Exception as error:  # noqa: BLE001 - try the next variant
+            last_error = error
+    if binary is None:
+        if last_error is not None:
+            # A node must start without network; provisioning failure
+            # degrades to "no served engine", never a crash.
+            logger.warning(
+                f"engine provisioning unavailable ({last_error}); the node "
+                "serves GGUF models only if another engine is configured"
+            )
         return None
     os.environ[LLAMA_SERVER_BIN_ENV] = str(binary)
     return binary

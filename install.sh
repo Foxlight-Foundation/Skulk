@@ -86,6 +86,16 @@ if ! command -v cc >/dev/null 2>&1; then
     fi
 fi
 
+# A GPU Linux node serves GGUF through the managed Vulkan llama-server build,
+# which needs the Vulkan loader; minimal CUDA/ROCm container images often lack
+# it while the driver's ICD is present.
+if [[ "$OS" == "Linux" ]] && ! ldconfig -p 2>/dev/null | grep -q libvulkan.so.1; then
+    if { command -v nvidia-smi >/dev/null 2>&1 || [[ -d /sys/class/drm ]]; } && need_apt; then
+        log "installing Vulkan loader (libvulkan1) for GPU serving"
+        apt_install libvulkan1 || warn "libvulkan1 install failed; GPU GGUF serving may be unavailable (skulk doctor will report it)"
+    fi
+fi
+
 if ! command -v cargo >/dev/null 2>&1 && [[ ! -x "$HOME/.cargo/bin/cargo" ]]; then
     log "installing Rust (rustup) for the skulk networking bindings"
     curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
