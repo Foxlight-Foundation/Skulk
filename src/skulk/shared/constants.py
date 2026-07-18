@@ -141,6 +141,12 @@ SKULK_MAX_CHUNK_SIZE = 512 * 1024
 
 SKULK_CUSTOM_MODEL_CARDS_DIR = SKULK_DATA_HOME / "custom_model_cards"
 
+# Managed engine binaries (#614 Phase 3): pinned prebuilt inference-engine
+# builds provisioned by skulk.provisioning live here, keyed by engine and
+# build tag (e.g. engines/llama-server/b10068/vulkan/...). SKULK_LLAMA_SERVER_BIN
+# always overrides a managed binary.
+SKULK_ENGINES_DIR = SKULK_DATA_HOME / "engines"
+
 SKULK_EVENT_LOG_DIR = SKULK_DATA_HOME / "event_log"
 SKULK_IMAGE_CACHE_DIR = SKULK_CACHE_HOME / "images"
 SKULK_TRACING_CACHE_DIR = SKULK_CACHE_HOME / "traces"

@@ -125,13 +125,36 @@ def _check_engine_available(facts: NodeFacts) -> Sequence[CheckResult]:
                 "only"
             ),
             remediation=(
-                "install an engine for this platform: a llama-cpp-python "
-                "build, a llama-server binary via SKULK_LLAMA_SERVER_BIN, or "
-                "a vllm CLI via SKULK_VLLM_BIN (engine provisioning can fetch "
-                "a pinned llama-server build on supported platforms)"
+                "`skulk doctor --fix` provisions the pinned llama-server build "
+                "on Linux; alternatively install a llama-cpp-python build, set "
+                "SKULK_LLAMA_SERVER_BIN to a custom llama-server, or set "
+                "SKULK_VLLM_BIN to a vllm CLI"
             ),
+            fix_available=facts.platform == "linux",
         )
     ]
+
+
+def _fix_engine_available(facts: NodeFacts) -> str | None:
+    """Provision the pinned llama-server build when no engine is available."""
+    if facts.platform != "linux":
+        return None
+    engine_present = (
+        facts.llama_cpp_importable
+        or facts.llama_server_binary.state == "ok"
+        or facts.vllm_binary.state == "ok"
+    )
+    if engine_present:
+        return None
+    from skulk.provisioning import ensure_llama_server
+
+    binary = ensure_llama_server(facts)
+    if binary is None:
+        raise RuntimeError(
+            "engine provisioning did not produce a binary (override present, "
+            "opted out, or download failed; see the log)"
+        )
+    return f"provisioned pinned llama-server at {binary}"
 
 
 # --- capability conflicts --------------------------------------------------
@@ -317,6 +340,7 @@ REGISTRY: tuple[DoctorCheck, ...] = (
             "as management."
         ),
         run=_check_engine_available,
+        fix=_fix_engine_available,
     ),
     DoctorCheck(
         check_id="capability-conflicts",

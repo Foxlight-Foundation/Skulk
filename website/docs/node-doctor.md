@@ -39,7 +39,7 @@ degraded node is loud even if nobody runs the doctor.
 
 ### Inference engine availability (`engine-available`)
 
-Verifies at least one inference engine is usable: in-process MLX on macOS, an importable llama-cpp-python build, a llama-server binary (SKULK_LLAMA_SERVER_BIN), or a vllm CLI (SKULK_VLLM_BIN). A node with none advertises no backends and can only participate as management.
+Verifies at least one inference engine is usable: in-process MLX on macOS, an importable llama-cpp-python build, a llama-server binary (SKULK_LLAMA_SERVER_BIN), or a vllm CLI (SKULK_VLLM_BIN). A node with none advertises no backends and can only participate as management. Supports `--fix`.
 
 ### Capability conflicts (`capability-conflicts`)
 
