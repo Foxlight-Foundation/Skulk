@@ -503,9 +503,13 @@ repo, downloaded on demand and verified before use, so a new user never builds
 llama.cpp. At node startup on Linux, when no `SKULK_LLAMA_SERVER_BIN` override
 is set, Skulk installs the pinned build under `~/.local/share/skulk/engines`
 (`SKULK_ENGINES_DIR`) and exports the binary path for the process. A visible
-NVIDIA or AMD GPU selects the Vulkan variant (upstream publishes no Linux CUDA
-prebuilt; NVIDIA's driver ships a Vulkan ICD, and vLLM remains the first-class
-CUDA serving path), and no GPU selects the CPU variant. An explicit override
+NVIDIA GPU tries variants in order: first a CUDA build (upstream publishes no
+Linux CUDA prebuilt, so this slot is reserved for a Foxlight-built artifact
+and is skipped until one is pinned in the manifest), then the Vulkan build
+(NVIDIA's bare-metal driver ships a working Vulkan ICD; container GPU clouds
+inject compute-only driver stacks where Vulkan cannot initialize, and there
+vLLM remains the first-class CUDA serving path). A visible AMD GPU selects
+the Vulkan variant, and no GPU selects the CPU variant. An explicit override
 always wins, and an invalid override is never masked by a managed binary: it
 stays a loud `invalid_engine_binary` conflict, because silently substituting a
 different binary would hide the configuration error.
