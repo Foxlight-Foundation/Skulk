@@ -6,6 +6,7 @@ import os
 import resource
 import signal
 import socket
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1139,6 +1140,12 @@ class Node:
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "doctor":
+        # `skulk doctor` is a standalone audit, not a node launch: dispatch
+        # before Args.parse() so the node argument parser never sees it.
+        from skulk.doctor.cli import main as doctor_main
+
+        sys.exit(doctor_main(sys.argv[2:]))
     args = Args.parse()
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     target = min(max(soft, 65535), hard)

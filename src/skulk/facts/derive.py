@@ -405,19 +405,35 @@ def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
     if any(gpu.detection_source == "nvidia_device_node" for gpu in facts.gpus):
         # The #612 class: hardware is visibly present but the node cannot read
         # its name or VRAM, so served-context sizing and hardware attribution
-        # silently degrade.
+        # silently degrade. The cause differs by whether the binding imports:
+        # absent binding means an install gap; importable binding with no NVML
+        # devices means the driver/library handshake failed.
+        if facts.pynvml_importable:
+            message = (
+                "An NVIDIA GPU is present and nvidia-ml-py is installed, but "
+                "NVML failed to enumerate it (likely a driver/library version "
+                "mismatch); VRAM detection, served-context sizing, and "
+                "hardware attribution are degraded."
+            )
+            remediation = (
+                "Check `nvidia-smi` works and the NVIDIA driver matches the "
+                "installed CUDA/NVML libraries, then restart skulk."
+            )
+        else:
+            message = (
+                "An NVIDIA GPU is present but nvidia-ml-py (pynvml) is not "
+                "importable, so VRAM detection, served-context sizing, and "
+                "hardware attribution are degraded."
+            )
+            remediation = (
+                "Install nvidia-ml-py into skulk's environment "
+                "(`uv pip install nvidia-ml-py`) and restart skulk."
+            )
         conflicts.append(
             CapabilityConflict(
                 code="gpu_detection_degraded",
-                message=(
-                    "An NVIDIA GPU is present but nvidia-ml-py (pynvml) is not "
-                    "importable, so VRAM detection, served-context sizing, and "
-                    "hardware attribution are degraded."
-                ),
-                remediation=(
-                    "Install nvidia-ml-py into skulk's environment "
-                    "(`uv pip install nvidia-ml-py`) and restart skulk."
-                ),
+                message=message,
+                remediation=remediation,
             )
         )
 

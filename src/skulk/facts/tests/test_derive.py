@@ -8,74 +8,20 @@ the declared-override-vs-observed-hardware disagreements in between.
 """
 
 from skulk.facts.derive import derive_node_backends
+from skulk.facts.testing import (
+    AMD_STRIX,
+    NVIDIA_A40,
+    NVIDIA_PRESENCE_ONLY,
+    bad_bin,
+    make_facts,
+    ok_bin,
+)
 from skulk.shared.types.node_facts import (
     CapabilityConflictCode,
-    EngineBinaryFact,
     GpuDeviceFact,
     LlamaServerDeviceProbe,
     NodeFacts,
 )
-
-NVIDIA_A40 = GpuDeviceFact(
-    vendor="nvidia",
-    name="NVIDIA A40",
-    detection_source="nvml",
-    vram_total_bytes=48 * 2**30,
-    compute_capability="8.6",
-)
-NVIDIA_PRESENCE_ONLY = GpuDeviceFact(
-    vendor="nvidia", detection_source="nvidia_device_node"
-)
-AMD_STRIX = GpuDeviceFact(
-    vendor="amd",
-    name="AMD GPU",
-    detection_source="amdgpu_sysfs",
-    vram_total_bytes=8 * 2**30,
-    gtt_total_bytes=120 * 2**30,
-)
-
-
-def make_facts(
-    *,
-    platform: str = "linux",
-    gpus: tuple[GpuDeviceFact, ...] = (),
-    llama_cpp_importable: bool = False,
-    llama_cpp_gpu_offload: bool | None = None,
-    mlx_audio_importable: bool = False,
-    llama_server_bin: EngineBinaryFact | None = None,
-    vllm_bin: EngineBinaryFact | None = None,
-    rpc_bin: EngineBinaryFact | None = None,
-    device_probe: LlamaServerDeviceProbe | None = None,
-    declared_llama_cpp: str | None = None,
-    declared_llama_server: str | None = None,
-    declared_vllm: str | None = None,
-) -> NodeFacts:
-    """Build a synthetic facts record with unconfigured-binary defaults."""
-    return NodeFacts(
-        platform=platform,
-        gpus=gpus,
-        llama_cpp_importable=llama_cpp_importable,
-        llama_cpp_gpu_offload=llama_cpp_gpu_offload,
-        mlx_audio_importable=mlx_audio_importable,
-        llama_server_binary=llama_server_bin
-        or EngineBinaryFact(env_var="SKULK_LLAMA_SERVER_BIN"),
-        vllm_binary=vllm_bin or EngineBinaryFact(env_var="SKULK_VLLM_BIN"),
-        rpc_server_binary=rpc_bin or EngineBinaryFact(env_var="SKULK_RPC_SERVER_BIN"),
-        llama_server_device_probe=device_probe or LlamaServerDeviceProbe(),
-        declared_llama_cpp_backends=declared_llama_cpp,
-        declared_llama_server_backends=declared_llama_server,
-        declared_vllm_backends=declared_vllm,
-    )
-
-
-def ok_bin(env_var: str) -> EngineBinaryFact:
-    return EngineBinaryFact(env_var=env_var, configured_path=f"/opt/{env_var}", state="ok")
-
-
-def bad_bin(env_var: str) -> EngineBinaryFact:
-    return EngineBinaryFact(
-        env_var=env_var, configured_path=f"/opt/{env_var}", state="missing"
-    )
 
 
 def conflict_codes(facts: NodeFacts) -> list[CapabilityConflictCode]:
