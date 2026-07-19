@@ -221,9 +221,23 @@ def served_stream_stats(
     if from_timings is not None and not batching:
         return from_timings
     if from_timings is not None:
-        return clock.stats(
-            prompt_tokens=from_timings.prompt_tokens,
+        # The prompt RATE covers only newly processed tokens (a slot-cache
+        # hit's cached prefix cost no prefill work and would inflate the wall
+        # rate), while the reported prompt COUNT stays the request's true
+        # prompt size, matching stats_from_llama_server_timings' convention.
+        raw_processed = timings.get("prompt_n") if timings is not None else None
+        processed_prompt = (
+            int(raw_processed)
+            if isinstance(raw_processed, (int, float))
+            and not isinstance(raw_processed, bool)
+            else from_timings.prompt_tokens
+        )
+        wall = clock.stats(
+            prompt_tokens=processed_prompt,
             generation_tokens=from_timings.generation_tokens,
+        )
+        return wall.model_copy(
+            update={"prompt_tokens": from_timings.prompt_tokens}
         )
     return clock.stats(prompt_tokens=0, generation_tokens=clock.pieces)
 

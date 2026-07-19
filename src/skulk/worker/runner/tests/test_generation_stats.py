@@ -223,3 +223,22 @@ def test_served_stream_stats_no_timings_falls_back_to_pieces() -> None:
     stats = served_stream_stats(clock, None, batching=True)
     assert stats.generation_tokens == 2
     assert stats.generation_tps == 2.0  # 2 pieces over 1s decode span
+
+
+def test_served_stream_stats_batching_cache_hit_rate_over_processed_only() -> None:
+    # A slot-cache hit reports the cached prefix in cache_n; the wall prompt
+    # rate must cover only the newly processed suffix while the reported
+    # prompt count keeps the request's true size (PR #626 review).
+    clock = _ticking_clock([0.0, 2.0, 4.0])
+    clock.mark_piece()
+    clock.mark_piece()
+    timings: dict[str, object] = {
+        "prompt_n": 10.0,
+        "prompt_ms": 100.0,
+        "predicted_n": 50.0,
+        "predicted_ms": 500.0,
+        "cache_n": 990.0,
+    }
+    stats = served_stream_stats(clock, timings, batching=True)
+    assert stats.prompt_tokens == 1000  # true request prompt size
+    assert stats.prompt_tps == 5.0  # 10 processed tokens over 2s wall prefill
