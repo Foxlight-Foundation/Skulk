@@ -31,10 +31,12 @@ endpoint, so you can run models far larger than any single machine could hold.
    curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash -s -- --ref dev
    ```
 
-   It installs prerequisites, builds the node, and finishes with
-   `skulk doctor --fix`, which audits the machine (GPUs, inference engines,
-   storage) and fixes what it safely can. Then start Skulk from the install
-   directory:
+   It installs prerequisites, builds the node, writes a `skulk.yaml` with
+   single-node [model store](./model-store.md) defaults (only when none
+   exists, so the store-first download flow works out of the box), and
+   finishes with `skulk doctor --fix`, which audits the machine (GPUs,
+   inference engines, storage) and fixes what it safely can. Then start
+   Skulk from the install directory:
 
    ```bash
    cd ~/skulk && uv run skulk
