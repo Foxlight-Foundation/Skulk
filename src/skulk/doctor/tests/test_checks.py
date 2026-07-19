@@ -29,11 +29,42 @@ def test_engine_available_ok_on_darwin() -> None:
     assert "mlx" in results[0].detail
 
 
-def test_engine_available_fails_on_bare_linux() -> None:
+def test_engine_available_fails_on_bare_linux(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Hermetic: the dormant-engine lookup must not see a real managed install
+    # or wheel on the developer machine.
+    monkeypatch.setattr(
+        "skulk.provisioning.llama_server.SKULK_ENGINES_DIR", tmp_path
+    )
+
+    def _no_wheel(vendor: str, facts: NodeFacts) -> tuple[Path, Path | None] | None:
+        return None
+
+    monkeypatch.setattr(
+        "skulk.provisioning.llama_server.wheel_llama_server", _no_wheel
+    )
     results = _check_engine_available(make_facts())
     assert [r.verdict for r in results] == ["fail"]
     assert "management" in results[0].consequence
     assert results[0].remediation != ""
+
+
+def test_engine_available_ok_with_dormant_wheel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The #628 shape: engine wheel installed, no override exported yet. Plain
+    # doctor must report the engine that startup will wire, not FAIL.
+    shim = tmp_path / "llama-server-cuda"
+
+    def _dormant(facts: NodeFacts) -> Path:
+        return shim
+
+    monkeypatch.setattr("skulk.provisioning.dormant_llama_server", _dormant)
+    results = _check_engine_available(make_facts(gpus=(NVIDIA_A40,)))
+    assert [r.verdict for r in results] == ["ok"]
+    assert str(shim) in results[0].detail
+    assert "startup" in results[0].detail
 
 
 def test_engine_available_ok_with_served_binary() -> None:

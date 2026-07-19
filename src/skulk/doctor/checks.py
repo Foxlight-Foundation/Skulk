@@ -157,6 +157,23 @@ def _check_engine_available(facts: NodeFacts) -> Sequence[CheckResult]:
         engines.append(f"vllm ({facts.vllm_binary.configured_path})")
     if engines:
         return [_ok(check_id, title, "available: " + ", ".join(engines))]
+    # A wheel-provisioned or previously provisioned managed engine derives no
+    # tags until node startup exports its path; without this read-only lookup
+    # plain doctor reports FAIL on exactly the box the installer just set up
+    # (#628). --fix and startup share the same discovery via
+    # ensure_llama_server.
+    from skulk.provisioning import dormant_llama_server
+
+    dormant = dormant_llama_server(facts)
+    if dormant is not None:
+        return [
+            _ok(
+                check_id,
+                title,
+                f"llama_server ({dormant}) is installed and wires "
+                "automatically at node startup",
+            )
+        ]
     return [
         CheckResult(
             check_id=check_id,
