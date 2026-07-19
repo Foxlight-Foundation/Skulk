@@ -97,8 +97,14 @@ def _ok(check_id: str, title: str, detail: str) -> CheckResult:
 
 
 def _declared_participation() -> str:
-    """The node's declared participation (management nodes need no engine)."""
-    return os.environ.get("SKULK_NODE_PARTICIPATION", "full").strip().lower()
+    """The node's declared participation (management nodes need no engine).
+
+    Normalized exactly like ``NodeResources.gather()``: an unrecognized value
+    (a typo like ``managment``) falls back to ``full``, so the doctor judges
+    the same effective role the runtime will actually use for placement.
+    """
+    declared = os.environ.get("SKULK_NODE_PARTICIPATION", "full").strip().lower()
+    return declared if declared in ("full", "management", "ffn_only") else "full"
 
 
 def _provisioning_fix_applicable(facts: NodeFacts) -> bool:

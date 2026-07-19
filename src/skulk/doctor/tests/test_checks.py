@@ -143,3 +143,22 @@ def test_models_storage_fails_when_path_is_a_file(
     results = checks_module._check_models_storage(make_facts(platform="darwin"))
     assert [r.verdict for r in results] == ["fail"]
     assert "not a directory" in results[0].detail
+
+
+def test_mistyped_participation_still_requires_an_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A typo'd participation value normalizes to full at runtime, so the
+    # doctor must judge the same effective role instead of skipping the
+    # engine check (PR #615 review).
+    monkeypatch.setenv("SKULK_NODE_PARTICIPATION", "managment")
+    results = _check_engine_available(make_facts())
+    assert [r.verdict for r in results] == ["fail"]
+
+
+def test_declared_management_needs_no_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SKULK_NODE_PARTICIPATION", "management")
+    results = _check_engine_available(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
