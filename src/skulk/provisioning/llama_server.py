@@ -75,6 +75,12 @@ def select_variant(facts: NodeFacts) -> EngineVariant | None:
     return chain[0] if chain else None
 
 
+# The CUDA wheel is compiled for SM 80/86/89/90 (+PTX from 90); a pre-Ampere
+# GPU (T4 is 7.5, V100 is 7.0) still ENUMERATES under --list-devices, so
+# selection must gate on compute capability or the failure surfaces only at
+# model load. Kept in lockstep with CUDA_ARCHITECTURES in engine-wheel.yml.
+CUDA_WHEEL_MIN_COMPUTE_CAPABILITY = (8, 0)
+
 # The pip-installable engine wheels, per GPU vendor: (distribution name,
 # importable module, server shim, RPC donor shim). NVIDIA tries the CUDA
 # wheel then the Vulkan one (bare-metal NVIDIA drives Vulkan fine); AMD uses
@@ -131,7 +137,28 @@ def _wheel_version_matches_pin(distribution: str) -> bool:
     return False
 
 
-def wheel_llama_server(vendor: str) -> tuple[Path, Path | None] | None:
+def _cuda_capability_ok(facts: NodeFacts) -> bool:
+    """Whether an observed NVIDIA GPU meets the CUDA wheel's compiled SM floor.
+
+    An unknown capability (NVML degraded) is treated as not-ok: preferring a
+    wheel that may have no kernels for the silicon would fail at model load,
+    while the Vulkan fallback fails loudly at probe time if it fails at all.
+    """
+    for gpu in facts.gpus_of("nvidia"):
+        if gpu.compute_capability is None:
+            continue
+        try:
+            major, minor = (int(part) for part in gpu.compute_capability.split("."))
+        except ValueError:
+            continue
+        if (major, minor) >= CUDA_WHEEL_MIN_COMPUTE_CAPABILITY:
+            return True
+    return False
+
+
+def wheel_llama_server(
+    vendor: str, facts: NodeFacts
+) -> tuple[Path, Path | None] | None:
     """The pip-installed engine wheel's shims for one GPU vendor, or ``None``.
 
     The engine wheels (packaging/skulk-llama-server-*) carry the
@@ -143,6 +170,7 @@ def wheel_llama_server(vendor: str) -> tuple[Path, Path | None] | None:
 
     Args:
         vendor: ``"nvidia"`` or ``"amd"``.
+        facts: The facts snapshot (gates the CUDA wheel on compute capability).
 
     Returns:
         ``(server_shim, rpc_shim_or_None)`` for the first installed wheel of
@@ -153,6 +181,10 @@ def wheel_llama_server(vendor: str) -> tuple[Path, Path | None] | None:
         vendor, ()
     ):
         if find_spec(module) is None:
+            continue
+        if distribution == "skulk-llama-server-cuda" and not _cuda_capability_ok(
+            facts
+        ):
             continue
         if not _wheel_version_matches_pin(distribution):
             continue
@@ -325,7 +357,7 @@ def ensure_llama_server(
     if vendor is not None:
         # A pip-installed engine wheel outranks tarball provisioning: it is
         # the standard-tooling path and already on disk (works offline too).
-        wheel = wheel_llama_server(vendor)
+        wheel = wheel_llama_server(vendor, facts)
         if wheel is not None:
             server_shim, rpc_shim = wheel
             os.environ[LLAMA_SERVER_BIN_ENV] = str(server_shim)

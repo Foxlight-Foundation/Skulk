@@ -96,6 +96,11 @@ def _ok(check_id: str, title: str, detail: str) -> CheckResult:
 # --- engine availability ---------------------------------------------------
 
 
+def _declared_participation() -> str:
+    """The node's declared participation (management nodes need no engine)."""
+    return os.environ.get("SKULK_NODE_PARTICIPATION", "full").strip().lower()
+
+
 def _provisioning_fix_applicable(facts: NodeFacts) -> bool:
     """Whether --fix can actually provision an engine on this node.
 
@@ -108,6 +113,7 @@ def _provisioning_fix_applicable(facts: NodeFacts) -> bool:
 
     return (
         facts.platform == "linux"
+        and _declared_participation() == "full"
         and facts.llama_server_binary.state == "not_configured"
         and os.environ.get(AUTOPROVISION_OPT_OUT_ENV, "").strip() != "1"
     )
@@ -122,6 +128,15 @@ def _check_engine_available(facts: NodeFacts) -> Sequence[CheckResult]:
     """
     check_id = "engine-available"
     title = "Inference engine availability"
+    if _declared_participation() != "full":
+        return [
+            _ok(
+                check_id,
+                title,
+                f"declared participation is {_declared_participation()!r}; "
+                "this node serves no inference shards and needs no engine",
+            )
+        ]
     derived = derive_node_backends(facts).backends
     engines: list[str] = []
     if "mlx" in derived:

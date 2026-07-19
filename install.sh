@@ -172,8 +172,9 @@ fi
 # --- vLLM (optional, NVIDIA Linux) ----------------------------------------
 
 if [[ "$WITH_VLLM" == "1" ]]; then
-    if [[ "$OS" != "Linux" ]] || ! command -v nvidia-smi >/dev/null 2>&1; then
-        warn "--with-vllm requested but this is not an NVIDIA Linux node; skipping"
+    if [[ "$OS" != "Linux" ]] || ! command -v nvidia-smi >/dev/null 2>&1 \
+        || ! nvidia-smi -L 2>/dev/null | grep -q GPU; then
+        warn "--with-vllm requested but no NVIDIA GPU is visible on this Linux node; skipping"
     else
         VLLM_ENV="$HOME/.skulk/vllm-env"
         log "installing vLLM into $VLLM_ENV (validated matrix; several GB)"

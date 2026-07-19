@@ -269,7 +269,9 @@ def test_wheel_outranks_tarball_provisioning(
     shim = _fake_wheel(tmp_path, "llama-server-cuda")
     rpc = _fake_wheel(tmp_path, "ggml-rpc-server-cuda")
 
-    def _fake_lookup(vendor: str) -> tuple[Path, Path | None] | None:
+    def _fake_lookup(
+        vendor: str, facts: object
+    ) -> tuple[Path, Path | None] | None:
         return (shim, rpc) if vendor == "nvidia" else None
 
     monkeypatch.setattr(provisioning, "wheel_llama_server", _fake_lookup)
@@ -295,7 +297,9 @@ def test_vulkan_wheel_wired_on_amd_nodes(
     _isolate_engines_dir(monkeypatch, tmp_path)
     shim = _fake_wheel(tmp_path, "llama-server-vulkan")
 
-    def _fake_lookup(vendor: str) -> tuple[Path, Path | None] | None:
+    def _fake_lookup(
+        vendor: str, facts: object
+    ) -> tuple[Path, Path | None] | None:
         return (shim, None) if vendor == "amd" else None
 
     monkeypatch.setattr(provisioning, "wheel_llama_server", _fake_lookup)
@@ -310,7 +314,7 @@ def test_tarball_fallback_when_no_wheel_installed(
 ) -> None:
     _isolate_engines_dir(monkeypatch, tmp_path)
 
-    def _no_wheel(vendor: str) -> tuple[Path, Path | None] | None:
+    def _no_wheel(vendor: str, facts: object) -> tuple[Path, Path | None] | None:
         return None
 
     monkeypatch.setattr(provisioning, "wheel_llama_server", _no_wheel)
@@ -320,3 +324,25 @@ def test_tarball_fallback_when_no_wheel_installed(
     wired = ensure_llama_server(make_facts(gpus=(AMD_STRIX,)))
     assert wired is not None
     assert "vulkan" in str(wired)
+
+
+def test_cuda_capability_gate() -> None:
+    # The CUDA wheel is compiled for SM >= 8.0: a T4 (7.5) or a
+    # capability-unknown NVML-degraded GPU must not select it (it would fail
+    # only at model load), while an A40 (8.6) passes (PR #615 review).
+    from skulk.facts.testing import NVIDIA_PRESENCE_ONLY
+    from skulk.shared.types.node_facts import GpuDeviceFact
+
+    t4 = GpuDeviceFact(
+        vendor="nvidia",
+        name="Tesla T4",
+        detection_source="nvml",
+        vram_total_bytes=16 * 2**30,
+        compute_capability="7.5",
+    )
+    assert provisioning._cuda_capability_ok(make_facts(gpus=(NVIDIA_A40,))) is True
+    assert provisioning._cuda_capability_ok(make_facts(gpus=(t4,))) is False
+    assert (
+        provisioning._cuda_capability_ok(make_facts(gpus=(NVIDIA_PRESENCE_ONLY,)))
+        is False
+    )
