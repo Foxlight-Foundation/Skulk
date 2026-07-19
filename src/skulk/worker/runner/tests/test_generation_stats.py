@@ -14,6 +14,7 @@ from skulk.worker.runner.generation_stats import (
     resolve_stream_token_counts,
     stats_from_llama_server_timings,
     subprocess_peak_memory,
+    served_stream_stats,
 )
 
 
@@ -169,3 +170,46 @@ def test_resolve_stream_token_counts_fallbacks() -> None:
     assert resolve_stream_token_counts(120, None, 20) == (100, 20)
     # No position signal at all: only the piece count is trustworthy.
     assert resolve_stream_token_counts(0, None, 7) == (0, 7)
+
+
+def _ticking_clock(moments: list[float]) -> StreamStatsClock:
+    """A clock fed a fixed sequence of perf-counter readings."""
+    it = iter(moments)
+    return StreamStatsClock(now=lambda: next(it))
+
+
+def test_served_stream_stats_single_stream_keeps_engine_timings() -> None:
+    # Engine phase timings beat proxy wall clocks when serving one stream.
+    clock = _ticking_clock([0.0, 1.0, 2.0])
+    clock.mark_piece()
+    clock.mark_piece()
+    timings = {"prompt_n": 10.0, "prompt_ms": 100.0, "predicted_n": 50.0, "predicted_ms": 500.0}
+    stats = served_stream_stats(clock, timings, batching=False)
+    assert stats.generation_tps == 100.0  # 50 tokens / 0.5s engine-measured
+    assert stats.prompt_tokens == 10
+    assert stats.generation_tokens == 50
+
+
+def test_served_stream_stats_batching_uses_wall_rates_with_engine_tokens() -> None:
+    # Under --parallel, per-slot eval timings count only slot-active time and
+    # overstate per-stream rates by roughly the batch width (#611): rates must
+    # come from the proxy wall clock while token counts stay engine-exact.
+    clock = _ticking_clock([0.0, 1.0, 11.0])  # start, first piece, last piece
+    clock.mark_piece()
+    clock.mark_piece()
+    # Engine claims 100 tok/s slot-active; wall truth is 50 tokens over 10s.
+    timings = {"prompt_n": 10.0, "prompt_ms": 100.0, "predicted_n": 50.0, "predicted_ms": 500.0}
+    stats = served_stream_stats(clock, timings, batching=True)
+    assert stats.generation_tps == 5.0  # 50 engine tokens / 10s wall decode
+    assert stats.prompt_tps == 10.0  # 10 tokens / 1s wall prefill
+    assert stats.prompt_tokens == 10
+    assert stats.generation_tokens == 50
+
+
+def test_served_stream_stats_no_timings_falls_back_to_pieces() -> None:
+    clock = _ticking_clock([0.0, 1.0, 2.0])
+    clock.mark_piece()
+    clock.mark_piece()
+    stats = served_stream_stats(clock, None, batching=True)
+    assert stats.generation_tokens == 2
+    assert stats.generation_tps == 2.0  # 2 pieces over 1s decode span

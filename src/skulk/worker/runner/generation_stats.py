@@ -188,6 +188,46 @@ def stats_from_llama_server_timings(
     )
 
 
+def served_stream_stats(
+    clock: StreamStatsClock,
+    timings: dict[str, object] | None,
+    *,
+    batching: bool,
+) -> GenerationStats:
+    """Resolve a served stream's final statistics honestly under batching.
+
+    Single-stream serving keeps the engine's own phase timings: they measure
+    prefill and decode inside the engine and beat any proxy wall clock. Under
+    multi-slot batching (``--parallel``) the engine's per-slot eval timings
+    count only the slot's ACTIVE time, not wall time per stream, so the
+    derived per-stream rates overstate reality by roughly the batch width
+    (measured ~4x at 64 slots); consumers (stats surfaces, performance
+    envelopes, the results ledger) read them as wall rates. In that mode the
+    proxy's wall clock provides the rates while the engine's exact token
+    counts are kept.
+
+    Args:
+        clock: The proxy-side stream clock (one piece marked per token).
+        timings: The engine's final ``timings`` object, when it sent one.
+        batching: Whether the serving engine decodes concurrent requests
+            together (configured max concurrency above one).
+
+    Returns:
+        Statistics whose rates are wall-honest for the serving mode.
+    """
+    from_timings = (
+        stats_from_llama_server_timings(timings) if timings is not None else None
+    )
+    if from_timings is not None and not batching:
+        return from_timings
+    if from_timings is not None:
+        return clock.stats(
+            prompt_tokens=from_timings.prompt_tokens,
+            generation_tokens=from_timings.generation_tokens,
+        )
+    return clock.stats(prompt_tokens=0, generation_tokens=clock.pieces)
+
+
 def blocking_call_stats(
     usage: object, wall_seconds: float
 ) -> GenerationStats | None:
