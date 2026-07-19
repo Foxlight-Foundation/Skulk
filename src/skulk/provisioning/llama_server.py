@@ -160,7 +160,8 @@ def wheel_llama_server(vendor: str) -> tuple[Path, Path | None] | None:
         if not server.is_file() or not os.access(server, os.X_OK):
             continue
         rpc = bin_dir / rpc_shim
-        return server, (rpc if rpc.is_file() else None)
+        rpc_usable = rpc.is_file() and os.access(rpc, os.X_OK)
+        return server, (rpc if rpc_usable else None)
     return None
 
 
