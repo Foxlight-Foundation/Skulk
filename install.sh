@@ -169,11 +169,14 @@ ENGINE_BUILD="$(grep -oE 'LLAMA_SERVER_PIN: Final = "b[0-9]+"' src/skulk/provisi
 # CUDA wheel exceeds PyPI's per-file limit); wheels carry sigstore build
 # provenance (gh attestation verify <wheel> --owner Foxlight-Foundation).
 FOXLIGHT_WHEEL_INDEX="https://wheels.foxlight.ai/simple/"
-# The Foxlight index is AUTHORITATIVE for engine wheels (--index-url), with
-# PyPI as the extra index for their dependencies (nvidia runtime wheels):
-# with the order reversed, a name-squatted or unexpected PyPI package could
-# shadow the source of truth.
-ENGINE_INDEX_FLAGS=(--index-url "$FOXLIGHT_WHEEL_INDEX" --extra-index-url "https://pypi.org/simple")
+# UV SEMANTICS, verified live: uv consults --extra-index-url indexes BEFORE
+# the --index-url default (the opposite of pip), and its default
+# first-index-wins strategy is the dependency-confusion defense. So the
+# Foxlight index is passed as the extra index (consulted first, wins for the
+# packages it carries) while PyPI stays the default for the NVIDIA runtime
+# dependencies. Making Foxlight the --index-url instead DEMOTES it under uv:
+# resolution then finds the empty PyPI project first and fails.
+ENGINE_INDEX_FLAGS=(--extra-index-url "$FOXLIGHT_WHEEL_INDEX")
 
 if [[ "$OS" == "Linux" ]] && [[ -z "$ENGINE_BUILD" ]]; then
     warn "could not read the engine pin from the checkout; skipping engine wheel install (skulk doctor will report the outcome)"
