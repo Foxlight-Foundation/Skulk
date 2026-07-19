@@ -86,8 +86,10 @@ def load_nvml() -> NvmlLike | None:
     """
     try:
         import pynvml  # pyright: ignore[reportMissingImports]
-    except ImportError:
-        logger.debug("pynvml not installed; no NVIDIA telemetry on this node")
+    except Exception as error:  # noqa: BLE001 - a broken install (not just an
+        # absent one) must degrade to "no NVIDIA telemetry", matching the
+        # facts probe's never-raises contract and this module's docstring.
+        logger.debug(f"pynvml not importable ({error}); no NVIDIA telemetry")
         return None
     nvml = _as_nvml(pynvml)
     try:

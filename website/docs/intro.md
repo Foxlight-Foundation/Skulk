@@ -23,13 +23,13 @@ endpoint, so you can run models far larger than any single machine could hold.
    curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash
    ```
 
-The installer targets the stable branch (`main`) regardless of which docs
-channel you are reading. To install the development branch instead (matching
-the `/next/` docs), pass a ref:
+   The installer targets the stable branch (`main`) regardless of which docs
+   channel you are reading. To install the development branch instead
+   (matching the `/next/` docs), pass a ref:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash -s -- --ref dev
-```
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash -s -- --ref dev
+   ```
 
    It installs prerequisites, builds the node, and finishes with
    `skulk doctor --fix`, which audits the machine (GPUs, inference engines,
