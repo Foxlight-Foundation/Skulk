@@ -49,6 +49,24 @@ replica keeps only the newest value for a node and reading type in a separate
 master, and never written to the event log. Drops and duplicates therefore
 affect freshness rather than cluster history.
 
+The plane is isolated from control traffic end to end. On the wire, telemetry
+rides its own gossipsub behavior with its own protocol identifier, so it has
+separate protocol and handler queues from control and election messages:
+control fan-out cannot starve telemetry, and telemetry pressure cannot consume
+control or election capacity. On the sending side, admission is a bounded
+latest-value map (256 keys, one per node and reading type) where a newer
+reading replaces the stale pending one, drained through a one-packet egress
+queue: at most one serialized telemetry packet ever waits on the network.
+
+That design is **lossy by design**. When the plane is under pressure, older
+pending readings are coalesced or dropped and the next reading supersedes them;
+nothing is retried, and a drop costs freshness only. The one telemetry-adjacent
+fact that does enter durable cluster state is the terminal outcome of a model
+download (completed or failed), because placement and the operator view depend
+on it being an ordered decision rather than a freshness-best-effort reading;
+download *progress* and every other reading stay on this plane and in
+`TelemetryView` only.
+
 ### Data plane
 
 The data plane carries request-scoped model output, provider streams, image and

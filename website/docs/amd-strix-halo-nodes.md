@@ -13,7 +13,9 @@ An AMD node can run GGUF models through **two engines**:
 - **`llama_server`** (served): Skulk launches an external `llama-server` process
   and proxies its OpenAI API. This is the only path to llama.cpp's **native
   multi-token prediction** (`--spec-type draft-mtp`), so it is how you get
-  speculative-decoding speedups on an AMD node. Single-node; enabled per node by
+  speculative-decoding speedups on an AMD node; see
+  [Speculative Decoding](speculative-decoding.md) for how served native MTP
+  works and its measured gains. Single-node; enabled per node by
   pointing `SKULK_LLAMA_SERVER_BIN` at a `llama-server` binary.
 
 This page covers what such a node needs, how to bring one up, both engines, and
@@ -246,9 +248,15 @@ There are two MTP shapes, both served this way:
   `--model-draft` (for example Gemma 4 31B with a published draft). The card
   co-fetches both through the store.
 
-To enable it on a node, build a recent `llama-server` with the Vulkan backend and
-point `SKULK_LLAMA_SERVER_BIN` at it before launching Skulk. Native MTP
-(`--spec-type draft-mtp`) landed in llama.cpp build b9196, so use a newer tag:
+You no longer need to build `llama-server` by hand to get this: Skulk's
+one-command installer (`install.sh` at the repo root) detects an AMD GPU and
+installs the prebuilt `skulk-llama-server-vulkan` engine wheel (a pinned
+Vulkan `llama-server` + `ggml-rpc-server` build), which Skulk's engine
+provisioning discovers and wires automatically. A manual build remains a
+supported override for a custom or newer llama.cpp: point
+`SKULK_LLAMA_SERVER_BIN` at your own binary and it always wins over the
+managed one. Native MTP (`--spec-type draft-mtp`) landed in llama.cpp build
+b9196, so use a newer tag:
 
 ```bash
 git clone https://github.com/ggml-org/llama.cpp.git ~/llama.cpp && cd ~/llama.cpp

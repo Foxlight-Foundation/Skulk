@@ -22,11 +22,15 @@ About 5 minutes per machine. No coding. No sudo for the standard install.
 
 You need:
 
-1. **A working Skulk install.** You should already be able to run `uv run skulk` from your Skulk folder and have it boot cleanly. If you can't, do that first; the [Build and Runtime guide](./build-and-runtime.md) walks you through it.
+1. **A working Skulk install.** You should already be able to run `uv run skulk` from your Skulk folder and have it boot cleanly. On a fresh box, the fastest way to get there is the one-command installer (`curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash`); the [Build and Runtime guide](./build-and-runtime.md) covers it, along with the manual path.
 2. **`uv` on your PATH.** Check by running `which uv`. If you see a path, you're good. If it says "not found", install `uv` from [docs.astral.sh/uv](https://docs.astral.sh/uv/) and come back.
 3. **macOS** (any recent version) **or Linux** with systemd (Ubuntu, Debian, Fedora, Arch, anything modern).
 
 That's it.
+
+:::note Linux GPU nodes provision their own engine
+A Linux node automatically downloads and verifies a pinned `llama-server` build at startup when no engine is configured, so the service serves GGUF models with zero engine setup. Set `SKULK_NO_ENGINE_AUTOPROVISION=1` in `~/.skulk/skulk.env` to opt out; see [engine provisioning](./build-and-runtime.md#engine-provisioning) for the details. For rented-GPU pod sessions (RunPod and similar), a prebaked CUDA image at `ghcr.io/foxlight-foundation/skulk-cuda-pod` skips the slow CUDA compiles entirely (`deployment/cuda/`).
+:::
 
 ## Install: pick your platform
 

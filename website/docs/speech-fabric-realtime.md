@@ -38,18 +38,68 @@ returns typed SSE delta/completed/usage/error events, while explicit
 `response_format=ndjson` preserves progressive NDJSON chunk framing. Batch
 cards and non-streaming requests retain the completed-response formats.
 
-`/v1/audio/speech` also accepts bounded multipart reference audio for mounted
-cards declaring `audio.supports_reference_audio = true`. The upload is
-request-scoped: it travels over node-addressed Zenoh `SPEECH_MEDIA`, stays out
-of State and the event log, and is deleted from the runner's temporary storage
-after generation. The API rejects reference uploads when Zenoh is unavailable
-instead of broadcasting private media through gossipsub.
+### Batch versus realtime routing
+
+The two transcription surfaces are routed differently and are not
+interchangeable:
+
+- `POST /v1/audio/transcriptions` is the **batch** path: the caller uploads a
+  complete audio clip and receives its transcript. The `stream=true` and
+  `response_format=ndjson` variants (available where the card has proven
+  streaming support) stream the **response** progressively; the input is still
+  one complete upload.
+- `WS /v1/realtime` is the **live** path: a bidirectional session where audio
+  frames stream in while partial and final transcripts stream out, backed by a
+  true streaming session on the mounted realtime STT model. It requires a card
+  that declares both streaming and realtime support.
+
+### Voice discovery
+
+`GET /v1/audio/voices?model=<model-id>` is a Skulk extension that lists a
+mounted TTS model's static built-in voices. It serves only models whose card
+declares `audio.supports_voice_listing = true`; the identifiers come from the
+card's `audio.voices` declaration, and a card may also declare a validated
+`audio.default_voice`, which the API applies only when a request omits `voice`.
+See [Model cards](model-cards.md) for the card-side declarations.
+
+### Reference-audio uploads
+
+`/v1/audio/speech` also accepts bounded reference audio for mounted cards
+declaring `audio.supports_reference_audio = true`, sent as a
+`multipart/form-data` request whose binary part is the `reference_audio` field
+alongside the normal speech request fields. The upload is request-scoped for
+its whole lifecycle: it travels over node-addressed Zenoh `SPEECH_MEDIA`, stays
+out of State and the event log, is assembled only in bounded process-local
+memory on the serving worker, and the runner deletes its request-scoped
+temporary file after generation. The API rejects reference uploads when Zenoh
+is unavailable instead of broadcasting private media through gossipsub.
 
 `WS /v1/realtime?model=<model-id>` accepts OpenAI-style base64 PCM16 append and
 commit events over a WebSocket. It emits transcript delta, final, and failure
 events from the mounted realtime STT model. An optional response configuration
 routes final transcripts through a mounted chat model and can stream the visible
 answer through a mounted TTS participant.
+
+Server VAD on the realtime endpoint is configured through the session's
+`turn_detection` object (sent in a `session.update` event, or the legacy
+`transcription_session.update` form). Setting `"type": "server_vad"` enables
+server-owned WebRTC voice activity detection with these bounded fields, all
+optional:
+
+- `aggressiveness` (0 to 3, default 2): WebRTC VAD aggressiveness, least to
+  most restrictive.
+- `prefix_padding_ms` (default 200): speech preroll subtracted from the
+  reported turn-start boundary.
+- `silence_duration_ms` (default 400): trailing silence required to end the
+  current utterance.
+- `minimum_speech_ms` (default 120): continuous speech required before a turn
+  start is announced.
+- `maximum_utterance_ms` (default 30000): hard duration limit that ends a
+  continuous utterance.
+
+With server VAD active the endpoint commits each detected utterance
+automatically as its own serialized provider call; barge-in during an active
+automatic response cancels the underlying model and TTS commands.
 
 The Fabric chain endpoint deliberately reuses this contract and implementation.
 Clients select optional chat/TTS participants through `session.update`; normal
@@ -150,6 +200,12 @@ Diagnostics retain counters and bounded aggregates, not audio payloads,
 transcripts, or completed call identifiers.
 
 ## Model Requirements
+
+Speech serving runs on the `mlx_audio` engine, which Skulk probes and
+advertises on **macOS nodes only** (it is backed by the upstream `mlx-audio`
+package). The GPU text engines (`llama_cpp`, `llama_server`, `vllm`) do not
+serve speech models, so a cluster needs at least one Mac with mounted speech
+capacity to offer these endpoints.
 
 Speech cards use the `mlx_audio` backend vocabulary and are single-node. A card
 may declare synthesis, transcription, streaming, realtime, voice-listing,

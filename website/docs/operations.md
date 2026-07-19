@@ -196,6 +196,13 @@ End-to-end, clients receive the error within **~4 to 6 seconds** of a node kill
 (master or worker rank). The correct client behavior in both cases is the
 same: **retry the request.**
 
+Node liveness itself is decided from a **dedicated telemetry heartbeat** each
+node publishes every two seconds; ordinary telemetry readings and the node's
+last indexed control event serve as fallback liveness signals if the heartbeat
+path degrades. `GET /v1/diagnostics/telemetry` on any node exposes that node's
+local telemetry-plane pressure (admission, coalescing, drop, queue, and publish
+metrics) when you need to see whether telemetry itself is under strain.
+
 Recovery timeline:
 
 - **Election** of a new master runs on a 3-second timeout
@@ -229,6 +236,31 @@ crash.
 `POST /admin/restart` is the clean way to recycle a node: it replaces the
 process image in place (releasing Metal memory) and the node rejoins
 automatically.
+
+### Capability conflicts: a GPU node configured wrong
+
+A node whose engine configuration disagrees with its observed hardware does not
+fail silently. The disagreement is advertised as a **capability conflict** and
+surfaces in `/state`'s `nodeHealth` (and the dashboard) with a stable code, a
+message describing the observed-versus-declared mismatch, and the exact
+remediation:
+
+- `gpu_serving_disabled` (error): a serving-capable GPU is visible but a
+  configured engine would run CPU-only, so GPU work would silently crawl.
+- `gpu_detection_degraded` (warn): a GPU is present but the node cannot fully
+  detect it, so VRAM-derived behavior quietly degrades.
+- `invalid_engine_binary` (warn): an engine binary override (for example
+  `SKULK_LLAMA_SERVER_BIN`) is set but points at something unusable. Skulk
+  deliberately does not paper over this with a managed build; the config error
+  stays loud.
+- `backend_override_conflict` (warn): a declared backend claims hardware the
+  node cannot observe. The declaration is still honored (configuration
+  overrides detection) but the disagreement is reported.
+
+The audit tool for these is **`skulk doctor`**: run `uv run skulk doctor` on
+the affected node for the full verdict list (each with its consequence and
+fix), or `skulk doctor --fix` to apply the safe remediations first. See
+[Node doctor](node-doctor.md) for the full command reference.
 
 ## Logs and Disk
 

@@ -18,18 +18,21 @@
 </div>
 
 <br>
-Skulk is an interconnect fabric for multi-node AI compute. It joins several machines into one cluster and moves work across them as if they were a single device. Its headline use today is distributed inference: point it at a few machines (Apple Silicon, and now AMD or other Linux GPU nodes too) and it pools their memory and GPUs behind one OpenAI-compatible endpoint, so you can run models far larger than any single machine could hold.
+Skulk is an interconnect fabric for multi-node AI compute. It joins several machines into one cluster and moves work across them as if they were a single device. Its headline use today is distributed inference: point it at a few machines (Apple Silicon on MLX, AMD on Vulkan llama.cpp, and NVIDIA CUDA nodes, all first-class peers) and it pools their memory and GPUs behind one OpenAI-compatible endpoint, so you can run models far larger than any single machine could hold.
 
 On top of that, Skulk adds:
 
-- Heterogeneous clusters: Apple Silicon nodes serving MLX models and AMD or other Linux GPU nodes serving GGUF models (through a llama.cpp engine on Vulkan or ROCm) in one cluster, with each model routed to a node that can run it.
+- Heterogeneous clusters: Apple Silicon nodes serving MLX models, AMD nodes serving GGUF models through a Vulkan or ROCm llama.cpp engine, and NVIDIA nodes serving GGUF through a CUDA llama.cpp build or vLLM, all in one cluster, with each model routed to a node that can run it.
 - Multi-node GGUF inference: a GGUF model that fits no single GPU node pools the GPU memory of several (one driver node plus memory donors over llama.cpp RPC), so two AMD Strix Halo boxes can together serve a quant neither could load alone. Guide: [AMD / Strix Halo nodes](https://foxlight-foundation.github.io/Skulk/amd-strix-halo-nodes/).
 - Production-grade speculative decoding delivering 1.16–2.2× speedups across nodes and on heterogeneous hardware.
-- An extension (plugin) API: separately installed Python packages hook the serving path (request transform, response observer, in-process embeddings). A raising extension is contained and skipped, and extensions never own the response stream. Guide: [Extensions](https://foxlight-foundation.github.io/Skulk/extensions/).
+- Concurrent GPU serving: a served vLLM engine brings continuous batching and paged attention to NVIDIA nodes, coexisting with the llama.cpp engines (the planner picks by hardware and expected concurrency), and the served llama.cpp engine itself decodes concurrent requests with dynamically sized context.
+- A speech fabric: OpenAI-compatible `/v1/audio/speech`, `/v1/audio/transcriptions`, and `/v1/audio/voices` endpoints, a realtime transcription WebSocket at `/v1/realtime`, and a hands-free voice loop in the dashboard chat. Guide: [Speech providers and realtime transcription](https://foxlight-foundation.github.io/Skulk/speech-fabric-realtime/).
+- An extension (plugin) API: separately installed Python packages hook the serving path (request transform, response observer, in-process embeddings) and can serve self-describing provider capabilities that stream media through the fabric and advertise themselves on the telemetry plane. A raising extension is contained and skipped, and extensions never own the response stream. Guide: [Extensions](https://foxlight-foundation.github.io/Skulk/extensions/).
+- Managed engine delivery: Linux GPU nodes get pinned `llama-server` builds as ordinary pip wheels (`skulk-llama-server-cuda`, `skulk-llama-server-vulkan`) from the Foxlight wheel index at `wheels.foxlight.ai`, built from pinned llama.cpp source with sigstore build-provenance attestations.
 - A real-time React dashboard with easy access to:
   - A central model store
   - A placement manager with live cluster preview
-  - Chat
+  - Chat, including the voice loop
   - Deep observability (cross-rank trace waterfalls, cluster timelines, and centralized logging)
 - Flexible API wire formats including:
   - OpenAI Chat Completions and Responses
@@ -40,7 +43,20 @@ On top of that, Skulk adds:
   - Placement failover in case nodes (including the master) go down
   - Crash-loop protection
   - Smarter placement management so that oversized placements are refused before they cause failures
+- Opt-in field telemetry: anonymous, content-free performance and reliability samples, collected only after explicit operator consent through a dashboard setting.
 - And much more.
+
+## Install
+
+One command takes a fresh macOS or Linux machine to a working node:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash
+```
+
+The installer fetches the toolchain (git, a C compiler, rustup, uv), clones the repo, syncs the environment, builds the dashboard when npm is available, and installs the right inference engine for the hardware it finds: NVIDIA Linux nodes get the CUDA `llama-server` wheel, AMD Linux nodes get the Vulkan one, and macOS needs nothing extra (in-process MLX). It finishes with `skulk doctor --fix`, which audits the node (GPU detection, engine availability, storage headroom) and applies safe remediations, printing the consequence and fix for anything it cannot repair. Capability comes from detection, not configuration: no environment variables are required. Re-running the installer is safe; every step is idempotent.
+
+For the manual development setup and what the installer does in detail, see [Build & Runtime Paths](https://foxlight-foundation.github.io/Skulk/build-and-runtime/); to audit a node at any later point, see [Node doctor](https://foxlight-foundation.github.io/Skulk/node-doctor/).
 
 ## Why Skulk
 
@@ -51,6 +67,10 @@ Why would you use Skulk over another solution? What does it get you?
 - **Speculative decoding that actually ships.** Multi-token-prediction (MTP) drafting with a bonus-driven verify loop, chained draft depths measured per model card (`mtp_max_depth`), and support for both greedy and temperature sampling. Works on single-node, pipeline-sharded, and tensor-parallel placements, including heterogeneous multi-node rings where draft/accept decisions are explicitly broadcast so mixed hardware cannot silently diverge and wedge the GPU. On by default for supported cards, with a per-card `speculative_multi_node` opt-out; the dashboard shows a ⚡ MTP badge with the active depth on each running instance. Full guide: [Speculative Decoding](https://foxlight-foundation.github.io/Skulk/speculative-decoding/). **Why it matters:** measured 1.16–2.2× decode speedups with verification-exact output: the accepted tokens are identical to what plain decode would have produced.
 
 - **Continuous batching.** `BatchGenerator` queues incoming requests and decodes them together token-by-token. `SKULK_MAX_CONCURRENT_REQUESTS` (default 8) controls the per-runner ceiling. **Why it matters:** multiple concurrent users share one model's forward pass; throughput scales with concurrency instead of head-of-line blocking.
+
+- **A vLLM served engine for concurrent GPU serving.** NVIDIA nodes can serve through a managed `vllm serve` process behind the same OpenAI-compatible surface: continuous batching and paged attention hold latency flat and grow aggregate throughput as concurrent clients pile on, where single-stream engines queue. It coexists with the llama.cpp engines rather than replacing them; the planner picks the engine by hardware and expected concurrency. Enabled per node via `SKULK_VLLM_BIN` (the installer's `--with-vllm` flag sets it up). **Why it matters:** one cluster serves both the single-user latency case and the many-user throughput case without hand-picking an engine per model.
+
+- **Concurrent serving on the served llama.cpp engine, with dynamic context.** The `llama_server` engine keeps several generations in flight against one model, and each instance's context is sized dynamically from what actually fits in memory beside the weights rather than a fixed cap; concurrency splits that placement-reserved context between active slots, so total KV memory never exceeds what placement accounted for. **Why it matters:** GPU Linux nodes handle overlapping requests and long contexts without either head-of-line blocking or a mid-stream allocator kill.
 
 ### Reliability
 
@@ -100,9 +120,13 @@ Why would you use Skulk over another solution? What does it get you?
 
 - **Family-aware behavior.** Gemma 4 multimodal (audio + vision), DeepSeek V3.2, GPT-OSS / Nemotron / Qwen 3.5 / Llama Nemotron Nano thinking-and-reasoning separation, structured output / JSON mode, OpenAI-compatible tool calling. **Why it matters:** new model releases land with explicit per-family handling, not a generic "the abstraction will figure it out."
 
+- **Speech, wired into the fabric.** Mounted TTS models serve `/v1/audio/speech` (with per-card voices listed at `/v1/audio/voices`); mounted STT models serve `/v1/audio/transcriptions` and a realtime transcription WebSocket at `/v1/realtime` that accepts streamed PCM16 audio and returns transcript deltas as they land. The dashboard chat closes the loop: speak into the microphone, get a transcript, generate a reply, and hear it spoken, all against models placed on your own cluster. Audio bytes ride dedicated node-addressed data paths, never the cluster's ordered event log. **Why it matters:** voice in and voice out are cluster capabilities like any other model, not a bolted-on sidecar service.
+
 ### APIs
 
 - **Four wire formats, one pipeline.** OpenAI Chat Completions, OpenAI Responses, Claude Messages, and Ollama-compatible endpoints all converge on the same internal `Task`. Adapters live in `src/skulk/api/adapters/`. **Why it matters:** clients pick the SDK they prefer; the cluster doesn't care.
+
+- **OpenAI-compatible speech endpoints.** `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/voices`, and the `/v1/realtime` WebSocket serve mounted TTS and STT models through the same placement lifecycle as any other model. **Why it matters:** existing OpenAI audio clients work against your own cluster unchanged.
 
 - **Auto-generated OpenAPI.** Routes carry `tags`, `summary`, and `description`; Pydantic field descriptions flow into the schema. The interactive API browser is built from the live spec. **Why it matters:** the API surface is programmable: generate clients, run contract tests, no doc drift.
 
@@ -118,6 +142,8 @@ Why would you use Skulk over another solution? What does it get you?
 
 - **Per-task cancellation.** `POST /v1/cancel/{command_id}` and the cooperative runner-task cancel both work; the dashboard exposes "Cancel task" on each running task in the Node tab. **Why it matters:** stuck or runaway requests are recoverable without restarting the runner.
 
+- **Opt-in field telemetry.** Inert until an operator explicitly consents through the dashboard setting (`telemetry.consent` in `skulk.yaml`); `SKULK_TELEMETRY_DISABLE=1` is a node-local hard kill switch that overrides fleet policy. Samples are content-free by construction: model id, coarse hardware class, cluster shape, timing and token counts, and error-class enums, never prompt or output text, node ids, hostnames, or addresses. The collector is bounded and fail-silent so it can never affect inference. **Why it matters:** real-fleet performance and reliability signal improves Skulk for everyone, and the operator, not the vendor, decides whether to send it.
+
 ### Engineering discipline
 
 - **Strict typing, tests, docs.** `basedpyright` runs at `0 errors, 0 warnings, 0 notes` on the main branch. Placement, apply, and API paths have test coverage. Architecture docs (`architecture.md` for narrative, `architecture-reference.md` for the dense fact-sheet) are required to update on architectural shape changes. **Why it matters:** regressions surface in CI, the codebase stays legible to future contributors, and the docs reflect what the code actually does.
@@ -125,6 +151,8 @@ Why would you use Skulk over another solution? What does it get you?
 - **Stability claims are earned on hardware.** Every reliability fix above was reproduced and re-verified live on a multi-node Apple Silicon cluster, with batteries that deliberately kill the master mid-serving, bounce nodes during decode, spray abandoned requests at loading models, and soak concurrent clients for hours. The bugs those batteries surfaced were fixed before any user hit them. **Why it matters:** "it should survive that" and "we watched it survive that" are different claims; Skulk makes the second one.
 
 ## Prerequisites
+
+The [one-command installer](#install) handles all of this automatically. Install these manually only when you want to develop on Skulk or control each step yourself.
 
 ### macOS
 
@@ -155,7 +183,7 @@ rustup toolchain install nightly
 
 ## Getting Started
 
-If you are brand new to Skulk, follow this order:
+If you are brand new to Skulk, run the [one-command installer](#install) and skip to step 5. For the from-source path, follow this order:
 
 1. Install the prerequisites for your platform.
 2. Clone the repo.
@@ -200,19 +228,21 @@ Build/runtime note:
 | macOS on Apple Silicon | Primary target. Best experience today. Serves MLX models. |
 | Multi-Mac clusters | Supported. Best results on matched macOS versions and fast networking. |
 | RDMA over Thunderbolt 5 | Supported on eligible macOS 26.2+ hardware after OS-level setup. |
-| AMD / Linux GPU (for example Strix Halo) | Supported. Joins a cluster and serves GGUF models on its GPU, alongside Apple Silicon nodes, through two engines: in-process `llama_cpp` (Vulkan or ROCm), and a served `llama_server` engine that unlocks llama.cpp's **native multi-token prediction** (`--spec-type draft-mtp`) so speculative decoding runs on AMD too. See the [AMD / Strix Halo node guide](https://foxlight-foundation.github.io/Skulk/amd-strix-halo-nodes). |
+| AMD / Linux GPU (for example Strix Halo) | Supported. Joins a cluster and serves GGUF models on its GPU, alongside Apple Silicon nodes, through two engines: in-process `llama_cpp` (Vulkan or ROCm), and a served `llama_server` engine that unlocks llama.cpp's **native multi-token prediction** (`--spec-type draft-mtp`) so speculative decoding runs on AMD too. The installer wires the pinned `skulk-llama-server-vulkan` engine wheel automatically. See the [AMD / Strix Halo node guide](https://foxlight-foundation.github.io/Skulk/amd-strix-halo-nodes). |
+| NVIDIA / Linux GPU (CUDA) | Supported, with parity to AMD. Serves GGUF through the served `llama_server` engine via the `skulk-llama-server-cuda` wheel (installed automatically) or an in-process CUDA `llama_cpp` build, and can additionally serve through vLLM (`SKULK_VLLM_BIN`, or the installer's `--with-vllm`) for high-concurrency GPU serving. |
 | Linux (CPU only) | Supported as a control/API node; GGUF serving on CPU is possible but slow. |
 
 ## Core Features
 
 - **Distributed inference**: split work across devices instead of treating each machine as an island.
-- **Heterogeneous engines**: Apple Silicon nodes serve MLX models; AMD or other Linux GPU nodes serve GGUF models through an in-process `llama_cpp` engine (Vulkan or ROCm) and a served `llama_server` engine; all in one cluster, with each model routed to a node that can run it.
+- **Heterogeneous engines**: Apple Silicon nodes serve MLX models; AMD and NVIDIA Linux GPU nodes serve GGUF models through an in-process `llama_cpp` engine (Vulkan, ROCm, or CUDA), a served `llama_server` engine, and optionally a served vLLM engine on NVIDIA; all in one cluster, with each model routed to a node that can run it.
 - **Speculative decoding**: measured 1.16–2.2× decode speedups via multi-token prediction, on by default for supported model cards, including multi-node placements on mixed hardware. On AMD/GPU nodes, llama.cpp's native MTP (`--spec-type draft-mtp`) runs through the served engine.
 - **Skulk Dashboard**: React dashboard for topology, model store, chat, settings, and placement workflows.
 - **Model Store**: centralize model files on one node and stage them to the rest of the cluster over the LAN; for GGUF repos it downloads only the quantization a model card pins, and the store host advertises a routable address so downloads work on a Thunderbolt-meshed fleet.
 - **Cluster-wide config sync**: update config from the dashboard and sync it across nodes.
 - **Placement previews**: inspect valid placements before launching a model.
 - **Thinking-aware chat UI**: chat with compatible models and surface reasoning content, separated from the answer on both the MLX and llama.cpp engines.
+- **Speech**: OpenAI-compatible text-to-speech and transcription endpoints, a realtime transcription WebSocket, and a hands-free voice loop in the dashboard chat.
 - **Alternative API compatibility**: OpenAI Chat Completions, OpenAI Responses, Claude Messages, and Ollama.
 - **Experimental inference tuning**: OptiQ and other KV cache backends for long-context and memory experiments.
 
@@ -329,11 +359,9 @@ Use this path when you want more than one machine in the cluster.
 
 Skulk can discover peers automatically in many local setups. If you want a fixed cluster topology, use `--bootstrap-peers` or the `SKULK_BOOTSTRAP_PEERS` environment variable.
 
-If you are rolling out a version that uses snapshot bootstrap plus bounded
-master replay retention, plan to upgrade every node in the cluster.
-Mixed-version operation is acceptable during rollout, but once a new master has
-compacted old replay history, an older restarted node that only knows how to
-rebuild from event `0` may no longer be able to fully resync.
+All nodes in a cluster must run the same Skulk version and source build before
+serving workloads. Upgrade every node together; a mixed-version cluster is a
+degraded rollout window, not a supported operating mode.
 
 Example:
 
@@ -377,6 +405,7 @@ Skulk exposes several API surfaces:
 - **OpenAI Responses**: `/v1/responses`
 - **Claude Messages**: `/v1/messages`
 - **Ollama-compatible endpoints**: `/ollama/api/...`
+- **Speech endpoints**: `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/voices`, and the `/v1/realtime` WebSocket
 - **Skulk control endpoints**: placement, model store, config, tracing, downloads, cluster state
 
 The most important API doc lives here:
@@ -533,6 +562,10 @@ uv run skulk --bootstrap-peers /ip4/192.168.1.20/tcp/5678/p2p/12D3KooW...
 | `SKULK_GROUP_CONNECT_DEADLINE_SECONDS` | Hard deadline for distributed group formation before the runner exits with a network diagnosis | `120` |
 | `SKULK_LOGGING_EXTERNAL` | Emit structured JSON logs on stdout for external shipping (Vector etc.) | `false` |
 | `SKULK_BOOTSTRAP_PEERS` | Comma-separated static peers to dial on startup | None |
+| `SKULK_LLAMA_SERVER_BIN` | Explicit `llama-server` binary for the served GGUF engine; overrides managed engine provisioning | Auto-provisioned on Linux |
+| `SKULK_NO_ENGINE_AUTOPROVISION` | Set to `1` to disable managed engine provisioning on this node | `0` |
+| `SKULK_VLLM_BIN` | Path to a `vllm` CLI; enables the served vLLM engine on NVIDIA nodes | None |
+| `SKULK_TELEMETRY_DISABLE` | Set to `1` to hard-disable field telemetry on this node, overriding fleet consent | `0` |
 | `HF_TOKEN` | Hugging Face token | None |
 
 Examples:
@@ -606,7 +639,9 @@ The full documentation site is published at
 [foxlight-foundation.github.io/Skulk](https://foxlight-foundation.github.io/Skulk/).
 Highlights:
 
+- [Build & runtime paths](https://foxlight-foundation.github.io/Skulk/build-and-runtime) (the one-command installer and engine provisioning) and [Node doctor](https://foxlight-foundation.github.io/Skulk/node-doctor)
 - [AMD / Strix Halo node guide](https://foxlight-foundation.github.io/Skulk/amd-strix-halo-nodes) (heterogeneous clusters, the llama.cpp engine)
+- [Speech providers and realtime transcription](https://foxlight-foundation.github.io/Skulk/speech-fabric-realtime) (TTS, STT, and the realtime WebSocket)
 - [Cluster communication](https://foxlight-foundation.github.io/Skulk/cluster-communication) (the control, telemetry, and data planes; the Zenoh transport)
 - [Model store](https://foxlight-foundation.github.io/Skulk/model-store)
 - [Model cards](https://foxlight-foundation.github.io/Skulk/model-cards) and [model capabilities](https://foxlight-foundation.github.io/Skulk/model-capabilities)

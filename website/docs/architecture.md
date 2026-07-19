@@ -52,7 +52,7 @@ flowchart TB
 Each subsystem has its own concern:
 
 - **Router** wraps libp2p (via PyO3 Rust bindings) and exposes typed pub/sub topics: `GLOBAL_EVENTS`, `LOCAL_EVENTS`, `COMMANDS`, `DOWNLOAD_COMMANDS`, `STATE_SYNC_MESSAGES`, `ELECTION_MESSAGES`, `CONNECTION_MESSAGES`, `TELEMETRY`, `DATA`, `PROVIDER_DATA`, `REALTIME_AUDIO`, `SPEECH_MEDIA`, `TRACE_DATA`, and `VISION_MEDIA`. Components subscribe by topic; every topic has a machine-checked control, telemetry, or data plane assignment and payloads are validated Pydantic types.
-- **Telemetry plane** (`TELEMETRY` topic) carries last-write-wins readings that are *not* decisions: each node's `participation` role and `backends`, memory and system profile, observational identity/disk/rdma-ctl status, heartbeat, and non-terminal model-download progress. Local producers never wait for network capacity: a fixed 256-key admission map replaces older values for the same node/reading (download progress additionally keys by model), evicts the oldest distinct key only at the bound, and drains through a one-packet network queue. Telemetry then uses a dedicated gossipsub behavior and protocol with independent per-peer handler queues. Aggregate pressure is available at `GET /v1/diagnostics/telemetry`. Readings land in an in-memory `TelemetryView`, not event-sourced `State`; only download completion and failure remain durable. Attempt identities stop delayed progress on the independent protocol from overriding terminal/reset decisions, while `GET /state` overlays the live view to preserve the dashboard's wire shape. The system profile includes a collector-agnostic accelerator block (GPU utilization, VRAM used and total, power, temperature, clock) normalized at each platform collector. Because the context-admission ceiling must be identical across ranks but telemetry is unordered, the master computes it once at placement time and stamps it onto the instance (`context_token_limit`). **Connectivity readings stay on the control plane**: `node_network`, the thunderbolt maps, and derived `thunderbolt_bridge_cycles` define the topology graph and therefore require ordered event-sourced state.
+- **Telemetry plane** (`TELEMETRY` topic) carries last-write-wins readings that are *not* decisions: each node's `participation` role and `backends`, memory and system profile, observational identity/disk/rdma-ctl status, heartbeat, and non-terminal model-download progress. Local producers never wait for network capacity: a fixed 256-key admission map replaces older values for the same node/reading (download progress additionally keys by model), evicts the oldest distinct key only at the bound, and drains through a one-packet network queue. Telemetry then uses a dedicated gossipsub behavior and protocol with independent per-peer handler queues: transport isolation is structural, so a saturated control or election path cannot delay telemetry and telemetry fan-out cannot consume control or election capacity. Aggregate pressure is available at `GET /v1/diagnostics/telemetry`. Readings land in an in-memory `TelemetryView`, not event-sourced `State`; only download completion and failure remain durable. Attempt identities stop delayed progress on the independent protocol from overriding terminal/reset decisions, while `GET /state` overlays the live view to preserve the dashboard's wire shape. The system profile includes a collector-agnostic accelerator block (GPU utilization, VRAM used and total, power, temperature, clock) normalized at each platform collector. Because the context-admission ceiling must be identical across ranks but telemetry is unordered, the master computes it once at placement time and stamps it onto the instance (`context_token_limit`). **Connectivity readings stay on the control plane**: `node_network`, the thunderbolt maps, and derived `thunderbolt_bridge_cycles` define the topology graph and therefore require ordered event-sourced state.
 - **Data plane** has six typed families. `DATA` carries generated token, image, embedding, transcription, and audio output; `PROVIDER_DATA` carries extension-provider stream frames without adding arbitrary provider payloads to `DataChunk`; `REALTIME_AUDIO` carries built-in realtime STT PCM from an owning API to the selected speech worker; `SPEECH_MEDIA` carries bounded request-scoped TTS reference audio and batch STT uploads; `TRACE_DATA` carries terminal per-rank diagnostic traces to the owning API; and `VISION_MEDIA` carries VLM and image-edit input from the owning API directly to every worker rank selected by the master's authoritative `TaskCreated` decision. Streaming families use explicit per-stream lifecycles and every family uses node-addressed same-node short circuit/remote delivery on Zenoh. Vision uses `opened -> chunk* -> completed -> accepted`, with a source-side deadline requiring acceptance from every selected rank. Batch STT waits for `TaskCreated`, then sends raw frames to the selected worker and gates runner dispatch on exact sequence, task owner, count, and SHA-256 verification. Trace assembly is best-effort and bounded by task count and age. Vision ingress has its own bounded network-receive lanes and remote dispatcher, stream/owner admission limits, five-minute lease, and `NodeDiagnostics.visionMediaEgress` counters so a large upload cannot delay control receive or consume generated-output capacity. Workers retain incomplete input only within fixed frame, per-command byte, process byte, stream-count, and age bounds; they expose it to planning only after the completion frame, sequence set, metadata, authoritative task owner, and SHA-256 digest verify and the acknowledgement is admitted to transport. `NodeDiagnostics.visionMediaIngress` reports API-staged commands/bytes, pending worker acknowledgements, retained worker streams/frames/bytes, verified streams, completions, rejections, and expirations. A generated-output command queue has a separate 30-minute no-frame resource lease, renewed by every producer frame observed by egress. The master never indexes, persists, or application-relays payloads from these families. OpenAI response models retain their required base64/JSON shapes, while provider, realtime audio, speech media, and vision media cluster framing uses bounded headers plus raw bytes. See [how the cluster communicates](cluster-communication) for transport and trust details.
 
   Vision admission is hard-bounded: an API accepts at most 64 staged plus active commands, 32 MiB per command, and 512 MiB across staged plus active transfers. The isolated remote dispatcher admits 16 streams total and per destination owner, with a 66-frame queue holding one open frame, at most 64 half-megabyte payload frames, and one completion frame per stream (512 MiB maximum queued media), 64 bounded rejection tasks, and a five-minute idle lease. Network receive has a separate 66-frame payload lane and 1024-frame metadata-only terminal lane. A worker admits 64 streams, 64 media chunks and 32 MiB per command, 512 MiB process-wide, and retains at most 64 pre-task failure reports; both worker retention and source acknowledgement expire after five minutes. Same-process delivery uses rendezvous channels rather than hidden packet queues.
@@ -208,7 +208,7 @@ the compute names the accelerator (`metal`, `vulkan`, `rocm`, `cuda`, `cpu`). A
 macOS node advertises `{mlx, mlx-metal}`; a Linux node with an importable
 `llama_cpp` built for its GPU adds `{llama_cpp, llama_cpp-vulkan}`. Backend
 tags are derived per node from observed hardware and configuration (see
-"Node capability: detection first, configuration as override" below) and
+"A node that just works" below) and
 gossiped on the telemetry plane as part of `NodeResources`.
 
 `NodeResources` also carries the DATA transport that startup actually resolved
@@ -272,8 +272,8 @@ capability in telemetry, so placement can eventually route a model to the metal
 that serves it best. Unlike the in-process runners, which serve one request at a
 time, the vLLM runner keeps several generations in flight at once (one streaming
 HTTP request per worker thread, bounded by `SKULK_VLLM_MAX_CONCURRENT_REQUESTS`) so
-the server actually *sees* concurrent requests and its continuous batching engages
-— without that the batching benefit never appears. The runner reports itself
+the server actually *sees* concurrent requests and its continuous batching engages;
+without that the batching benefit never appears. The runner reports itself
 running while any generation is in flight and returns to ready only when the last
 one drains. This first slice is single-node text generation; tool calling,
 logprobs, vLLM's own multi-GPU parallelism, and vLLM-aware memory admission are
@@ -320,6 +320,47 @@ concrete engine for its node at runner-spawn time by intersecting the card's
 [AMD Strix Halo nodes](./amd-strix-halo-nodes.md) guide for bringing up a
 non-Mac node.
 
+For GGUF text models the bundled cards use that preference order deliberately:
+they list both llama.cpp engines as compatible but rank the served
+`llama_server` tags ahead of the in-process `llama_cpp` tags. The in-process
+runner serves one request at a time, so under concurrent load its aggregate
+throughput stays flat as clients are added; the served engine keeps several
+generations in flight against `llama-server`'s parallel slots, and aggregate
+tokens per second then scale with concurrency instead. On a node that
+advertises a llama-server binary the model serves through the served proxy; on
+a node without one, the preference is a soft order intersected with the node's
+advertised backends, so the same card falls through to the in-process runner
+unchanged. How many slots the server actually runs is a per-node operator knob
+(`SKULK_LLAMA_SERVER_PARALLEL`, default 1): llama-server splits its total
+context budget evenly across slots, so raising concurrency trades per-request
+context, a choice that belongs to the node operator rather than the card.
+
+Context sizing for the GGUF engines is dynamic rather than a fixed constant.
+Placement reserves KV cache for an 8192-token admission floor, but the window a
+runner actually serves comes from a deterministic memory-fit ceiling the master
+computes once at placement time and stamps onto the instance: for each hosting
+node, the tokens whose KV cache fits that node's GPU working set after its
+weight share and overhead, taken as the minimum across nodes and capped at the
+card's advertised maximum context. Determinism is load-bearing here (every rank
+must admit or reject a request identically or the collectives deadlock), so the
+calculation uses only static inputs such as total RAM and a node's discrete
+VRAM total, never the time-varying available-memory reading
+(`instance_context_token_limit` in `src/skulk/shared/models/memory_estimate.py`).
+The engines that commit their whole context window at load (in-process
+llama.cpp, llama-server, vLLM) get the lifted window only where it lands in
+discrete GPU VRAM, the same pool placement admitted the model against. A GGUF
+placement on a node without discrete VRAM keeps the 8192-token floor, because
+its fit is derived from total system RAM while the load-time window competes
+with live available memory, and an uncomputable fit (a card without KV-head
+metadata, or a pooled RPC placement) clamps back to the floor rather than
+committing a fictitious window that would fail at load. MLX is unaffected
+either way: it grows its KV cache lazily per request and keeps the full
+memory/card fit. The practical effect is that a large-VRAM GPU node serves a
+model at the largest context that actually fits it, instead of a fixed clamp
+that makes served models unusable for real-context work. The
+[Architecture Reference](architecture-reference) carries the exact admission
+arithmetic.
+
 Cards describe the model; the platform describes itself. A card's
 `compatible_backends` records which engines the model's artifacts run on
 (model truth), and it never encodes a gap in Skulk's own implementation
@@ -329,105 +370,8 @@ model's projector yet, and only the `mlx_audio` engine currently owns TTS/STT),
 that limitation lives in a code-level capability table that placement and the
 worker both consult, so the model never lands where an advertised capability
 would silently degrade, and the card needs no edit when the platform catches up.
-
-Speech serving is in a staged rollout. Phase 0 added `TextToSpeech`,
-`SpeechToText`, `SpeechTranslation`, the `[audio]` card section, and the
-`mlx_audio` backend tags (`mlx_audio`, `mlx_audio-metal`) when the upstream
-`mlx_audio` package imports on macOS. TTS serving is exposed at
-`POST /v1/audio/speech`: the API validates a mounted TTS model, sends a
-`SpeechSynthesis` command through the master, the worker dispatches it to the
-single-node `mlx_audio` speech runner, and the runner emits `AudioChunk` output
-on the data plane. TTS output streaming is stable for TTS cards that explicitly
-declare `audio.supports_streaming = true`; no experiment gate is required. The
-runner can emit independently encoded MP3 segments or headerless mono signed-16-bit
-PCM segments. The API describes PCM framing through response headers before it
-commits the body. The dashboard requests PCM, segments visible assistant output
-into ordered sentences, and pauses HTTP reads against a bounded AudioWorklet
-queue; stop aborts queued and active synthesis. The bundled Qwen3 TTS card
-declares MP3 and PCM streaming support after live validation; Fish Audio and
-the remaining bundled speech cards stay batch-only.
-
-For cards declaring reference-audio support, the same route accepts a bounded
-multipart upload. The API pins the command to one ready instance and sends the
-raw file to its worker through `SPEECH_MEDIA`; only metadata enters the command.
-The worker verifies ordered chunks and the terminal digest in process-local
-memory, then injects bytes into the local runner task. The runner materializes a
-request-scoped temporary file for upstream `mlx_audio` and deletes it in a
-`finally` block. Cancellation, transport failure, malformed input, and expiry
-clear pending media. Reference bytes never enter State or the event log.
-Non-streaming requests use the default path where the API collects the chunks
-and returns one raw audio response. Production API nodes also expose the
-first-party `tts@1.0.0` provider facade over this same core path. Generic calls
-open through the provider contract, become the existing `SpeechSynthesis`
-command, and return `AudioChunk` output as raw MP3 `InlineMediaAttachment`
-frames over `PROVIDER_DATA`. The descriptor remains available for contract
-discovery, while its telemetry tag is advertised only when an eligible mounted
-model and its routable runners are ready; dynamic admission rechecks the
-specific model before `started`, and cancellation reaches the core command.
-STT serving is exposed at
-`POST /v1/audio/transcriptions`: the API validates a mounted STT model, accepts a
-multipart audio upload, retains it until authoritative task placement, and sends
-raw `SPEECH_MEDIA` frames directly to the selected worker. The worker verifies
-the owner, frame count, and digest before dispatching the speech runner, and the
-runner emits `TranscriptionChunk` output on the data plane. Audio bytes never
-enter State or the ordered event log.
-Batch requests collect terminal output in the requested response format. Cards
-declaring `audio.supports_streaming = true` may instead return model-produced
-deltas as typed SSE or progressive NDJSON; disconnect cancellation reaches the
-core command and releases its queue. The built-in `stt@1.0.0` provider exposes
-the same batch inference path as a Fabric transform. Its opening metadata stays control-sized while one or
-more raw encoded-audio `InlineMediaAttachment` frames travel over
-`PROVIDER_DATA`; caller input half-close starts inference and one completed
-frame returns the final transcript. It advertises only with ready mounted STT
-capacity and does not claim progressive output. The stable `stt.realtime@1.0.0`
-provider adds a truthful
-bidirectional path for cards backed by an upstream incremental session.
-Admission pins `RealtimeAudioTranscription` to one ready single-host instance.
-Bounded `REALTIME_AUDIO` packets move mono PCM16 from the owning API to that
-worker, using a same-node short circuit or node-addressed Zenoh delivery, and a
-bounded local channel completes the worker-to-runner hop. PCM is never event
-sourced; partial plus final `TranscriptionChunk` output returns through DATA.
-Remote capacity is not advertised when Zenoh is unavailable. The provider is
-available only when the card declares both streaming and realtime support and
-eligible mounted capacity is ready and reachable. The
-`WS /v1/realtime` compatibility edge and the explicit
-`WS /v1/fabric/chains/speech` composition surface adapt base64 24 kHz PCM16
-append/commit events onto this same binary provider path and emit transcript
-delta/final events, enforce same-origin browsers and bounded messages, and
-cancel the provider on disconnect. Optional bounded server VAD incrementally
-resamples input for WebRTC classification, emits start/stop events, and commits
-the utterance on silence or maximum duration. VAD-enabled appends are forwarded
-in classifier-sized source slices and stop at the detected boundary. The socket
-serializes multiple utterances as distinct provider calls with linked item IDs,
-per-turn VAD reset, and no overlapping STT provider ownership. Optional typed
-response configuration routes final transcripts through the selected mounted
-chat model under a strict 1-4096 output-token ceiling (256 by default), with
-hidden reasoning disabled by default for speech-ready output, and then through
-a normal mounted `tts@1.0.0` provider, emitting
-assistant text and MP3 audio events. Explicit cancellation and VAD barge-in
-cancel active model/TTS work. The Fabric path names its STT participant with
-`stt_model` and otherwise reuses these lifecycle guarantees. Every API
-also registers stable `vad@1.0.0` through `BuiltinVadProvider`. This reusable
-bidirectional provider frames mono PCM16 for WebRTC VAD and emits typed turn
-boundaries with bounded minimum-speech, hangover, preroll, and maximum-duration
-state; it has no mounted-model dependency and retains no media. Dashboard chat selects
-this path only when both the model card and local provider advertisement say it
-is available; its AudioWorklet resamples microphone Float32 frames to the edge's
-24 kHz PCM16 contract, while non-realtime models retain batch MediaRecorder
-transcription. Mounted TTS cards with static `audio.voices` metadata expose it
-through the Skulk `GET /v1/audio/voices` extension. Translation-capable STT
-cards can reuse the bounded batch path through experimental
-`POST /v1/audio/translations`; the speech runner maps the English-target intent
-to model-family generation arguments. Supporting TTS cards can accept bounded
-reference-audio uploads through the request-scoped `SPEECH_MEDIA` path described
-above.
-See [Speech Providers and Realtime Transcription](speech-fabric-realtime).
-The dashboard composes the shipped speech endpoints in chat: mounted TTS models
-can speak draft text, replay assistant messages, or auto-speak final assistant
-responses; mounted STT models can transcribe a browser-recorded clip into the
-draft box. Realtime cards use an AudioWorklet, server VAD, and a persistent
-multi-turn WebSocket; batch-only cards retain `MediaRecorder`. Microphone
-controls require a secure browser context such as HTTPS or localhost.
+Speech serving is the largest current example of that gating and has its own
+section below.
 
 The llama.cpp runner serves GGUF models single-node and matches the MLX runner
 on the capabilities llama.cpp supports natively: per-token logprobs (with the
@@ -443,14 +387,159 @@ serves at full context without it. Whether a given GGUF emits a structured tool
 call (versus describing one in prose) depends on the model and its embedded chat
 template, which the runner uses as-is.
 
-## Node capability: detection first, configuration as override
+## Speech serving
 
-Where a node's advertised backends come from was inverted. Historically an
-operator had to declare what the node could do (set `SKULK_LLAMA_CPP_BACKENDS`,
-point env vars at engine binaries), and an undeclared GPU simply went unused,
-sometimes silently serving on CPU at a fraction of hardware speed. The
-principle now is: **detection creates capability, configuration overrides it,
-and disagreement between the two is always loud.**
+Speech models are ordinary model cards with an `[audio]` section, served by a
+dedicated `mlx_audio` engine. A macOS node advertises the `mlx_audio` /
+`mlx_audio-metal` backend tags whenever the upstream `mlx_audio` package
+imports, and the platform capability table keeps TTS and STT cards off the
+text engines, so a speech card lands only on a node whose probed package can
+actually serve it. Speech runners are single-node. The card's `audio` section
+declares what the model truthfully supports (streaming, realtime, reference
+audio, translation, fixed voices), and every serving surface below gates on
+those declarations rather than assuming them per family.
+
+### Text to speech
+
+`POST /v1/audio/speech` serves mounted TTS models. The API validates the
+mounted card, sends a `SpeechSynthesis` command through the master, the worker
+dispatches it to the speech runner, and the runner emits `AudioChunk` output on
+the data plane. Non-streaming requests collect the chunks into one raw audio
+response. Cards that declare `audio.supports_streaming = true` also stream: the
+runner emits independently encoded MP3 segments or headerless mono
+signed-16-bit PCM, and the API describes the PCM framing through response
+headers before it commits the body. (The bundled Qwen3 TTS card declares MP3
+and PCM streaming after live validation; the remaining bundled speech cards
+stay batch-only.) Cards with fixed speakers can declare `audio.voices` plus a
+validated default voice, exposed through the Skulk `GET /v1/audio/voices`
+extension and applied only when callers omit `voice`.
+
+Cards declaring reference-audio support accept a bounded multipart upload on
+the same route. The API pins the command to one ready instance and sends the
+raw file to that worker over the node-addressed `SPEECH_MEDIA` data plane; only
+metadata rides the command path, and the audio bytes never enter `State` or the
+event log. The worker verifies ordered chunks and a terminal digest in bounded
+process-local memory, the runner materializes a request-scoped temporary file
+for the upstream library and deletes it in a `finally` block, and cancellation,
+transport failure, malformed input, and expiry all clear pending media.
+
+The same core path also backs the first-party `tts@1.0.0` capability provider
+(see [Extensions](#extensions-plugins)): a generic provider call becomes the
+existing `SpeechSynthesis` command and returns raw MP3 frames over
+`PROVIDER_DATA`. The descriptor is always discoverable, but the capability tag
+is advertised only while an eligible mounted model and its routable runners are
+ready; admission rechecks the specific model before the stream starts, and
+provider cancellation reaches the core command.
+
+### Speech to text
+
+`POST /v1/audio/transcriptions` serves mounted STT models. The API accepts a
+multipart audio upload, retains it until the master's authoritative task
+placement, then sends raw `SPEECH_MEDIA` frames directly to the selected
+worker, which verifies the task owner, frame count, and SHA-256 digest before
+dispatching the runner. Transcripts return as `TranscriptionChunk` output on
+the data plane; audio bytes never enter `State` or the ordered event log. Batch
+requests collect terminal output in the requested response format, and cards
+declaring streaming support can instead return the model's own deltas as typed
+SSE or progressive NDJSON, with a client disconnect cancelling the underlying
+command. The batch path is also exposed as the first-party `stt@1.0.0`
+provider: callers send bounded encoded audio as binary frames, half-close input
+to start inference, and receive one final transcript. Translation-capable cards
+additionally serve `POST /v1/audio/translations` when both the node's
+experimental mode and the `experiments.speech_translation` toggle are on.
+
+### Realtime transcription
+
+Cards backed by a genuinely incremental upstream session can declare realtime
+support, which enables the stable `stt.realtime@1.0.0` bidirectional provider.
+Admission pins a `RealtimeAudioTranscription` task to one ready single-host
+instance; the caller then streams mono PCM16 frames from the owning API node to
+that worker over the bounded `REALTIME_AUDIO` data plane, using a same-node
+short circuit when the capacity is local and node-addressed Zenoh delivery when
+it is remote. Remote capacity is not advertised when Zenoh is unavailable,
+because private audio is never broadcast on the gossipsub fallback. PCM is
+never event-sourced; partial and final transcripts return through the normal
+`DATA` lifecycle. The provider is advertised only while a card declaring both
+streaming and realtime support has ready, reachable mounted capacity.
+
+### The realtime WebSocket
+
+`WS /v1/realtime` is the multi-turn, OpenAI-compatible edge over that provider:
+it exists so that standard realtime clients (a browser, an SDK speaking the
+OpenAI realtime dialect) can hold a spoken conversation with mounted models
+without knowing anything about providers or the data plane. Same-origin
+browsers and origin-less SDK clients send bounded base64 24 kHz mono PCM16
+append/commit events; the edge decodes them into raw provider frames and
+returns transcript delta and final events. One socket carries a whole session:
+each committed utterance becomes a distinct provider call with linked item IDs,
+VAD state resets per turn, and a new turn is rejected while a committed one is
+still draining, so STT provider ownership never overlaps.
+
+Optional server VAD moves turn-taking to the server: the edge incrementally
+resamples appended audio into classifier-sized WebRTC frames, emits
+speech-start and speech-stop events, forwards audio only up to the detected
+boundary, and commits the utterance automatically on silence or maximum
+duration.
+
+An optional response configuration turns the socket into a full voice loop:
+each final transcript is routed through a selected mounted chat model under a
+strict 1-4096 output-token ceiling (256 by default, with hidden reasoning
+disabled by default so the output stays speech-ready), and then optionally
+through a mounted `tts@1.0.0` provider, emitting assistant text events and MP3
+audio events. Explicit cancellation and VAD barge-in (the caller speaking over
+the response) cancel the active model and TTS work, and disconnecting the
+socket cancels the underlying provider.
+
+`WS /v1/fabric/chains/speech` exposes the same hardened bridge as an explicit
+composition surface: its typed session update names the STT model and selects
+optional mounted chat, TTS, and voice participants, inheriting the realtime
+admission, data-plane routing, bounded conversation text, cancellation, and
+barge-in guarantees rather than re-implementing them. The normative wire
+contracts for both sockets are in
+[Speech Providers and Realtime Transcription](speech-fabric-realtime).
+
+### Voice activity detection
+
+Every production API node also advertises `vad@1.0.0`, a stable bidirectional
+voice-activity provider with no mounted-model dependency, so it is always
+available even on a cluster serving no speech models. It accepts bounded mono
+PCM16 at the WebRTC-supported 8, 16, 32, and 48 kHz rates, re-frames arbitrary
+input chunks into exact classifier windows, and emits typed
+`speech_started` / `speech_stopped` turn boundaries governed by bounded
+minimum-speech, silence-hangover, preroll, and maximum-utterance state. Media
+is processed per call and never retained.
+
+### The dashboard voice loop
+
+The dashboard composes these surfaces in chat: mounted TTS models can speak
+draft text, replay assistant messages, or auto-speak final assistant responses
+(the dashboard requests PCM, segments visible assistant output into ordered
+sentences, and pauses HTTP reads against a bounded AudioWorklet queue; stop
+aborts queued and active synthesis), and mounted STT models transcribe a
+browser recording into the draft box. Realtime cards get the live microphone
+path only when the card's declaration and the local API's live `stt.realtime`
+advertisement agree; an AudioWorklet then captures microphone audio and
+continuously resamples it to the edge's 24 kHz PCM16 contract, while
+batch-only cards keep `MediaRecorder` upload. Microphone controls require a
+secure browser context such as HTTPS or localhost. The dense per-symbol
+contracts behind all of these surfaces live in the
+[Architecture Reference](architecture-reference).
+
+## A node that just works
+
+Getting a machine to serve should not require the operator to describe the
+machine. Skulk's environment handling runs on one principle: **detection
+creates capability, configuration overrides it, and disagreement between the
+two is always loud.** An operator may still declare what a node can do (set
+`SKULK_LLAMA_CPP_BACKENDS`, point env vars at engine binaries), and a
+declaration always wins, but a GPU never goes unused just because nobody
+declared it, and nothing silently serves on CPU at a fraction of hardware
+speed. Four pieces build on the same facts in sequence: detection derives what
+the node advertises, the doctor makes the resulting contract executable on
+demand, managed provisioning supplies the engine binaries detection expects,
+and the installer composes all of it into one command.
+
+### Detection and derivation
 
 One probe pass per process (`src/skulk/facts/`) gathers a typed `NodeFacts`
 record (`src/skulk/shared/types/node_facts.py`): every GPU the node can see
@@ -504,13 +593,15 @@ llama.cpp. At node startup on Linux, when no `SKULK_LLAMA_SERVER_BIN` override
 is set, Skulk installs the pinned build under `~/.local/share/skulk/engines`
 (`SKULK_ENGINES_DIR`) and exports the binary path for the process. On GPU
 nodes the preferred managed source is a pip-installable engine wheel,
-built from the pinned upstream source in Skulk's own CI and installed
+built from the pinned upstream source in Skulk's own CI, published on
+Foxlight's own package index at `wheels.foxlight.ai`, and installed
 through the same standard tooling as every other dependency:
 `skulk-llama-server-cuda` on NVIDIA (CUDA runtime resolved from NVIDIA's
 official PyPI packages) and `skulk-llama-server-vulkan` on AMD (Khronos
 Vulkan loader bundled; the driver's ICD remains the one OS prerequisite).
 An installed wheel is wired automatically, including its bundled
-`ggml-rpc-server` donor binary for multi-node GGUF. Failing that, a visible
+`ggml-rpc-server` donor binary for multi-node GGUF. Failing that, the
+checksum-verified tarball fallback applies: a visible
 NVIDIA GPU tries tarball variants in order: first a CUDA build (upstream publishes no
 Linux CUDA prebuilt, so this slot is reserved for a Foxlight-built artifact
 and is skipped until one is pinned in the manifest), then the Vulkan build
@@ -661,7 +752,9 @@ Models live under `SKULK_MODELS_DIR`: by default that resolves to `SKULK_DATA_HO
 
 ### Model store (optional)
 
-For multi-node deployments with shared filesystems, a model store hosts canonical model artifacts on one machine. Other nodes stage from the store (rsync-like) rather than each downloading from Hugging Face independently. A model card can bind those artifacts to an immutable Hugging Face commit through `source_revision`; the revision is carried through metadata discovery, the store registry, direct downloads, and worker staging so a changed upstream `main` cannot silently replace a qualified artifact. Revision changes install a new canonical copy before the previous store directory is removed. This is a config-driven feature; without a store, each node downloads independently. See [Model Store](model-store) for setup details.
+For multi-node deployments with shared filesystems, a model store hosts canonical model artifacts on one machine. Other nodes stage from the store (rsync-like) rather than each downloading from Hugging Face independently. On the store host itself, staging hardlinks the store's files into the staging directory instead of copying them (store files are immutable once registered, and staged files are never mutated in place), so a model staged on the same filesystem as its canonical copy costs no extra disk; a filesystem that cannot link falls back to a real copy. This is a config-driven feature; without a store, each node downloads independently. See [Model Store](model-store) for setup details.
+
+A model card can bind its artifacts to an immutable Hugging Face commit through `source_revision`, and the pin is part of artifact identity rather than a download hint. Metadata probes and byte downloads read at exactly that commit, the store registry persists it, and every staged copy records it in an on-disk revision marker; a staged or canonical directory carrying a different revision is the wrong artifact and is replaced rather than reused, with the replacement landing only after the requested revision has fully downloaded so a failed fetch never destroys the previous copy. Pinned models load from a revision-qualified canonical directory, so pinned bytes never occupy the mutable-`main` path and a changed upstream `main` can never silently substitute different weights for a qualified artifact.
 
 Staged copies have a lifecycle: by default (`cleanup_on_deactivate: true`), a staged model becomes an eviction candidate when no live runner uses it (including as a companion repo: MTP sidecar, assistant, or split vision weights, which no instance names directly but which a live runner depends on just the same). Candidates are kept newest-first by last use up to the `staging_keep_recent_gb` grace budget (default 40 GiB) and deleted beyond it; the in-use set is always kept and does not count against the budget. The same budget enforcement runs at exactly two moments, and only while `cleanup_on_deactivate` is `true` (the toggle gates the whole pass; `false` means no automatic eviction at all): at instance deactivation and at node startup. It is lifecycle-triggered, not disk-pressure-triggered: the grace budget is a recency floor, not a free-space high-water mark, so nothing evicts just because the disk is filling. The startup pass is what reconciles copies orphaned by a crashed session, and the grace budget is why a crash-restart cycle keeps its recent models warm instead of re-staging everything. `GET /store/storage` reports the per-node breakdown. Deleting a model from the store (`DELETE /store/models/{id}`) goes further than the lazy budget pass: it removes the canonical copy from the store host *and* broadcasts a cluster-wide eviction (the `EvictStagedModel` command → `StagedModelEvicted` event) so every node immediately drops its locally-staged copy, because a worker's staged shards are an independent cache the store-host delete would otherwise leave behind. `POST /store/purge-staging` clears staged copies without touching the store's canonical copy.
 
@@ -670,6 +763,8 @@ Companion repos follow a single download contract: `companion_download_specs()` 
 ### Custom model cards
 
 User-added model cards live under `SKULK_CUSTOM_MODEL_CARDS_DIR` (default `SKULK_DATA_HOME/custom_model_cards`) as TOML files. On Linux that resolves to `~/.local/share/skulk/custom_model_cards`; on macOS/Windows to `~/.skulk/custom_model_cards`. Built-in cards live in `resources/inference_model_cards/`. The capability resolver reads both; custom cards override built-ins for the same `model_id`.
+
+Model discovery feeds this card system. `GET /models/search` searches Hugging Face repositories, and `POST /models/add` builds a custom card from repository metadata, detecting GGUF repositories (which `mlx-lm` cannot load) and giving them a llama.cpp card instead of the MLX default. Hugging Face's search indexes repository metadata, not file manifests, so a pasted GGUF filename can come back empty even when the file exists somewhere on the Hub. Filename-shaped queries therefore get a bounded fallback: Skulk progressively broadens the model-name prefix, inspects a capped set of candidate repositories' file manifests, keeps only repositories containing the exact basename, and returns the matched repo-relative path alongside each result. Adding such a result pins that exact quant file on the generated card instead of applying the default quant preference, and the pin is honored end to end: the store download request names the pinned file, a staged directory that lacks the pinned quant (or its complete shard group) is not treated as a cache hit, and the store recovers a missing selected file before staging.
 
 ## API adapters
 
@@ -712,61 +807,92 @@ The contract is deliberately small (`src/skulk/extensions/`):
 - Each hook invocation receives an `ExtensionContext` carrying the node
   identity, the running Skulk version, programmatic access to the cluster's
   embedding serving (the in-process equivalent of `POST /v1/embeddings`), and
-  telemetry-plane access. `read_cluster()` is the read surface: an immutable
-  per-node snapshot of the cluster (backends, participation role, accelerator
-  vendor, version, liveness, advertised capabilities) so a plugin can discover
-  the fabric it belongs to. `advertise_capability(tag)` is the write surface: it
-  publishes an opaque capability tag this node offers onto the plane so peers
-  discover it the same way native nodes advertise their backends
-  (`withdraw_capability(tag)` reverses it). Together these are first-class
-  citizenship expressed as plane access: a plugin both reads and writes the
-  telemetry plane.
-- An extension can also be a **provider**: a plugin that serves a capability of
-  its own. Because the set of future capabilities is open-ended, Skulk
-  standardizes the description, not the capabilities: a provider publishes one
-  `CapabilityDescriptor` per capability (id, semantic version, human/LLM-readable
-  description, JSON Schemas for input and output, and the call's I/O mode:
-  unary, server-streaming, client-streaming, or bidirectional). Discovery is
-  two-layered: the descriptor's id is auto-advertised as the node's telemetry
-  tag (cheap, gossiped), and the full descriptor travels on demand through
-  `describe_node()` / `GET /v1/capabilities` (heavy, fetched). Providers also
-  get an `on_start` startup hook, since a pure provider has no chat hook
-  through which to reach the context. A reference provider lives at
-  `examples/extensions/echo-provider/`. The generic capability call completes
-  the unary loop: a provider implementing `handle_call` is callable via
-  `call_capability(node, id, version, revision, payload)`. Calls are
-  node-addressed and direct (the master is never in the hot path; nothing is
-  event-sourced), pinned to the discovered descriptor revision, schema-validated
-  in both directions, and bounded (deadline, payload caps, per-node concurrency
-  bound), with every failure a typed machine-readable error. Server-streaming
-  providers implement `handle_stream`; callers use
-  `stream_capability(node, id, version, revision, payload)`. A control-sized
-  peer-API request performs opening admission; an optional dynamic-admission
-  hook can reject changing backend/model conditions before `started`. Then
-  `PROVIDER_DATA` carries both active directions directly between caller and
-  provider nodes (master and State remain outside the hot path). Skulk owns
-  `started`, validates handler sequence and direction-specific chunk schemas,
-  requires one terminal per active direction, and withholds a provider terminal
-  until its handler iterator returns and completes `finally` cleanup. It
-  closes closable handler iterators before publishing a synthetic failure for
-  malformed output. It preserves raw inline media outside JSON, expires gaps,
-  and explicitly cancels abandoned calls.
-  `CapabilityStreamInput.complete()` is caller input half-close: it terminates
-  only `caller_to_provider`, leaving provider output active. Remote pressure is
-  isolated by owner, call, and direction. The transport now executes
-  server-streaming, client-streaming, and bidirectional descriptors. The first
-  built-in bidirectional consumer is `stt.realtime@1.0.0`: it admits only a
-  truthful streaming STT model, pins one single-host instance, and keeps caller
-  PCM off State and the event log through bounded local or node-addressed Zenoh
-  ingress. After core output terminates, it sends `TaskFinished` and withholds
-  the provider terminal until replicated task state is terminal or deleted, so
-  the next turn cannot race stale busy admission. Remote capacity is not
-  advertised without Zenoh.
-- Production API nodes prepend first-party providers to the guarded extension
-  registry. They include `tts@1.0.0`, a facade over mounted core `mlx_audio`
-  serving rather than a duplicate runtime, and experimental
-  `stt.realtime@1.0.0`. First-party contracts take deterministic precedence
-  over external extensions claiming the same `id@version`.
+  the telemetry-plane and capability surfaces described in the subsections
+  below.
+
+### Citizenship on the telemetry plane
+
+An extension is not a guest process observing Skulk from outside; the context
+gives it the same plane native nodes use to describe themselves.
+`read_cluster()` is the read surface: an immutable per-node snapshot of the
+cluster (backends, participation role, accelerator vendor, version, liveness,
+advertised capabilities) so a plugin can discover the fabric it belongs to
+without touching `State` or the event log. `advertise_capability(tag)` is the
+write surface: it publishes an opaque capability tag this node offers onto the
+plane, where peers discover it the same way they discover a node's backends;
+`withdraw_capability(tag)` reverses it, and peers observe the shrunken set on
+the next gossip round. Together these are first-class citizenship expressed as
+plane access: a plugin both reads and writes the telemetry plane, and nothing
+about a tag is event-sourced.
+
+### Providers and capability calls
+
+An extension can also be a **provider**: a plugin that serves a capability of
+its own. Because the set of future capabilities is open-ended, Skulk
+standardizes the description, not the capabilities. A provider publishes one
+`CapabilityDescriptor` per capability: an id, a semantic version, a human- and
+LLM-readable description, JSON Schemas for input and output, and the call's
+I/O mode (unary, server-streaming, client-streaming, or bidirectional). The
+descriptor is self-describing on purpose: a caller that has never heard of a
+capability can discover what it does, validate payloads against its schemas,
+and pin the exact descriptor revision it read. Discovery is two-layered: the
+descriptor's id is auto-advertised as the node's telemetry tag (cheap,
+gossiped), and the full descriptor travels on demand through
+`describe_node()` / `GET /v1/capabilities` (heavy, fetched). Providers also
+get an `on_start` startup hook, since a pure provider has no chat hook through
+which to reach the context. A reference provider lives at
+`examples/extensions/echo-provider/`.
+
+The unary capability call closes the loop: a provider implementing
+`handle_call` is callable via
+`call_capability(node, id, version, revision, payload)`. Calls are
+node-addressed and direct (the master is never in the hot path and nothing is
+event-sourced), pinned to the discovered descriptor revision so discovery and
+invocation cannot silently disagree, schema-validated in both directions, and
+bounded by a deadline, payload caps, and a per-node concurrency bound, with
+every failure a typed machine-readable error rather than an exception.
+
+### Provider streaming
+
+The three streaming I/O modes are what make providers useful for media rather
+than only JSON. Opening a stream is a control-sized peer-API request that
+performs admission; an optional dynamic-admission hook can reject on live
+conditions (a mounted model that just disappeared) before anything streams.
+The media itself then flows on the dedicated `PROVIDER_DATA` data-plane topic
+directly between the caller and provider nodes, with the master, `State`, and
+the event log outside the path entirely.
+
+Both directions follow one lifecycle contract: `started`, then ordered chunks,
+then exactly one terminal (`completed`, `failed`, or `cancelled`) per active
+direction. Skulk owns the mechanics so provider code cannot corrupt them: it
+emits `started` itself, validates the handler's sequence and per-chunk
+schemas, withholds the provider's terminal until the handler iterator has
+returned and finished its `finally` cleanup (so dependent work can never
+observe success before the provider is actually done), closes a misbehaving
+handler's iterator before publishing a synthetic failure for malformed output,
+expires sequence gaps, and explicitly cancels abandoned calls. Raw media rides
+outside JSON as bounded inline bytes or staged blob references.
+
+For client-streaming and bidirectional modes the caller receives an input sink
+alongside the provider's output stream, and the two directions terminate
+independently: the caller's `complete()` is input half-close, terminating only
+the caller-to-provider direction while provider output stays active until the
+provider finishes. That asymmetry is the point of the batch `stt@1.0.0`
+transform (send all audio, half-close, then receive the transcript) and of the
+realtime speech providers, where input and output run concurrently for a whole
+utterance. Remote pressure is isolated per owner, call, and direction, so one
+slow consumer cannot stall another provider's stream. The full frame-level
+contract (bounds, deduplication, expiry, cancellation surfaces) is in the
+[Architecture Reference](architecture-reference).
+
+Production API nodes prepend the first-party providers described in
+[Speech serving](#speech-serving) (`tts@1.0.0`, `stt@1.0.0`,
+`stt.realtime@1.0.0`, `vad@1.0.0`) to the same guarded registry; they are
+facades over mounted core serving rather than duplicate runtimes, and
+first-party contracts take deterministic precedence over external extensions
+claiming the same `id@version`.
+
+### Invariants and version discipline
 
 Three invariants shape the design. First, **a raising extension never breaks
 inference**: every extension call is guarded, an exception is logged loudly
@@ -867,7 +993,7 @@ Architecture decisions:
 The dashboard's main surfaces:
 
 - **Topology**: spatial cluster view, node-by-node status
-- **Model Store**: search Hugging Face, place models, monitor downloads
+- **Model Store**: search Hugging Face (including exact GGUF filename lookup), place models, monitor downloads
 - **Chat**: chat client against placed text models, with mounted TTS playback
   and mounted STT microphone transcription when speech models are ready
 - **Observability panel**: right-side resizable dock for live cluster health, per-node diagnostics, trace browsing (work in progress)

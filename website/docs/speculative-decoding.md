@@ -60,7 +60,22 @@ each model to the right one from its card:
 Everything below (the MLX drafter table, the multi-node speedups, and the
 turn-itself-off cases) is about the MLX engine. The served engine's speculation
 is configured on the model card (`served_spec_type`, `served_spec_n_max`) and,
-like MLX MTP, is carded off per model when a pairing does not pay.
+like MLX MTP, is carded off per model when a pairing does not pay. That is the
+per-model opt-out pattern across engines: a model whose measured
+drafter-and-target pairing nets negative carries the disable on its own card,
+rather than a global switch.
+
+The [vLLM engine](vllm-engine.md) does **not** run Skulk's MTP speculation: a
+model placed on vLLM decodes plain. That engine's win is aggregate throughput
+under concurrent load (continuous batching), not single-stream speedup, so the
+two features address different bottlenecks.
+
+One served-engine degradation behavior worth knowing: a card-declared separate
+draft GGUF is a best-effort companion at download time, so if the draft file is
+missing on disk when the model loads, the served runner logs a warning and
+**serves the model without speculation** rather than failing the placement. If
+a served MTP model decodes at plain speed, check the runner log for that
+warning before suspecting the model.
 
 ### Served-engine speedups (AMD / llama.cpp)
 
