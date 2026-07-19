@@ -165,19 +165,33 @@ uv sync
 # of a hardcoded one the runtime would then ignore as a pin mismatch.
 ENGINE_BUILD="$(grep -oE 'LLAMA_SERVER_PIN: Final = "b[0-9]+"' src/skulk/provisioning/manifest.py | grep -oE '[0-9]+' || true)"
 
+# The Foxlight wheel index is the source of truth for engine wheels (the
+# CUDA wheel exceeds PyPI's per-file limit); wheels carry sigstore build
+# provenance (gh attestation verify <wheel> --owner Foxlight-Foundation).
+FOXLIGHT_WHEEL_INDEX="https://wheels.foxlight.foundation/simple/"
+# The Foxlight index is AUTHORITATIVE for engine wheels (--index-url), with
+# PyPI as the extra index for their dependencies (nvidia runtime wheels):
+# with the order reversed, a name-squatted or unexpected PyPI package could
+# shadow the source of truth.
+ENGINE_INDEX_FLAGS=(--index-url "$FOXLIGHT_WHEEL_INDEX" --extra-index-url "https://pypi.org/simple")
+
 if [[ "$OS" == "Linux" ]] && [[ -z "$ENGINE_BUILD" ]]; then
     warn "could not read the engine pin from the checkout; skipping engine wheel install (skulk doctor will report the outcome)"
 elif [[ "$OS" == "Linux" ]] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q GPU; then
     log "installing the CUDA llama-server engine wheel (engine build b$ENGINE_BUILD)"
-    if ! uv pip install "skulk-llama-server-cuda==0.${ENGINE_BUILD}.*"; then
-        warn "skulk-llama-server-cuda unavailable (not yet published or no network);"
-        warn "falling back to the managed Vulkan build; skulk doctor will report the outcome"
+    if ! uv pip install "${ENGINE_INDEX_FLAGS[@]}" "skulk-llama-server-cuda==0.${ENGINE_BUILD}.*"; then
+        warn "the CUDA engine wheel is unavailable (index not yet live, no network, or unsupported platform);"
+        warn "trying the Vulkan engine wheel (NVIDIA GPUs run the Vulkan build on bare metal)"
+        # Mirrors runtime preference: cuda wheel, then vulkan wheel, then the
+        # managed tarball path that skulk itself provisions.
+        uv pip install "${ENGINE_INDEX_FLAGS[@]}" "skulk-llama-server-vulkan==0.${ENGINE_BUILD}.*" \
+            || warn "vulkan wheel also unavailable; falling back to the managed tarball build (skulk doctor will report the outcome)"
     fi
 elif [[ "$OS" == "Linux" ]] \
     && compgen -G "/sys/class/drm/card*/device/gpu_busy_percent" > /dev/null 2>&1; then
     log "installing the Vulkan llama-server engine wheel (engine build b$ENGINE_BUILD)"
-    if ! uv pip install "skulk-llama-server-vulkan==0.${ENGINE_BUILD}.*"; then
-        warn "skulk-llama-server-vulkan unavailable (not yet published or no network);"
+    if ! uv pip install "${ENGINE_INDEX_FLAGS[@]}" "skulk-llama-server-vulkan==0.${ENGINE_BUILD}.*"; then
+        warn "skulk-llama-server-vulkan unavailable (index not yet live or no network);"
         warn "falling back to the managed tarball build; skulk doctor will report the outcome"
     fi
 fi

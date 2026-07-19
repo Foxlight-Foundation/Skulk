@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: "Publish the built wheels to PyPI"
+        description: "Publish the wheels (Foxlight R2 index + Vulkan PyPI mirror)"
         type: boolean
         default: false
   push:
@@ -40,6 +40,10 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     # Container jobs default to sh (dash), which rejects `set -o pipefail`;
     # every run step here assumes bash.
     defaults:
@@ -156,33 +160,50 @@ jobs:
           # devices; the point is that the shim resolves and the binary execs.
           /tmp/smoke/bin/llama-server-${{ matrix.variant }} --list-devices || true
 
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: packaging/${{ matrix.package }}/dist/*.whl
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.package }}-wheel
           path: packaging/${{ matrix.package }}/dist/*.whl
           if-no-files-found: error
 
-  # One publish job per project, each bound to its own PyPI trusted-publisher
-  # environment: PyPI rejects two pending publishers sharing an identical
-  # (repo, workflow, environment) configuration, and per-project environments
-  # also scope each OIDC grant to exactly one package.
-  publish-cuda:
+  # The Foxlight R2 wheel index (wheels.foxlight.foundation) is the SOURCE OF
+  # TRUTH for both engine wheels: branded, size-unconstrained, ours (the
+  # PyTorch/download.pytorch.org pattern; the CUDA wheel's ~450MB is over
+  # PyPI's per-file limit). Wheels carry sigstore build provenance from the
+  # build job (gh attestation verify <wheel> --owner Foxlight-Foundation).
+  # Requires repository secrets R2_ACCOUNT_ID / R2_ACCESS_KEY_ID /
+  # R2_SECRET_ACCESS_KEY / R2_BUCKET.
+  publish-index:
     needs: build
     if: github.event_name == 'workflow_dispatch' && inputs.publish
     runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: skulk-llama-server-cuda-wheel
+          pattern: "*-wheel"
+          merge-multiple: true
           path: dist
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist
+      - uses: astral-sh/setup-uv@v6
+      - name: Publish wheels to the Foxlight index
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          uv run --no-project --with boto3 python scripts/publish_wheel_index.py dist/*.whl
 
-  publish-vulkan:
+  # PyPI mirror for the Vulkan wheel only (it fits PyPI's limits): keeps the
+  # project name claimed and reachable for plain-PyPI users. skip-existing
+  # makes re-dispatches idempotent for an already-published version.
+  publish-vulkan-pypi:
     needs: build
     if: github.event_name == 'workflow_dispatch' && inputs.publish
     runs-on: ubuntu-latest
@@ -197,3 +218,4 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          skip-existing: true
