@@ -3,7 +3,7 @@
 # Any-propagation suppressions are scoped to this file.
 """Publish engine wheels to the Foxlight PEP 503 index on Cloudflare R2.
 
-The index (``wheels.foxlight.foundation``) is the source of truth for
+The index (``wheels.foxlight.ai``) is the source of truth for
 Foxlight-built engine wheels (#614 engine provisioning): a static "simple"
 index that ``uv pip install --index-url`` resolves like any registry
 (consumers make it the AUTHORITATIVE index, with PyPI demoted to an extra
@@ -40,7 +40,7 @@ from typing import Any
 
 #: Public base URL the index is served from (R2 custom domain). One constant
 #: so a domain change is a one-line edit.
-INDEX_BASE_URL = "https://wheels.foxlight.foundation"
+INDEX_BASE_URL = "https://wheels.foxlight.ai"
 
 _WHEEL_NAME = re.compile(r"^(?P<distribution>[A-Za-z0-9_.]+?)-\d")
 
