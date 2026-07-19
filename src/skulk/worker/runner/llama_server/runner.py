@@ -34,7 +34,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Final, Literal, NamedTuple
+from typing import Any, Final, Literal, NamedTuple, cast
 
 import httpx
 
@@ -73,6 +73,7 @@ from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
 from skulk.worker.runner.generation_stats import (
     StreamStatsClock,
     blocking_call_stats,
+    served_stream_stats,
     stats_from_llama_server_timings,
     subprocess_peak_memory,
 )
@@ -878,18 +879,12 @@ class Runner(ServedConcurrentDispatch):
         admission_in_flight = self._admission_concurrency(task.task_id)
 
         def final_stats() -> GenerationStats:
-            # Prefer the engine's own measurements; fall back to proxy-side
-            # wall clocks (prompt count unknowable from here, reported as 0).
+            # Engine timings win single-stream; under --parallel batching the
+            # per-slot eval rates are not wall rates, so the proxy clock
+            # provides the rates and the engine keeps the token counts (#611).
             # Peak memory always comes from the server child, never this proxy.
-            if last_timings is not None:
-                from_timings = stats_from_llama_server_timings(last_timings)
-                if from_timings is not None:
-                    base = from_timings.model_copy(
-                        update={"peak_memory_usage": self._server_peak_memory()}
-                    )
-                    return self.stamp_runner_stats(base, admission_in_flight)
-            base = clock.stats(
-                prompt_tokens=0, generation_tokens=clock.pieces
+            base = served_stream_stats(
+                clock, last_timings, batching=self._max_concurrency > 1
             ).model_copy(update={"peak_memory_usage": self._server_peak_memory()})
             return self.stamp_runner_stats(base, admission_in_flight)
 
@@ -996,11 +991,25 @@ class Runner(ServedConcurrentDispatch):
         # Engine-side timings when the server includes them, usage-derived
         # effective rates otherwise (#532).
         raw_timings = result.get("timings")
+        # Same wall-honesty rule as the streaming path (#611): engine timings
+        # only when serving single-stream; under batching the usage-derived
+        # whole-request wall rates are the honest ones, with the prompt RATE
+        # over the engine's processed count so a slot-cache hit's cached
+        # prefix cannot inflate it.
+        processed_prompt: int | None = None
+        if isinstance(raw_timings, dict):
+            raw_prompt_n = cast("dict[str, object]", raw_timings).get("prompt_n")
+            if isinstance(raw_prompt_n, (int, float)) and not isinstance(
+                raw_prompt_n, bool
+            ):
+                processed_prompt = int(raw_prompt_n)
         stats = (
             stats_from_llama_server_timings(raw_timings)
-            if isinstance(raw_timings, dict)
+            if isinstance(raw_timings, dict) and self._max_concurrency <= 1
             else None
-        ) or blocking_call_stats(result.get("usage"), request_seconds)
+        ) or blocking_call_stats(
+            result.get("usage"), request_seconds, processed_prompt
+        )
         if stats is not None:
             # The model lives in the server child; never report proxy RSS.
             stats = stats.model_copy(

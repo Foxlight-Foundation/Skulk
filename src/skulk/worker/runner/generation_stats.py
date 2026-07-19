@@ -188,8 +188,64 @@ def stats_from_llama_server_timings(
     )
 
 
+def served_stream_stats(
+    clock: StreamStatsClock,
+    timings: dict[str, object] | None,
+    *,
+    batching: bool,
+) -> GenerationStats:
+    """Resolve a served stream's final statistics honestly under batching.
+
+    Single-stream serving keeps the engine's own phase timings: they measure
+    prefill and decode inside the engine and beat any proxy wall clock. Under
+    multi-slot batching (``--parallel``) the engine's per-slot eval timings
+    count only the slot's ACTIVE time, not wall time per stream, so the
+    derived per-stream rates overstate reality by roughly the batch width
+    (measured ~4x at 64 slots); consumers (stats surfaces, performance
+    envelopes, the results ledger) read them as wall rates. In that mode the
+    proxy's wall clock provides the rates while the engine's exact token
+    counts are kept.
+
+    Args:
+        clock: The proxy-side stream clock (one piece marked per token).
+        timings: The engine's final ``timings`` object, when it sent one.
+        batching: Whether the serving engine decodes concurrent requests
+            together (configured max concurrency above one).
+
+    Returns:
+        Statistics whose rates are wall-honest for the serving mode.
+    """
+    from_timings = (
+        stats_from_llama_server_timings(timings) if timings is not None else None
+    )
+    if from_timings is not None and not batching:
+        return from_timings
+    if from_timings is not None:
+        # The prompt RATE covers only newly processed tokens (a slot-cache
+        # hit's cached prefix cost no prefill work and would inflate the wall
+        # rate), while the reported prompt COUNT stays the request's true
+        # prompt size, matching stats_from_llama_server_timings' convention.
+        raw_processed = timings.get("prompt_n") if timings is not None else None
+        processed_prompt = (
+            int(raw_processed)
+            if isinstance(raw_processed, (int, float))
+            and not isinstance(raw_processed, bool)
+            else from_timings.prompt_tokens
+        )
+        wall = clock.stats(
+            prompt_tokens=processed_prompt,
+            generation_tokens=from_timings.generation_tokens,
+        )
+        return wall.model_copy(
+            update={"prompt_tokens": from_timings.prompt_tokens}
+        )
+    return clock.stats(prompt_tokens=0, generation_tokens=clock.pieces)
+
+
 def blocking_call_stats(
-    usage: object, wall_seconds: float
+    usage: object,
+    wall_seconds: float,
+    processed_prompt_tokens: int | None = None,
 ) -> GenerationStats | None:
     """Statistics for a non-streamed (blocking) completion from its ``usage``.
 
@@ -198,6 +254,14 @@ def blocking_call_stats(
     (necessarily under-reporting each phase's true speed - still honest, and
     far better than the null that hid llama.cpp throughput entirely, #532).
     Returns ``None`` when ``usage`` lacks integer token counts.
+
+    Args:
+        usage: The response ``usage`` object with integer token counts.
+        wall_seconds: Whole-request wall time.
+        processed_prompt_tokens: When known (the engine's ``prompt_n``), the
+            prompt RATE covers only these newly processed tokens so a
+            slot-cache hit's cached prefix cannot inflate it; the reported
+            prompt COUNT stays the request's true size from ``usage``.
     """
     if not isinstance(usage, dict):
         return None
@@ -207,8 +271,13 @@ def blocking_call_stats(
     if not isinstance(prompt_tokens, int) or not isinstance(completion_tokens, int):
         return None
     rate_window = wall_seconds if wall_seconds > 0 else 0.0
+    rate_prompt = (
+        processed_prompt_tokens
+        if processed_prompt_tokens is not None
+        else prompt_tokens
+    )
     return GenerationStats(
-        prompt_tps=prompt_tokens / rate_window if rate_window else 0.0,
+        prompt_tps=rate_prompt / rate_window if rate_window else 0.0,
         generation_tps=completion_tokens / rate_window if rate_window else 0.0,
         prompt_tokens=prompt_tokens,
         generation_tokens=completion_tokens,
