@@ -50,8 +50,15 @@ A model card may set `source_revision` to a full Hugging Face commit hash. The
 store records that revision with its registry entry and treats a different
 revision as a different artifact generation. If a card's pin changes, Skulk
 downloads and registers the replacement before removing the previous canonical
-copy. Worker staging also records the revision, so a cached directory from a
-different commit is replaced instead of being silently reused.
+copy.
+
+Worker staging enforces the same discipline: each staged directory records the
+revision it was staged from, and a staging request checks that record before
+reusing anything. A staged directory recorded at a different revision is
+deleted and re-staged from the pinned artifact; it is **never treated as a
+cache hit**, so a pin change can never silently serve the previous commit's
+weights. On a store host whose staging path is the store itself, a pinned model
+resolves directly to its revision-qualified canonical store directory.
 
 Cards without `source_revision` retain the historical behavior and follow the
 repository's mutable `main` branch.
@@ -156,6 +163,23 @@ For worker nodes, `node_cache_path` is usually a fast local path such as `~/.sku
 
 For the store host, you often point `node_cache_path` at the same directory as `store_path` so the store host can load directly from the shared volume without making another copy.
 
+### Staging on the store host uses hardlinks
+
+When the store host stages into a separate local staging directory (rather than
+pointing `node_cache_path` at the store), it **hardlinks** store files into
+place instead of copying them, falling back to a full copy only on filesystems
+that cannot link (a cross-device staging path, or some network mounts). This is
+safe because store files are immutable once registered and staged files are
+never modified in place.
+
+The disk-usage consequence: when store and staging share a filesystem, a staged
+copy on the store host costs **no additional disk**; without the hardlink, a
+26 GB GGUF would need 52 GB to stage. Note that naive per-directory size tools
+(`du` on each directory separately) double-count hardlinked files, so the store
+host's staging directory can look larger than the disk space it actually
+consumes. Worker nodes stage over HTTP from the store host, so their staged
+copies are always real bytes on their own disk.
+
 ## Staging Cache and Disk Management
 
 When a worker needs a model it does not host, it copies that model's files from
@@ -208,10 +232,13 @@ used idle copies.
 
 `DELETE /store/models/{model_id}` removes the canonical copy from the store host
 **and** evicts that model's staged copy from every node in the cluster at once.
-This path is unconditional: it ignores both `cleanup_on_deactivate` and the
-recency budget, because once the canonical copy is gone the staged copies are
-orphans. Use it to remove a model everywhere and reclaim its disk fleet-wide in
-one call.
+The eviction is a broadcast through the cluster's control plane: the delete
+issues a command, the master turns it into a fleet-wide event, and every worker
+that applies it removes its staged copy on disk while the model's download
+records are dropped from cluster state. This path is unconditional: it ignores
+both `cleanup_on_deactivate` and the recency budget, because once the canonical
+copy is gone the staged copies are orphans. Use it to remove a model everywhere
+and reclaim its disk fleet-wide in one call.
 
 ### Reclaiming disk manually
 
