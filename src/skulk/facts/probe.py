@@ -283,8 +283,9 @@ def gather_node_facts(
         import pynvml  # noqa: F401  # pyright: ignore[reportMissingImports, reportUnusedImport]
 
         pynvml_importable = True
-    except ImportError:
-        pass
+    except Exception as error:  # noqa: BLE001 - never-raises contract: a broken
+        # install must degrade to "not importable", not crash the probe.
+        logger.debug(f"pynvml not importable: {error}")
 
     gpus: list[GpuDeviceFact] = []
     if platform == "darwin":
@@ -321,8 +322,9 @@ def gather_node_facts(
             llama_cpp_gpu_offload = bool(llama_cpp.llama_supports_gpu_offload())  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
         except Exception:  # noqa: BLE001 - binding/ABI quirk means "unverifiable"
             llama_cpp_gpu_offload = None
-    except ImportError:
-        pass
+    except Exception as error:  # noqa: BLE001 - native extension loads can fail
+        # with OSError/ABI errors, not just ImportError; degrade, never raise.
+        logger.debug(f"llama_cpp not importable: {error}")
 
     mlx_audio_importable = False
     if platform == "darwin":

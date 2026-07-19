@@ -91,3 +91,20 @@ def main() -> int:
     binary = binary_path()
     os.execve(str(binary), [str(binary), *sys.argv[1:]], launch_environment())
     return 1  # pragma: no cover - execve does not return on success
+
+
+def rpc_main() -> int:
+    """Console entry point for the bundled ``ggml-rpc-server`` (RPC donor).
+
+    Same loader wiring as :func:`main`, so a multi-node GGUF donor on a
+    wheel-provisioned node runs the CUDA RPC server without any manual
+    library-path setup.
+    """
+    rpc = rpc_server_path()
+    if rpc is None:
+        raise FileNotFoundError(
+            "no ggml-rpc-server payload in this wheel; this is a source "
+            "checkout, not a built wheel"
+        )
+    os.execve(str(rpc), [str(rpc), *sys.argv[1:]], launch_environment())
+    return 1  # pragma: no cover - execve does not return on success

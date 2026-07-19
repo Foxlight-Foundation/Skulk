@@ -136,7 +136,10 @@ uv sync
 
 if [[ "$OS" == "Linux" ]] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q GPU; then
     log "installing the CUDA llama-server engine wheel"
-    if ! uv pip install skulk-llama-server-cuda; then
+    # Version pinned to the engine build in src/skulk/provisioning/manifest.py
+    # (0.<llama.cpp build>.*); the engine-wheel workflow guard keeps them in
+    # lockstep so an older ref cannot silently pull a newer engine.
+    if ! uv pip install "skulk-llama-server-cuda==0.10068.*"; then
         warn "skulk-llama-server-cuda unavailable (not yet published or no network);"
         warn "falling back to the managed Vulkan build; skulk doctor will report the outcome"
     fi

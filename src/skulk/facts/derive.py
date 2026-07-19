@@ -251,6 +251,28 @@ def _derive_llama_server(
         )
     else:
         probe = facts.llama_server_device_probe
+        if probe.outcome == "failed":
+            # The binary could not even answer --list-devices (crash, missing
+            # shared library, timeout): advertising GPU tags would hand
+            # placement a dead engine that only fails at runner startup.
+            # Disable the engine loudly; unsupported (an old build without
+            # the flag) is the only legitimate fall-through.
+            conflicts.append(
+                CapabilityConflict(
+                    code="invalid_engine_binary",
+                    message=(
+                        "The configured llama-server binary failed its device "
+                        f"probe ({probe.detail or 'no detail'}); the "
+                        "llama_server engine is disabled on this node."
+                    ),
+                    remediation=(
+                        "Run the binary with --list-devices to reproduce, fix "
+                        "or replace it (or unset SKULK_LLAMA_SERVER_BIN to "
+                        "use a managed build), then restart skulk."
+                    ),
+                )
+            )
+            return set(), conflicts, notes
         if probe.outcome == "devices":
             computes = [cb for cb in _GPU_COMPUTES if cb in probe.computes]
             if computes:

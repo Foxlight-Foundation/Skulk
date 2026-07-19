@@ -33,6 +33,7 @@ dependencies = [
 
 [project.scripts]
 llama-server-cuda = "skulk_llama_server_cuda:main"
+ggml-rpc-server-cuda = "skulk_llama_server_cuda:rpc_main"
 
 [build-system]
 requires = ["hatchling"]

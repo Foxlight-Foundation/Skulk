@@ -10,6 +10,9 @@
 # project and register this repository + workflow as a trusted publisher.
 name: engine-wheel
 
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
     inputs:
@@ -47,6 +50,7 @@ jobs:
           grep -q "LLAMA_SERVER_PIN: Final = \"$LLAMA_CPP_PIN\"" src/skulk/provisioning/manifest.py
           BUILD_NUM="${LLAMA_CPP_PIN#b}"
           grep -q "version = \"0.${BUILD_NUM}\." packaging/skulk-llama-server-cuda/pyproject.toml
+          grep -q "skulk-llama-server-cuda==0.${BUILD_NUM}" install.sh
 
       - name: Build llama-server (CUDA)
         run: |

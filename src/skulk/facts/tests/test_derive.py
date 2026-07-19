@@ -270,11 +270,26 @@ def test_served_derives_vulkan_from_amd_hardware() -> None:
         make_facts(
             gpus=(AMD_STRIX,),
             llama_server_bin=ok_bin("SKULK_LLAMA_SERVER_BIN"),
-            device_probe=LlamaServerDeviceProbe(outcome="failed", detail="boom"),
+            device_probe=LlamaServerDeviceProbe(outcome="unsupported"),
         )
     )
     assert "llama_server-vulkan" in derivation.backends
     assert derivation.conflicts == ()
+
+
+def test_served_failed_probe_disables_engine_loudly() -> None:
+    # A binary that cannot even answer --list-devices (crash, missing shared
+    # library, timeout) must not be advertised: placement would get a dead
+    # engine that only fails at runner startup (PR #615 review).
+    facts = make_facts(
+        gpus=(AMD_STRIX,),
+        llama_server_bin=ok_bin("SKULK_LLAMA_SERVER_BIN"),
+        device_probe=LlamaServerDeviceProbe(outcome="failed", detail="boom"),
+    )
+    derivation = derive_node_backends(facts)
+    assert not any(tag.startswith("llama_server") for tag in derivation.backends)
+    assert conflict_codes(facts) == ["invalid_engine_binary"]
+    assert "boom" in derivation.conflicts[0].message
 
 
 def test_served_cpu_build_on_gpu_node_is_loud() -> None:

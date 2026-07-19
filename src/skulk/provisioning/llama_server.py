@@ -39,7 +39,7 @@ from skulk.provisioning.manifest import (
     EngineArtifact,
     EngineVariant,
 )
-from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
+from skulk.shared.backends import LLAMA_SERVER_BIN_ENV, RPC_SERVER_BIN_ENV
 from skulk.shared.constants import SKULK_ENGINES_DIR
 from skulk.shared.types.node_facts import NodeFacts
 
@@ -75,6 +75,32 @@ def select_variant(facts: NodeFacts) -> EngineVariant | None:
     return chain[0] if chain else None
 
 
+def _wheel_version_matches_pin() -> bool:
+    """Whether the installed engine wheel packages the pinned build.
+
+    The wheel version scheme is ``0.<llama.cpp build>.<packaging rev>``; a
+    wheel packaging a different build than :data:`LLAMA_SERVER_PIN` is
+    ignored (with a log line) rather than silently overriding the validated
+    pin, since ``ensure_llama_server`` prefers the wheel over the
+    checksum-verified tarball path.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        installed = version("skulk-llama-server-cuda")
+    except PackageNotFoundError:
+        return False
+    expected_prefix = f"0.{LLAMA_SERVER_PIN.removeprefix('b')}."
+    if installed.startswith(expected_prefix):
+        return True
+    logger.warning(
+        f"installed skulk-llama-server-cuda {installed} does not package the "
+        f"pinned llama.cpp build {LLAMA_SERVER_PIN}; ignoring the wheel "
+        f"(install skulk-llama-server-cuda=={expected_prefix}* to use it)"
+    )
+    return False
+
+
 def wheel_llama_server() -> Path | None:
     """The pip-installed CUDA engine wheel's shim, or ``None``.
 
@@ -88,6 +114,8 @@ def wheel_llama_server() -> Path | None:
     hashes, works offline once installed.
     """
     if find_spec("skulk_llama_server_cuda") is None:
+        return None
+    if not _wheel_version_matches_pin():
         return None
     shim = Path(sys.executable).resolve().parent / "llama-server-cuda"
     if shim.is_file() and os.access(shim, os.X_OK):
@@ -246,6 +274,13 @@ def ensure_llama_server(
         wheel = wheel_llama_server()
         if wheel is not None:
             os.environ[LLAMA_SERVER_BIN_ENV] = str(wheel)
+            # The RPC donor binary is bundled in the wheel too, behind its
+            # own loader-wiring shim; without this, rpc_server_binary()'s
+            # sibling search next to the console script finds nothing and a
+            # multi-node donor spawn fails (#615 review).
+            rpc_shim = wheel.parent / "ggml-rpc-server-cuda"
+            if RPC_SERVER_BIN_ENV not in os.environ and rpc_shim.is_file():
+                os.environ[RPC_SERVER_BIN_ENV] = str(rpc_shim)
             return wheel
     if not allow_download:
         # Prefer the same variant order a download would use: with multiple
