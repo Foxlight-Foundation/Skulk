@@ -89,7 +89,8 @@ fi
 # A GPU Linux node serves GGUF through the managed Vulkan llama-server build,
 # which needs the Vulkan loader; minimal CUDA/ROCm container images often lack
 # it while the driver's ICD is present.
-if [[ "$OS" == "Linux" ]] && ! ldconfig -p 2>/dev/null | grep -q libvulkan.so.1; then
+if [[ "$OS" == "Linux" ]] && command -v ldconfig >/dev/null 2>&1 \
+    && ! ldconfig -p 2>/dev/null | grep -q libvulkan.so.1; then
     if { command -v nvidia-smi >/dev/null 2>&1 || [[ -d /sys/class/drm ]]; } && need_apt; then
         log "installing Vulkan loader (libvulkan1) for GPU serving"
         apt_install libvulkan1 || warn "libvulkan1 install failed; GPU GGUF serving may be unavailable (skulk doctor will report it)"

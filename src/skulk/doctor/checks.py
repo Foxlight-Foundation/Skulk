@@ -104,10 +104,12 @@ def _provisioning_fix_applicable(facts: NodeFacts) -> bool:
     (valid or not; an invalid override is its own conflict, not something to
     paper over), and auto-provisioning not opted out.
     """
+    from skulk.provisioning.llama_server import AUTOPROVISION_OPT_OUT_ENV
+
     return (
         facts.platform == "linux"
         and facts.llama_server_binary.state == "not_configured"
-        and os.environ.get("SKULK_NO_ENGINE_AUTOPROVISION", "").strip() != "1"
+        and os.environ.get(AUTOPROVISION_OPT_OUT_ENV, "").strip() != "1"
     )
 
 
