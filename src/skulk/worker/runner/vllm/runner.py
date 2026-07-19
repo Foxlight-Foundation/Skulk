@@ -321,10 +321,11 @@ def parse_openai_sse_line(line: str) -> _StreamDelta | None:
     usage = raw_usage if isinstance(raw_usage, dict) else None
     choices = chunk.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        # The stream_options include_usage final chunk carries empty choices
-        # plus the engine-exact token counts (#631); anything else choice-less
-        # stays skipped.
-        if usage is not None:
+        # The stream_options include_usage final chunk carries exactly
+        # ``"choices": []`` plus the engine-exact token counts (#631); only
+        # that shape is accepted, so a malformed payload that happens to have
+        # a usage-shaped field stays skipped like any other stray line.
+        if usage is not None and isinstance(choices, list) and not choices:
             return _StreamDelta("", "", None, done=False, usage=usage)
         return None
     choice = choices[0]
@@ -744,7 +745,12 @@ class Runner(ServedConcurrentDispatch):
             # while the reported prompt COUNT stays the request's true size
             # (the same cache-hit rule as the llama_server path, #611/#631).
             prompt_total = _usage_count(last_usage, "prompt_tokens") or 0
-            generation = _usage_count(last_usage, "completion_tokens") or clock.pieces
+            # Explicit None check: an engine-exact completion count of 0 is a
+            # real measurement and must not fall back to the piece count.
+            usage_generation = _usage_count(last_usage, "completion_tokens")
+            generation = (
+                usage_generation if usage_generation is not None else clock.pieces
+            )
             processed_prompt = prompt_total
             if last_usage is not None:
                 details = last_usage.get("prompt_tokens_details")

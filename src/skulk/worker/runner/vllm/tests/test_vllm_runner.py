@@ -179,6 +179,11 @@ def test_parse_sse_done_sentinel() -> None:
         "event: ping",  # non-data line
         "data: {not json}",  # malformed json
         'data: {"choices":[]}',  # choice-less payload without usage
+        # usage may only ride a well-formed chunk: choices exactly [] (the
+        # include_usage final chunk) or a dict-bearing choices list.
+        'data: {"usage":{"prompt_tokens":5}}',  # no choices key at all
+        'data: {"choices":"x","usage":{"prompt_tokens":5}}',  # malformed choices
+        'data: {"choices":[42],"usage":{"prompt_tokens":5}}',  # non-dict choice
         "",  # blank
     ],
 )
