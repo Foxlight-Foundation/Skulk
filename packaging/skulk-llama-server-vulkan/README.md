@@ -10,3 +10,5 @@ llama-server-vulkan --list-devices
 ```
 
 Skulk's engine provisioning discovers the installed wheel automatically and wires it as the node's served engine. Version scheme: `0.<llama.cpp build>.<packaging revision>`, in lockstep with the CUDA sibling wheel and Skulk's engine pin. Built from source in the Skulk repository's `engine-wheel` workflow and published via PyPI trusted publishing.
+
+The bundled binaries derive from llama.cpp (MIT) and the bundled `libvulkan` is the Khronos Vulkan Loader (Apache-2.0); both license texts ship in the wheel under `skulk_llama_server_vulkan/licenses/`.

@@ -43,7 +43,7 @@ build-backend = "hatchling.build"
 packages = ["src/skulk_llama_server_cuda"]
 # The compiled binaries land here during the CI build (see engine-wheel.yml);
 # artifact-info.json records the upstream tag and source checksum.
-artifacts = ["src/skulk_llama_server_cuda/bin/**"]
+artifacts = ["src/skulk_llama_server_cuda/bin/**", "src/skulk_llama_server_cuda/licenses/**"]
 
 [tool.hatch.build.targets.wheel.hooks.custom]
 # Marks the wheel platform-specific (linux x86_64) even though the Python
