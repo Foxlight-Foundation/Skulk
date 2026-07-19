@@ -161,25 +161,38 @@ def _check_engine_available(facts: NodeFacts) -> Sequence[CheckResult]:
     # tags until node startup exports its path; without this read-only lookup
     # plain doctor reports FAIL on exactly the box the installer just set up
     # (#628). --fix and startup share the same discovery via
-    # ensure_llama_server.
+    # ensure_llama_server. The candidate is validated with the same device
+    # probe derivation applies at startup: a shim whose runtime is broken
+    # (dead Vulkan ICD, missing CUDA loader) would be disabled at startup, so
+    # reporting it OK here would trade #628's false negative for a false
+    # positive (PR #634 review).
+    from skulk.facts.probe import probe_llama_server_devices
     from skulk.provisioning import dormant_llama_server
 
     dormant = dormant_llama_server(facts)
+    broken_dormant_detail: str | None = None
     if dormant is not None:
-        return [
-            _ok(
-                check_id,
-                title,
-                f"llama_server ({dormant}) is installed and wires "
-                "automatically at node startup",
-            )
-        ]
+        probe = probe_llama_server_devices(str(dormant))
+        if probe.outcome != "failed":
+            return [
+                _ok(
+                    check_id,
+                    title,
+                    f"llama_server ({dormant}) is installed and wires "
+                    "automatically at node startup",
+                )
+            ]
+        broken_dormant_detail = (
+            f"an installed managed llama-server at {dormant} failed its "
+            f"device probe ({probe.detail}); startup would disable it"
+        )
     return [
         CheckResult(
             check_id=check_id,
             title=title,
             verdict="fail",
-            detail="no inference engine is importable or configured on this node",
+            detail=broken_dormant_detail
+            or "no inference engine is importable or configured on this node",
             consequence=(
                 "the node advertises no backends and will never be selected to "
                 "serve a model; it participates in the cluster as management "

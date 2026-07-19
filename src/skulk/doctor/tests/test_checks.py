@@ -61,10 +61,38 @@ def test_engine_available_ok_with_dormant_wheel(
         return shim
 
     monkeypatch.setattr("skulk.provisioning.dormant_llama_server", _dormant)
+
+    def _probe_ok(binary: str) -> object:
+        from skulk.shared.types.node_facts import LlamaServerDeviceProbe
+
+        return LlamaServerDeviceProbe(outcome="devices", computes=("cuda",))
+
+    monkeypatch.setattr(
+        "skulk.facts.probe.probe_llama_server_devices", _probe_ok
+    )
     results = _check_engine_available(make_facts(gpus=(NVIDIA_A40,)))
     assert [r.verdict for r in results] == ["ok"]
     assert str(shim) in results[0].detail
     assert "startup" in results[0].detail
+
+
+def test_engine_available_fails_when_dormant_engine_is_broken(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A shim whose runtime probe fails (dead Vulkan ICD, missing CUDA loader)
+    # would be disabled at startup; doctor must not claim it as available
+    # (PR #634 review). The nonexistent tmp path makes the real probe fail
+    # with a launch error, exercising the same outcome as a broken loader.
+    shim = tmp_path / "llama-server-vulkan"
+
+    def _dormant(facts: NodeFacts) -> Path:
+        return shim
+
+    monkeypatch.setattr("skulk.provisioning.dormant_llama_server", _dormant)
+    results = _check_engine_available(make_facts(gpus=(NVIDIA_A40,)))
+    assert [r.verdict for r in results] == ["fail"]
+    assert str(shim) in results[0].detail
+    assert "failed its device probe" in results[0].detail
 
 
 def test_engine_available_ok_with_served_binary() -> None:
