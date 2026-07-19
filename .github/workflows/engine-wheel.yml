@@ -95,13 +95,16 @@ jobs:
           git clone --depth 1 --branch "$LLAMA_CPP_PIN" \
             https://github.com/ggml-org/llama.cpp /tmp/llama-cpp-src
           if [ "${{ matrix.variant }}" = "cuda" ]; then
-            BACKEND_FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES"
-            # ggml-cuda links CUDA driver-API symbols (cuMem* VMM); a GPU-less
-            # build container has no libcuda, so link against the toolkit's
-            # driver stubs. Runtime resolves the real libcuda.so.1 from the
-            # target machine's driver, which is the wheel's one OS
-            # prerequisite regardless.
-            export LIBRARY_PATH="/usr/local/cuda/lib64/stubs:${LIBRARY_PATH:-}"
+            # GGML_CUDA_NO_VMM: the VMM allocator references CUDA driver-API
+            # symbols (cuMem*), and a GPU-less builder cannot satisfy the
+            # transitive libcuda.so.1 NEEDED resolution at the executable
+            # link (the toolkit stubs ship only libcuda.so, and LIBRARY_PATH
+            # cannot influence transitive SONAME resolution at all, which is
+            # why the stubs approach failed). Disabling VMM removes every
+            # driver-API reference; llama-server commits its KV window up
+            # front at a fixed -c, so the VMM pool allocator's benefit is
+            # marginal for this serving shape.
+            BACKEND_FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES -DGGML_CUDA_NO_VMM=ON"
           else
             BACKEND_FLAGS="-DGGML_VULKAN=ON"
           fi
