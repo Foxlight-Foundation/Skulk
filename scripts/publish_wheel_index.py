@@ -5,7 +5,9 @@
 
 The index (``wheels.foxlight.foundation``) is the source of truth for
 Foxlight-built engine wheels (#614 engine provisioning): a static "simple"
-index that ``uv pip install --extra-index-url`` resolves like any registry,
+index that ``uv pip install --index-url`` resolves like any registry
+(consumers make it the AUTHORITATIVE index, with PyPI demoted to an extra
+index for dependencies),
 the same pattern PyTorch (download.pytorch.org) and llama-cpp-python use for
 wheels too large or too platform-specific for PyPI.
 
@@ -138,7 +140,8 @@ def _regenerate_index(
             body = client.get_object(
                 Bucket=bucket, Key=f"simple/{project}/index.html"
             )["Body"].read().decode()
-        except Exception:  # noqa: BLE001 - first publish for this project
+        except client.exceptions.NoSuchKey:
+            # First publish for this project: no prior anchors to preserve.
             continue
         for match in re.finditer(
             r'href="[^"]*/wheels/([^"#]+)#sha256=([0-9a-f]{64})"', body
