@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: "Publish the built wheels to PyPI"
+        description: "Publish the wheels (Foxlight R2 index + Vulkan PyPI mirror)"
         type: boolean
         default: false
   push:

@@ -126,11 +126,10 @@ def _regenerate_index(
     Args:
         client: The S3 client.
         bucket: The R2 bucket name.
-        checksums: sha256 by wheel filename for wheels uploaded THIS run;
-            files already indexed keep their existing anchors by re-reading
-            the object metadata is deliberately avoided (hashing gigabytes
-            remotely per publish would be wasteful), so anchors for
-            previously-published files come from the previous index.
+        checksums: sha256 by wheel filename for wheels uploaded THIS run.
+            Previously published files keep the anchors recorded in the
+            prior index; re-downloading and re-hashing gigabytes of remote
+            wheels on every publish is deliberately avoided.
     """
     # Merge existing per-project anchors so older files keep their hashes.
     existing_anchor: dict[str, str] = {}
