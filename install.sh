@@ -169,14 +169,28 @@ if [[ "$OS" == "Linux" ]] && [[ -z "$ENGINE_BUILD" ]]; then
     warn "could not read the engine pin from the checkout; skipping engine wheel install (skulk doctor will report the outcome)"
 elif [[ "$OS" == "Linux" ]] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q GPU; then
     log "installing the CUDA llama-server engine wheel (engine build b$ENGINE_BUILD)"
-    # The CUDA wheel exceeds PyPI's per-file size limit, so it is hosted on a
-    # GitHub Release; pip installs wheels from URLs directly, and the wheel
-    # carries sigstore build provenance (gh attestation verify <file>
-    # --owner Foxlight-Foundation).
-    CUDA_WHEEL_URL="https://github.com/Foxlight-Foundation/Skulk/releases/download/engines-b${ENGINE_BUILD}/skulk_llama_server_cuda-0.${ENGINE_BUILD}.0-py3-none-manylinux_2_35_x86_64.whl"
-    if ! uv pip install "$CUDA_WHEEL_URL"; then
-        warn "the CUDA engine wheel is unavailable (not yet released or no network);"
-        warn "falling back to the managed Vulkan build; skulk doctor will report the outcome"
+    # The CUDA wheel exceeds PyPI's per-file size limit, so it is hosted on
+    # the engines-<pin> GitHub Release; the asset is resolved from the release
+    # API so packaging-revision bumps need no installer edit, and pip installs
+    # the URL directly. The wheel carries sigstore build provenance
+    # (gh attestation verify <file> --owner Foxlight-Foundation).
+    CUDA_WHEEL_URL=""
+    if [[ "$(uname -m)" == "x86_64" ]]; then
+        CUDA_WHEEL_URL="$(curl -fsSL "https://api.github.com/repos/Foxlight-Foundation/Skulk/releases/tags/engines-b${ENGINE_BUILD}" 2>/dev/null \
+            | grep -oE '"browser_download_url": *"[^"]*skulk_llama_server_cuda-0\.'"${ENGINE_BUILD}"'\.[0-9]+-[^"]*x86_64\.whl"' \
+            | grep -oE 'https://[^"]*' | sort -V | tail -1 || true)"
+    fi
+    CUDA_OK=0
+    if [[ -n "$CUDA_WHEEL_URL" ]] && uv pip install "$CUDA_WHEEL_URL"; then
+        CUDA_OK=1
+    fi
+    if [[ "$CUDA_OK" != "1" ]]; then
+        warn "the CUDA engine wheel is unavailable (not yet released, no network, or non-x86_64);"
+        warn "trying the Vulkan engine wheel (bare-metal NVIDIA drives Vulkan)"
+        # Mirrors runtime preference: cuda wheel, then vulkan wheel, then the
+        # managed tarball path that skulk itself provisions.
+        uv pip install "skulk-llama-server-vulkan==0.${ENGINE_BUILD}.*" \
+            || warn "vulkan wheel also unavailable; falling back to the managed tarball build (skulk doctor will report the outcome)"
     fi
 elif [[ "$OS" == "Linux" ]] \
     && compgen -G "/sys/class/drm/card*/device/gpu_busy_percent" > /dev/null 2>&1; then
