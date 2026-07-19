@@ -289,7 +289,13 @@ def provision_llama_server(variant: EngineVariant) -> Path:
                 "llama-server binary; report this as a skulk bug"
             )
         if not target_dir.exists():
-            extracted.rename(target_dir)
+            try:
+                extracted.rename(target_dir)
+            except OSError:
+                # Two provisioners racing (node startup + doctor --fix): the
+                # loser falls through to the winner's completed install.
+                if not target_dir.exists():
+                    raise
     binary = _binary_in(target_dir)
     if binary is None:
         raise RuntimeError(
