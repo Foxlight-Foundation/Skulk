@@ -179,7 +179,7 @@ FOXLIGHT_WHEEL_INDEX="https://wheels.foxlight.ai/simple/"
 # The default index is pinned to PyPI explicitly: a host exporting
 # UV_INDEX_URL / UV_DEFAULT_INDEX would otherwise silently replace the
 # fallback that supplies the NVIDIA runtime dependencies.
-ENGINE_INDEX_FLAGS=(--extra-index-url "$FOXLIGHT_WHEEL_INDEX" --index-url "https://pypi.org/simple")
+ENGINE_INDEX_FLAGS=(--extra-index-url "$FOXLIGHT_WHEEL_INDEX" --index-url "https://pypi.org/simple/")
 
 if [[ "$OS" == "Linux" ]] && [[ -z "$ENGINE_BUILD" ]]; then
     warn "could not read the engine pin from the checkout; skipping engine wheel install (skulk doctor will report the outcome)"
