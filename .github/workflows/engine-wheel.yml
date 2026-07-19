@@ -40,6 +40,11 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    # Container jobs default to sh (dash), which rejects `set -o pipefail`;
+    # every run step here assumes bash.
+    defaults:
+      run:
+        shell: bash
     strategy:
       matrix:
         include:
