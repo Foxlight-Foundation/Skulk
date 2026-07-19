@@ -264,6 +264,11 @@ def provision_llama_server(variant: EngineVariant) -> Path:
             "binary; report this as a skulk bug"
         )
     binary.chmod(binary.stat().st_mode | 0o111)
+    rpc_sibling = binary.parent / "ggml-rpc-server"
+    if rpc_sibling.is_file():
+        # Same umask/extraction guard as the server binary: a donor spawn
+        # must not fail on a stripped exec bit after a successful provision.
+        rpc_sibling.chmod(rpc_sibling.stat().st_mode | 0o111)
     logger.info(f"provisioned llama-server at {binary}")
     return binary
 

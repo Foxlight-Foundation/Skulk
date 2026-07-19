@@ -387,7 +387,7 @@ REGISTRY: tuple[DoctorCheck, ...] = (
         title="Model storage",
         docs=(
             "Verifies the models directory exists, is writable, and has "
-            "download headroom (warns under 10 GB free, fails under 2 GB)."
+            "download headroom (warns under 10 GB free, fails at 2 GB or less)."
         ),
         run=_check_models_storage,
         fix=_fix_models_storage,

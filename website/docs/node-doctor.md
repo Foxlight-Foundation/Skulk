@@ -47,7 +47,7 @@ Runs backend derivation over the node facts snapshot and surfaces every observat
 
 ### Model storage (`models-storage`)
 
-Verifies the models directory exists, is writable, and has download headroom (warns under 10 GB free, fails under 2 GB). Supports `--fix`.
+Verifies the models directory exists, is writable, and has download headroom (warns under 10 GB free, fails at 2 GB or less). Supports `--fix`.
 
 ### Dashboard assets (`dashboard-assets`)
 
