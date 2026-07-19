@@ -189,10 +189,7 @@ jobs:
           pattern: "*-wheel"
           merge-multiple: true
           path: dist
-      - name: Install uv
-        run: |
-          curl -fsSL https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: astral-sh/setup-uv@v6
       - name: Publish wheels to the Foxlight index
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}

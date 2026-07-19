@@ -101,12 +101,19 @@ def _bucket_wheels(client: Any, bucket: str) -> dict[str, list[str]]:
 
 
 def _put_html(client: Any, bucket: str, key: str, body: str) -> None:
-    client.put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=body.encode(),
-        ContentType="text/html; charset=utf-8",
-    )
+    """Write one HTML page under both its index.html and trailing-slash keys.
+
+    PEP 503 clients request ``/simple/`` and ``/simple/<project>/``; whether a
+    static host rewrites those to ``index.html`` is a serving-layer detail, so
+    the page is stored under both keys and works either way.
+    """
+    for object_key in (key, key.removesuffix("index.html")):
+        client.put_object(
+            Bucket=bucket,
+            Key=object_key,
+            Body=body.encode(),
+            ContentType="text/html; charset=utf-8",
+        )
 
 
 def _regenerate_index(
@@ -143,9 +150,16 @@ def _regenerate_index(
         rows: list[str] = []
         for filename in sorted(files):
             digest = checksums.get(filename) or existing_anchor.get(filename)
-            fragment = f"#sha256={digest}" if digest else ""
+            if digest is None:
+                # Every published link carries a sha256 anchor; a wheel with
+                # no known digest (not uploaded this run, absent from the
+                # prior index) must never be silently republished unhashed.
+                raise RuntimeError(
+                    f"no sha256 known for {filename}; re-upload it through "
+                    "this script to restore its anchor"
+                )
             rows.append(
-                f'    <a href="{INDEX_BASE_URL}/wheels/{filename}{fragment}">'
+                f'    <a href="{INDEX_BASE_URL}/wheels/{filename}#sha256={digest}">'
                 f"{filename}</a><br/>"
             )
         _put_html(
