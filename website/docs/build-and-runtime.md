@@ -30,12 +30,37 @@ the repo into `~/skulk`, syncs the environment, builds the dashboard when npm
 is available, and finishes with `skulk doctor --fix`, which audits the node
 (GPU detection, engine availability, storage headroom) and applies safe
 remediations, printing the consequence and fix for anything it cannot repair.
-On an NVIDIA Linux node, `--with-vllm` additionally installs vLLM into its own
-virtual environment and records `SKULK_VLLM_BIN`. Re-running the installer is
-safe: every step is idempotent.
+Re-running the installer is safe: every step is idempotent.
 
 At any later point, `uv run skulk doctor` re-audits the node; see
 [Node doctor](node-doctor) for the check list and verdicts.
+
+### Engine provisioning
+
+The installer wires an inference engine matched to the hardware it detects:
+
+- **NVIDIA Linux**: installs the `skulk-llama-server-cuda` wheel from the
+  Foxlight wheel index (`wheels.foxlight.ai`), a pinned `llama-server` build
+  compiled from upstream llama.cpp source with sigstore build-provenance
+  attestations. If that wheel is unavailable, it falls back to the
+  `skulk-llama-server-vulkan` wheel (NVIDIA drives Vulkan fine on bare metal),
+  and finally to the managed tarball build Skulk provisions itself at startup.
+- **AMD Linux**: installs the `skulk-llama-server-vulkan` wheel, with the same
+  managed-tarball fallback.
+- **macOS**: needs nothing; Apple Silicon serves through in-process MLX.
+
+Skulk also auto-provisions a pinned, checksum-verified `llama-server` at node
+startup on Linux when no engine is configured. Setting
+`SKULK_LLAMA_SERVER_BIN` to your own build always overrides, and
+`SKULK_NO_ENGINE_AUTOPROVISION=1` opts a node out of auto-provisioning
+entirely.
+
+On an NVIDIA Linux node, the installer's `--with-vllm` flag additionally
+installs vLLM: the concurrent-serving fast path on CUDA, where continuous
+batching holds latency flat under many simultaneous clients. It lives in its
+own virtual environment (vLLM's dependency matrix conflicts with Skulk's), and
+the installer records `SKULK_VLLM_BIN` in `~/.skulk/skulk.env` so the served
+vLLM engine is available to the node.
 
 The manual paths below are for development: use them when you work on Skulk
 itself or want control over each step.

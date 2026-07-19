@@ -13,4 +13,6 @@ Skulk's engine provisioning discovers the installed wheel automatically and wire
 
 Version scheme: `0.<llama.cpp build>.<packaging revision>`; `0.10068.0` is the first packaging of upstream `b10068`. Built and published by the `engine-wheel` workflow in the Skulk repository via PyPI trusted publishing.
 
+How this wheel fits into Skulk's install and provisioning flow is documented in the [Build & Runtime Paths guide](https://foxlight-foundation.github.io/Skulk/build-and-runtime/).
+
 The bundled `llama-server` and `ggml-rpc-server` binaries derive from llama.cpp (MIT); its license text ships in the wheel under `skulk_llama_server_cuda/licenses/`.

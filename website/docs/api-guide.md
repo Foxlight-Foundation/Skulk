@@ -28,7 +28,9 @@ token.
 - First working request: [First Success Flow](#first-success-flow)
 - OpenAI-compatible chat: [OpenAI Chat Completions](#openai-chat-completions)
 - OpenAI Responses format: [OpenAI Responses API](#openai-responses-api)
+- OpenAI embeddings: [OpenAI Embeddings API](#openai-embeddings-api)
 - OpenAI text-to-speech: [OpenAI Audio Speech API](#openai-audio-speech-api)
+- Image generation: [Image Generation and Editing](#image-generation-and-editing)
 - Claude format: [Claude Messages API](#claude-messages-api)
 - Ollama compatibility: [Ollama API](#ollama-api)
 - Placement and launch: [Placement and Instance Management](#placement-and-instance-management)
@@ -83,6 +85,7 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
+- `POST /v1/embeddings`
 - `POST /v1/audio/speech`
 - `POST /v1/audio/transcriptions`
 - `POST /v1/audio/translations`
@@ -90,6 +93,7 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `WS /v1/realtime`
 - `WS /v1/fabric/chains/speech`
 - `POST /v1/messages`
+- `POST /v1/cancel/{command_id}`
 - `POST /ollama/api/chat`
 - `POST /ollama/api/generate`
 - `GET /ollama/api/tags`
@@ -97,9 +101,27 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `GET /ollama/api/ps`
 - `GET /ollama/api/version`
 
+The Ollama group also serves alias paths (`/ollama/api/api/...`,
+`/ollama/api/v1/...`, and `HEAD` version probes); see
+[Ollama API](#ollama-api).
+
+### Images
+
+- `POST /v1/images/generations`
+- `POST /v1/images/edits`
+- `GET /images`
+- `GET /images/{image_id}`
+
+### Benchmarking
+
+- `POST /bench/chat/completions`
+- `POST /bench/images/generations`
+- `POST /bench/images/edits`
+
 ### Skulk Control APIs
 
 - `GET /v1/models`
+- `GET /models`
 - `POST /v1/tools/web_search`
 - `POST /v1/tools/open_url`
 - `POST /v1/tools/extract_page`
@@ -130,8 +152,13 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `GET /store/models/{model_id}/optimize/status`
 - `GET /filesystem/browse`
 - `GET /node/identity`
+- `GET /node_id`
+- `POST /admin/restart`
+- `GET /onboarding`
+- `POST /onboarding`
 - `GET /v1/tracing`
 - `PUT /v1/tracing`
+- `GET /v1/telemetry/preview`
 - `GET /v1/traces`
 - `GET /v1/traces/cluster`
 - `POST /v1/traces/delete`
@@ -514,6 +541,37 @@ curl -X POST http://localhost:52415/v1/responses \
   }'
 ```
 
+## OpenAI Embeddings API
+
+**POST** `/v1/embeddings`
+
+Generates embeddings with a mounted embedding model. The model must be placed
+and running, and its card must declare `TextEmbedding`: a non-embedding model
+returns **400 Bad Request**, and an unplaced model returns **404 No instance
+found**.
+
+```bash
+curl -X POST http://localhost:52415/v1/embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "BAAI/bge-small-en-v1.5",
+    "input": ["Skulk connects devices into one cluster"]
+  }'
+```
+
+Request fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `model` | string | Required mounted embedding model id |
+| `input` | string or array | Required text or list of texts; an empty list returns **400 Bad Request** |
+| `encoding_format` | string | `float` (default) returns number arrays; `base64` returns each embedding as base64-encoded little-endian float32 bytes |
+| `dimensions` | integer | Not supported. Any value returns **400 Bad Request**; embeddings come back at the model's native dimensionality |
+| `user` | string | Optional caller identifier, accepted for compatibility |
+
+The response is the OpenAI list shape: one `data[]` entry per input in input
+order, the resolved `model`, and `usage` with prompt and total token counts.
+
 ## OpenAI Audio Speech API
 
 **POST** `/v1/audio/speech`
@@ -747,6 +805,176 @@ curl -X POST http://localhost:52415/ollama/api/show \
   -d '{"name": "mlx-community/Llama-3.2-1B-Instruct-4bit"}'
 ```
 
+### Alias routes
+
+Ollama clients differ in how they join a configured base URL with API paths, so
+Skulk also serves alias routes that map onto the same handlers:
+
+- `POST /ollama/api/api/chat` and `POST /ollama/api/v1/chat` alias
+  `POST /ollama/api/chat`
+- `GET /ollama/api/api/tags` and `GET /ollama/api/v1/tags` alias
+  `GET /ollama/api/tags`
+- `HEAD /ollama/` and `HEAD /ollama/api/version` answer the version probe some
+  clients send before their first real request
+
+## Image Generation and Editing
+
+Skulk serves OpenAI-style image generation and editing from placed image
+models (for example the bundled FLUX cards).
+
+Availability note: these routes are always registered, but they return
+**404 No instance found** until an instance of the requested image model is
+placed and running. Image model cards are hidden from the model catalog
+(`GET /v1/models`, placement previews, and the dashboard) unless the node runs
+with `SKULK_ENABLE_IMAGE_MODELS=true`, so in practice serving image models
+requires setting that environment variable before launching one.
+
+### Generate images
+
+**POST** `/v1/images/generations`
+
+```bash
+curl -X POST http://localhost:52415/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "exolabs/FLUX.1-schnell-4bit",
+    "prompt": "a fox curled up in autumn leaves",
+    "n": 1,
+    "size": "1024x1024",
+    "response_format": "b64_json"
+  }'
+```
+
+Request fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `model` | string | Required placed image model id |
+| `prompt` | string | Required generation prompt |
+| `n` | integer | Number of images; default `1` |
+| `size` | string | `auto` (default), `512x512`, `768x768`, `1024x768`, `768x1024`, `1024x1024`, `1024x1536`, or `1536x1024` |
+| `quality` | string | `high`, `medium` (default), or `low` |
+| `output_format` | string | `png` (default), `jpeg`, or `webp` |
+| `response_format` | string | `b64_json` (default) returns inline base64 image data; `url` stores each image on this API node and returns a fetchable URL instead |
+| `stream` | boolean | With `partial_images > 0`, returns an SSE stream of partial and final images instead of one JSON response |
+| `partial_images` | integer | Number of intermediate previews per image when streaming; default `0` |
+| `advanced_params` | object | Optional `seed`, `num_inference_steps` (1-100), `guidance` (1.0-20.0), `negative_prompt`, and `num_sync_steps` (1-100). When `seed` is omitted, Skulk assigns one so multi-node generation stays deterministic |
+
+The non-streaming response is `{ "created": ..., "data": [...] }` with one
+`b64_json` or `url` entry per image.
+
+### Edit images
+
+**POST** `/v1/images/edits`
+
+Image-to-image editing. Unlike generations, this endpoint takes a multipart
+form because it carries the input image:
+
+```bash
+curl -X POST http://localhost:52415/v1/images/edits \
+  -F image=@input.png \
+  -F prompt='make it snow' \
+  -F model=exolabs/FLUX.1-Kontext-dev-4bit \
+  -F response_format=b64_json
+```
+
+Form fields mirror the generation fields (`n`, `size`, `quality`,
+`output_format`, `response_format`, `stream`, `partial_images`, and a JSON
+`advanced_params` string), plus:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `image` | file | Required input image, at most 24 MiB raw; larger uploads return **413 Request Entity Too Large** |
+| `input_fidelity` | string | `low` (default) or `high`; controls how strongly the input image constrains the edit |
+
+The input image travels to the selected worker over the bounded vision media
+path described under chat image inputs; it is never written to the event log
+or replicated `State`. The response shape matches image generation.
+
+### Stored images
+
+**GET** `/images`
+
+Lists the images this API node currently stores for `response_format: "url"`
+responses. Each entry carries `image_id`, `url`, `content_type`, and
+`expires_at`.
+
+**GET** `/images/{image_id}`
+
+Returns one stored image as raw bytes with its stored content type.
+
+```bash
+curl http://localhost:52415/images
+curl -o out.png http://localhost:52415/images/<image_id>
+```
+
+Stored images are node-local and expire one hour after creation; a missing or
+expired id returns **404 Image not found or expired**. Use
+`response_format: "b64_json"` when you need the image bytes to outlive the
+cache.
+
+## Benchmark Endpoints
+
+Benchmark variants of the generation endpoints run the same admission and
+validation as their non-bench counterparts, force a non-streaming run
+(`stream=false`, and `partial_images=0` for images), and flag the task so the
+serving runner collects generation statistics. The response extends the normal
+response shape with two extra fields:
+
+- `generation_stats`: runner-reported timing/throughput statistics for the run
+- `power_usage`: per-node and total system power sampled from live cluster
+  telemetry while the request ran
+
+Endpoints:
+
+- **POST** `/bench/chat/completions` takes the same body as
+  `POST /v1/chat/completions` and returns the chat completion plus stats. The
+  same `TextGeneration` admission applies.
+- **POST** `/bench/images/generations` takes the same body as
+  `POST /v1/images/generations`.
+- **POST** `/bench/images/edits` takes the same multipart form as
+  `POST /v1/images/edits`.
+
+```bash
+curl -X POST http://localhost:52415/bench/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+    "messages": [{"role": "user", "content": "Benchmark me"}]
+  }'
+```
+
+## Cancel an In-Flight Command
+
+**POST** `/v1/cancel/{command_id}`
+
+Requests cancellation of one in-flight generation command by its command ID.
+It covers text generation, image generation, embeddings, and speech synthesis
+or transcription commands owned by the API node you call: Skulk closes the
+local response stream and sends a task cancellation so the serving runner
+stops instead of generating into the void.
+
+Finding the command ID:
+
+- streaming chat completions open with the SSE comment line
+  `: command_id <id>`, and every streamed chunk's `id` field carries the same
+  value
+- non-streaming chat responses use the command ID as the response `id`
+- Skulk control responses such as `POST /place_instance` return an explicit
+  `command_id` field (those placement commands complete immediately and are
+  not cancellable here)
+
+```bash
+curl -X POST http://localhost:52415/v1/cancel/<command_id>
+```
+
+A cancelled command returns
+`{"message": "Command cancelled.", "command_id": "..."}`. An unknown or
+already-completed command returns **404 Command not found or already
+completed**. Command streams are node-local, so call the same API node that
+accepted the original request. Simply disconnecting from a streaming response
+triggers the same cancellation path implicitly.
+
 ## Model Discovery
 
 ### List models
@@ -757,7 +985,9 @@ curl -X POST http://localhost:52415/ollama/api/show \
 curl http://localhost:52415/v1/models
 ```
 
-This returns known model cards, not just running instances.
+This returns known model cards, not just running instances. `GET /models`
+serves the same catalog through the same handler; prefer the `/v1/models` path
+for OpenAI-compatible clients.
 
 ### Search Hugging Face
 
@@ -1113,6 +1343,10 @@ Used by the dashboard to browse a safe subset of the filesystem when selecting c
 
 Returns hostname, preferred IP, and node identity information used by the dashboard.
 
+`GET /node_id` is the minimal companion route: it returns only this node's ID
+(the same value `/node/identity` reports, without the hostname and IP fields).
+Node IDs are per-session and change when the process restarts.
+
 ### Restart a node
 
 **POST** `/admin/restart?node_id=<optional node id>`
@@ -1125,6 +1359,28 @@ Gracefully restart the Skulk process on this or a remote node. When `node_id` is
 
 Returns `{"status": "restarting", "node_id": "..."}` for local restarts, or `{"status": "restart_sent", "node_id": "..."}` for remote restarts.
 If a local restart is already scheduled, returns HTTP 409 with `{"status": "restart_already_pending"}`.
+
+### Onboarding status
+
+**GET** `/onboarding`
+
+Returns whether the dashboard onboarding flow has been completed on this node:
+
+```json
+{"completed": false}
+```
+
+**POST** `/onboarding`
+
+Marks the local onboarding flow as complete and returns `{"completed": true}`.
+The request takes no body. The flag is a node-local marker file, not cluster
+state: each node tracks its own onboarding status, and the dashboard uses it to
+decide whether to show the first-run setup flow.
+
+```bash
+curl http://localhost:52415/onboarding
+curl -X POST http://localhost:52415/onboarding
+```
 
 ## State, Events, and Tracing
 
@@ -1876,7 +2132,7 @@ The operator panel at `/operator` is designed for mobile access and can also be 
 
 | Endpoint | Description |
 | --- | --- |
-| `GET /v1/state` | Full cluster state: nodes, instances, runners, memory, GPU |
+| `GET /state` | Full cluster state: nodes, instances, runners, memory, GPU |
 | `GET /node_id` | Local node's ID |
 | `GET /node/identity` | Node ID, hostname, and preferred LAN IP |
 
@@ -1892,13 +2148,13 @@ The operator panel at `/operator` is designed for mobile access and can also be 
 
 | Endpoint | Description |
 | --- | --- |
-| `POST /v1/nodes/{node_id}/restart` | Send a restart command to any node in the cluster |
+| `POST /admin/restart?node_id=<id>` | Send a restart command to any node in the cluster |
 
 ### Typical operator app workflow
 
 1. Call `GET /v1/connectivity/remote-access` on the initially discovered node to get the `preferredUrl`, then use that as the base URL for subsequent calls.
-2. Poll `GET /v1/state` every 5 seconds for node health (memory, GPU, temperature).
-3. Show per-node cards with restart buttons that call `POST /v1/nodes/{node_id}/restart`.
+2. Poll `GET /state` every 5 seconds for node health (memory, GPU, temperature).
+3. Show per-node cards with restart buttons that call `POST /admin/restart?node_id=<id>`.
 4. On first launch or settings screen, show the `operatorUrl` as a QR code so users can hand it off to another device.
 
 ## Helpful Next Docs

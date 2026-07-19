@@ -51,6 +51,12 @@ endpoint, so you can run models far larger than any single machine could hold.
    that speaks that format. The [API guide](api-guide) walks through a first
    request step by step, from placement to first token.
 
+Speech works the same way: launch a speech model and the dashboard chat gains a
+hands-free voice loop, while the cluster serves OpenAI-compatible
+`/v1/audio/speech` and `/v1/audio/transcriptions` endpoints plus a realtime
+transcription WebSocket at `/v1/realtime`
+([speech guide](speech-fabric-realtime)).
+
 For the runtime details, see [build and runtime paths](build-and-runtime) and
 [run as a service](run-skulk-as-a-service).
 
