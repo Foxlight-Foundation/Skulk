@@ -92,7 +92,36 @@ def test_engine_available_fails_when_dormant_engine_is_broken(
     results = _check_engine_available(make_facts(gpus=(NVIDIA_A40,)))
     assert [r.verdict for r in results] == ["fail"]
     assert str(shim) in results[0].detail
-    assert "failed its device probe" in results[0].detail
+    assert "would be disabled at startup" in results[0].detail
+
+
+def test_engine_available_flags_cpu_only_dormant_on_gpu_node(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A CPU-only build on a GPU node: derivation ADVERTISES llama_server-cpu
+    # with an error-level gpu_serving_disabled conflict (#609), so the engine
+    # is available but the doctor detail must surface the conflict, because
+    # the capability-conflicts check reads unwired facts and cannot see it
+    # before startup (PR #634 review round 2).
+    shim = tmp_path / "llama-server-cpu"
+
+    def _dormant(facts: NodeFacts) -> Path:
+        return shim
+
+    monkeypatch.setattr("skulk.provisioning.dormant_llama_server", _dormant)
+
+    def _probe_cpu_only(binary: str) -> object:
+        from skulk.shared.types.node_facts import LlamaServerDeviceProbe
+
+        return LlamaServerDeviceProbe(outcome="devices", computes=())
+
+    monkeypatch.setattr(
+        "skulk.facts.probe.probe_llama_server_devices", _probe_cpu_only
+    )
+    results = _check_engine_available(make_facts(gpus=(NVIDIA_A40,)))
+    assert [r.verdict for r in results] == ["ok"]
+    assert "startup will flag" in results[0].detail
+    assert "fraction of hardware speed" in results[0].detail
 
 
 def test_engine_available_ok_with_served_binary() -> None:

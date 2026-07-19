@@ -161,30 +161,55 @@ def _check_engine_available(facts: NodeFacts) -> Sequence[CheckResult]:
     # tags until node startup exports its path; without this read-only lookup
     # plain doctor reports FAIL on exactly the box the installer just set up
     # (#628). --fix and startup share the same discovery via
-    # ensure_llama_server. The candidate is validated with the same device
-    # probe derivation applies at startup: a shim whose runtime is broken
-    # (dead Vulkan ICD, missing CUDA loader) would be disabled at startup, so
-    # reporting it OK here would trade #628's false negative for a false
-    # positive (PR #634 review).
+    # ensure_llama_server. The candidate is judged by REPLAYING the real
+    # derivation over a hypothetical facts snapshot with the binary wired:
+    # any candidate startup would disable (failed device probe from a dead
+    # Vulkan ICD or missing CUDA loader, a CPU-only build on a GPU node's
+    # gpu_serving_disabled, ...) must not read as available, or #628's false
+    # negative becomes a false positive (PR #634 review, both rounds).
     from skulk.facts.probe import probe_llama_server_devices
     from skulk.provisioning import dormant_llama_server
+    from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
+    from skulk.shared.types.node_facts import EngineBinaryFact
 
     dormant = dormant_llama_server(facts)
     broken_dormant_detail: str | None = None
     if dormant is not None:
-        probe = probe_llama_server_devices(str(dormant))
-        if probe.outcome != "failed":
+        hypothetical = facts.model_copy(
+            update={
+                "llama_server_binary": EngineBinaryFact(
+                    env_var=LLAMA_SERVER_BIN_ENV,
+                    configured_path=str(dormant),
+                    state="ok",
+                ),
+                "llama_server_device_probe": probe_llama_server_devices(
+                    str(dormant)
+                ),
+            }
+        )
+        replay = derive_node_backends(hypothetical)
+        if "llama_server" in replay.backends:
+            # Derivation can advertise the engine AND raise conflicts (the
+            # #609 cpu-only-on-GPU shape keeps llama_server-cpu with an
+            # error-level gpu_serving_disabled); those stay visible here
+            # because the capability-conflicts check reads the unwired facts
+            # and cannot see them before startup.
+            flagged = "; ".join(c.message for c in replay.conflicts)
             return [
                 _ok(
                     check_id,
                     title,
                     f"llama_server ({dormant}) is installed and wires "
-                    "automatically at node startup",
+                    "automatically at node startup"
+                    + (f" (startup will flag: {flagged})" if flagged else ""),
                 )
             ]
+        reason = "; ".join(c.message for c in replay.conflicts) or (
+            "the binary derives no usable backend on this hardware"
+        )
         broken_dormant_detail = (
-            f"an installed managed llama-server at {dormant} failed its "
-            f"device probe ({probe.detail}); startup would disable it"
+            f"an installed managed llama-server at {dormant} would be "
+            f"disabled at startup: {reason}"
         )
     return [
         CheckResult(
