@@ -1,7 +1,11 @@
 # pyright: reportPrivateUsage=false
 """Doctor registry tests: verdicts, consequences, and crash containment."""
 
+from pathlib import Path
+
 from collections.abc import Sequence
+
+import pytest
 
 from skulk.doctor.checks import (
     REGISTRY,
@@ -123,3 +127,20 @@ def test_fix_not_promised_with_invalid_override() -> None:
     )
     assert [r.verdict for r in results] == ["fail"]
     assert results[0].fix_available is False
+
+
+def test_models_storage_fails_when_path_is_a_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A file squatting on the models path must FAIL, not read as a healthy
+    # existing directory (PR #615 review).
+    import skulk.doctor.checks as checks_module
+
+    squatter = tmp_path / "models"
+    squatter.write_text("not a directory")
+    monkeypatch.setattr(
+        "skulk.shared.constants.SKULK_MODELS_DIR", squatter
+    )
+    results = checks_module._check_models_storage(make_facts(platform="darwin"))
+    assert [r.verdict for r in results] == ["fail"]
+    assert "not a directory" in results[0].detail

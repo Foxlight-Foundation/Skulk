@@ -289,6 +289,20 @@ def _check_models_storage(facts: NodeFacts) -> Sequence[CheckResult]:
                 fix_available=True,
             )
         ]
+    if not models_dir.is_dir():
+        return [
+            CheckResult(
+                check_id=check_id,
+                title=title,
+                verdict="fail",
+                detail=f"models path {models_dir} exists but is not a directory",
+                consequence="every model download on this node will fail",
+                remediation=(
+                    f"move or remove the file at {models_dir} (or point "
+                    "SKULK_MODELS_DIR at a directory)"
+                ),
+            )
+        ]
     if not os.access(models_dir, os.W_OK):
         return [
             CheckResult(
