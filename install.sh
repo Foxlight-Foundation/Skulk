@@ -139,6 +139,22 @@ cd "$INSTALL_DIR"
 
 # --- environment -----------------------------------------------------------
 
+# An existing-but-old uv rejects this project's configuration; upgrade it to
+# the repo's declared minimum before syncing so re-runs stay idempotent on
+# hosts that already had uv.
+UV_MIN="$(grep -oE 'required-version = ">=([0-9.]+)"' pyproject.toml | grep -oE '[0-9.]+' | head -1 || true)"
+if [[ -n "$UV_MIN" ]]; then
+    UV_HAVE="$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    if [[ -n "$UV_HAVE" ]] && [[ "$(printf '%s\n%s\n' "$UV_MIN" "$UV_HAVE" | sort -V | head -1)" != "$UV_MIN" ]]; then
+        log "upgrading uv ($UV_HAVE -> >=$UV_MIN)"
+        uv self update >/dev/null 2>&1 || curl -fsSL https://astral.sh/uv/install.sh | sh
+        UV_HAVE="$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+        if [[ -n "$UV_HAVE" ]] && [[ "$(printf '%s\n%s\n' "$UV_MIN" "$UV_HAVE" | sort -V | head -1)" != "$UV_MIN" ]]; then
+            die "uv $UV_HAVE is below the required >=$UV_MIN and could not be upgraded (package-manager installs need a manual upgrade)"
+        fi
+    fi
+fi
+
 log "syncing the Python environment (first run compiles the Rust bindings; this can take a few minutes)"
 uv sync
 

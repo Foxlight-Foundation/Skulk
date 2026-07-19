@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import os
 import platform as platform_module
-import sys
+import sysconfig
 import tarfile
 import tempfile
 from importlib.util import find_spec
@@ -176,7 +176,10 @@ def wheel_llama_server(
         ``(server_shim, rpc_shim_or_None)`` for the first installed wheel of
         the vendor's preference order whose version matches the pin.
     """
-    bin_dir = Path(sys.executable).resolve().parent
+    # sysconfig's scripts path is the venv's own bin directory; resolving
+    # sys.executable would follow the venv symlink to uv's cached base
+    # interpreter, whose bin dir does not contain the wheel shims.
+    bin_dir = Path(sysconfig.get_path("scripts"))
     for distribution, module, server_shim, rpc_shim in _WHEELS_BY_VENDOR.get(
         vendor, ()
     ):
