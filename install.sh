@@ -74,6 +74,15 @@ if ! command -v git >/dev/null 2>&1; then
     fi
 fi
 
+if ! command -v curl >/dev/null 2>&1; then
+    if need_apt; then
+        log "installing curl"
+        apt_install curl ca-certificates
+    else
+        die "curl is required; install it and re-run"
+    fi
+fi
+
 if ! command -v cc >/dev/null 2>&1; then
     # The Rust networking bindings compile from source; that needs a linker.
     if need_apt; then
@@ -133,25 +142,25 @@ cd "$INSTALL_DIR"
 log "syncing the Python environment (first run compiles the Rust bindings; this can take a few minutes)"
 uv sync
 
-# --- CUDA engine wheel (NVIDIA Linux) --------------------------------------
+# --- engine wheels (Linux GPU) ----------------------------------------------
 
-if [[ "$OS" == "Linux" ]] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q GPU; then
-    log "installing the CUDA llama-server engine wheel"
-    # Version pinned to the engine build in src/skulk/provisioning/manifest.py
-    # (0.<llama.cpp build>.*); the engine-wheel workflow guard keeps them in
-    # lockstep so an older ref cannot silently pull a newer engine.
-    if ! uv pip install "skulk-llama-server-cuda==0.10068.*"; then
+# The wheel version derives from the CHECKED-OUT ref's engine pin, so
+# installing --ref dev after a pin advance pulls the matching wheel instead
+# of a hardcoded one the runtime would then ignore as a pin mismatch.
+ENGINE_BUILD="$(grep -oE 'LLAMA_SERVER_PIN: Final = "b[0-9]+"' src/skulk/provisioning/manifest.py | grep -oE '[0-9]+' || true)"
+
+if [[ "$OS" == "Linux" ]] && [[ -z "$ENGINE_BUILD" ]]; then
+    warn "could not read the engine pin from the checkout; skipping engine wheel install (skulk doctor will report the outcome)"
+elif [[ "$OS" == "Linux" ]] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q GPU; then
+    log "installing the CUDA llama-server engine wheel (engine build b$ENGINE_BUILD)"
+    if ! uv pip install "skulk-llama-server-cuda==0.${ENGINE_BUILD}.*"; then
         warn "skulk-llama-server-cuda unavailable (not yet published or no network);"
         warn "falling back to the managed Vulkan build; skulk doctor will report the outcome"
     fi
-fi
-
-# --- Vulkan engine wheel (AMD Linux) ----------------------------------------
-
-if [[ "$OS" == "Linux" ]] && ! command -v nvidia-smi >/dev/null 2>&1 \
+elif [[ "$OS" == "Linux" ]] \
     && compgen -G "/sys/class/drm/card*/device/gpu_busy_percent" > /dev/null 2>&1; then
-    log "installing the Vulkan llama-server engine wheel"
-    if ! uv pip install "skulk-llama-server-vulkan==0.10068.*"; then
+    log "installing the Vulkan llama-server engine wheel (engine build b$ENGINE_BUILD)"
+    if ! uv pip install "skulk-llama-server-vulkan==0.${ENGINE_BUILD}.*"; then
         warn "skulk-llama-server-vulkan unavailable (not yet published or no network);"
         warn "falling back to the managed tarball build; skulk doctor will report the outcome"
     fi
