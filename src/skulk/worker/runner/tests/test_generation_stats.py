@@ -105,6 +105,20 @@ def test_blocking_call_stats_uses_exact_counts_and_wall_rates() -> None:
     assert stats.generation_tps == 10.0
 
 
+def test_blocking_call_stats_cache_hit_rate_over_processed_only() -> None:
+    # A slot-cache hit: 1000-token prompt but only 10 newly processed. The
+    # prompt RATE covers the processed tokens; the COUNT stays the true size.
+    stats = blocking_call_stats(
+        {"prompt_tokens": 1000, "completion_tokens": 40},
+        wall_seconds=2.0,
+        processed_prompt_tokens=10,
+    )
+    assert stats is not None
+    assert stats.prompt_tokens == 1000
+    assert stats.prompt_tps == 5.0
+    assert stats.generation_tps == 20.0
+
+
 def test_blocking_call_stats_rejects_missing_or_non_dict_usage() -> None:
     assert blocking_call_stats(None, 1.0) is None
     assert blocking_call_stats({"prompt_tokens": 80}, 1.0) is None

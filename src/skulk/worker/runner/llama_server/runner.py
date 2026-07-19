@@ -34,7 +34,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Final, Literal, NamedTuple
+from typing import Any, Final, Literal, NamedTuple, cast
 
 import httpx
 
@@ -993,12 +993,23 @@ class Runner(ServedConcurrentDispatch):
         raw_timings = result.get("timings")
         # Same wall-honesty rule as the streaming path (#611): engine timings
         # only when serving single-stream; under batching the usage-derived
-        # whole-request wall rates are the honest ones.
+        # whole-request wall rates are the honest ones, with the prompt RATE
+        # over the engine's processed count so a slot-cache hit's cached
+        # prefix cannot inflate it.
+        processed_prompt: int | None = None
+        if isinstance(raw_timings, dict):
+            raw_prompt_n = cast("dict[str, object]", raw_timings).get("prompt_n")
+            if isinstance(raw_prompt_n, (int, float)) and not isinstance(
+                raw_prompt_n, bool
+            ):
+                processed_prompt = int(raw_prompt_n)
         stats = (
             stats_from_llama_server_timings(raw_timings)
             if isinstance(raw_timings, dict) and self._max_concurrency <= 1
             else None
-        ) or blocking_call_stats(result.get("usage"), request_seconds)
+        ) or blocking_call_stats(
+            result.get("usage"), request_seconds, processed_prompt
+        )
         if stats is not None:
             # The model lives in the server child; never report proxy RSS.
             stats = stats.model_copy(

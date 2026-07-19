@@ -243,7 +243,9 @@ def served_stream_stats(
 
 
 def blocking_call_stats(
-    usage: object, wall_seconds: float
+    usage: object,
+    wall_seconds: float,
+    processed_prompt_tokens: int | None = None,
 ) -> GenerationStats | None:
     """Statistics for a non-streamed (blocking) completion from its ``usage``.
 
@@ -252,6 +254,14 @@ def blocking_call_stats(
     (necessarily under-reporting each phase's true speed - still honest, and
     far better than the null that hid llama.cpp throughput entirely, #532).
     Returns ``None`` when ``usage`` lacks integer token counts.
+
+    Args:
+        usage: The response ``usage`` object with integer token counts.
+        wall_seconds: Whole-request wall time.
+        processed_prompt_tokens: When known (the engine's ``prompt_n``), the
+            prompt RATE covers only these newly processed tokens so a
+            slot-cache hit's cached prefix cannot inflate it; the reported
+            prompt COUNT stays the request's true size from ``usage``.
     """
     if not isinstance(usage, dict):
         return None
@@ -261,8 +271,13 @@ def blocking_call_stats(
     if not isinstance(prompt_tokens, int) or not isinstance(completion_tokens, int):
         return None
     rate_window = wall_seconds if wall_seconds > 0 else 0.0
+    rate_prompt = (
+        processed_prompt_tokens
+        if processed_prompt_tokens is not None
+        else prompt_tokens
+    )
     return GenerationStats(
-        prompt_tps=prompt_tokens / rate_window if rate_window else 0.0,
+        prompt_tps=rate_prompt / rate_window if rate_window else 0.0,
         generation_tps=completion_tokens / rate_window if rate_window else 0.0,
         prompt_tokens=prompt_tokens,
         generation_tokens=completion_tokens,
