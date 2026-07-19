@@ -129,9 +129,7 @@ out. The CUDA engine also ships as the pip wheel `skulk-llama-server-cuda`
 tarball provisioning on NVIDIA nodes. Engine wheels publish to the Foxlight
 PEP 503 index on Cloudflare R2 (`wheels.foxlight.foundation`, source of
 truth; `scripts/publish_wheel_index.py`; CUDA wheel exceeds PyPI's size
-limit) with the Vulkan wheel mirrored to PyPI; the CUDA wheel builds with
-`GGML_CUDA_NO_VMM=ON` (GPU-less CI cannot link the driver API; never
-reintroduce driver-API-dependent flags there). The CUDA wheel builds with
+limit) with the Vulkan wheel mirrored to PyPI. The CUDA wheel builds with
 `GGML_CUDA_NO_VMM=ON`: GPU-less CI cannot satisfy the driver API's transitive
 libcuda.so.1 link (stubs ship only libcuda.so), so never reintroduce
 driver-API-dependent flags to that build. ADVANCING THE ENGINE PIN IS A

@@ -181,7 +181,7 @@ elif [[ "$OS" == "Linux" ]] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-s
     log "installing the CUDA llama-server engine wheel (engine build b$ENGINE_BUILD)"
     if ! uv pip install "skulk-llama-server-cuda==0.${ENGINE_BUILD}.*" "${ENGINE_INDEX_FLAGS[@]}"; then
         warn "the CUDA engine wheel is unavailable (index not yet live, no network, or unsupported platform);"
-        warn "trying the Vulkan engine wheel (bare-metal NVIDIA drives Vulkan)"
+        warn "trying the Vulkan engine wheel (NVIDIA GPUs run the Vulkan build on bare metal)"
         # Mirrors runtime preference: cuda wheel, then vulkan wheel, then the
         # managed tarball path that skulk itself provisions.
         uv pip install "skulk-llama-server-vulkan==0.${ENGINE_BUILD}.*" "${ENGINE_INDEX_FLAGS[@]}" \
