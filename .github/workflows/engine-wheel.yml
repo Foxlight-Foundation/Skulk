@@ -96,6 +96,12 @@ jobs:
             https://github.com/ggml-org/llama.cpp /tmp/llama-cpp-src
           if [ "${{ matrix.variant }}" = "cuda" ]; then
             BACKEND_FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES"
+            # ggml-cuda links CUDA driver-API symbols (cuMem* VMM); a GPU-less
+            # build container has no libcuda, so link against the toolkit's
+            # driver stubs. Runtime resolves the real libcuda.so.1 from the
+            # target machine's driver, which is the wheel's one OS
+            # prerequisite regardless.
+            export LIBRARY_PATH="/usr/local/cuda/lib64/stubs:${LIBRARY_PATH:-}"
           else
             BACKEND_FLAGS="-DGGML_VULKAN=ON"
           fi
