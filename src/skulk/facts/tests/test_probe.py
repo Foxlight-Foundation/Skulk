@@ -266,3 +266,26 @@ def test_cpp_declaration_does_not_suppress_device_probe(tmp_path: Path) -> None:
     )
     assert facts.llama_server_device_probe.outcome == "devices"
     assert facts.llama_server_device_probe.computes == ("vulkan",)
+
+
+def test_loader_error_echoing_flag_is_failed_not_unsupported(
+    tmp_path: Path,
+) -> None:
+    # A crash whose output merely mentions the flag (usage text, echoed argv)
+    # must classify as failed, not unsupported: unsupported falls back to
+    # vendor inference, which would advertise GPU capability for a binary
+    # that cannot run (PR #615 review).
+    binary = tmp_path / "llama-server"
+    binary.write_text(
+        "#!/bin/sh\n"
+        'echo "error while loading shared libraries (argv: --list-devices)" >&2\n'
+        "exit 127\n"
+    )
+    binary.chmod(0o755)
+    facts = gather_node_facts(
+        env={"SKULK_LLAMA_SERVER_BIN": str(binary)},
+        platform="linux",
+        nvidia_presence=False,
+        drm_root=tmp_path / "no-drm",
+    )
+    assert facts.llama_server_device_probe.outcome == "failed"

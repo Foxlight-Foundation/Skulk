@@ -228,9 +228,16 @@ def probe_llama_server_devices(binary: str) -> LlamaServerDeviceProbe:
         return LlamaServerDeviceProbe(outcome="failed", detail=str(error))
     output = completed.stdout + "\n" + completed.stderr
     if completed.returncode != 0:
-        # Old builds reject the flag with an "invalid argument" usage error;
-        # anything else (driver fault, missing shared library) is a failure.
-        if "--list-devices" in output or "invalid argument" in output.lower():
+        # Old builds reject the flag with a specific "invalid/unknown
+        # argument" usage error naming it; anything else (driver fault,
+        # missing shared library, loader errors that happen to echo the
+        # command line) is a failure, which derivation treats as a broken
+        # binary rather than falling back to vendor inference.
+        lowered = output.lower()
+        if (
+            "invalid argument: --list-devices" in lowered
+            or "unknown argument: --list-devices" in lowered
+        ):
             return LlamaServerDeviceProbe(outcome="unsupported")
         detail = output.strip().splitlines()[-1] if output.strip() else ""
         return LlamaServerDeviceProbe(
