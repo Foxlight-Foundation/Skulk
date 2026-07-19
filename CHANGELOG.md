@@ -15,6 +15,68 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **The speech fabric: text-to-speech, transcription, and realtime voice.**
+  Mounted TTS models serve OpenAI-compatible `POST /v1/audio/speech`
+  (including streamed MP3/PCM for cards with proven streaming support,
+  static voice catalogs via `GET /v1/audio/voices`, and bounded multipart
+  reference audio for supporting cards); mounted STT models serve
+  `POST /v1/audio/transcriptions` (with typed SSE or progressive NDJSON
+  streaming where a card proves it) and experimental
+  `POST /v1/audio/translations`. A realtime transcription provider pins a
+  session to a mounted speech worker and feeds a true upstream streaming
+  session over bounded ingress; `WS /v1/realtime` is the OpenAI-compatible
+  multi-turn adapter over it (24 kHz PCM16, optional server VAD with
+  barge-in, and an optional response pipeline through a mounted chat model
+  and TTS voice), and `WS /v1/fabric/chains/speech` exposes the same bridge
+  as an explicit speech-to-chat-to-speech composition surface. A built-in
+  WebRTC VAD provider emits typed turn boundaries on every production API
+  node. The dashboard gains a full voice loop: assistant speech playback
+  and microphone capture that uses realtime transcription when the mounted
+  card supports it. Speech input and output ride dedicated node-addressed
+  data paths, never the event log.
+
+- **The vLLM served engine: the GPU concurrency fast path.** The worker can
+  launch an external `vllm serve` process and proxy its OpenAI HTTP API as
+  a second served-backend engine. Continuous batching and paged attention
+  hold latency flat under concurrent load where single-stream engines
+  collapse; the engine coexists with the llama.cpp engines and placement
+  picks per hardware and expected concurrency. Single-node text generation
+  in this first slice; enable per node with `SKULK_VLLM_BIN` or the
+  installer's `--with-vllm`.
+
+- **Concurrent serving on llama-server, with dynamic context.** The served
+  llama.cpp engine now dispatches requests concurrently (`--parallel`
+  slots behind a shared bounded-dispatch mixin), and the serving context is
+  sized dynamically from placement-time memory fit instead of a fixed
+  ceiling: discrete-VRAM nodes lift to the card's maximum where it fits,
+  while nodes without discrete VRAM keep the conservative floor. GGUF model
+  cards now prefer the served engine so concurrent serving is the default
+  GGUF path.
+
+- **Performance envelopes (observe-only).** The API node records one
+  observation per completed generation into a bounded in-memory registry
+  keyed by hardware, model, engine, and quantization, bucketed by in-flight
+  concurrency at admission: p50/p90 time-to-first-token, decode rate,
+  aggregate throughput, and a knee estimate. Exposed at
+  `GET /v1/diagnostics/performance-envelopes` (with a cluster fan-out) and
+  the dashboard Performance tab; deliberately off the event log and
+  telemetry gossip.
+
+- **Generated output rides an explicit stream lifecycle.** `DATA`-plane
+  frames now carry `started -> chunk* -> completed|failed|cancelled` with
+  per-command sequencing: the API orders and deduplicates frames, converts
+  unresolved gaps into terminal transport errors with producer
+  cancellation, and remote egress uses bounded independent per-command
+  workers so one slow consumer cannot stall another stream. Extension
+  provider media has the same contract on its own `PROVIDER_DATA` family,
+  including client-streaming and bidirectional providers with caller
+  half-close.
+
+- **Model search across Hugging Face from the dashboard.** The model-store
+  search can look up repositories and files directly on Hugging Face,
+  so adding a model no longer requires leaving the dashboard to find the
+  artifact.
+
 - **Node Facts, derived capability, doctor, engine provisioning, and a
   one-command installer (the "skulk just works" program, #614).** Detection
   now creates serving capability and configuration overrides it, with every
@@ -38,7 +100,9 @@ This project records release notes here and mirrors public-facing notes in
   wheel built from pinned upstream source in Skulk's own CI:
   `skulk-llama-server-cuda` (NVIDIA; CUDA runtime from NVIDIA's official
   PyPI packages) and `skulk-llama-server-vulkan` (AMD; Khronos loader
-  bundled), both published by the `engine-wheel` workflow with a guard
+  bundled), both carrying sigstore build provenance and published to the
+  Foxlight wheel index at `wheels.foxlight.ai` (the authoritative source;
+  the Vulkan wheel is additionally mirrored to PyPI), with a workflow guard
   keeping the engine pin, wheel versions, and installer in lockstep.
 
 - **Explicit, auditable cluster heartbeat.** Nodes now publish a dedicated
