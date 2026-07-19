@@ -1,9 +1,8 @@
 # pyright: reportPrivateUsage=false
 """Doctor registry tests: verdicts, consequences, and crash containment."""
 
-from pathlib import Path
-
 from collections.abc import Sequence
+from pathlib import Path
 
 import pytest
 
