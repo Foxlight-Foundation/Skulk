@@ -169,8 +169,13 @@ if [[ "$OS" == "Linux" ]] && [[ -z "$ENGINE_BUILD" ]]; then
     warn "could not read the engine pin from the checkout; skipping engine wheel install (skulk doctor will report the outcome)"
 elif [[ "$OS" == "Linux" ]] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q GPU; then
     log "installing the CUDA llama-server engine wheel (engine build b$ENGINE_BUILD)"
-    if ! uv pip install "skulk-llama-server-cuda==0.${ENGINE_BUILD}.*"; then
-        warn "skulk-llama-server-cuda unavailable (not yet published or no network);"
+    # The CUDA wheel exceeds PyPI's per-file size limit, so it is hosted on a
+    # GitHub Release; pip installs wheels from URLs directly, and the wheel
+    # carries sigstore build provenance (gh attestation verify <file>
+    # --owner Foxlight-Foundation).
+    CUDA_WHEEL_URL="https://github.com/Foxlight-Foundation/Skulk/releases/download/engines-b${ENGINE_BUILD}/skulk_llama_server_cuda-0.${ENGINE_BUILD}.0-py3-none-manylinux_2_35_x86_64.whl"
+    if ! uv pip install "$CUDA_WHEEL_URL"; then
+        warn "the CUDA engine wheel is unavailable (not yet released or no network);"
         warn "falling back to the managed Vulkan build; skulk doctor will report the outcome"
     fi
 elif [[ "$OS" == "Linux" ]] \

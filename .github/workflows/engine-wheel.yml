@@ -40,6 +40,10 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     # Container jobs default to sh (dash), which rejects `set -o pipefail`;
     # every run step here assumes bash.
     defaults:
@@ -85,7 +89,7 @@ jobs:
           grep -q "version = \"0.${BUILD_NUM}\." packaging/skulk-llama-server-vulkan/pyproject.toml
           # The installer derives the wheel version from the checkout's
           # manifest; guard the derivation wiring rather than a literal.
-          grep -q 'skulk-llama-server-cuda==0.${ENGINE_BUILD}' install.sh
+          grep -q 'skulk_llama_server_cuda-0.${ENGINE_BUILD}' install.sh
           grep -q 'skulk-llama-server-vulkan==0.${ENGINE_BUILD}' install.sh
           grep -q 'LLAMA_SERVER_PIN' install.sh
 
@@ -156,6 +160,11 @@ jobs:
           # devices; the point is that the shim resolves and the binary execs.
           /tmp/smoke/bin/llama-server-${{ matrix.variant }} --list-devices || true
 
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: packaging/${{ matrix.package }}/dist/*.whl
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.package }}-wheel
@@ -166,21 +175,34 @@ jobs:
   # environment: PyPI rejects two pending publishers sharing an identical
   # (repo, workflow, environment) configuration, and per-project environments
   # also scope each OIDC grant to exactly one package.
+  # The CUDA wheel (~450MB of compiled kernels for four SM architectures) is
+  # far over PyPI's 100MB per-file limit, so it publishes to a GitHub Release
+  # instead: pip installs wheels from URLs directly, so every part of the
+  # wheel machinery is unchanged, and the sigstore build-provenance
+  # attestation from the build job is verifiable with
+  # `gh attestation verify <wheel> --owner Foxlight-Foundation`.
   publish-cuda:
     needs: build
     if: github.event_name == 'workflow_dispatch' && inputs.publish
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
-      id-token: write
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: skulk-llama-server-cuda-wheel
           path: dist
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist
+      - name: Upload wheel to the engines release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BUILD_NUM="${LLAMA_CPP_PIN#b}"
+          TAG="engines-${LLAMA_CPP_PIN}"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1             || gh release create "$TAG" --repo "$GITHUB_REPOSITORY"                  --title "Engine builds ${LLAMA_CPP_PIN}"                  --notes "Pinned llama.cpp ${LLAMA_CPP_PIN} engine wheels too large for PyPI. Verify provenance: gh attestation verify <file> --owner Foxlight-Foundation. See website/docs/node-doctor.md and the engine pin advancement checklist."
+          gh release upload "$TAG" dist/*.whl --clobber --repo "$GITHUB_REPOSITORY"
+          echo "uploaded to release $TAG:"
+          sha256sum dist/*.whl
 
   publish-vulkan:
     needs: build

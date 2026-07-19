@@ -125,7 +125,9 @@ upstream llama-server build on demand (Vulkan for visible GPUs, CPU
 otherwise; no upstream Linux CUDA prebuilt exists, vLLM is the CUDA path);
 `SKULK_LLAMA_SERVER_BIN` overrides, `SKULK_NO_ENGINE_AUTOPROVISION=1` opts
 out. The CUDA engine also ships as the pip wheel `skulk-llama-server-cuda`
-(packaging/, built+published by `.github/workflows/engine-wheel.yml`), which
+(packaging/, built by `.github/workflows/engine-wheel.yml`; hosted on the
+`engines-<pin>` GitHub Release because it exceeds PyPI's per-file size limit,
+installed by direct URL; the Vulkan sibling publishes to PyPI), which
 outranks tarball provisioning on NVIDIA nodes. The CUDA wheel builds with
 `GGML_CUDA_NO_VMM=ON`: GPU-less CI cannot satisfy the driver API's transitive
 libcuda.so.1 link (stubs ship only libcuda.so), so never reintroduce
