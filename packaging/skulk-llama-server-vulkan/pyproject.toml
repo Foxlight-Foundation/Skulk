@@ -18,7 +18,7 @@ version = "0.10068.0"
 description = "Pinned Vulkan llama-server build for Skulk's served GGUF engine (Linux x86_64)"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 dependencies = []
 
 [project.scripts]

@@ -207,10 +207,12 @@ def probe_llama_server_devices(binary: str) -> LlamaServerDeviceProbe:
     """Ask a llama-server binary which devices its build can drive.
 
     Runs ``<binary> --list-devices`` under a hard timeout. The flag exits
-    nonzero on builds that predate it (``unsupported``); crashes, timeouts, and
-    launch failures are ``failed``. Both fall back to hardware-vendor
-    derivation, so a probe failure can never make a node less capable than the
-    pre-probe behavior.
+    nonzero with a specific invalid-argument error on builds that predate it
+    (``unsupported``, which derivation treats as evidence-free and falls back
+    to weaker sources); crashes, timeouts, and launch failures are ``failed``,
+    which derivation treats as a broken binary and disables the engine with a
+    loud ``invalid_engine_binary`` conflict rather than advertising capability
+    the binary cannot deliver.
     """
     try:
         completed = subprocess.run(  # noqa: S603 - operator-configured binary
