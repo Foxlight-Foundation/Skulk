@@ -124,9 +124,14 @@ On Linux, `src/skulk/provisioning/` fetches the pinned, checksum-verified
 upstream llama-server build on demand (Vulkan for visible GPUs, CPU
 otherwise; no upstream Linux CUDA prebuilt exists, vLLM is the CUDA path);
 `SKULK_LLAMA_SERVER_BIN` overrides, `SKULK_NO_ENGINE_AUTOPROVISION=1` opts
-out. `install.sh` is the one-command fresh-box installer (thin; intelligence
-lives in doctor). nvidia-ml-py is a HARD Linux dependency: nothing optional
-may be load-bearing.
+out. The CUDA engine also ships as the pip wheel `skulk-llama-server-cuda`
+(packaging/, built+published by `.github/workflows/engine-wheel.yml`), which
+outranks tarball provisioning on NVIDIA nodes. ADVANCING THE ENGINE PIN IS A
+CHECKLIST (architecture-reference.md "Engine pin advancement"): bump pin +
+re-record checksums + bump wheel version + republish + fresh-box gauntlet;
+never advance casually. `install.sh` is the one-command fresh-box installer
+(thin; intelligence lives in doctor). nvidia-ml-py is a HARD Linux
+dependency: nothing optional may be load-bearing.
 
 ### Inference engines
 A model card's `placement.compatible_backends` selects which engine serves it

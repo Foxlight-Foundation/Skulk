@@ -730,6 +730,30 @@ rust/                   # libp2p (networking), PyO3 bindings, system_custodian
 
 This file is intentionally dense. If you find a stale fact, fix it inline rather than working around it.
 
+### Engine pin advancement (deliberate, never automatic)
+
+The managed llama-server engine is pinned (`LLAMA_SERVER_PIN` in
+`src/skulk/provisioning/manifest.py`, currently `b10068`) so upstream churn is
+a discrete validated event, not a continuous silent risk (the same
+`source_revision` doctrine model cards apply to Hugging Face artifacts).
+Advancing the pin is a checklist, and skipping steps is how a silent behavior
+change ships:
+
+1. Bump `LLAMA_SERVER_PIN` and re-record every artifact sha256 in
+   `LLAMA_SERVER_ARTIFACTS` from the new release's asset digests
+   (`gh api repos/ggml-org/llama.cpp/releases/tags/<tag>`).
+2. Bump the wheel version in `packaging/skulk-llama-server-cuda/pyproject.toml`
+   (scheme `0.<build>.<rev>`) and the pinned range in `install.sh`; the
+   `engine-wheel` workflow guard fails if any of the three disagree.
+3. Rebuild and publish the wheel (`engine-wheel` workflow, dispatch with
+   `publish=true`).
+4. Run the fresh-box gauntlet (RunPod runbook section 11 in foxlight-docs)
+   against the new pin before it reaches dev: install path, doctor verdicts,
+   GPU-speed serving.
+5. Check upstream release notes for served-API/flag behavior changes (the
+   harness #69 keepalive change is the canonical example of what a pin bump
+   can smuggle in) and update runner/proxy assumptions if needed.
+
 The AGENTS.md "Documentation" section requires updates here when architectural shape changes:
 
 - New component → add to "Components"
