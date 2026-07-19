@@ -101,7 +101,7 @@ jobs:
             # driver stubs. Runtime resolves the real libcuda.so.1 from the
             # target machine's driver, which is the wheel's one OS
             # prerequisite regardless.
-            export LIBRARY_PATH="/usr/local/cuda/lib64/stubs:${LIBRARY_PATH:-}"
+            export LIBRARY_PATH="/usr/local/cuda/lib64/stubs${LIBRARY_PATH:+:$LIBRARY_PATH}"
           else
             BACKEND_FLAGS="-DGGML_VULKAN=ON"
           fi
@@ -148,6 +148,15 @@ jobs:
           uv venv /tmp/smoke --python 3.12
           uv pip install --python /tmp/smoke/bin/python \
             packaging/${{ matrix.package }}/dist/*.whl
+          if [ "${{ matrix.variant }}" = "cuda" ]; then
+            # The binary links libcuda.so.1 (the driver), which a GPU-less
+            # runner lacks; satisfy the loader with the toolkit stub under
+            # the SONAME so exec + --version can be smoke-tested. Real
+            # machines resolve the driver's own libcuda.so.1 instead.
+            mkdir -p /tmp/stublib
+            ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /tmp/stublib/libcuda.so.1
+            export LD_LIBRARY_PATH="/tmp/stublib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          fi
           /tmp/smoke/bin/llama-server-${{ matrix.variant }} --version
           # --list-devices on a GPU-less runner legitimately reports no
           # devices; the point is that the shim resolves and the binary execs.
