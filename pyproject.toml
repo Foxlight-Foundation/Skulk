@@ -44,6 +44,12 @@ dependencies = [
   "transformers>=5.5.0,<6.0.0",
   "jsonschema>=4.26.0",
   "webrtcvad-wheels>=2.0.14,<3",
+  # Platform-conditional HARD dependency (#614): nothing optional may be
+  # load-bearing. Without this binding an NVIDIA node silently loses VRAM
+  # detection, the served-context lift, and hardware attribution (#612). It is
+  # a tiny pure-Python NVML binding, inert without an NVIDIA driver, so
+  # non-NVIDIA Linux nodes pay only a few kilobytes.
+  "nvidia-ml-py>=12.535.108; sys_platform == 'linux'",
 ]
 
 [project.scripts]

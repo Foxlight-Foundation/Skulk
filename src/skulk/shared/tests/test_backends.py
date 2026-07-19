@@ -1,22 +1,19 @@
 # pyright: reportPrivateUsage=false
-"""Tests for the backend capability tag vocabulary and node probing."""
+"""Tests for the backend capability tag vocabulary.
 
-import importlib.abc
-import importlib.machinery
+Probing and derivation behavior (which tags a node advertises given what it
+observed and declared) lives in ``skulk.facts`` and is tested with synthetic
+facts in ``src/skulk/facts/tests/``; this module covers the tag vocabulary,
+resolution, and the thin ``probe_node_backends`` delegation.
+"""
+
 import sys
-from collections.abc import Sequence
-from pathlib import Path
-from types import ModuleType
 
 import pytest
 
-from skulk.shared import backends
+import skulk.facts
+from skulk.facts.derive import BackendDerivation
 from skulk.shared.backends import (
-    LLAMA_CPP_BACKENDS_ENV,
-    LLAMA_SERVER_BACKENDS_ENV,
-    LLAMA_SERVER_BIN_ENV,
-    VLLM_BACKENDS_ENV,
-    VLLM_BIN_ENV,
     engine_of,
     engine_supports_multi_node,
     make_backend_tag,
@@ -64,233 +61,17 @@ def test_probe_includes_mlx_on_darwin() -> None:
         assert "mlx" not in tags
 
 
-def test_llama_cpp_probe_empty_without_binding(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Force the probe import to fail regardless of what is installed locally.
-    monkeypatch.setitem(sys.modules, "llama_cpp", None)
-    assert backends._probe_llama_cpp_backends() == frozenset()
-
-
-def test_mlx_audio_probe_empty_without_binding(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setitem(sys.modules, "mlx_audio", None)
-    assert backends._probe_mlx_audio_backends() == frozenset()
-
-
-def test_mlx_audio_probe_empty_when_native_import_fails(
+def test_probe_node_backends_delegates_to_facts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class BrokenMlxAudioFinder(importlib.abc.MetaPathFinder):
-        def find_spec(
-            self,
-            fullname: str,
-            path: Sequence[str] | None,
-            target: ModuleType | None = None,
-        ) -> importlib.machinery.ModuleSpec | None:
-            if fullname == "mlx_audio":
-                raise OSError("dlopen failed")
-            return None
-
-    monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.delitem(sys.modules, "mlx_audio", raising=False)
-    monkeypatch.setattr(sys, "meta_path", [BrokenMlxAudioFinder(), *sys.meta_path])
-    assert backends._probe_mlx_audio_backends() == frozenset()
-
-
-def test_mlx_audio_probe_empty_off_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setitem(sys.modules, "mlx_audio", ModuleType("mlx_audio"))
-    assert backends._probe_mlx_audio_backends() == frozenset()
-
-
-def test_mlx_audio_probe_advertises_on_darwin_when_importable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setitem(sys.modules, "mlx_audio", ModuleType("mlx_audio"))
-    assert backends._probe_mlx_audio_backends() == frozenset(
-        {"mlx_audio", "mlx_audio-metal"}
+    # The public probe entry point is a thin delegate over the process-wide
+    # facts snapshot; consumers must see exactly the derived tags.
+    monkeypatch.setattr(
+        skulk.facts,
+        "current_backend_derivation",
+        lambda: BackendDerivation(backends=frozenset({"llama_server-cuda"})),
     )
-
-
-def test_llama_cpp_probe_reads_declared_backends(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Stand in a dummy module so the import succeeds without the real binding.
-    monkeypatch.setitem(sys.modules, "llama_cpp", object())
-    monkeypatch.setenv(LLAMA_CPP_BACKENDS_ENV, "vulkan, rocm , bogus, metal")
-    tags = backends._probe_llama_cpp_backends()
-    assert "llama_cpp" in tags  # bare engine tag
-    assert "llama_cpp-vulkan" in tags
-    assert "llama_cpp-rocm" in tags
-    assert "llama_cpp-bogus" not in tags  # not a known compute backend
-    assert "llama_cpp-metal" not in tags  # metal is MLX-only, ignored for llama.cpp
-
-
-def test_llama_cpp_probe_defaults_to_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "llama_cpp", object())
-    monkeypatch.delenv(LLAMA_CPP_BACKENDS_ENV, raising=False)
-    tags = backends._probe_llama_cpp_backends()
-    # Without an operator declaration we claim only CPU, never over-claim GPU.
-    assert tags == frozenset({"llama_cpp", "llama_cpp-cpu"})
-
-
-def test_served_probe_empty_without_binary(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No binary configured => the node does not advertise the served engine.
-    monkeypatch.delenv(LLAMA_SERVER_BIN_ENV, raising=False)
-    assert backends._probe_served_backends() == frozenset()
-
-
-def test_served_probe_empty_when_binary_missing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    # A configured-but-nonexistent path must not advertise the engine.
-    monkeypatch.setenv(LLAMA_SERVER_BIN_ENV, str(tmp_path / "nope" / "llama-server"))
-    assert backends._probe_served_backends() == frozenset()
-
-
-def _make_executable(path: Path) -> Path:
-    path.write_text("#!/bin/sh\n")
-    path.chmod(0o755)
-    return path
-
-
-def test_served_probe_reads_declared_backends(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    binary = _make_executable(tmp_path / "llama-server")
-    monkeypatch.setenv(LLAMA_SERVER_BIN_ENV, str(binary))
-    monkeypatch.setenv(LLAMA_SERVER_BACKENDS_ENV, "vulkan, rocm , metal")
-    tags = backends._probe_served_backends()
-    assert "llama_server" in tags  # bare engine tag
-    assert "llama_server-vulkan" in tags
-    assert "llama_server-rocm" in tags
-    assert "llama_server-metal" not in tags  # metal is MLX-only, never served here
-
-
-def test_served_probe_falls_back_to_llama_cpp_backends(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    # With no dedicated SERVER_BACKENDS, the served engine reuses the node's
-    # llama.cpp backend declaration (same GPU, whichever engine drives it).
-    binary = _make_executable(tmp_path / "llama-server")
-    monkeypatch.setenv(LLAMA_SERVER_BIN_ENV, str(binary))
-    monkeypatch.delenv(LLAMA_SERVER_BACKENDS_ENV, raising=False)
-    monkeypatch.setenv(LLAMA_CPP_BACKENDS_ENV, "vulkan")
-    tags = backends._probe_served_backends()
-    assert tags == frozenset({"llama_server", "llama_server-vulkan"})
-
-
-def test_served_probe_defaults_to_cpu(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    binary = _make_executable(tmp_path / "llama-server")
-    monkeypatch.setenv(LLAMA_SERVER_BIN_ENV, str(binary))
-    monkeypatch.delenv(LLAMA_SERVER_BACKENDS_ENV, raising=False)
-    monkeypatch.delenv(LLAMA_CPP_BACKENDS_ENV, raising=False)
-    assert backends._probe_served_backends() == frozenset(
-        {"llama_server", "llama_server-cpu"}
-    )
-
-
-def test_vllm_probe_empty_without_binary(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No SKULK_VLLM_BIN => the node does not advertise the vLLM engine.
-    monkeypatch.delenv(VLLM_BIN_ENV, raising=False)
-    assert backends._probe_vllm_backends() == frozenset()
-
-
-def test_vllm_probe_empty_when_binary_missing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setenv(VLLM_BIN_ENV, str(tmp_path / "nope" / "vllm"))
-    assert backends._probe_vllm_backends() == frozenset()
-
-
-def test_vllm_probe_reads_declared_gpu_backends(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    binary = _make_executable(tmp_path / "vllm")
-    monkeypatch.setenv(VLLM_BIN_ENV, str(binary))
-    # Only GPU computes are honored; metal/vulkan/cpu are ignored for vLLM.
-    monkeypatch.setenv(VLLM_BACKENDS_ENV, "cuda, vulkan , metal, cpu")
-    tags = backends._probe_vllm_backends()
-    assert tags == frozenset({"vllm", "vllm-cuda"})
-
-
-def test_vllm_probe_falls_back_to_server_then_llama_cpp_backends(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    # No dedicated VLLM_BACKENDS: reuse the node's llama.cpp GPU declaration
-    # (same GPU, whichever engine drives it).
-    binary = _make_executable(tmp_path / "vllm")
-    monkeypatch.setenv(VLLM_BIN_ENV, str(binary))
-    monkeypatch.delenv(VLLM_BACKENDS_ENV, raising=False)
-    monkeypatch.delenv(LLAMA_SERVER_BACKENDS_ENV, raising=False)
-    monkeypatch.setenv(LLAMA_CPP_BACKENDS_ENV, "rocm")
-    assert backends._probe_vllm_backends() == frozenset({"vllm", "vllm-rocm"})
-
-
-def test_vllm_probe_empty_with_no_gpu_backend_declared(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    # Unlike the llama_server probe there is no cpu fallback: a vLLM node with no
-    # declared GPU backend is not a useful placement target, so it advertises nothing.
-    binary = _make_executable(tmp_path / "vllm")
-    monkeypatch.setenv(VLLM_BIN_ENV, str(binary))
-    monkeypatch.delenv(VLLM_BACKENDS_ENV, raising=False)
-    monkeypatch.delenv(LLAMA_SERVER_BACKENDS_ENV, raising=False)
-    monkeypatch.delenv(LLAMA_CPP_BACKENDS_ENV, raising=False)
-    assert backends._probe_vllm_backends() == frozenset()
-
-
-def _fake_llama_cpp(gpu_offload: bool | None) -> object:
-    """A stand-in llama_cpp module whose llama_supports_gpu_offload is controllable.
-
-    ``gpu_offload=None`` omits the symbol so the introspection call raises and the
-    probe treats the build as unverifiable.
-    """
-    from types import SimpleNamespace
-
-    if gpu_offload is None:
-        return SimpleNamespace()
-
-    def _supports() -> bool:
-        return gpu_offload
-
-    return SimpleNamespace(llama_supports_gpu_offload=_supports)
-
-
-def test_llama_cpp_probe_keeps_gpu_when_build_supports_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setitem(sys.modules, "llama_cpp", _fake_llama_cpp(gpu_offload=True))
-    monkeypatch.setenv(LLAMA_CPP_BACKENDS_ENV, "vulkan")
-    tags = backends._probe_llama_cpp_backends()
-    assert "llama_cpp-vulkan" in tags  # GPU build verified -> advertised
-
-
-def test_llama_cpp_probe_drops_gpu_when_build_is_cpu_only(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The clobber case: env declares vulkan but the wheel has no GPU offload
-    # compiled in (e.g. uv sync restored the CPU PyPI wheel). The node must NOT
-    # advertise vulkan, only cpu, so GPU GGUF work is not routed here.
-    monkeypatch.setitem(sys.modules, "llama_cpp", _fake_llama_cpp(gpu_offload=False))
-    monkeypatch.setenv(LLAMA_CPP_BACKENDS_ENV, "vulkan, rocm")
-    tags = backends._probe_llama_cpp_backends()
-    assert "llama_cpp-vulkan" not in tags
-    assert "llama_cpp-rocm" not in tags
-    assert tags == frozenset({"llama_cpp", "llama_cpp-cpu"})
-
-
-def test_llama_cpp_probe_trusts_declaration_when_unverifiable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Introspection unavailable -> trust the operator's declaration rather than
-    # punish a possibly-working GPU node for a binding quirk.
-    monkeypatch.setitem(sys.modules, "llama_cpp", _fake_llama_cpp(gpu_offload=None))
-    monkeypatch.setenv(LLAMA_CPP_BACKENDS_ENV, "vulkan")
-    tags = backends._probe_llama_cpp_backends()
-    assert "llama_cpp-vulkan" in tags
+    assert probe_node_backends() == frozenset({"llama_server-cuda"})
 
 
 def test_resolve_node_engine_existing_mlx_cards_unchanged() -> None:

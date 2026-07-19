@@ -9,8 +9,8 @@ from typing import Literal, Self, cast, final
 import psutil
 from pydantic import BaseModel, field_serializer, field_validator
 
-from skulk.shared.backends import probe_node_backends
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.node_facts import CapabilityConflict
 from skulk.shared.types.thunderbolt import ThunderboltIdentifier
 from skulk.utils.pydantic_ext import CamelCaseModel
 
@@ -303,6 +303,12 @@ class NodeResources(CamelCaseModel):
     backends: frozenset[str] = frozenset({"mlx"})
     participation: NodeParticipation = "full"
     data_transport: NodeDataTransport = "gossipsub"
+    capability_conflicts: tuple[CapabilityConflict, ...] = ()
+    """Loud observation-vs-declaration disagreements from backend derivation
+    (#614): each entry names a way this node's serving capability is degraded
+    or conflicted (silent CPU serving, degraded GPU detection, an unusable
+    engine binary override), with its remediation. Cluster health maps these
+    one-to-one onto ``nodeHealth`` reasons so the dashboard shows them."""
 
     @field_validator("backends", mode="before")
     @classmethod
@@ -314,6 +320,15 @@ class NodeResources(CamelCaseModel):
         # populates over gossip (without this the feature is inert).
         if isinstance(v, (list, tuple, set, frozenset)):
             return frozenset(cast("Iterable[str]", v))
+        return v
+
+    @field_validator("capability_conflicts", mode="before")
+    @classmethod
+    def _coerce_capability_conflicts(cls, v: object) -> object:
+        # Same wire-shape coercion as backends: JSON arrays arrive as lists,
+        # and strict mode rejects a list where a tuple is declared.
+        if isinstance(v, list):
+            return tuple(cast("Iterable[object]", v))
         return v
 
     @field_serializer("backends")
@@ -337,15 +352,20 @@ class NodeResources(CamelCaseModel):
         Returns:
             The capability and policy facts this node advertises to the fleet.
         """
-        backends = probe_node_backends()
+        # Function-level import: the facts package imports shared type modules,
+        # so a module-level import here would risk a cycle as facts grows.
+        from skulk.facts import current_backend_derivation
+
+        derivation = current_backend_derivation()
         declared = os.environ.get("SKULK_NODE_PARTICIPATION", "full").strip().lower()
         participation: NodeParticipation = (
             declared if declared in ("full", "management", "ffn_only") else "full"
         )
         return cls(
-            backends=backends,
+            backends=derivation.backends,
             participation=participation,
             data_transport=data_transport,
+            capability_conflicts=derivation.conflicts,
         )
 
 

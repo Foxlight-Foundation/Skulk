@@ -107,6 +107,32 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
 - **Election**: Bully algorithm for master election, carried on the isolated election gossipsub behavior with duplicate candidate suppression during protocol migration
 - **API**: FastAPI server for OpenAI-compatible chat completions
 
+### Node Facts & capability derivation (#614)
+Detection creates capability; configuration overrides it; disagreement is
+always loud. One probe pass per process (`src/skulk/facts/`) gathers a typed
+`NodeFacts` record (all observed GPUs across vendors, importable deps, engine
+binaries plus their `--list-devices` report, raw `SKULK_*` declarations); a
+pure derivation turns it into the advertised backend tags plus
+`CapabilityConflict` entries (`gpu_serving_disabled`, `gpu_detection_degraded`,
+`invalid_engine_binary`, `backend_override_conflict`) that ride
+`NodeResources.capability_conflicts` into `nodeHealth` and the dashboard.
+`probe_node_backends()` is a thin delegate over the cached snapshot; nobody
+probes ad hoc. `skulk doctor [--fix|--json]` (`src/skulk/doctor/`) runs the
+check registry on demand; `website/docs/node-doctor.md` is GENERATED from the
+registry by `scripts/generate_doctor_docs.py` (rerun after registry changes).
+On Linux, `src/skulk/provisioning/` fetches the pinned, checksum-verified
+upstream llama-server build on demand (Vulkan for visible GPUs, CPU
+otherwise; no upstream Linux CUDA prebuilt exists, vLLM is the CUDA path);
+`SKULK_LLAMA_SERVER_BIN` overrides, `SKULK_NO_ENGINE_AUTOPROVISION=1` opts
+out. The CUDA engine also ships as the pip wheel `skulk-llama-server-cuda`
+(packaging/, built+published by `.github/workflows/engine-wheel.yml`), which
+outranks tarball provisioning on NVIDIA nodes. ADVANCING THE ENGINE PIN IS A
+CHECKLIST (architecture-reference.md "Engine pin advancement"): bump pin +
+re-record checksums + bump wheel version + republish + fresh-box gauntlet;
+never advance casually. `install.sh` is the one-command fresh-box installer
+(thin; intelligence lives in doctor). nvidia-ml-py is a HARD Linux
+dependency: nothing optional may be load-bearing.
+
 ### Inference engines
 A model card's `placement.compatible_backends` selects which engine serves it
 (`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):

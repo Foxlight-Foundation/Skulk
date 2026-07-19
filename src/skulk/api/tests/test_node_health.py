@@ -11,6 +11,7 @@ from skulk.api.node_health import (
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.node_facts import CapabilityConflict
 from skulk.shared.types.profiling import DiskUsage, NodeIdentity, NodeResources
 from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
@@ -391,3 +392,66 @@ def test_unknown_build_identity_does_not_create_false_mismatch() -> None:
     )
 
     assert all(node.level == "ok" for node in health.values())
+
+
+def _conflict(code: str) -> "CapabilityConflict":
+    return CapabilityConflict(
+        code=code,  # pyright: ignore[reportArgumentType]
+        message=f"synthetic {code}",
+        remediation="fix it and restart skulk",
+    )
+
+
+def test_capability_conflicts_map_onto_health_reasons() -> None:
+    # Backend derivation conflicts (#614) advertised on NodeResources become
+    # per-node health reasons verbatim: same code, message, and remediation.
+    resources = NodeResources(
+        backends=frozenset({"llama_server", "llama_server-cpu"}),
+        capability_conflicts=(
+            _conflict("gpu_serving_disabled"),
+            _conflict("gpu_detection_degraded"),
+        ),
+    )
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW},
+        downloads={},
+        node_disk={},
+        now=_NOW,
+        node_resources={_NODE: resources},
+    )
+    node = health["node-a"]
+    codes = [reason.code for reason in node.reasons]
+    assert codes == ["gpu_serving_disabled", "gpu_detection_degraded"]
+    # gpu_serving_disabled is the error-severity conflict; the aggregate is red.
+    assert node.level == "error"
+    assert node.reasons[0].remediation == "fix it and restart skulk"
+
+
+def test_warn_only_capability_conflicts_aggregate_to_warn() -> None:
+    resources = NodeResources(
+        backends=frozenset({"llama_server", "llama_server-cuda"}),
+        capability_conflicts=(
+            _conflict("invalid_engine_binary"),
+            _conflict("backend_override_conflict"),
+        ),
+    )
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW},
+        downloads={},
+        node_disk={},
+        now=_NOW,
+        node_resources={_NODE: resources},
+    )
+    assert health["node-a"].level == "warn"
+
+
+def test_no_capability_conflicts_stays_ok() -> None:
+    resources = NodeResources(backends=frozenset({"mlx"}))
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW},
+        downloads={},
+        node_disk={},
+        now=_NOW,
+        node_resources={_NODE: resources},
+    )
+    assert health["node-a"].level == "ok"

@@ -6,6 +6,7 @@ import os
 import resource
 import signal
 import socket
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1139,6 +1140,12 @@ class Node:
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "doctor":
+        # `skulk doctor` is a standalone audit, not a node launch: dispatch
+        # before Args.parse() so the node argument parser never sees it.
+        from skulk.doctor.cli import main as doctor_main
+
+        sys.exit(doctor_main(sys.argv[2:]))
     args = Args.parse()
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     target = min(max(soft, 65535), hard)
@@ -1187,6 +1194,32 @@ def main():
         )
     else:
         logger.info(f"{_LIBP2P_NAMESPACE_ENV_VAR} unset, using default")
+
+    # Engine auto-provisioning (#614 Phase 3): before any serving decision,
+    # ensure a Linux node without an explicit llama-server override has the
+    # pinned managed build (fetch + checksum-verify on first run), then
+    # re-derive capability facts so the advertised backends include it. macOS
+    # and opted-out nodes return immediately. --offline nodes never reach for
+    # the network (the air-gapped contract covers engine artifacts exactly
+    # like model downloads) but still wire an already-provisioned managed
+    # install from disk, so an offline restart keeps its served capability.
+    # Management-only launches skip entirely (whether via --no-worker or the
+    # declared SKULK_NODE_PARTICIPATION=management): they are never placement
+    # candidates and must stay side-effect free.
+    declared_participation = (
+        os.environ.get("SKULK_NODE_PARTICIPATION", "").strip().lower()
+    )
+    if not args.no_worker and declared_participation != "management":
+        from skulk.facts import current_node_facts, refresh_node_facts
+        from skulk.provisioning import ensure_llama_server
+
+        if (
+            ensure_llama_server(
+                current_node_facts(), allow_download=not args.offline
+            )
+            is not None
+        ):
+            refresh_node_facts()
 
     if args.spawn_api:
         preflight_api_port(args.api_port)

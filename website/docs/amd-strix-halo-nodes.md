@@ -164,9 +164,12 @@ automates.
    binding does not expose native MTP). Build it once with Vulkan and point the
    node at it (see the MTP section below). `install-deps.sh --with-llama-server`
    does this for you.
-5. **Launch the node**: declare its backend and point it at the rest of the
-   cluster, using the `launch-skulk.sh.example` template (sets
-   `SKULK_LLAMA_CPP_BACKENDS=vulkan`). Nodes on the same LAN segment find each
+5. **Launch the node**: point it at the rest of the cluster using the
+   `launch-skulk.sh.example` template. Skulk detects the Radeon GPU and derives
+   the node's backends automatically, so declaring
+   `SKULK_LLAMA_CPP_BACKENDS=vulkan` (as the template does) is an explicit
+   override, no longer a requirement; run `uv run skulk doctor` to audit what
+   the node will advertise. Nodes on the same LAN segment find each
    other automatically (mDNS); if this node is on a different segment, set
    `SKULK_BOOTSTRAP_PEERS` to dial the existing nodes. On Linux there is no
    launchd, so start it detached so it survives an SSH disconnect:

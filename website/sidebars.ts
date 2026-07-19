@@ -25,6 +25,7 @@ const sidebars: SidebarsConfig = {
         "thunderbolt-clustering",
         "amd-strix-halo-nodes",
         "run-skulk-as-a-service",
+        "node-doctor",
         "external-logging",
         {
           type: "category",

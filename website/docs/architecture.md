@@ -206,9 +206,9 @@ Every node advertises the compute **backends** it can serve as
 string: the engine selects the worker runner class (`mlx` or `llama_cpp`), and
 the compute names the accelerator (`metal`, `vulkan`, `rocm`, `cuda`, `cpu`). A
 macOS node advertises `{mlx, mlx-metal}`; a Linux node with an importable
-`llama_cpp` built for its GPU adds `{llama_cpp, llama_cpp-vulkan}` (the compute
-backends come from `SKULK_LLAMA_CPP_BACKENDS`, defaulting to `cpu` when that env
-var is unset so a node never over-claims a GPU). Backends are probed per node and
+`llama_cpp` built for its GPU adds `{llama_cpp, llama_cpp-vulkan}`. Backend
+tags are derived per node from observed hardware and configuration (see
+"Node capability: detection first, configuration as override" below) and
 gossiped on the telemetry plane as part of `NodeResources`.
 
 `NodeResources` also carries the DATA transport that startup actually resolved
@@ -442,6 +442,113 @@ also caps the served context so the buffer stays bounded. The default path
 serves at full context without it. Whether a given GGUF emits a structured tool
 call (versus describing one in prose) depends on the model and its embedded chat
 template, which the runner uses as-is.
+
+## Node capability: detection first, configuration as override
+
+Where a node's advertised backends come from was inverted. Historically an
+operator had to declare what the node could do (set `SKULK_LLAMA_CPP_BACKENDS`,
+point env vars at engine binaries), and an undeclared GPU simply went unused,
+sometimes silently serving on CPU at a fraction of hardware speed. The
+principle now is: **detection creates capability, configuration overrides it,
+and disagreement between the two is always loud.**
+
+One probe pass per process (`src/skulk/facts/`) gathers a typed `NodeFacts`
+record (`src/skulk/shared/types/node_facts.py`): every GPU the node can see
+across vendors, with how each was detected (full NVML, a bare NVIDIA device
+node, AMD sysfs, or the Apple platform); which dependencies import; the state
+of every configured engine binary (usable, missing, not executable); what a
+configured `llama-server` binary itself reports via `--list-devices`; and the
+raw serving-relevant `SKULK_*` declarations, verbatim. A pure function,
+`derive_node_backends()`, turns that record into the advertised backend tags
+with a fixed precedence per engine: an operator declaration wins over the
+engine binary's own device list, which wins over hardware vendor inference,
+with a CPU floor only when nothing above yields a GPU backend. Purity is the
+point: the whole capability pipeline is exercised in tests with synthetic
+facts, no hardware required.
+
+Disagreements never resolve silently. Every place where observation and
+declaration conflict, or where the derived result leaves visible hardware
+unused, produces a `CapabilityConflict` with a stable code, a message carrying
+the concrete observed and declared values, and a remediation. Four codes exist
+today: `gpu_serving_disabled` (a GPU is visible but everything would serve on
+CPU: an error), `gpu_detection_degraded` (an NVIDIA GPU is present but the
+node cannot fully read it, so VRAM-derived behavior like served-context sizing
+degrades: a warning), `invalid_engine_binary` (an engine binary override
+points at an unusable path: a warning), and `backend_override_conflict` (a
+declaration claims hardware the node cannot observe; the declaration is still
+honored, but the disagreement is loud: a warning). Conflicts ride
+`NodeResources.capability_conflicts` over the existing telemetry plane into
+the `nodeHealth` map on `GET /state` and the dashboard's topology badges, so a
+misconfigured node is visible from any node in the cluster rather than only in
+its own logs.
+
+### The node doctor
+
+`skulk doctor` makes the same environment contract executable on demand. It
+runs a check registry (engine availability, capability conflicts, model
+storage headroom and writability, dashboard assets) against the same facts
+snapshot the capability pipeline uses, and every non-OK verdict states its
+consequence for serving plus the exact remediation. `skulk doctor --fix`
+applies the safe idempotent remediations (provisioning the pinned engine build
+on Linux, installing `nvidia-ml-py`, creating the models directory), and
+`skulk doctor --json` emits machine-readable results. The user-facing check
+list in [Node doctor](node-doctor) is generated from the registry itself, so
+the docs and the checks cannot drift apart.
+
+### Managed engine provisioning
+
+Skulk manages engine binaries the way it manages models: a pinned known-good
+upstream llama.cpp release with per-artifact SHA-256 checksums recorded in the
+repo, downloaded on demand and verified before use, so a new user never builds
+llama.cpp. At node startup on Linux, when no `SKULK_LLAMA_SERVER_BIN` override
+is set, Skulk installs the pinned build under `~/.local/share/skulk/engines`
+(`SKULK_ENGINES_DIR`) and exports the binary path for the process. On GPU
+nodes the preferred managed source is a pip-installable engine wheel,
+built from the pinned upstream source in Skulk's own CI and installed
+through the same standard tooling as every other dependency:
+`skulk-llama-server-cuda` on NVIDIA (CUDA runtime resolved from NVIDIA's
+official PyPI packages) and `skulk-llama-server-vulkan` on AMD (Khronos
+Vulkan loader bundled; the driver's ICD remains the one OS prerequisite).
+An installed wheel is wired automatically, including its bundled
+`ggml-rpc-server` donor binary for multi-node GGUF. Failing that, a visible
+NVIDIA GPU tries tarball variants in order: first a CUDA build (upstream publishes no
+Linux CUDA prebuilt, so this slot is reserved for a Foxlight-built artifact
+and is skipped until one is pinned in the manifest), then the Vulkan build
+(NVIDIA's bare-metal driver ships a working Vulkan ICD; container GPU clouds
+inject compute-only driver stacks where Vulkan cannot initialize, and there
+vLLM remains the first-class CUDA serving path). A visible AMD GPU selects
+the Vulkan variant, and no GPU selects the CPU variant. An explicit override
+always wins, and an invalid override is never masked by a managed binary: it
+stays a loud `invalid_engine_binary` conflict, because silently substituting a
+different binary would hide the configuration error.
+`SKULK_NO_ENGINE_AUTOPROVISION=1` opts a node out; provisioning failure (for
+example, no network) degrades to a warning rather than blocking node startup.
+
+### The installer
+
+`install.sh` at the repo root is the one-command path from a fresh macOS or
+Linux machine to a working node:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash
+```
+
+The installer targets the stable branch (`main`) regardless of which docs
+channel you are reading. To install the development branch instead (matching
+the `/next/` docs), pass a ref:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash -s -- --ref dev
+```
+
+It is deliberately thin: it fetches prerequisites (git, a C toolchain, rustup,
+uv), clones the repo, syncs the environment, builds the dashboard when npm is
+present, and hands off to `skulk doctor --fix`, which owns all of the
+environment intelligence described above. On an NVIDIA Linux node,
+`--with-vllm` additionally creates a dedicated vLLM virtual environment with
+Skulk's validated dependency matrix and records `SKULK_VLLM_BIN` (vLLM lives
+in its own venv because Skulk pins a newer transformers than vLLM can use).
+Re-running the installer is safe; every step is idempotent.
 
 ## The inference engine
 
@@ -682,10 +789,14 @@ switch that skips discovery entirely.
 ## NVIDIA / CUDA nodes
 
 NVIDIA GPUs join a cluster the same way AMD Strix nodes do: through the
-llama.cpp engines. The node declares `SKULK_LLAMA_CPP_BACKENDS=cuda` (the
-build is cross-checked so a CPU-only wheel can never masquerade as a GPU
-node), telemetry comes from a passive NVML collector that fills the same
-normalized accelerator profile as the Apple and AMD collectors, and
+llama.cpp engines. The GPU is detected automatically and the node derives its
+CUDA backends from it; declaring `SKULK_LLAMA_CPP_BACKENDS=cuda` remains
+available as an explicit override, and either way the installed build is
+cross-checked so a CPU-only wheel can never masquerade as a GPU node.
+Telemetry comes from a passive NVML collector that fills the same
+normalized accelerator profile as the Apple and AMD collectors (the
+`nvidia-ml-py` binding is a hard dependency on Linux, so full NVIDIA
+detection never hinges on an optional install), and
 placement admission uses that telemetry identically. A one-shot install
 recipe at `deployment/cuda/install-deps.sh` takes a machine with the NVIDIA
 driver present (rented GPU pods ship it) to a serving node: build

@@ -1,0 +1,185 @@
+# Builds the pip-installable llama-server engine wheels
+# (skulk-llama-server-cuda, skulk-llama-server-vulkan; packaging/) and
+# publishes them to PyPI via trusted publishing. Same principle as
+# cuda-image.yml: the compilers run on plain amd64 runners without a GPU,
+# inside pinned containers, so each wheel's glibc/toolkit lineage is known.
+# Building from the pinned upstream SOURCE (not upstream's binaries) is the
+# supply-chain posture: we trust llama.cpp's code at a tag, built by us.
+#
+# Build runs on dispatch and on packaging changes; PUBLISH runs only on manual
+# dispatch with publish=true (cutting a wheel release is a deliberate act).
+# One-time setup on PyPI (account owner): create both projects and register
+# this repository + workflow as a trusted publisher.
+#
+# Advancing the engine pin is a checklist (architecture-reference.md
+# "Engine pin advancement"); the guard step enforces the mechanical parts.
+name: engine-wheel
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the built wheels to PyPI"
+        type: boolean
+        default: false
+  push:
+    branches: [dev]
+    paths:
+      - "packaging/**"
+      - ".github/workflows/engine-wheel.yml"
+
+env:
+  # Must match src/skulk/provisioning/manifest.py LLAMA_SERVER_PIN and both
+  # packaging versions (0.<build>.<rev>); the guard step enforces all of them.
+  LLAMA_CPP_PIN: b10068
+  CUDA_ARCHITECTURES: "80-real;86-real;89-real;90"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        include:
+          - variant: cuda
+            container: nvidia/cuda:12.4.1-devel-ubuntu22.04
+            package: skulk-llama-server-cuda
+            module: skulk_llama_server_cuda
+          - variant: vulkan
+            container: ubuntu:22.04
+            package: skulk-llama-server-vulkan
+            module: skulk_llama_server_vulkan
+    container: ${{ matrix.container }}
+    steps:
+      - name: Install build prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update -qq
+          apt-get install -y -qq git cmake build-essential libcurl4-openssl-dev curl ca-certificates binutils gnupg
+          if [ "${{ matrix.variant }}" = "vulkan" ]; then
+            # LunarG Vulkan SDK for glslc + headers, the same source upstream
+            # llama.cpp CI uses for its Vulkan builds.
+            curl -fsSL https://packages.lunarg.com/lunarg-signing-key-pub.asc \
+              | gpg --dearmor -o /usr/share/keyrings/lunarg.gpg
+            echo "deb [signed-by=/usr/share/keyrings/lunarg.gpg] https://packages.lunarg.com/vulkan jammy main" \
+              > /etc/apt/sources.list.d/lunarg-vulkan.list
+            apt-get update -qq
+            apt-get install -y -qq vulkan-sdk
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Guard pin agreement
+        run: |
+          set -euo pipefail
+          grep -q "LLAMA_SERVER_PIN: Final = \"$LLAMA_CPP_PIN\"" src/skulk/provisioning/manifest.py
+          BUILD_NUM="${LLAMA_CPP_PIN#b}"
+          grep -q "version = \"0.${BUILD_NUM}\." packaging/skulk-llama-server-cuda/pyproject.toml
+          grep -q "version = \"0.${BUILD_NUM}\." packaging/skulk-llama-server-vulkan/pyproject.toml
+          # The installer derives the wheel version from the checkout's
+          # manifest; guard the derivation wiring rather than a literal.
+          grep -q 'skulk-llama-server-cuda==0.${ENGINE_BUILD}' install.sh
+          grep -q 'skulk-llama-server-vulkan==0.${ENGINE_BUILD}' install.sh
+          grep -q 'LLAMA_SERVER_PIN' install.sh
+
+      - name: Build llama-server (${{ matrix.variant }})
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$LLAMA_CPP_PIN" \
+            https://github.com/ggml-org/llama.cpp /tmp/llama-cpp-src
+          if [ "${{ matrix.variant }}" = "cuda" ]; then
+            BACKEND_FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES"
+          else
+            BACKEND_FLAGS="-DGGML_VULKAN=ON"
+          fi
+          cmake -S /tmp/llama-cpp-src -B /tmp/build \
+            $BACKEND_FLAGS \
+            -DGGML_RPC=ON \
+            -DBUILD_SHARED_LIBS=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN' \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
+          cmake --build /tmp/build --target llama-server ggml-rpc-server -j"$(nproc)"
+
+      - name: Assemble wheel payload
+        run: |
+          set -euo pipefail
+          BIN=packaging/${{ matrix.package }}/src/${{ matrix.module }}/bin
+          mkdir -p "$BIN"
+          cp /tmp/build/bin/llama-server /tmp/build/bin/ggml-rpc-server "$BIN"/
+          cp /tmp/build/bin/*.so* "$BIN"/ 2>/dev/null || true
+          if [ "${{ matrix.variant }}" = "vulkan" ]; then
+            # Bundle the Khronos loader (Apache-2.0, redistributable) so the
+            # wheel needs no system libvulkan; the driver's ICD remains the
+            # one genuine OS prerequisite.
+            cp /usr/lib/x86_64-linux-gnu/libvulkan.so.1* "$BIN"/
+          fi
+          strip --strip-unneeded "$BIN"/llama-server "$BIN"/ggml-rpc-server "$BIN"/*.so* || true
+          ls -la "$BIN"/
+
+      - name: Install uv
+        run: |
+          curl -fsSL https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build wheel
+        run: |
+          set -euo pipefail
+          cd packaging/${{ matrix.package }}
+          uv build --wheel
+          ls -la dist/
+
+      - name: Smoke-test wheel (no GPU; exec + version only)
+        run: |
+          set -euo pipefail
+          uv venv /tmp/smoke --python 3.12
+          uv pip install --python /tmp/smoke/bin/python \
+            packaging/${{ matrix.package }}/dist/*.whl
+          /tmp/smoke/bin/llama-server-${{ matrix.variant }} --version
+          # --list-devices on a GPU-less runner legitimately reports no
+          # devices; the point is that the shim resolves and the binary execs.
+          /tmp/smoke/bin/llama-server-${{ matrix.variant }} --list-devices || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}-wheel
+          path: packaging/${{ matrix.package }}/dist/*.whl
+          if-no-files-found: error
+
+  # One publish job per project, each bound to its own PyPI trusted-publisher
+  # environment: PyPI rejects two pending publishers sharing an identical
+  # (repo, workflow, environment) configuration, and per-project environments
+  # also scope each OIDC grant to exactly one package.
+  publish-cuda:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: skulk-llama-server-cuda-wheel
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  publish-vulkan:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    environment: pypi-vulkan
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: skulk-llama-server-vulkan-wheel
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

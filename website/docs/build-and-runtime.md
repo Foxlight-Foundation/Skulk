@@ -9,6 +9,37 @@ sidebar_position: 3
 Skulk supports both `uv` and Nix in development, but they do not have the same
 job.
 
+## One-Command Install
+
+The fastest path from a fresh macOS or Linux machine to a working node:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash
+```
+
+The installer targets the stable branch (`main`) regardless of which docs
+channel you are reading. To install the development branch instead (matching
+the `/next/` docs), pass a ref:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash -s -- --ref dev
+```
+
+The installer fetches prerequisites (git, a C toolchain, rustup, uv), clones
+the repo into `~/skulk`, syncs the environment, builds the dashboard when npm
+is available, and finishes with `skulk doctor --fix`, which audits the node
+(GPU detection, engine availability, storage headroom) and applies safe
+remediations, printing the consequence and fix for anything it cannot repair.
+On an NVIDIA Linux node, `--with-vllm` additionally installs vLLM into its own
+virtual environment and records `SKULK_VLLM_BIN`. Re-running the installer is
+safe: every step is idempotent.
+
+At any later point, `uv run skulk doctor` re-audits the node; see
+[Node doctor](node-doctor) for the check list and verdicts.
+
+The manual paths below are for development: use them when you work on Skulk
+itself or want control over each step.
+
 ## Recommended Contract
 
 - `uv` is the canonical runtime path for Skulk on macOS.

@@ -7,12 +7,15 @@ NVML is unavailable. NVML queries are the vendor-supported passive
 interface (the same one ``nvidia-smi`` uses); they never collide with
 compute work the way the historical macOS IOGPUFamily poller did.
 
-The ``nvidia-ml-py`` binding (imported as ``pynvml``) is intentionally NOT a
-Skulk dependency: it is inert without an NVIDIA driver, and CUDA nodes are
-the exception, not the rule. The CUDA install recipe
-(``deployment/cuda/install-deps.sh``) installs it; the import is guarded
-here so every other node pays nothing. All NVML access goes through the
-small :class:`NvmlLike` surface so tests inject a fake and never need a GPU.
+The ``nvidia-ml-py`` binding (imported as ``pynvml``) is a platform-conditional
+HARD dependency on Linux (#614: nothing optional may be load-bearing -- its
+absence used to silently cap served context and drop hardware attribution,
+#612). It is inert without an NVIDIA driver, so non-NVIDIA Linux nodes pay only
+kilobytes; macOS installs never pull it. The import stays guarded so a broken
+or hand-pruned environment degrades to "no NVIDIA telemetry" with the facts
+layer raising the loud ``gpu_detection_degraded`` conflict. All NVML access
+goes through the small :class:`NvmlLike` surface so tests inject a fake and
+never need a GPU.
 """
 
 from __future__ import annotations
@@ -83,8 +86,10 @@ def load_nvml() -> NvmlLike | None:
     """
     try:
         import pynvml  # pyright: ignore[reportMissingImports]
-    except ImportError:
-        logger.debug("pynvml not installed; no NVIDIA telemetry on this node")
+    except Exception as error:  # noqa: BLE001 - a broken install (not just an
+        # absent one) must degrade to "no NVIDIA telemetry", matching the
+        # facts probe's never-raises contract and this module's docstring.
+        logger.debug(f"pynvml not importable ({error}); no NVIDIA telemetry")
         return None
     nvml = _as_nvml(pynvml)
     try:
