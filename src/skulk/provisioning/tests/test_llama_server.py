@@ -252,16 +252,27 @@ def test_interrupted_extraction_leaves_no_partial_install(
     assert provision_llama_server("vulkan").is_file()
 
 
+def _fake_wheel(tmp_path: Path, name: str) -> Path:
+    shim = tmp_path / name
+    shim.write_text("#!/bin/sh\n")
+    shim.chmod(0o755)
+    return shim
+
+
 def test_wheel_outranks_tarball_provisioning(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # The pip-installed CUDA wheel is the preferred managed source on NVIDIA
-    # nodes: no download may happen when it is present.
+    # A pip-installed engine wheel is the preferred managed source: no
+    # download may happen when one is present, and its RPC donor shim is
+    # exported alongside.
     _isolate_engines_dir(monkeypatch, tmp_path)
-    shim = tmp_path / "llama-server-cuda"
-    shim.write_text("#!/bin/sh\n")
-    shim.chmod(0o755)
-    monkeypatch.setattr(provisioning, "wheel_llama_server", lambda: shim)
+    shim = _fake_wheel(tmp_path, "llama-server-cuda")
+    rpc = _fake_wheel(tmp_path, "ggml-rpc-server-cuda")
+
+    def _fake_lookup(vendor: str) -> tuple[Path, Path | None] | None:
+        return (shim, rpc) if vendor == "nvidia" else None
+
+    monkeypatch.setattr(provisioning, "wheel_llama_server", _fake_lookup)
 
     def _must_not_download(art: EngineArtifact, destination: Path) -> None:
         raise AssertionError("downloaded despite an installed engine wheel")
@@ -269,23 +280,43 @@ def test_wheel_outranks_tarball_provisioning(
     monkeypatch.setattr(provisioning, "_download", _must_not_download)
     monkeypatch.delenv(provisioning.AUTOPROVISION_OPT_OUT_ENV, raising=False)
     monkeypatch.delenv(LLAMA_SERVER_BIN_ENV, raising=False)
+    monkeypatch.delenv(provisioning.RPC_SERVER_BIN_ENV, raising=False)
     wired = ensure_llama_server(make_facts(gpus=(NVIDIA_A40,)))
     assert wired == shim
     assert os.environ[LLAMA_SERVER_BIN_ENV] == str(shim)
+    assert os.environ[provisioning.RPC_SERVER_BIN_ENV] == str(rpc)
 
 
-def test_wheel_ignored_on_amd_nodes(
+def test_vulkan_wheel_wired_on_amd_nodes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # The wheel is CUDA-only; an AMD node must keep the Vulkan tarball path.
+    # AMD nodes use the Vulkan wheel when installed; the tarball path is the
+    # fallback, not the preference.
     _isolate_engines_dir(monkeypatch, tmp_path)
-    shim = tmp_path / "llama-server-cuda"
-    shim.write_text("#!/bin/sh\n")
-    shim.chmod(0o755)
-    monkeypatch.setattr(provisioning, "wheel_llama_server", lambda: shim)
+    shim = _fake_wheel(tmp_path, "llama-server-vulkan")
+
+    def _fake_lookup(vendor: str) -> tuple[Path, Path | None] | None:
+        return (shim, None) if vendor == "amd" else None
+
+    monkeypatch.setattr(provisioning, "wheel_llama_server", _fake_lookup)
+    monkeypatch.delenv(provisioning.AUTOPROVISION_OPT_OUT_ENV, raising=False)
+    monkeypatch.delenv(LLAMA_SERVER_BIN_ENV, raising=False)
+    wired = ensure_llama_server(make_facts(gpus=(AMD_STRIX,)))
+    assert wired == shim
+
+
+def test_tarball_fallback_when_no_wheel_installed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolate_engines_dir(monkeypatch, tmp_path)
+
+    def _no_wheel(vendor: str) -> tuple[Path, Path | None] | None:
+        return None
+
+    monkeypatch.setattr(provisioning, "wheel_llama_server", _no_wheel)
     _pin_fake_artifact(monkeypatch, _fake_archive())
     monkeypatch.delenv(provisioning.AUTOPROVISION_OPT_OUT_ENV, raising=False)
     monkeypatch.delenv(LLAMA_SERVER_BIN_ENV, raising=False)
     wired = ensure_llama_server(make_facts(gpus=(AMD_STRIX,)))
     assert wired is not None
-    assert wired != shim
+    assert "vulkan" in str(wired)

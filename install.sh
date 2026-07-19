@@ -145,6 +145,17 @@ if [[ "$OS" == "Linux" ]] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi
     fi
 fi
 
+# --- Vulkan engine wheel (AMD Linux) ----------------------------------------
+
+if [[ "$OS" == "Linux" ]] && ! command -v nvidia-smi >/dev/null 2>&1 \
+    && compgen -G "/sys/class/drm/card*/device/gpu_busy_percent" > /dev/null 2>&1; then
+    log "installing the Vulkan llama-server engine wheel"
+    if ! uv pip install "skulk-llama-server-vulkan==0.10068.*"; then
+        warn "skulk-llama-server-vulkan unavailable (not yet published or no network);"
+        warn "falling back to the managed tarball build; skulk doctor will report the outcome"
+    fi
+fi
+
 # --- dashboard (optional) --------------------------------------------------
 
 if [[ "$HEADLESS" == "1" ]]; then

@@ -75,51 +75,92 @@ def select_variant(facts: NodeFacts) -> EngineVariant | None:
     return chain[0] if chain else None
 
 
-def _wheel_version_matches_pin() -> bool:
+# The pip-installable engine wheels, per GPU vendor: (distribution name,
+# importable module, server shim, RPC donor shim). NVIDIA tries the CUDA
+# wheel then the Vulkan one (bare-metal NVIDIA drives Vulkan fine); AMD uses
+# the Vulkan wheel.
+_WHEELS_BY_VENDOR: dict[str, tuple[tuple[str, str, str, str], ...]] = {
+    "nvidia": (
+        (
+            "skulk-llama-server-cuda",
+            "skulk_llama_server_cuda",
+            "llama-server-cuda",
+            "ggml-rpc-server-cuda",
+        ),
+        (
+            "skulk-llama-server-vulkan",
+            "skulk_llama_server_vulkan",
+            "llama-server-vulkan",
+            "ggml-rpc-server-vulkan",
+        ),
+    ),
+    "amd": (
+        (
+            "skulk-llama-server-vulkan",
+            "skulk_llama_server_vulkan",
+            "llama-server-vulkan",
+            "ggml-rpc-server-vulkan",
+        ),
+    ),
+}
+
+
+def _wheel_version_matches_pin(distribution: str) -> bool:
     """Whether the installed engine wheel packages the pinned build.
 
     The wheel version scheme is ``0.<llama.cpp build>.<packaging rev>``; a
     wheel packaging a different build than :data:`LLAMA_SERVER_PIN` is
     ignored (with a log line) rather than silently overriding the validated
-    pin, since ``ensure_llama_server`` prefers the wheel over the
+    pin, since ``ensure_llama_server`` prefers wheels over the
     checksum-verified tarball path.
     """
     from importlib.metadata import PackageNotFoundError, version
 
     try:
-        installed = version("skulk-llama-server-cuda")
+        installed = version(distribution)
     except PackageNotFoundError:
         return False
     expected_prefix = f"0.{LLAMA_SERVER_PIN.removeprefix('b')}."
     if installed.startswith(expected_prefix):
         return True
     logger.warning(
-        f"installed skulk-llama-server-cuda {installed} does not package the "
-        f"pinned llama.cpp build {LLAMA_SERVER_PIN}; ignoring the wheel "
-        f"(install skulk-llama-server-cuda=={expected_prefix}* to use it)"
+        f"installed {distribution} {installed} does not package the pinned "
+        f"llama.cpp build {LLAMA_SERVER_PIN}; ignoring the wheel (install "
+        f"{distribution}=={expected_prefix}* to use it)"
     )
     return False
 
 
-def wheel_llama_server() -> Path | None:
-    """The pip-installed CUDA engine wheel's shim, or ``None``.
+def wheel_llama_server(vendor: str) -> tuple[Path, Path | None] | None:
+    """The pip-installed engine wheel's shims for one GPU vendor, or ``None``.
 
-    The ``skulk-llama-server-cuda`` wheel (packaging/skulk-llama-server-cuda)
-    carries the Foxlight-built CUDA binary with NVIDIA's official runtime
-    wheels as dependencies; its ``llama-server-cuda`` console script wires the
-    loader path and execs the binary, so Skulk treats the shim exactly like
-    any other llama-server binary (the facts probe validates it via
-    ``--list-devices``). Installed via ordinary pip/uv, it is the preferred
-    managed source on NVIDIA nodes: standard tooling, ecosystem-verified
-    hashes, works offline once installed.
+    The engine wheels (packaging/skulk-llama-server-*) carry the
+    Foxlight-built binaries behind console shims that wire the loader path
+    and exec, so Skulk treats a shim exactly like any other llama-server
+    binary (the facts probe validates it via ``--list-devices``). Installed
+    via ordinary pip/uv, a wheel is the preferred managed source: standard
+    tooling, ecosystem-verified hashes, works offline once installed.
+
+    Args:
+        vendor: ``"nvidia"`` or ``"amd"``.
+
+    Returns:
+        ``(server_shim, rpc_shim_or_None)`` for the first installed wheel of
+        the vendor's preference order whose version matches the pin.
     """
-    if find_spec("skulk_llama_server_cuda") is None:
-        return None
-    if not _wheel_version_matches_pin():
-        return None
-    shim = Path(sys.executable).resolve().parent / "llama-server-cuda"
-    if shim.is_file() and os.access(shim, os.X_OK):
-        return shim
+    bin_dir = Path(sys.executable).resolve().parent
+    for distribution, module, server_shim, rpc_shim in _WHEELS_BY_VENDOR.get(
+        vendor, ()
+    ):
+        if find_spec(module) is None:
+            continue
+        if not _wheel_version_matches_pin(distribution):
+            continue
+        server = bin_dir / server_shim
+        if not server.is_file() or not os.access(server, os.X_OK):
+            continue
+        rpc = bin_dir / rpc_shim
+        return server, (rpc if rpc.is_file() else None)
     return None
 
 
@@ -268,20 +309,27 @@ def ensure_llama_server(
         return None
     if not select_variant_chain(facts):
         return None
-    if facts.gpus_of("nvidia"):
-        # The pip-installed CUDA wheel outranks tarball provisioning: it is
+    vendor = (
+        "nvidia"
+        if facts.gpus_of("nvidia")
+        else "amd"
+        if facts.gpus_of("amd")
+        else None
+    )
+    if vendor is not None:
+        # A pip-installed engine wheel outranks tarball provisioning: it is
         # the standard-tooling path and already on disk (works offline too).
-        wheel = wheel_llama_server()
+        wheel = wheel_llama_server(vendor)
         if wheel is not None:
-            os.environ[LLAMA_SERVER_BIN_ENV] = str(wheel)
+            server_shim, rpc_shim = wheel
+            os.environ[LLAMA_SERVER_BIN_ENV] = str(server_shim)
             # The RPC donor binary is bundled in the wheel too, behind its
             # own loader-wiring shim; without this, rpc_server_binary()'s
             # sibling search next to the console script finds nothing and a
             # multi-node donor spawn fails (#615 review).
-            rpc_shim = wheel.parent / "ggml-rpc-server-cuda"
-            if RPC_SERVER_BIN_ENV not in os.environ and rpc_shim.is_file():
+            if RPC_SERVER_BIN_ENV not in os.environ and rpc_shim is not None:
                 os.environ[RPC_SERVER_BIN_ENV] = str(rpc_shim)
-            return wheel
+            return server_shim
     if not allow_download:
         # Prefer the same variant order a download would use: with multiple
         # variants on disk (a cpu install from a pre-GPU run plus a later

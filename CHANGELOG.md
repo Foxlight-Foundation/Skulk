@@ -34,10 +34,12 @@ This project records release notes here and mirrors public-facing notes in
   demand (`SKULK_LLAMA_SERVER_BIN` still overrides;
   `SKULK_NO_ENGINE_AUTOPROVISION=1` opts out), and `install.sh` takes a
   fresh macOS or Linux box to a working node in one command. On NVIDIA
-  Linux, the preferred managed engine source is the pip-installable
-  `skulk-llama-server-cuda` wheel (Foxlight-built CUDA llama-server with
-  NVIDIA's official runtime wheels as dependencies), built and published by
-  the `engine-wheel` workflow.
+  Linux GPU nodes, the preferred managed engine source is a pip-installable
+  wheel built from pinned upstream source in Skulk's own CI:
+  `skulk-llama-server-cuda` (NVIDIA; CUDA runtime from NVIDIA's official
+  PyPI packages) and `skulk-llama-server-vulkan` (AMD; Khronos loader
+  bundled), both published by the `engine-wheel` workflow with a guard
+  keeping the engine pin, wheel versions, and installer in lockstep.
 
 - **Explicit, auditable cluster heartbeat.** Nodes now publish a dedicated
   telemetry heartbeat instead of making liveness an accidental side effect of
