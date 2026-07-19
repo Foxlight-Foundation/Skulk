@@ -6125,7 +6125,10 @@ class API:
     def _build_image_url(self, request: Request, image_id: Id) -> str:
         host = request.headers.get("host", f"localhost:{self.port}")
         scheme = "https" if request.url.scheme == "https" else "http"
-        return f"{scheme}://{host}/v1/images/{image_id}"
+        # The stored-image fetch route is GET /images/{image_id} (no /v1
+        # prefix); emitting /v1/... here returned URLs that always 404ed,
+        # found when the 1.5.0 docs review documented the url response mode.
+        return f"{scheme}://{host}/images/{image_id}"
 
     async def image_generations(
         self, request: Request, payload: ImageGenerationTaskParams
