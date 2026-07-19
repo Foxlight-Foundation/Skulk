@@ -533,6 +533,14 @@ Linux machine to a working node:
 curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash
 ```
 
+The installer targets the stable branch (`main`) regardless of which docs
+channel you are reading. To install the development branch instead (matching
+the `/next/` docs), pass a ref:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash -s -- --ref dev
+```
+
 It is deliberately thin: it fetches prerequisites (git, a C toolchain, rustup,
 uv), clones the repo, syncs the environment, builds the dashboard when npm is
 present, and hands off to `skulk doctor --fix`, which owns all of the
