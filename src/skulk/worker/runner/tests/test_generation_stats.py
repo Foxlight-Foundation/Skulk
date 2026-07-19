@@ -12,9 +12,9 @@ from skulk.worker.runner.generation_stats import (
     parse_vm_hwm,
     process_peak_memory,
     resolve_stream_token_counts,
+    served_stream_stats,
     stats_from_llama_server_timings,
     subprocess_peak_memory,
-    served_stream_stats,
 )
 
 
@@ -183,7 +183,12 @@ def test_served_stream_stats_single_stream_keeps_engine_timings() -> None:
     clock = _ticking_clock([0.0, 1.0, 2.0])
     clock.mark_piece()
     clock.mark_piece()
-    timings = {"prompt_n": 10.0, "prompt_ms": 100.0, "predicted_n": 50.0, "predicted_ms": 500.0}
+    timings: dict[str, object] = {
+        "prompt_n": 10.0,
+        "prompt_ms": 100.0,
+        "predicted_n": 50.0,
+        "predicted_ms": 500.0,
+    }
     stats = served_stream_stats(clock, timings, batching=False)
     assert stats.generation_tps == 100.0  # 50 tokens / 0.5s engine-measured
     assert stats.prompt_tokens == 10
@@ -198,7 +203,12 @@ def test_served_stream_stats_batching_uses_wall_rates_with_engine_tokens() -> No
     clock.mark_piece()
     clock.mark_piece()
     # Engine claims 100 tok/s slot-active; wall truth is 50 tokens over 10s.
-    timings = {"prompt_n": 10.0, "prompt_ms": 100.0, "predicted_n": 50.0, "predicted_ms": 500.0}
+    timings: dict[str, object] = {
+        "prompt_n": 10.0,
+        "prompt_ms": 100.0,
+        "predicted_n": 50.0,
+        "predicted_ms": 500.0,
+    }
     stats = served_stream_stats(clock, timings, batching=True)
     assert stats.generation_tps == 5.0  # 50 engine tokens / 10s wall decode
     assert stats.prompt_tps == 10.0  # 10 tokens / 1s wall prefill
