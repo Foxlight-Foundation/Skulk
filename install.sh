@@ -168,7 +168,7 @@ ENGINE_BUILD="$(grep -oE 'LLAMA_SERVER_PIN: Final = "b[0-9]+"' src/skulk/provisi
 # The Foxlight wheel index is the source of truth for engine wheels (the
 # CUDA wheel exceeds PyPI's per-file limit); wheels carry sigstore build
 # provenance (gh attestation verify <wheel> --owner Foxlight-Foundation).
-FOXLIGHT_WHEEL_INDEX="https://wheels.foxlight.foundation/simple/"
+FOXLIGHT_WHEEL_INDEX="https://wheels.foxlight.ai/simple/"
 # The Foxlight index is AUTHORITATIVE for engine wheels (--index-url), with
 # PyPI as the extra index for their dependencies (nvidia runtime wheels):
 # with the order reversed, a name-squatted or unexpected PyPI package could
