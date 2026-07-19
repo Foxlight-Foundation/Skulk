@@ -1203,9 +1203,13 @@ def main():
     # the network (the air-gapped contract covers engine artifacts exactly
     # like model downloads) but still wire an already-provisioned managed
     # install from disk, so an offline restart keeps its served capability.
-    # Management-only launches (--no-worker) skip entirely: they advertise no
-    # backends and must stay side-effect free.
-    if not args.no_worker:
+    # Management-only launches skip entirely (whether via --no-worker or the
+    # declared SKULK_NODE_PARTICIPATION=management): they are never placement
+    # candidates and must stay side-effect free.
+    declared_participation = (
+        os.environ.get("SKULK_NODE_PARTICIPATION", "").strip().lower()
+    )
+    if not args.no_worker and declared_participation != "management":
         from skulk.facts import current_node_facts, refresh_node_facts
         from skulk.provisioning import ensure_llama_server
 

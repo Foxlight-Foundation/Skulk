@@ -151,14 +151,16 @@ def _amd_gpu_facts(drm_root: Path) -> tuple[GpuDeviceFact, ...]:
     except OSError:
         return ()
     facts: list[GpuDeviceFact] = []
-    for index, device in enumerate(candidates):
+    for device in candidates:
         if not (device / "gpu_busy_percent").is_file():
+            # Non-amdgpu DRM entries (e.g. an Intel iGPU) must not consume a
+            # vendor-local index.
             continue
         facts.append(
             GpuDeviceFact(
                 vendor="amd",
                 name="AMD GPU",
-                index=index,
+                index=len(facts),
                 detection_source="amdgpu_sysfs",
                 vram_total_bytes=_read_sysfs_int(device / "mem_info_vram_total"),
                 gtt_total_bytes=_read_sysfs_int(device / "mem_info_gtt_total"),

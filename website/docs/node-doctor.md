@@ -1,7 +1,7 @@
 # Node doctor
 
 `skulk doctor` audits a node's environment against the same facts snapshot
-Skulk's capability pipeline uses: which GPUs the node can see, which inference
+that Skulk's capability pipeline uses: which GPUs the node can see, which inference
 engines are usable, whether declared configuration matches observed hardware,
 and whether storage has headroom. Every non-OK verdict states its consequence
 for serving and the exact remediation.

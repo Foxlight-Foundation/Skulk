@@ -327,7 +327,8 @@ def ensure_llama_server(
             # own loader-wiring shim; without this, rpc_server_binary()'s
             # sibling search next to the console script finds nothing and a
             # multi-node donor spawn fails (#615 review).
-            if RPC_SERVER_BIN_ENV not in os.environ and rpc_shim is not None:
+            rpc_override = os.environ.get(RPC_SERVER_BIN_ENV, "").strip()
+            if not rpc_override and rpc_shim is not None:
                 os.environ[RPC_SERVER_BIN_ENV] = str(rpc_shim)
             return server_shim
     if not allow_download:

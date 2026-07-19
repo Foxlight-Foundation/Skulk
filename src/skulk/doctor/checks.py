@@ -223,15 +223,24 @@ def _fix_capability_conflicts(facts: NodeFacts) -> str | None:
     )
     if not degraded or facts.pynvml_importable:
         return None
+    # uv-managed environments ship no pip module in the interpreter, so
+    # prefer `uv pip install --python <this interpreter>` and fall back to
+    # `python -m pip` for conventional venvs.
+    uv = shutil.which("uv")
+    command = (
+        [uv, "pip", "install", "--python", sys.executable, "nvidia-ml-py"]
+        if uv is not None
+        else [sys.executable, "-m", "pip", "install", "nvidia-ml-py"]
+    )
     completed = subprocess.run(  # noqa: S603 - fixed, known-safe command
-        [sys.executable, "-m", "pip", "install", "nvidia-ml-py"],
+        command,
         capture_output=True,
         text=True,
         timeout=300,
     )
     if completed.returncode != 0:
         raise RuntimeError(
-            f"pip install nvidia-ml-py failed: {completed.stderr.strip()[-300:]}"
+            f"nvidia-ml-py install failed: {completed.stderr.strip()[-300:]}"
         )
     return "installed nvidia-ml-py (restart skulk to pick it up)"
 
