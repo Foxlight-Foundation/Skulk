@@ -21,6 +21,51 @@ default_voice = "ryan"
 supports_reference_audio = false
 sample_rates = [24000]
 
+[[audio.voice_catalog]]
+id = "serena"
+name = "Serena"
+preferred_languages = ["zh"]
+
+[[audio.voice_catalog]]
+id = "vivian"
+name = "Vivian"
+preferred_languages = ["zh"]
+
+[[audio.voice_catalog]]
+id = "uncle_fu"
+name = "Uncle Fu"
+preferred_languages = ["zh"]
+
+[[audio.voice_catalog]]
+id = "ryan"
+name = "Ryan"
+preferred_languages = ["en"]
+
+[[audio.voice_catalog]]
+id = "aiden"
+name = "Aiden"
+preferred_languages = ["en"]
+
+[[audio.voice_catalog]]
+id = "ono_anna"
+name = "Ono Anna"
+preferred_languages = ["ja"]
+
+[[audio.voice_catalog]]
+id = "sohee"
+name = "Sohee"
+preferred_languages = ["ko"]
+
+[[audio.voice_catalog]]
+id = "eric"
+name = "Eric"
+preferred_languages = ["zh"]
+
+[[audio.voice_catalog]]
+id = "dylan"
+name = "Dylan"
+preferred_languages = ["zh"]
+
 [placement]
 compatible_backends = ["mlx_audio", "mlx_audio-metal"]
 backend_preference = ["mlx_audio-metal", "mlx_audio"]

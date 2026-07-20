@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { MOBILE_BREAKPOINT_PX } from '../../hooks/useMediaQuery';
 import styled, { css } from 'styled-components';
 import { FiMic, FiPaperclip, FiSend, FiSquare, FiVolume2, FiVolumeX, FiX } from 'react-icons/fi';
-import type { ChatSpeechModelOption, ChatUploadedFile } from '../../types/chat';
+import type { ChatSpeechModelOption, ChatUploadedFile, ChatVoiceOption } from '../../types/chat';
 import { ChatAttachments } from './ChatAttachments';
 import { Button } from '../common/Button';
 import { useSkulkTranslation } from '../../i18n/tolgee';
@@ -51,6 +51,10 @@ export interface ChatFormProps {
   selectedSpeechModelId?: string | null;
   /** Optional model-specific TTS voice or preset. */
   selectedVoice?: string | null;
+  /** Discovered built-in voices for the selected mounted TTS model. */
+  voiceOptions?: ChatVoiceOption[];
+  /** Whether the selected model's voice catalog is still loading. */
+  isVoiceCatalogLoading?: boolean;
   /** Whether final assistant messages should be spoken automatically. */
   autoSpeakAssistant?: boolean;
   /** Enable a persistent server-VAD conversation instead of push-to-transcribe. */
@@ -401,6 +405,8 @@ export function ChatForm({
   selectedTranscriptionModelId = null,
   selectedSpeechModelId = null,
   selectedVoice = null,
+  voiceOptions = [],
+  isVoiceCatalogLoading = false,
   autoSpeakAssistant = false,
   realtimeVoiceEnabled = true,
   autoSubmitVoice = false,
@@ -454,6 +460,9 @@ export function ChatForm({
     (model) => model.modelId === selectedTranscriptionId,
   );
   const selectedSpeechId = selectedSpeechModelId ?? speechModels[0]?.modelId ?? null;
+  const selectedSpeechModel = speechModels.find(
+    (model) => model.modelId === selectedSpeechId,
+  );
   const secureRecordingContext = typeof window === 'undefined'
     || window.isSecureContext
     || isLocalBrowserHostname(window.location.hostname);
@@ -485,7 +494,14 @@ export function ChatForm({
     : !browserRecordingAvailable
       ? t('chat.form.voiceErrors.unsupportedRecording', 'Browser audio recording is unavailable.')
       : null;
-  const speechReady = Boolean(selectedSpeechId && onSpeakText);
+  const speechReady = Boolean(
+    selectedSpeechId
+    && onSpeakText
+    && (
+      !selectedSpeechModel?.supportsVoiceListing
+      || (!isVoiceCatalogLoading && voiceOptions.length > 0)
+    ),
+  );
   const transcriptionReady = Boolean(
     selectedTranscriptionId && browserRecordingAvailable,
   );
@@ -1178,12 +1194,34 @@ export function ChatForm({
               )}
             </VoiceSelect>
             {speechModels.length > 0 && (
-              <VoiceInput
-                value={selectedVoice ?? ''}
-                onChange={(event) => onSelectedVoiceChange?.(event.target.value || null)}
-                placeholder={t('chat.form.voicePlaceholder', 'voice')}
-                aria-label={t('chat.form.voiceName', 'Voice')}
-              />
+              selectedSpeechModel?.supportsVoiceListing ? (
+                <VoiceSelect
+                  value={voiceOptions.some((voice) => voice.id === selectedVoice) ? selectedVoice ?? '' : ''}
+                  disabled={isVoiceCatalogLoading}
+                  onChange={(event) => onSelectedVoiceChange?.(event.target.value || null)}
+                  aria-label={t('chat.form.voiceName', 'Voice')}
+                >
+                  <option value="">
+                    {isVoiceCatalogLoading
+                      ? t('chat.form.loadingVoices', 'Loading voices...')
+                      : t('chat.form.autoVoice', 'Auto (match language)')}
+                  </option>
+                  {voiceOptions.map((voice) => (
+                    <option key={voice.id} value={voice.id}>
+                      {voice.preferredLanguages.length > 0
+                        ? `${voice.name} (${voice.preferredLanguages.join(', ')})`
+                        : voice.name}
+                    </option>
+                  ))}
+                </VoiceSelect>
+              ) : (
+                <VoiceInput
+                  value={selectedVoice ?? ''}
+                  onChange={(event) => onSelectedVoiceChange?.(event.target.value || null)}
+                  placeholder={t('chat.form.voicePlaceholder', 'voice')}
+                  aria-label={t('chat.form.voiceName', 'Voice')}
+                />
+              )
             )}
             <VoiceToggle
               type="button"

@@ -205,3 +205,6 @@ def test_qwen_custom_voice_card_exposes_upstream_speaker_inventory() -> None:
         "eric",
         "dylan",
     )
+    assert tuple(voice.id for voice in card.audio.voice_catalog) == card.audio.voices
+    assert card.audio.voice_catalog[3].name == "Ryan"
+    assert card.audio.voice_catalog[3].preferred_languages == ("en",)

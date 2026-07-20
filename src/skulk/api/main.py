@@ -12504,9 +12504,21 @@ class API:
                 status_code=400,
                 detail=f"Model {resolved} does not support voice listing",
             )
+        catalog_by_id = {
+            voice.id: voice for voice in model_card.audio.voice_catalog
+        }
         return AudioVoiceList(
             data=tuple(
-                AudioVoice(id=voice, name=voice, model=str(resolved))
+                AudioVoice(
+                    id=voice,
+                    name=catalog_by_id[voice].name if voice in catalog_by_id else voice,
+                    model=str(resolved),
+                    preferred_languages=(
+                        catalog_by_id[voice].preferred_languages
+                        if voice in catalog_by_id
+                        else ()
+                    ),
+                )
                 for voice in model_card.audio.voices
             )
         )

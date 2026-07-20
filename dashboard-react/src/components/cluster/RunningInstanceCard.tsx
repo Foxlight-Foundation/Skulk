@@ -46,6 +46,8 @@ export interface RunningInstanceCardProps {
   onDelete?: () => void;
   onChat?: () => void;
   isEmbedding?: boolean;
+  /** Whether the model can directly serve text chat, independent of readiness. */
+  supportsTextChat?: boolean;
   /** Speculative-decoding status from the model card's runtime section:
    *  shown as a badge when the card declares an MTP sidecar or assistant
    *  drafter and the placement allows it (#254). */
@@ -346,6 +348,7 @@ export function RunningInstanceCard({
   onDelete,
   onChat,
   isEmbedding,
+  supportsTextChat = true,
   speculation,
   className,
 }: RunningInstanceCardProps) {
@@ -357,7 +360,7 @@ export function RunningInstanceCard({
     : baseCfg;
   const link = hfUrl(modelId);
   const showProgress = (status === 'loading' || status === 'warming_up') && loadProgress != null;
-  const canChat = (status === 'ready' || status === 'running') && !isEmbedding;
+  const canChat = (status === 'ready' || status === 'running') && !isEmbedding && supportsTextChat;
 
   return (
     <Card $color={cfg.color} $glow={cfg.glow} className={className}>

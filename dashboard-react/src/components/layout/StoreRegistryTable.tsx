@@ -10,6 +10,7 @@ import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
 import { ClusterCard, type ClusterCardProps } from '../cluster/ClusterCard';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
+import { modelSupportsTextChat } from '../../types/models';
 
 /* ================================================================
    Types
@@ -35,6 +36,7 @@ export interface ModelCardInfo {
   supportsTensor?: boolean;
   capabilities?: string[];
   tags?: string[];
+  tasks?: string[];
   resolvedCapabilities?: {
     supportsThinking?: boolean;
     supportsThinkingToggle?: boolean;
@@ -755,6 +757,7 @@ export function StoreRegistryTable({
             // MLX (safetensors) weights. GGUF models carry llama.cpp's own quant
             // format, so OptiQ doesn't apply — hide the optimize action for them.
             const isGguf = /gguf/i.test(entry.model_id);
+            const supportsTextChat = modelSupportsTextChat(modelCards[entry.model_id]);
             return (
               <TRow key={entry.model_id}>
                 <PlayCell $area="play">
@@ -833,7 +836,7 @@ export function StoreRegistryTable({
                           {badge}
                         </InfoTooltip>
                       ) : badge}
-                      {ready && onChat && !modelCards?.[entry.model_id]?.tags?.includes('embedding') && (
+                      {ready && onChat && supportsTextChat && (
                         <ChatBubble onClick={() => onChat(entry.model_id)} title={t('storeRegistry.chatWithModel', 'Chat with model')}>
                           <BsChatDotsFill size={14} />
                         </ChatBubble>

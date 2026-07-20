@@ -193,6 +193,10 @@ Declares speech serving metadata for TTS and STT models:
 - `voices`
   - stable built-in voice identifiers returned by `GET /v1/audio/voices`; this
     requires `kind = "tts"` and `supports_voice_listing = true`
+- `voice_catalog`
+  - optional ordered metadata for every identifier in `voices`; each entry
+    carries the same `id`, a display `name`, and ordered BCP 47
+    `preferred_languages` used by clients for deterministic language matching
 - `default_voice`
   - built-in voice used when a TTS request omits `voice`; it must appear in
     `voices`
@@ -388,8 +392,20 @@ response_formats = ["mp3", "wav"]
 supports_streaming = true
 supports_realtime = false
 supports_voice_listing = true
+voices = ["serena", "ryan"]
+default_voice = "ryan"
 supports_reference_audio = false
 sample_rates = [24000]
+
+[[audio.voice_catalog]]
+id = "serena"
+name = "Serena"
+preferred_languages = ["zh"]
+
+[[audio.voice_catalog]]
+id = "ryan"
+name = "Ryan"
+preferred_languages = ["en"]
 ```
 
 ## When to Extend a Card

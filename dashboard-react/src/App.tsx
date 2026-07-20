@@ -36,6 +36,7 @@ import { chatActions } from './store/slices/chatSlice';
 import { useAppDispatch, useAppSelector } from './store/hooks';
 import { uiActions, type ObservabilityTab } from './store/slices/uiSlice';
 import { useSkulkTranslation, type SkulkTranslate } from './i18n/tolgee';
+import { modelSupportsTextChat } from './types/models';
 
 const Shell = styled.div`
   position: relative;
@@ -476,6 +477,7 @@ export function App() {
       // the backend read below only refines the in-process MLX/llama_cpp split.
       let engine: InstanceCardData['engine'] = instanceType === 'LlamaRpc' ? 'served' : 'mlx';
       let isEmbedding = false;
+      let supportsTextChat = true;
       let speculation: InstanceCardData['speculation'];
       if (runnerToShard) {
         const firstShard = Object.values(runnerToShard)[0];
@@ -487,6 +489,10 @@ export function App() {
         const mc = (shardInner?.modelCard ?? shardInner?.model_card) as Record<string, unknown> | undefined;
         const tasks = mc?.tasks as string[] | undefined;
         if (tasks?.includes('TextEmbedding')) isEmbedding = true;
+        supportsTextChat = modelSupportsTextChat({
+          tasks,
+          capabilities: mc?.capabilities as string[] | undefined,
+        });
 
         // Engine: every instance is wrapped as an MlxRing/Jaccl instance on the
         // wire, so the card's placement backends (not the wrapper) tell us which
@@ -563,6 +569,7 @@ export function App() {
         statusMessage: derived.message,
         loadProgress: derived.progress,
         isEmbedding,
+        supportsTextChat,
         speculation,
       });
     }

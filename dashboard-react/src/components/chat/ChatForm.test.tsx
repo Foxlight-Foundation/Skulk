@@ -119,4 +119,39 @@ describe('ChatForm speech controls', () => {
     });
     expect(onSpeakText).toHaveBeenCalledWith('Speak this response');
   });
+
+  it('renders discovered voices and preserves automatic language matching', async () => {
+    const onSelectedVoiceChange = vi.fn();
+    const speechModel: ChatSpeechModelOption = {
+      modelId: 'org/catalog-tts',
+      label: 'Catalog TTS',
+      responseFormats: ['mp3'],
+      supportsVoiceListing: true,
+    };
+
+    await renderChatForm({
+      onSend: vi.fn(),
+      speechModels: [speechModel],
+      selectedSpeechModelId: speechModel.modelId,
+      selectedVoice: null,
+      voiceOptions: [
+        { id: 'serena', name: 'Serena', preferredLanguages: ['zh'] },
+        { id: 'ryan', name: 'Ryan', preferredLanguages: ['en'] },
+      ],
+      onSelectedVoiceChange,
+    });
+
+    const voiceSelect = container?.querySelector<HTMLSelectElement>('[aria-label="Voice"]');
+    expect(voiceSelect?.value).toBe('');
+    expect([...voiceSelect!.options].map((option) => option.textContent)).toEqual([
+      'Auto (match language)',
+      'Serena (zh)',
+      'Ryan (en)',
+    ]);
+
+    await act(async () => {
+      await userEvent.selectOptions(voiceSelect!, 'ryan');
+    });
+    expect(onSelectedVoiceChange).toHaveBeenCalledWith('ryan');
+  });
 });

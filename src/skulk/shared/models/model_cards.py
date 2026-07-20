@@ -32,7 +32,7 @@ from skulk.shared.constants import (
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import ReasoningEffort
-from skulk.utils.pydantic_ext import CamelCaseModel
+from skulk.utils.pydantic_ext import CamelCaseModel, FrozenModel
 
 # kinda ugly...
 # TODO: load search path from config.toml
@@ -131,6 +131,42 @@ class AudioCardKind(str, Enum):
 
     TextToSpeech = "tts"
     SpeechToText = "stt"
+
+
+class AudioVoiceConfig(FrozenModel):
+    """Declarative metadata for one stable built-in TTS voice."""
+
+    id: str
+    """Model-specific voice identifier accepted by speech synthesis."""
+    name: str
+    """Human-readable voice name shown by clients."""
+    preferred_languages: tuple[str, ...] = ()
+    """Ordered BCP 47 language tags for which this voice is a preferred match."""
+
+    @field_validator("id", "name", mode="before")
+    @classmethod
+    def _normalize_voice_text(cls, value: object) -> str:
+        normalized = str(value).strip()
+        if not normalized:
+            raise ValueError("voice id and name must not be empty")
+        return normalized
+
+    @field_validator("preferred_languages", mode="before")
+    @classmethod
+    def _normalize_preferred_languages(cls, value: object) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, Iterable) or isinstance(value, (str, bytes)):
+            raise ValueError("preferred_languages must be a list of language tags")
+        languages = tuple(
+            str(item).strip().lower().replace("_", "-")
+            for item in cast("Iterable[object]", value)
+        )
+        if any(not language for language in languages):
+            raise ValueError("preferred_languages must not contain empty tags")
+        if len(set(languages)) != len(languages):
+            raise ValueError("preferred_languages must not contain duplicates")
+        return languages
 
 
 class AudioResponseFormat(str, Enum):
@@ -324,6 +360,8 @@ class AudioCardConfig(CamelCaseModel):
     """Whether the model can enumerate voices through a voice-listing API."""
     voices: tuple[str, ...] = ()
     """Stable built-in voice identifiers exposed by the model."""
+    voice_catalog: tuple[AudioVoiceConfig, ...] = ()
+    """Optional display and language metadata for every declared built-in voice."""
     default_voice: str | None = None
     """Built-in voice used when a TTS request omits an explicit voice."""
     supports_reference_audio: bool | None = None
@@ -408,6 +446,20 @@ class AudioCardConfig(CamelCaseModel):
     def _serialize_voices(self, value: tuple[str, ...]) -> list[str]:
         return list(value)
 
+    @field_validator("voice_catalog", mode="before")
+    @classmethod
+    def _coerce_voice_catalog(cls, value: object) -> tuple[AudioVoiceConfig, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, Iterable) or isinstance(value, (str, bytes)):
+            raise ValueError("voice_catalog must be a list of voice metadata")
+        return tuple(
+            item
+            if isinstance(item, AudioVoiceConfig)
+            else AudioVoiceConfig.model_validate(item)
+            for item in cast("Iterable[object]", value)
+        )
+
     @model_validator(mode="after")
     def _validate_audio_metadata_consistency(self) -> "AudioCardConfig":
         if (
@@ -427,6 +479,14 @@ class AudioCardConfig(CamelCaseModel):
             raise ValueError("voices requires kind to be tts")
         if self.voices and self.supports_voice_listing is not True:
             raise ValueError("voices requires supports_voice_listing=true")
+        if self.supports_voice_listing is True and not self.voices:
+            raise ValueError("supports_voice_listing=true requires voices")
+        if self.voice_catalog:
+            catalog_ids = tuple(voice.id for voice in self.voice_catalog)
+            if catalog_ids != self.voices:
+                raise ValueError(
+                    "voice_catalog ids must match voices exactly and preserve order"
+                )
         if self.default_voice is not None and self.default_voice not in self.voices:
             raise ValueError("default_voice must be included in voices")
         return self

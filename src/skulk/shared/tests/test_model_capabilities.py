@@ -9,6 +9,7 @@ from skulk.shared.models.model_cards import (
     AudioCardConfig,
     AudioCardKind,
     AudioResponseFormat,
+    AudioVoiceConfig,
     BuiltinToolType,
     ModalitiesCardConfig,
     ModelCard,
@@ -98,6 +99,7 @@ def test_resolve_model_capability_profile_exposes_tts_audio_metadata() -> None:
             supports_streaming=True,
             supports_realtime=True,
             supports_voice_listing=True,
+            voices=("alloy",),
             sample_rates=(24000,),
         ),
     )
@@ -186,12 +188,27 @@ def test_audio_card_config_validates_static_voice_catalog() -> None:
         kind=AudioCardKind.TextToSpeech,
         supports_voice_listing=True,
         voices=("alloy", "coral"),
+        voice_catalog=(
+            AudioVoiceConfig(
+                id="alloy",
+                name="Alloy",
+                preferred_languages=("en-US",),
+            ),
+            AudioVoiceConfig(id="coral", name="Coral"),
+        ),
     )
 
     assert config.voices == ("alloy", "coral")
+    assert config.voice_catalog[0].preferred_languages == ("en-us",)
 
     with pytest.raises(ValidationError, match="supports_voice_listing"):
         AudioCardConfig(kind=AudioCardKind.TextToSpeech, voices=("alloy",))
+
+    with pytest.raises(ValidationError, match="requires voices"):
+        AudioCardConfig(
+            kind=AudioCardKind.TextToSpeech,
+            supports_voice_listing=True,
+        )
 
     with pytest.raises(ValidationError, match="default_voice"):
         AudioCardConfig(
@@ -206,6 +223,14 @@ def test_audio_card_config_validates_static_voice_catalog() -> None:
             kind=AudioCardKind.TextToSpeech,
             supports_voice_listing=True,
             voices=("alloy", "alloy"),
+        )
+
+    with pytest.raises(ValidationError, match="must match voices exactly"):
+        AudioCardConfig(
+            kind=AudioCardKind.TextToSpeech,
+            supports_voice_listing=True,
+            voices=("alloy",),
+            voice_catalog=(AudioVoiceConfig(id="coral", name="Coral"),),
         )
 
 
