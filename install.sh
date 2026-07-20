@@ -259,6 +259,11 @@ if [[ ! -f skulk.yaml ]]; then
 # the docs).
 model_store:
   store_host: "$(hostname -s)"
+  # Loopback keeps the single-node client working even when the short
+  # hostname is not locally resolvable; on the store host, skulk replaces a
+  # loopback literal with its best routable IPv4 before broadcasting to
+  # peers, so this stays correct if the node later joins a cluster.
+  store_http_host: "127.0.0.1"
   store_path: "$STORE_PATH"
 EOF
     log "wrote skulk.yaml: single-node model store at $STORE_PATH"
