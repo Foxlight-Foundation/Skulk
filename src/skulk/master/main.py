@@ -1751,9 +1751,25 @@ class Master:
                         type(local_event.event),
                         now=time.monotonic(),
                     ):
+                        # Envelope events (NodeGatheredInfo and friends) all
+                        # share one event name; without the payload type the
+                        # warning cannot identify WHICH reading keeps landing
+                        # on the wrong plane (#633).
+                        rejected = local_event.event
+                        payload: object | None = None
+                        if isinstance(rejected, NodeGatheredInfo):
+                            payload = rejected.info
+                        elif isinstance(rejected, NodeDownloadProgress):
+                            payload = rejected.download_progress
+                        payload_note = (
+                            f" carrying {type(payload).__name__}"
+                            if payload is not None
+                            else ""
+                        )
                         logger.warning(
                             "Rejected non-control event before ordering/indexing: "
-                            f"{type(local_event.event).__name__}"
+                            f"{type(local_event.event).__name__}{payload_note} "
+                            f"from {local_event.origin}"
                         )
                     self._multi_buffer.skip(
                         local_event.origin_idx, local_event.origin
