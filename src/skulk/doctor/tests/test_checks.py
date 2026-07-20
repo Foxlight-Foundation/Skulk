@@ -119,9 +119,10 @@ def test_engine_available_flags_cpu_only_dormant_on_gpu_node(
         "skulk.facts.probe.probe_llama_server_devices", _probe_cpu_only
     )
     results = _check_engine_available(make_facts(gpus=(NVIDIA_A40,)))
-    assert [r.verdict for r in results] == ["ok"]
-    assert "startup will flag" in results[0].detail
-    assert "fraction of hardware speed" in results[0].detail
+    assert [r.verdict for r in results] == ["ok", "fail"]
+    assert "gpu_serving_disabled" in results[1].title
+    assert "fraction of hardware speed" in results[1].detail
+    assert results[1].remediation != ""
 
 
 def test_engine_available_ok_with_served_binary() -> None:

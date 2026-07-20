@@ -191,19 +191,37 @@ def _check_engine_available(facts: NodeFacts) -> Sequence[CheckResult]:
         if "llama_server" in replay.backends:
             # Derivation can advertise the engine AND raise conflicts (the
             # #609 cpu-only-on-GPU shape keeps llama_server-cpu with an
-            # error-level gpu_serving_disabled); those stay visible here
-            # because the capability-conflicts check reads the unwired facts
-            # and cannot see them before startup.
-            flagged = "; ".join(c.message for c in replay.conflicts)
-            return [
+            # error-level gpu_serving_disabled). The capability-conflicts
+            # check reads the unwired facts and cannot see them before
+            # startup, so each replayed conflict becomes its own verdict here
+            # with the same error->fail mapping; the audit's exit code then
+            # matches what startup will flag instead of reading healthy.
+            results = [
                 _ok(
                     check_id,
                     title,
                     f"llama_server ({dormant}) is installed and wires "
-                    "automatically at node startup"
-                    + (f" (startup will flag: {flagged})" if flagged else ""),
+                    "automatically at node startup",
                 )
             ]
+            for conflict in replay.conflicts:
+                conflict_verdict: CheckVerdict = (
+                    "fail" if conflict.code in CONFLICT_ERROR_CODES else "degraded"
+                )
+                results.append(
+                    CheckResult(
+                        check_id=check_id,
+                        title=f"Startup capability conflict: {conflict.code}",
+                        verdict=conflict_verdict,
+                        detail=conflict.message,
+                        consequence=(
+                            "node startup will wire this engine and raise "
+                            "this conflict into nodeHealth"
+                        ),
+                        remediation=conflict.remediation,
+                    )
+                )
+            return results
         reason = "; ".join(c.message for c in replay.conflicts) or (
             "the binary derives no usable backend on this hardware"
         )
