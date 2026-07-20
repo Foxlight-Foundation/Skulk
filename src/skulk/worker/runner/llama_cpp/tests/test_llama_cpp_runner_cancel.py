@@ -9,14 +9,19 @@ and the task ends ``Cancelled`` rather than ``Complete``. A request that is not
 cancelled still emits exactly one terminal chunk and completes.
 """
 
-from types import SimpleNamespace
+import sys
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
+import pytest
 from anyio import WouldBlock
 
+from skulk.shared.models.model_cards import ModelCard, ModelTask
 from skulk.shared.types.common import CommandId, ModelId, NodeId
 from skulk.shared.types.events import ChunkGenerated, Event, TaskStatusUpdated
-from skulk.shared.types.tasks import TaskStatus, TextGeneration
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.tasks import LoadModel, TaskStatus, TextGeneration
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.shared.types.worker.instances import InstanceId
 from skulk.shared.types.worker.runners import RunnerId, RunnerReady
@@ -63,12 +68,21 @@ class _CancelReceiver:
 
 def _make_runner(cancel: _CancelReceiver) -> tuple[Runner, _CaptureSender]:
     sender = _CaptureSender()
+    card = ModelCard(
+        model_id=ModelId("some/gguf-model"),
+        storage_size=Memory.from_bytes(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="model.gguf",
+    )
     bound = SimpleNamespace(
         instance=SimpleNamespace(),
         bound_runner_id=RunnerId("r1"),
         bound_shard=SimpleNamespace(
             world_size=1,
-            model_card=SimpleNamespace(model_id=ModelId("some/gguf-model")),
+            model_card=card,
             device_rank=0,
         ),
         bound_node_id=NodeId("n1"),
@@ -80,6 +94,36 @@ def _make_runner(cancel: _CancelReceiver) -> tuple[Runner, _CaptureSender]:
         cancel_receiver=cast("object", cancel),  # pyright: ignore[reportArgumentType]
     )
     return runner, sender
+
+
+def test_load_model_explicitly_disables_full_swa_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Dependency defaults must not expand SWA beyond admission's estimate."""
+    from skulk.download import download_utils
+    from skulk.shared.models.memory_estimate import LLAMA_CPP_FULL_SWA_CACHE
+
+    captured: dict[str, object] = {}
+
+    class _FakeLlama:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    fake_module = ModuleType("llama_cpp")
+    monkeypatch.setattr(fake_module, "Llama", _FakeLlama, raising=False)
+    monkeypatch.setitem(sys.modules, "llama_cpp", fake_module)
+
+    def _model_path(*_args: object) -> Path:
+        return tmp_path
+
+    monkeypatch.setattr(download_utils, "build_model_path", _model_path)
+    (tmp_path / "model.gguf").touch()
+
+    runner, _sender = _make_runner(_CancelReceiver())
+    runner._load_model(LoadModel(instance_id=InstanceId("i1")))
+
+    assert LLAMA_CPP_FULL_SWA_CACHE is False
+    assert captured["swa_full"] is LLAMA_CPP_FULL_SWA_CACHE
 
 
 def _tool_task() -> TextGeneration:
