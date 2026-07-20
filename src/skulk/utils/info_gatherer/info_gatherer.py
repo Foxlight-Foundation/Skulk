@@ -615,10 +615,12 @@ class InfoGatherer:
                 tg.start_soon(self._monitor_disk_usage)
                 tg.start_soon(self._monitor_capabilities)
                 tg.start_soon(self._monitor_heartbeat)
-
-                nc = await NodeConfig.gather()
-                if nc is not None:
-                    await self.info_sender.send(nc)
+                # NodeConfig is deliberately NOT sent: it is neither a
+                # telemetry-plane reading nor a durable control event, so the
+                # master rejects it before ordering and nothing consumes it
+                # (apply() no-ops it). Sending it only produced a guaranteed
+                # rejected-event warning at every startup (#633). The type
+                # stays in the GatheredInfo union for wire decode.
         except BaseExceptionGroup as exception_group:
             # A closed/broken info channel means our consumer is gone — the
             # worker is shutting down or being replaced on a master
