@@ -25,6 +25,15 @@ const ttsModel: ChatSpeechModelOption = {
   responseFormats: ['mp3', 'wav'],
 };
 
+const referenceTtsModel: ChatSpeechModelOption = {
+  modelId: 'mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit',
+  label: 'Qwen3-TTS-Base-4bit',
+  defaultResponseFormat: 'mp3',
+  responseFormats: ['mp3', 'pcm'],
+  supportsStreaming: true,
+  supportsReferenceAudio: true,
+};
+
 const meta: Meta<typeof ChatForm> = {
   title: 'Chat/ChatForm',
   component: ChatForm,
@@ -115,6 +124,20 @@ export const PlaybackActive: Story = {
     selectedSpeechModelId: ttsModel.modelId,
     isSpeaking: true,
     onStopSpeaking: () => console.log('Stop speech'),
+  },
+};
+
+export const ReferenceAudio: Story = {
+  args: {
+    onSend: () => {},
+    canSendMessages: false,
+    speechModels: [referenceTtsModel],
+    selectedSpeechModelId: referenceTtsModel.modelId,
+    referenceAudioFile: new File(['RIFF-reference'], 'speaker.wav', { type: 'audio/wav' }),
+    referenceAudioText: 'A short transcript of the reference clip.',
+    onReferenceAudioChange: () => {},
+    onReferenceAudioTextChange: () => {},
+    onSpeakText: (text) => console.log('Speak with reference:', text),
   },
 };
 

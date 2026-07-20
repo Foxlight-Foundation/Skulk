@@ -31,6 +31,8 @@ export interface ChatSpeechModelOption {
   supportsStreaming?: boolean;
   /** Whether the model truthfully supports progressive realtime transcription. */
   supportsRealtime?: boolean;
+  /** Whether the model accepts request-scoped reference audio for voice conditioning. */
+  supportsReferenceAudio?: boolean;
 }
 
 /** One stable voice returned by the mounted model's discovery endpoint. */
