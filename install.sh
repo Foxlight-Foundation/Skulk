@@ -137,6 +137,26 @@ else
 fi
 cd "$INSTALL_DIR"
 
+# --- filesystem sanity -------------------------------------------------------
+
+# Network filesystems break uv's installer mid-sync ('Stale file handle',
+# reproduced on RunPod's /workspace MooseFS volume, #627) and are slow homes
+# for a venv regardless. Refuse loudly with the fix instead of failing
+# cryptically minutes later; SKULK_INSTALL_ALLOW_NETWORK_FS=1 overrides for
+# network mounts known to behave.
+if [[ "$OS" == "Linux" ]] && command -v findmnt >/dev/null 2>&1; then
+    FS_TYPE="$(findmnt -n -o FSTYPE --target "$INSTALL_DIR" 2>/dev/null || true)"
+    case "$FS_TYPE" in
+        nfs|nfs4|cifs|smb3|9p|lustre|ceph|glusterfs|fuse.*|moosefs|mfs)
+            if [[ "${SKULK_INSTALL_ALLOW_NETWORK_FS:-}" == "1" ]]; then
+                warn "installing on a network filesystem ($FS_TYPE) because SKULK_INSTALL_ALLOW_NETWORK_FS=1; uv sync may fail with stale file handles"
+            else
+                die "install directory $INSTALL_DIR sits on a network filesystem ($FS_TYPE), which breaks uv's installer (stale file handles) and slows the node. Re-run with --dir on a local disk (container/cloud boxes: e.g. --dir \$HOME/skulk on the container disk, not /workspace), or set SKULK_INSTALL_ALLOW_NETWORK_FS=1 to proceed anyway."
+            fi
+            ;;
+    esac
+fi
+
 # --- environment -----------------------------------------------------------
 
 # An existing-but-old uv rejects this project's configuration; upgrade it to
