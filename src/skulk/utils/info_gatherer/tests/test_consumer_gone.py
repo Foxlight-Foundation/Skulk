@@ -65,18 +65,20 @@ async def test_consumer_closing_mid_run_stops_cleanly():
 
 
 async def test_real_errors_still_propagate(monkeypatch: pytest.MonkeyPatch):
-    # The consumer-gone handling must not swallow genuine faults. The fault
-    # is injected through the static-info monitor (the one-shot NodeConfig
-    # send this test originally used no longer exists, #633).
+    # The consumer-gone handling must not swallow genuine faults. Monitor
+    # LOOPS deliberately catch per-iteration gather errors, so the fault is
+    # injected at the task level: a monitor coroutine that dies outright,
+    # which is exactly what run()'s group handling must re-raise (the
+    # one-shot NodeConfig send this test originally rode was removed in
+    # #633).
     from skulk.utils.info_gatherer import info_gatherer as module
 
-    async def explode():
+    async def explode(self: InfoGatherer) -> None:
         raise ValueError("genuine gatherer fault")
 
-    monkeypatch.setattr(module.StaticNodeInformation, "gather", explode)
+    monkeypatch.setattr(module.InfoGatherer, "_monitor_static_info", explode)
     info_send, _info_recv = channel[GatheredInfo]()
     gatherer = _quiet_gatherer(info_send)
-    gatherer.static_info_poll_interval = 0.05
     with pytest.raises(BaseExceptionGroup) as exc_info:
         with anyio.fail_after(30):
             await gatherer.run()
