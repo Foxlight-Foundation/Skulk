@@ -91,6 +91,14 @@ Make sure:
 
 The store server uses port `58080` by default.
 
+:::note Fresh installs
+`install.sh` writes a `skulk.yaml` with single-node store defaults (this
+host as its own store host, storing under `~/.skulk/model-store`) when no
+config exists, so the store API works out of the box. When you join several
+such nodes into one cluster, designate exactly ONE store host and point
+every node's `store_host` at it.
+:::
+
 ## Recommended Setup: Dashboard First
 
 This is the simplest path for most people.
