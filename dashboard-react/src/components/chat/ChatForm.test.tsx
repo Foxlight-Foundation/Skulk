@@ -207,6 +207,7 @@ describe('ChatForm speech controls', () => {
       await userEvent.upload(input!, replacement);
     });
     expect(onReferenceAudioChange).toHaveBeenLastCalledWith(replacement);
+    expect(onReferenceAudioTextChange).toHaveBeenLastCalledWith('');
   });
 
   it('hides reference-audio controls for TTS models without the capability', async () => {

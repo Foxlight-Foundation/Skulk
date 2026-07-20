@@ -556,7 +556,7 @@ export function ChatForm({
     }
     setMediaError(null);
     onReferenceAudioChange?.(file);
-    if (!file) onReferenceAudioTextChange?.('');
+    onReferenceAudioTextChange?.('');
   }, [onReferenceAudioChange, onReferenceAudioTextChange, t]);
 
   // Auto-resize textarea
