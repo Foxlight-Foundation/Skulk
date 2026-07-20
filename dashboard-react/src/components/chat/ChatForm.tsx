@@ -13,6 +13,7 @@ import {
   RealtimeTranscriptionSocket,
   selectTranscriptionCaptureMode,
 } from '../../audio/realtimeTranscription';
+import { MAX_REFERENCE_AUDIO_BYTES } from '../../audio/speechSynthesisRequest';
 
 export interface ChatFormProps {
   onSend: (message: string, files: ChatUploadedFile[]) => void;
@@ -55,6 +56,10 @@ export interface ChatFormProps {
   voiceOptions?: ChatVoiceOption[];
   /** Whether the selected model's voice catalog is still loading. */
   isVoiceCatalogLoading?: boolean;
+  /** Request-scoped reference clip used to condition dashboard TTS playback. */
+  referenceAudioFile?: File | null;
+  /** Optional transcript paired with the request-scoped reference clip. */
+  referenceAudioText?: string;
   /** Whether final assistant messages should be spoken automatically. */
   autoSpeakAssistant?: boolean;
   /** Enable a persistent server-VAD conversation instead of push-to-transcribe. */
@@ -73,6 +78,10 @@ export interface ChatFormProps {
   onSelectSpeechModel?: (modelId: string | null) => void;
   /** Persist the optional model-specific voice or preset. */
   onSelectedVoiceChange?: (voice: string | null) => void;
+  /** Select or clear the request-scoped reference clip. */
+  onReferenceAudioChange?: (file: File | null) => void;
+  /** Update the optional transcript for the request-scoped reference clip. */
+  onReferenceAudioTextChange?: (text: string) => void;
   /** Toggle automatic TTS playback for final assistant messages. */
   onAutoSpeakAssistantChange?: (enabled: boolean) => void;
   onRealtimeVoiceEnabledChange?: (enabled: boolean) => void;
@@ -149,6 +158,10 @@ const VoiceGroup = styled.div`
   min-width: 0;
 `;
 
+const ReferenceAudioGroup = styled(VoiceGroup)`
+  flex-wrap: wrap;
+`;
+
 const VoiceLabel = styled.span`
   color: ${({ theme }) => theme.colors.textMuted};
   font-size: ${({ theme }) => theme.fontSizes.xs};
@@ -201,6 +214,18 @@ const VoiceInput = styled.input`
   &::placeholder {
     color: ${({ theme }) => theme.colors.textMuted};
   }
+`;
+
+const ReferenceTextInput = styled(VoiceInput)`
+  width: 156px;
+`;
+
+const ReferenceAudioName = styled.span`
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: ${({ theme }) => theme.colors.textSecondary};
 `;
 
 const VoiceToggle = styled.button<{ $active: boolean }>`
@@ -407,6 +432,8 @@ export function ChatForm({
   selectedVoice = null,
   voiceOptions = [],
   isVoiceCatalogLoading = false,
+  referenceAudioFile = null,
+  referenceAudioText = '',
   autoSpeakAssistant = false,
   realtimeVoiceEnabled = true,
   autoSubmitVoice = false,
@@ -416,6 +443,8 @@ export function ChatForm({
   onSelectTranscriptionModel,
   onSelectSpeechModel,
   onSelectedVoiceChange,
+  onReferenceAudioChange,
+  onReferenceAudioTextChange,
   onAutoSpeakAssistantChange,
   onRealtimeVoiceEnabledChange,
   onAutoSubmitVoiceChange,
@@ -438,6 +467,7 @@ export function ChatForm({
   const [mediaError, setMediaError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const referenceAudioInputRef = useRef<HTMLInputElement>(null);
   const filesRef = useRef<ChatUploadedFile[]>([]);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -515,6 +545,19 @@ export function ChatForm({
   const recordingButtonLabel = transcriptionReady && recordingUnavailableReason
     ? `${startRecordingLabel}. ${recordingUnavailableReason}`
     : startRecordingLabel;
+
+  const selectReferenceAudio = useCallback((file: File | null) => {
+    if (file && file.size > MAX_REFERENCE_AUDIO_BYTES) {
+      setMediaError(t(
+        'chat.form.voiceErrors.referenceAudioTooLarge',
+        'Reference audio must be 25 MiB or smaller.',
+      ));
+      return;
+    }
+    setMediaError(null);
+    onReferenceAudioChange?.(file);
+    if (!file) onReferenceAudioTextChange?.('');
+  }, [onReferenceAudioChange, onReferenceAudioTextChange, t]);
 
   // Auto-resize textarea
   const resize = useCallback(() => {
@@ -1260,6 +1303,62 @@ export function ChatForm({
               </VoiceIconBtn>
             )}
           </VoiceGroup>
+
+          {selectedSpeechModel?.supportsReferenceAudio && (
+            <ReferenceAudioGroup>
+              <VoiceLabel>{t('chat.form.referenceLabel', 'Reference')}</VoiceLabel>
+              <VoiceIconBtn
+                variant="ghost"
+                size="sm"
+                icon
+                type="button"
+                disabled={isLoading || isSpeaking}
+                onClick={() => referenceAudioInputRef.current?.click()}
+                aria-label={t('chat.form.chooseReferenceAudio', 'Choose reference audio')}
+                title={t('chat.form.chooseReferenceAudio', 'Choose reference audio')}
+                $active={Boolean(referenceAudioFile)}
+              >
+                <FiPaperclip size={15} />
+              </VoiceIconBtn>
+              <input
+                ref={referenceAudioInputRef}
+                type="file"
+                accept="audio/*"
+                style={{ display: 'none' }}
+                aria-label={t('chat.form.referenceAudioFile', 'Reference audio file')}
+                onChange={(event) => {
+                  selectReferenceAudio(event.target.files?.[0] ?? null);
+                  event.target.value = '';
+                }}
+              />
+              {referenceAudioFile && (
+                <>
+                  <ReferenceAudioName title={referenceAudioFile.name}>
+                    {referenceAudioFile.name}
+                  </ReferenceAudioName>
+                  <VoiceIconBtn
+                    variant="ghost"
+                    size="sm"
+                    icon
+                    type="button"
+                    disabled={isLoading || isSpeaking}
+                    onClick={() => selectReferenceAudio(null)}
+                    aria-label={t('chat.form.removeReferenceAudio', 'Remove reference audio')}
+                    title={t('chat.form.removeReferenceAudio', 'Remove reference audio')}
+                  >
+                    <FiX size={14} />
+                  </VoiceIconBtn>
+                  <ReferenceTextInput
+                    value={referenceAudioText}
+                    disabled={isLoading || isSpeaking}
+                    onChange={(event) => onReferenceAudioTextChange?.(event.target.value)}
+                    placeholder={t('chat.form.referenceTranscriptPlaceholder', 'reference transcript')}
+                    aria-label={t('chat.form.referenceTranscript', 'Reference transcript')}
+                  />
+                </>
+              )}
+            </ReferenceAudioGroup>
+          )}
 
           {displayVoiceError && <VoiceStatus $error>{displayVoiceError}</VoiceStatus>}
         </VoiceRow>

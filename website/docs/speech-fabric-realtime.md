@@ -74,6 +74,13 @@ memory on the serving worker, and the runner deletes its request-scoped
 temporary file after generation. The API rejects reference uploads when Zenoh
 is unavailable instead of broadcasting private media through gossipsub.
 
+The dashboard shows a reference-audio picker only when the selected mounted TTS
+card declares this capability. The optional transcript and selected browser
+`File` stay local until synthesis; the dashboard sends them as multipart form
+data and reuses the same clip for every sentence-sized request in one response.
+Changing TTS models clears the selection, and the browser never turns the clip
+into a persistent voice profile.
+
 `WS /v1/realtime?model=<model-id>` accepts OpenAI-style base64 PCM16 append and
 commit events over a WebSocket. It emits transcript delta, final, and failure
 events from the mounted realtime STT model. An optional response configuration

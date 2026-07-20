@@ -425,6 +425,11 @@ event log. The worker verifies ordered chunks and a terminal digest in bounded
 process-local memory, the runner materializes a request-scoped temporary file
 for the upstream library and deletes it in a `finally` block, and cancellation,
 transport failure, malformed input, and expiry all clear pending media.
+The dashboard exposes this upload only for a selected TTS card declaring the
+capability, keeps the clip browser-local until synthesis, and reuses the same
+request-scoped `File` for all sentence segments in one response. Selecting a
+different TTS model clears the clip; persistent custom voices remain a separate
+resource and lifecycle.
 
 The same core path also backs the first-party `tts@1.0.0` capability provider
 (see [Extensions](#extensions-plugins)): a generic provider call becomes the

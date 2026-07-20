@@ -154,4 +154,74 @@ describe('ChatForm speech controls', () => {
     });
     expect(onSelectedVoiceChange).toHaveBeenCalledWith('ryan');
   });
+
+  it('exposes request-scoped reference audio only for a supporting TTS model', async () => {
+    const onReferenceAudioChange = vi.fn();
+    const onReferenceAudioTextChange = vi.fn();
+    const referenceAudio = new File(['RIFF-reference'], 'speaker.wav', {
+      type: 'audio/wav',
+    });
+    const speechModel: ChatSpeechModelOption = {
+      modelId: 'org/reference-tts',
+      label: 'Reference TTS',
+      responseFormats: ['mp3'],
+      supportsReferenceAudio: true,
+    };
+
+    await renderChatForm({
+      onSend: vi.fn(),
+      speechModels: [speechModel],
+      selectedSpeechModelId: speechModel.modelId,
+      referenceAudioFile: referenceAudio,
+      referenceAudioText: 'Known transcript',
+      onReferenceAudioChange,
+      onReferenceAudioTextChange,
+    });
+
+    expect(container?.textContent).toContain('speaker.wav');
+    const transcript = container?.querySelector<HTMLInputElement>(
+      '[aria-label="Reference transcript"]',
+    );
+    expect(transcript?.value).toBe('Known transcript');
+    await act(async () => {
+      await userEvent.fill(transcript!, 'Updated transcript');
+    });
+    expect(onReferenceAudioTextChange).toHaveBeenLastCalledWith('Updated transcript');
+
+    const remove = container?.querySelector<HTMLButtonElement>(
+      '[aria-label="Remove reference audio"]',
+    );
+    await act(async () => {
+      await userEvent.click(remove!);
+    });
+    expect(onReferenceAudioChange).toHaveBeenCalledWith(null);
+    expect(onReferenceAudioTextChange).toHaveBeenCalledWith('');
+
+    const input = container?.querySelector<HTMLInputElement>(
+      '[aria-label="Reference audio file"]',
+    );
+    const replacement = new File(['replacement'], 'replacement.wav', {
+      type: 'audio/wav',
+    });
+    await act(async () => {
+      await userEvent.upload(input!, replacement);
+    });
+    expect(onReferenceAudioChange).toHaveBeenLastCalledWith(replacement);
+  });
+
+  it('hides reference-audio controls for TTS models without the capability', async () => {
+    await renderChatForm({
+      onSend: vi.fn(),
+      speechModels: [{
+        modelId: 'org/fixed-voice-tts',
+        label: 'Fixed Voice TTS',
+        responseFormats: ['mp3'],
+        supportsReferenceAudio: false,
+      }],
+      selectedSpeechModelId: 'org/fixed-voice-tts',
+    });
+
+    expect(container?.querySelector('[aria-label="Choose reference audio"]')).toBeNull();
+    expect(container?.querySelector('[aria-label="Reference audio file"]')).toBeNull();
+  });
 });

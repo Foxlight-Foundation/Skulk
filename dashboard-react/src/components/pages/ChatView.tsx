@@ -28,6 +28,7 @@ import {
   createPinnedSpeechVoiceSelector,
   fetchSpeechVoiceCatalog,
 } from '../../audio/speechVoiceSelection';
+import { buildSpeechSynthesisRequest } from '../../audio/speechSynthesisRequest';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -223,6 +224,7 @@ function speechModelOption(modelId: string, model: ModelInfo | undefined): ChatS
     supportsVoiceListing: model?.audio?.supports_voice_listing ?? false,
     defaultVoice: model?.audio?.default_voice ?? null,
     supportsStreaming: model?.audio?.supports_streaming ?? false,
+    supportsReferenceAudio: model?.audio?.supports_reference_audio ?? false,
     supportsRealtime: Boolean(
       resolved?.supports_realtime_audio
         && model?.audio?.supports_streaming
@@ -625,6 +627,8 @@ export function ChatView({
   const [voiceCatalogError, setVoiceCatalogError] = useState<string | null>(null);
   const [voiceOptions, setVoiceOptions] = useState<ChatVoiceOption[]>([]);
   const [isVoiceCatalogLoading, setIsVoiceCatalogLoading] = useState(false);
+  const [referenceAudioFile, setReferenceAudioFile] = useState<File | null>(null);
+  const [referenceAudioText, setReferenceAudioText] = useState('');
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
   const [isAutoSpeaking, setIsAutoSpeaking] = useState(false);
   const audioPlaybackRef = useRef<HTMLAudioElement | null>(null);
@@ -823,6 +827,11 @@ export function ChatView({
   );
 
   useEffect(() => {
+    setReferenceAudioFile(null);
+    setReferenceAudioText('');
+  }, [selectedSpeechModelId, selectedSpeechOption?.supportsReferenceAudio]);
+
+  useEffect(() => {
     setVoiceOptions([]);
     setVoiceCatalogError(null);
     if (!selectedSpeechModelId || !selectedSpeechOption?.supportsVoiceListing) {
@@ -915,18 +924,19 @@ export function ChatView({
         'This speech model requires secure streaming audio playback in this browser.',
       ));
     }
-    const speechRequest = (format: AudioResponseFormat, stream: boolean) => fetch('/v1/audio/speech', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal,
-      body: JSON.stringify({
+    const speechRequest = (format: AudioResponseFormat, stream: boolean) => fetch(
+      '/v1/audio/speech',
+      buildSpeechSynthesisRequest({
         model: selectedSpeechModelId,
         input,
-        response_format: format,
-        ...(stream ? { stream: true } : {}),
-        ...(voice ? { voice } : {}),
+        responseFormat: format,
+        stream,
+        voice,
+        referenceAudio: referenceAudioFile,
+        referenceText: referenceAudioText,
+        signal,
       }),
-    });
+    );
     const initialFormat: AudioResponseFormat = useStreamingPcm
       ? 'pcm'
       : encodedFallbackFormat!;
@@ -985,7 +995,7 @@ export function ChatView({
       if (audioObjectUrlRef.current === objectUrl) audioObjectUrlRef.current = null;
       URL.revokeObjectURL(objectUrl);
     }
-  }, [selectedSpeechModelId, selectedSpeechOption, t]);
+  }, [referenceAudioFile, referenceAudioText, selectedSpeechModelId, selectedSpeechOption, t]);
 
   const speakText = useCallback(async (text: string, messageId: string | null = 'draft') => {
     const input = text.trim();
@@ -1662,6 +1672,8 @@ export function ChatView({
           selectedVoice={selectedVoice}
           voiceOptions={voiceOptions}
           isVoiceCatalogLoading={isVoiceCatalogLoading}
+          referenceAudioFile={referenceAudioFile}
+          referenceAudioText={referenceAudioText}
           autoSpeakAssistant={autoSpeakAssistant}
           realtimeVoiceEnabled={realtimeVoiceEnabled}
           autoSubmitVoice={autoSubmitVoice}
@@ -1671,6 +1683,8 @@ export function ChatView({
           onSelectTranscriptionModel={selectTranscriptionModel}
           onSelectSpeechModel={selectSpeechModel}
           onSelectedVoiceChange={setSelectedVoice}
+          onReferenceAudioChange={setReferenceAudioFile}
+          onReferenceAudioTextChange={setReferenceAudioText}
           onAutoSpeakAssistantChange={setAutoSpeakAssistant}
           onRealtimeVoiceEnabledChange={setRealtimeVoiceEnabled}
           onAutoSubmitVoiceChange={setAutoSubmitVoice}
