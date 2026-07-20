@@ -350,8 +350,15 @@ def test_dormant_matches_ensure_offline_adoption(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # Drift guard: the diagnostic answer must be the binary offline startup
-    # actually wires.
+    # actually wires. Hermetic against the developer/CI environment: a real
+    # installed engine wheel would outrank the provisioned tarball for BOTH
+    # functions, silently weakening the comparison (PR #634 review).
     _isolate_engines_dir(monkeypatch, tmp_path)
+
+    def _no_wheel(vendor: str, facts: object) -> tuple[Path, Path | None] | None:
+        return None
+
+    monkeypatch.setattr(provisioning, "wheel_llama_server", _no_wheel)
     _pin_fake_artifact(monkeypatch, _fake_archive())
     provisioned = provision_llama_server("vulkan")
     monkeypatch.delenv(provisioning.AUTOPROVISION_OPT_OUT_ENV, raising=False)
