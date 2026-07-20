@@ -1,0 +1,37 @@
+# Qwen2.5-1.5B-Instruct (official Qwen safetensors release, bf16) for the
+# vllm served engine (#630): the small smoke-test card of the vLLM starter
+# set, sized so any vLLM-capable GPU can place it. Qwen2.5 is an INSTRUCT
+# model, NOT a thinking model (no <think> mode before Qwen3); text-only, no
+# [reasoning] section. Tool calling is declared off: see the [tooling] note below.
+# context_length is the config.json max_position_embeddings (32768).
+# `supports_tensor = false`: vLLM runs single-node in Skulk. Architecture from
+# config.json (qwen2: 28 layers, hidden 1536, 2 KV heads, bf16). storage_size
+# is the full repo staging set (safetensors + tokenizer/config).
+model_id = "Qwen/Qwen2.5-1.5B-Instruct"
+n_layers = 28
+hidden_size = 1536
+num_key_value_heads = 2
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "qwen"
+quantization = "bf16"
+base_model = "Qwen2.5 1.5B Instruct"
+capabilities = ["text"]
+context_length = 32768
+trust_remote_code = false
+
+# PLATFORM truth override: Qwen2.5 the MODEL supports OpenAI tool calling
+# (the qwen family default would advertise it), but these cards serve
+# exclusively on the vllm engine, whose runner does not implement tool
+# dispatch yet (#638). Advertising tools here would promise a guaranteed
+# runtime error. Flip this back to the family default when the vllm runner
+# gains tool calling.
+[tooling]
+supports_tool_calling = false
+
+[placement]
+compatible_backends = ["vllm-cuda", "vllm-rocm"]
+backend_preference = ["vllm-cuda", "vllm-rocm"]
+
+[storage_size]
+in_bytes = 3098955668

@@ -31,9 +31,11 @@ _CARD_DIRS = {
 
 # Mirrors _ENGINES x _COMPUTE_BACKENDS in skulk.shared.backends. If an engine
 # or compute backend is added there, extend this and the assertions below.
-_VALID_TAGS = frozenset({"mlx", "mlx_audio", "llama_cpp", "llama_server"}) | frozenset(
+_VALID_TAGS = frozenset(
+    {"mlx", "mlx_audio", "llama_cpp", "llama_server", "vllm"}
+) | frozenset(
     f"{engine}-{compute}"
-    for engine in ("mlx", "mlx_audio", "llama_cpp", "llama_server")
+    for engine in ("mlx", "mlx_audio", "llama_cpp", "llama_server", "vllm")
     for compute in ("metal", "vulkan", "rocm", "cuda", "cpu")
 )
 
