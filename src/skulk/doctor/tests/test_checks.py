@@ -29,11 +29,100 @@ def test_engine_available_ok_on_darwin() -> None:
     assert "mlx" in results[0].detail
 
 
-def test_engine_available_fails_on_bare_linux() -> None:
+def test_engine_available_fails_on_bare_linux(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Hermetic: the dormant-engine lookup must not see a real managed install
+    # or wheel on the developer machine.
+    monkeypatch.setattr(
+        "skulk.provisioning.llama_server.SKULK_ENGINES_DIR", tmp_path
+    )
+
+    def _no_wheel(vendor: str, facts: NodeFacts) -> tuple[Path, Path | None] | None:
+        return None
+
+    monkeypatch.setattr(
+        "skulk.provisioning.llama_server.wheel_llama_server", _no_wheel
+    )
     results = _check_engine_available(make_facts())
     assert [r.verdict for r in results] == ["fail"]
     assert "management" in results[0].consequence
     assert results[0].remediation != ""
+
+
+def test_engine_available_ok_with_dormant_wheel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The #628 shape: engine wheel installed, no override exported yet. Plain
+    # doctor must report the engine that startup will wire, not FAIL.
+    shim = tmp_path / "llama-server-cuda"
+
+    def _dormant(facts: NodeFacts) -> Path:
+        return shim
+
+    monkeypatch.setattr("skulk.provisioning.dormant_llama_server", _dormant)
+
+    def _probe_ok(binary: str) -> object:
+        from skulk.shared.types.node_facts import LlamaServerDeviceProbe
+
+        return LlamaServerDeviceProbe(outcome="devices", computes=("cuda",))
+
+    monkeypatch.setattr(
+        "skulk.facts.probe.probe_llama_server_devices", _probe_ok
+    )
+    results = _check_engine_available(make_facts(gpus=(NVIDIA_A40,)))
+    assert [r.verdict for r in results] == ["ok"]
+    assert str(shim) in results[0].detail
+    assert "startup" in results[0].detail
+
+
+def test_engine_available_fails_when_dormant_engine_is_broken(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A shim whose runtime probe fails (dead Vulkan ICD, missing CUDA loader)
+    # would be disabled at startup; doctor must not claim it as available
+    # (PR #634 review). The nonexistent tmp path makes the real probe fail
+    # with a launch error, exercising the same outcome as a broken loader.
+    shim = tmp_path / "llama-server-vulkan"
+
+    def _dormant(facts: NodeFacts) -> Path:
+        return shim
+
+    monkeypatch.setattr("skulk.provisioning.dormant_llama_server", _dormant)
+    results = _check_engine_available(make_facts(gpus=(NVIDIA_A40,)))
+    assert [r.verdict for r in results] == ["fail"]
+    assert str(shim) in results[0].detail
+    assert "would be disabled at startup" in results[0].detail
+
+
+def test_engine_available_flags_cpu_only_dormant_on_gpu_node(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A CPU-only build on a GPU node: derivation ADVERTISES llama_server-cpu
+    # with an error-level gpu_serving_disabled conflict (#609), so the engine
+    # is available but the doctor detail must surface the conflict, because
+    # the capability-conflicts check reads unwired facts and cannot see it
+    # before startup (PR #634 review round 2).
+    shim = tmp_path / "llama-server-cpu"
+
+    def _dormant(facts: NodeFacts) -> Path:
+        return shim
+
+    monkeypatch.setattr("skulk.provisioning.dormant_llama_server", _dormant)
+
+    def _probe_cpu_only(binary: str) -> object:
+        from skulk.shared.types.node_facts import LlamaServerDeviceProbe
+
+        return LlamaServerDeviceProbe(outcome="devices", computes=())
+
+    monkeypatch.setattr(
+        "skulk.facts.probe.probe_llama_server_devices", _probe_cpu_only
+    )
+    results = _check_engine_available(make_facts(gpus=(NVIDIA_A40,)))
+    assert [r.verdict for r in results] == ["ok", "fail"]
+    assert "gpu_serving_disabled" in results[1].title
+    assert "fraction of hardware speed" in results[1].detail
+    assert results[1].remediation != ""
 
 
 def test_engine_available_ok_with_served_binary() -> None:

@@ -326,6 +326,86 @@ def test_tarball_fallback_when_no_wheel_installed(
     assert "vulkan" in str(wired)
 
 
+def test_dormant_reports_wheel_without_wiring(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The read-only diagnostics twin (#628): reports the shim startup would
+    # adopt, but never exports environment.
+    _isolate_engines_dir(monkeypatch, tmp_path)
+    shim = _fake_wheel(tmp_path, "llama-server-cuda")
+
+    def _fake_lookup(
+        vendor: str, facts: object
+    ) -> tuple[Path, Path | None] | None:
+        return (shim, None) if vendor == "nvidia" else None
+
+    monkeypatch.setattr(provisioning, "wheel_llama_server", _fake_lookup)
+    monkeypatch.delenv(provisioning.AUTOPROVISION_OPT_OUT_ENV, raising=False)
+    monkeypatch.delenv(LLAMA_SERVER_BIN_ENV, raising=False)
+    assert provisioning.dormant_llama_server(make_facts(gpus=(NVIDIA_A40,))) == shim
+    assert LLAMA_SERVER_BIN_ENV not in os.environ
+
+
+def test_dormant_matches_ensure_offline_adoption(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Drift guard: the diagnostic answer must be the binary offline startup
+    # actually wires. Hermetic against the developer/CI environment: a real
+    # installed engine wheel would outrank the provisioned tarball for BOTH
+    # functions, silently weakening the comparison (PR #634 review).
+    _isolate_engines_dir(monkeypatch, tmp_path)
+
+    def _no_wheel(vendor: str, facts: object) -> tuple[Path, Path | None] | None:
+        return None
+
+    monkeypatch.setattr(provisioning, "wheel_llama_server", _no_wheel)
+    _pin_fake_artifact(monkeypatch, _fake_archive())
+    provisioned = provision_llama_server("vulkan")
+    monkeypatch.delenv(provisioning.AUTOPROVISION_OPT_OUT_ENV, raising=False)
+    monkeypatch.delenv(LLAMA_SERVER_BIN_ENV, raising=False)
+    facts = make_facts(gpus=(NVIDIA_A40,))
+    dormant = provisioning.dormant_llama_server(facts)
+    assert dormant == provisioned
+    assert LLAMA_SERVER_BIN_ENV not in os.environ
+    wired = ensure_llama_server(facts, allow_download=False)
+    assert wired == dormant
+
+
+def test_dormant_honors_override_and_opt_out(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolate_engines_dir(monkeypatch, tmp_path)
+    shim = _fake_wheel(tmp_path, "llama-server-cuda")
+
+    def _cuda_wheel(
+        vendor: str, facts: object
+    ) -> tuple[Path, Path | None] | None:
+        return (shim, None)
+
+    monkeypatch.setattr(provisioning, "wheel_llama_server", _cuda_wheel)
+    # Explicit override wins: nothing dormant to report.
+    override_facts = make_facts(
+        gpus=(NVIDIA_A40,), llama_server_bin=ok_bin(LLAMA_SERVER_BIN_ENV)
+    )
+    assert provisioning.dormant_llama_server(override_facts) is None
+    # Opt-out disables adoption, so the diagnostic must not promise it.
+    monkeypatch.setenv(provisioning.AUTOPROVISION_OPT_OUT_ENV, "1")
+    assert provisioning.dormant_llama_server(make_facts(gpus=(NVIDIA_A40,))) is None
+
+
+def test_dormant_none_when_nothing_on_disk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolate_engines_dir(monkeypatch, tmp_path)
+
+    def _no_wheel(vendor: str, facts: object) -> tuple[Path, Path | None] | None:
+        return None
+
+    monkeypatch.setattr(provisioning, "wheel_llama_server", _no_wheel)
+    monkeypatch.delenv(provisioning.AUTOPROVISION_OPT_OUT_ENV, raising=False)
+    assert provisioning.dormant_llama_server(make_facts(gpus=(NVIDIA_A40,))) is None
+
+
 def test_cuda_capability_gate() -> None:
     # The CUDA wheel is compiled for SM >= 8.0: a T4 (7.5) or a
     # capability-unknown NVML-degraded GPU must not select it (it would fail

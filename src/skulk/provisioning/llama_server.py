@@ -325,6 +325,51 @@ def _binary_in(target_dir: Path) -> Path | None:
     return None
 
 
+def dormant_llama_server(facts: NodeFacts) -> Path | None:
+    """The managed llama-server that node startup would wire, without wiring it.
+
+    Read-only twin of :func:`ensure_llama_server`'s no-network paths, for
+    diagnostics: ``skulk doctor`` without ``--fix`` must not export
+    environment variables or download anything, but it also must not report
+    an engine-less node when startup will wire an already-installed managed
+    engine (#628). Same gates and the same preference order (engine wheel
+    shim first, then an already-provisioned managed install on disk); no
+    environment mutation, no network.
+
+    Args:
+        facts: The current facts snapshot (decides applicability and variant).
+
+    Returns:
+        The managed binary startup would adopt, or ``None`` when nothing on
+        disk would wire (override present, opted out, non-Linux, or no
+        installed wheel/build).
+    """
+    if os.environ.get(AUTOPROVISION_OPT_OUT_ENV, "").strip() == "1":
+        return None
+    if facts.llama_server_binary.state != "not_configured":
+        return None
+    if not select_variant_chain(facts):
+        return None
+    vendor = (
+        "nvidia"
+        if facts.gpus_of("nvidia")
+        else "amd"
+        if facts.gpus_of("amd")
+        else None
+    )
+    if vendor is not None:
+        wheel = wheel_llama_server(vendor, facts)
+        if wheel is not None:
+            return wheel[0]
+    for variant in select_variant_chain(facts):
+        existing = _binary_in(
+            SKULK_ENGINES_DIR / "llama-server" / LLAMA_SERVER_PIN / variant
+        )
+        if existing is not None and os.access(existing, os.X_OK):
+            return existing
+    return None
+
+
 def ensure_llama_server(
     facts: NodeFacts, *, allow_download: bool = True
 ) -> Path | None:

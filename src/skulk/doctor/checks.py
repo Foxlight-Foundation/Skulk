@@ -157,12 +157,85 @@ def _check_engine_available(facts: NodeFacts) -> Sequence[CheckResult]:
         engines.append(f"vllm ({facts.vllm_binary.configured_path})")
     if engines:
         return [_ok(check_id, title, "available: " + ", ".join(engines))]
+    # A wheel-provisioned or previously provisioned managed engine derives no
+    # tags until node startup exports its path; without this read-only lookup
+    # plain doctor reports FAIL on exactly the box the installer just set up
+    # (#628). --fix and startup share the same discovery via
+    # ensure_llama_server. The candidate is judged by REPLAYING the real
+    # derivation over a hypothetical facts snapshot with the binary wired:
+    # any candidate startup would disable (failed device probe from a dead
+    # Vulkan ICD or missing CUDA loader, a CPU-only build on a GPU node's
+    # gpu_serving_disabled, ...) must not read as available, or #628's false
+    # negative becomes a false positive (PR #634 review, both rounds).
+    from skulk.facts.probe import probe_llama_server_devices
+    from skulk.provisioning import dormant_llama_server
+    from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
+    from skulk.shared.types.node_facts import EngineBinaryFact
+
+    dormant = dormant_llama_server(facts)
+    broken_dormant_detail: str | None = None
+    if dormant is not None:
+        hypothetical = facts.model_copy(
+            update={
+                "llama_server_binary": EngineBinaryFact(
+                    env_var=LLAMA_SERVER_BIN_ENV,
+                    configured_path=str(dormant),
+                    state="ok",
+                ),
+                "llama_server_device_probe": probe_llama_server_devices(
+                    str(dormant)
+                ),
+            }
+        )
+        replay = derive_node_backends(hypothetical)
+        if "llama_server" in replay.backends:
+            # Derivation can advertise the engine AND raise conflicts (the
+            # #609 cpu-only-on-GPU shape keeps llama_server-cpu with an
+            # error-level gpu_serving_disabled). The capability-conflicts
+            # check reads the unwired facts and cannot see them before
+            # startup, so each replayed conflict becomes its own verdict here
+            # with the same error->fail mapping; the audit's exit code then
+            # matches what startup will flag instead of reading healthy.
+            results = [
+                _ok(
+                    check_id,
+                    title,
+                    f"llama_server ({dormant}) is installed and wires "
+                    "automatically at node startup",
+                )
+            ]
+            for conflict in replay.conflicts:
+                conflict_verdict: CheckVerdict = (
+                    "fail" if conflict.code in CONFLICT_ERROR_CODES else "degraded"
+                )
+                results.append(
+                    CheckResult(
+                        check_id=check_id,
+                        title=f"Startup capability conflict: {conflict.code}",
+                        verdict=conflict_verdict,
+                        detail=conflict.message,
+                        consequence=(
+                            "node startup will wire this engine and raise "
+                            "this conflict into nodeHealth"
+                        ),
+                        remediation=conflict.remediation,
+                    )
+                )
+            return results
+        reason = "; ".join(c.message for c in replay.conflicts) or (
+            "the binary derives no usable backend on this hardware"
+        )
+        broken_dormant_detail = (
+            f"an installed managed llama-server at {dormant} would be "
+            f"disabled at startup: {reason}"
+        )
     return [
         CheckResult(
             check_id=check_id,
             title=title,
             verdict="fail",
-            detail="no inference engine is importable or configured on this node",
+            detail=broken_dormant_detail
+            or "no inference engine is importable or configured on this node",
             consequence=(
                 "the node advertises no backends and will never be selected to "
                 "serve a model; it participates in the cluster as management "

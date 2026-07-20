@@ -6,6 +6,7 @@ llama-server logic in :mod:`skulk.provisioning.llama_server`.
 """
 
 from skulk.provisioning.llama_server import (
+    dormant_llama_server,
     ensure_llama_server,
     managed_llama_server_path,
     provision_llama_server,
@@ -16,6 +17,7 @@ from skulk.provisioning.manifest import LLAMA_SERVER_PIN, EngineVariant
 __all__ = [
     "LLAMA_SERVER_PIN",
     "EngineVariant",
+    "dormant_llama_server",
     "ensure_llama_server",
     "managed_llama_server_path",
     "provision_llama_server",
