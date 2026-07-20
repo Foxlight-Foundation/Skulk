@@ -224,6 +224,10 @@ def build_vllm_serve_args(
         f"{gpu_memory_utilization:.2f}",
         "--tensor-parallel-size",
         "1",
+        # Off by default in vLLM; without it the include_usage final chunk
+        # carries no prompt_tokens_details, so the cache-honest prompt rate
+        # (#631) would silently never subtract cached prefix tokens.
+        "--enable-prompt-tokens-details",
     ]
     if trust_remote_code:
         args.append("--trust-remote-code")

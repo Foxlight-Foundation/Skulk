@@ -127,6 +127,9 @@ def test_build_vllm_serve_args_shape() -> None:
     assert args[args.index("--gpu-memory-utilization") + 1] == "0.90"
     # single-node in this slice.
     assert args[args.index("--tensor-parallel-size") + 1] == "1"
+    # Required for prompt_tokens_details in the include_usage final chunk;
+    # without it the cache-honest prompt rate (#631) never sees cached counts.
+    assert "--enable-prompt-tokens-details" in args
 
 
 def test_build_vllm_serve_args_trust_remote_code() -> None:
