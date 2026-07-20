@@ -145,7 +145,10 @@ cd "$INSTALL_DIR"
 # cryptically minutes later; SKULK_INSTALL_ALLOW_NETWORK_FS=1 overrides for
 # network mounts known to behave.
 if [[ "$OS" == "Linux" ]] && command -v findmnt >/dev/null 2>&1; then
-    FS_TYPE="$(findmnt -n -o FSTYPE --target "$INSTALL_DIR" 2>/dev/null || true)"
+    # $PWD, not $INSTALL_DIR: after the cd above, a relative --dir would
+    # resolve against the new working directory and silently skip the guard
+    # (PR #640 review).
+    FS_TYPE="$(findmnt -n -o FSTYPE --target "$PWD" 2>/dev/null || true)"
     case "$FS_TYPE" in
         nfs|nfs4|cifs|smb3|9p|lustre|ceph|glusterfs|fuse.*|moosefs|mfs)
             if [[ "${SKULK_INSTALL_ALLOW_NETWORK_FS:-}" == "1" ]]; then
