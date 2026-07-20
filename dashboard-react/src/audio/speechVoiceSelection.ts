@@ -53,13 +53,34 @@ export function inferSpeechLanguage(text: string): string | null {
   if (/[\uac00-\ud7af]/u.test(text)) return 'ko';
   if (/[\u3040-\u30ff]/u.test(text)) return 'ja';
   if (/[\u3400-\u4dbf\u4e00-\u9fff]/u.test(text)) return 'zh';
-  if (/[A-Za-z\u00c0-\u024f]/u.test(text)) return 'en';
   if (/[\u0400-\u052f]/u.test(text)) return 'ru';
   return null;
 }
 
 function primaryLanguage(languageTag: string): string {
   return languageTag.trim().toLowerCase().replace('_', '-').split('-')[0];
+}
+
+function containsLatinScript(text: string): boolean {
+  return /[A-Za-z\u00c0-\u024f]/u.test(text);
+}
+
+function usesLatinScript(languageTag: string): boolean {
+  try {
+    return new Intl.Locale(languageTag).maximize().script === 'Latn';
+  } catch {
+    return false;
+  }
+}
+
+function soleCatalogLatinLanguage(voices: readonly ChatVoiceOption[]): string | null {
+  const languages = new Set<string>();
+  for (const voice of voices) {
+    for (const language of voice.preferredLanguages) {
+      if (usesLatinScript(language)) languages.add(primaryLanguage(language));
+    }
+  }
+  return languages.size === 1 ? languages.values().next().value ?? null : null;
 }
 
 /** Resolve an explicit or automatic voice for one complete textual response. */
@@ -70,7 +91,10 @@ export function selectSpeechVoice(
   defaultVoice: string | null,
 ): string | null {
   if (explicitVoice) return explicitVoice;
-  const language = inferSpeechLanguage(text);
+  const inferredLanguage = inferSpeechLanguage(text);
+  const language = inferredLanguage ?? (
+    containsLatinScript(text) ? soleCatalogLatinLanguage(voices) : null
+  );
   if (language) {
     const match = voices.find((voice) => voice.preferredLanguages.some(
       (candidate) => primaryLanguage(candidate) === language,

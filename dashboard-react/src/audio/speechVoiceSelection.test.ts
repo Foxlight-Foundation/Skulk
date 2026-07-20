@@ -38,7 +38,7 @@ describe('speech voice discovery', () => {
 
 describe('speech language and voice selection', () => {
   it('recognizes the scripts represented by the bundled voice catalog', () => {
-    expect(inferSpeechLanguage('An English response.')).toBe('en');
+    expect(inferSpeechLanguage('An English response.')).toBeNull();
     expect(inferSpeechLanguage('这是中文。')).toBe('zh');
     expect(inferSpeechLanguage('これは日本語です。')).toBe('ja');
     expect(inferSpeechLanguage('한국어 응답입니다.')).toBe('ko');
@@ -47,6 +47,16 @@ describe('speech language and voice selection', () => {
   it('selects the first discovered voice matching the response language', () => {
     expect(selectSpeechVoice('This is English.', VOICES, null, 'serena')).toBe('ryan');
     expect(selectSpeechVoice('これは日本語です。', VOICES, null, 'serena')).toBe('ono_anna');
+  });
+
+  it('does not misclassify Latin text when the catalog has multiple Latin languages', () => {
+    const multilingualVoices: ChatVoiceOption[] = [
+      ...VOICES,
+      { id: 'lucia', name: 'Lucia', preferredLanguages: ['es'] },
+    ];
+
+    expect(selectSpeechVoice('Una respuesta en español.', multilingualVoices, null, 'serena'))
+      .toBe('serena');
   });
 
   it('pins one voice for every sentence in the playback session', () => {
