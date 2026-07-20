@@ -159,6 +159,7 @@ class _StreamDelta(NamedTuple):
     content: str
     finish: Literal["stop", "length", "content_filter"] | None
     done: bool  # the terminal ``data: [DONE]`` sentinel
+    usage: dict[str, Any] | None = None  # the include_usage final-chunk counts
 
 
 def _gpu_memory_utilization() -> float:
@@ -223,6 +224,10 @@ def build_vllm_serve_args(
         f"{gpu_memory_utilization:.2f}",
         "--tensor-parallel-size",
         "1",
+        # Off by default in vLLM; without it the include_usage final chunk
+        # carries no prompt_tokens_details, so the cache-honest prompt rate
+        # (#631) would silently never subtract cached prefix tokens.
+        "--enable-prompt-tokens-details",
     ]
     if trust_remote_code:
         args.append("--trust-remote-code")
@@ -281,6 +286,20 @@ def vllm_reasoning_overrides(task_params: Any) -> dict[str, Any]:
     return overrides
 
 
+def _usage_count(usage: dict[str, Any] | None, key: str) -> int | None:
+    """A non-negative integer token count from a usage object, or ``None``.
+
+    Bool-guarded like every timings extraction: JSON ``true`` is an ``int``
+    to ``isinstance`` and must not read as a count of one.
+    """
+    if usage is None:
+        return None
+    value = usage.get(key)
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
 def parse_openai_sse_line(line: str) -> _StreamDelta | None:
     """Parse one OpenAI SSE line into a ``_StreamDelta``, or ``None`` to skip it.
 
@@ -302,8 +321,16 @@ def parse_openai_sse_line(line: str) -> _StreamDelta | None:
         return None
     if not isinstance(chunk, dict):
         return None
+    raw_usage = chunk.get("usage")
+    usage = raw_usage if isinstance(raw_usage, dict) else None
     choices = chunk.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        # The stream_options include_usage final chunk carries exactly
+        # ``"choices": []`` plus the engine-exact token counts (#631); only
+        # that shape is accepted, so a malformed payload that happens to have
+        # a usage-shaped field stays skipped like any other stray line.
+        if usage is not None and isinstance(choices, list) and not choices:
+            return _StreamDelta("", "", None, done=False, usage=usage)
         return None
     choice = choices[0]
     raw_delta = choice.get("delta")
@@ -325,6 +352,7 @@ def parse_openai_sse_line(line: str) -> _StreamDelta | None:
         content=delta.get("content") or "",
         finish=finish,
         done=False,
+        usage=usage,
     )
 
 
@@ -696,6 +724,10 @@ class Runner(ServedConcurrentDispatch):
         command_id: CommandId,
     ) -> None:
         body["stream"] = True
+        # The final pre-[DONE] chunk then carries engine-exact token counts
+        # (empty choices + usage), the only place the proxy can learn the
+        # prompt size (#631).
+        body["stream_options"] = {"include_usage": True}
         assert self.base_url is not None
         clock = StreamStatsClock()
         # In-flight captured at THIS task's admission on the dispatch loop, for
@@ -705,16 +737,46 @@ class Runner(ServedConcurrentDispatch):
         # thread, so a burst does not collapse every sample into one bucket.
         admission_in_flight = self._admission_concurrency(task.task_id)
 
+        last_usage: dict[str, Any] | None = None
+
         def final_stats() -> GenerationStats:
             # Peak memory always comes from the server child (weights + KV live
-            # there), never this proxy. Prompt count is unknowable from the SSE
-            # stream, reported as 0 (a zero reads as "unmeasured").
+            # there), never this proxy. Token counts come from the
+            # include_usage final chunk when it arrived (engine-exact); a
+            # stream that ended without one falls back to prompt 0
+            # ("unmeasured") and the piece count. The prompt RATE covers only
+            # newly processed tokens so a prefix-cache hit cannot inflate it,
+            # while the reported prompt COUNT stays the request's true size
+            # (the same cache-hit rule as the llama_server path, #611/#631).
+            prompt_total = _usage_count(last_usage, "prompt_tokens") or 0
+            # Explicit None check: an engine-exact completion count of 0 is a
+            # real measurement and must not fall back to the piece count.
+            usage_generation = _usage_count(last_usage, "completion_tokens")
+            generation = (
+                usage_generation if usage_generation is not None else clock.pieces
+            )
+            processed_prompt = prompt_total
+            if last_usage is not None:
+                details = last_usage.get("prompt_tokens_details")
+                if isinstance(details, dict):
+                    cached = details.get("cached_tokens")
+                    if (
+                        isinstance(cached, int)
+                        and not isinstance(cached, bool)
+                        and 0 < cached <= prompt_total
+                    ):
+                        processed_prompt = prompt_total - cached
             base = clock.stats(
-                prompt_tokens=0, generation_tokens=clock.pieces
-            ).model_copy(update={"peak_memory_usage": self._server_peak_memory()})
+                prompt_tokens=processed_prompt, generation_tokens=generation
+            ).model_copy(
+                update={
+                    "prompt_tokens": prompt_total,
+                    "peak_memory_usage": self._server_peak_memory(),
+                }
+            )
             return self.stamp_runner_stats(base, admission_in_flight)
 
-        emitted_finish = False
+        finish_reason: Literal["stop", "length", "content_filter"] | None = None
         # No read timeout: generation can pause between tokens on a busy GPU. The
         # connection is closed (aborting server generation) when we break out.
         timeout = httpx.Timeout(connect=15.0, read=None, write=30.0, pool=None)
@@ -734,6 +796,8 @@ class Runner(ServedConcurrentDispatch):
                     continue
                 if delta.done:
                     break
+                if delta.usage is not None:
+                    last_usage = delta.usage
                 if delta.reasoning or delta.content:
                     # One SSE delta per generated token piece.
                     clock.mark_piece()
@@ -744,19 +808,20 @@ class Runner(ServedConcurrentDispatch):
                 if delta.content:
                     self._send_token(command_id, model_id, delta.content)
                 if delta.finish is not None:
-                    self._send_token(
-                        command_id,
-                        model_id,
-                        "",
-                        finish_reason=delta.finish,
-                        stats=final_stats(),
-                    )
-                    emitted_finish = True
-        # Guarantee a terminal chunk so the consumer's stream closes even if the
-        # server ended without an explicit finish_reason.
-        if not emitted_finish and not self._is_cancelled(task.task_id):
+                    # The terminal chunk is deferred past the loop: the
+                    # include_usage counts arrive AFTER the finish_reason
+                    # chunk, and stats must include them (#631).
+                    finish_reason = delta.finish
+        # One guaranteed terminal chunk (with final stats) once the stream is
+        # fully drained, whether or not the server sent an explicit
+        # finish_reason.
+        if not self._is_cancelled(task.task_id):
             self._send_token(
-                command_id, model_id, "", finish_reason="stop", stats=final_stats()
+                command_id,
+                model_id,
+                "",
+                finish_reason=finish_reason or "stop",
+                stats=final_stats(),
             )
 
     def _server_peak_memory(self) -> Memory:

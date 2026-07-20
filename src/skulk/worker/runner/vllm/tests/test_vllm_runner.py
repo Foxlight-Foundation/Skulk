@@ -127,6 +127,9 @@ def test_build_vllm_serve_args_shape() -> None:
     assert args[args.index("--gpu-memory-utilization") + 1] == "0.90"
     # single-node in this slice.
     assert args[args.index("--tensor-parallel-size") + 1] == "1"
+    # Required for prompt_tokens_details in the include_usage final chunk;
+    # without it the cache-honest prompt rate (#631) never sees cached counts.
+    assert "--enable-prompt-tokens-details" in args
 
 
 def test_build_vllm_serve_args_trust_remote_code() -> None:
@@ -178,12 +181,58 @@ def test_parse_sse_done_sentinel() -> None:
     [
         "event: ping",  # non-data line
         "data: {not json}",  # malformed json
-        'data: {"choices":[]}',  # choice-less payload
+        'data: {"choices":[]}',  # choice-less payload without usage
+        # usage may only ride a well-formed chunk: choices exactly [] (the
+        # include_usage final chunk) or a dict-bearing choices list.
+        'data: {"usage":{"prompt_tokens":5}}',  # no choices key at all
+        'data: {"choices":"x","usage":{"prompt_tokens":5}}',  # malformed choices
+        'data: {"choices":[42],"usage":{"prompt_tokens":5}}',  # non-dict choice
         "",  # blank
     ],
 )
 def test_parse_sse_skips_non_deltas(line: str) -> None:
     assert parse_openai_sse_line(line) is None
+
+
+def test_parse_sse_usage_final_chunk() -> None:
+    # The stream_options include_usage final chunk: empty choices, engine-exact
+    # counts (#631). Must parse into a usage-bearing delta, not be skipped.
+    line = (
+        'data: {"choices":[],"usage":{"prompt_tokens":1000,'
+        '"completion_tokens":40,"prompt_tokens_details":{"cached_tokens":990}}}'
+    )
+    delta = parse_openai_sse_line(line)
+    assert delta is not None
+    assert delta.usage == {
+        "prompt_tokens": 1000,
+        "completion_tokens": 40,
+        "prompt_tokens_details": {"cached_tokens": 990},
+    }
+    assert delta.content == "" and delta.finish is None and not delta.done
+
+
+def test_parse_sse_usage_on_choice_chunk() -> None:
+    # Some servers attach usage on the last choice-bearing chunk instead of a
+    # separate one; it must ride along with the delta.
+    line = (
+        'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}],'
+        '"usage":{"prompt_tokens":7,"completion_tokens":2}}'
+    )
+    delta = parse_openai_sse_line(line)
+    assert delta is not None
+    assert delta.content == "hi"
+    assert delta.finish == "stop"
+    assert delta.usage == {"prompt_tokens": 7, "completion_tokens": 2}
+
+
+def test_usage_count_bool_and_shape_guards() -> None:
+    from skulk.worker.runner.vllm.runner import _usage_count
+
+    assert _usage_count({"prompt_tokens": 1000}, "prompt_tokens") == 1000
+    assert _usage_count({"prompt_tokens": True}, "prompt_tokens") is None
+    assert _usage_count({"prompt_tokens": -1}, "prompt_tokens") is None
+    assert _usage_count({"prompt_tokens": "10"}, "prompt_tokens") is None
+    assert _usage_count(None, "prompt_tokens") is None
 
 
 def test_gpu_memory_utilization_default(monkeypatch: pytest.MonkeyPatch) -> None:
