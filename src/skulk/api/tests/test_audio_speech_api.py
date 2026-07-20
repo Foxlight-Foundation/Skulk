@@ -34,6 +34,7 @@ from skulk.shared.models.model_cards import (
     AudioCardConfig,
     AudioCardKind,
     AudioResponseFormat,
+    AudioVoiceConfig,
     ModelCard,
     ModelId,
     ModelTask,
@@ -618,6 +619,18 @@ async def test_audio_voices_returns_static_mounted_catalog(
                 update={
                     "supports_voice_listing": True,
                     "voices": ("alloy", "coral"),
+                    "voice_catalog": (
+                        AudioVoiceConfig(
+                            id="alloy",
+                            name="Alloy",
+                            preferred_languages=("en",),
+                        ),
+                        AudioVoiceConfig(
+                            id="coral",
+                            name="Coral",
+                            preferred_languages=("es",),
+                        ),
+                    ),
                 }
             )
         }
@@ -634,6 +647,11 @@ async def test_audio_voices_returns_static_mounted_catalog(
     response = await api.audio_voices(str(card.model_id))
 
     assert [voice.id for voice in response.data] == ["alloy", "coral"]
+    assert [voice.name for voice in response.data] == ["Alloy", "Coral"]
+    assert [voice.preferred_languages for voice in response.data] == [
+        ("en",),
+        ("es",),
+    ]
     assert all(voice.model == str(card.model_id) for voice in response.data)
 
 

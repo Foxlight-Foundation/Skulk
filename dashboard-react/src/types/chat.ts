@@ -25,10 +25,20 @@ export interface ChatSpeechModelOption {
   defaultResponseFormat?: AudioResponseFormat | null;
   responseFormats: AudioResponseFormat[];
   supportsVoiceListing?: boolean;
+  /** Validated card default used when automatic language matching has no match. */
+  defaultVoice?: string | null;
   /** Whether the mounted model supports progressive audio generation. */
   supportsStreaming?: boolean;
   /** Whether the model truthfully supports progressive realtime transcription. */
   supportsRealtime?: boolean;
+}
+
+/** One stable voice returned by the mounted model's discovery endpoint. */
+export interface ChatVoiceOption {
+  id: string;
+  name: string;
+  /** Ordered BCP 47 language tags for which the model recommends this voice. */
+  preferredLanguages: string[];
 }
 
 /** Attachment persisted on an individual chat message. */

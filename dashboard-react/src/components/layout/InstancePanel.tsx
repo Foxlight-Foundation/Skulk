@@ -18,6 +18,8 @@ export interface InstanceCardData {
   statusMessage?: string;
   loadProgress?: number;
   isEmbedding?: boolean;
+  /** Whether this model may be selected as a direct dashboard text-chat target. */
+  supportsTextChat?: boolean;
   /** Speculative-decoding status derived from the model card's runtime
    *  section: present when the card declares an MTP sidecar or assistant
    *  drafter and the placement allows it (#254). */

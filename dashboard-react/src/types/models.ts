@@ -21,6 +21,8 @@ export interface AudioCapabilityInfo {
   supports_streaming?: boolean;
   supports_realtime?: boolean;
   supports_voice_listing?: boolean;
+  default_voice?: string | null;
+  voices?: string[];
   supports_reference_audio?: boolean;
   supports_translation?: boolean;
   sample_rates?: number[];
@@ -86,6 +88,52 @@ export interface ModelInfo {
   tooling?: ToolingCapabilityInfo;
   runtime?: RuntimeCapabilityInfo;
   resolved_capabilities?: ResolvedModelCapabilities;
+}
+
+/** Model-card fields needed to decide whether the dashboard may open text chat. */
+export interface ModelTextChatMetadata {
+  tasks?: readonly string[];
+  capabilities?: readonly string[];
+  tags?: readonly string[];
+  resolved_capabilities?: Partial<Pick<
+    ResolvedModelCapabilities,
+    'supports_speech_synthesis' | 'supports_transcription' | 'supports_speech_translation'
+  >>;
+}
+
+/**
+ * Return whether a model can be selected as the direct target of dashboard text chat.
+ *
+ * Text generation wins for multi-capability models. Speech-only and embedding-only
+ * models remain available to their dedicated APIs and chat voice controls without
+ * being offered as `/v1/chat/completions` targets.
+ */
+export function modelSupportsTextChat(model: ModelTextChatMetadata | undefined): boolean {
+  if (!model) return true;
+
+  const tasks = new Set(model.tasks ?? []);
+  if (tasks.has('TextGeneration')) return true;
+  if (tasks.has('TextEmbedding')) return false;
+  if (
+    tasks.has('TextToSpeech')
+    || tasks.has('SpeechToText')
+    || tasks.has('SpeechTranslation')
+  ) {
+    return false;
+  }
+
+  const capabilities = new Set([...(model.capabilities ?? []), ...(model.tags ?? [])]);
+  if (capabilities.has('embedding')) return false;
+  if (capabilities.has('text')) return true;
+
+  const resolved = model.resolved_capabilities;
+  return !(
+    capabilities.has('tts')
+    || capabilities.has('stt')
+    || resolved?.supports_speech_synthesis
+    || resolved?.supports_transcription
+    || resolved?.supports_speech_translation
+  );
 }
 
 /** Group of related model variants shown as one family in the picker UI. */

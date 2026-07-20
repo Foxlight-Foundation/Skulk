@@ -1127,6 +1127,13 @@ class AudioVoice(BaseModel, frozen=True):
     id: str = Field(description="Model-specific voice identifier.")
     name: str = Field(description="Human-readable voice name.")
     model: str = Field(description="Mounted text-to-speech model id.")
+    preferred_languages: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Ordered BCP 47 language tags for which the model card recommends "
+            "this voice."
+        ),
+    )
     kind: Literal["builtin"] = Field(
         default="builtin",
         description="Voice source. Version 1 exposes built-in voices only.",

@@ -192,6 +192,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
             supportsTensor: m.supports_tensor ?? undefined,
             capabilities: m.capabilities ?? undefined,
             tags: m.tags ?? [],
+            tasks: m.tasks ?? [],
             resolvedCapabilities: m.resolved_capabilities ? {
               supportsThinking: m.resolved_capabilities.supports_thinking ?? false,
               supportsThinkingToggle: m.resolved_capabilities.supports_thinking_toggle ?? false,
@@ -260,6 +261,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
             supportsTensor: (raw.supportsTensor ?? raw.supports_tensor) as boolean | undefined,
             capabilities: raw.capabilities as string[] | undefined,
             tags: fallbackTags,
+            tasks: raw.tasks as string[] | undefined,
           };
         }
       }

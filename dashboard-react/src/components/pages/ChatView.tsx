@@ -8,8 +8,9 @@ import type {
   ChatMessage,
   ChatSpeechModelOption,
   ChatUploadedFile,
+  ChatVoiceOption,
 } from '../../types/chat';
-import type { ModelInfo } from '../../types/models';
+import { modelSupportsTextChat, type ModelInfo } from '../../types/models';
 import type { InstanceCardData } from '../layout/InstancePanel';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
@@ -23,6 +24,10 @@ import {
   splitCompleteSpeechSentences,
   StreamingSpeechPlayback,
 } from '../../audio/streamingSpeechPlayback';
+import {
+  createPinnedSpeechVoiceSelector,
+  fetchSpeechVoiceCatalog,
+} from '../../audio/speechVoiceSelection';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -195,23 +200,6 @@ function shortModelLabel(modelId: string): string {
   return parts[parts.length - 1] || modelId;
 }
 
-function modelSupportsChat(model: ModelInfo | undefined): boolean {
-  if (!model) return true;
-  const tasks = new Set(model.tasks ?? []);
-  if (tasks.has('TextGeneration')) return true;
-  if (tasks.has('TextEmbedding')) return false;
-  const resolved = model.resolved_capabilities;
-  const speechOnly = Boolean(
-    resolved?.supports_speech_synthesis
-      || resolved?.supports_transcription
-      || resolved?.supports_speech_translation
-      || tasks.has('TextToSpeech')
-      || tasks.has('SpeechToText')
-      || tasks.has('SpeechTranslation'),
-  );
-  return !speechOnly;
-}
-
 function speechModelOption(modelId: string, model: ModelInfo | undefined): ChatSpeechModelOption {
   const resolved = model?.resolved_capabilities;
   const responseFormats = (
@@ -233,6 +221,7 @@ function speechModelOption(modelId: string, model: ModelInfo | undefined): ChatS
     defaultResponseFormat,
     responseFormats: formats,
     supportsVoiceListing: model?.audio?.supports_voice_listing ?? false,
+    defaultVoice: model?.audio?.default_voice ?? null,
     supportsStreaming: model?.audio?.supports_streaming ?? false,
     supportsRealtime: Boolean(
       resolved?.supports_realtime_audio
@@ -633,6 +622,9 @@ export function ChatView({
   const [modelContextLengths, setModelContextLengths] = useState<Record<string, number>>({});
   const [modelCatalogById, setModelCatalogById] = useState<Record<string, ModelInfo>>({});
   const [speechError, setSpeechError] = useState<string | null>(null);
+  const [voiceCatalogError, setVoiceCatalogError] = useState<string | null>(null);
+  const [voiceOptions, setVoiceOptions] = useState<ChatVoiceOption[]>([]);
+  const [isVoiceCatalogLoading, setIsVoiceCatalogLoading] = useState(false);
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
   const [isAutoSpeaking, setIsAutoSpeaking] = useState(false);
   const audioPlaybackRef = useRef<HTMLAudioElement | null>(null);
@@ -746,7 +738,7 @@ export function ChatView({
 
   // Ready models
   const readyModels = useMemo(
-    () => readyRunnableInstances.filter((i) => !i.isEmbedding && modelSupportsChat(modelCatalogById[i.modelId])),
+    () => readyRunnableInstances.filter((i) => !i.isEmbedding && modelSupportsTextChat(modelCatalogById[i.modelId])),
     [modelCatalogById, readyRunnableInstances],
   );
 
@@ -830,6 +822,41 @@ export function ChatView({
     [readySpeechModels, selectedSpeechModelId],
   );
 
+  useEffect(() => {
+    setVoiceOptions([]);
+    setVoiceCatalogError(null);
+    if (!selectedSpeechModelId || !selectedSpeechOption?.supportsVoiceListing) {
+      setIsVoiceCatalogLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setIsVoiceCatalogLoading(true);
+    void fetchSpeechVoiceCatalog(selectedSpeechModelId, controller.signal)
+      .then((voices) => {
+        if (!controller.signal.aborted) setVoiceOptions(voices);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setVoiceCatalogError(error instanceof Error
+          ? error.message
+          : t('chat.view.errors.voiceDiscoveryFailed', 'Voice discovery failed.'));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setIsVoiceCatalogLoading(false);
+      });
+    return () => controller.abort();
+  }, [selectedSpeechModelId, selectedSpeechOption?.supportsVoiceListing, t]);
+
+  const effectiveSelectedVoice = selectedVoice && (
+    !selectedSpeechOption?.supportsVoiceListing
+    || voiceOptions.some((voice) => voice.id === selectedVoice)
+  )
+    ? selectedVoice
+    : null;
+  const voiceCatalogReady = !selectedSpeechOption?.supportsVoiceListing
+    || voiceOptions.length > 0;
+
   const canSendMessages = Boolean(
     selectedModelId && readyModels.some((model) => model.modelId === selectedModelId),
   );
@@ -859,9 +886,16 @@ export function ChatView({
     text: string,
     messageId: string | null,
     signal: AbortSignal,
+    voice: string | null,
   ) => {
     const input = text.trim();
     if (!input || !selectedSpeechModelId) return;
+    if (selectedSpeechOption?.supportsVoiceListing && !voice) {
+      throw new Error(t(
+        'chat.view.errors.noDiscoveredVoice',
+        'No discovered voice is available for this speech model.',
+      ));
+    }
     const responseFormat = selectedSpeechOption?.defaultResponseFormat ?? 'mp3';
     const useStreamingPcm = Boolean(
       selectedSpeechOption?.supportsStreaming
@@ -890,7 +924,7 @@ export function ChatView({
         input,
         response_format: format,
         ...(stream ? { stream: true } : {}),
-        ...(selectedVoice ? { voice: selectedVoice } : {}),
+        ...(voice ? { voice } : {}),
       }),
     });
     const initialFormat: AudioResponseFormat = useStreamingPcm
@@ -951,7 +985,7 @@ export function ChatView({
       if (audioObjectUrlRef.current === objectUrl) audioObjectUrlRef.current = null;
       URL.revokeObjectURL(objectUrl);
     }
-  }, [selectedSpeechModelId, selectedSpeechOption, selectedVoice, t]);
+  }, [selectedSpeechModelId, selectedSpeechOption, t]);
 
   const speakText = useCallback(async (text: string, messageId: string | null = 'draft') => {
     const input = text.trim();
@@ -960,8 +994,13 @@ export function ChatView({
     stopSpeechPlayback();
     const abortController = new AbortController();
     speechAbortRef.current = abortController;
+    const selectVoice = createPinnedSpeechVoiceSelector(
+      voiceOptions,
+      effectiveSelectedVoice,
+      selectedSpeechOption?.defaultVoice ?? null,
+    );
     try {
-      await playSpeechSegment(input, messageId, abortController.signal);
+      await playSpeechSegment(input, messageId, abortController.signal, selectVoice(input));
       if (speechAbortRef.current === abortController) stopSpeechPlayback();
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
@@ -973,9 +1012,12 @@ export function ChatView({
     }
   }, [
     playSpeechSegment,
+    effectiveSelectedVoice,
     selectedSpeechModelId,
+    selectedSpeechOption?.defaultVoice,
     stopSpeechPlayback,
     t,
+    voiceOptions,
   ]);
 
   const transcribeAudio = useCallback(async (audio: Blob): Promise<string> => {
@@ -1084,15 +1126,26 @@ export function ChatView({
     let toolLoopLimitHit = false;
     let speechTail = '';
     let speechVisibleContent = '';
+    const selectResponseVoice = createPinnedSpeechVoiceSelector(
+      voiceOptions,
+      effectiveSelectedVoice,
+      selectedSpeechOption?.defaultVoice ?? null,
+    );
     const sentenceQueue = (
       autoSpeakAssistant
       && selectedSpeechModelId
+      && voiceCatalogReady
       && selectedSpeechOption?.supportsStreaming
       && selectedSpeechOption.responseFormats.includes('pcm')
       && canUseStreamingSpeechPlayback()
     )
       ? new SpeechSentenceQueue(
-          (sentence, signal) => playSpeechSegment(sentence, null, signal),
+          (sentence, signal) => playSpeechSegment(
+            sentence,
+            null,
+            signal,
+            selectResponseVoice(sentence),
+          ),
           (error) => {
             const message = error instanceof Error
               ? error.message
@@ -1374,6 +1427,7 @@ export function ChatView({
     addMessage,
     autoSpeakAssistant,
     canSendMessages,
+    effectiveSelectedVoice,
     isLoading,
     selectedBuiltinTools,
     selectedModelId,
@@ -1385,6 +1439,8 @@ export function ChatView({
     supportsThinking,
     thinkingEnabled,
     t,
+    voiceCatalogReady,
+    voiceOptions,
   ]);
 
   const handleCancel = useCallback(async () => {
@@ -1463,13 +1519,24 @@ export function ChatView({
       if (
         autoSpeakAssistant
         && selectedSpeechModelId
+        && voiceCatalogReady
         && selectedSpeechOption?.supportsStreaming
         && selectedSpeechOption.responseFormats.includes('pcm')
         && canUseStreamingSpeechPlayback()
       ) {
         if (!speechSentenceQueueRef.current) {
+          const selectResponseVoice = createPinnedSpeechVoiceSelector(
+            voiceOptions,
+            effectiveSelectedVoice,
+            selectedSpeechOption.defaultVoice ?? null,
+          );
           speechSentenceQueueRef.current = new SpeechSentenceQueue(
-            (sentence, signal) => playSpeechSegment(sentence, null, signal),
+            (sentence, signal) => playSpeechSegment(
+              sentence,
+              null,
+              signal,
+              selectResponseVoice(sentence),
+            ),
             (error) => {
               setSpeechError(error instanceof Error
                 ? error.message
@@ -1514,11 +1581,14 @@ export function ChatView({
   }, [
     addMessage,
     autoSpeakAssistant,
+    effectiveSelectedVoice,
     playSpeechSegment,
     selectedSpeechModelId,
     selectedSpeechOption,
     speakText,
     t,
+    voiceCatalogReady,
+    voiceOptions,
   ]);
 
   const handleRealtimeResponseDone = useCallback((status: string) => {
@@ -1590,12 +1660,14 @@ export function ChatView({
           selectedTranscriptionModelId={selectedTranscriptionModelId}
           selectedSpeechModelId={selectedSpeechModelId}
           selectedVoice={selectedVoice}
+          voiceOptions={voiceOptions}
+          isVoiceCatalogLoading={isVoiceCatalogLoading}
           autoSpeakAssistant={autoSpeakAssistant}
           realtimeVoiceEnabled={realtimeVoiceEnabled}
           autoSubmitVoice={autoSubmitVoice}
           realtimeResponseModelId={selectedModelId}
           isSpeaking={speakingMessageId !== null || isAutoSpeaking}
-          voiceError={speechError}
+          voiceError={voiceCatalogError ?? speechError}
           onSelectTranscriptionModel={selectTranscriptionModel}
           onSelectSpeechModel={selectSpeechModel}
           onSelectedVoiceChange={setSelectedVoice}

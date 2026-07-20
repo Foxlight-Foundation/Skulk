@@ -655,8 +655,9 @@ curl 'http://localhost:52415/v1/audio/voices?model=org/tts-model'
 ```
 
 The response is `{ "object": "list", "data": [...] }`. Each item contains the
-voice `id`, display `name`, mounted `model`, and `kind = "builtin"`. Version 1
-does not create or persist voice profiles.
+voice `id`, display `name`, mounted `model`, `kind = "builtin"`, and an ordered
+`preferred_languages` array of BCP 47 tags when the model card declares
+language preferences. Version 1 does not create or persist voice profiles.
 
 ## OpenAI Audio Transcriptions API
 

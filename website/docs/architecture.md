@@ -410,9 +410,12 @@ runner emits independently encoded MP3 segments or headerless mono
 signed-16-bit PCM, and the API describes the PCM framing through response
 headers before it commits the body. (The bundled Qwen3 TTS card declares MP3
 and PCM streaming after live validation; the remaining bundled speech cards
-stay batch-only.) Cards with fixed speakers can declare `audio.voices` plus a
-validated default voice, exposed through the Skulk `GET /v1/audio/voices`
-extension and applied only when callers omit `voice`.
+stay batch-only.) Cards with fixed speakers can declare `audio.voices`, a
+validated default voice, and ordered `audio.voice_catalog` display/language
+metadata. The Skulk `GET /v1/audio/voices` extension exposes that model truth;
+the dashboard can choose the first preferred-language match and pins it across
+all sentence-sized requests in one response. The API applies the card default
+only when callers omit `voice`.
 
 Cards declaring reference-audio support accept a bounded multipart upload on
 the same route. The API pins the command to one ready instance and sends the
