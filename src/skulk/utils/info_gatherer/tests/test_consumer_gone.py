@@ -31,8 +31,11 @@ def _quiet_gatherer(info_send: Sender[GatheredInfo]) -> InfoGatherer:
         mactop_interval=None,
         thunderbolt_bridge_poll_interval=None,
         static_info_poll_interval=None,
+        node_resources_poll_interval=None,
         rdma_ctl_poll_interval=None,
         disk_poll_interval=None,
+        gpu_linux_poll_interval=None,
+        capabilities_poll_interval=None,
     )
 
 
