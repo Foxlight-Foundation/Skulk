@@ -106,7 +106,8 @@ def test_load_model_explicitly_disables_full_swa_cache(
     captured: dict[str, object] = {}
 
     class _FakeLlama:
-        def __init__(self, **kwargs: object) -> None:
+        def __init__(self, *, swa_full: bool, **kwargs: object) -> None:
+            captured["swa_full"] = swa_full
             captured.update(kwargs)
 
     fake_module = ModuleType("llama_cpp")
@@ -124,6 +125,24 @@ def test_load_model_explicitly_disables_full_swa_cache(
 
     assert LLAMA_CPP_FULL_SWA_CACHE is False
     assert captured["swa_full"] is LLAMA_CPP_FULL_SWA_CACHE
+
+
+def test_load_model_rejects_binding_that_silently_ignores_swa_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older ``**kwargs``-only binding must fail before allocating memory."""
+
+    class _LegacyLlama:
+        def __init__(self, **_kwargs: object) -> None:
+            pytest.fail("legacy binding must not be constructed")
+
+    fake_module = ModuleType("llama_cpp")
+    monkeypatch.setattr(fake_module, "Llama", _LegacyLlama, raising=False)
+    monkeypatch.setitem(sys.modules, "llama_cpp", fake_module)
+
+    runner, _sender = _make_runner(_CancelReceiver())
+    with pytest.raises(RuntimeError, match="does not explicitly support swa_full"):
+        runner._load_model(LoadModel(instance_id=InstanceId("i1")))
 
 
 def _tool_task() -> TextGeneration:

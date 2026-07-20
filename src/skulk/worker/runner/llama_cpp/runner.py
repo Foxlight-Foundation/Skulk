@@ -16,8 +16,10 @@ warmup), mirroring the embeddings runner's group-less lifecycle.
 cleanly on nodes (e.g. Macs) where the binding is not installed.
 """
 
+import inspect
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -120,6 +122,29 @@ _VISION_HANDLER_BY_MODEL_TYPE: dict[str, str] = {
     "moondream": "MoondreamChatHandler",
     "nanollava": "NanoLlavaChatHandler",
 }
+
+
+def _require_bounded_swa_support(llama_class: Callable[..., object]) -> None:
+    """Fail closed when the installed binding cannot apply ``swa_full``.
+
+    Older llama-cpp-python releases accept arbitrary keyword arguments and
+    silently ignore ``swa_full``. Continuing on those builds would restore the
+    runtime/admission mismatch this runner is required to prevent.
+    """
+    try:
+        parameters = inspect.signature(llama_class).parameters
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "cannot verify llama-cpp-python bounded SWA support; install a "
+            "build whose Llama constructor explicitly declares swa_full"
+        ) from exc
+    if "swa_full" not in parameters:
+        raise RuntimeError(
+            "installed llama-cpp-python does not explicitly support swa_full; "
+            "refusing to load because full SWA cache can exceed admission"
+        )
+
+
 _DEFAULT_VISION_HANDLER: Final = "MTMDChatHandler"
 
 
@@ -758,6 +783,8 @@ class Runner:
         from llama_cpp import Llama  # pyright: ignore[reportAttributeAccessIssue]
 
         from skulk.download.download_utils import build_model_path
+
+        _require_bounded_swa_support(Llama)
 
         card = self.shard_metadata.model_card
         model_id = card.model_id
