@@ -410,12 +410,16 @@ class _ImmediateFailureInputProvider(_BidirectionalProvider):
         )
 
 
-def _build_api(provider: object) -> API:
+def _build_api(
+    provider: object, *, provider_transport_buffer: int = 256
+) -> API:
     command_sender, _ = channel[ForwarderCommand]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
     _, event_receiver = channel[IndexedEvent]()
     _, election_receiver = channel[ElectionMessage]()
-    provider_sender, provider_receiver = channel[ProviderStreamPacket](256)
+    provider_sender, provider_receiver = channel[ProviderStreamPacket](
+        provider_transport_buffer
+    )
     return API(
         NodeId("api-node"),
         port=52415,
@@ -1196,7 +1200,10 @@ async def test_cancel_racing_admission_still_emits_started_first() -> None:
 
 
 async def test_caller_queue_overflow_cannot_report_truncated_stream_complete() -> None:
-    api = _build_api(_BurstProvider())
+    # The simulated transport must hold more than the caller's 256-frame queue;
+    # otherwise upstream backpressure prevents the queue under test from ever
+    # overflowing and the provider legitimately completes the whole stream.
+    api = _build_api(_BurstProvider(), provider_transport_buffer=512)
     context = api._extension_context  # pyright: ignore[reportPrivateUsage]
     opened = False
     frames: list[CapabilityStreamFrame] = []
@@ -1214,7 +1221,9 @@ async def test_caller_queue_overflow_cannot_report_truncated_stream_complete() -
             timeout_seconds=5.0,
         )
         opened = session.open_result.ok
-        await anyio.sleep(0.1)
+        with anyio.fail_after(1.0):
+            while api._provider_stream_receivers:  # pyright: ignore[reportPrivateUsage]
+                await anyio.sleep(0.01)
         frames = [frame async for frame in session.frames]
         task_group.cancel_scope.cancel()
 

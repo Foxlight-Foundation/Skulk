@@ -92,6 +92,18 @@ KV_DTYPE_BYTES: int = 2
 """Bytes per KV-cache element. MLX keeps the KV cache in fp16 even for 4-bit
 weights unless quantized-KV is explicitly enabled, which Skulk does not."""
 
+LLAMA_CPP_FULL_SWA_CACHE: Final = False
+"""Whether the in-process llama.cpp runner expands sliding-window attention.
+
+This is part of the memory-admission contract, not a performance preference.
+The generic GGUF estimate conservatively charges every layer for the full
+context using the card's scalar KV geometry. That safely overestimates a
+bounded sliding-window cache, but it can underestimate ``swa_full=True`` for
+architectures whose sliding layers use wider K/V tensors than their global
+layers. Keep the runner tied to this constant so a dependency default cannot
+silently invalidate the context window Skulk admitted.
+"""
+
 
 def memory_overhead_factor(model_card: ModelCard) -> float:
     """Engine-appropriate weight-overhead multiplier for a model.

@@ -16,8 +16,10 @@ warmup), mirroring the embeddings runner's group-less lifecycle.
 cleanly on nodes (e.g. Macs) where the binding is not installed.
 """
 
+import inspect
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -25,7 +27,10 @@ from anyio import WouldBlock
 
 from skulk.api.types import GenerationStats, ToolCallItem, TopLogprobItem
 from skulk.shared.models.capabilities import resolve_model_capability_profile
-from skulk.shared.models.memory_estimate import KV_CONTEXT_BUDGET_TOKENS
+from skulk.shared.models.memory_estimate import (
+    KV_CONTEXT_BUDGET_TOKENS,
+    LLAMA_CPP_FULL_SWA_CACHE,
+)
 from skulk.shared.models.model_cards import OutputParserType, ReasoningFormat
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
@@ -117,6 +122,29 @@ _VISION_HANDLER_BY_MODEL_TYPE: dict[str, str] = {
     "moondream": "MoondreamChatHandler",
     "nanollava": "NanoLlavaChatHandler",
 }
+
+
+def _require_bounded_swa_support(llama_class: Callable[..., object]) -> None:
+    """Fail closed when the installed binding cannot apply ``swa_full``.
+
+    Older llama-cpp-python releases accept arbitrary keyword arguments and
+    silently ignore ``swa_full``. Continuing on those builds would restore the
+    runtime/admission mismatch this runner is required to prevent.
+    """
+    try:
+        parameters = inspect.signature(llama_class).parameters
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "cannot verify llama-cpp-python bounded SWA support; install a "
+            "build whose Llama constructor explicitly declares swa_full"
+        ) from exc
+    if "swa_full" not in parameters:
+        raise RuntimeError(
+            "installed llama-cpp-python does not explicitly support swa_full; "
+            "refusing to load because full SWA cache can exceed admission"
+        )
+
+
 _DEFAULT_VISION_HANDLER: Final = "MTMDChatHandler"
 
 
@@ -756,6 +784,8 @@ class Runner:
 
         from skulk.download.download_utils import build_model_path
 
+        _require_bounded_swa_support(Llama)
+
         card = self.shard_metadata.model_card
         model_id = card.model_id
         model_dir = build_model_path(ModelId(model_id), card.source_revision)
@@ -781,9 +811,12 @@ class Runner:
         # built with (Vulkan/ROCm/CUDA). n_ctx is bounded by the KV budget
         # placement reserved (never 0/full-context nor the larger admission
         # ceiling, either of which OOM-kills the node on a large-context model --
-        # see serving_n_ctx). logits_all (logprobs, opt-in) further bounds it
-        # because it pre-allocates an n_ctx*vocab*4 logits buffer. See
-        # _logits_all_enabled / _logits_all_n_ctx.
+        # see serving_n_ctx). Sliding-window attention must remain bounded: the
+        # shared estimator conservatively accounts for that mode, while
+        # llama-cpp-python defaults swa_full to true and can otherwise allocate a
+        # full-context cache for every sliding layer. logits_all (logprobs,
+        # opt-in) further bounds n_ctx because it pre-allocates an n_ctx*vocab*4
+        # logits buffer. See _logits_all_enabled / _logits_all_n_ctx.
         logits_all = _logits_all_enabled()
         n_ctx = serving_n_ctx(self.context_token_limit, logits_all)
         # Vision GGUF (#128): when the card declares a vision config, load the
@@ -810,7 +843,7 @@ class Runner:
         logger.info(
             f"loading GGUF {gguf_path.name} for {model_id} "
             f"(n_ctx={n_ctx}, logits_all={logits_all}, flash_attn={flash_attn}, "
-            f"vision={vision is not None})"
+            f"swa_full={LLAMA_CPP_FULL_SWA_CACHE}, vision={vision is not None})"
         )
         with runner_phase(
             "load_model",
@@ -821,6 +854,7 @@ class Runner:
                 "n_ctx": n_ctx,
                 "logits_all": logits_all,
                 "flash_attn": flash_attn,
+                "swa_full": LLAMA_CPP_FULL_SWA_CACHE,
                 "vision": vision is not None,
             },
         ):
@@ -830,6 +864,7 @@ class Runner:
                 n_ctx=n_ctx,
                 logits_all=logits_all,
                 flash_attn=flash_attn,
+                swa_full=LLAMA_CPP_FULL_SWA_CACHE,
                 verbose=False,
                 chat_handler=chat_handler,
             )
