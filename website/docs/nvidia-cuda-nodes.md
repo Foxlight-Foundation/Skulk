@@ -99,6 +99,14 @@ runs through the CUDA paths: the CUDA engine wheel for GGUF, and **vLLM as the
 served path for high-concurrency workloads** (neither needs Vulkan; both need
 only the driver the pod image already carries).
 
+**Install on the container disk, not the network volume.** Pod network
+volumes (RunPod's `/workspace`) break the Python installer mid-sync with
+stale-file-handle errors and make a slow home for the environment. The
+installer detects a network-filesystem target and refuses with the fix;
+pass `--dir "$HOME/skulk"` (or any container-local path) instead. Network
+mounts you know to behave can be forced with
+`SKULK_INSTALL_ALLOW_NETWORK_FS=1`.
+
 For repeated rented-GPU sessions there is a **prebaked pod image** on GHCR:
 
 ```
