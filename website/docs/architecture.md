@@ -330,10 +330,13 @@ tokens per second then scale with concurrency instead. On a node that
 advertises a llama-server binary the model serves through the served proxy; on
 a node without one, the preference is a soft order intersected with the node's
 advertised backends, so the same card falls through to the in-process runner
-unchanged. How many slots the server actually runs is a per-node operator knob
-(`SKULK_LLAMA_SERVER_PARALLEL`, default 1): llama-server splits its total
-context budget evenly across slots, so raising concurrency trades per-request
-context, a choice that belongs to the node operator rather than the card.
+unchanged. The per-node `SKULK_LLAMA_SERVER_PARALLEL` setting (default 1) is the
+requested slot ceiling. llama-server splits its total context budget evenly
+across slots, so the runner lowers that count when necessary to retain the
+placement admission floor (8192 tokens) in every slot. This preserves a usable
+per-request window on memory-constrained and pooled placements instead of
+silently truncating generations; nodes with a larger memory-fit context still
+use more of the requested slots.
 
 Context sizing for the GGUF engines is dynamic rather than a fixed constant.
 Placement reserves KV cache for an 8192-token admission floor, but the window a
