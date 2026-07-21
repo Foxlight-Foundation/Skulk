@@ -40,6 +40,7 @@ import httpx
 
 from skulk.api.types import GenerationStats
 from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
+from skulk.shared.models.memory_estimate import KV_CONTEXT_BUDGET_TOKENS
 from skulk.shared.models.model_cards import OutputParserType
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
@@ -129,18 +130,16 @@ _LLAMA_SERVER_PARALLEL_ENV: Final = "SKULK_LLAMA_SERVER_PARALLEL"
 _DEFAULT_LLAMA_SERVER_PARALLEL: Final = 1
 
 
-def _llama_server_parallel() -> int:
-    """Number of parallel llama-server slots = concurrent generations in flight.
+def _llama_server_parallel(context_token_limit: int) -> int:
+    """Return the safe parallel-slot count for this served context window.
 
     Concurrency is OPT-IN for the served llama.cpp engine (default 1, unchanged
-    behavior). Setting ``SKULK_LLAMA_SERVER_PARALLEL`` above 1 launches
-    ``llama-server --parallel N`` so its continuous batching engages, and the
-    runner keeps N generations in flight. llama-server SPLITS the total context
-    (``-c``) across the N slots, so each concurrent request gets ``n_ctx / N``
-    context; the total KV memory is unchanged (what placement reserved), which is
-    why this is opt-in rather than default-on -- unlike vLLM's paged pool, N-way
-    concurrency here trades per-request context. An unparseable or below-1 value
-    falls back to the default.
+    behavior). ``SKULK_LLAMA_SERVER_PARALLEL`` is an upper bound: llama-server
+    splits its fixed ``-c`` window evenly across the slots, so the runner caps the
+    requested count to keep at least ``KV_CONTEXT_BUDGET_TOKENS`` in each slot.
+    Without the cap, a memory-constrained placement can start successfully but
+    silently truncate every generation after only a handful of tokens. An
+    unparseable or below-1 value falls back to the default.
     """
     raw = os.environ.get(_LLAMA_SERVER_PARALLEL_ENV, "").strip()
     if not raw:
@@ -159,7 +158,16 @@ def _llama_server_parallel() -> int:
             f"using {_DEFAULT_LLAMA_SERVER_PARALLEL}"
         )
         return _DEFAULT_LLAMA_SERVER_PARALLEL
-    return value
+    context_limited_parallel = max(1, context_token_limit // KV_CONTEXT_BUDGET_TOKENS)
+    effective_parallel = min(value, context_limited_parallel)
+    if effective_parallel < value:
+        logger.warning(
+            f"{_LLAMA_SERVER_PARALLEL_ENV}={value} exceeds the safe slot count "
+            f"for a {context_token_limit}-token server context; capping to "
+            f"{effective_parallel} so every slot retains at least "
+            f"{KV_CONTEXT_BUDGET_TOKENS} tokens"
+        )
+    return effective_parallel
 
 
 def _draft_model_args(
@@ -453,9 +461,15 @@ class Runner(ServedConcurrentDispatch):
         # itself (llama-server can't), splitting reasoning from the answer.
         self._uses_channel_parser: bool = False
         self.current_status: RunnerStatus = RunnerIdle()
-        # Concurrent dispatch state (shared mixin): up to N generations in flight,
-        # N = SKULK_LLAMA_SERVER_PARALLEL, matching the server's --parallel slots.
-        self._init_concurrent_dispatch(_llama_server_parallel(), "llama-gen")
+        self._serving_context_tokens = serving_n_ctx(
+            self.context_token_limit, logits_all=False
+        )
+        # The configured parallelism is a ceiling. Preserve the placement
+        # contract's minimum useful context in every llama-server slot instead of
+        # letting a high node-wide value silently truncate all generations.
+        self._init_concurrent_dispatch(
+            _llama_server_parallel(self._serving_context_tokens), "llama-gen"
+        )
         logger.info("llama-server runner created")
         self.update_status(RunnerIdle())
 
@@ -566,13 +580,18 @@ class Runner(ServedConcurrentDispatch):
         reasoning_format_none = self._uses_channel_parser or not (
             _model_declares_reasoning(card)
         )
-        n_ctx = serving_n_ctx(self.context_token_limit, logits_all=False)
+        n_ctx = self._serving_context_tokens
         try:
             with runner_phase(
                 "load_model",
                 detail="spawn_llama_server",
                 task_id=task.task_id,
-                attrs={"gguf_file": gguf_path.name, "n_ctx": n_ctx},
+                attrs={
+                    "gguf_file": gguf_path.name,
+                    "n_ctx": n_ctx,
+                    "parallel": self._max_concurrency,
+                    "slot_context_tokens": n_ctx // self._max_concurrency,
+                },
             ):
                 self._spawn_server(
                     gguf_path, n_ctx, card.runtime, reasoning_format_none
@@ -618,10 +637,9 @@ class Runner(ServedConcurrentDispatch):
             n_gpu_layers,
             "-c",
             str(n_ctx),
-            # Parallel slots for continuous batching. N = the runner's dispatch
-            # concurrency (SKULK_LLAMA_SERVER_PARALLEL), so the server accepts as
-            # many concurrent requests as the runner streams. llama-server splits
-            # -c across these slots (n_ctx/N per slot); total KV is unchanged.
+            # Parallel slots for continuous batching. The configured value is a
+            # ceiling; _llama_server_parallel caps it against n_ctx so each slot
+            # retains the placement contract's minimum useful context.
             "--parallel",
             str(self._max_concurrency),
             "--host",
