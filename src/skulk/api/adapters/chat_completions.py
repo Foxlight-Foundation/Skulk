@@ -248,9 +248,9 @@ def usage_from_stats(stats: GenerationStats | None) -> Usage | None:
     terminal chunk rather than per-chunk OpenAI usage envelopes, so standard
     OpenAI clients saw ``usage: null`` on every chat response (#644). The
     adapter derives the standard object here from the same engine-exact
-    counts the bench surface already exposes. Zero counts on both sides mean
-    "unmeasured this request" and yield ``None`` rather than a fabricated
-    zero-usage claim.
+    counts the bench surface already exposes. A zero count on either side
+    means that side was unmeasured (the runner convention) and yields
+    ``None`` rather than a fabricated zero claim in cost accounting.
     """
     if stats is None:
         return None
