@@ -90,9 +90,13 @@ def test_usage_from_stats_unmeasured_and_none() -> None:
     from skulk.api.adapters.chat_completions import usage_from_stats
 
     assert usage_from_stats(None) is None
-    # All-zero stats mean unmeasured; a fabricated zero-usage claim would
-    # mislead cost accounting, so the field stays null (#644).
+    # A zero on EITHER side means that side was unmeasured (runner fallbacks
+    # produce prompt 0 with real decode counts); a fabricated zero would
+    # mislead cost accounting, so partial measurements stay null (#644,
+    # PR #645 review).
     assert usage_from_stats(_stats(0, 0)) is None
+    assert usage_from_stats(_stats(0, 30)) is None
+    assert usage_from_stats(_stats(30, 0)) is None
     usage = usage_from_stats(_stats(5, 7))
     assert usage is not None and usage.total_tokens == 12
 

@@ -256,7 +256,12 @@ def usage_from_stats(stats: GenerationStats | None) -> Usage | None:
         return None
     prompt = max(stats.prompt_tokens, 0)
     completion = max(stats.generation_tokens, 0)
-    if prompt == 0 and completion == 0:
+    # A zero on either side means that side was unmeasured (the stats
+    # convention throughout the runners; e.g. a vLLM stream without its
+    # include_usage terminal falls back to prompt 0). OpenAI's usage shape
+    # cannot express "unknown", so a partial measurement stays null rather
+    # than fabricating a zero count into clients' cost accounting.
+    if prompt == 0 or completion == 0:
         return None
     return Usage(
         prompt_tokens=prompt,
