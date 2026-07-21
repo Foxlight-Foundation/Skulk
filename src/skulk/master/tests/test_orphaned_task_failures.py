@@ -267,3 +267,90 @@ def test_worker_lifecycle_task_not_failed() -> None:
         {},
     )
     assert orphaned_task_failure_events(state, frozenset()) == []
+
+
+# --- #647: stale lifecycle tasks orphaned by a vanished executor -----------
+
+
+def _shutdown_task(
+    task_id: TaskId,
+    instance_id: InstanceId,
+    status: TaskStatus = TaskStatus.Pending,
+) -> Task:
+    from skulk.shared.types.tasks import Shutdown
+    from skulk.shared.types.worker.instances import RunnerId
+
+    return Shutdown(
+        task_id=task_id,
+        instance_id=instance_id,
+        task_status=status,
+        runner_id=RunnerId(),
+    )
+
+
+def _state_647(
+    tasks: dict[TaskId, Task],
+    instances: dict[InstanceId, Instance] | None = None,
+) -> State:
+    return State(tasks=tasks, instances=instances or {})
+
+
+def test_stale_lifecycle_task_fails_only_after_grace() -> None:
+    from skulk.master.main import stale_lifecycle_task_failures
+
+    task_id = TaskId()
+    state = _state_647({task_id: _shutdown_task(task_id, InstanceId("gone"))})
+    tracking: dict[TaskId, float] = {}
+    # First observation: stamped, not yet failed.
+    assert stale_lifecycle_task_failures(state, tracking, now=100.0) == []
+    assert task_id in tracking
+    # Still inside the grace.
+    assert stale_lifecycle_task_failures(state, tracking, now=150.0) == []
+    # Past the grace: one terminal event, tracking entry consumed.
+    events = stale_lifecycle_task_failures(state, tracking, now=161.0)
+    assert [e.task_id for e in events] == [task_id]
+    assert events[0].error_type == "executor_lost"
+    assert task_id not in tracking
+
+
+def test_lifecycle_task_with_live_instance_is_never_reaped() -> None:
+    from skulk.master.main import stale_lifecycle_task_failures
+
+    task_id = TaskId()
+    instance_id = InstanceId("alive")
+    state = _state_647(
+        {task_id: _shutdown_task(task_id, instance_id)},
+        {instance_id: _instance(instance_id)},
+    )
+    tracking: dict[TaskId, float] = {}
+    assert stale_lifecycle_task_failures(state, tracking, now=0.0) == []
+    assert stale_lifecycle_task_failures(state, tracking, now=10_000.0) == []
+    assert tracking == {}
+
+
+def test_command_tasks_are_left_to_the_223_pass() -> None:
+    from skulk.master.main import stale_lifecycle_task_failures
+
+    task_id = TaskId()
+    state = _state_647({task_id: _text_task(task_id, InstanceId("gone"))})
+    tracking: dict[TaskId, float] = {}
+    assert stale_lifecycle_task_failures(state, tracking, now=0.0) == []
+    assert stale_lifecycle_task_failures(state, tracking, now=10_000.0) == []
+    assert tracking == {}
+
+
+def test_terminal_lifecycle_task_clears_tracking() -> None:
+    from skulk.master.main import stale_lifecycle_task_failures
+
+    task_id = TaskId()
+    pending = _state_647({task_id: _shutdown_task(task_id, InstanceId("gone"))})
+    tracking: dict[TaskId, float] = {}
+    assert stale_lifecycle_task_failures(pending, tracking, now=0.0) == []
+    assert task_id in tracking
+    # The worker reported after all (e.g. a slow but healthy teardown):
+    # terminal status leaves the orphan set and the stamp is dropped.
+    completed = _state_647(
+        {task_id: _shutdown_task(task_id, InstanceId("gone"), TaskStatus.Complete)}
+    )
+    assert stale_lifecycle_task_failures(completed, tracking, now=30.0) == []
+    assert tracking == {}

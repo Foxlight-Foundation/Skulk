@@ -423,6 +423,82 @@ def orphaned_task_failure_events(
     return events
 
 
+#: A lifecycle task whose instance no longer exists can only ever be
+#: completed by the worker that was executing it. Healthy teardown completes
+#: in seconds; past this grace the executor is presumed gone for good (a
+#: killed node returns with a NEW ephemeral identity that knows nothing of
+#: the old tasks, #647) and the master declares the task dead.
+ORPHANED_LIFECYCLE_TASK_GRACE_SECONDS = 60.0
+
+
+def stale_lifecycle_task_failures(
+    state: State,
+    first_seen_orphaned: dict[TaskId, float],
+    *,
+    now: float,
+    grace_seconds: float = ORPHANED_LIFECYCLE_TASK_GRACE_SECONDS,
+) -> list[TaskFailed]:
+    """Fail lifecycle tasks orphaned past the grace by a vanished executor.
+
+    The #223 pass covers API-facing command tasks via their instance. The
+    complementary gap (#647): worker LIFECYCLE tasks (Shutdown, CreateRunner,
+    LoadModel, ...) belonging to an already-deleted instance are normally
+    reconciled by the executing worker's own plan loop, but when that worker
+    died ungracefully its restarted process carries a new node identity and
+    can never report; the task sits Pending/Running in state forever, and
+    anything waiting on task convergence hangs. Instance deletion also
+    removed the task-to-node attribution, so the reap is grace-based rather
+    than membership-based: a lifecycle task that stays non-terminal with no
+    instance for longer than a healthy teardown could possibly take has no
+    living executor.
+
+    Mutates ``first_seen_orphaned`` (master-local tracking, not state):
+    stamps newly orphaned tasks, drops tasks that left the orphaned
+    condition, and drops tasks it emits for (TaskFailed flips the status on
+    apply, so each task is emitted at most once; if the emit were ever lost
+    the task re-stamps and gets another full grace, which is self-healing).
+
+    Args:
+        state: The master's current applied state.
+        first_seen_orphaned: Monotonic first-observation stamps, owned by
+            the caller across ticks.
+        now: Current monotonic time.
+        grace_seconds: How long a task may stay orphaned before it is
+            declared dead.
+
+    Returns:
+        Terminal ``TaskFailed`` events to index through the ordered path.
+    """
+    events: list[TaskFailed] = []
+    orphaned_now: set[TaskId] = set()
+    for task_id, task in state.tasks.items():
+        if isinstance(task, _COMMAND_TASK_TYPES):
+            continue  # the #223 pass owns API-facing tasks
+        if task.task_status not in (TaskStatus.Pending, TaskStatus.Running):
+            continue
+        if task.instance_id in state.instances:
+            continue
+        orphaned_now.add(task_id)
+        first_seen = first_seen_orphaned.setdefault(task_id, now)
+        if now - first_seen >= grace_seconds:
+            events.append(
+                TaskFailed(
+                    task_id=task_id,
+                    error_type="executor_lost",
+                    error_message=(
+                        "Lifecycle task outlived its instance with no "
+                        "surviving executor (node died mid-task and "
+                        "returned with a new identity)"
+                    ),
+                )
+            )
+    emitted = {event.task_id for event in events}
+    for task_id in list(first_seen_orphaned):
+        if task_id not in orphaned_now or task_id in emitted:
+            del first_seen_orphaned[task_id]
+    return events
+
+
 def instances_wedged_by_download_failure(
     state: State,
 ) -> dict[InstanceId, tuple[frozenset[NodeId], str]]:
@@ -550,6 +626,9 @@ class Master:
         # transition makes a 10-second planning loop emit one warning and one
         # recovery message instead of repeating the same warning indefinitely.
         self._heartbeat_gap_warned_nodes: set[NodeId] = set()
+        # First-observation stamps for lifecycle tasks orphaned by a deleted
+        # instance (#647); master-local, feeds stale_lifecycle_task_failures.
+        self._orphaned_lifecycle_first_seen: dict[TaskId, float] = {}
         # Instance ids whose memory-refusal re-placement has already been
         # initiated (#290). The command processor generates events but does not
         # apply them — self.state only updates when they round-trip through
@@ -1579,6 +1658,22 @@ class Master:
                     f"{task_failed.error_message}"
                 )
                 await self.event_sender.send(task_failed)
+
+            # Reap lifecycle tasks whose executor died with its old node
+            # identity (#647): grace-based because instance deletion already
+            # removed the task-to-node attribution. Suppressed during the
+            # topology-settle grace like every liveness-derived action.
+            if topology_settled:
+                for task_failed in stale_lifecycle_task_failures(
+                    self.state,
+                    self._orphaned_lifecycle_first_seen,
+                    now=time.monotonic(),
+                ):
+                    logger.warning(
+                        f"Failing stale lifecycle task {task_failed.task_id}: "
+                        f"{task_failed.error_message}"
+                    )
+                    await self.event_sender.send(task_failed)
 
             # kill broken instances (suppressed during the topology-settle
             # grace, same rationale as dying_instance_ids above)
