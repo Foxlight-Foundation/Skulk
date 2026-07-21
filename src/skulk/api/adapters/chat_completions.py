@@ -248,20 +248,24 @@ def usage_from_stats(stats: GenerationStats | None) -> Usage | None:
     terminal chunk rather than per-chunk OpenAI usage envelopes, so standard
     OpenAI clients saw ``usage: null`` on every chat response (#644). The
     adapter derives the standard object here from the same engine-exact
-    counts the bench surface already exposes. A zero count on either side
-    means that side was unmeasured (the runner convention) and yields
-    ``None`` rather than a fabricated zero claim in cost accounting.
+    counts the bench surface already exposes. A zero prompt count means the
+    prompt side was unmeasured (every known runner fallback shape) and
+    yields ``None`` rather than a fabricated zero claim in cost accounting;
+    a zero completion count with a measured prompt is a real outcome and
+    keeps its usage object.
     """
     if stats is None:
         return None
     prompt = max(stats.prompt_tokens, 0)
     completion = max(stats.generation_tokens, 0)
-    # A zero on either side means that side was unmeasured (the stats
-    # convention throughout the runners; e.g. a vLLM stream without its
-    # include_usage terminal falls back to prompt 0). OpenAI's usage shape
-    # cannot express "unknown", so a partial measurement stays null rather
-    # than fabricating a zero count into clients' cost accounting.
-    if prompt == 0 or completion == 0:
+    # A zero PROMPT count means the prompt side was unmeasured: every known
+    # runner fallback (a vLLM stream without its include_usage terminal,
+    # served wall stats without timings) produces prompt 0 with real decode
+    # counts, and OpenAI's usage shape cannot express "unknown", so those
+    # stay null rather than fabricating a zero into cost accounting. A zero
+    # COMPLETION count with a measured prompt is a legitimate outcome (an
+    # immediately-stopped generation) and keeps its usage object.
+    if prompt == 0:
         return None
     return Usage(
         prompt_tokens=prompt,
