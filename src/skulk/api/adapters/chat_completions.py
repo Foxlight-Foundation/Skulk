@@ -15,11 +15,14 @@ from skulk.api.types import (
     ChatCompletionMessageText,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    CompletionTokensDetails,
     ErrorInfo,
     ErrorResponse,
     FinishReason,
+    GenerationStats,
     Logprobs,
     LogprobsContentItem,
+    PromptTokensDetails,
     StreamingChoiceResponse,
     ToolCall,
     Usage,
@@ -238,6 +241,32 @@ async def chat_request_to_text_generation(
     )
 
 
+def usage_from_stats(stats: GenerationStats | None) -> Usage | None:
+    """Synthesize the OpenAI ``usage`` object from Skulk's generation stats.
+
+    Runners report token accounting through ``GenerationStats`` on the
+    terminal chunk rather than per-chunk OpenAI usage envelopes, so standard
+    OpenAI clients saw ``usage: null`` on every chat response (#644). The
+    adapter derives the standard object here from the same engine-exact
+    counts the bench surface already exposes. Zero counts on both sides mean
+    "unmeasured this request" and yield ``None`` rather than a fabricated
+    zero-usage claim.
+    """
+    if stats is None:
+        return None
+    prompt = max(stats.prompt_tokens, 0)
+    completion = max(stats.generation_tokens, 0)
+    if prompt == 0 and completion == 0:
+        return None
+    return Usage(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        total_tokens=prompt + completion,
+        prompt_tokens_details=PromptTokensDetails(),
+        completion_tokens_details=CompletionTokensDetails(),
+    )
+
+
 def chunk_to_response(
     chunk: TokenChunk, command_id: CommandId
 ) -> ChatCompletionResponse:
@@ -333,7 +362,7 @@ async def generate_chat_stream(
                             finish_reason="tool_calls",
                         )
                     ],
-                    usage=last_usage,
+                    usage=last_usage or usage_from_stats(chunk.stats),
                 )
                 yield f"data: {tool_response.model_dump_json()}\n\n"
                 if chunk.stats is not None:
@@ -353,7 +382,7 @@ async def generate_chat_stream(
                 chunk_response = chunk_to_response(chunk, command_id)
                 if chunk.finish_reason is not None:
                     chunk_response = chunk_response.model_copy(
-                        update={"usage": last_usage}
+                        update={"usage": last_usage or usage_from_stats(chunk.stats)}
                     )
                 yield f"data: {chunk_response.model_dump_json()}\n\n"
 
@@ -386,6 +415,7 @@ async def collect_chat_response(
     finish_reason: FinishReason | None = None
     error_message: str | None = None
     last_usage: Usage | None = None
+    last_stats: GenerationStats | None = None
 
     async for chunk in chunk_stream:
         match chunk:
@@ -400,6 +430,7 @@ async def collect_chat_response(
                 if model is None:
                     model = chunk.model
                 last_usage = chunk.usage or last_usage
+                last_stats = chunk.stats or last_stats
                 if chunk.is_thinking:
                     thinking_parts.append(chunk.text)
                 else:
@@ -419,6 +450,7 @@ async def collect_chat_response(
                 if model is None:
                     model = chunk.model
                 last_usage = chunk.usage or last_usage
+                last_stats = chunk.stats or last_stats
                 tool_calls.extend(
                     ToolCall(
                         id=tool.id,
@@ -461,6 +493,6 @@ async def collect_chat_response(
                 finish_reason=finish_reason,
             )
         ],
-        usage=last_usage,
+        usage=last_usage or usage_from_stats(last_stats),
     ).model_dump_json()
     return
