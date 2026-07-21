@@ -288,8 +288,11 @@ def _shutdown_task(
     )
 
 
-def _state_647(tasks: dict[TaskId, Task], instances: dict[InstanceId, object] | None = None) -> State:
-    return State(tasks=tasks, instances=instances or {})  # pyright: ignore[reportArgumentType]
+def _state_647(
+    tasks: dict[TaskId, Task],
+    instances: dict[InstanceId, Instance] | None = None,
+) -> State:
+    return State(tasks=tasks, instances=instances or {})
 
 
 def test_stale_lifecycle_task_fails_only_after_grace() -> None:
