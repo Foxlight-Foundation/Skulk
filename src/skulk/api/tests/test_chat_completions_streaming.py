@@ -95,3 +95,33 @@ def test_usage_from_stats_unmeasured_and_none() -> None:
     assert usage_from_stats(_stats(0, 0)) is None
     usage = usage_from_stats(_stats(5, 7))
     assert usage is not None and usage.total_tokens == 12
+
+
+async def _tool_call_stream_with_stats():
+    from skulk.api.types import ToolCallItem
+    from skulk.shared.types.chunks import ToolCallChunk
+
+    yield ToolCallChunk(
+        model=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
+        tool_calls=[ToolCallItem(name="get_weather", arguments='{"city":"Oslo"}')],
+        usage=None,
+        stats=_stats(43, 30),
+    )
+
+
+@pytest.mark.anyio
+async def test_streaming_tool_call_terminal_synthesizes_usage_from_stats() -> None:
+    # The tool-calls finish path is a distinct terminal from the token path
+    # and must carry the synthesized usage too (#644, PR #645 review).
+    chunks = [
+        chunk
+        async for chunk in generate_chat_stream(
+            CommandId("cmd-644-tools"), _tool_call_stream_with_stats()
+        )
+    ]
+    final_data = [c for c in chunks if c.startswith("data: {")][-1]
+    assert '"finish_reason":"tool_calls"' in final_data
+    assert '"usage":' in final_data
+    assert '"prompt_tokens":43' in final_data
+    assert '"completion_tokens":30' in final_data
+    assert '"total_tokens":73' in final_data
