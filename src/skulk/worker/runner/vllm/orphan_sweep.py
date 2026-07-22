@@ -48,7 +48,11 @@ def find_orphaned_vllm_engine_pids(proc_root: Path = Path("/proc")) -> list[int]
         if not entry.name.isdigit():
             continue
         try:
-            stat_text = (entry / "stat").read_text()
+            # Both files decode with errors="replace": comm is arbitrary
+            # bytes (any process can set a non-UTF-8 title), and a strict
+            # decode raising UnicodeDecodeError past the OSError catch
+            # would crash worker startup over an unrelated process.
+            stat_text = (entry / "stat").read_bytes().decode(errors="replace")
             cmdline = (
                 (entry / "cmdline")
                 .read_bytes()

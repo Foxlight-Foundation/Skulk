@@ -42,6 +42,14 @@ def test_find_orphaned_vllm_engine_pids(tmp_path: pathlib.Path) -> None:
     # Non-pid entries and unreadable processes are skipped.
     (tmp_path / "self").mkdir()
     (tmp_path / "201").mkdir()  # no stat/cmdline: vanished mid-scan
+    # A process whose comm carries non-UTF-8 bytes must be skipped, not
+    # crash the scan: a strict decode would raise UnicodeDecodeError past
+    # the OSError catch and take worker startup down with it (PR #656
+    # review).
+    entry = tmp_path / "107"
+    entry.mkdir()
+    (entry / "stat").write_bytes(b"107 (bad\xffcomm) S 1 107 107 0 -1")
+    (entry / "cmdline").write_bytes(b"daemon\x00--flag")
 
     assert find_orphaned_vllm_engine_pids(tmp_path) == [101]
 
