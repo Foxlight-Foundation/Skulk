@@ -257,9 +257,13 @@ if [[ "$WITH_VLLM" == "1" ]]; then
         #   JIT sampling kernels shell out to it); installing it into the
         #   venv suffices because the runner prepends the venv bin dir to the
         #   server's PATH.
+        # Default index pinned explicitly (mirroring ENGINE_INDEX_FLAGS
+        # above): a host exporting UV_INDEX_URL/UV_DEFAULT_INDEX would
+        # otherwise redirect dependency resolution to its own mirror.
         uv pip install --python "$VLLM_ENV/bin/python" \
             "vllm==0.24.0+cu129" ninja \
             --extra-index-url "https://wheels.vllm.ai/0.24.0/cu129/" \
+            --index-url "https://pypi.org/simple/" \
             --torch-backend=cu128
         mkdir -p "$HOME/.skulk"
         if ! grep -q "SKULK_VLLM_BIN" "$HOME/.skulk/skulk.env" 2>/dev/null; then
