@@ -14,7 +14,12 @@ from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskP
 from skulk.shared.types.worker.runner_response import GenerationResponse
 from skulk.worker.engines.mlx.cache import CacheSnapshot, KVPrefixCache
 from skulk.worker.engines.mlx.generator import generate as generate_module
-from skulk.worker.engines.mlx.vision import MediaRegion, VisionProcessor, VisionResult
+from skulk.worker.engines.mlx.vision import (
+    MediaRegion,
+    VisionProcessor,
+    VisionResult,
+    prepare_vision,
+)
 
 mlx_generate = generate_module.mlx_generate
 
@@ -128,6 +133,10 @@ def _empty_cache_list(**_kwargs: object) -> list[object]:
     return []
 
 
+def _always_false(**_kwargs: object) -> bool:
+    return False
+
+
 def _version_map(package: str, *, mlx_version: str, mlx_vlm_version: str) -> str:
     return {"mlx": mlx_version, "mlx-vlm": mlx_vlm_version}[package]
 
@@ -150,6 +159,7 @@ def test_native_vision_generation_uses_mlx_vlm_generate_step(
     ):
         assert input_ids.shape == (1, 3)
         assert pixel_values.shape == (1,)
+        assert cast(mx.array, _kwargs["image_grid_thw"]).tolist() == [[1, 2, 3]]
         yield mx.array(101), mx.zeros((8,))
         yield mx.array(102), mx.zeros((8,))
         yield mx.array(999), mx.zeros((8,))
@@ -172,6 +182,7 @@ def test_native_vision_generation_uses_mlx_vlm_generate_step(
         embeddings=mx.zeros((1, 0, 1)),
         media_regions=[],
         pixel_values=mx.array([1.0]),
+        image_grid_thw=mx.array([[1, 2, 3]]),
     )
 
     responses = list(
@@ -271,10 +282,100 @@ def test_mlx_generate_routes_native_vision_through_reference_path(
     assert [response.text for response in responses] == ["native"]
 
 
-def test_mlx_generate_uses_pipeline_aware_path_on_fixed_stack(
+def test_mlx_generate_rejects_image_input_without_vision_processor() -> None:
+    """Image requests must never silently enter the text-only generation path."""
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/Qwen3.6-27B-4bit"),
+        input=[InputMessage(role="user", content="what is this?")],
+        chat_template_messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "what is this?"},
+                ],
+            }
+        ],
+        images=["ignored"],
+        max_output_tokens=8,
+        temperature=0.0,
+    )
+
+    with pytest.raises(RuntimeError, match="without a vision processor"):
+        list(
+            mlx_generate(
+                model=_fake_model(),
+                tokenizer=_fake_tokenizer(),
+                task=task,
+                prompt="<bos>",
+                kv_prefix_cache=None,
+                group=None,
+                vision_processor=None,
+            )
+        )
+
+
+def test_mlx_generate_rejects_failed_vision_preprocessing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fixed upstream stacks should use the faster legacy generation path."""
+    """A processor error must fail the request instead of returning a hallucination."""
+
+    def _fail_prepare_vision(**_kwargs: object) -> VisionResult:
+        raise ImportError("processor dependency unavailable")
+
+    monkeypatch.setattr(
+        "skulk.worker.engines.mlx.generator.generate.prepare_vision",
+        _fail_prepare_vision,
+    )
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/Qwen3.6-27B-4bit"),
+        input=[InputMessage(role="user", content="what is this?")],
+        chat_template_messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "what is this?"},
+                ],
+            }
+        ],
+        images=["ignored"],
+        max_output_tokens=8,
+        temperature=0.0,
+    )
+
+    with pytest.raises(RuntimeError, match="Vision preprocessing failed") as exc_info:
+        list(
+            mlx_generate(
+                model=_fake_model(),
+                tokenizer=_fake_tokenizer(),
+                task=task,
+                prompt="<bos>",
+                kv_prefix_cache=None,
+                group=None,
+                vision_processor=_fake_vision_processor(),
+            )
+        )
+
+    assert isinstance(exc_info.value.__cause__, ImportError)
+
+
+def test_prepare_vision_rejects_images_without_structured_messages() -> None:
+    """Missing multimodal prompt structure must not cause images to be ignored."""
+    with pytest.raises(ValueError, match="missing chat_template_messages"):
+        prepare_vision(
+            images=["ignored"],
+            chat_template_messages=None,
+            vision_processor=_fake_vision_processor(),
+            tokenizer=_fake_tokenizer(),
+            model=_fake_model(),
+        )
+
+
+def test_mlx_generate_uses_native_reference_path_for_local_vision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local VLMs preserve family-specific multimodal position handling."""
 
     vision = VisionResult(
         prompt="ignored",
@@ -282,26 +383,19 @@ def test_mlx_generate_uses_pipeline_aware_path_on_fixed_stack(
         embeddings=mx.zeros((1, 0, 1)),
         media_regions=[],
         pixel_values=mx.array([1.0]),
+        image_grid_thw=mx.array([[1, 2, 3]]),
     )
-
-    class _FakeModel:
-        def __init__(self) -> None:
-            self.pixel_values: mx.array | None = None
-
-        def set_pixel_values(self, pixel_values: mx.array | None) -> None:
-            self.pixel_values = pixel_values
 
     def _fake_prepare_vision(**_kwargs: object) -> VisionResult:
         return vision
 
-    def _fake_prefill(*_args: object, **_kwargs: object) -> tuple[float, int, list[CacheSnapshot]]:
-        return 0.0, 2, []
+    def _fake_native_generate(**kwargs: object):
+        native_vision = cast(VisionResult, kwargs["vision"])
+        assert native_vision.image_grid_thw is not None
+        yield GenerationResponse(text="native", token=101, usage=None)
 
-    def _fake_stream_generate(*_args: object, **_kwargs: object):
-        yield GenerationResponse(text="legacy", token=101, usage=None)
-
-    def _fail_native_generate(**_kwargs: object):
-        raise AssertionError("fixed stacks should not force reference native vision")
+    def _fail_stream_generate(*_args: object, **_kwargs: object):
+        raise AssertionError("local native vision must use mlx-vlm generation")
 
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.generator.generate.prepare_vision",
@@ -313,15 +407,11 @@ def test_mlx_generate_uses_pipeline_aware_path_on_fixed_stack(
     )
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.generator.generate._mlx_generate_native_vision",
-        _fail_native_generate,
-    )
-    monkeypatch.setattr(
-        "skulk.worker.engines.mlx.generator.generate.prefill",
-        _fake_prefill,
+        _fake_native_generate,
     )
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.generator.generate.stream_generate",
-        _fake_stream_generate,
+        _fail_stream_generate,
     )
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.generator.generate.make_kv_cache",
@@ -345,10 +435,9 @@ def test_mlx_generate_uses_pipeline_aware_path_on_fixed_stack(
         temperature=0.0,
     )
 
-    model = _FakeModel()
     responses = list(
         mlx_generate(
-            model=cast(Model, cast(object, model)),
+            model=_fake_model(),
             tokenizer=_fake_tokenizer(),
             task=task,
             prompt="<bos>",
@@ -358,8 +447,7 @@ def test_mlx_generate_uses_pipeline_aware_path_on_fixed_stack(
         )
     )
 
-    assert [response.text for response in responses] == ["legacy"]
-    assert model.pixel_values is None
+    assert [response.text for response in responses] == ["native"]
 
 
 def test_native_vision_reference_path_version_gate(
@@ -368,10 +456,9 @@ def test_native_vision_reference_path_version_gate(
     """Recent upstream MLX versions should disable the slower reference path."""
 
     monkeypatch.delenv("SKULK_NATIVE_VISION_REFERENCE_PATH", raising=False)
+
     def _fake_version(package: str) -> str:
-        return _version_map(
-            package, mlx_version="0.31.1", mlx_vlm_version="0.4.4"
-        )
+        return _version_map(package, mlx_version="0.31.1", mlx_vlm_version="0.4.4")
 
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.generator.generate.metadata.version",
@@ -387,6 +474,7 @@ def test_native_vision_reference_path_keeps_prereleases_on_safe_path(
     """Prerelease builds should keep the safer reference path enabled."""
 
     monkeypatch.delenv("SKULK_NATIVE_VISION_REFERENCE_PATH", raising=False)
+
     def _fake_version(package: str) -> str:
         return _version_map(
             package, mlx_version="0.31.1rc1", mlx_vlm_version="0.4.4.dev1"
@@ -466,7 +554,9 @@ def test_mlx_generate_slices_native_pixel_values_after_prefix_hit(
             self.pixel_values: list[mx.array] | mx.array | None = None
             self.seen_pixel_values: list[mx.array] | mx.array | None = None
 
-        def set_pixel_values(self, pixel_values: list[mx.array] | mx.array | None) -> None:
+        def set_pixel_values(
+            self, pixel_values: list[mx.array] | mx.array | None
+        ) -> None:
             self.pixel_values = pixel_values
 
     vision = VisionResult(
@@ -511,6 +601,14 @@ def test_mlx_generate_slices_native_pixel_values_after_prefix_hit(
         "skulk.worker.engines.mlx.generator.generate.stream_generate",
         _fake_stream_generate,
     )
+    monkeypatch.setattr(
+        "skulk.worker.engines.mlx.generator.generate.mx_barrier",
+        _noop_barrier,
+    )
+    monkeypatch.setattr(
+        "skulk.worker.engines.mlx.generator.generate._should_force_native_vision_full_prefill_for_request",
+        _always_false,
+    )
 
     task = TextGenerationTaskParams(
         model=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
@@ -545,7 +643,7 @@ def test_mlx_generate_slices_native_pixel_values_after_prefix_hit(
             task=task,
             prompt="<bos>",
             kv_prefix_cache=cast(KVPrefixCache, cast(object, _FakePrefixCache())),
-            group=None,
+            group=_fake_group(),
             vision_processor=_fake_vision_processor(),
         )
     )
@@ -581,7 +679,9 @@ def test_mlx_generate_skips_embedding_patch_when_native_images_are_fully_cached(
             self.pixel_values: list[mx.array] | mx.array | None = None
             self.seen_pixel_values: list[mx.array] | mx.array | None = None
 
-        def set_pixel_values(self, pixel_values: list[mx.array] | mx.array | None) -> None:
+        def set_pixel_values(
+            self, pixel_values: list[mx.array] | mx.array | None
+        ) -> None:
             self.pixel_values = pixel_values
             self.seen_pixel_values = pixel_values
 
@@ -628,6 +728,14 @@ def test_mlx_generate_skips_embedding_patch_when_native_images_are_fully_cached(
         "skulk.worker.engines.mlx.generator.generate.patch_embed_tokens",
         _raise_patch_embed_tokens_error,
     )
+    monkeypatch.setattr(
+        "skulk.worker.engines.mlx.generator.generate.mx_barrier",
+        _noop_barrier,
+    )
+    monkeypatch.setattr(
+        "skulk.worker.engines.mlx.generator.generate._should_force_native_vision_full_prefill_for_request",
+        _always_false,
+    )
 
     task = TextGenerationTaskParams(
         model=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
@@ -662,7 +770,7 @@ def test_mlx_generate_skips_embedding_patch_when_native_images_are_fully_cached(
             task=task,
             prompt="<bos>",
             kv_prefix_cache=cast(KVPrefixCache, cast(object, _FakePrefixCache())),
-            group=None,
+            group=_fake_group(),
             vision_processor=_fake_vision_processor(),
         )
     )
@@ -711,7 +819,9 @@ def test_mlx_generate_full_prefills_distributed_fully_cached_native_images(
             self.pixel_values: list[mx.array] | mx.array | None = None
             self.seen_pixel_values: list[mx.array] | mx.array | None = None
 
-        def set_pixel_values(self, pixel_values: list[mx.array] | mx.array | None) -> None:
+        def set_pixel_values(
+            self, pixel_values: list[mx.array] | mx.array | None
+        ) -> None:
             self.pixel_values = pixel_values
             if pixel_values is not None:
                 self.seen_pixel_values = pixel_values
@@ -1102,7 +1212,9 @@ def test_mlx_generate_full_prefills_distributed_cached_native_image_prefix(
             self.pixel_values: list[mx.array] | mx.array | None = None
             self.seen_pixel_values: list[mx.array] | mx.array | None = None
 
-        def set_pixel_values(self, pixel_values: list[mx.array] | mx.array | None) -> None:
+        def set_pixel_values(
+            self, pixel_values: list[mx.array] | mx.array | None
+        ) -> None:
             self.pixel_values = pixel_values
             if pixel_values is not None:
                 self.seen_pixel_values = pixel_values

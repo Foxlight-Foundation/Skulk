@@ -133,6 +133,7 @@ class _VlmGenerateStep(Protocol):
         input_ids: mx.array,
         model: Model,
         pixel_values: mx.array | list[mx.array],
+        image_grid_thw: mx.array | None,
         mask: object,
         max_tokens: int,
         sampler: Callable[[mx.array], mx.array],
@@ -320,9 +321,7 @@ def _media_region_attrs(media_regions: list[MediaRegion]) -> dict[str, object]:
         "media_region_lengths": [
             str(region.end_pos - region.start_pos) for region in media_regions
         ],
-        "media_region_hashes": [
-            region.content_hash[:12] for region in media_regions
-        ],
+        "media_region_hashes": [region.content_hash[:12] for region in media_regions],
     }
 
 
@@ -413,7 +412,9 @@ def _slice_native_pixel_values_for_uncached_suffix(
         return pixel_values
 
     available_images = (
-        len(pixel_values) if isinstance(pixel_values, list) else int(pixel_values.shape[0])
+        len(pixel_values)
+        if isinstance(pixel_values, list)
+        else int(pixel_values.shape[0])
     )
     remaining_indices = [
         idx
@@ -463,7 +464,9 @@ def _native_media_regions_for_uncached_suffix(
         return media_regions
 
     available_images = (
-        len(pixel_values) if isinstance(pixel_values, list) else int(pixel_values.shape[0])
+        len(pixel_values)
+        if isinstance(pixel_values, list)
+        else int(pixel_values.shape[0])
     )
     return [
         region
@@ -498,7 +501,9 @@ def _slice_native_pixel_values_by_indices(
         return None
 
     available_images = (
-        len(pixel_values) if isinstance(pixel_values, list) else int(pixel_values.shape[0])
+        len(pixel_values)
+        if isinstance(pixel_values, list)
+        else int(pixel_values.shape[0])
     )
     valid_indices = [idx for idx in indices if idx < available_images]
     if not valid_indices:
@@ -912,12 +917,15 @@ def prefill(
     # that are never consumed during prefill and later deadlock the ranks.
     set_pipeline_prefill(model, is_prefill=is_pipeline)
 
-    with runner_phase(
-        "prefill_barrier",
-        detail="prefill_mx_barrier",
-        attrs={"rank": rank, "group_size": group_size, "prompt_tokens": num_tokens},
-        include_memory=True,
-    ), _hang_debug_watch(f"prefill barrier rank={rank} group_size={group_size}"):
+    with (
+        runner_phase(
+            "prefill_barrier",
+            detail="prefill_mx_barrier",
+            attrs={"rank": rank, "group_size": group_size, "prompt_tokens": num_tokens},
+            include_memory=True,
+        ),
+        _hang_debug_watch(f"prefill barrier rank={rank} group_size={group_size}"),
+    ):
         mx_barrier(group)
     logger.info(
         f"Starting prefill (rank={rank}, group_size={group_size}, prompt_tokens={num_tokens})"
@@ -930,18 +938,21 @@ def prefill(
             pipeline_distributed_callback = (
                 distributed_prompt_progress_callback if pipeline_chunks >= 2 else None
             )
-            with runner_phase(
-                "prefill_pipeline",
-                detail="pipeline_parallel_prefill",
-                attrs={
-                    "rank": rank,
-                    "group_size": group_size,
-                    "pipeline_chunks": pipeline_chunks,
-                    "prompt_tokens": num_tokens,
-                },
-                include_memory=True,
-            ), _hang_debug_watch(
-                f"pipeline_parallel_prefill rank={rank} group_size={group_size}"
+            with (
+                runner_phase(
+                    "prefill_pipeline",
+                    detail="pipeline_parallel_prefill",
+                    attrs={
+                        "rank": rank,
+                        "group_size": group_size,
+                        "pipeline_chunks": pipeline_chunks,
+                        "prompt_tokens": num_tokens,
+                    },
+                    include_memory=True,
+                ),
+                _hang_debug_watch(
+                    f"pipeline_parallel_prefill rank={rank} group_size={group_size}"
+                ),
             ):
                 pipeline_parallel_prefill(
                     model=model,
@@ -964,17 +975,20 @@ def prefill(
             # flight and wedging the next collective.
             # Use max_tokens=1 because max_tokens=0 does not work.
             # We just throw away the generated token - we only care about filling the cache
-            with runner_phase(
-                "prefill_stream",
-                detail="stream_generate_prefill",
-                attrs={
-                    "rank": rank,
-                    "group_size": group_size,
-                    "prompt_tokens": num_tokens,
-                },
-                include_memory=True,
-            ), _hang_debug_watch(
-                f"stream_generate prefill rank={rank} group_size={group_size}"
+            with (
+                runner_phase(
+                    "prefill_stream",
+                    detail="stream_generate_prefill",
+                    attrs={
+                        "rank": rank,
+                        "group_size": group_size,
+                        "prompt_tokens": num_tokens,
+                    },
+                    include_memory=True,
+                ),
+                _hang_debug_watch(
+                    f"stream_generate prefill rank={rank} group_size={group_size}"
+                ),
             ):
                 for _ in stream_generate(
                     model=model,
@@ -1083,8 +1097,8 @@ def _stream_generate_without_lookahead(
     generated_count = 0
 
     # Multi-node: the last rank decides each token; receivers never sample.
-    token_decider = group is None or group.size() <= 1 or (
-        group.rank() == group.size() - 1
+    token_decider = (
+        group is None or group.size() <= 1 or (group.rank() == group.size() - 1)
     )
 
     for token_index in range(max_tokens):
@@ -1199,7 +1213,9 @@ def _make_prenorm_trunk_fn(trunk: object) -> Callable[..., mx.array] | None:
     # pure-attention trunks use the first cache entry.
     fa_idx = int(cast(int, getattr(trunk, "fa_idx", 0)))
     ssm_idx_attr: object | None = getattr(trunk, "ssm_idx", None)
-    ssm_idx: int | None = int(cast(int, ssm_idx_attr)) if ssm_idx_attr is not None else None
+    ssm_idx: int | None = (
+        int(cast(int, ssm_idx_attr)) if ssm_idx_attr is not None else None
+    )
     make_attention_mask = cast(
         "Callable[[mx.array, object], object]",
         _mlx_lm_base.create_attention_mask,
@@ -1247,7 +1263,9 @@ def _get_trunk_and_head(
                 # Tied word embeddings: embed_tokens.as_linear acts as the head
                 embed: object | None = getattr(trunk, "embed_tokens", None)
                 as_linear: object | None = getattr(embed, "as_linear", None)
-                head = as_linear if as_linear is not None and callable(as_linear) else None
+                head = (
+                    as_linear if as_linear is not None and callable(as_linear) else None
+                )
             if head is not None:
                 head_fn = cast(Callable[..., mx.array], head)
                 norm: object | None = getattr(trunk, "norm", None)
@@ -1338,9 +1356,7 @@ def _exchange_drafts(
                 ]
             )
         else:
-            chain_lp = chain_logits - mx.logsumexp(
-                chain_logits, axis=-1, keepdims=True
-            )
+            chain_lp = chain_logits - mx.logsumexp(chain_logits, axis=-1, keepdims=True)
             q_row = warp_to_probs(chain_lp[0], sampling)
             # Explicit per-round key: only this rank draws here, and using
             # the global stream would desync it from the peers' aligned
@@ -1360,9 +1376,7 @@ def _exchange_drafts(
                 ]
             )
         mx.eval(payload)
-    summed = _broadcast_via_all_sum(
-        draft_group, payload, detail="mtp_draft_exchange"
-    )
+    summed = _broadcast_via_all_sum(draft_group, payload, detail="mtp_draft_exchange")
     chain_len = int(summed[0].item())
     draft_toks = [int(t) for t in cast("list[int]", summed[1 : 1 + chain_len].tolist())]
     draft_probs = None if sampling.is_greedy else summed[1 + slots :]
@@ -1543,9 +1557,7 @@ def _stream_generate_with_mtp(
         return MlxGenerationResponse(
             text=detokenizer.last_segment,
             token=token_int,
-            logprobs=logprobs_row.squeeze(0)
-            if logprobs_row.ndim > 1
-            else logprobs_row,
+            logprobs=logprobs_row.squeeze(0) if logprobs_row.ndim > 1 else logprobs_row,
             from_draft=from_draft,
             prompt_tokens=prompt.size,
             prompt_tps=prompt_tps,
@@ -1785,16 +1797,12 @@ def _stream_generate_with_mtp(
                     int(t) for t in cast("list[int]", verify_sampled.tolist())
                 ]
                 prefix = 0
-                while (
-                    prefix < chain_len and draft_toks[prefix] == target_ints[prefix]
-                ):
+                while prefix < chain_len and draft_toks[prefix] == target_ints[prefix]:
                     prefix += 1
                 # Row prefix yields the next bonus: the correction on a
                 # partial reject, the free next token on a full accept. (With
                 # processors active the row is re-sampled through them below.)
-                return prefix, (
-                    target_ints[prefix] if not logits_processors else None
-                )
+                return prefix, (target_ints[prefix] if not logits_processors else None)
             assert draft_probs is not None and chain_len == 1
             verify_probs = warp_to_probs(v_lp[0], sampling)
             mx.eval(v_h, verify_probs)
@@ -1867,7 +1875,9 @@ def _stream_generate_with_mtp(
                 # prefix to the next verify instead of paying a dedicated
                 # replay forward now (a reject used to cost a full extra
                 # trunk pass; riding along in the next verify is free).
-                trim_cache(prompt_cache, replay_len + chain_len + 1, pre_verify_snapshot)
+                trim_cache(
+                    prompt_cache, replay_len + chain_len + 1, pre_verify_snapshot
+                )
                 pending_replay = [*pending_replay, bonus, *draft_toks[:prefix_len]]
                 if (
                     drafter_reads_target_cache
@@ -1893,9 +1903,7 @@ def _stream_generate_with_mtp(
         # whose hiddens are v_h rows 0..p-1. The next bonus pair is consumed
         # by the next draft() from v_h[:, p].
         if prefix_len > 0 and drafter is not None:
-            drafter.observe(
-                v_h[0, :prefix_len, :], mx.array(draft_toks[:prefix_len])
-            )
+            drafter.observe(v_h[0, :prefix_len, :], mx.array(draft_toks[:prefix_len]))
 
         # ---- emit accepted drafts ----
         stream_done = False
@@ -2042,24 +2050,30 @@ def warmup_inference(
 
     tokens_generated = 0
 
-    with runner_phase(
-        "prefill_barrier",
-        detail="warmup_pre_generation_barrier",
-        attrs={"model_id": str(model_id)},
-        include_memory=True,
-    ), _hang_debug_watch(f"warmup pre-generation barrier model={model_id}"):
+    with (
+        runner_phase(
+            "prefill_barrier",
+            detail="warmup_pre_generation_barrier",
+            attrs={"model_id": str(model_id)},
+            include_memory=True,
+        ),
+        _hang_debug_watch(f"warmup pre-generation barrier model={model_id}"),
+    ):
         mx_barrier(group)
 
     logger.info("Generating warmup tokens")
 
     t = time.monotonic()
 
-    with runner_phase(
-        "warmup",
-        detail="warmup_mlx_generate",
-        attrs={"model_id": str(model_id)},
-        include_memory=True,
-    ), _hang_debug_watch(f"warmup mlx_generate model={model_id}"):
+    with (
+        runner_phase(
+            "warmup",
+            detail="warmup_mlx_generate",
+            attrs={"model_id": str(model_id)},
+            include_memory=True,
+        ),
+        _hang_debug_watch(f"warmup mlx_generate model={model_id}"),
+    ):
         for _r in mlx_generate(
             model=model,
             tokenizer=tokenizer,
@@ -2083,13 +2097,16 @@ def warmup_inference(
             min(math.ceil(tokens_generated / max(time.monotonic() - t, 0.001)), 100),
         )
 
-    with runner_phase(
-        "decode_barrier",
-        detail="warmup_final_barrier",
-        attrs={"model_id": str(model_id), "tokens_generated": tokens_generated},
-        include_memory=True,
-    ), _hang_debug_watch(
-        f"warmup final barrier model={model_id} tokens_generated={tokens_generated}"
+    with (
+        runner_phase(
+            "decode_barrier",
+            detail="warmup_final_barrier",
+            attrs={"model_id": str(model_id), "tokens_generated": tokens_generated},
+            include_memory=True,
+        ),
+        _hang_debug_watch(
+            f"warmup final barrier model={model_id} tokens_generated={tokens_generated}"
+        ),
     ):
         mx_barrier(group)
 
@@ -2194,12 +2211,12 @@ def _mlx_generate_native_vision(
 ) -> Generator[GenerationResponse]:
     """Generate for native-vision models via MLX-VLM's multimodal path.
 
-    Gemma 4's reference MLX-VLM generation path computes multimodal input
-    embeddings up front through ``model.get_input_embeddings(...)`` and then
-    drives ``model.language_model`` directly. Running native-vision models
-    through generic ``mlx_lm.stream_generate`` can diverge from that path even
-    when prompt tokens and image preprocessing are correct, so we follow the
-    reference execution strategy here.
+    The reference MLX-VLM generation path computes family-specific multimodal
+    input embeddings and positions before driving the language model. Running
+    native Qwen or Gemma vision models through generic
+    ``mlx_lm.stream_generate`` can diverge from that path even when prompt
+    tokens and image preprocessing are correct, so we follow the reference
+    execution strategy here.
     """
     vlm_generate_step = cast(
         _VlmGenerateStep,
@@ -2249,17 +2266,20 @@ def _mlx_generate_native_vision(
 
     logger.info(f"Native decode context: {decode_context}")
     logger.info("Starting native mlx-vlm multimodal decode")
-    with runner_phase(
-        "decode_barrier",
-        detail="native_decode_barrier",
-        attrs={
-            "prompt_tokens": prompt_token_count,
-            "media_regions": len(vision.media_regions),
-            **_native_pixel_values_attrs(vision.pixel_values),
-        },
-        task_id=trace_task_id,
-        include_memory=True,
-    ), _hang_debug_watch(f"native decode barrier ({decode_context})"):
+    with (
+        runner_phase(
+            "decode_barrier",
+            detail="native_decode_barrier",
+            attrs={
+                "prompt_tokens": prompt_token_count,
+                "media_regions": len(vision.media_regions),
+                **_native_pixel_values_attrs(vision.pixel_values),
+            },
+            task_id=trace_task_id,
+            include_memory=True,
+        ),
+        _hang_debug_watch(f"native decode barrier ({decode_context})"),
+    ):
         mx_barrier(group)
 
     with runner_phase(
@@ -2277,6 +2297,7 @@ def _mlx_generate_native_vision(
             input_ids=all_prompt_tokens[None],
             model=model,
             pixel_values=vision.pixel_values,
+            image_grid_thw=vision.image_grid_thw,
             mask=None,
             max_tokens=max_tokens,
             sampler=sampler,
@@ -2287,13 +2308,16 @@ def _mlx_generate_native_vision(
         )
 
     first_token_wait_started = time.perf_counter()
-    with runner_phase(
-        "decode_wait_first_token",
-        detail="native_decode_first_token",
-        attrs={"prompt_tokens": prompt_token_count, "max_tokens": max_tokens},
-        task_id=trace_task_id,
-        include_memory=True,
-    ), _hang_debug_watch(f"native decode first token ({decode_context})"):
+    with (
+        runner_phase(
+            "decode_wait_first_token",
+            detail="native_decode_first_token",
+            attrs={"prompt_tokens": prompt_token_count, "max_tokens": max_tokens},
+            task_id=trace_task_id,
+            include_memory=True,
+        ),
+        _hang_debug_watch(f"native decode first token ({decode_context})"),
+    ):
         try:
             first_token, first_logprobs = next(token_generator)
         except StopIteration:
@@ -2397,7 +2421,9 @@ def _mlx_generate_native_vision(
         accumulated_text += final_text
 
     generation_elapsed = time.perf_counter() - generation_start_time
-    generation_tps = completion_tokens / generation_elapsed if generation_elapsed > 0 else 0.0
+    generation_tps = (
+        completion_tokens / generation_elapsed if generation_elapsed > 0 else 0.0
+    )
 
     final_stats = GenerationStats(
         prompt_tps=float(prompt_tps),
@@ -2425,12 +2451,15 @@ def _mlx_generate_native_vision(
         usage=final_usage,
     )
 
-    with runner_phase(
-        "decode_barrier",
-        detail="native_decode_final_barrier",
-        task_id=trace_task_id,
-        include_memory=True,
-    ), _hang_debug_watch(f"native decode final barrier ({decode_context})"):
+    with (
+        runner_phase(
+            "decode_barrier",
+            detail="native_decode_final_barrier",
+            task_id=trace_task_id,
+            include_memory=True,
+        ),
+        _hang_debug_watch(f"native decode final barrier ({decode_context})"),
+    ):
         mx_barrier(group)
 
 
@@ -2487,22 +2516,38 @@ def mlx_generate(
     min_prefix_hit_length = max(1000, system_prompt_token_count(task, tokenizer))
 
     vision: VisionResult | None = None
+    if task.images and vision_processor is None:
+        record_runner_phase(
+            "vision_preprocess",
+            event="prepare_vision_failed",
+            detail="image input has no vision processor",
+            task_id=trace_task_id,
+            include_memory=True,
+        )
+        raise RuntimeError(
+            f"Model {task.model} received image input without a vision processor"
+        )
     if vision_processor is not None:
         try:
-            with runner_phase(
-                "vision_preprocess",
-                detail="prepare_vision",
-                attrs={
-                    "image_count": len(task.images),
-                    "chat_template_messages": len(task.chat_template_messages or []),
-                },
-                task_id=trace_task_id,
-                include_memory=True,
-            ), trace(
-                "native_vision_preprocess",
-                trace_rank,
-                "vision",
-                task_id=trace_task_id,
+            with (
+                runner_phase(
+                    "vision_preprocess",
+                    detail="prepare_vision",
+                    attrs={
+                        "image_count": len(task.images),
+                        "chat_template_messages": len(
+                            task.chat_template_messages or []
+                        ),
+                    },
+                    task_id=trace_task_id,
+                    include_memory=True,
+                ),
+                trace(
+                    "native_vision_preprocess",
+                    trace_rank,
+                    "vision",
+                    task_id=trace_task_id,
+                ),
             ):
                 vision = prepare_vision(
                     images=task.images,
@@ -2512,17 +2557,24 @@ def mlx_generate(
                     model=model,
                     task_id=trace_task_id,
                 )
-        except Exception:
-            logger.opt(exception=True).warning(
-                "Vision processing failed, falling back to text-only"
+        except Exception as exc:
+            logger.opt(exception=True).error(
+                "Vision processing failed; refusing a text-only fallback"
             )
             record_runner_phase(
                 "vision_preprocess",
                 event="prepare_vision_failed",
-                detail="falling back to text-only",
+                detail="request failed",
                 task_id=trace_task_id,
                 include_memory=True,
             )
+            raise RuntimeError(
+                f"Vision preprocessing failed for model {task.model}"
+            ) from exc
+    if task.images and vision is None:
+        raise RuntimeError(
+            f"Vision preprocessing produced no image input for model {task.model}"
+        )
     if vision is not None:
         all_prompt_tokens = vision.prompt_tokens
     media_regions: list[MediaRegion] = vision.media_regions if vision else []
@@ -2657,7 +2709,7 @@ def mlx_generate(
     max_stop_len = max((len(s) for s in stop_sequences), default=0)
 
     if vision is not None and vision.pixel_values is not None:
-        if _should_use_native_vision_reference_path():
+        if group is None or _should_use_native_vision_reference_path():
             if kv_prefix_cache is not None:
                 logger.info(
                     "Disabling KV prefix cache for native vision generation to follow "
@@ -2821,7 +2873,9 @@ def mlx_generate(
         )
     else:
         maybe_vision_ctx = contextlib.nullcontext()
-    uses_pipeline_decode = group is not None and _has_pipeline_communication_layer(model)
+    uses_pipeline_decode = group is not None and _has_pipeline_communication_layer(
+        model
+    )
     if uses_pipeline_decode:
         prefill_prompt_tokens = (
             prompt_tokens if len(prompt_tokens) > 1 else prompt_tokens[:0]
@@ -2830,11 +2884,14 @@ def mlx_generate(
         prefill_prompt_tokens = prompt_tokens[:-1]
 
     try:
-        with maybe_vision_ctx, trace(
-            "prefill",
-            trace_rank,
-            "prefill",
-            task_id=trace_task_id,
+        with (
+            maybe_vision_ctx,
+            trace(
+                "prefill",
+                trace_rank,
+                "prefill",
+                task_id=trace_task_id,
+            ),
         ):
             prefill_tps, prefill_tokens, ssm_snapshots_list = prefill(
                 model,
@@ -2891,19 +2948,22 @@ def mlx_generate(
 
     logger.info(f"Decode context: {decode_context}")
     logger.info("Starting decode")
-    with runner_phase(
-        "decode_barrier",
-        detail="decode_mx_barrier",
-        attrs={
-            "total_prompt_tokens": len(all_prompt_tokens),
-            "uncached_prompt_tokens": len(prompt_tokens),
-            "prefix_hit_length": prefix_hit_length,
-            **_media_region_attrs(media_regions),
-            **_native_pixel_values_attrs(native_pixel_values),
-        },
-        task_id=trace_task_id,
-        include_memory=True,
-    ), _hang_debug_watch(f"decode barrier ({decode_context})"):
+    with (
+        runner_phase(
+            "decode_barrier",
+            detail="decode_mx_barrier",
+            attrs={
+                "total_prompt_tokens": len(all_prompt_tokens),
+                "uncached_prompt_tokens": len(prompt_tokens),
+                "prefix_hit_length": prefix_hit_length,
+                **_media_region_attrs(media_regions),
+                **_native_pixel_values_attrs(native_pixel_values),
+            },
+            task_id=trace_task_id,
+            include_memory=True,
+        ),
+        _hang_debug_watch(f"decode barrier ({decode_context})"),
+    ):
         mx_barrier(group)
 
     # Resolve a drafter for single-node speculative decoding.
@@ -2984,9 +3044,7 @@ def mlx_generate(
                         model,
                         mtp_weights,
                         assistant_model=assistant_model,
-                        runtime=model_card.runtime
-                        if model_card is not None
-                        else None,
+                        runtime=model_card.runtime if model_card is not None else None,
                     )
                 if _drafter is not None:
                     _card_draft_depth = (
@@ -2997,8 +3055,7 @@ def mlx_generate(
                         else 1
                     )
                     logger.info(
-                        "MTP speculative decoding enabled "
-                        f"(D={_card_draft_depth})"
+                        f"MTP speculative decoding enabled (D={_card_draft_depth})"
                     )
 
     # Gate the agreement on the model CARD declaring speculation — the card
@@ -3152,19 +3209,21 @@ def mlx_generate(
                 kv_bits=KV_BITS,
             )
     first_token_wait_started = time.perf_counter()
-    with runner_phase(
-        "decode_wait_first_token",
-        detail="stream_generate_first_token",
-        attrs={"max_tokens": max_tokens},
-        task_id=trace_task_id,
-        include_memory=True,
-    ), _hang_debug_watch(f"decode first token ({decode_context})"):
+    with (
+        runner_phase(
+            "decode_wait_first_token",
+            detail="stream_generate_first_token",
+            attrs={"max_tokens": max_tokens},
+            task_id=trace_task_id,
+            include_memory=True,
+        ),
+        _hang_debug_watch(f"decode first token ({decode_context})"),
+    ):
         try:
             first_out = next(token_generator)
         except StopIteration:
             logger.warning(
-                "Decode generator ended before yielding a response "
-                f"({decode_context})"
+                f"Decode generator ended before yielding a response ({decode_context})"
             )
             return
     logger.info(
@@ -3352,12 +3411,15 @@ def mlx_generate(
                 task_id=trace_task_id,
                 include_memory=True,
             )
-            with runner_phase(
-                "decode_barrier",
-                detail="decode_final_barrier",
-                task_id=trace_task_id,
-                include_memory=True,
-            ), _hang_debug_watch(f"decode final barrier ({decode_context})"):
+            with (
+                runner_phase(
+                    "decode_barrier",
+                    detail="decode_final_barrier",
+                    task_id=trace_task_id,
+                    include_memory=True,
+                ),
+                _hang_debug_watch(f"decode final barrier ({decode_context})"),
+            ):
                 mx_barrier(group)
             break
 

@@ -4,10 +4,12 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
+from collections.abc import Mapping
 from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Callable, Protocol, cast
 
 if TYPE_CHECKING:
     from skulk.worker.engines.mlx.vision import VisionProcessor
@@ -49,6 +51,7 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx_lm.utils import load_model as _mlx_lm_load_model
 from pydantic import RootModel
+from safetensors import safe_open
 
 from skulk.download.download_utils import (
     build_companion_model_path,
@@ -167,7 +170,119 @@ class _VlmModelLoader(Protocol):
 class _MlxLmLoadModel(Protocol):
     """Typed callable surface for mlx-lm's model loader."""
 
-    def __call__(self, model_path: Path, **kwargs: object) -> tuple[nn.Module, object]: ...
+    def __call__(
+        self, model_path: Path, **kwargs: object
+    ) -> tuple[nn.Module, object]: ...
+
+
+class _SafeTensorMetadataHandle(Protocol):
+    """Typed metadata surface used from safetensors' dynamic extension type."""
+
+    def metadata(self) -> dict[str, str] | None: ...
+
+
+_QWEN_CONVERTED_NORM_SUFFIXES = (
+    ".input_layernorm.weight",
+    ".post_attention_layernorm.weight",
+    "model.norm.weight",
+    ".q_norm.weight",
+    ".k_norm.weight",
+)
+_VLM_LOAD_PATCH_LOCK = threading.Lock()
+
+
+def _has_mlx_safetensors(model_path: Path) -> bool:
+    """Return whether a local model bundle contains converted MLX weights."""
+    for weight_path in sorted(model_path.glob("*.safetensors")):
+        try:
+            with safe_open(str(weight_path), framework="numpy") as raw_handle:
+                handle = cast(
+                    _SafeTensorMetadataHandle,
+                    cast(object, raw_handle),
+                )
+                metadata = handle.metadata() or {}
+        except (OSError, ValueError):
+            continue
+        if metadata.get("format") == "mlx":
+            return True
+    return False
+
+
+def _guard_converted_qwen_norm_sanitizer(
+    sanitizer: Callable[
+        [object, dict[str, mx.array]],
+        dict[str, mx.array],
+    ],
+    sanitize_key: Callable[[str], str],
+) -> Callable[[object, dict[str, mx.array]], dict[str, mx.array]]:
+    """Backport mlx-vlm's converted-Qwen RMSNorm guard from v0.6.5.
+
+    mlx-vlm 0.6.4 adds one to every Qwen3.5-family RMSNorm weight during
+    loading. That conversion is correct for source Hugging Face weights but
+    corrupts MLX checkpoints whose ``language_model.*`` keys were already
+    converted. Preserve those exact arrays while leaving all other upstream
+    sanitization intact.
+    """
+
+    def guarded(
+        model: object,
+        weights: dict[str, mx.array],
+    ) -> dict[str, mx.array]:
+        converted_norm_weights = {
+            # mlx-vlm 0.6.4 uses ``value += 1``; MLX mutates that array, so
+            # retaining the original object would retain the corruption too.
+            sanitize_key(key): mx.array(value)
+            for key, value in weights.items()
+            if key.startswith("language_model.")
+            and value.ndim == 1
+            and any(key.endswith(suffix) for suffix in _QWEN_CONVERTED_NORM_SUFFIXES)
+        }
+        sanitized = sanitizer(model, weights)
+        sanitized.update(converted_norm_weights)
+        return sanitized
+
+    return guarded
+
+
+def _install_converted_qwen_norm_guard(
+    model_path: Path,
+) -> tuple[type[object], object] | None:
+    """Install the v0.6.5 Qwen sanitizer fix for one v0.6.4 model load."""
+    if not _has_mlx_safetensors(model_path):
+        return None
+    try:
+        raw_config = cast(
+            object,
+            json.loads((model_path / "config.json").read_text()),
+        )
+    except (json.JSONDecodeError, OSError):
+        return None
+    config = _object_dict(raw_config)
+    model_type = config.get("model_type")
+    if model_type not in {"qwen3_5", "qwen3_5_moe"}:
+        return None
+
+    model_module = import_module(f"mlx_vlm.models.{model_type}")
+    model_class = cast(type[object], vars(model_module)["Model"])
+    model_class_dict = cast(Mapping[str, object], vars(model_class))
+    original = model_class_dict["sanitize"]
+    sanitize_key_module = import_module("mlx_vlm.models.qwen3_5.qwen3_5")
+    sanitize_key = cast(
+        Callable[[str], str],
+        vars(sanitize_key_module)["sanitize_key"],
+    )
+    guarded = _guard_converted_qwen_norm_sanitizer(
+        cast(
+            Callable[[object, dict[str, mx.array]], dict[str, mx.array]],
+            original,
+        ),
+        sanitize_key,
+    )
+    type.__setattr__(model_class, "sanitize", guarded)
+    logger.info(
+        "Applying the mlx-vlm 0.6.5 converted-Qwen norm sanitizer guard"
+    )
+    return model_class, original
 
 
 def _apply_nemotron_reasoning_controls(
@@ -252,8 +367,7 @@ def log_request_shape(
         payload.update(extra)
 
     logger.info(
-        "[request-shape] "
-        f"{json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
+        f"[request-shape] {json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
     )
     logger.info(f"[request-shape] prompt label={label}\n{prompt}")
 
@@ -425,7 +539,9 @@ class _Gemma4DynamicVisionTower(nn.Module):
 
         config = self._inner.config
         if config is not None and config.standardize:
-            hidden_states = (hidden_states - self._inner.std_bias) * self._inner.std_scale
+            hidden_states = (
+                hidden_states - self._inner.std_bias
+            ) * self._inner.std_scale
 
         return hidden_states
 
@@ -504,40 +620,73 @@ class _VlmModelWrapper(nn.Module):
         # Delegate attribute access to the inner model so layer iteration,
         # parameter access, etc. all work transparently.
         if name == "_pixel_values":
-            return _object_dict(cast(object, object.__getattribute__(self, "__dict__"))).get(
-                "_pixel_values"
-            )
+            return _object_dict(
+                cast(object, object.__getattribute__(self, "__dict__"))
+            ).get("_pixel_values")
         if name == "_inner":
             return cast(object, object.__getattribute__(self, name))
         return cast(object, getattr(self._inner, name))
 
 
-def load_model(model_path: Path, **kwargs: object) -> tuple[nn.Module, object]:
-    """Load a model, trying mlx-lm first then falling back to mlx-vlm for vision models."""
-    model_kwargs = kwargs
+def _load_vlm_model(model_path: Path, **kwargs: object) -> tuple[nn.Module, object]:
+    """Load and wrap one native multimodal model through MLX-VLM."""
+    mlx_vlm_utils = import_module("mlx_vlm.utils")
+    mlx_vlm_utils_dict = cast(dict[str, object], vars(mlx_vlm_utils))
+    mlx_vlm_load_model = cast(
+        _VlmModelLoader,
+        mlx_vlm_utils_dict["load_model"],
+    )
+    with _VLM_LOAD_PATCH_LOCK:
+        patch = _install_converted_qwen_norm_guard(model_path)
+        try:
+            model = mlx_vlm_load_model(model_path, **kwargs)
+        finally:
+            if patch is not None:
+                model_class, original = patch
+                type.__setattr__(model_class, "sanitize", original)
+    model = _patch_gemma4_native_vision(model)
+    return _VlmModelWrapper(model), None
+
+
+def load_model(
+    model_path: Path,
+    *,
+    prefer_vlm: bool = False,
+    **kwargs: object,
+) -> tuple[nn.Module, object]:
+    """Load a text or native multimodal model.
+
+    Args:
+        model_path: Local model bundle.
+        prefer_vlm: Load through MLX-VLM even when MLX-LM recognizes the model
+            type. MLX-LM intentionally strips vision towers from Qwen VLM
+            checkpoints, so a single-node vision placement must opt into the
+            native model to preserve its image-grid-aware embeddings and RoPE.
+        **kwargs: Loader options forwarded to the selected upstream loader.
+
+    Returns:
+        The loaded model and the optional upstream tokenizer placeholder.
+    """
+    if prefer_vlm:
+        logger.info("Loading vision model through native mlx-vlm path")
+        try:
+            return _load_vlm_model(model_path, **kwargs)
+        except ImportError as exc:
+            raise ValueError("Native vision model loading requires mlx-vlm") from exc
+
     mlx_lm_load_model = cast(_MlxLmLoadModel, _mlx_lm_load_model)
     try:
-        return mlx_lm_load_model(model_path, **model_kwargs)
-    except ValueError as e:
-        if "not supported" not in str(e):
+        return mlx_lm_load_model(model_path, **kwargs)
+    except ValueError as exc:
+        if "not supported" not in str(exc):
             raise
-        # Model type not in mlx-lm (e.g. gemma4 vision model) — try mlx-vlm
-        logger.info(f"Model type not supported by mlx-lm, trying mlx-vlm: {e}")
+        logger.info(f"Model type not supported by mlx-lm, trying mlx-vlm: {exc}")
         try:
-            mlx_vlm_utils = import_module("mlx_vlm.utils")
-            mlx_vlm_utils_dict = cast(dict[str, object], vars(mlx_vlm_utils))
-            mlx_vlm_load_model = cast(
-                _VlmModelLoader,
-                mlx_vlm_utils_dict["load_model"],
-            )
-            model = mlx_vlm_load_model(model_path, **model_kwargs)
-            model = _patch_gemma4_native_vision(model)
-            # Wrap so mlx-lm's generation pipeline sees plain arrays
-            return _VlmModelWrapper(model), None
+            return _load_vlm_model(model_path, **kwargs)
         except ImportError:
             raise ValueError(
-                f"{e}. Install mlx-vlm for vision model support: pip install -U mlx-vlm"
-            ) from e
+                f"{exc}. Install mlx-vlm for vision model support: pip install -U mlx-vlm"
+            ) from exc
 
 
 def sidecar_load_eligible(
@@ -692,7 +841,16 @@ def load_mlx_items(
         card = bound_instance.bound_shard.model_card
         model_path = build_model_path(card.model_id, card.source_revision)
         start_time = time.perf_counter()
-        model, _ = load_model(model_path, lazy=True, strict=False)
+        vision_config = card.vision
+        prefer_vlm = vision_config is not None and vision_config.weights_repo == str(
+            card.model_id
+        )
+        model, _ = load_model(
+            model_path,
+            lazy=True,
+            strict=False,
+            prefer_vlm=prefer_vlm,
+        )
         # Eval layers one by one for progress reporting
         try:
             import skulk.worker.runner.bootstrap as bootstrap
