@@ -26,6 +26,11 @@ from pathlib import Path
 from loguru import logger
 
 _ENGINE_CORE_MARKER = "VLLM::EngineCore"
+# /proc/<pid>/comm is kernel-truncated to 15 characters, so the comm-side
+# match uses the truncated marker rather than a broad "VLLM" prefix: an
+# init-parented vLLM-adjacent helper with a title like "VLLMRouter" must
+# never satisfy the sweep (PR #656 review).
+_ENGINE_CORE_COMM_PREFIX = _ENGINE_CORE_MARKER[:15]
 
 
 def find_orphaned_vllm_engine_pids(proc_root: Path = Path("/proc")) -> list[int]:
@@ -66,10 +71,12 @@ def find_orphaned_vllm_engine_pids(proc_root: Path = Path("/proc")) -> list[int]
         if parent_pid != 1:
             continue
         # setproctitle rewrites both cmdline and comm; comm is truncated to
-        # 15 chars ("VLLM::EngineCor"), so match the prefix there and the
-        # full marker in cmdline.
+        # 15 chars ("VLLM::EngineCor"), so match the truncated marker there
+        # and the full marker in cmdline.
         comm = stat_text.split("(", 1)[-1].rsplit(")", 1)[0]
-        if _ENGINE_CORE_MARKER in cmdline or comm.startswith("VLLM"):
+        if _ENGINE_CORE_MARKER in cmdline or comm.startswith(
+            _ENGINE_CORE_COMM_PREFIX
+        ):
             orphans.append(int(entry.name))
     return orphans
 

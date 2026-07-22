@@ -31,6 +31,10 @@ def test_find_orphaned_vllm_engine_pids(tmp_path: pathlib.Path) -> None:
     _fake_proc(tmp_path, 102, "VLLM::EngineCor", 500, "VLLM::EngineCore idle")
     # Manually launched vllm serve under nohup: ppid 1 but not an engine core.
     _fake_proc(tmp_path, 103, "vllm", 1, "/opt/venv/bin/vllm serve model")
+    # Init-parented vLLM-adjacent helper whose title merely starts with
+    # "VLLM": must NOT match (the comm rule uses the truncated EngineCore
+    # marker, not a broad prefix).
+    _fake_proc(tmp_path, 106, "VLLMRouter", 1, "VLLMRouter --listen")
     # Unrelated init-parented daemon.
     _fake_proc(tmp_path, 104, "sshd", 1, "/usr/sbin/sshd -D")
     # Comm containing parens and spaces must not break stat parsing.
