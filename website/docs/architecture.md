@@ -275,9 +275,18 @@ HTTP request per worker thread, bounded by `SKULK_VLLM_MAX_CONCURRENT_REQUESTS`)
 the server actually *sees* concurrent requests and its continuous batching engages;
 without that the batching benefit never appears. The runner reports itself
 running while any generation is in flight and returns to ready only when the last
-one drains. This first slice is single-node text generation; tool calling,
-logprobs, vLLM's own multi-GPU parallelism, and vLLM-aware memory admission are
-follow-ups.
+one drains. Context windows for vLLM placements are deliberately capped (32,768 tokens,
+applied at the placement stamp): vLLM commits and optimizes its entire
+declared window at engine start, so a 262k-context card would otherwise turn
+a minutes-long bring-up into more than an hour. Applying the cap where the
+window is stamped keeps request admission and the serving engine in
+agreement; it retires when vLLM-aware admission arrives. Checkpoints that
+ship native multi-token-prediction heads (Qwen3.6 among them) can declare
+vLLM speculative decoding on their card, engaging the model's own prediction
+heads with no separate draft model; measured on an A100, this roughly
+doubles single-stream decode on the dense Qwen3.6. This first slice is
+single-node text generation; tool calling, logprobs, vLLM's own multi-GPU
+parallelism, and vLLM-aware memory admission are follow-ups.
 
 The `llama_server` engine is also how a GGUF model larger than any single GPU node gets
 served: **multi-node memory pooling over llama.cpp's RPC backend**. When a model

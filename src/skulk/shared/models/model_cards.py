@@ -740,6 +740,21 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     2 is the usual sweet spot for single-layer MTP heads, which re-run their
     one layer for deeper positions. ``None`` uses vLLM's method default."""
 
+    @model_validator(mode="after")
+    def _validate_vllm_spec_pairing(self) -> "RuntimeCapabilityCardConfig":
+        """Reject depth-without-method so custom cards fail fast, not silently.
+
+        ``vllm_spec_num_tokens`` is meaningless without ``vllm_spec_method``
+        (the runner would ignore it); bundled cards are gated by the invariant
+        suite, but operator-authored custom cards deserve the same loud
+        failure at load (PR #649 review).
+        """
+        if self.vllm_spec_num_tokens is not None and self.vllm_spec_method is None:
+            raise ValueError(
+                "vllm_spec_num_tokens requires vllm_spec_method"
+            )
+        return self
+
     @field_validator("prompt_renderer", mode="before")
     @classmethod
     def _validate_prompt_renderer(

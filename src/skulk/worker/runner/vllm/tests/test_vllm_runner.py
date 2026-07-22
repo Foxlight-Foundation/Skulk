@@ -610,17 +610,10 @@ def test_build_vllm_serve_args_speculative_config() -> None:
     assert "--speculative-config" not in _serve_args()
 
 
-def test_max_model_len_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
-    from skulk.worker.runner.vllm.runner import (
-        _DEFAULT_MAX_MODEL_LEN_CEILING,
-        _MAX_MODEL_LEN_CEILING_ENV,
-        _max_model_len_ceiling,
-    )
+def test_vllm_max_model_len_constant_shared_with_placement() -> None:
+    # The cap lives at the placement stamp (memory_estimate.VLLM_MAX_MODEL_LEN)
+    # and the runner min()s against the SAME constant as defense in depth, so
+    # admission and the served window cannot disagree (PR #649 review).
+    from skulk.shared.models.memory_estimate import VLLM_MAX_MODEL_LEN
 
-    monkeypatch.delenv(_MAX_MODEL_LEN_CEILING_ENV, raising=False)
-    assert _max_model_len_ceiling() == _DEFAULT_MAX_MODEL_LEN_CEILING
-    monkeypatch.setenv(_MAX_MODEL_LEN_CEILING_ENV, "131072")
-    assert _max_model_len_ceiling() == 131072
-    for bad in ("nonsense", "0", "-5"):
-        monkeypatch.setenv(_MAX_MODEL_LEN_CEILING_ENV, bad)
-        assert _max_model_len_ceiling() == _DEFAULT_MAX_MODEL_LEN_CEILING
+    assert VLLM_MAX_MODEL_LEN == 32768

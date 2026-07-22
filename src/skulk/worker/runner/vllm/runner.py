@@ -65,6 +65,7 @@ import httpx
 from skulk.api.types import GenerationStats
 from skulk.download.download_utils import build_model_path
 from skulk.shared.backends import VLLM_BIN_ENV
+from skulk.shared.models.memory_estimate import VLLM_MAX_MODEL_LEN
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
@@ -116,43 +117,6 @@ _HEALTH_DEADLINE_S: Final = 600.0
 # is a follow-up when vLLM-aware admission lands).
 _GPU_MEMORY_UTILIZATION_ENV: Final = "SKULK_VLLM_GPU_MEMORY_UTILIZATION"
 _DEFAULT_GPU_MEMORY_UTILIZATION: Final = 0.90
-
-# Ceiling on the context window passed to `vllm serve --max-model-len` until
-# vLLM-aware admission lands. vLLM pre-allocates and CUDA-graph-captures for
-# the FULL max-model-len at startup: passing a 262k-context card's declared
-# window straight through turned a ~3-minute engine bring-up into ~90 minutes
-# on an A100-80GB (wowsers-slate validation, 2026-07-22) even though it
-# eventually served. 32768 matches the validated starter-card experience and
-# every current bench shape; operators can raise it deliberately.
-_MAX_MODEL_LEN_CEILING_ENV: Final = "SKULK_VLLM_MAX_MODEL_LEN"
-_DEFAULT_MAX_MODEL_LEN_CEILING: Final = 32768
-
-
-def _max_model_len_ceiling() -> int:
-    """The serve-time context ceiling, from env or the 32768 default.
-
-    An unparseable or below-1 value falls back to the default rather than
-    passing vLLM a nonsense window.
-    """
-    raw = os.environ.get(_MAX_MODEL_LEN_CEILING_ENV, "").strip()
-    if not raw:
-        return _DEFAULT_MAX_MODEL_LEN_CEILING
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning(
-            f"{_MAX_MODEL_LEN_CEILING_ENV}={raw!r} is not an integer; "
-            f"using {_DEFAULT_MAX_MODEL_LEN_CEILING}"
-        )
-        return _DEFAULT_MAX_MODEL_LEN_CEILING
-    if value < 1:
-        logger.warning(
-            f"{_MAX_MODEL_LEN_CEILING_ENV}={value} is below 1; "
-            f"using {_DEFAULT_MAX_MODEL_LEN_CEILING}"
-        )
-        return _DEFAULT_MAX_MODEL_LEN_CEILING
-    return value
-
 
 # Upper bound on concurrent in-flight generations the runner streams to the one
 # ``vllm serve`` at once. This is a client-side admission bound (the thread-pool
@@ -549,16 +513,16 @@ class Runner(ServedConcurrentDispatch):
         card = self.shard_metadata.model_card
         model_id = card.model_id
         model_dir = build_model_path(ModelId(model_id), card.source_revision)
-        n_ctx = min(
-            serving_n_ctx(self.context_token_limit, logits_all=False),
-            _max_model_len_ceiling(),
-        )
-        if n_ctx < serving_n_ctx(self.context_token_limit, logits_all=False):
-            logger.info(
-                f"vllm max-model-len capped at {n_ctx} (card context "
-                f"{self.context_token_limit}; raise "
-                f"{_MAX_MODEL_LEN_CEILING_ENV} deliberately, startup cost "
-                "grows with the window)"
+        # Placement stamps the vllm startup-cost cap into context_token_limit
+        # (VLLM_MAX_MODEL_LEN at the stamp, so admission and the served
+        # window agree); the min() here is defense in depth for instances
+        # stamped by a pre-cap master during a rolling window.
+        stamped_n_ctx = serving_n_ctx(self.context_token_limit, logits_all=False)
+        n_ctx = min(stamped_n_ctx, VLLM_MAX_MODEL_LEN)
+        if n_ctx < stamped_n_ctx:
+            logger.warning(
+                f"vllm max-model-len defensively capped at {n_ctx} (stamped "
+                f"{stamped_n_ctx}): the instance predates the stamp-side cap"
             )
         try:
             with runner_phase(

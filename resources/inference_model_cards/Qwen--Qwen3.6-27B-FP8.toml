@@ -1,9 +1,8 @@
 # Qwen3.6 27B for the vllm served engine (the "wowsers" slate: current-generation
 # models serving out of the box). Official Qwen FP8 release of the dense 27B; ~31 GB of weights fits
 # 48 GB-class GPUs with KV headroom.
-# # Ships NATIVE MTP heads (config text_config.mtp_num_hidden_layers);
-# vLLM-side speculative wiring is a runner follow-up and will add runtime
-# fields here when it lands.
+# # Ships NATIVE MTP heads (config text_config.mtp_num_hidden_layers),
+# engaged through the [runtime] vllm speculative fields below.
 # Model truth vs platform truth notes, mirroring the #635 starter-set
 # precedent:
 # - The repo is an image-text-to-text architecture; the MODEL supports vision.
