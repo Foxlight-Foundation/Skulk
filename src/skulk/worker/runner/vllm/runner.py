@@ -720,18 +720,16 @@ class Runner(ServedConcurrentDispatch):
                     except subprocess.TimeoutExpired:
                         self._signal_server_group(proc, signal.SIGKILL)
                         proc.wait(timeout=5)
-                    else:
-                        # The group leader exiting does not prove its
-                        # descendants did: a wedged EngineCore that ignores
-                        # SIGTERM while vllm serve exits promptly would
-                        # survive the graceful path. A blanket killpg here
-                        # would race pgid reuse once the group is empty
-                        # (PR #656 review), so the mop is the orphan sweep
-                        # instead: any surviving engine core has already
-                        # been reparented to init by the leader's exit, and
-                        # the sweep kills only per-pid re-verified,
-                        # marker-matched engine cores.
-                        sweep_orphaned_vllm_engines()
+                # The leader being gone (whether it exited just now or died
+                # BEFORE teardown ran: a startup crash observed by
+                # _await_health, an unexpected server exit) does not prove
+                # its descendants did: an EngineCore that outlived the
+                # leader is already init-reparented and holding VRAM. A
+                # blanket killpg here would race pgid reuse once the group
+                # is empty (PR #656 review), so the mop is the orphan sweep
+                # on EVERY teardown path: it kills only per-pid re-verified,
+                # marker-matched engine cores.
+                sweep_orphaned_vllm_engines()
             except Exception:  # noqa: BLE001 - teardown is best-effort
                 pass
             self.server_proc = None
