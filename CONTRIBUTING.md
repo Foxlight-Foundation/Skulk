@@ -65,6 +65,7 @@ The Skulk dashboard is a React + TypeScript + styled-components app in `dashboar
 - `src/components/chat/` — ChatForm, ChatMessages, ChatModelSelector
 - `src/stores/` — Zustand stores (chatStore, uiStore) with localStorage/sessionStorage persistence
 - `src/hooks/` — useClusterState, useConfig, useModelPicker
+- `e2e/` — Explicit Playwright qualification against a running Skulk dashboard
 
 To run the dashboard in dev mode:
 ```bash
@@ -287,6 +288,29 @@ The React dashboard has Storybook stories for key components:
 ```bash
 cd dashboard-react && npx storybook dev -p 6007
 ```
+
+Dashboard component tests and the production build run locally with:
+
+```bash
+cd dashboard-react
+npm run test
+npm run build
+```
+
+The live vision test is deliberately explicit because it places a real image
+through the built-in dashboard and a running model. Provide the dashboard URL,
+the exact mounted model ID, and a local PNG fixture:
+
+```bash
+cd dashboard-react
+SKULK_DASHBOARD_URL=http://localhost:52415 \
+SKULK_VISION_MODEL=mlx-community/Qwen3-VL-4B-Instruct-4bit \
+SKULK_VISION_IMAGE_PATH=/absolute/path/to/portrait.png \
+npm run test:e2e:vision
+```
+
+The test verifies the exact uploaded bytes in the completion request and checks
+the rendered answer for the portrait's identity, clothing, and background.
 
 ## Licensing and File Headers
 

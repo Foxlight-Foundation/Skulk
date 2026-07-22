@@ -8,6 +8,7 @@
     "build": "vite build",
     "lint": "eslint .",
     "test": "vitest run --project unit",
+    "test:e2e:vision": "playwright test --config playwright.vision.config.ts",
     "docs:typedoc": "typedoc --options typedoc.json",
     "tolgee:export": "node scripts/export-tolgee-import.mjs",
     "preview": "vite preview",
