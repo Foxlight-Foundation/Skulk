@@ -104,6 +104,12 @@ _STORE_HTTP_RETRY_ATTEMPTS = 12
 # ride the full minute-long budget meant for transient route flaps mid
 # transfer (#657). Three attempts still absorb a one-off connect blip.
 _STORE_PROBE_RETRY_ATTEMPTS = 3
+# Download-status polls tolerate route flaps (the transfer budget's
+# rationale), but a store that stops ANSWERING for this many consecutive
+# polls (~1 minute at the default 5s interval) is unreachable, not stalled;
+# without this bound the stall clock would grind for its full multi-hour
+# budget before failing with a misleading "no progress" error (#657 review).
+_STORE_POLL_UNREACHABLE_THRESHOLD = 12
 _STORE_HTTP_RETRY_BASE_SECONDS = 0.5
 _STORE_HTTP_RETRY_MAX_DELAY_SECONDS = 8.0
 _T = TypeVar("_T")
@@ -928,6 +934,7 @@ class ModelStoreClient:
         # advance) counts toward the stall.
         last_progress = -1.0
         stalled_for = 0.0
+        consecutive_transport_failures = 0
         while stalled_for < timeout:
             await _asyncio.sleep(poll_interval)
             advanced = False
@@ -936,6 +943,7 @@ class ModelStoreClient:
                     create_http_session(timeout_profile="short") as session,
                     session.get(status_url) as resp,
                 ):
+                    consecutive_transport_failures = 0
                     if resp.status == 200:
                         data = await resp.json()
                         if isinstance(data, dict):
@@ -965,6 +973,24 @@ class ModelStoreClient:
                 raise
             except Exception as exc:
                 logger.debug(f"ModelStoreClient: download status poll failed: {exc}")
+                # A store that stops ANSWERING is a different failure from a
+                # download that stops ADVANCING: the stall clock exists for
+                # the latter (a live store legitimately grinding through a
+                # huge file), while sustained transport failure would ride
+                # that clock for up to the full multi-hour stall budget
+                # before failing with a misleading "no progress" error.
+                # Bound it separately and surface unreachability so callers
+                # can engage the direct-HF fallback (#657 review).
+                consecutive_transport_failures += 1
+                if (
+                    consecutive_transport_failures
+                    >= _STORE_POLL_UNREACHABLE_THRESHOLD
+                ):
+                    raise StoreUnreachableError(
+                        f"store host stopped answering download status polls "
+                        f"for {model_id} ({consecutive_transport_failures} "
+                        f"consecutive failures): {exc}"
+                    ) from exc
             stalled_for = 0.0 if advanced else stalled_for + poll_interval
 
         raise TimeoutError(

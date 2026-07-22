@@ -175,3 +175,112 @@ async def test_store_dropping_mid_transfer_falls_back(tmp_path: Path) -> None:
 
     assert path == inner.dest
     assert inner.ensure_calls == [(_MODEL_ID, False)]
+
+
+@pytest.mark.anyio
+async def test_probe_uses_small_budget_then_raises_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real availability probe exhausts exactly the 3-attempt budget.
+
+    Exercises ModelStoreClient.is_model_available itself (not a stub):
+    transport failures must consume _STORE_PROBE_RETRY_ATTEMPTS attempts,
+    then raise StoreUnreachableError rather than returning False
+    (PR #664 review).
+    """
+    import aiohttp
+
+    from skulk.store import model_store_client as msc
+
+    counter = {"attempts": 0}
+
+    class _Session:
+        async def __aenter__(self) -> "_Session":
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        def get(self, url: str) -> "_Session":
+            return self
+
+    class _Request(_Session):
+        async def __aenter__(self) -> "_Session":
+            counter["attempts"] += 1
+            raise aiohttp.ClientConnectionError("no route to store")
+
+    class _OuterSession(_Session):
+        def get(self, url: str) -> _Request:
+            return _Request()
+
+    def _fake_session(timeout_profile: str = "short") -> _OuterSession:
+        return _OuterSession()
+
+    async def _no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(msc, "create_http_session", _fake_session)
+    monkeypatch.setattr(msc.asyncio, "sleep", _no_sleep)
+
+    client = ModelStoreClient("unreachable-host")
+    with pytest.raises(StoreUnreachableError):
+        await client.is_model_available("org/some-model")
+    assert counter["attempts"] == msc._STORE_PROBE_RETRY_ATTEMPTS
+
+
+@pytest.mark.anyio
+async def test_poll_dropout_raises_unreachable_not_stall_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A store that stops answering status polls surfaces unreachability.
+
+    The stall clock exists for a live store grinding through a huge file; a
+    store that stops ANSWERING must not ride it for the multi-hour budget
+    and then fail with a misleading "no progress" error (PR #664 review).
+    """
+    import aiohttp
+
+    from skulk.store import model_store_client as msc
+
+    poll_attempts = {"attempts": 0}
+
+    class _Session:
+        async def __aenter__(self) -> "_Session":
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+    class _PostRequest(_Session):
+        """The download request itself succeeds (store was up)."""
+
+        status = 200
+
+        async def json(self) -> dict[str, object]:
+            return {"status": "started"}
+
+    class _GetRequest(_Session):
+        async def __aenter__(self) -> "_Session":
+            poll_attempts["attempts"] += 1
+            raise aiohttp.ClientConnectionError("route dropped mid poll")
+
+    class _OuterSession(_Session):
+        def post(self, url: str, **kwargs: object) -> _PostRequest:
+            return _PostRequest()
+
+        def get(self, url: str) -> _GetRequest:
+            return _GetRequest()
+
+    def _fake_session(timeout_profile: str = "short") -> _OuterSession:
+        return _OuterSession()
+
+    async def _no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(msc, "create_http_session", _fake_session)
+    monkeypatch.setattr(msc.asyncio, "sleep", _no_sleep)
+
+    client = ModelStoreClient("dropping-host")
+    with pytest.raises(StoreUnreachableError, match="stopped answering"):
+        await client.request_and_wait_for_download("org/some-model")
+    assert poll_attempts["attempts"] == msc._STORE_POLL_UNREACHABLE_THRESHOLD
