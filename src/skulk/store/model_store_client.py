@@ -99,6 +99,11 @@ _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB per read/write chunk
 _CONNECT_TIMEOUT = 10.0  # seconds — abort if store host unreachable
 _READ_TIMEOUT = 120.0  # seconds — abort if no data for 2 minutes
 _STORE_HTTP_RETRY_ATTEMPTS = 12
+# The availability probe is the reachability DECISION point: a
+# store-unreachable node should reach its HF-fallback answer in seconds, not
+# ride the full minute-long budget meant for transient route flaps mid
+# transfer (#657). Three attempts still absorb a one-off connect blip.
+_STORE_PROBE_RETRY_ATTEMPTS = 3
 _STORE_HTTP_RETRY_BASE_SECONDS = 0.5
 _STORE_HTTP_RETRY_MAX_DELAY_SECONDS = 8.0
 _T = TypeVar("_T")
@@ -112,6 +117,18 @@ class ModelNotInStoreError(Exception):
     This is an expected, handleable error — callers should catch it and
     present a meaningful message to the user (e.g. "model not available
     in offline mode").
+    """
+
+
+class StoreUnreachableError(Exception):
+    """Raised when the store host cannot be reached at the transport level.
+
+    Deliberately distinct from :class:`ModelNotInStoreError`: "the store
+    answered and does not have it" and "the store never answered" demand
+    different responses. A store-unreachable node with HF fallback enabled
+    downloads directly from Hugging Face instead of starving (#657) — the
+    exact shape of a remote fabric member whose route to the home store
+    does not exist while its public-internet path is fine.
     """
 
 
@@ -202,27 +219,40 @@ async def _retry_store_http(
     operation: Callable[[], Awaitable[_T]],
     *,
     description: str,
+    attempts: int = _STORE_HTTP_RETRY_ATTEMPTS,
 ) -> _T:
     """Retry transient store HTTP transport failures with capped backoff.
 
     The model store sits behind normal node networking, so route flaps can last
     longer than a single TCP connect timeout during cluster churn or macOS
     interface changes. Keep retrying for roughly a minute of no-route failures
-    before surfacing a terminal download failure.
+    before surfacing a terminal download failure. Exhausted transport retries
+    raise :class:`StoreUnreachableError` (wrapping the last error) so callers
+    can distinguish "store never answered" from in-protocol failures.
+
+    Args:
+        operation: Coroutine factory performing one store HTTP request.
+        description: Human-readable operation name for retry logging.
+        attempts: Retry budget. Callers whose next move depends on
+            reachability itself (the availability probe) pass a smaller
+            budget so a store-unreachable node reaches its fallback decision
+            in seconds rather than minutes (#657).
     """
-    for attempt in range(1, _STORE_HTTP_RETRY_ATTEMPTS + 1):
+    for attempt in range(1, attempts + 1):
         try:
             return await operation()
         except (aiohttp.ClientError, TimeoutError, asyncio.TimeoutError) as error:
-            if attempt == _STORE_HTTP_RETRY_ATTEMPTS:
-                raise
+            if attempt == attempts:
+                raise StoreUnreachableError(
+                    f"store host unreachable during {description}: {error}"
+                ) from error
             delay = min(
                 _STORE_HTTP_RETRY_BASE_SECONDS * (2 ** (attempt - 1)),
                 _STORE_HTTP_RETRY_MAX_DELAY_SECONDS,
             )
             logger.warning(
                 f"ModelStoreClient: {description} failed on attempt "
-                f"{attempt}/{_STORE_HTTP_RETRY_ATTEMPTS}: {error}; "
+                f"{attempt}/{attempts}: {error}; "
                 f"retrying in {delay:.1f}s"
             )
             await asyncio.sleep(delay)
@@ -449,13 +479,23 @@ class ModelStoreClient:
         """Return ``True`` if *model_id* is available in the store.
 
         Uses ``GET /models/{model_id}/files`` — a 200 response means the
-        model is present; 404 means it is not.  Any network error is treated
-        as unavailable (returns ``False``).
+        model is present; 404 means it is not. Transport-level failure raises
+        :class:`StoreUnreachableError` after a deliberately small retry
+        budget: "unreachable" and "not available" used to collapse into
+        ``False`` here, which sent store-unreachable nodes down the
+        store-host-download path to starve for minutes against a host they
+        cannot reach (#657). Non-transport surprises still degrade to
+        ``False`` (the store answered strangely; the store-host path can
+        investigate).
 
         Args:
             model_id: HuggingFace-style model ID.
             source_revision: Full immutable Hugging Face commit required by the
                 caller, or ``None`` for the store's mutable-main entry.
+
+        Raises:
+            StoreUnreachableError: The store host never answered at the
+                transport level.
         """
         url = _with_source_revision(
             _make_store_url(
@@ -477,7 +517,10 @@ class ModelStoreClient:
             return await _retry_store_http(
                 _request,
                 description=f"availability probe for {model_id}",
+                attempts=_STORE_PROBE_RETRY_ATTEMPTS,
             )
+        except StoreUnreachableError:
+            raise
         except Exception as exc:
             logger.debug(f"ModelStoreClient: availability probe failed: {exc}")
             return False
@@ -1382,32 +1425,37 @@ class ModelStoreDownloader(ShardDownloader):
             touch_last_used(dest_path)
             return dest_path
 
-        available = await self._store_client.is_model_available(
-            model_id, shard.model_card.source_revision
-        )
+        try:
+            available = await self._store_client.is_model_available(
+                model_id, shard.model_card.source_revision
+            )
+        except StoreUnreachableError as exc:
+            return await self._fallback_for_unreachable_store(
+                shard, config_only, cause=exc
+            )
         same_repo_drafts = _same_repo_draft_files(shard.model_card)
 
         if available:
-            if (
-                shard.model_card.gguf_file
-                or same_repo_drafts
-                or shard.model_card.source_revision
-            ):
-                # A canonical entry may hold a different GGUF quant or predate a
-                # same-repo draft declaration. Ensure the store has every file
-                # selected by this card before staging; the request is idempotent
-                # when the entry is already complete. Workers never fetch these
-                # files directly from Hugging Face.
-                await self._store_client.request_and_wait_for_download(
-                    model_id,
-                    pinned_gguf=shard.model_card.gguf_file,
-                    extra_pinned_gguf=same_repo_drafts,
-                    source_revision=shard.model_card.source_revision,
-                )
-            logger.info(
-                f"ModelStoreDownloader: staging {model_id} from store → {dest_path}"
-            )
             try:
+                if (
+                    shard.model_card.gguf_file
+                    or same_repo_drafts
+                    or shard.model_card.source_revision
+                ):
+                    # A canonical entry may hold a different GGUF quant or predate a
+                    # same-repo draft declaration. Ensure the store has every file
+                    # selected by this card before staging; the request is idempotent
+                    # when the entry is already complete. Workers never fetch these
+                    # files directly from Hugging Face.
+                    await self._store_client.request_and_wait_for_download(
+                        model_id,
+                        pinned_gguf=shard.model_card.gguf_file,
+                        extra_pinned_gguf=same_repo_drafts,
+                        source_revision=shard.model_card.source_revision,
+                    )
+                logger.info(
+                    f"ModelStoreDownloader: staging {model_id} from store → {dest_path}"
+                )
                 path = await self._store_client.stage_shard(
                     model_id,
                     Path(self._staging_config.node_cache_path),
@@ -1421,6 +1469,12 @@ class ModelStoreDownloader(ShardDownloader):
                 )
                 touch_last_used(path)
                 return path
+            except StoreUnreachableError as exc:
+                # The store dropped off between the probe and the transfer:
+                # the node can still serve itself from Hugging Face.
+                return await self._fallback_for_unreachable_store(
+                    shard, config_only, cause=exc
+                )
             except ModelNotInStoreError:
                 # Store index was stale — the file was reported present but
                 # could not be staged.  Fall through to the HF path.
@@ -1451,28 +1505,71 @@ class ModelStoreDownloader(ShardDownloader):
                     extra_pinned_gguf=same_repo_drafts,
                     source_revision=shard.model_card.source_revision,
                 )
+            except StoreUnreachableError as exc:
+                # The store became unreachable between the probe and the
+                # download request (or a same-fleet route flapped out): the
+                # node can still serve itself from Hugging Face.
+                return await self._fallback_for_unreachable_store(
+                    shard, config_only, cause=exc
+                )
             except (RuntimeError, TimeoutError) as exc:
                 raise ModelNotInStoreError(
                     f"Store host failed to download {model_id}: {exc}"
                 ) from exc
             # Model now in store — stage it
-            path = await self._store_client.stage_shard(
-                model_id,
-                Path(self._staging_config.node_cache_path),
-                on_progress=lambda downloaded, total: self._emit_progress(
-                    shard,
-                    status="in_progress",
-                    downloaded_bytes=downloaded,
-                    total_bytes=total,
-                ),
-                source_revision=shard.model_card.source_revision,
-            )
+            try:
+                path = await self._store_client.stage_shard(
+                    model_id,
+                    Path(self._staging_config.node_cache_path),
+                    on_progress=lambda downloaded, total: self._emit_progress(
+                        shard,
+                        status="in_progress",
+                        downloaded_bytes=downloaded,
+                        total_bytes=total,
+                    ),
+                    source_revision=shard.model_card.source_revision,
+                )
+            except StoreUnreachableError as exc:
+                return await self._fallback_for_unreachable_store(
+                    shard, config_only, cause=exc
+                )
             touch_last_used(path)
             return path
 
         raise ModelNotInStoreError(
             f"Model {model_id} is not in the store and HuggingFace fallback is disabled"
         )
+
+    async def _fallback_for_unreachable_store(
+        self, shard: ShardMetadata, config_only: bool, *, cause: Exception
+    ) -> Path:
+        """Stage directly from Hugging Face because the store never answered.
+
+        Store-first remains the discipline when the store is part of this
+        node's reachable world; a node that cannot reach the store at all (a
+        remote fabric member whose route home does not exist, #657) must not
+        starve with a working public-internet path to the artifact origin.
+        The inner downloader is the pre-store Hugging Face path, so the
+        card's ``source_revision`` pin and pinned-GGUF selection behave
+        exactly as they did before the store existed. Loud by design: every
+        engagement logs the cause so an operator sees the topology problem,
+        and fallback-disabled deployments get an error naming
+        unreachability rather than a false "not in store".
+        """
+        model_id = str(shard.model_card.model_id)
+        if not self._allow_hf_fallback:
+            raise ModelNotInStoreError(
+                f"Store host is unreachable for {model_id} and HuggingFace "
+                f"fallback is disabled: {cause}"
+            ) from cause
+        logger.warning(
+            f"ModelStoreDownloader: store host unreachable for {model_id} — "
+            f"downloading directly from Hugging Face instead ({cause}). If "
+            "this node should reach the store, check its route to the store "
+            "host; if it is a remote member, direct-origin staging is "
+            "expected."
+        )
+        return await self._inner.ensure_shard(shard, config_only)
 
     async def get_shard_download_status(
         self,
