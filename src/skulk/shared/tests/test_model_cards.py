@@ -41,7 +41,8 @@ async def test_custom_card_overrides_bundled(
     (builtin_dir / "override-model.toml").write_text(
         _MINIMAL_CARD.format(quantization="fp16")
     )
-    (custom_dir / "override-model.toml").write_text(
+    # Named with the normalized model id so delete_custom_card resolves it.
+    (custom_dir / "testorg--override-model.toml").write_text(
         _MINIMAL_CARD.format(quantization="int4")
     )
     # An invalid custom card must be skipped (with a warning), not abort the
@@ -68,6 +69,23 @@ async def test_custom_card_overrides_bundled(
     assert model_cards_module._card_cache[
         ModelId("testorg/override-model")
     ].is_custom
+
+    # Deleting the override restores the BUNDLED card immediately (PR #655
+    # review): the cache only self-refreshes when empty, so without the
+    # delete-path reload the bundled model would vanish from the catalog
+    # until process restart.
+    monkeypatch.setattr(
+        model_cards_module, "_custom_cards_dir", Path(str(custom_dir))
+    )
+    monkeypatch.setattr(
+        model_cards_module, "_BUILTIN_CARD_DIRS", [Path(str(builtin_dir))]
+    )
+    assert await model_cards_module.delete_custom_card(
+        ModelId("testorg/override-model")
+    )
+    restored = model_cards_module._card_cache[ModelId("testorg/override-model")]
+    assert not restored.is_custom, "bundled card must return after delete"
+    assert restored.quantization == "fp16"
 
 
 def test_vllm_spec_pairing_validator() -> None:

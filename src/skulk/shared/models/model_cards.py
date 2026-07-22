@@ -1190,11 +1190,20 @@ def add_to_card_cache(card: "ModelCard") -> None:
 
 
 async def delete_custom_card(model_id: ModelId) -> bool:
-    """Delete a user-added custom model card. Returns True if deleted."""
+    """Delete a user-added custom model card. Returns True if deleted.
+
+    If the deleted card was overriding a bundled card (#652), the bundled
+    card is reloaded immediately: the cache only self-refreshes when empty,
+    so a bare pop would leave the bundled model missing from the catalog
+    until process restart. The builtin reload is first-wins, so it restores
+    only ids that are now absent and cannot displace other live overrides.
+    """
     card_path = _custom_cards_dir / (ModelId(model_id).normalize() + ".toml")
     if await card_path.exists():
         await card_path.unlink()
         _card_cache.pop(model_id, None)
+        for builtin_dir in _BUILTIN_CARD_DIRS:
+            await _load_cards_from_dir(builtin_dir, is_custom=False)
         return True
     return False
 
