@@ -159,6 +159,14 @@ def test_bundled_card_invariants(kind: str, path: Path) -> None:
             assert runtime.served_spec_type is not None, (
                 "served draft repo without served_spec_type"
             )
+        if runtime.vllm_spec_method is not None:
+            assert "vllm" in engines, (
+                "vllm_spec_method without the vllm engine (dead config)"
+            )
+        if runtime.vllm_spec_num_tokens is not None:
+            assert runtime.vllm_spec_method is not None, (
+                "vllm_spec_num_tokens without vllm_spec_method (dead config)"
+            )
 
 
 @pytest.mark.parametrize(

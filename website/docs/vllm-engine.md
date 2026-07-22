@@ -107,5 +107,11 @@ them). Skulk keeps the engines side by side precisely so the choice is made
 per model and per hardware rather than by ideology; the model card's backend
 ranking is where that choice is recorded.
 
-vLLM does not run Skulk's speculative decoding; see
-[Speculative Decoding](speculative-decoding.md) for which engines do.
+vLLM runs card-driven speculative decoding for checkpoints that ship
+native multi-token-prediction heads (Qwen3.6 among them): the card's
+`vllm_spec_method = "mtp"` and `vllm_spec_num_tokens` map to vLLM's
+`--speculative-config`, engaging the model's own prediction heads with no
+separate draft model. Measured on an A100-80GB, this roughly doubles
+single-stream decode on Qwen3.6-27B-FP8 (2.01x at depth 2, 77%
+acceptance). See [Speculative Decoding](speculative-decoding.md) for the
+other engines' mechanisms.

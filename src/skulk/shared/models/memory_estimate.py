@@ -189,6 +189,16 @@ def gpu_working_set_ceiling(ram_total: Memory) -> Memory:
 # MLX context).
 _UPFRONT_WINDOW_ENGINE_PREFIXES: Final = ("llama_cpp", "llama_server", "vllm")
 
+#: Ceiling on the context window stamped (and therefore served and
+#: admitted-against) for vLLM-resolved placements, until vLLM-aware admission
+#: models engine-start cost. vLLM pre-allocates and CUDA-graph-captures its
+#: FULL ``--max-model-len`` at startup: a 262k-context card turned a
+#: ~3-minute bring-up into ~90 minutes on an A100-80GB even though the window
+#: fit in memory. Applied at the stamp so placement admission and the served
+#: window can never disagree (PR #649 review, both reviewers); the runner
+#: min()s against the same constant as defense in depth.
+VLLM_MAX_MODEL_LEN: Final = 32768
+
 
 def shard_preallocates_kv_upfront(shard: ShardMetadata) -> bool:
     """Whether the runner for THIS shard commits a fixed context window at load.
@@ -388,6 +398,29 @@ def instance_context_token_limit(
         limit = memory_limit
     else:
         limit = min(memory_limit, card_limit)
+
+    # vLLM startup-cost cap (see VLLM_MAX_MODEL_LEN): applies when the
+    # placement resolves to the vllm engine (every shard's resolved_backend),
+    # falling back to the card declaring ONLY vllm backends when resolution
+    # has not happened yet. Deterministic: resolved backends and card
+    # backends are both static placement inputs.
+    resolved = [
+        shard.resolved_backend
+        for shard in shard_assignments.runner_to_shard.values()
+    ]
+    if any(r is not None for r in resolved):
+        placement_is_vllm = all(
+            r is not None and r.startswith("vllm") for r in resolved
+        )
+    else:
+        declared = model_card.placement.compatible_backends
+        placement_is_vllm = bool(declared) and all(
+            tag.startswith("vllm") for tag in declared
+        )
+    if placement_is_vllm:
+        limit = (
+            VLLM_MAX_MODEL_LEN if limit is None else min(limit, VLLM_MAX_MODEL_LEN)
+        )
 
     # This ceiling is now the value the runner actually serves: the window-committing
     # served engines (llama_cpp / llama_server / vllm, the runners that call

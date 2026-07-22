@@ -1,0 +1,38 @@
+# Gemma 4 31B Instruct QAT W4A16 for the vllm served engine (the "wowsers" slate: current-generation
+# models serving out of the box). Google's OFFICIAL quantization-aware-trained w4a16 release in
+# compressed-tensors format (~23 GB): the flagship 31B on 24-48 GB GPUs
+# with near-bf16 quality, per Google's QAT training.
+# # Model truth vs platform truth notes, mirroring the #635 starter-set
+# precedent:
+# - The repo is an image-text-to-text architecture; the MODEL supports vision.
+#   The vllm runner is text-only in this slice and the vision platform gate
+#   ({mlx, llama_cpp} in shared/backends.py) would make a vision-declaring
+#   vllm-only card unplaceable, so this card claims text serving only.
+#   Restore the vision declaration when the vllm runner gains image input.
+# - Tool calling is declared off: the vllm runner does not implement tool
+#   dispatch yet (#638); flip to the family default when it lands.
+# Architecture facts from the repo's config.json; context_length is the
+# config max_position_embeddings. storage_size is the full staging set.
+# `supports_tensor = false`: vLLM runs single-node in Skulk.
+model_id = "google/gemma-4-31B-it-qat-w4a16-ct"
+n_layers = 60
+hidden_size = 5376
+num_key_value_heads = 16
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "gemma"
+quantization = "w4a16"
+base_model = "Gemma 4 31B Instruct QAT W4A16"
+capabilities = ["text", "thinking"]
+context_length = 262144
+trust_remote_code = false
+
+[tooling]
+supports_tool_calling = false
+
+[placement]
+compatible_backends = ["vllm-cuda", "vllm-rocm"]
+backend_preference = ["vllm-cuda", "vllm-rocm"]
+
+[storage_size]
+in_bytes = 23297565093

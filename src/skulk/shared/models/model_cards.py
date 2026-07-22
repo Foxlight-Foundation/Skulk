@@ -720,6 +720,40 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     ``served_spec_draft_repo``), e.g. ``"mtp-gemma-4-31B-it.gguf"``. Required when
     ``served_spec_draft_repo`` is set; selects the exact draft quant the runner
     passes to ``--model-draft``."""
+    vllm_spec_method: Literal["mtp"] | None = None
+    """Speculative-decoding method for the ``vllm`` served engine.
+
+    Maps to vLLM's ``--speculative-config`` ``method`` key. ``"mtp"`` engages
+    the checkpoint's own native multi-token-prediction heads (vLLM resolves
+    the matching drafter architecture, e.g. ``Qwen3_5MTP``, with no separate
+    draft model); requires a checkpoint that ships MTP heads
+    (``mtp_num_hidden_layers`` in its config). Only the vllm engine reads
+    this; ``served_spec_type`` remains the llama_server equivalent. The
+    vocabulary starts deliberately narrow and grows as methods are validated
+    live."""
+    vllm_spec_num_tokens: int | None = Field(default=None, gt=0)
+    """Draft tokens per step for vLLM speculative decoding
+    (``--speculative-config`` ``num_speculative_tokens``).
+
+    Requires ``vllm_spec_method``. Positive; acceptance falls per position
+    (measured on Qwen3.6-27B-FP8: 86% at position 0, 69% at position 1), so
+    2 is the usual sweet spot for single-layer MTP heads, which re-run their
+    one layer for deeper positions. ``None`` uses vLLM's method default."""
+
+    @model_validator(mode="after")
+    def _validate_vllm_spec_pairing(self) -> "RuntimeCapabilityCardConfig":
+        """Reject depth-without-method so custom cards fail fast, not silently.
+
+        ``vllm_spec_num_tokens`` is meaningless without ``vllm_spec_method``
+        (the runner would ignore it); bundled cards are gated by the invariant
+        suite, but operator-authored custom cards deserve the same loud
+        failure at load (PR #649 review).
+        """
+        if self.vllm_spec_num_tokens is not None and self.vllm_spec_method is None:
+            raise ValueError(
+                "vllm_spec_num_tokens requires vllm_spec_method"
+            )
+        return self
 
     @field_validator("prompt_renderer", mode="before")
     @classmethod
