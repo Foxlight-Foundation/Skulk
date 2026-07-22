@@ -223,7 +223,11 @@ A model card's `placement.compatible_backends` selects which engine serves it
   Qwen3.6-27B-FP8 measured 2.01x; method `dflash` = separate block-parallel
   speculator repo, the Laguna cards). Single-node
   text in v1; tool calling / logprobs / multi-node / vLLM-aware admission
-  are follow-ups.
+  are follow-ups. Lifecycle (#653): teardown signals the server's whole
+  process group (vLLM's EngineCore is a grandchild) with an orphan-sweep
+  mop after graceful leader exit, and worker startup reaps init-reparented
+  `VLLM::EngineCore` processes (argv[0]/comm marker match, per-pid
+  re-verified before SIGKILL) before advertising capacity.
   `AcceleratorMetrics.compute_capability` (+ `native_fp4`/`native_fp8`, via NVML)
   is the capability signal for keying placement on GPU generation, not vendor.
 

@@ -288,6 +288,18 @@ doubles single-stream decode on the dense Qwen3.6. This first slice is
 single-node text generation; tool calling, logprobs, vLLM's own multi-GPU
 parallelism, and vLLM-aware memory admission are follow-ups.
 
+The vLLM server's lifecycle is guarded against GPU-memory leaks in both
+directions. On teardown, the runner signals the server's entire process
+group (the server starts in its own session), because vLLM runs its actual
+engine in a grandchild process: terminating only the direct child could
+leave that engine core alive holding the full GPU allocation. And at worker
+startup, before the node advertises any capacity, a one-shot sweep reaps
+engine-core processes orphaned by an earlier abrupt shutdown (recognized by
+their process title and the fact that their parent is gone); without it, a
+crashed node could come back up with tens of gigabytes of GPU memory
+invisibly held, refusing placements for space nothing appears to own. Each
+reap is logged, so a node that recovered says why.
+
 The `llama_server` engine is also how a GGUF model larger than any single GPU node gets
 served: **multi-node memory pooling over llama.cpp's RPC backend**. When a model
 fits no single node but fits the combined GPU memory of several `llama_server`

@@ -106,6 +106,7 @@ from skulk.worker.runner.llama_cpp.runner import (
     wants_logprobs,
 )
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
+from skulk.worker.runner.vllm.orphan_sweep import sweep_orphaned_vllm_engines
 
 # vLLM startup can be slow: weight load + torch.compile + CUDA-graph capture on a
 # large model runs to a couple of minutes, so allow a generous health deadline.
@@ -639,12 +640,20 @@ class Runner(ServedConcurrentDispatch):
         server_env["PATH"] = (
             f"{Path(binary).parent}{os.pathsep}{server_env.get('PATH', '')}"
         )
+        # start_new_session puts vllm serve at the head of its own process
+        # group, so teardown can signal the WHOLE group: vLLM spawns its
+        # EngineCore as a grandchild, and terminating only the direct child
+        # left the engine core alive holding the full GPU allocation when the
+        # parent died mid-teardown (#653). PDEATHSIG still covers the direct
+        # child on runner death; the worker-startup orphan sweep covers the
+        # crash shapes neither reaches.
         self.server_proc = subprocess.Popen(
             args,
             stdout=self.server_log,
             stderr=subprocess.STDOUT,
             env=server_env,
             preexec_fn=_set_pdeathsig if os.name == "posix" else None,
+            start_new_session=True,
         )
 
     def _pick_port(self) -> int:
@@ -699,12 +708,28 @@ class Runner(ServedConcurrentDispatch):
         if proc is not None:
             try:
                 if proc.poll() is None:
-                    proc.terminate()
+                    # Signal the process GROUP (the server was started with
+                    # start_new_session, so its pgid is its pid): vLLM's
+                    # EngineCore is a grandchild and a plain terminate() left
+                    # it orphaned with the GPU allocation when teardown raced
+                    # a node restart (#653). Fall back to the single-process
+                    # path if group signalling is unavailable.
+                    self._signal_server_group(proc, signal.SIGTERM)
                     try:
                         proc.wait(timeout=10)
                     except subprocess.TimeoutExpired:
-                        proc.kill()
+                        self._signal_server_group(proc, signal.SIGKILL)
                         proc.wait(timeout=5)
+                # The leader being gone (whether it exited just now or died
+                # BEFORE teardown ran: a startup crash observed by
+                # _await_health, an unexpected server exit) does not prove
+                # its descendants did: an EngineCore that outlived the
+                # leader is already init-reparented and holding VRAM. A
+                # blanket killpg here would race pgid reuse once the group
+                # is empty (PR #656 review), so the mop is the orphan sweep
+                # on EVERY teardown path: it kills only per-pid re-verified,
+                # marker-matched engine cores.
+                sweep_orphaned_vllm_engines()
             except Exception:  # noqa: BLE001 - teardown is best-effort
                 pass
             self.server_proc = None
@@ -712,6 +737,19 @@ class Runner(ServedConcurrentDispatch):
             with contextlib.suppress(Exception):
                 self.server_log.close()
             self.server_log = None
+
+    @staticmethod
+    def _signal_server_group(proc: "subprocess.Popen[bytes]", sig: int) -> None:
+        """Send ``sig`` to the server's process group, or just the server.
+
+        The group covers vLLM's EngineCore grandchild (#653); the
+        single-process fallback keeps teardown working if the group is
+        already gone or the platform lacks ``killpg``.
+        """
+        try:
+            os.killpg(proc.pid, sig)
+        except (OSError, AttributeError):
+            proc.send_signal(sig)
 
     # --- generation: proxy the server's OpenAI streaming API ------------------
 
