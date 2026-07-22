@@ -245,7 +245,7 @@ def _check_engine_available(facts: NodeFacts) -> Sequence[CheckResult]:
                 "`skulk doctor --fix` provisions the pinned llama-server build "
                 "on Linux (on an NVIDIA node this installs the "
                 "skulk-llama-server-cuda wheel from the Foxlight index, then "
-                "falls back to the Vulkan/CPU tarball); alternatively install "
+                "falls back to the managed Vulkan/CPU lanes); alternatively install "
                 "a llama-cpp-python build, set SKULK_LLAMA_SERVER_BIN to a "
                 "custom llama-server, or set SKULK_VLLM_BIN to a vllm CLI"
             ),
