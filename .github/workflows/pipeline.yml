@@ -41,15 +41,32 @@ jobs:
             exit 0
           fi
           echo "wire-surface files touched:"; echo "$touched"
-          if git diff "$base"...HEAD -- rust/networking/src/swarm.rs | grep -q "NETWORK_VERSION"; then
-            echo "NETWORK_VERSION changed; guard passes"
-            exit 0
+          # Every wire-surface change requires a WIRE_COMPAT.md entry: a bump
+          # records itself there, and a wire-neutral change records the
+          # neutrality judgment. Version detection matches only ADDED or
+          # REMOVED lines (-U0) so context lines near the constant cannot
+          # satisfy the guard.
+          version_changed=false
+          if git diff -U0 "$base"...HEAD -- rust/networking/src/swarm.rs | grep -Eq "^[+-].*NETWORK_VERSION.*=" ; then
+            version_changed=true
           fi
+          compat_updated=false
           if git diff --name-only "$base"...HEAD -- rust/networking/WIRE_COMPAT.md | grep -q .; then
-            echo "WIRE_COMPAT.md updated (wire-neutral change recorded); guard passes"
+            compat_updated=true
+          fi
+          if [ "$compat_updated" = "true" ]; then
+            if [ "$version_changed" = "true" ]; then
+              echo "NETWORK_VERSION changed and WIRE_COMPAT.md updated; guard passes"
+            else
+              echo "WIRE_COMPAT.md updated (wire-neutral change recorded); guard passes"
+            fi
             exit 0
           fi
-          echo "::error::This PR touches rust/networking wire surfaces without bumping NETWORK_VERSION (rust/networking/src/swarm.rs) or recording a wire-neutral entry in rust/networking/WIRE_COMPAT.md. Wire-behavior changes MUST bump the version (the pnet key derives from it, making incompatible builds fail loudly at connect); provably wire-neutral changes (comments, timing, logging) add a WIRE_COMPAT.md entry instead. See rust/networking/WIRE_COMPAT.md for the doctrine."
+          if [ "$version_changed" = "true" ]; then
+            echo "::error::NETWORK_VERSION changed without a WIRE_COMPAT.md entry. Every bump records itself in rust/networking/WIRE_COMPAT.md (what changed on the wire and why)."
+            exit 1
+          fi
+          echo "::error::This PR touches rust/networking wire surfaces without updating rust/networking/WIRE_COMPAT.md. Wire-behavior changes MUST bump NETWORK_VERSION (rust/networking/src/swarm.rs) and record the bump there (the pnet key derives from the version, making incompatible builds fail loudly at connect); provably wire-neutral changes (comments, timing, logging) record the neutrality judgment instead. See rust/networking/WIRE_COMPAT.md for the doctrine."
           exit 1
 
   lint:

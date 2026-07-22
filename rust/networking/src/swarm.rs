@@ -288,13 +288,23 @@ mod transport {
         // Seed for the libp2p private-network pre-shared key. Changing this is a
         // wire-compatibility break (nodes with a different seed cannot form a
         // cluster), so it lands only as a coordinated whole-fleet upgrade (#324).
-        let builder = Sha3_256::new().update(b"skulk_discovery_network");
+        //
+        // NETWORK_VERSION ALWAYS contributes to the key; a configured
+        // namespace layers cluster isolation on top rather than replacing
+        // it. The previous either/or derivation silently disabled the wire
+        // version gate on every deployment that sets a namespace — which
+        // the installed service template does by default — so a version
+        // bump changed nothing exactly where the loud-connect-failure
+        // guarantee was needed (#659 review, P1).
+        let builder = Sha3_256::new()
+            .update(b"skulk_discovery_network")
+            .update(NETWORK_VERSION);
 
         if let Ok(var) = env::var(OVERRIDE_VERSION_ENV_VAR) {
             let bytes = var.into_bytes();
             builder.update(&bytes)
         } else {
-            builder.update(NETWORK_VERSION)
+            builder
         }
         .finalize()
     });

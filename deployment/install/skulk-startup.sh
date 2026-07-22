@@ -139,7 +139,10 @@ run_prep() {
     # wire-incompatible stale build refuse connections loudly.
     RUST_TREE_COMMIT="$(git log -1 --format=%H -- rust/ 2>/dev/null || true)"
     RUST_TREE_MARKER=".venv/.skulk-rust-tree-commit"
-    if [ -n "$RUST_TREE_COMMIT" ]; then
+    # The marker lives inside the venv (the artifact it describes); no venv
+    # yet (first boot, or a fully failed sync) means nothing to mark and the
+    # reinstall below would fail the same way the sync just did.
+    if [ -n "$RUST_TREE_COMMIT" ] && [ -d .venv ]; then
         if [ "$(cat "$RUST_TREE_MARKER" 2>/dev/null || true)" != "$RUST_TREE_COMMIT" ]; then
             log "rust/ tree moved to ${RUST_TREE_COMMIT}; rebuilding skulk_pyo3_bindings (non-fatal)"
             # shellcheck disable=SC2086
