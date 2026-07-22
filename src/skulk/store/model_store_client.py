@@ -872,6 +872,10 @@ class ModelStoreClient:
         Raises:
             RuntimeError: If the download failed on the store host.
             TimeoutError: If the download made no progress for *timeout* seconds.
+            StoreUnreachableError: If the store host stopped answering at the
+                transport level (exhausted request retries, or
+                ``_STORE_POLL_UNREACHABLE_THRESHOLD`` consecutive failed
+                status polls).
         """
         import asyncio as _asyncio
 
