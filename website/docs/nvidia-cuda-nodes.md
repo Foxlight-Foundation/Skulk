@@ -135,6 +135,15 @@ as an external served engine through `SKULK_VLLM_BIN`, which the installer
 records in `~/.skulk/skulk.env`. The download is several GB. See
 [The vLLM engine](vllm-engine.md) for scope, knobs, and when it wins.
 
+One extra requirement applies to models carded with a DFlash speculator
+(the Laguna cards): the speculator JIT-compiles its kernels through NVRTC at
+engine start, which needs a **CUDA 12.8 or newer toolchain** on the node
+(older headers predate the FP8 types it uses). Nodes running a CUDA 12.8+
+driver stack normally have this already; container images pinned to an older
+CUDA toolkit need the newer `cuda-nvcc`/`cudart-dev` packages installed even
+though the GPU driver itself is fine. Models without a DFlash card section
+are unaffected.
+
 ## Troubleshooting
 
 `uv run skulk doctor` is the audit: it inspects the same facts snapshot Skulk's

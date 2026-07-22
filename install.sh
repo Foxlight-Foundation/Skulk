@@ -246,25 +246,36 @@ if [[ "$WITH_VLLM" == "1" ]]; then
     else
         VLLM_ENV="$HOME/.skulk/vllm-env"
         log "installing vLLM into $VLLM_ENV (validated matrix; several GB)"
-        uv venv "$VLLM_ENV" --python 3.12
+        # --allow-existing keeps re-runs idempotent (a bare `uv venv` refuses
+        # to reuse an existing environment and would fail the second install).
+        uv venv "$VLLM_ENV" --python 3.12 --allow-existing
         # vLLM lives in its own venv and Skulk drives its CLI as an external
         # served engine (SKULK_VLLM_BIN). Validated matrix notes:
-        # - vllm 0.24.0 publishes only cpu/cu129/cu130 wheels on PyPI, and the
+        # - vllm 0.25.x publishes only cpu/cu129/cu130 wheels on PyPI, and the
         #   default wheel links libcudart.so.13, which cannot import on the
         #   CUDA 12.x drivers common on GPU clouds; the cu129 VARIANT wheel
         #   from wheels.vllm.ai is the one that runs there (probe-validated).
+        #   0.25.1 (from 0.24.0) is the floor for the DFlash speculator
+        #   architectures (Laguna cards); the DFlash spec method itself
+        #   predates it.
         # - ninja must be resolvable by the vllm server process (FlashInfer
         #   JIT sampling kernels shell out to it); installing it into the
         #   venv suffices because the runner prepends the venv bin dir to the
         #   server's PATH.
+        # - torch backend must be cu129: vllm 0.25.1 requires
+        #   torchcodec>=0.14, which the cu128 torch index does not carry
+        #   (tops out at 0.11.1+cu128), so cu128 fails resolution outright
+        #   (fresh-box validated). DFlash cards additionally JIT their
+        #   speculator kernels through nvrtc and need a CUDA >= 12.8
+        #   toolchain on the node (12.4 headers lack __nv_fp8_e8m0).
         # Default index pinned explicitly (mirroring ENGINE_INDEX_FLAGS
         # above): a host exporting UV_INDEX_URL/UV_DEFAULT_INDEX would
         # otherwise redirect dependency resolution to its own mirror.
         uv pip install --python "$VLLM_ENV/bin/python" \
-            "vllm==0.24.0+cu129" ninja \
-            --extra-index-url "https://wheels.vllm.ai/0.24.0/cu129/" \
+            "vllm==0.25.1+cu129" ninja \
+            --extra-index-url "https://wheels.vllm.ai/0.25.1/cu129/" \
             --index-url "https://pypi.org/simple/" \
-            --torch-backend=cu128
+            --torch-backend=cu129
         mkdir -p "$HOME/.skulk"
         if ! grep -q "SKULK_VLLM_BIN" "$HOME/.skulk/skulk.env" 2>/dev/null; then
             echo "SKULK_VLLM_BIN=$VLLM_ENV/bin/vllm" >> "$HOME/.skulk/skulk.env"

@@ -78,6 +78,18 @@ plain; that engine's headline win remains aggregate throughput under
 concurrent load (continuous batching), so the two mechanisms address
 different bottlenecks and now both exist on the served path.
 
+The same card fields absorb vendor speculation schemes that use a separate
+published speculator instead of in-checkpoint heads. Poolside's Laguna
+models ship a block-parallel **DFlash** drafter as its own Hugging Face
+repo; the card declares `vllm_spec_method = "dflash"` with
+`vllm_spec_draft_repo` naming that drafter (mapped to the
+speculative-config `model` key), and vLLM (0.25.1 or later, which serves
+both the Laguna architecture and its DFlash drafter natively) fetches and
+runs it. No vendor fork or engine-specific code is involved: a new scheme
+is a new card declaration. Block-parallel drafters propose a whole block
+per step, so their carded depths run much deeper than MTP's (the Laguna
+XS 2.1 FP8 card uses the vendor-recommended 15 for a 16-token block).
+
 One served-engine degradation behavior worth knowing: a card-declared separate
 draft GGUF is a best-effort companion at download time, so if the draft file is
 missing on disk when the model loads, the served runner logs a warning and

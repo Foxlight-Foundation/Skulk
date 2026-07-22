@@ -167,6 +167,9 @@ def test_bundled_card_invariants(kind: str, path: Path) -> None:
             assert runtime.vllm_spec_method is not None, (
                 "vllm_spec_num_tokens without vllm_spec_method (dead config)"
             )
+        # The method/draft-repo pairing itself (dflash requires a draft repo,
+        # mtp forbids one) is enforced by the card model validator, so an
+        # inconsistent bundled card already fails at parse above.
 
 
 @pytest.mark.parametrize(
