@@ -65,7 +65,17 @@ def _detect_vision_from_config(model_id: ModelId) -> "VisionCardConfig | None":
 
 
 async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
-    """Load all TOML model cards from a directory into the cache."""
+    """Load all TOML model cards from a directory into the cache.
+
+    Within a load pass the first card for a model id wins (duplicate ids in
+    the builtin dirs, or among custom files, keep their existing precedence),
+    but a CUSTOM card replaces a bundled card for the same id: the custom
+    directory exists for operator override, and the previous first-wins
+    behavior silently ignored the override because the builtin dirs load
+    first (#652). Both the override and a failed custom-card parse are
+    logged, since a silently dropped operator card reads as "my card is
+    live" while the bundled card actually serves.
+    """
     async for toml_file in directory.rglob("*.toml"):
         try:
             card = await ModelCard.load_from_path(toml_file)
@@ -75,10 +85,20 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
                 vision = _detect_vision_from_config(card.model_id)
                 if vision is not None:
                     card = card.model_copy(update={"vision": vision})
-            if card.model_id not in _card_cache:
+            existing = _card_cache.get(card.model_id)
+            if existing is None:
                 _card_cache[card.model_id] = card
-        except (ValidationError, TOMLKitError):
-            pass
+            elif is_custom and not existing.is_custom:
+                logger.info(
+                    f"custom model card {toml_file} overrides the bundled "
+                    f"card for {card.model_id}"
+                )
+                _card_cache[card.model_id] = card
+        except (ValidationError, TOMLKitError) as error:
+            if is_custom:
+                logger.warning(
+                    f"ignoring invalid custom model card {toml_file}: {error}"
+                )
 
 
 async def _refresh_card_cache() -> None:
