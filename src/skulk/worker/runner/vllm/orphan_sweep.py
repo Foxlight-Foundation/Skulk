@@ -41,48 +41,58 @@ def find_orphaned_vllm_engine_pids(proc_root: Path = Path("/proc")) -> list[int]
     platforms without ``/proc`` (macOS) the scan returns empty and the sweep
     is a no-op; the vllm engine is Linux-oriented so nothing is lost.
     """
-    orphans: list[int] = []
     if not proc_root.exists():
-        return orphans
-    for entry in proc_root.iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            # Both files decode with errors="replace": comm is arbitrary
-            # bytes (any process can set a non-UTF-8 title), and a strict
-            # decode raising UnicodeDecodeError past the OSError catch
-            # would crash worker startup over an unrelated process.
-            stat_text = (entry / "stat").read_bytes().decode(errors="replace")
-            cmdline = (
-                (entry / "cmdline")
-                .read_bytes()
-                .replace(b"\x00", b" ")
-                .decode(errors="replace")
-            )
-        except OSError:
-            # Process vanished mid-scan or is unreadable; either way it is
-            # not ours to reap.
-            continue
-        # /proc/<pid>/stat: "pid (comm) state ppid ..."; comm may itself
-        # contain spaces or parens, so split at the LAST closing paren.
-        fields_after_comm = stat_text.rsplit(")", 1)[-1].split()
-        if len(fields_after_comm) < 2:
-            continue
-        try:
-            parent_pid = int(fields_after_comm[1])
-        except ValueError:
-            continue
-        if parent_pid != 1:
-            continue
-        # setproctitle rewrites both cmdline and comm; comm is truncated to
-        # 15 chars ("VLLM::EngineCor"), so match the truncated marker there
-        # and the full marker in cmdline.
-        comm = stat_text.split("(", 1)[-1].rsplit(")", 1)[0]
-        if _ENGINE_CORE_MARKER in cmdline or comm.startswith(
-            _ENGINE_CORE_COMM_PREFIX
-        ):
-            orphans.append(int(entry.name))
-    return orphans
+        return []
+    return [
+        int(entry.name)
+        for entry in proc_root.iterdir()
+        if entry.name.isdigit() and _is_orphaned_engine_core(entry)
+    ]
+
+
+def _is_orphaned_engine_core(entry: Path) -> bool:
+    """Whether this /proc entry is an engine core reparented to init, NOW.
+
+    Factored out of the scan so the sweep can re-verify the condition
+    immediately before signalling: between scan and kill the original
+    process can exit and the kernel can (rarely) reuse the pid for an
+    unrelated init-parented process, and SIGKILL to a recycled pid is the
+    exact harm class this module exists to avoid.
+    """
+    try:
+        # Both files decode with errors="replace": comm is arbitrary
+        # bytes (any process can set a non-UTF-8 title), and a strict
+        # decode raising UnicodeDecodeError past the OSError catch
+        # would crash worker startup over an unrelated process.
+        stat_text = (entry / "stat").read_bytes().decode(errors="replace")
+        cmdline = (
+            (entry / "cmdline")
+            .read_bytes()
+            .replace(b"\x00", b" ")
+            .decode(errors="replace")
+        )
+    except OSError:
+        # Process vanished mid-scan or is unreadable; either way it is
+        # not ours to reap.
+        return False
+    # /proc/<pid>/stat: "pid (comm) state ppid ..."; comm may itself
+    # contain spaces or parens, so split at the LAST closing paren.
+    fields_after_comm = stat_text.rsplit(")", 1)[-1].split()
+    if len(fields_after_comm) < 2:
+        return False
+    try:
+        parent_pid = int(fields_after_comm[1])
+    except ValueError:
+        return False
+    if parent_pid != 1:
+        return False
+    # setproctitle rewrites both cmdline and comm; comm is truncated to
+    # 15 chars ("VLLM::EngineCor"), so match the truncated marker there
+    # and the full marker in cmdline.
+    comm = stat_text.split("(", 1)[-1].rsplit(")", 1)[0]
+    return _ENGINE_CORE_MARKER in cmdline or comm.startswith(
+        _ENGINE_CORE_COMM_PREFIX
+    )
 
 
 def sweep_orphaned_vllm_engines() -> int:
@@ -93,7 +103,14 @@ def sweep_orphaned_vllm_engines() -> int:
     the pid so a node that WAS wedged says why it recovered.
     """
     killed = 0
-    for pid in find_orphaned_vllm_engine_pids():
+    proc_root = Path("/proc")
+    for pid in find_orphaned_vllm_engine_pids(proc_root):
+        # Re-verify at kill time: the scanned process may have exited and
+        # the pid been recycled to an unrelated init-parented process
+        # (PR #656 review). The re-check shrinks the race to the read/kill
+        # gap, which is the best a pid-based kill can do.
+        if not _is_orphaned_engine_core(proc_root / str(pid)):
+            continue
         try:
             os.kill(pid, signal.SIGKILL)
         except OSError as error:
