@@ -130,7 +130,8 @@ class StoreUnreachableError(Exception):
     """Raised when the store host cannot be reached at the transport level.
 
     Deliberately distinct from :class:`ModelNotInStoreError`: "the store
-    answered and does not have it" and "the store never answered" demand
+    answered and does not have it" and "the store cannot be reached"
+    (whether it never answered or dropped off mid-transfer) demand
     different responses. A store-unreachable node with HF fallback enabled
     downloads directly from Hugging Face instead of starving (#657) — the
     exact shape of a remote fabric member whose route to the home store
@@ -976,7 +977,7 @@ class ModelStoreClient:
             except RuntimeError:
                 raise
             except (
-                aiohttp.ClientError,
+                aiohttp.ClientConnectionError,
                 TimeoutError,
                 asyncio.TimeoutError,
             ) as exc:
@@ -989,9 +990,11 @@ class ModelStoreClient:
                 # before failing with a misleading "no progress" error.
                 # Bound it separately and surface unreachability so callers
                 # can engage the direct-HF fallback (#657 review). Only
-                # TRANSPORT failures count: a reachable store returning
-                # malformed responses is a store bug, not unreachability,
-                # and stays on the stall clock (second review round).
+                # CONNECTION-level failures count: aiohttp.ClientError also
+                # covers response-level errors like ContentTypeError, where
+                # the store ANSWERED with a malformed body — a store bug,
+                # not unreachability — so those stay on the stall clock
+                # with the generic handler below (third review round).
                 consecutive_transport_failures += 1
                 if (
                     consecutive_transport_failures
