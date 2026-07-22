@@ -296,7 +296,8 @@ is in:
 - **Model not in the store** (the store answered): the node asks the *store
   host* to download it from Hugging Face, then stages from the store. The
   store stays the single source of truth for model files.
-- **Store unreachable** (the store never answered): the node downloads
+- **Store unreachable** (the store could not be reached, whether it never
+  answered or dropped off mid-transfer): the node downloads
   *directly* from Hugging Face, preserving the card's pinned source
   revision. This is the expected shape for a remote fabric member whose
   route to the store does not exist while its public-internet path works;

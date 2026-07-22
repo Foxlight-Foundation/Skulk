@@ -1578,7 +1578,7 @@ class ModelStoreDownloader(ShardDownloader):
     async def _fallback_for_unreachable_store(
         self, shard: ShardMetadata, config_only: bool, *, cause: Exception
     ) -> Path:
-        """Stage directly from Hugging Face because the store never answered.
+        """Stage directly from Hugging Face because the store is unreachable.
 
         Store-first remains the discipline when the store is part of this
         node's reachable world; a node that cannot reach the store at all (a
