@@ -508,3 +508,41 @@ def test_ensure_skips_wheel_install_when_offline(
     monkeypatch.setattr(provisioning, "wheel_llama_server", _no_wheel)
 
     assert ensure_llama_server(make_facts(gpus=(NVIDIA_A40,)), allow_download=False) is None
+
+
+def test_installed_vulkan_wheel_does_not_shadow_cuda_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An NVIDIA node with only the Vulkan wheel still completes the CUDA lane.
+
+    The Vulkan shim resolves happily but cannot drive the GPU in a
+    compute-only container; the on-demand install keys on the CUDA wheel
+    itself, not on any-wheel-resolved (PR #665 review).
+    """
+    _isolate_engines_dir(monkeypatch, tmp_path)
+    monkeypatch.delenv(LLAMA_SERVER_BIN_ENV, raising=False)
+    facts = make_facts(gpus=(NVIDIA_A40,))
+
+    vulkan_shim = tmp_path / "llama-server-vulkan"
+    cuda_shim = tmp_path / "llama-server-cuda"
+    for shim in (vulkan_shim, cuda_shim):
+        shim.write_text("#!/bin/sh\n")
+        shim.chmod(0o755)
+    installed = {"done": False}
+
+    def _fake_cuda_usable() -> bool:
+        return installed["done"]
+
+    def _fake_install(installed_facts: object) -> bool:
+        installed["done"] = True
+        return True
+
+    def _resolver(vendor: str, wheel_facts: object) -> tuple[Path, None]:
+        return ((cuda_shim, None) if installed["done"] else (vulkan_shim, None))
+
+    monkeypatch.setattr(provisioning, "_cuda_wheel_usable", _fake_cuda_usable)
+    monkeypatch.setattr(provisioning, "try_install_cuda_wheel", _fake_install)
+    monkeypatch.setattr(provisioning, "wheel_llama_server", _resolver)
+
+    assert ensure_llama_server(facts) == cuda_shim
+    assert installed["done"]

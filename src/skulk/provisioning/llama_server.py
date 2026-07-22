@@ -216,6 +216,22 @@ def wheel_llama_server(
     return None
 
 
+def _cuda_wheel_usable() -> bool:
+    """Whether the pinned CUDA engine wheel is installed and pin-matched.
+
+    Distinct from :func:`wheel_llama_server` returning something: on an
+    NVIDIA node with only the VULKAN wheel installed (install.sh fell back,
+    or a bare-metal environment reused in a compute-only container), the
+    resolver happily returns the Vulkan shim, but that shim cannot drive the
+    GPU where no Vulkan ICD exists. The on-demand CUDA install must key on
+    the CUDA wheel itself, not on any-wheel-resolved (PR #665 review).
+    """
+    return (
+        find_spec("skulk_llama_server_cuda") is not None
+        and _wheel_version_matches_pin("skulk-llama-server-cuda")
+    )
+
+
 def try_install_cuda_wheel(facts: NodeFacts) -> bool:
     """Install the pinned CUDA engine wheel from the Foxlight index.
 
@@ -239,11 +255,17 @@ def try_install_cuda_wheel(facts: NodeFacts) -> bool:
     uv = shutil.which("uv")
     pin = LLAMA_SERVER_PIN.removeprefix("b")
     specifier = f"skulk-llama-server-cuda==0.{pin}.*"
+    # Quoted and fully index-pinned so the remediation is copy/paste safe
+    # (the * would glob in a shell; an exported UV_INDEX_URL/PIP_INDEX_URL
+    # must not redirect resolution, same threat model as the install call).
+    manual_command = (
+        f"pip install '{specifier}' --extra-index-url {FOXLIGHT_WHEEL_INDEX} "
+        f"--index-url {_PYPI_INDEX}"
+    )
     if uv is None:
         logger.warning(
             "no uv on PATH to install the CUDA engine wheel; install it "
-            f"manually with: pip install --extra-index-url "
-            f"{FOXLIGHT_WHEEL_INDEX} '{specifier}'"
+            f"manually with: {manual_command}"
         )
         return False
     logger.info(
@@ -273,7 +295,7 @@ def try_install_cuda_wheel(facts: NodeFacts) -> bool:
         logger.warning(
             "CUDA engine wheel install timed out; the node degrades to the "
             "Vulkan/tarball chain (retry via `skulk doctor --fix` or install "
-            f"manually: {specifier})"
+            f"manually: {manual_command})"
         )
         return False
     if completed.returncode != 0:
@@ -501,8 +523,8 @@ def ensure_llama_server(
         # the standard-tooling path and already on disk (works offline too).
         wheel = wheel_llama_server(vendor, facts)
         if (
-            wheel is None
-            and vendor == "nvidia"
+            vendor == "nvidia"
+            and not _cuda_wheel_usable()
             and allow_download
             and try_install_cuda_wheel(facts)
         ):
@@ -513,6 +535,10 @@ def ensure_llama_server(
             # the GPU. install.sh's engine step covers curl-installed nodes;
             # this covers every other entry path (bare checkouts, GPU-cloud
             # containers) and self-heals a stale wheel after a pin advance.
+            # Keyed on the CUDA wheel itself, not any-wheel-resolved: an
+            # installed VULKAN wheel must not shadow the attempt, since its
+            # shim cannot drive the GPU in a compute-only container
+            # (PR #665 review).
             wheel = wheel_llama_server(vendor, facts)
         if wheel is not None:
             server_shim, rpc_shim = wheel
