@@ -10,11 +10,16 @@ use tokio::sync::{mpsc, oneshot};
 /// The current version of the network: this prevents devices running different versions of the
 /// software from interacting with each other.
 ///
-/// TODO: right now this is a hardcoded constant; figure out what the versioning semantics should
-///       even be, and how to inject the right version into this config/initialization. E.g. should
-///       this be passed in as a parameter? What about rapidly changing versions in debug builds?
-///       this is all VERY very hard to figure out and needs to be mulled over as a team.
-pub const NETWORK_VERSION: &[u8] = b"v0.0.1";
+/// THE RULE (#659): any change to wire behavior in this crate — protocol ids,
+/// topics, message framing, behaviour composition — bumps this constant IN
+/// THE SAME COMMIT and adds an entry to `rust/networking/WIRE_COMPAT.md`
+/// (CI enforces the pairing). The pnet pre-shared key derives from this
+/// value, so a bump makes wire-incompatible builds fail loudly at connect
+/// instead of half-working: the telemetry-isolation change (31e3f333)
+/// shipped without a bump, and a fresh build against a stale fleet
+/// produced a fully-synced node that was invisible to membership because
+/// its telemetry protocol had no peers while events flowed fine.
+pub const NETWORK_VERSION: &[u8] = b"v0.0.2";
 pub const OVERRIDE_VERSION_ENV_VAR: &str = "SKULK_LIBP2P_NAMESPACE";
 const ELECTION_TOPIC: &str = "election_messages";
 const ELECTION_PROTOCOL_PREFIX: &str = "/skulk/election/meshsub";

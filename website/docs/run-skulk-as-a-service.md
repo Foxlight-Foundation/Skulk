@@ -176,6 +176,12 @@ Every time the service starts (boot, manual restart, post-crash relaunch), it ru
 
 1. **`git pull --ff-only`** pulls new commits if any. Failure (offline, dirty tree, fast-forward not possible) is logged and ignored; the service boots whatever revision is already checked out.
 2. **`uv sync`** refreshes the Python virtualenv to match the lockfile. Failure (PyPI unreachable, wheel build error) is logged and ignored; the service boots with the current venv.
+   The script then checks whether any pulled commit touched the `rust/`
+   tree and, if so, forces a rebuild of the Rust bindings
+   (`uv sync --reinstall-package skulk_pyo3_bindings`): a plain sync reuses
+   the cached bindings wheel, which once left a fleet running stale wire
+   code for days while looking fully up to date. The rebuild is also
+   non-fatal; a failure keeps the current bindings.
 3. **`npm install && npm run build`** in `dashboard-react/` rebuilds the dashboard. Individual failures are logged and ignored as long as a previously built `dashboard-react/dist/` exists. **If `dist/` is missing, the service refuses to start** because there'd be no dashboard to serve.
 
 Everything from this phase is logged to `~/.skulk/logs/skulk.prep.log` so you can audit what actually happened on the last boot.

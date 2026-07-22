@@ -91,6 +91,19 @@ Any node's API can serve any request: the API forwards work to the placed runner
 
 Operational diagnostics are the narrow exception required to observe and finish a staggered deployment safely. Peer diagnostic responses ignore unknown additive fields recursively, additive counters use compatibility defaults, and the collector compares each peer's reported package version and source commit. `GET /v1/diagnostics/cluster` returns aggregate and per-node `versionStatus`; `GET /state` adds a warning-level `version_mismatch` health reason while known live builds disagree. This tolerance does not extend to events, commands, state snapshots, model traffic, or inference compatibility.
 
+The wire itself enforces build compatibility one level deeper. The
+networking layer derives its private-network key from a wire version
+constant (`NETWORK_VERSION`), so two builds whose network protocols differ
+refuse to connect at all (loudly) rather than half-working. Any change to
+wire behavior in the networking crate bumps that constant in the same
+commit (CI enforces the pairing against a wire-compatibility log), because
+the half-working alternative is the worst failure this system knows: a
+node that connects, syncs the event log, participates in election, and yet
+never appears in membership because one protocol silently reaches nobody.
+The service startup script complements this by rebuilding the Rust
+bindings whenever a pulled commit touches the Rust tree, so a fleet cannot
+silently run stale wire code while its source tree reports current.
+
 ## Lifecycle of a request
 
 This is the path a chat completion takes from HTTP through to SSE response:

@@ -127,6 +127,32 @@ run_prep() {
         log "warning: uv sync failed (continuing with current venv)"
     fi
 
+    # Rust bindings rebuild (#659). `uv sync` reuses the cached
+    # skulk_pyo3_bindings wheel unless the PROJECT VERSION changes, so a git
+    # pull that changes rust/ source leaves the venv running the OLD wire
+    # code indefinitely: the live fleet ran pre-telemetry-isolation bindings
+    # for eight days while reporting itself up to date, and a fresh build
+    # joining it became a fully-synced node invisible to membership. Track
+    # the last commit that touched rust/ and force a bindings reinstall when
+    # it moves. Non-fatal: a failed rebuild keeps the current (stale)
+    # bindings and the node still starts; NETWORK_VERSION bumps make a truly
+    # wire-incompatible stale build refuse connections loudly.
+    RUST_TREE_COMMIT="$(git log -1 --format=%H -- rust/ 2>/dev/null || true)"
+    RUST_TREE_MARKER=".venv/.skulk-rust-tree-commit"
+    if [ -n "$RUST_TREE_COMMIT" ]; then
+        if [ "$(cat "$RUST_TREE_MARKER" 2>/dev/null || true)" != "$RUST_TREE_COMMIT" ]; then
+            log "rust/ tree moved to ${RUST_TREE_COMMIT}; rebuilding skulk_pyo3_bindings (non-fatal)"
+            # shellcheck disable=SC2086
+            if uv sync $SYNC_FLAGS --reinstall-package skulk_pyo3_bindings 2>&1 | tee -a "$PREP_LOG" >&2; then
+                printf '%s\n' "$RUST_TREE_COMMIT" > "$RUST_TREE_MARKER"
+            else
+                log "warning: bindings rebuild failed (continuing with current bindings)"
+            fi
+        else
+            log "rust bindings current (rust/ tree at ${RUST_TREE_COMMIT})"
+        fi
+    fi
+
     # GPU llama.cpp wheel self-heal (#568). --inexact above PRESERVES a
     # present source-built wheel, but cannot RESTORE one that was already
     # pruned (a plain `uv sync` run by hand or by another tool drops it). A
