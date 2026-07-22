@@ -1466,8 +1466,11 @@ Behavior notes:
 - `GET /v1/diagnostics/telemetry` takes no parameters and returns aggregate
   metrics for the API node's isolated telemetry transport: fixed admission and
   network-queue capacities, current and maximum depth, offered/coalesced/dropped
-  readings, successful publishes, publish failures and bytes, plus oldest
-  pending and last-successful-publish age. It never returns telemetry payloads, node/model maps,
+  readings, successful publishes, publish failures and bytes, no-peer publish
+  count (`noPeerPublishes`: publishes that found no peers subscribed on the
+  telemetry protocol; sustained growth on a connected node means its
+  heartbeats reach nobody and it will not appear in membership, typically a
+  build/wire mismatch), plus oldest pending and last-successful-publish age. It never returns telemetry payloads, node/model maps,
   or completed attempt identifiers. Query each node directly for its local
   counters; this endpoint is deliberately separate from the node diagnostics
   bundle so additive telemetry instrumentation does not change that bundle's

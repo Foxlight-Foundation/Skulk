@@ -53,7 +53,7 @@ from .provider_streams import (
 )
 from .realtime_audio import RealtimeAudioPacket
 from .speech_media import SpeechMediaPacket
-from .telemetry_plane import TelemetryPlaneObserver
+from .telemetry_plane import NO_PEER_WARNING_AFTER_SECONDS, TelemetryPlaneObserver
 from .topics import (
     CONNECTION_MESSAGES,
     DATA,
@@ -920,7 +920,21 @@ class Router:
             if telemetry:
                 self._telemetry_plane_observer.record_published(len(packet.data))
         except NoPeersSubscribedToTopicError:
-            pass
+            # Ordinary topics tolerate this quietly (a lone node publishing
+            # before peers arrive is normal). Telemetry does NOT: a sustained
+            # no-peer state on a node with live connections means its
+            # heartbeats reach nobody and it is invisible to membership while
+            # looking healthy locally — the wire-mismatch ghost (#660). Count
+            # it distinctly and warn once the state persists.
+            if telemetry and self._telemetry_plane_observer.record_no_peer_publish():
+                logger.warning(
+                    "Telemetry has had no subscribed peers for over "
+                    f"{NO_PEER_WARNING_AFTER_SECONDS:.0f}s on the isolated "
+                    "telemetry protocol; this node's heartbeats are reaching "
+                    "nobody and it will not appear in cluster membership. If "
+                    "other nodes are connected, suspect a wire-protocol/build "
+                    "mismatch (rebuild bindings, check versions)."
+                )
         except AllQueuesFullError:
             if telemetry:
                 self._telemetry_plane_observer.record_publish_failure()

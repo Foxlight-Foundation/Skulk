@@ -886,6 +886,18 @@ class TelemetryPlaneDiagnostics(CamelCaseModel):
     publish_failures: int = Field(
         description="Telemetry publishes rejected by transport pressure or size limits."
     )
+    no_peer_publishes: int = Field(
+        # Additive counter: compatibility default per the tolerant-diagnostics
+        # boundary, so a newer node's response parses on an older peer.
+        default=0,
+        description=(
+            "Telemetry publishes that found no peers subscribed on the isolated "
+            "telemetry protocol. Sustained growth on a node with live "
+            "connections means its telemetry is reaching nobody: the node "
+            "stays invisible to cluster membership while otherwise healthy "
+            "(the failure shape of a wire-protocol mismatch)."
+        ),
+    )
     bytes_published: int = Field(
         description="Serialized telemetry bytes successfully published."
     )
