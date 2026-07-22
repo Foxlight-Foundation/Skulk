@@ -91,6 +91,18 @@ Any node's API can serve any request: the API forwards work to the placed runner
 
 Operational diagnostics are the narrow exception required to observe and finish a staggered deployment safely. Peer diagnostic responses ignore unknown additive fields recursively, additive counters use compatibility defaults, and the collector compares each peer's reported package version and source commit. `GET /v1/diagnostics/cluster` returns aggregate and per-node `versionStatus`; `GET /state` adds a warning-level `version_mismatch` health reason while known live builds disagree. This tolerance does not extend to events, commands, state snapshots, model traffic, or inference compatibility.
 
+One more note on the graph the dashboard draws and placement searches: it
+is built from two sources. Workers probe each other's advertised addresses
+and record the paths that verify, and every node also records its live,
+authenticated fabric connections as edges in their own right. The second
+source is what keeps a member behind NAT or a proxy visible and placeable:
+such a node's advertised addresses may all be unreachable from its peers
+while the connection that carries its traffic works perfectly, and before
+the session edge existed it rendered as a floating, edgeless node in
+exactly that healthy state. Addresses that repeatedly fail their probes
+are retried on a slower cadence rather than every sweep, so a remote
+membership does not flood logs probing paths that can never work.
+
 ## Lifecycle of a request
 
 This is the path a chat completion takes from HTTP through to SSE response:

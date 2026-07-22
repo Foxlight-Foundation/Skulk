@@ -682,6 +682,9 @@ class Node:
                 speech_media_packet_receiver=router.receiver(topics.SPEECH_MEDIA),
                 vision_media_packet_sender=router.sender(topics.VISION_MEDIA),
                 vision_media_packet_receiver=router.receiver(topics.VISION_MEDIA),
+                connection_message_receiver=router.receiver(
+                    topics.CONNECTION_MESSAGES
+                ),
                 store_client=worker_store_client,
                 staging_config=worker_staging_cfg,
             )
@@ -1102,6 +1105,9 @@ class Node:
                             ),
                             speech_media_packet_receiver=self.router.receiver(
                                 topics.SPEECH_MEDIA
+                            ),
+                            connection_message_receiver=self.router.receiver(
+                                topics.CONNECTION_MESSAGES
                             ),
                             vision_media_packet_sender=self.router.sender(
                                 topics.VISION_MEDIA

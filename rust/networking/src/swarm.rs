@@ -46,6 +46,12 @@ pub enum FromSwarm {
     },
     Discovered {
         peer_id: PeerId,
+        // The connection's observed remote endpoint (#662): the Python side
+        // records the authenticated session as a first-class topology path,
+        // so a member whose advertised addresses are all unreachable (a
+        // NAT'd/proxied remote node) still gets a truthful topology edge.
+        remote_ip: String,
+        remote_tcp_port: u16,
     },
     Expired {
         peer_id: PeerId,
@@ -230,8 +236,17 @@ fn filter_swarm_event(event: SwarmEvent<BehaviourEvent>) -> Option<FromSwarm> {
             data,
         }),
         SwarmEvent::Behaviour(BehaviourEvent::Discovery(
-            discovery::Event::ConnectionEstablished { peer_id, .. },
-        )) => Some(FromSwarm::Discovered { peer_id }),
+            discovery::Event::ConnectionEstablished {
+                peer_id,
+                remote_ip,
+                remote_tcp_port,
+                ..
+            },
+        )) => Some(FromSwarm::Discovered {
+            peer_id,
+            remote_ip: remote_ip.to_string(),
+            remote_tcp_port,
+        }),
         SwarmEvent::Behaviour(BehaviourEvent::Discovery(discovery::Event::ConnectionClosed {
             peer_id,
             ..
