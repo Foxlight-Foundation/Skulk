@@ -113,5 +113,10 @@ native multi-token-prediction heads (Qwen3.6 among them): the card's
 `--speculative-config`, engaging the model's own prediction heads with no
 separate draft model. Measured on an A100-80GB, this roughly doubles
 single-stream decode on Qwen3.6-27B-FP8 (2.01x at depth 2, 77%
-acceptance). See [Speculative Decoding](speculative-decoding.md) for the
-other engines' mechanisms.
+acceptance). Vendor schemes with a separately published speculator use the
+same fields: `vllm_spec_method = "dflash"` plus `vllm_spec_draft_repo`
+pairs Poolside's Laguna models with their block-parallel DFlash drafter
+(vLLM 0.25.1 or later), with the drafter repo resolved through vLLM's own
+Hugging Face cache at engine start. See
+[Speculative Decoding](speculative-decoding.md) for the other engines'
+mechanisms.

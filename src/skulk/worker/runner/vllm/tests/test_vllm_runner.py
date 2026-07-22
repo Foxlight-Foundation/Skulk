@@ -608,6 +608,19 @@ def test_build_vllm_serve_args_speculative_config() -> None:
     assert _json.loads(payload) == {"method": "mtp"}
     # No method: the flag must be absent entirely.
     assert "--speculative-config" not in _serve_args()
+    # Draft-model methods (dflash) name the separate speculator repo in the
+    # config's "model" key (vendor-published shape for the Laguna cards).
+    args = _serve_args(
+        spec_method="dflash",
+        spec_num_tokens=15,
+        spec_draft_repo="poolside/Laguna-XS-2.1-DFlash-FP8",
+    )
+    payload = args[args.index("--speculative-config") + 1]
+    assert _json.loads(payload) == {
+        "method": "dflash",
+        "num_speculative_tokens": 15,
+        "model": "poolside/Laguna-XS-2.1-DFlash-FP8",
+    }
 
 
 def test_vllm_max_model_len_constant_shared_with_placement() -> None:

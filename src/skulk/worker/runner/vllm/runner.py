@@ -200,6 +200,7 @@ def build_vllm_serve_args(
     trust_remote_code: bool,
     spec_method: str | None = None,
     spec_num_tokens: int | None = None,
+    spec_draft_repo: str | None = None,
 ) -> list[str]:
     """Build the ``vllm serve`` command line. Pure, so it is unit-testable.
 
@@ -236,13 +237,19 @@ def build_vllm_serve_args(
         args.append("--trust-remote-code")
     if spec_method is not None:
         # Card-declared speculative decoding (runtime.vllm_spec_method /
-        # vllm_spec_num_tokens): method "mtp" engages the checkpoint's own
-        # native prediction heads (vLLM resolves the matching drafter
-        # architecture, no separate draft model). Measured on Qwen3.6-27B-FP8:
-        # 2.01x single-stream decode at num_speculative_tokens=2.
+        # vllm_spec_num_tokens / vllm_spec_draft_repo): method "mtp" engages
+        # the checkpoint's own native prediction heads (vLLM resolves the
+        # matching drafter architecture, no separate draft model); measured
+        # on Qwen3.6-27B-FP8: 2.01x single-stream decode at
+        # num_speculative_tokens=2. Draft-model methods ("dflash") name a
+        # separate speculator repo in the config's "model" key, which vLLM
+        # resolves from its own HF cache at engine start (the card validator
+        # guarantees the method/draft-repo pairing is consistent).
         speculative: dict[str, Any] = {"method": spec_method}
         if spec_num_tokens is not None:
             speculative["num_speculative_tokens"] = spec_num_tokens
+        if spec_draft_repo is not None:
+            speculative["model"] = spec_draft_repo
         args.extend(["--speculative-config", json.dumps(speculative)])
     return args
 
@@ -574,6 +581,11 @@ class Runner(ServedConcurrentDispatch):
             ),
             spec_num_tokens=(
                 card_runtime.vllm_spec_num_tokens
+                if card_runtime is not None
+                else None
+            ),
+            spec_draft_repo=(
+                card_runtime.vllm_spec_draft_repo
                 if card_runtime is not None
                 else None
             ),
