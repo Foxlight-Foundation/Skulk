@@ -1076,7 +1076,7 @@ curl -X POST http://localhost:52415/place_instance \
 | `sharding` | `Pipeline` or `Tensor` |
 | `instance_meta` | `MlxRing`, `MlxJaccl`, or `LlamaRpc` (multi-node GGUF pooling: one driver node holds the model and each donor node lends GPU memory over the network) |
 | `min_nodes` | Minimum nodes required for the placement |
-| `excluded_nodes` | Optional. Node IDs the master should treat as if absent when scoring this placement. Already-running instances on those nodes are unaffected (exclusion is per-placement, not cluster-wide). Default: `[]`. Note: node IDs are per-session, so they change when a cluster session restarts. |
+| `excluded_nodes` | Optional. Node IDs the master should treat as if absent when scoring this placement. Already-running instances on those nodes are unaffected (exclusion is per-placement, not cluster-wide), and automatic repair re-placements of this instance (memory refusal, download failure) keep honoring the same exclusions. Default: `[]`. Note: node IDs are per-session, so they change when a cluster session restarts. |
 
 The placement is validated against the current cluster state **before** the
 command is forwarded, so an impossible placement fails at the API instead of

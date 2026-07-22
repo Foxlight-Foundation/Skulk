@@ -7,6 +7,7 @@ from skulk.master.placement import (
     fallback_command_for_refused_instance,
     get_transition_events,
     place_instance,
+    replacement_command_for_download_failed_instance,
     replacement_command_for_refused_instance,
 )
 from skulk.master.tests.conftest import (
@@ -1541,3 +1542,58 @@ def test_placement_ports_avoid_live_instance_ports() -> None:
     free = low + 7
     in_use = {p for p in range(low, high + 1) if p != free}
     assert random_ephemeral_port(in_use) == free
+
+
+def test_repair_commands_preserve_original_exclusions() -> None:
+    """Repair re-placements keep the caller's per-placement exclusions (#658).
+
+    Placement stamps the effective exclusions on the instance; every repair
+    shape (wider refusal re-place, anywhere fallback, download-failure
+    replacement) must union them with its own newly excluded nodes. Before
+    the stamp existed, a repaired instance could land on exactly the nodes
+    the caller excluded (observed live: a placement pinned off five nodes
+    was repaired onto one of them).
+    """
+    topology, node_memory, node_network, node_ids = _fully_connected_three_nodes(
+        (10.0, 10.0, 10.0)
+    )
+    operator_excluded = node_ids[2]
+    card = ModelCard(
+        model_id=ModelId("exclusion-carry-model"),
+        storage_size=Memory.from_gb(6),
+        n_layers=12,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+    )
+    command = PlaceInstance(
+        model_card=card,
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=2,
+        excluded_nodes=[operator_excluded],
+    )
+    placed = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        excluded_nodes={operator_excluded},
+    )
+    instance = next(iter(placed.values()))
+    # The effective exclusions are stamped on the placement decision.
+    assert instance.excluded_nodes == [operator_excluded]
+    assert operator_excluded not in instance.shard_assignments.node_to_runner
+
+    wider = replacement_command_for_refused_instance(instance)
+    assert operator_excluded in wider.excluded_nodes
+
+    refusing_node = node_ids[0]
+    fallback = fallback_command_for_refused_instance(instance, refusing_node)
+    assert set(fallback.excluded_nodes) == {operator_excluded, refusing_node}
+
+    download_failed = replacement_command_for_download_failed_instance(
+        instance, {node_ids[1]}
+    )
+    assert set(download_failed.excluded_nodes) == {operator_excluded, node_ids[1]}

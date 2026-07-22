@@ -754,6 +754,11 @@ def place_instance(
     cycle_digraph: Topology = topology.get_subgraph_from_nodes(selected_cycle.node_ids)
 
     instance_id = InstanceId()
+    # Persist the effective per-placement exclusions on the instance (#658):
+    # repair re-placements reconstruct intent from the instance, and without
+    # this record they widened eligibility back to the full topology. Sorted
+    # so the replicated placement event is deterministic.
+    stamped_exclusions = sorted(excluded_nodes) if excluded_nodes else []
     target_instances = dict(deepcopy(current_instances))
 
     if selected_is_rpc:
@@ -781,6 +786,7 @@ def place_instance(
             instance_id=instance_id,
             shard_assignments=shard_assignments,
             context_token_limit=context_token_limit,
+            excluded_nodes=stamped_exclusions,
             driver_node=driver_node,
             donor_endpoints=donor_endpoints,
         )
@@ -827,6 +833,7 @@ def place_instance(
                 instance_id=instance_id,
                 shard_assignments=shard_assignments,
                 context_token_limit=context_token_limit,
+                excluded_nodes=stamped_exclusions,
                 jaccl_devices=mlx_jaccl_devices,
                 jaccl_coordinators=mlx_jaccl_coordinators,
             )
@@ -844,6 +851,7 @@ def place_instance(
                 instance_id=instance_id,
                 shard_assignments=shard_assignments,
                 context_token_limit=context_token_limit,
+                excluded_nodes=stamped_exclusions,
                 hosts_by_node=hosts_by_node,
                 ephemeral_port=ephemeral_port,
             )
@@ -904,7 +912,10 @@ def fallback_command_for_refused_instance(
         sharding=sharding,
         instance_meta=instance_meta,
         min_nodes=1,
-        excluded_nodes=[refusing_node],
+        # The refusing node plus the instance's original per-placement
+        # exclusions (#658): the anywhere-fallback still may not land on
+        # nodes the caller excluded.
+        excluded_nodes=sorted({*instance.excluded_nodes, refusing_node}),
     )
 
 
@@ -914,9 +925,10 @@ def replacement_command_for_refused_instance(instance: Instance) -> PlaceInstanc
     When a worker refuses its shard for lack of GPU-wireable memory at load
     time (#290), the master re-places the same model one node wider so every
     node holds a smaller share. The placement intent (model card, sharding
-    family, instance backend) is recovered from the instance itself; the
-    operator's original per-placement node exclusions are not retained on the
-    instance, so the wider re-placement searches the full topology.
+    family, instance backend, per-placement node exclusions) is recovered
+    from the instance itself; the caller's original exclusions are stamped
+    on the instance at placement time (#658), so the wider re-placement
+    keeps honoring them instead of searching the full topology.
 
     ``min_nodes`` is the refused width plus one. Raising it past the cluster
     size makes :func:`place_instance` raise :class:`PlacementError`, which the
@@ -933,6 +945,9 @@ def replacement_command_for_refused_instance(instance: Instance) -> PlaceInstanc
         sharding=sharding,
         instance_meta=instance_meta,
         min_nodes=width + 1,
+        # The instance's original per-placement exclusions (#658); the wider
+        # re-placement keeps honoring the caller's intent.
+        excluded_nodes=sorted(instance.excluded_nodes),
     )
 
 
@@ -962,7 +977,10 @@ def replacement_command_for_download_failed_instance(
         sharding=sharding,
         instance_meta=instance_meta,
         min_nodes=width,
-        excluded_nodes=list(excluded_nodes),
+        # The union of the instance's original per-placement exclusions
+        # (#658) and the newly failed node(s): repair must not land on
+        # nodes the caller excluded, nor on the nodes that just failed.
+        excluded_nodes=sorted({*instance.excluded_nodes, *excluded_nodes}),
     )
 
 
