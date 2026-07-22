@@ -61,8 +61,13 @@ vllm_spec_draft_repo = "poolside/Laguna-XS-2.1-DFlash-FP8"
 supports_tool_calling = false
 
 [placement]
-compatible_backends = ["vllm-cuda", "vllm-rocm"]
-backend_preference = ["vllm-cuda", "vllm-rocm"]
+# CUDA-only, unlike the rest of the vllm slate: the card's DFlash runtime
+# JIT-compiles its speculator through NVRTC (CUDA 12.8+), which has no ROCm
+# path in vLLM 0.25.1, so a vllm-rocm node would accept placement and then
+# fail at engine start. Add vllm-rocm back only after a ROCm validation
+# pass (with the DFlash runtime proven or carded off for that backend).
+compatible_backends = ["vllm-cuda"]
+backend_preference = ["vllm-cuda"]
 
 [storage_size]
 in_bytes = 35329658390
