@@ -52,21 +52,65 @@ def test_no_peer_warning_fires_only_after_sustained_window() -> None:
 
 
 def test_successful_publish_resets_the_no_peer_window() -> None:
-    """A successful publish ends the sustained window.
+    """A successful publish ends the sustained window AND its rate limit.
 
-    The next no-peer outcome starts a fresh window rather than inheriting
-    the old start time, so recovery followed by a new outage is timed
-    honestly.
+    The next outage is a fresh incident: timed from its own start, and its
+    first warning is not suppressed by a stale rate-limit stamp from the
+    previous incident (PR #663 review).
+    """
+    observer = _observer()
+    # Drive the first incident all the way to a warning.
+    observer.record_no_peer_publish(now=0.0)
+    assert observer.record_no_peer_publish(now=NO_PEER_WARNING_AFTER_SECONDS + 1.0)
+    recovery = NO_PEER_WARNING_AFTER_SECONDS + 2.0
+    observer.record_published(10, now=recovery)
+    assert observer.no_peers_since is None
+    assert observer.last_no_peer_warning_at is None
+    # New outage: not yet sustained even though the first one started at 0,
+    # and once sustained it warns even though the previous warning was
+    # within the old rate-limit interval.
+    assert not observer.record_no_peer_publish(now=recovery + 1.0)
+    assert observer.record_no_peer_publish(
+        now=recovery + 1.0 + NO_PEER_WARNING_AFTER_SECONDS + 1.0
+    )
+
+
+def test_transport_failure_breaks_no_peer_continuity() -> None:
+    """A pressure failure ends the sustained window.
+
+    Saturated per-peer queues imply peers exist, so a no-peer window
+    claiming continuity across the failure would overstate it
+    (PR #663 review).
     """
     observer = _observer()
     observer.record_no_peer_publish(now=0.0)
-    observer.record_published(10, now=5.0)
+    observer.record_publish_failure()
     assert observer.no_peers_since is None
-    # New outage: not yet sustained even though the first one started at 0.
-    assert not observer.record_no_peer_publish(now=6.0)
     assert not observer.record_no_peer_publish(
-        now=6.0 + NO_PEER_WARNING_AFTER_SECONDS - 1.0
+        now=NO_PEER_WARNING_AFTER_SECONDS + 1.0
     )
+
+
+def test_no_warning_without_connected_peers() -> None:
+    """A lone node never gets the mismatch warning.
+
+    Single-node deployments hit no-peer outcomes as their normal state; the
+    count stays honest but the warning gates on live swarm connections
+    (PR #663 review). When the state persists after peers connect, the
+    caller-side window restart (restart_no_peer_window on first connect)
+    plus persistence gives the fresh connection its own grace period.
+    """
+    observer = _observer()
+    observer.record_no_peer_publish(peers_connected=False, now=0.0)
+    assert not observer.record_no_peer_publish(
+        peers_connected=False, now=NO_PEER_WARNING_AFTER_SECONDS * 4
+    )
+    assert observer.no_peer_publishes == 2
+    # First peer arrives: router restarts the window; a persisting no-peer
+    # state then warns only after its own full grace period.
+    observer.restart_no_peer_window()
+    connect_at = NO_PEER_WARNING_AFTER_SECONDS * 4 + 1.0
+    assert not observer.record_no_peer_publish(now=connect_at)
     assert observer.record_no_peer_publish(
-        now=6.0 + NO_PEER_WARNING_AFTER_SECONDS + 1.0
+        now=connect_at + NO_PEER_WARNING_AFTER_SECONDS + 1.0
     )

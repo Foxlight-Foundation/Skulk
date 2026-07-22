@@ -887,8 +887,10 @@ class TelemetryPlaneDiagnostics(CamelCaseModel):
         description="Telemetry publishes rejected by transport pressure or size limits."
     )
     no_peer_publishes: int = Field(
-        # Additive counter: compatibility default per the tolerant-diagnostics
-        # boundary, so a newer node's response parses on an older peer.
+        # Additive counter with a compatibility default so THIS model still
+        # parses an OLDER peer's response that lacks the field; the reverse
+        # direction (newer payload on older code) is covered by the peer
+        # diagnostics boundary's recursive unknown-field tolerance (#293).
         default=0,
         description=(
             "Telemetry publishes that found no peers subscribed on the isolated "
