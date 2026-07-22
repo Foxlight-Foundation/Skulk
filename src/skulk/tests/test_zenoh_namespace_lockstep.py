@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 """Lockstep guard: the Zenoh namespace token mirrors the Rust pnet key (#659).
 
 Two nodes whose libp2p keys agree but whose Zenoh namespaces differ silently
@@ -33,14 +34,14 @@ def test_network_version_matches_rust() -> None:
     rust_version = _rust_constant(
         r'pub const NETWORK_VERSION: &\[u8\] = b"([^"]+)";'
     )
-    assert _LIBP2P_NETWORK_VERSION == rust_version
+    assert rust_version == _LIBP2P_NETWORK_VERSION
 
 
 def test_namespace_env_var_matches_rust() -> None:
     rust_env_var = _rust_constant(
         r'pub const OVERRIDE_VERSION_ENV_VAR: &str = "([^"]+)";'
     )
-    assert _LIBP2P_NAMESPACE_ENV_VAR == rust_env_var
+    assert rust_env_var == _LIBP2P_NAMESPACE_ENV_VAR
 
 
 def test_token_layers_namespace_over_version() -> None:

@@ -55,10 +55,18 @@ def test_no_verbatim_hash_overlap() -> None:
 def test_libp2p_namespace_token_mirrors_swarm() -> None:
     # #312 review P2: the Zenoh namespace must derive from the SAME token libp2p
     # isolates on (swarm.rs), or one cluster splits across two Zenoh namespaces.
-    # Override present -> override value, even when empty (Rust env::var is Ok("")).
-    assert _libp2p_namespace_token({"SKULK_LIBP2P_NAMESPACE": "prod"}) == "prod"
-    assert _libp2p_namespace_token({"SKULK_LIBP2P_NAMESPACE": ""}) == ""
-    # Unset -> NETWORK_VERSION default, NOT a Skulk-only "skulk" default.
+    # Since #659 the version ALWAYS contributes and a present override layers
+    # on top (even when empty: Rust env::var is Ok("")), so a wire-version
+    # bump re-keys both transports on every deployment shape.
+    assert (
+        _libp2p_namespace_token({"SKULK_LIBP2P_NAMESPACE": "prod"})
+        == _LIBP2P_NETWORK_VERSION + "prod"
+    )
+    assert (
+        _libp2p_namespace_token({"SKULK_LIBP2P_NAMESPACE": ""})
+        == _LIBP2P_NETWORK_VERSION
+    )
+    # Unset -> NETWORK_VERSION alone, NOT a Skulk-only "skulk" default.
     assert _libp2p_namespace_token({}) == _LIBP2P_NETWORK_VERSION
     # The legacy EXO_ env libp2p never reads must NOT influence the token.
     assert _libp2p_namespace_token({"EXO_LIBP2P_NAMESPACE": "legacy"}) == (
