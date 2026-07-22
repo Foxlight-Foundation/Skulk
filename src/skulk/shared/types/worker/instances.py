@@ -38,14 +38,17 @@ class BaseInstance(TaggedModel):
     # than the ordered event log, where divergent per-rank ceilings would
     # deadlock the collectives. ``None`` means no enforceable ceiling.
     context_token_limit: int | None = None
-    # The caller's per-placement node exclusions, stamped at placement time
-    # (#658): repair re-placements (memory refusal #290, download failure
-    # #381) reconstruct their intent from the instance, and before this
-    # field existed they silently widened eligibility back to the full
-    # topology — a repaired instance could land on exactly the nodes the
-    # caller excluded. Sorted for deterministic replicated events; empty for
-    # legacy instances replayed from older event logs (additive default).
-    excluded_nodes: list[NodeId] = Field(default_factory=list)
+    excluded_nodes: list[NodeId] = Field(
+        default_factory=list,
+        description=(
+            "The caller's per-placement node exclusions, stamped at "
+            "placement time: repair re-placements (memory refusal, download "
+            "failure) reconstruct their intent from the instance and keep "
+            "honoring these instead of widening eligibility back to the "
+            "full topology. Sorted for deterministic replicated events; "
+            "empty for instances replayed from older event logs."
+        ),
+    )
 
     def shard(self, runner_id: RunnerId) -> ShardMetadata | None:
         return self.shard_assignments.runner_to_shard.get(runner_id, None)
