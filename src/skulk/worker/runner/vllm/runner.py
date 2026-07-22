@@ -106,6 +106,7 @@ from skulk.worker.runner.llama_cpp.runner import (
     wants_logprobs,
 )
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
+from skulk.worker.runner.vllm.orphan_sweep import sweep_orphaned_vllm_engines
 
 # vLLM startup can be slow: weight load + torch.compile + CUDA-graph capture on a
 # large model runs to a couple of minutes, so allow a generous health deadline.
@@ -723,11 +724,14 @@ class Runner(ServedConcurrentDispatch):
                         # The group leader exiting does not prove its
                         # descendants did: a wedged EngineCore that ignores
                         # SIGTERM while vllm serve exits promptly would
-                        # survive the graceful path (PR #656 review). A final
-                        # SIGKILL to the group is a no-op when the group is
-                        # already empty (killpg raises, swallowed by the
-                        # fallback's send_signal on the dead leader).
-                        self._signal_server_group(proc, signal.SIGKILL)
+                        # survive the graceful path. A blanket killpg here
+                        # would race pgid reuse once the group is empty
+                        # (PR #656 review), so the mop is the orphan sweep
+                        # instead: any surviving engine core has already
+                        # been reparented to init by the leader's exit, and
+                        # the sweep kills only per-pid re-verified,
+                        # marker-matched engine cores.
+                        sweep_orphaned_vllm_engines()
             except Exception:  # noqa: BLE001 - teardown is best-effort
                 pass
             self.server_proc = None
