@@ -81,6 +81,25 @@ def _isolate_engines_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pat
     return engines
 
 
+@pytest.fixture(autouse=True)
+def _never_install_wheels(  # pyright: ignore[reportUnusedFunction] - autouse
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No test here may attempt a real wheel install (#661 review, P1).
+
+    On a machine with uv on PATH and no CUDA wheel, the on-demand install
+    branch in ensure_llama_server would otherwise run a REAL multi-GB
+    `uv pip install` against the live index from inside the older NVIDIA
+    tarball-path tests. Tests that exercise the install stub it themselves,
+    overriding this default.
+    """
+
+    def _no_install(installed_facts: object) -> bool:
+        return False
+
+    monkeypatch.setattr(provisioning, "try_install_cuda_wheel", _no_install)
+
+
 def test_provision_downloads_verifies_and_installs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
