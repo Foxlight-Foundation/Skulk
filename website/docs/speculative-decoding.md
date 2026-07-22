@@ -65,10 +65,18 @@ per-model opt-out pattern across engines: a model whose measured
 drafter-and-target pairing nets negative carries the disable on its own card,
 rather than a global switch.
 
-The [vLLM engine](vllm-engine.md) does **not** run Skulk's MTP speculation: a
-model placed on vLLM decodes plain. That engine's win is aggregate throughput
-under concurrent load (continuous batching), not single-stream speedup, so the
-two features address different bottlenecks.
+The [vLLM engine](vllm-engine.md) runs its own speculative decoding for
+checkpoints that ship native multi-token-prediction heads (Qwen3.6 among
+them): the card's `vllm_spec_method = "mtp"` and `vllm_spec_num_tokens`
+fields map to vLLM's `--speculative-config`, and vLLM resolves the matching
+drafter architecture from the checkpoint itself, with no separate draft
+model. Measured on an A100-80GB, this roughly doubles single-stream decode
+on Qwen3.6-27B-FP8 (about 2x at depth 2, 70-83% draft acceptance). The same
+per-model carding rule applies: a model whose measured pairing does not pay
+simply omits the fields. Models without native heads placed on vLLM decode
+plain; that engine's headline win remains aggregate throughput under
+concurrent load (continuous batching), so the two mechanisms address
+different bottlenecks and now both exist on the served path.
 
 One served-engine degradation behavior worth knowing: a card-declared separate
 draft GGUF is a best-effort companion at download time, so if the draft file is
