@@ -186,7 +186,7 @@ async def test_probe_uses_small_budget_then_raises_unreachable(
     Exercises ModelStoreClient.is_model_available itself (not a stub):
     transport failures must consume _STORE_PROBE_RETRY_ATTEMPTS attempts,
     then raise StoreUnreachableError rather than returning False
-    (PR #664 review).
+    (#657 review round).
     """
     import aiohttp
 
@@ -236,7 +236,7 @@ async def test_poll_dropout_raises_unreachable_not_stall_timeout(
 
     The stall clock exists for a live store grinding through a huge file; a
     store that stops ANSWERING must not ride it for the multi-hour budget
-    and then fail with a misleading "no progress" error (PR #664 review).
+    and then fail with a misleading "no progress" error (#657 review round).
     """
     import aiohttp
 
