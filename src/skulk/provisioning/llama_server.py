@@ -255,12 +255,14 @@ def try_install_cuda_wheel(facts: NodeFacts) -> bool:
     uv = shutil.which("uv")
     pin = LLAMA_SERVER_PIN.removeprefix("b")
     specifier = f"skulk-llama-server-cuda==0.{pin}.*"
-    # Quoted and fully index-pinned so the remediation is copy/paste safe
-    # (the * would glob in a shell; an exported UV_INDEX_URL/PIP_INDEX_URL
-    # must not redirect resolution, same threat model as the install call).
+    # Quoted, fully index-pinned, and targeting THIS interpreter so the
+    # remediation is copy/paste safe: the * would glob in a shell, an
+    # exported UV_INDEX_URL/PIP_INDEX_URL must not redirect resolution, and
+    # a bare `pip` could install into a different environment than the one
+    # the running node resolves wheels from (PR #665 review).
     manual_command = (
-        f"pip install '{specifier}' --extra-index-url {FOXLIGHT_WHEEL_INDEX} "
-        f"--index-url {_PYPI_INDEX}"
+        f"{sys.executable} -m pip install '{specifier}' "
+        f"--extra-index-url {FOXLIGHT_WHEEL_INDEX} --index-url {_PYPI_INDEX}"
     )
     if uv is None:
         logger.warning(
@@ -307,6 +309,17 @@ def try_install_cuda_wheel(facts: NodeFacts) -> bool:
         return False
     # find_spec caches negative lookups from before the install.
     importlib.invalidate_caches()
+    if not _cuda_wheel_usable():
+        # A zero exit that did not land a usable pin-matched wheel in THIS
+        # environment (uv resolved a different interpreter, a broken wheel)
+        # must not read as success: the caller would skip the Vulkan/tarball
+        # chain believing the CUDA lane is live (PR #665 review).
+        logger.warning(
+            "CUDA engine wheel install reported success but the wheel is "
+            "not importable and pin-matched in this environment; the node "
+            f"degrades to the Vulkan/tarball chain ({manual_command})"
+        )
+        return False
     return True
 
 

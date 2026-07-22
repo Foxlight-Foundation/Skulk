@@ -546,3 +546,32 @@ def test_installed_vulkan_wheel_does_not_shadow_cuda_install(
 
     assert ensure_llama_server(facts) == cuda_shim
     assert installed["done"]
+
+
+def test_install_success_requires_usable_wheel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A zero-exit install that lands no usable wheel is not success.
+
+    uv resolving a different interpreter (or a broken wheel) must degrade to
+    the Vulkan/tarball chain rather than letting the caller believe the CUDA
+    lane is live (#661 review round).
+    """
+
+    class _Completed:
+        returncode = 0
+        stderr = ""
+
+    def _fake_run(*args: object, **kwargs: object) -> "_Completed":
+        return _Completed()
+
+    def _fake_which(_name: str) -> str:
+        return "/usr/bin/uv"
+
+    def _still_unusable() -> bool:
+        return False
+
+    monkeypatch.setattr(provisioning.subprocess, "run", _fake_run)
+    monkeypatch.setattr(provisioning.shutil, "which", _fake_which)
+    monkeypatch.setattr(provisioning, "_cuda_wheel_usable", _still_unusable)
+    assert not provisioning.try_install_cuda_wheel(make_facts(gpus=(NVIDIA_A40,)))
