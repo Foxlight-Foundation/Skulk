@@ -65,7 +65,17 @@ def _detect_vision_from_config(model_id: ModelId) -> "VisionCardConfig | None":
 
 
 async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
-    """Load all TOML model cards from a directory into the cache."""
+    """Load all TOML model cards from a directory into the cache.
+
+    Within a load pass the first card for a model id wins (duplicate ids in
+    the builtin dirs, or among custom files, keep their existing precedence),
+    but a CUSTOM card replaces a bundled card for the same id: the custom
+    directory exists for operator override, and the previous first-wins
+    behavior silently ignored the override because the builtin dirs load
+    first (#652). Both the override and a failed custom-card parse are
+    logged, since a silently dropped operator card reads as "my card is
+    live" while the bundled card actually serves.
+    """
     async for toml_file in directory.rglob("*.toml"):
         try:
             card = await ModelCard.load_from_path(toml_file)
@@ -75,10 +85,20 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
                 vision = _detect_vision_from_config(card.model_id)
                 if vision is not None:
                     card = card.model_copy(update={"vision": vision})
-            if card.model_id not in _card_cache:
+            existing = _card_cache.get(card.model_id)
+            if existing is None:
                 _card_cache[card.model_id] = card
-        except (ValidationError, TOMLKitError):
-            pass
+            elif is_custom and not existing.is_custom:
+                logger.info(
+                    f"custom model card {toml_file} overrides the bundled "
+                    f"card for {card.model_id}"
+                )
+                _card_cache[card.model_id] = card
+        except (ValidationError, TOMLKitError) as error:
+            if is_custom:
+                logger.warning(
+                    f"ignoring invalid custom model card {toml_file}: {error}"
+                )
 
 
 async def _refresh_card_cache() -> None:
@@ -1170,11 +1190,20 @@ def add_to_card_cache(card: "ModelCard") -> None:
 
 
 async def delete_custom_card(model_id: ModelId) -> bool:
-    """Delete a user-added custom model card. Returns True if deleted."""
+    """Delete a user-added custom model card. Returns True if deleted.
+
+    If the deleted card was overriding a bundled card (#652), the bundled
+    card is reloaded immediately: the cache only self-refreshes when empty,
+    so a bare pop would leave the bundled model missing from the catalog
+    until process restart. The builtin reload is first-wins, so it restores
+    only ids that are now absent and cannot displace other live overrides.
+    """
     card_path = _custom_cards_dir / (ModelId(model_id).normalize() + ".toml")
     if await card_path.exists():
         await card_path.unlink()
         _card_cache.pop(model_id, None)
+        for builtin_dir in _BUILTIN_CARD_DIRS:
+            await _load_cards_from_dir(builtin_dir, is_custom=False)
         return True
     return False
 
