@@ -125,6 +125,7 @@ from skulk.utils.task_group import TaskGroup
 from skulk.worker.plan import plan
 from skulk.worker.runner.bootstrap import WEDGE_FAILURE_MARKER
 from skulk.worker.runner.runner_supervisor import RunnerSupervisor
+from skulk.worker.runner.vllm.orphan_sweep import sweep_orphaned_vllm_engines
 
 _STALE_RESET_MAX_WAIT_TICKS = 300
 """How many ~100ms planning ticks to hold planning while stale download
@@ -898,6 +899,11 @@ class Worker:
     async def run(self):
         logger.info("Starting Worker")
         self._reconcile_staging_on_startup()
+        # A vLLM engine core orphaned by an abrupt previous shutdown holds
+        # its GPU allocation invisibly and blocks placement admission until
+        # someone kills it (#653); reap exactly that shape before this
+        # incarnation starts advertising capacity. No-op off Linux.
+        sweep_orphaned_vllm_engines()
 
         info_send, info_recv = channel[GatheredInfo]()
         info_gatherer: InfoGatherer = InfoGatherer(
