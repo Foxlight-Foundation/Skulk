@@ -608,3 +608,19 @@ def test_build_vllm_serve_args_speculative_config() -> None:
     assert _json.loads(payload) == {"method": "mtp"}
     # No method: the flag must be absent entirely.
     assert "--speculative-config" not in _serve_args()
+
+
+def test_max_model_len_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skulk.worker.runner.vllm.runner import (
+        _DEFAULT_MAX_MODEL_LEN_CEILING,
+        _MAX_MODEL_LEN_CEILING_ENV,
+        _max_model_len_ceiling,
+    )
+
+    monkeypatch.delenv(_MAX_MODEL_LEN_CEILING_ENV, raising=False)
+    assert _max_model_len_ceiling() == _DEFAULT_MAX_MODEL_LEN_CEILING
+    monkeypatch.setenv(_MAX_MODEL_LEN_CEILING_ENV, "131072")
+    assert _max_model_len_ceiling() == 131072
+    for bad in ("nonsense", "0", "-5"):
+        monkeypatch.setenv(_MAX_MODEL_LEN_CEILING_ENV, bad)
+        assert _max_model_len_ceiling() == _DEFAULT_MAX_MODEL_LEN_CEILING
