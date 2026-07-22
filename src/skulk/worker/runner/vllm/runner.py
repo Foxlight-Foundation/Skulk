@@ -197,6 +197,8 @@ def build_vllm_serve_args(
     max_model_len: int,
     gpu_memory_utilization: float,
     trust_remote_code: bool,
+    spec_method: str | None = None,
+    spec_num_tokens: int | None = None,
 ) -> list[str]:
     """Build the ``vllm serve`` command line. Pure, so it is unit-testable.
 
@@ -231,6 +233,16 @@ def build_vllm_serve_args(
     ]
     if trust_remote_code:
         args.append("--trust-remote-code")
+    if spec_method is not None:
+        # Card-declared speculative decoding (runtime.vllm_spec_method /
+        # vllm_spec_num_tokens): method "mtp" engages the checkpoint's own
+        # native prediction heads (vLLM resolves the matching drafter
+        # architecture, no separate draft model). Measured on Qwen3.6-27B-FP8:
+        # 2.01x single-stream decode at num_speculative_tokens=2.
+        speculative: dict[str, Any] = {"method": spec_method}
+        if spec_num_tokens is not None:
+            speculative["num_speculative_tokens"] = spec_num_tokens
+        args.extend(["--speculative-config", json.dumps(speculative)])
     return args
 
 
@@ -536,6 +548,7 @@ class Runner(ServedConcurrentDispatch):
         host = "127.0.0.1"
         port = self._pick_port()
         self.base_url = f"http://{host}:{port}"
+        card_runtime = self.shard_metadata.model_card.runtime
         args = build_vllm_serve_args(
             binary,
             model_dir,
@@ -545,6 +558,14 @@ class Runner(ServedConcurrentDispatch):
             n_ctx,
             _gpu_memory_utilization(),
             self.shard_metadata.model_card.trust_remote_code,
+            spec_method=(
+                card_runtime.vllm_spec_method if card_runtime is not None else None
+            ),
+            spec_num_tokens=(
+                card_runtime.vllm_spec_num_tokens
+                if card_runtime is not None
+                else None
+            ),
         )
         # Deterministic log path keyed by runner_id (matching llama_server), so
         # postmortem debugging is easy and restarts truncate rather than pile up
@@ -554,10 +575,19 @@ class Runner(ServedConcurrentDispatch):
         )
         self.server_log = open(self.server_log_path, "wb")  # noqa: SIM115
         logger.info(f"spawning vllm serve: {' '.join(args)} (log={self.server_log_path})")
+        # The vllm CLI lives in its own venv; putting that venv's bin dir at
+        # the front of the child's PATH lets tools installed alongside it
+        # resolve (vLLM >= 0.24 shells out to `ninja` for FlashInfer JIT
+        # sampling kernels and dies at engine init when it is absent).
+        server_env = dict(os.environ)
+        server_env["PATH"] = (
+            f"{Path(binary).parent}{os.pathsep}{server_env.get('PATH', '')}"
+        )
         self.server_proc = subprocess.Popen(
             args,
             stdout=self.server_log,
             stderr=subprocess.STDOUT,
+            env=server_env,
             preexec_fn=_set_pdeathsig if os.name == "posix" else None,
         )
 

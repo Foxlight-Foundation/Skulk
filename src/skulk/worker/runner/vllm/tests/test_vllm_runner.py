@@ -592,3 +592,19 @@ def test_main_backpressure_caps_submitted_generations() -> None:
         release.set()
         task_s.send(Shutdown(instance_id=InstanceId("bp-inst"), runner_id=runner.runner_id))
         thread.join(timeout=5)
+
+
+def test_build_vllm_serve_args_speculative_config() -> None:
+    # Card-declared MTP speculation maps to vLLM's --speculative-config JSON
+    # (probe-validated shape: {"method": "mtp", "num_speculative_tokens": 2}).
+    args = _serve_args(spec_method="mtp", spec_num_tokens=2)
+    payload = args[args.index("--speculative-config") + 1]
+    import json as _json
+
+    assert _json.loads(payload) == {"method": "mtp", "num_speculative_tokens": 2}
+    # Method without an explicit depth uses vLLM's default: no key emitted.
+    args = _serve_args(spec_method="mtp")
+    payload = args[args.index("--speculative-config") + 1]
+    assert _json.loads(payload) == {"method": "mtp"}
+    # No method: the flag must be absent entirely.
+    assert "--speculative-config" not in _serve_args()

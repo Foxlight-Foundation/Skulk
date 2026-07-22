@@ -213,8 +213,14 @@ A model card's `placement.compatible_backends` selects which engine serves it
   llama.cpp TTFT ~31s vs vLLM ~0.5s), while single-stream on non-FP4 GPUs the
   in-process engines can win. **Coexists** (not replaces): the planner picks by
   hardware + expected concurrency. Enabled per node via `SKULK_VLLM_BIN`
-  (advertises `vllm-cuda`/`vllm-rocm`, GPU-only). Single-node text in v1; tool
-  calling / logprobs / multi-node / vLLM-aware admission are follow-ups.
+  (advertises `vllm-cuda`/`vllm-rocm`, GPU-only). Validated matrix: vllm
+  0.24.0+cu129 (variant wheel from wheels.vllm.ai; the PyPI default links
+  libcudart.so.13) + ninja in the venv (FlashInfer JIT; the runner prepends
+  the venv bin dir to the server PATH). Card `runtime.vllm_spec_method`/
+  `vllm_spec_num_tokens` map to `--speculative-config` (method `mtp` =
+  native prediction heads; Qwen3.6-27B-FP8 measured 2.01x). Single-node
+  text in v1; tool calling / logprobs / multi-node / vLLM-aware admission
+  are follow-ups.
   `AcceleratorMetrics.compute_capability` (+ `native_fp4`/`native_fp8`, via NVML)
   is the capability signal for keying placement on GPU generation, not vendor.
 

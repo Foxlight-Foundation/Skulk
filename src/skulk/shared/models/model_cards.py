@@ -720,6 +720,25 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     ``served_spec_draft_repo``), e.g. ``"mtp-gemma-4-31B-it.gguf"``. Required when
     ``served_spec_draft_repo`` is set; selects the exact draft quant the runner
     passes to ``--model-draft``."""
+    vllm_spec_method: Literal["mtp"] | None = None
+    """Speculative-decoding method for the ``vllm`` served engine.
+
+    Maps to vLLM's ``--speculative-config`` ``method`` key. ``"mtp"`` engages
+    the checkpoint's own native multi-token-prediction heads (vLLM resolves
+    the matching drafter architecture, e.g. ``Qwen3_5MTP``, with no separate
+    draft model); requires a checkpoint that ships MTP heads
+    (``mtp_num_hidden_layers`` in its config). Only the vllm engine reads
+    this; ``served_spec_type`` remains the llama_server equivalent. The
+    vocabulary starts deliberately narrow and grows as methods are validated
+    live."""
+    vllm_spec_num_tokens: int | None = Field(default=None, gt=0)
+    """Draft tokens per step for vLLM speculative decoding
+    (``--speculative-config`` ``num_speculative_tokens``).
+
+    Requires ``vllm_spec_method``. Positive; acceptance falls per position
+    (measured on Qwen3.6-27B-FP8: 86% at position 0, 69% at position 1), so
+    2 is the usual sweet spot for single-layer MTP heads, which re-run their
+    one layer for deeper positions. ``None`` uses vLLM's method default."""
 
     @field_validator("prompt_renderer", mode="before")
     @classmethod

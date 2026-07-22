@@ -28,6 +28,16 @@ capabilities = ["text", "thinking", "thinking_toggle"]
 context_length = 262144
 trust_remote_code = false
 
+[runtime]
+# Native MTP through vLLM's unified "mtp" method: the checkpoint's own
+# prediction head (mtp_num_hidden_layers=1) drafts, no separate model.
+# Probe-measured on A100-80GB, 512-token greedy decode: 27B-FP8 2.01x
+# (48->97 tok/s, 77% acceptance), 35B-A3B-FP8 1.51x. Depth 2 because
+# per-position acceptance falls (86% pos0, 69% pos1) as the single MTP
+# layer re-runs for deeper positions.
+vllm_spec_method = "mtp"
+vllm_spec_num_tokens = 2
+
 [tooling]
 supports_tool_calling = false
 

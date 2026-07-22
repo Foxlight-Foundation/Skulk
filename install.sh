@@ -247,11 +247,20 @@ if [[ "$WITH_VLLM" == "1" ]]; then
         VLLM_ENV="$HOME/.skulk/vllm-env"
         log "installing vLLM into $VLLM_ENV (validated matrix; several GB)"
         uv venv "$VLLM_ENV" --python 3.12
-        # Skulk's own env pins transformers>=5, which vLLM cannot use yet, so
         # vLLM lives in its own venv and Skulk drives its CLI as an external
-        # served engine (SKULK_VLLM_BIN).
+        # served engine (SKULK_VLLM_BIN). Validated matrix notes:
+        # - vllm 0.24.0 publishes only cpu/cu129/cu130 wheels on PyPI, and the
+        #   default wheel links libcudart.so.13, which cannot import on the
+        #   CUDA 12.x drivers common on GPU clouds; the cu129 VARIANT wheel
+        #   from wheels.vllm.ai is the one that runs there (probe-validated).
+        # - ninja must be resolvable by the vllm server process (FlashInfer
+        #   JIT sampling kernels shell out to it); installing it into the
+        #   venv suffices because the runner prepends the venv bin dir to the
+        #   server's PATH.
         uv pip install --python "$VLLM_ENV/bin/python" \
-            "vllm==0.11.0" "transformers<5" --torch-backend=cu128
+            "vllm==0.24.0+cu129" ninja \
+            --extra-index-url "https://wheels.vllm.ai/0.24.0/cu129/" \
+            --torch-backend=cu128
         mkdir -p "$HOME/.skulk"
         if ! grep -q "SKULK_VLLM_BIN" "$HOME/.skulk/skulk.env" 2>/dev/null; then
             echo "SKULK_VLLM_BIN=$VLLM_ENV/bin/vllm" >> "$HOME/.skulk/skulk.env"
