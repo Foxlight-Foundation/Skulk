@@ -60,11 +60,11 @@ def test_libp2p_namespace_token_mirrors_swarm() -> None:
     # bump re-keys both transports on every deployment shape.
     assert (
         _libp2p_namespace_token({"SKULK_LIBP2P_NAMESPACE": "prod"})
-        == _LIBP2P_NETWORK_VERSION + "prod"
+        == _LIBP2P_NETWORK_VERSION + "\0prod"
     )
     assert (
         _libp2p_namespace_token({"SKULK_LIBP2P_NAMESPACE": ""})
-        == _LIBP2P_NETWORK_VERSION
+        == _LIBP2P_NETWORK_VERSION + "\0"
     )
     # Unset -> NETWORK_VERSION alone, NOT a Skulk-only "skulk" default.
     assert _libp2p_namespace_token({}) == _LIBP2P_NETWORK_VERSION

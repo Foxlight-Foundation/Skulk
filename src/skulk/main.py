@@ -153,7 +153,9 @@ def _libp2p_namespace_token(environ: Mapping[str, str]) -> str:
     """
     override = environ.get(_LIBP2P_NAMESPACE_ENV_VAR)
     if override is not None:
-        return _LIBP2P_NETWORK_VERSION + override
+        # NUL-delimited to keep (version, namespace) pairs injective in the
+        # token, mirroring the Rust key derivation's delimiter (#659 review).
+        return _LIBP2P_NETWORK_VERSION + "\0" + override
     return _LIBP2P_NETWORK_VERSION
 
 

@@ -296,9 +296,15 @@ mod transport {
         // the installed service template does by default — so a version
         // bump changed nothing exactly where the loud-connect-failure
         // guarantee was needed (#659 review, P1).
+        // The NUL delimiter keeps (version, namespace) pairs injective in
+        // the hashed byte stream: without it ("v0.0.21", "x") and
+        // ("v0.0.2", "1x") hash identically (#659 review). NUL cannot
+        // appear in either field (a version literal here; env vars are
+        // NUL-free on POSIX).
         let builder = Sha3_256::new()
             .update(b"skulk_discovery_network")
-            .update(NETWORK_VERSION);
+            .update(NETWORK_VERSION)
+            .update(b"\0");
 
         if let Ok(var) = env::var(OVERRIDE_VERSION_ENV_VAR) {
             let bytes = var.into_bytes();

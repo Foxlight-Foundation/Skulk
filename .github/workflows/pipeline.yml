@@ -33,7 +33,9 @@ jobs:
           set -euo pipefail
           base="origin/${{ github.base_ref }}"
           git fetch origin "${{ github.base_ref }}" --depth=1
-          wire_files="rust/networking/src/swarm.rs rust/networking/src/discovery.rs rust/networking/src/zenoh_session.rs"
+          # Dependency manifests are wire surfaces too: a libp2p or zenoh
+          # upgrade can change protocol behavior without touching our source.
+          wire_files="rust/networking/src/swarm.rs rust/networking/src/discovery.rs rust/networking/src/zenoh_session.rs rust/networking/Cargo.toml rust/Cargo.toml"
           # shellcheck disable=SC2086
           touched=$(git diff --name-only "$base"...HEAD -- $wire_files)
           if [ -z "$touched" ]; then
