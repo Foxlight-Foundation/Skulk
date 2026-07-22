@@ -6,6 +6,7 @@ import { defineConfig } from 'playwright/test';
 export default defineConfig({
   testDir: './e2e',
   testMatch: 'vision-live.spec.ts',
+  outputDir: process.env.SKULK_VISION_OUTPUT_DIR ?? 'test-results/vision-live',
   timeout: 10 * 60 * 1000,
   expect: {
     timeout: 2 * 60 * 1000,
