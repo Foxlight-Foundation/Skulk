@@ -35,6 +35,10 @@ def test_find_orphaned_vllm_engine_pids(tmp_path: pathlib.Path) -> None:
     # "VLLM": must NOT match (the comm rule uses the truncated EngineCore
     # marker, not a broad prefix).
     _fake_proc(tmp_path, 106, "VLLMRouter", 1, "VLLMRouter --listen")
+    # Init-parented watchdog carrying the engine-core title as an ARGUMENT
+    # (a nohup'd `pgrep -f VLLM::EngineCore` loop): only argv[0]
+    # participates in the cmdline match, so this must NOT match.
+    _fake_proc(tmp_path, 108, "pgrep", 1, "pgrep -f VLLM::EngineCore")
     # Unrelated init-parented daemon.
     _fake_proc(tmp_path, 104, "sshd", 1, "/usr/sbin/sshd -D")
     # Comm containing parens and spaces must not break stat parsing.

@@ -41,13 +41,17 @@ def find_orphaned_vllm_engine_pids(proc_root: Path = Path("/proc")) -> list[int]
     platforms without ``/proc`` (macOS) the scan returns empty and the sweep
     is a no-op; the vllm engine is Linux-oriented so nothing is lost.
     """
-    if not proc_root.exists():
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError:
+        # /proc missing or unlistable (container mount quirks): the sweep is
+        # best-effort and must never take worker startup down.
         return []
-    return [
+    return sorted(
         int(entry.name)
-        for entry in proc_root.iterdir()
+        for entry in entries
         if entry.name.isdigit() and _is_orphaned_engine_core(entry)
-    ]
+    )
 
 
 def _is_orphaned_engine_core(entry: Path) -> bool:
@@ -65,10 +69,16 @@ def _is_orphaned_engine_core(entry: Path) -> bool:
         # decode raising UnicodeDecodeError past the OSError catch
         # would crash worker startup over an unrelated process.
         stat_text = (entry / "stat").read_bytes().decode(errors="replace")
-        cmdline = (
+        # Only argv[0] participates in the match: a watchdog or monitor
+        # that carries the engine-core title as an ARGUMENT (e.g. an
+        # init-parented `pgrep -f VLLM::EngineCore` loop) must never
+        # satisfy a destructive sweep. setproctitle writes the title into
+        # the argv area as the leading string, so a real engine core's
+        # argv[0] starts with the marker.
+        argv0 = (
             (entry / "cmdline")
             .read_bytes()
-            .replace(b"\x00", b" ")
+            .split(b"\x00", 1)[0]
             .decode(errors="replace")
         )
     except OSError:
@@ -88,9 +98,9 @@ def _is_orphaned_engine_core(entry: Path) -> bool:
         return False
     # setproctitle rewrites both cmdline and comm; comm is truncated to
     # 15 chars ("VLLM::EngineCor"), so match the truncated marker there
-    # and the full marker in cmdline.
+    # and the full marker at the head of argv[0].
     comm = stat_text.split("(", 1)[-1].rsplit(")", 1)[0]
-    return _ENGINE_CORE_MARKER in cmdline or comm.startswith(
+    return argv0.startswith(_ENGINE_CORE_MARKER) or comm.startswith(
         _ENGINE_CORE_COMM_PREFIX
     )
 

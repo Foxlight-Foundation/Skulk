@@ -719,6 +719,15 @@ class Runner(ServedConcurrentDispatch):
                     except subprocess.TimeoutExpired:
                         self._signal_server_group(proc, signal.SIGKILL)
                         proc.wait(timeout=5)
+                    else:
+                        # The group leader exiting does not prove its
+                        # descendants did: a wedged EngineCore that ignores
+                        # SIGTERM while vllm serve exits promptly would
+                        # survive the graceful path (PR #656 review). A final
+                        # SIGKILL to the group is a no-op when the group is
+                        # already empty (killpg raises, swallowed by the
+                        # fallback's send_signal on the dead leader).
+                        self._signal_server_group(proc, signal.SIGKILL)
             except Exception:  # noqa: BLE001 - teardown is best-effort
                 pass
             self.server_proc = None
