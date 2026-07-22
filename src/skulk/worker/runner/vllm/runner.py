@@ -126,6 +126,19 @@ _DEFAULT_GPU_MEMORY_UTILIZATION: Final = 0.90
 _MAX_CONCURRENT_REQUESTS_ENV: Final = "SKULK_VLLM_MAX_CONCURRENT_REQUESTS"
 _DEFAULT_MAX_CONCURRENT_REQUESTS: Final = 32
 
+# vLLM scheduler defaults (vllm/config: max_num_batched_tokens / max_num_seqs
+# when the server flags are omitted). The scheduler reserves draft slots per
+# sequence out of the batched-token budget, so deep speculative depths need
+# the budget raised or engine init fails with a negative
+# max_num_scheduled_tokens. Depth 9 is where the default budget goes
+# non-positive (2048 - 256 * 8 = 0); the sizing kicks in at 8 because depth 8
+# leaves a degenerate 256-token budget. 8192 is the fresh-box-validated floor
+# (Laguna depth-15 card, vLLM 0.25.1, A100-80GB).
+_VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS: Final = 2048
+_VLLM_DEFAULT_MAX_NUM_SEQS: Final = 256
+_SPEC_DEPTH_NEEDING_BATCH_SIZING: Final = 8
+_SPEC_BATCHED_TOKENS_FLOOR: Final = 8192
+
 
 def _max_concurrent_requests() -> int:
     """The concurrent in-flight generation cap, from env or the default.
@@ -251,6 +264,26 @@ def build_vllm_serve_args(
         if spec_draft_repo is not None:
             speculative["model"] = spec_draft_repo
         args.extend(["--speculative-config", json.dumps(speculative)])
+        if (
+            spec_num_tokens is not None
+            and spec_num_tokens >= _SPEC_DEPTH_NEEDING_BATCH_SIZING
+        ):
+            # vLLM budgets draft slots out of --max-num-batched-tokens: with
+            # its defaults (2048 batched tokens, 256 seqs) the scheduler
+            # computes 2048 - 256 * (depth - 1) scheduled tokens, which goes
+            # non-positive at depth 9 and the server refuses to start
+            # ("max_num_scheduled_tokens is set to -1536" observed live with
+            # the Laguna depth-15 card on vLLM 0.25.1). Deep block-parallel
+            # drafters therefore need the batch budget raised alongside the
+            # depth; shallow MTP depths keep vLLM's defaults untouched (the
+            # shape the #649 cards validated under). The 8192 floor is the
+            # value fresh-box validated with the depth-15 Laguna card.
+            batched = max(
+                _SPEC_BATCHED_TOKENS_FLOOR,
+                _VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS
+                + _VLLM_DEFAULT_MAX_NUM_SEQS * (spec_num_tokens - 1),
+            )
+            args.extend(["--max-num-batched-tokens", str(batched)])
     return args
 
 

@@ -37,8 +37,14 @@ trust_remote_code = false
 # pairing (poolside/Laguna-XS-2.1-DFlash-FP8: a 5-layer sliding-window draft
 # reading target hidden states, block_size 16, BF16, ~0.9 GB). Depth 15 is the
 # vendor-recommended setting for the 16-token block (their measured 1.67-2.64x
-# on GSM8K/HumanEval, acceptance length 3.5-4.6). The draft repo resolves via
+# on GSM8K/HumanEval, acceptance length 3.5-4.6). Fresh-box measured through
+# Skulk on A100-80GB (vLLM 0.25.1, temp 0, 300-token completions): 1.35x
+# single-stream (129 -> 174 tok/s median of 3), acceptance length 3.44; the
+# A100 lacks native FP8 (target runs the Marlin W8A16 path), so newer GPUs
+# should land closer to the vendor numbers. The draft repo resolves via
 # vLLM's own HF cache at engine start; store-staged drafts are a follow-up.
+# The speculator JIT-compiles its kernels through nvrtc and needs a
+# CUDA >= 12.8 toolchain on the node (12.4 headers lack __nv_fp8_e8m0).
 vllm_spec_method = "dflash"
 vllm_spec_num_tokens = 15
 vllm_spec_draft_repo = "poolside/Laguna-XS-2.1-DFlash-FP8"

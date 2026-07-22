@@ -621,6 +621,23 @@ def test_build_vllm_serve_args_speculative_config() -> None:
         "num_speculative_tokens": 15,
         "model": "poolside/Laguna-XS-2.1-DFlash-FP8",
     }
+    # Deep depths must raise the scheduler's batched-token budget: vLLM's
+    # defaults (2048 batched, 256 seqs) go negative at depth 15 and engine
+    # init fails ("max_num_scheduled_tokens is set to -1536" observed live).
+    # 8192 is the fresh-box-validated floor for the Laguna depth-15 card.
+    assert args[args.index("--max-num-batched-tokens") + 1] == "8192"
+    # Shallow MTP depths keep vLLM's default scheduler sizing (the exact
+    # shape the #649 cards validated under): no flag emitted.
+    shallow = _serve_args(spec_method="mtp", spec_num_tokens=2)
+    assert "--max-num-batched-tokens" not in shallow
+    # Depths past the validated floor scale linearly rather than re-hitting
+    # the same wall (2048 + 256 * 30 = 9728 at depth 31).
+    deep = _serve_args(
+        spec_method="dflash",
+        spec_num_tokens=31,
+        spec_draft_repo="poolside/Laguna-XS-2.1-DFlash-FP8",
+    )
+    assert deep[deep.index("--max-num-batched-tokens") + 1] == "9728"
 
 
 def test_vllm_max_model_len_constant_shared_with_placement() -> None:
