@@ -483,8 +483,18 @@ def test_ensure_installs_cuda_wheel_on_demand(
     ) -> tuple[Path, Path | None] | None:
         return (shim, None) if installed["done"] else None
 
+    def _cuda_usable_tracks_install() -> bool:
+        # Stubbed so the test is hermetic: on a host that actually has the
+        # pin-matched CUDA wheel installed (the documented NVIDIA install
+        # path), the real probe would return True and skip the on-demand
+        # install this test exists to exercise (PR #665 review).
+        return installed["done"]
+
     monkeypatch.setattr(provisioning, "try_install_cuda_wheel", _fake_install)
     monkeypatch.setattr(provisioning, "wheel_llama_server", _wheel_after_install)
+    monkeypatch.setattr(
+        provisioning, "_cuda_wheel_usable", _cuda_usable_tracks_install
+    )
 
     assert ensure_llama_server(facts) == shim
     assert installed["done"]

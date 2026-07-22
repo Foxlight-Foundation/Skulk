@@ -127,7 +127,7 @@ _WHEELS_BY_VENDOR: dict[str, tuple[tuple[str, str, str, str], ...]] = {
 }
 
 
-def _wheel_version_matches_pin(distribution: str) -> bool:
+def _wheel_version_matches_pin(distribution: str, *, quiet: bool = False) -> bool:
     """Whether the installed engine wheel packages the pinned build.
 
     The wheel version scheme is ``0.<llama.cpp build>.<packaging rev>``; a
@@ -135,6 +135,13 @@ def _wheel_version_matches_pin(distribution: str) -> bool:
     ignored (with a log line) rather than silently overriding the validated
     pin, since ``ensure_llama_server`` prefers wheels over the
     checksum-verified tarball path.
+
+    Args:
+        distribution: The engine wheel's distribution name.
+        quiet: Suppress the mismatch warning. The install-decision probe
+            (:func:`_cuda_wheel_usable`) runs alongside the resolver's own
+            check, which already warns; a second identical line per startup
+            is noise (PR #665 review).
     """
     from importlib.metadata import PackageNotFoundError, version
 
@@ -145,11 +152,12 @@ def _wheel_version_matches_pin(distribution: str) -> bool:
     expected_prefix = f"0.{LLAMA_SERVER_PIN.removeprefix('b')}."
     if installed.startswith(expected_prefix):
         return True
-    logger.warning(
-        f"installed {distribution} {installed} does not package the pinned "
-        f"llama.cpp build {LLAMA_SERVER_PIN}; ignoring the wheel (install "
-        f"{distribution}=={expected_prefix}* to use it)"
-    )
+    if not quiet:
+        logger.warning(
+            f"installed {distribution} {installed} does not package the pinned "
+            f"llama.cpp build {LLAMA_SERVER_PIN}; ignoring the wheel (install "
+            f"{distribution}=={expected_prefix}* to use it)"
+        )
     return False
 
 
@@ -226,9 +234,8 @@ def _cuda_wheel_usable() -> bool:
     GPU where no Vulkan ICD exists. The on-demand CUDA install must key on
     the CUDA wheel itself, not on any-wheel-resolved (PR #665 review).
     """
-    return (
-        find_spec("skulk_llama_server_cuda") is not None
-        and _wheel_version_matches_pin("skulk-llama-server-cuda")
+    return find_spec("skulk_llama_server_cuda") is not None and (
+        _wheel_version_matches_pin("skulk-llama-server-cuda", quiet=True)
     )
 
 
@@ -304,7 +311,7 @@ def try_install_cuda_wheel(facts: NodeFacts) -> bool:
         logger.warning(
             "CUDA engine wheel install failed (exit "
             f"{completed.returncode}): {completed.stderr.strip()[-500:]}; the "
-            "node degrades to the Vulkan/tarball chain"
+            f"node degrades to the Vulkan/tarball chain ({manual_command})"
         )
         return False
     # find_spec caches negative lookups from before the install.
