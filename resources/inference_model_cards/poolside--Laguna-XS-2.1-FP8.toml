@@ -32,6 +32,14 @@ capabilities = ["text", "thinking", "thinking_toggle"]
 context_length = 262144
 trust_remote_code = false
 
+[reasoning]
+# Laguna is not a family the capability resolver knows, so without this the
+# resolved profile would advertise thinking with thinking_format "none".
+# Model truth: <think>-token-delimited with a template enable_thinking
+# toggle (matching the resolved shape of the Qwen3.6 vllm cards).
+supports_toggle = true
+format = "token_delimited"
+
 [runtime]
 # Poolside's DFlash block-parallel speculator, the vendor-published FP8-target
 # pairing (poolside/Laguna-XS-2.1-DFlash-FP8: a 5-layer sliding-window draft
