@@ -971,7 +971,11 @@ class ModelStoreClient:
                                 advanced = True
             except RuntimeError:
                 raise
-            except Exception as exc:
+            except (
+                aiohttp.ClientError,
+                TimeoutError,
+                asyncio.TimeoutError,
+            ) as exc:
                 logger.debug(f"ModelStoreClient: download status poll failed: {exc}")
                 # A store that stops ANSWERING is a different failure from a
                 # download that stops ADVANCING: the stall clock exists for
@@ -980,7 +984,10 @@ class ModelStoreClient:
                 # that clock for up to the full multi-hour stall budget
                 # before failing with a misleading "no progress" error.
                 # Bound it separately and surface unreachability so callers
-                # can engage the direct-HF fallback (#657 review).
+                # can engage the direct-HF fallback (#657 review). Only
+                # TRANSPORT failures count: a reachable store returning
+                # malformed responses is a store bug, not unreachability,
+                # and stays on the stall clock (second review round).
                 consecutive_transport_failures += 1
                 if (
                     consecutive_transport_failures
@@ -991,6 +998,8 @@ class ModelStoreClient:
                         f"for {model_id} ({consecutive_transport_failures} "
                         f"consecutive failures): {exc}"
                     ) from exc
+            except Exception as exc:
+                logger.debug(f"ModelStoreClient: download status poll failed: {exc}")
             stalled_for = 0.0 if advanced else stalled_for + poll_interval
 
         raise TimeoutError(
