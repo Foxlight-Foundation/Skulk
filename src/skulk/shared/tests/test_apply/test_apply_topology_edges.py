@@ -71,6 +71,33 @@ def test_member_node_survives_losing_its_last_edge() -> None:
     assert state.topology.contains_node(MEMBER)
 
 
+def test_reap_ignores_the_phantom_dangling_own_edges() -> None:
+    """A dead peer's own emitted edges cannot pin it in the graph.
+
+    A crash-looping peer can publish its own session edge (peer to member)
+    before its first NodeGatheredInfo and then die; nobody remains to emit
+    that edge's deletion. Reaping keys on IN-edges (what live observers
+    maintain toward the peer), so the member's own deletion still removes
+    the phantom, dangling out-edge and all (PR #674 review).
+    """
+    state = _member_state()
+    state = apply_topology_edge_created(
+        TopologyEdgeCreated(conn=_connection(MEMBER, PHANTOM)), state
+    )
+    # The phantom's own emission, indexed before it died.
+    state = apply_topology_edge_created(
+        TopologyEdgeCreated(conn=_connection(PHANTOM, MEMBER)), state
+    )
+
+    state = apply_topology_edge_deleted(
+        TopologyEdgeDeleted(conn=_connection(MEMBER, PHANTOM)), state
+    )
+    assert not state.topology.contains_node(PHANTOM)
+    assert state.topology.contains_node(MEMBER)
+    # The dangling reverse edge went with the node.
+    assert not list(state.topology.get_all_connections_between(PHANTOM, MEMBER))
+
+
 def test_never_member_with_remaining_edges_survives() -> None:
     """Only a fully isolated never-member is reaped.
 

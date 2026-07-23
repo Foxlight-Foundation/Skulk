@@ -550,14 +550,18 @@ def apply_topology_edge_deleted(event: TopologyEdgeDeleted, state: State) -> Sta
     # NodeGatheredInfo), and add_connection mints a topology node for it. If
     # that peer dies before its first publish it never stamps last_seen, so
     # the master's timeout loop can never reap it and it would linger as a
-    # floating phantom member. When the last edge touching such a
-    # never-a-member node is deleted, drop the node itself. Real members
-    # always carry last_seen and are reaped by NodeTimedOut instead (#671).
+    # floating phantom member. When the last edge POINTING AT such a
+    # never-a-member node is deleted, drop the node itself: in-edges are
+    # what live observers maintain toward the peer, while any out-edges are
+    # the dead peer's own emissions that nobody remains to delete (they
+    # would otherwise pin the phantom forever) and removal clears them.
+    # Real members always carry last_seen and are reaped by NodeTimedOut
+    # instead (#671).
     for endpoint in (event.conn.source, event.conn.sink):
         if (
             endpoint not in state.last_seen
             and topology.contains_node(endpoint)
-            and topology.node_is_isolated(endpoint)
+            and topology.node_has_no_incoming_edges(endpoint)
         ):
             topology.remove_node(endpoint)
     return state.model_copy(update={"topology": topology})

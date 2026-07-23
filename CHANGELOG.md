@@ -285,9 +285,10 @@ This project records release notes here and mirrors public-facing notes in
   information. A peer that disconnected without ever becoming a member left
   that entry behind forever, because the membership timeout only reaps nodes
   it has heard from; a crash-looping box could litter the graph with a new
-  phantom entry per restart attempt. Deleting the last edge touching a
-  never-a-member node now removes the node itself; real members are
-  untouched (#671).
+  phantom entry per restart attempt. Deleting the last edge pointing at a
+  never-a-member node now removes the node itself, along with any dangling
+  edges the dead peer emitted that nobody remains to delete; real members
+  are untouched (#671).
 
 - **The dashboard node card shows VRAM for discrete-GPU nodes.** The card's
   memory figure treated any reported VRAM as a unified-memory carve-out and
