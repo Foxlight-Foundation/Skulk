@@ -133,6 +133,7 @@ def test_session_edge_self_heal_detects_state_loss() -> None:
         _session_emitted_edges = {peer: edge}
 
         detect = Worker._session_edges_missing_from_state  # pyright: ignore[reportPrivateUsage]
+        detect_stale = Worker._session_edges_stale_in_state  # pyright: ignore[reportPrivateUsage]
         _session_edge_may_emit = Worker._session_edge_may_emit  # pyright: ignore[reportPrivateUsage]
 
     stub = _WorkerStub()
@@ -169,6 +170,16 @@ def test_session_edge_self_heal_detects_state_loss() -> None:
     stub.state = member_state
     stub._session_edge_counts = {peer: 0}  # pyright: ignore[reportPrivateUsage]
     assert stub.detect() == []
+
+    # The mirror direction: an edge present in state that the bookkeeping
+    # no longer backs (a create that raced a disconnect) is reported for
+    # deletion, so the reconciliation converges from either side.
+    stub.state = present
+    assert stub.detect_stale() == [
+        Connection(source=self_id, sink=peer, edge=edge)
+    ]
+    stub._session_edge_counts = {peer: 1}  # pyright: ignore[reportPrivateUsage]
+    assert stub.detect_stale() == []
 
 
 def test_probe_backoff_schedule() -> None:

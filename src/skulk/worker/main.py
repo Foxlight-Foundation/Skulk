@@ -2936,6 +2936,28 @@ class Worker:
             missing.append(Connection(source=self.node_id, sink=peer, edge=edge))
         return missing
 
+    def _session_edges_stale_in_state(self) -> list[Connection]:
+        """Session edges in replicated state that this worker no longer backs.
+
+        The mirror of :meth:`_session_edges_missing_from_state`: the sweep
+        reconciles state toward the socket-truth bookkeeping in BOTH
+        directions, so a create that raced a disconnect (the sweep detected
+        the edge missing, suspended at the send, and the ingress enqueued
+        the delete first) is cleaned up one sweep later instead of claiming
+        a fabric path that no longer exists.
+        """
+        stale: list[Connection] = []
+        for conn in self.state.topology.out_edges(self.node_id):
+            if not isinstance(conn.edge, SocketConnection) or not conn.edge.session:
+                continue
+            if (
+                self._session_edge_counts.get(conn.sink, 0) > 0
+                and self._session_emitted_edges.get(conn.sink) == conn.edge
+            ):
+                continue
+            stale.append(conn)
+        return stale
+
     async def _session_edge_ingress(self) -> None:
         """Record authenticated libp2p sessions as topology paths (#662).
 
@@ -3150,14 +3172,23 @@ class Worker:
                     logger.debug(f"ping failed to discover {conn=}")
                     await self.event_sender.send(TopologyEdgeDeleted(conn=conn))
 
-            # Session-edge self-heal: re-emit any live session edge that
-            # replicated state lost (a state-side reap misjudging a
-            # pre-membership peer as dead, #671), so the wrong judgment
-            # corrects within one sweep instead of persisting to reconnect.
+            # Session-edge self-heal, both directions (#671): re-emit any
+            # live edge state lost, and delete any state edge the bookkeeping
+            # no longer backs (a create that raced a disconnect). Eligibility
+            # is rechecked immediately before each send because the awaits
+            # are checkpoints where the ingress can change the bookkeeping.
             for healed in self._session_edges_missing_from_state():
+                if (
+                    self._session_edge_counts.get(healed.sink, 0) <= 0
+                    or self._session_emitted_edges.get(healed.sink) != healed.edge
+                ):
+                    continue
                 logger.debug(
                     f"re-emitting live session edge lost from state: {healed}"
                 )
                 await self.event_sender.send(TopologyEdgeCreated(conn=healed))
+            for stale in self._session_edges_stale_in_state():
+                logger.debug(f"deleting session edge no longer backed: {stale}")
+                await self.event_sender.send(TopologyEdgeDeleted(conn=stale))
 
             await anyio.sleep(10)
