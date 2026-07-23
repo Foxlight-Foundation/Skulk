@@ -1,6 +1,6 @@
 from enum import Enum
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from skulk.shared.models.memory_estimate import (
     KV_CONTEXT_BUDGET_TOKENS,
@@ -38,6 +38,17 @@ class BaseInstance(TaggedModel):
     # than the ordered event log, where divergent per-rank ceilings would
     # deadlock the collectives. ``None`` means no enforceable ceiling.
     context_token_limit: int | None = None
+    excluded_nodes: list[NodeId] = Field(
+        default_factory=list,
+        description=(
+            "The caller's per-placement node exclusions, stamped at "
+            "placement time: repair re-placements (memory refusal, download "
+            "failure) reconstruct their intent from the instance and keep "
+            "honoring these instead of widening eligibility back to the "
+            "full topology. Sorted for deterministic replicated events; "
+            "empty for instances replayed from older event logs."
+        ),
+    )
 
     def shard(self, runner_id: RunnerId) -> ShardMetadata | None:
         return self.shard_assignments.runner_to_shard.get(runner_id, None)

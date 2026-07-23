@@ -1346,6 +1346,12 @@ class Master:
                                         self._telemetry_view.node_memory,
                                         self.state.node_network,
                                         download_status=self._effective_downloads(),
+                                        excluded_nodes=set(
+                                            replace_command.excluded_nodes
+                                        ),
+                                        stamped_exclusions=set(
+                                            refused.excluded_nodes
+                                        ),
                                         node_resources=self._telemetry_view.node_resources,
                                         node_vram=usable_vram_by_node(
                                             self._telemetry_view.node_system,
@@ -1395,7 +1401,12 @@ class Master:
                                             self._telemetry_view.node_memory,
                                             self.state.node_network,
                                             download_status=self._effective_downloads(),
-                                            excluded_nodes={command.node_id},
+                                            excluded_nodes=set(
+                                                fallback.excluded_nodes
+                                            ),
+                                            stamped_exclusions=set(
+                                                refused.excluded_nodes
+                                            ),
                                             node_resources=self._telemetry_view.node_resources,
                                             node_vram=usable_vram_by_node(
                                                 self._telemetry_view.node_system,
@@ -1768,7 +1779,8 @@ class Master:
                     self._telemetry_view.node_memory,
                     self.state.node_network,
                     download_status=self._effective_downloads(),
-                    excluded_nodes=set(failed_nodes),
+                    excluded_nodes=set(replace_command.excluded_nodes),
+                    stamped_exclusions=set(instance.excluded_nodes),
                     node_resources=self._telemetry_view.node_resources,
                     node_vram=usable_vram_by_node(
                         self._telemetry_view.node_system,

@@ -262,7 +262,10 @@ The system uses event sourcing for state management:
   - `events.py`: Event types (discriminated union)
   - `commands.py`: Command types
   - `tasks.py`: Task types for worker execution
-  - `state.py`: Cluster state model
+  - `state.py`: Cluster state model. `BaseInstance.excluded_nodes` persists
+    the caller's per-placement exclusions so repair re-placements keep
+    honoring them (searching with intent-plus-failed-nodes but stamping
+    only the original intent, #658)
 - `src/skulk/shared/models/`: persisted model metadata and capability resolution
   - `model_cards.py`: declarative model cards, including optional advanced capability sections
   - `capabilities.py`: normalized runtime capability profiles derived from model cards plus conservative family defaults
