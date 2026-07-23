@@ -343,6 +343,7 @@ uv run skulk-harness fresh-install qualify \
 # After promotion, before release/tag publication
 uv run skulk-harness fresh-install qualify \
   --profile shipping \
+  --expected-commit <full-promoted-main-sha> \
   --config <private-fresh-install-config>
 ```
 
