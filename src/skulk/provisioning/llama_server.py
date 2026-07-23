@@ -295,6 +295,7 @@ def try_install_cuda_wheel(facts: NodeFacts) -> bool:
         and key
         not in (
             "UV_FIND_LINKS",
+            "UV_CONFIG_FILE",
             "PIP_INDEX_URL",
             "PIP_EXTRA_INDEX_URL",
             "PIP_FIND_LINKS",
@@ -306,6 +307,12 @@ def try_install_cuda_wheel(facts: NodeFacts) -> bool:
                 uv,
                 "pip",
                 "install",
+                # --no-config: a discovered pyproject.toml/uv.toml (or an
+                # operator UV_CONFIG_FILE) can carry [[index]]/find-links
+                # settings that outrank the CLI flags; the automated install
+                # must resolve from exactly the two indexes named below
+                # (PR #665 review).
+                "--no-config",
                 "--python",
                 sys.executable,
                 specifier,

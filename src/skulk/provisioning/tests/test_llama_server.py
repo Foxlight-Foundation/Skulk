@@ -492,6 +492,7 @@ def test_cuda_wheel_install_sanitizes_index_environment(
     stripped (PR #665 review).
     """
     seen_env: dict[str, str] = {}
+    seen_argv: list[str] = []
 
     class _Completed:
         returncode = 1
@@ -501,6 +502,9 @@ def test_cuda_wheel_install_sanitizes_index_environment(
         env = kwargs.get("env")
         assert isinstance(env, dict)
         seen_env.update(cast(dict[str, str], env))
+        argv = args[0]
+        assert isinstance(argv, list)
+        seen_argv.extend(cast(list[str], argv))
         return _Completed()
 
     def _uv_on_path(_name: str) -> str:
@@ -508,6 +512,7 @@ def test_cuda_wheel_install_sanitizes_index_environment(
 
     monkeypatch.setenv("UV_INDEX", "https://mirror.corp.example/simple")
     monkeypatch.setenv("UV_DEFAULT_INDEX", "https://mirror.corp.example/simple")
+    monkeypatch.setenv("UV_CONFIG_FILE", "/etc/uv/corp.toml")
     monkeypatch.setenv("PIP_INDEX_URL", "https://mirror.corp.example/simple")
     monkeypatch.setenv("PIP_EXTRA_INDEX_URL", "https://mirror.corp.example/x")
     monkeypatch.setattr(provisioning.shutil, "which", _uv_on_path)
@@ -518,10 +523,14 @@ def test_cuda_wheel_install_sanitizes_index_environment(
     for forbidden in (
         "UV_INDEX",
         "UV_DEFAULT_INDEX",
+        "UV_CONFIG_FILE",
         "PIP_INDEX_URL",
         "PIP_EXTRA_INDEX_URL",
     ):
         assert forbidden not in seen_env
+    # Config-file discovery (project pyproject.toml/uv.toml) is the other
+    # index side channel; the install must opt out of it entirely.
+    assert "--no-config" in seen_argv
 
 
 def test_cuda_wheel_install_degrades_when_uv_cannot_execute(
