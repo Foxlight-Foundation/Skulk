@@ -170,9 +170,11 @@ export function ClusterNode({
   const barH = deviceBodyH;
   const barGap = 6;
 
-  // RAM metrics
+  // Memory metrics: system/unified RAM, or the VRAM pool on a discrete-GPU
+  // node (the pool models actually serve from there, #669).
   const ramUsed = nodeInfo.mactop_info?.memory?.ram_usage ?? 0;
   const ramTotal = nodeInfo.mactop_info?.memory?.ram_total ?? 0;
+  const memoryIsVram = nodeInfo.mactop_info?.memory?.is_vram ?? false;
   const ramPercent = ramTotal > 0 ? (ramUsed / ramTotal) * 100 : 0;
 
   // GPU metrics
@@ -202,6 +204,7 @@ export function ClusterNode({
         name={name}
         ramUsed={ramUsed}
         ramTotal={ramTotal}
+        memoryIsVram={memoryIsVram}
         statusText={statusText}
         cx={0}
         fontSize={labelFontSize}

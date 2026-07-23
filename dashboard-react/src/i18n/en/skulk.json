@@ -343,6 +343,7 @@
   "nodeLabel.inspectDiagnostics": "Inspect live node diagnostics",
   "nodeLabel.restart": "Restart this node",
   "nodeLabel.restartTooltip": "Restart this node - releases GPU memory and rejoins the cluster",
+  "nodeLabel.vramPrefix": "VRAM",
   "observability.accelerator.clock": "Clock",
   "observability.accelerator.notReported": "not reported",
   "observability.accelerator.power": "Power",

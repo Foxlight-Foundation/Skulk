@@ -65,7 +65,21 @@ function normalizeNodeLabel(value?: string): string {
     .replace(/[\s._-]+/g, '');
 }
 
-function transformTopology(
+/**
+ * Build the dashboard's per-node topology view from the raw `/state` maps.
+ *
+ * Joins identity, memory, system/accelerator, network, Thunderbolt, RDMA,
+ * and health records by node id, selects each node's display memory pool
+ * (system/unified RAM, reassembled Strix carve-out, or a discrete GPU's
+ * labeled VRAM pool, #669), and converts the raw connection map into
+ * renderable edges.
+ *
+ * Exported for unit tests of the memory-pool selection; production
+ * consumers go through {@link useClusterState}.
+ *
+ * @returns The nodes keyed by id plus the edge list the topology view renders.
+ */
+export function transformTopology(
   raw: RawTopology,
   identities: Record<string, RawNodeIdentity>,
   memory: Record<string, RawMemoryUsage>,
@@ -90,20 +104,44 @@ function transformTopology(
     const ramAvailable = mem?.ramAvailable?.inBytes ?? 0;
     const ramUsage = Math.max(ramTotal - ramAvailable, 0);
 
-    // Total unified memory for display. We show the machine's total unified RAM
-    // on every node (not the GPU-available or placement-admittable amount) so the
-    // fleet reads consistently. On Apple Silicon all unified RAM is reported as
-    // system RAM, so ramTotal is already the whole pool. An AMD APU (Strix Halo)
-    // is also unified memory, but the BIOS carves a slice out as dedicated "VRAM"
-    // that the OS does not count as system RAM, so ramTotal is only the remaining
-    // slice; add the VRAM carve-out back to show the full unified pool the machine
-    // has. Apple nodes report no carve-out VRAM (vramTotalBytes null), so they are
-    // unchanged.
+    // Memory pool for display. On unified-memory machines the serving pool IS
+    // system RAM, so we show the machine's total unified RAM (not the
+    // GPU-available or placement-admittable amount) so the fleet reads
+    // consistently. On Apple Silicon all unified RAM is reported as system
+    // RAM, so ramTotal is already the whole pool. An AMD APU (Strix Halo) is
+    // also unified memory, but the BIOS carves a slice out as dedicated
+    // "VRAM" that the OS does not count as system RAM, so ramTotal is only
+    // the remaining slice; add the VRAM carve-out back to show the full
+    // unified pool the machine has.
+    //
+    // A DISCRETE GPU is different: host RAM and VRAM are separate pools and
+    // models serve out of VRAM, so the card shows the VRAM pool (labeled).
+    // Adding the pools, as the carve-out branch would, showed a 512GB-host
+    // GPU-cloud A40 node as "548.5GB" when 45GB governs what it can serve
+    // (#669). Discrete vs unified is decided by placement's UMA signature
+    // rather than vendor strings: a unified APU's GTT aperture spans the
+    // whole system (gttTotal > vramTotal AND gttTotal >= ramTotal), while a
+    // discrete card's GTT is ~= its VRAM and NVIDIA reports none at all
+    // (see usable_vram_by_node in master/placement_utils.py). A missing RAM
+    // reading falls to the discrete side, matching placement's conservative
+    // fallback.
     const vramTotal = sys?.accelerator?.vramTotalBytes ?? 0;
     const vramUsed = sys?.accelerator?.vramUsedBytes ?? 0;
-    const hasCarveoutVram = vramTotal > 0;
-    const unifiedTotal = hasCarveoutVram ? ramTotal + vramTotal : ramTotal;
-    const unifiedUsage = hasCarveoutVram ? ramUsage + vramUsed : ramUsage;
+    const gttTotal = sys?.accelerator?.gttTotalBytes ?? 0;
+    const isUnifiedCarveout =
+      vramTotal > 0 && ramTotal > 0 && gttTotal > vramTotal && gttTotal >= ramTotal;
+    const isDiscreteGpu = vramTotal > 0 && !isUnifiedCarveout;
+    const hasCarveoutVram = isUnifiedCarveout;
+    const unifiedTotal = isDiscreteGpu
+      ? vramTotal
+      : hasCarveoutVram
+        ? ramTotal + vramTotal
+        : ramTotal;
+    const unifiedUsage = isDiscreteGpu
+      ? vramUsed
+      : hasCarveoutVram
+        ? ramUsage + vramUsed
+        : ramUsage;
 
     const rawIfaces = net?.interfaces ?? [];
     const networkInterfaces = rawIfaces.map((iface) => ({
@@ -129,7 +167,11 @@ function transformTopology(
       network_interfaces: networkInterfaces,
       ip_to_interface: ipToInterface,
       mactop_info: {
-        memory: { ram_usage: unifiedUsage, ram_total: unifiedTotal },
+        memory: {
+          ram_usage: unifiedUsage,
+          ram_total: unifiedTotal,
+          is_vram: isDiscreteGpu || undefined,
+        },
         temp: sys?.temp != null ? { gpu_temp_avg: Math.max(30, sys.temp) } : undefined,
         // `sys.gpuUsage` is a 0–100 percent; MactopInfo.gpu_usage[1] (and the
         // stories) carry a 0–1 fraction that ClusterNode re-multiplies by 100.
