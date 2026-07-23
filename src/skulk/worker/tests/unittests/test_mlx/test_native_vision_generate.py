@@ -570,10 +570,10 @@ def test_slice_native_pixel_values_for_uncached_suffix_returns_none_when_fully_c
     assert result is None
 
 
-def test_mlx_generate_slices_native_pixel_values_after_prefix_hit(
+def test_mlx_generate_full_prefills_native_pixels_instead_of_reusing_prefix_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Follow-up turns should not reuse stale pixel values from cached images."""
+    """Native requests must re-inject every image instead of restoring text offsets."""
 
     class _FakePrefixCache:
         def get_kv_cache(
@@ -582,8 +582,7 @@ def test_mlx_generate_slices_native_pixel_values_after_prefix_hit(
             _prompt_tokens: object,
             media_regions: list[MediaRegion] | None = None,
         ) -> tuple[KVCacheType, mx.array, int]:
-            assert media_regions is not None
-            return cast(KVCacheType, []), mx.array([6, 7, 8]), 0
+            raise AssertionError("native vision must not read the prefix cache")
 
         def add_kv_cache(self, *args: object, **kwargs: object) -> None:
             return None
@@ -619,10 +618,15 @@ def test_mlx_generate_slices_native_pixel_values_after_prefix_hit(
         model: _FakeModel, *_args: object, **_kwargs: object
     ) -> tuple[float, int, list[CacheSnapshot]]:
         assert isinstance(model.pixel_values, list)
-        assert len(model.pixel_values) == 1
-        assert model.pixel_values[0].tolist() == [20.0]
+        assert [value.tolist() for value in model.pixel_values] == [
+            [10.0],
+            [20.0],
+        ]
         model.seen_pixel_values = model.pixel_values
-        return 0.0, 2, []
+        return 0.0, 7, []
+
+    def _fake_make_kv_cache(**_kwargs: object) -> KVCacheType:
+        return cast(KVCacheType, [])
 
     def _fake_stream_generate(*_args: object, **_kwargs: object):
         yield GenerationResponse(text="ok", token=101, usage=None)
@@ -638,6 +642,10 @@ def test_mlx_generate_slices_native_pixel_values_after_prefix_hit(
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.generator.generate.prefill",
         _fake_prefill,
+    )
+    monkeypatch.setattr(
+        "skulk.worker.engines.mlx.generator.generate.make_kv_cache",
+        _fake_make_kv_cache,
     )
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.generator.generate.stream_generate",
@@ -695,10 +703,10 @@ def test_mlx_generate_slices_native_pixel_values_after_prefix_hit(
     assert model.pixel_values is None
 
 
-def test_mlx_generate_skips_embedding_patch_when_native_images_are_fully_cached(
+def test_mlx_generate_reinjects_native_images_when_prefix_cache_is_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fully cached native images should fall back to plain text prefill only."""
+    """A cache candidate must not suppress pixel injection on a later request."""
 
     class _FakePrefixCache:
         def get_kv_cache(
@@ -707,8 +715,7 @@ def test_mlx_generate_skips_embedding_patch_when_native_images_are_fully_cached(
             _prompt_tokens: object,
             media_regions: list[MediaRegion] | None = None,
         ) -> tuple[KVCacheType, mx.array, int]:
-            assert media_regions is not None
-            return cast(KVCacheType, []), mx.array([7, 8]), 0
+            raise AssertionError("native vision must not read the prefix cache")
 
         def add_kv_cache(self, *args: object, **kwargs: object) -> None:
             return None
@@ -723,9 +730,10 @@ def test_mlx_generate_skips_embedding_patch_when_native_images_are_fully_cached(
 
         def set_pixel_values(
             self, pixel_values: list[mx.array] | mx.array | None
-        ) -> None:
-            self.pixel_values = pixel_values
-            self.seen_pixel_values = pixel_values
+            ) -> None:
+                self.pixel_values = pixel_values
+                if pixel_values is not None:
+                    self.seen_pixel_values = pixel_values
 
     vision = VisionResult(
         prompt="ignored",
@@ -744,8 +752,15 @@ def test_mlx_generate_skips_embedding_patch_when_native_images_are_fully_cached(
     def _fake_prefill(
         model: _FakeModel, *_args: object, **_kwargs: object
     ) -> tuple[float, int, list[CacheSnapshot]]:
-        assert model.pixel_values is None
-        return 0.0, 2, []
+        assert isinstance(model.pixel_values, list)
+        assert [value.tolist() for value in model.pixel_values] == [
+            [10.0],
+            [20.0],
+        ]
+        return 0.0, 7, []
+
+    def _fake_make_kv_cache(**_kwargs: object) -> KVCacheType:
+        return cast(KVCacheType, [])
 
     def _fake_stream_generate(*_args: object, **_kwargs: object):
         yield GenerationResponse(text="ok", token=101, usage=None)
@@ -761,6 +776,10 @@ def test_mlx_generate_skips_embedding_patch_when_native_images_are_fully_cached(
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.generator.generate.prefill",
         _fake_prefill,
+    )
+    monkeypatch.setattr(
+        "skulk.worker.engines.mlx.generator.generate.make_kv_cache",
+        _fake_make_kv_cache,
     )
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.generator.generate.stream_generate",
@@ -818,7 +837,7 @@ def test_mlx_generate_skips_embedding_patch_when_native_images_are_fully_cached(
     )
 
     assert [response.text for response in responses] == ["ok"]
-    assert model.seen_pixel_values is None
+    assert model.seen_pixel_values is not None
 
 
 def test_mlx_generate_full_prefills_distributed_fully_cached_native_images(
@@ -967,10 +986,10 @@ def test_mlx_generate_full_prefills_distributed_fully_cached_native_images(
     assert model.pixel_values is None
 
 
-def test_mlx_generate_reuses_distributed_single_fully_cached_native_image(
+def test_mlx_generate_full_prefills_distributed_single_native_image(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Single-image cached follow-ups should avoid the full-prefill fallback."""
+    """Distributed single-image requests also avoid unsafe prefix restoration."""
 
     class _FakePrefixCache:
         def get_kv_cache(
@@ -979,8 +998,7 @@ def test_mlx_generate_reuses_distributed_single_fully_cached_native_image(
             _prompt_tokens: object,
             media_regions: list[MediaRegion] | None = None,
         ) -> tuple[KVCacheType, mx.array, int]:
-            assert media_regions is not None
-            return cast(KVCacheType, []), mx.array([5, 6, 7, 8]), 0
+            raise AssertionError("native vision must not read the prefix cache")
 
         def add_kv_cache(self, *args: object, **kwargs: object) -> None:
             return None
@@ -1010,8 +1028,8 @@ def test_mlx_generate_reuses_distributed_single_fully_cached_native_image(
                 self.saw_non_none_pixel_values or pixel_values is not None
             )
 
-    def _fail_make_kv_cache(**_kwargs: object) -> KVCacheType:
-        raise AssertionError("single-image cached follow-ups should reuse prefix cache")
+    def _fake_make_kv_cache(**_kwargs: object) -> KVCacheType:
+        return cast(KVCacheType, [])
 
     def _fake_prefill(
         model: _FakeModel,
@@ -1021,8 +1039,9 @@ def test_mlx_generate_reuses_distributed_single_fully_cached_native_image(
         *_args: object,
         **_kwargs: object,
     ) -> tuple[float, int, list[CacheSnapshot]]:
-        assert model.pixel_values is None
-        assert prompt_tokens.tolist() == [5, 6, 7]
+        assert model.pixel_values is not None
+        assert model.pixel_values.tolist() == [[10.0]]
+        assert prompt_tokens.tolist() == [1, 2, 3, 4, 5, 6, 7]
         return 0.0, len(prompt_tokens), []
 
     def _fake_stream_generate(*_args: object, **_kwargs: object):
@@ -1038,7 +1057,7 @@ def test_mlx_generate_reuses_distributed_single_fully_cached_native_image(
     )
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.generator.generate.make_kv_cache",
-        _fail_make_kv_cache,
+        _fake_make_kv_cache,
     )
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.generator.generate.prefill",
@@ -1086,7 +1105,7 @@ def test_mlx_generate_reuses_distributed_single_fully_cached_native_image(
     )
 
     assert [response.text for response in responses] == ["ok"]
-    assert model.saw_non_none_pixel_values is False
+    assert model.saw_non_none_pixel_values is True
     assert model.pixel_values is None
 
 
@@ -1102,8 +1121,7 @@ def test_mlx_generate_pipeline_decode_starts_from_single_prompt_token(
             _prompt_tokens: object,
             media_regions: list[MediaRegion] | None = None,
         ) -> tuple[KVCacheType, mx.array, int]:
-            assert media_regions is not None
-            return cast(KVCacheType, []), mx.array([5, 6, 7, 8]), 0
+            raise AssertionError("native vision must not read the prefix cache")
 
         def add_kv_cache(self, *args: object, **kwargs: object) -> None:
             return None
@@ -1134,9 +1152,13 @@ def test_mlx_generate_pipeline_decode_starts_from_single_prompt_token(
         *_args: object,
         **_kwargs: object,
     ) -> tuple[float, int, list[CacheSnapshot]]:
-        assert model.pixel_values is None
-        assert prompt_tokens.tolist() == [5, 6, 7, 8]
+        assert model.pixel_values is not None
+        assert model.pixel_values.tolist() == [[10.0]]
+        assert prompt_tokens.tolist() == [1, 2, 3, 4, 5, 6, 7, 8]
         return 0.0, len(prompt_tokens), []
+
+    def _fake_make_kv_cache(**_kwargs: object) -> KVCacheType:
+        return cast(KVCacheType, [])
 
     def _fake_pipeline_decode(*_args: object, **kwargs: object):
         prompt = cast(mx.array, kwargs["prompt"])
@@ -1164,6 +1186,10 @@ def test_mlx_generate_pipeline_decode_starts_from_single_prompt_token(
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.generator.generate.prefill",
         _fake_prefill,
+    )
+    monkeypatch.setattr(
+        "skulk.worker.engines.mlx.generator.generate.make_kv_cache",
+        _fake_make_kv_cache,
     )
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.generator.generate._stream_generate_without_lookahead",

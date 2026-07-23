@@ -1,6 +1,7 @@
 // Copyright 2026 Foxlight Foundation
 
-import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
 
 import { expect, test, type Page, type Request } from 'playwright/test';
@@ -8,6 +9,9 @@ import { expect, test, type Page, type Request } from 'playwright/test';
 const dashboardUrl = process.env.SKULK_DASHBOARD_URL;
 const modelId = process.env.SKULK_VISION_MODEL;
 const imagePath = process.env.SKULK_VISION_IMAGE_PATH;
+const assertionMode = process.env.SKULK_VISION_ASSERTION_MODE ?? 'identity';
+
+type VisionAssertionMode = 'identity' | 'structured-identity' | 'visible-details';
 
 interface ImageUrlPart {
   type: 'image_url';
@@ -23,6 +27,10 @@ interface TextPart {
 
 interface ChatCompletionBody {
   model?: unknown;
+  max_tokens?: unknown;
+  temperature?: unknown;
+  top_p?: unknown;
+  enable_thinking?: unknown;
   messages?: Array<{
     role?: unknown;
     content?: unknown;
@@ -32,6 +40,15 @@ interface ChatCompletionBody {
 function requiredEnvironment(name: string, value: string | undefined): string {
   if (!value) {
     throw new Error(`${name} is required for live dashboard vision qualification.`);
+  }
+  return value;
+}
+
+function exactAssertionMode(value: string): VisionAssertionMode {
+  if (value !== 'identity' && value !== 'structured-identity' && value !== 'visible-details') {
+    throw new Error(
+      `SKULK_VISION_ASSERTION_MODE must be identity, structured-identity, or visible-details, got ${value}.`,
+    );
   }
   return value;
 }
@@ -75,6 +92,7 @@ test('the built-in dashboard sends and understands a real portrait', async ({ pa
   const exactDashboardUrl = requiredEnvironment('SKULK_DASHBOARD_URL', dashboardUrl);
   const exactModelId = requiredEnvironment('SKULK_VISION_MODEL', modelId);
   const exactImagePath = requiredEnvironment('SKULK_VISION_IMAGE_PATH', imagePath);
+  const exactMode = exactAssertionMode(assertionMode);
 
   await page.addInitScript(() => {
     localStorage.setItem('skulk-telemetry-consent-seen', new Date().toISOString());
@@ -87,7 +105,11 @@ test('the built-in dashboard sends and understands a real portrait', async ({ pa
   await page.locator('input[type="file"][accept="image/*"]').setInputFiles(exactImagePath);
   await expect(page.getByRole('img', { name: basename(exactImagePath) })).toBeVisible();
 
-  const prompt = 'Identify the person in this image. Then report the clothing colors and the background color. Be concise.';
+  const prompt = exactMode === 'identity'
+    ? 'Identify the person in this image. Then report the clothing colors and the background color. Be concise.'
+    : exactMode === 'structured-identity'
+      ? 'Who is this person? What colors are the jacket, shirt, and background? Answer exactly: NAME; JACKET; SHIRT; BACKGROUND.'
+      : 'How many people are visible? Describe the jacket color, the shirt or collar color, and the background color. Do not identify the person.';
   await page.locator('textarea').fill(prompt);
   const completionResponsePromise = page.waitForResponse(
     (response) => response.request().method() === 'POST'
@@ -111,8 +133,33 @@ test('the built-in dashboard sends and understands a real portrait', async ({ pa
   expect(Buffer.from(dataUrlMatch![1], 'base64').equals(readFileSync(exactImagePath))).toBe(true);
 
   const assistantMessage = page.locator('[data-message-role="assistant"]').last();
-  await expect(assistantMessage).toContainText(/Elon\s+Musk/i, { timeout: 8 * 60 * 1000 });
+  await expect(assistantMessage).toContainText(/\S/, { timeout: 2 * 60 * 1000 });
   const answer = await assistantMessage.innerText();
+
+  writeFileSync(
+    testInfo.outputPath('vision-answer.json'),
+    `${JSON.stringify({
+      modelId: exactModelId,
+      assertionMode: exactMode,
+      prompt,
+      answer,
+      requestControls: {
+        maxTokens: body.max_tokens,
+        temperature: body.temperature,
+        topP: body.top_p,
+        enableThinking: body.enable_thinking,
+      },
+      imageSha256: createHash('sha256').update(readFileSync(exactImagePath)).digest('hex'),
+    }, null, 2)}\n`,
+  );
+
+  if (exactMode !== 'visible-details') {
+    expect(answer).toMatch(/Elon\s+Musk/i);
+  } else {
+    expect(answer).toMatch(
+      /(?:\b(?:one|1|single)\b.{0,30}\b(?:person|man)\b|\b(?:person|man)\b.{0,30}\b(?:one|1|single)\b)/i,
+    );
+  }
   expect(answer).toMatch(/(?:dark|black|navy).{0,40}(?:suit|jacket|blazer)|(?:suit|jacket|blazer).{0,40}(?:dark|black|navy)/is);
   expect(answer).toMatch(/(?:white|light(?:-colored)?).{0,30}(?:shirt|collar)|(?:shirt|collar).{0,30}(?:white|light(?:-colored)?)/is);
   expect(answer).toMatch(/(?:black|dark).{0,30}(?:background|backdrop)|(?:background|backdrop).{0,30}(?:black|dark)/is);
