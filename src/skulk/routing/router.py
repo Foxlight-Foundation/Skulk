@@ -551,6 +551,9 @@ class Router:
             admission_capacity=_TELEMETRY_ADMISSION_CAPACITY,
             network_queue_capacity=_TELEMETRY_OUTBOUND_BUFFER,
         )
+        # Live libp2p connections by peer: (refcount, first observed remote
+        # endpoint). Feeds current_session_connections (#662).
+        self._session_connections: dict[str, tuple[int, tuple[str, int] | None]] = {}
         # Live swarm connections, from PyFromSwarm.Connection updates. Gates
         # the telemetry no-peer mismatch warning (#660): a lone node hits
         # no-peer outcomes as its normal state and must not be told to
@@ -831,6 +834,49 @@ class Router:
             )
             raise
 
+    def _track_session_connection(self, message: ConnectionMessage) -> None:
+        """Maintain the live-connection snapshot for late consumers (#662).
+
+        A worker recreated mid-session (master election recreates it) starts
+        its session-edge ingress with a fresh receiver, so connections
+        established BEFORE that receiver existed would never re-emit and the
+        new session's topology would miss their edges. The router outlives
+        worker recreation, so it keeps the authoritative per-peer refcount
+        and one representative endpoint, and ``current_session_connections``
+        hands a snapshot to each newly started ingress.
+        """
+        peer = str(message.node_id)
+        if message.connected:
+            count, endpoint = self._session_connections.get(peer, (0, None))
+            if (
+                endpoint is None
+                and message.remote_ip is not None
+                and message.remote_tcp_port is not None
+            ):
+                endpoint = (message.remote_ip, message.remote_tcp_port)
+            self._session_connections[peer] = (count + 1, endpoint)
+        else:
+            count, endpoint = self._session_connections.get(peer, (1, None))
+            if count <= 1:
+                self._session_connections.pop(peer, None)
+            else:
+                self._session_connections[peer] = (count - 1, endpoint)
+
+    def current_session_connections(self) -> dict[str, tuple[str, int, int]]:
+        """Snapshot of live peers as ``(ip, port, live_connection_count)`` (#662).
+
+        The live count rides along so a consumer seeding its own refcounts
+        (the worker's session-edge ingress after a mid-session recreation)
+        starts from the true number of connections: seeding one ref for a
+        multi-homed peer would let the first later disconnect delete the
+        session edge while other connections remain (PR #668 review).
+        """
+        return {
+            peer: (endpoint[0], endpoint[1], count)
+            for peer, (count, endpoint) in self._session_connections.items()
+            if endpoint is not None
+        }
+
     async def _networking_recv(self):
         try:
             while True:
@@ -856,6 +902,7 @@ class Router:
                         logger.trace(
                             f"Received message on connection_messages with payload {message}"
                         )
+                        self._track_session_connection(message)
                         had_peers = bool(self._connected_swarm_peers)
                         if message.connected:
                             self._connected_swarm_peers.add(str(message.node_id))

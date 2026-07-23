@@ -33,6 +33,12 @@ bindings while `versionStatus` reported "consistent".
 
 ## Entries (newest first)
 
+- **wire-neutral** (2026-07-22, #662): `FromSwarm::Discovered` gains
+  `remote_ip`/`remote_tcp_port` fields describing the connection's observed
+  remote endpoint. This enum crosses only the in-process PyO3 boundary to
+  Python (`PyFromSwarm.Connection`); nothing about gossipsub protocols,
+  topics, framing, transports, or the pnet key changes, so no
+  `NETWORK_VERSION` bump.
 - **v0.0.2** (2026-07-22, #659): retroactive bump covering the
   telemetry-isolation protocol split (31e3f333: TELEMETRY moved to
   `/skulk/telemetry/meshsub`, ELECTION to `/skulk/election/meshsub` with a

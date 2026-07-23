@@ -144,6 +144,10 @@ enum PyFromSwarm {
     Connection {
         peer_id: String,
         connected: bool,
+        // Observed remote endpoint of the established connection; empty
+        // string / 0 on the disconnect event (#662).
+        remote_ip: String,
+        remote_tcp_port: u16,
     },
     Message {
         origin: String,
@@ -154,13 +158,21 @@ enum PyFromSwarm {
 impl From<FromSwarm> for PyFromSwarm {
     fn from(value: FromSwarm) -> Self {
         match value {
-            FromSwarm::Discovered { peer_id } => Self::Connection {
+            FromSwarm::Discovered {
+                peer_id,
+                remote_ip,
+                remote_tcp_port,
+            } => Self::Connection {
                 peer_id: peer_id.to_base58(),
                 connected: true,
+                remote_ip,
+                remote_tcp_port,
             },
             FromSwarm::Expired { peer_id } => Self::Connection {
                 peer_id: peer_id.to_base58(),
                 connected: false,
+                remote_ip: String::new(),
+                remote_tcp_port: 0,
             },
             FromSwarm::Message { from, topic, data } => Self::Message {
                 origin: from.to_base58(),

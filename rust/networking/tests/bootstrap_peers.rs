@@ -46,7 +46,7 @@ async fn two_nodes_connect_via_bootstrap_peers() {
                     let _ = event;
                 }
                 Some(event) = stream_b.next() => {
-                    if let FromSwarm::Discovered { peer_id } = event {
+                    if let FromSwarm::Discovered { peer_id, .. } = event {
                         if peer_id == peer_id_a {
                             return true;
                         }
@@ -106,7 +106,7 @@ async fn two_nodes_exchange_election_messages_on_isolated_protocol() {
             tokio::select! {
                 Some(_) = events_a_rx.recv() => {}
                 Some(event) = events_b_rx.recv() => {
-                    if matches!(event, FromSwarm::Discovered { peer_id } if peer_id == peer_id_a) {
+                    if matches!(event, FromSwarm::Discovered { peer_id, .. } if peer_id == peer_id_a) {
                         return;
                     }
                 }
@@ -223,7 +223,7 @@ async fn two_nodes_exchange_telemetry_on_isolated_protocol() {
             tokio::select! {
                 Some(_) = events_a_rx.recv() => {}
                 Some(event) = events_b_rx.recv() => {
-                    if matches!(event, FromSwarm::Discovered { peer_id } if peer_id == peer_id_a) {
+                    if matches!(event, FromSwarm::Discovered { peer_id, .. } if peer_id == peer_id_a) {
                         return;
                     }
                 }

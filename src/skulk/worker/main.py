@@ -1,10 +1,11 @@
 import base64
 import hashlib
 import io
+import ipaddress
 import sys
 import time
 from collections import defaultdict, deque
-from collections.abc import Container, Mapping
+from collections.abc import Callable, Container, Mapping
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ from loguru import logger
 from PIL import Image
 
 from skulk.download.download_utils import resolve_model_in_path
+from skulk.routing.connection_message import ConnectionMessage
 from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.routing.router import TelemetrySender
 from skulk.routing.speech_media import SpeechMediaPacket
@@ -629,6 +631,10 @@ class Worker:
         speech_media_packet_receiver: Receiver[SpeechMediaPacket] | None = None,
         vision_media_packet_sender: Sender[VisionMediaPacket] | None = None,
         vision_media_packet_receiver: Receiver[VisionMediaPacket] | None = None,
+        connection_message_receiver: Receiver[ConnectionMessage] | None = None,
+        session_connection_snapshot: (
+            Callable[[], dict[str, tuple[str, int, int]]] | None
+        ) = None,
         store_client: ModelStoreClient | None = None,
         staging_config: StagingNodeConfig | None = None,
     ):
@@ -651,6 +657,8 @@ class Worker:
         self._speech_media_packet_receiver = speech_media_packet_receiver
         self._vision_media_packet_sender = vision_media_packet_sender
         self._vision_media_packet_receiver = vision_media_packet_receiver
+        self._connection_message_receiver = connection_message_receiver
+        self._session_connection_snapshot = session_connection_snapshot
         # Shared, Node-owned telemetry view (#279). The worker prunes a node's
         # telemetry here when it sees NodeTimedOut, because the worker runs on
         # EVERY node regardless of role - so a --no-api node (or a --no-api
@@ -924,6 +932,8 @@ class Worker:
                 tg.start_soon(self.plan_step)
                 tg.start_soon(self._event_applier)
                 tg.start_soon(self._poll_connection_updates)
+                if self._connection_message_receiver is not None:
+                    tg.start_soon(self._session_edge_ingress)
                 if self._realtime_audio_receiver is not None:
                     tg.start_soon(self._realtime_audio_ingress)
                 if self._realtime_audio_packet_receiver is not None:
@@ -2846,20 +2856,184 @@ class Worker:
                 for model_id in report.evicted_model_ids
             )
 
+    @staticmethod
+    def _session_edge_multiaddr(ip: str, port: int) -> Multiaddr:
+        """Build the multiaddr for a session edge's observed remote endpoint.
+
+        Dual-stack listeners can report IPv4 peers as IPv4-mapped IPv6
+        literals (``::ffff:203.0.113.7``); normalize those to plain IPv4 so
+        the same host never appears under two address families and the
+        ``/ip6/`` form never carries a dotted literal. Falls back to the
+        codebase-wide ":"-means-v6 heuristic when the string does not parse
+        as an IP at all (defensive; the transport hands us real addresses).
+        """
+        try:
+            parsed = ipaddress.ip_address(ip)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, ipaddress.IPv6Address):
+            mapped = parsed.ipv4_mapped
+            if mapped is not None:
+                return Multiaddr(address=f"/ip4/{mapped}/tcp/{port}")
+            return Multiaddr(address=f"/ip6/{ip}/tcp/{port}")
+        if isinstance(parsed, ipaddress.IPv4Address):
+            return Multiaddr(address=f"/ip4/{ip}/tcp/{port}")
+        return Multiaddr(
+            address=(
+                f"/ip6/{ip}/tcp/{port}" if ":" in ip else f"/ip4/{ip}/tcp/{port}"
+            )
+        )
+
+    async def _session_edge_ingress(self) -> None:
+        """Record authenticated libp2p sessions as topology paths (#662).
+
+        The connectivity graph was built exclusively from HTTP probes of
+        peers' ADVERTISED addresses, so a member whose advertised addresses
+        are all unreachable from here (a NAT'd or proxied remote node whose
+        real path is the session itself) contributed no edges: it rendered
+        as a floating node in the dashboard and could never form a placement
+        cycle, while events, election, and serving all flowed fine over the
+        very connection this loop now records. The libp2p session is
+        noise-authenticated (peer id == node id), which is STRONGER identity
+        verification than the probe's /node_id readback, so it qualifies as
+        a first-class path, annotated with the connection's observed remote
+        endpoint. Sessions are refcounted per peer (a multi-homed peer holds
+        several connections); the edge exists while any connection does.
+        The probe loop's delete pass only manages port-52415 edges, so probe
+        sweeps never tear these down.
+        """
+        assert self._connection_message_receiver is not None
+        session_counts: dict[NodeId, int] = {}
+        emitted_edges: dict[NodeId, SocketConnection] = {}
+        if self._session_connection_snapshot is not None:
+            # Seed from connections established before this worker existed
+            # (a mid-session worker recreation after master election): those
+            # never re-emit ConnectionMessage, so without the seed the new
+            # session's topology would miss their edges (PR #668 review).
+            # An event for a seeded connection may still sit buffered in the
+            # receiver (created before this loop started), which can
+            # overcount its refs; the cost is a session edge lingering until
+            # node removal, never a missing edge. The snapshot's live count
+            # seeds the refs directly: a multi-homed peer seeded at one ref
+            # would lose its edge on the first later disconnect while other
+            # connections remain (PR #668 review).
+            for peer_str, (
+                ip,
+                port,
+                live_count,
+            ) in self._session_connection_snapshot().items():
+                peer = NodeId(peer_str)
+                session_counts[peer] = session_counts.get(peer, 0) + live_count
+                if peer in emitted_edges:
+                    continue
+                edge = SocketConnection(
+                    sink_multiaddr=self._session_edge_multiaddr(ip, port),
+                    session=True,
+                )
+                emitted_edges[peer] = edge
+                await self.event_sender.send(
+                    TopologyEdgeCreated(
+                        conn=Connection(source=self.node_id, sink=peer, edge=edge)
+                    )
+                )
+        with self._connection_message_receiver as messages:
+            async for message in messages:
+                peer = message.node_id
+                if message.connected:
+                    session_counts[peer] = session_counts.get(peer, 0) + 1
+                    if (
+                        peer in emitted_edges
+                        or message.remote_ip is None
+                        or message.remote_tcp_port is None
+                    ):
+                        # A connect event always carries its endpoint; a
+                        # missing one (defensive) must not mint a /tcp/0
+                        # multiaddr.
+                        continue
+                    edge = SocketConnection(
+                        sink_multiaddr=self._session_edge_multiaddr(
+                            message.remote_ip, message.remote_tcp_port
+                        ),
+                        session=True,
+                    )
+                    emitted_edges[peer] = edge
+                    await self.event_sender.send(
+                        TopologyEdgeCreated(
+                            conn=Connection(
+                                source=self.node_id, sink=peer, edge=edge
+                            )
+                        )
+                    )
+                else:
+                    remaining = session_counts.get(peer, 1) - 1
+                    if remaining > 0:
+                        session_counts[peer] = remaining
+                        continue
+                    session_counts.pop(peer, None)
+                    edge = emitted_edges.pop(peer, None)
+                    if edge is not None:
+                        await self.event_sender.send(
+                            TopologyEdgeDeleted(
+                                conn=Connection(
+                                    source=self.node_id, sink=peer, edge=edge
+                                )
+                            )
+                        )
+
+    # An advertised address that keeps failing its reachability probe is
+    # probed at a slower cadence instead of every 10-second sweep: a WAN or
+    # NAT'd member advertises addresses its peers can never reach (and its
+    # peers' LAN/link-local addresses are equally unreachable from it), and
+    # the full-rate probing of permanently dead addresses produced a
+    # sustained warning flood plus wasted sockets on both sides of every
+    # remote membership (#662). Mirrors the discovery layer's link-local
+    # slow-retry precedent. An address enters backoff after
+    # _PROBE_BACKOFF_AFTER_FAILURES consecutive failed sweeps and is then
+    # probed every _PROBE_BACKOFF_RETRY_ROUNDS'th sweep, so a path that
+    # comes back is still discovered within about a minute.
+    _PROBE_BACKOFF_AFTER_FAILURES = 3
+    _PROBE_BACKOFF_RETRY_ROUNDS = 6
+
     async def _poll_connection_updates(self):
+        probe_failures: defaultdict[str, int] = defaultdict(int)
+        sweep_index = 0
         while True:
+            sweep_index += 1
             edges = set(
                 conn.edge for conn in self.state.topology.out_edges(self.node_id)
             )
+
+            def _due_this_sweep(ip: str, *, sweep: int = sweep_index) -> bool:
+                if probe_failures[ip] < self._PROBE_BACKOFF_AFTER_FAILURES:
+                    return True
+                return sweep % self._PROBE_BACKOFF_RETRY_ROUNDS == 0
+
+            probed: set[str] = set()
+            considered: set[str] = set()
+
+            def _should_probe(
+                ip: str,
+                *,
+                sweep_probed: set[str] = probed,
+                sweep_considered: set[str] = considered,
+            ) -> bool:
+                sweep_considered.add(ip)
+                due = _due_this_sweep(ip)
+                if due:
+                    sweep_probed.add(ip)
+                return due
+
             conns: defaultdict[NodeId, set[str]] = defaultdict(set)
             async for ip, nid in check_reachable(
                 self.state.topology,
                 self.node_id,
                 self.state.node_network,
+                should_probe=_should_probe,
             ):
                 if ip in conns[nid]:
                     continue
                 conns[nid].add(ip)
+                probe_failures.pop(ip, None)
                 edge = SocketConnection(
                     # nonsense multiaddr
                     sink_multiaddr=Multiaddr(address=f"/ip4/{ip}/tcp/52415")
@@ -2875,11 +3049,37 @@ class Worker:
                         )
                     )
 
+            verified = {ip for ips in conns.values() for ip in ips}
+            for ip in probed - verified:
+                probe_failures[ip] += 1
+            # Addresses that stopped being advertised entirely would
+            # otherwise accumulate failure counters forever.
+            for ip in [k for k in probe_failures if k not in considered]:
+                probe_failures.pop(ip, None)
+
             for conn in self.state.topology.out_edges(self.node_id):
                 if not isinstance(conn.edge, SocketConnection):
                     continue
+                # Session edges are owned by _session_edge_ingress, which
+                # deletes them when the last libp2p connection closes. Skip
+                # them EXPLICITLY rather than relying on the port check: a
+                # session's observed remote port can coincidentally be 52415,
+                # and probe-deleting a live session edge would leave the peer
+                # floating until a reconnect (PR #668 review).
+                if conn.edge.session:
+                    continue
                 # ignore mDNS discovered connections
                 if conn.edge.sink_multiaddr.port != 52415:
+                    continue
+                # An edge whose address sat out this sweep due to BACKOFF was
+                # not disproven; deleting it on a skipped probe would flap
+                # the topology at the backoff cadence. An address the sweep
+                # never even CONSIDERED is different: the peer no longer
+                # advertises it (interface down, DHCP/VPN change), so the
+                # edge must fall through to deletion exactly as it did
+                # before backoff existed (PR #668 review).
+                edge_ip = conn.edge.sink_multiaddr.ip_address
+                if edge_ip in considered and edge_ip not in probed:
                     continue
                 if (
                     conn.sink not in conns
