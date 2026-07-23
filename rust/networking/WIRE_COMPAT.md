@@ -7,6 +7,13 @@ here. The pnet pre-shared key derives from `NETWORK_VERSION`, so a bump
 makes wire-incompatible builds refuse to connect, loudly, instead of
 half-working.
 
+A `NETWORK_VERSION` bump MUST also bump the bindings package version in
+`rust/skulk_pyo3_bindings/pyproject.toml` (plus `uv lock`). That version is
+the rollout forcing function: `uv sync` rebuilds the cached bindings wheel
+only when it moves, and every installed startup script runs `uv sync`, so
+the bump makes auto-updating nodes rebuild their bindings on the FIRST
+restart instead of running new Python against stale wire code.
+
 CI enforces the pairing: a PR touching anything under this crate's `src/`
 tree, this crate's `Cargo.toml`, or the workspace `Cargo.toml`/`Cargo.lock`
 at the repo root (a libp2p or zenoh dependency bump changes protocol
