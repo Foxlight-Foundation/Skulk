@@ -281,6 +281,25 @@ def try_install_cuda_wheel(facts: NodeFacts) -> bool:
         f"installing the CUDA engine wheel ({specifier}) from "
         f"{FOXLIGHT_WHEEL_INDEX}; multi-GB, one-time"
     )
+    # Env-provided index settings outrank CLI flags in uv's resolution
+    # (UV_INDEX is consulted before --extra-index-url, and the default
+    # first-index strategy stops at the first index carrying the package),
+    # so a host-level corporate mirror or cache index could serve a stale
+    # or non-Foxlight engine build despite the explicit pins. Strip every
+    # index/find-links override so resolution uses exactly the two indexes
+    # named on the command line (PR #665 review).
+    sanitized_env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("UV_INDEX", "UV_EXTRA_INDEX", "UV_DEFAULT_INDEX"))
+        and key
+        not in (
+            "UV_FIND_LINKS",
+            "PIP_INDEX_URL",
+            "PIP_EXTRA_INDEX_URL",
+            "PIP_FIND_LINKS",
+        )
+    }
     try:
         completed = subprocess.run(
             [
@@ -299,6 +318,7 @@ def try_install_cuda_wheel(facts: NodeFacts) -> bool:
             text=True,
             timeout=_WHEEL_INSTALL_TIMEOUT_SECONDS,
             check=False,
+            env=sanitized_env,
         )
     except subprocess.TimeoutExpired:
         logger.warning(

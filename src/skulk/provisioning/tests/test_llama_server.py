@@ -6,6 +6,7 @@ import io
 import os
 import tarfile
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -478,6 +479,49 @@ def test_cuda_wheel_install_gates_on_capability_and_uv(
 
     monkeypatch.setattr(provisioning.shutil, "which", _no_uv)
     assert not _REAL_TRY_INSTALL_CUDA_WHEEL(make_facts(gpus=(NVIDIA_A40,)))
+
+
+def test_cuda_wheel_install_sanitizes_index_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Env-level index overrides cannot redirect the engine wheel install.
+
+    UV_INDEX (and pip equivalents) outrank CLI flags under uv's first-index
+    strategy, so a host-level mirror could serve a stale or non-Foxlight
+    build despite the explicit pins; the install must run with those
+    stripped (PR #665 review).
+    """
+    seen_env: dict[str, str] = {}
+
+    class _Completed:
+        returncode = 1
+        stderr = "stop here"
+
+    def _capture_run(*args: object, **kwargs: object) -> "_Completed":
+        env = kwargs.get("env")
+        assert isinstance(env, dict)
+        seen_env.update(cast(dict[str, str], env))
+        return _Completed()
+
+    def _uv_on_path(_name: str) -> str:
+        return "/usr/bin/uv"
+
+    monkeypatch.setenv("UV_INDEX", "https://mirror.corp.example/simple")
+    monkeypatch.setenv("UV_DEFAULT_INDEX", "https://mirror.corp.example/simple")
+    monkeypatch.setenv("PIP_INDEX_URL", "https://mirror.corp.example/simple")
+    monkeypatch.setenv("PIP_EXTRA_INDEX_URL", "https://mirror.corp.example/x")
+    monkeypatch.setattr(provisioning.shutil, "which", _uv_on_path)
+    monkeypatch.setattr(provisioning.subprocess, "run", _capture_run)
+
+    assert not _REAL_TRY_INSTALL_CUDA_WHEEL(make_facts(gpus=(NVIDIA_A40,)))
+    assert seen_env, "install subprocess never ran"
+    for forbidden in (
+        "UV_INDEX",
+        "UV_DEFAULT_INDEX",
+        "PIP_INDEX_URL",
+        "PIP_EXTRA_INDEX_URL",
+    ):
+        assert forbidden not in seen_env
 
 
 def test_cuda_wheel_install_degrades_when_uv_cannot_execute(
