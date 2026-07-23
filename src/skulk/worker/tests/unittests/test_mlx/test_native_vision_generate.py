@@ -402,6 +402,149 @@ def test_batch_generate_rejects_failed_vision_preprocessing(
     assert isinstance(exc_info.value.__cause__, ImportError)
 
 
+def test_batch_generate_native_vision_bypasses_prefix_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production batch requests must not restore native multimodal cache state."""
+
+    class _FailingPrefixCache:
+        def get_kv_cache(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("native vision must not read the prefix cache")
+
+        def add_kv_cache(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("native vision must not write the prefix cache")
+
+    class _FakeNativeModel:
+        def __init__(self) -> None:
+            self.pixel_values: mx.array | list[mx.array] | None = None
+            self.saw_pixel_values = False
+
+        def set_pixel_values(
+            self, pixel_values: mx.array | list[mx.array] | None
+        ) -> None:
+            self.pixel_values = pixel_values
+            self.saw_pixel_values = self.saw_pixel_values or pixel_values is not None
+
+    class _FakeUpstreamBatchGenerator:
+        _prompt_time_counter = 0.0
+
+        def insert(self, **_kwargs: object) -> list[int]:
+            return [17]
+
+    vision = VisionResult(
+        prompt="ignored",
+        prompt_tokens=mx.array([1, 2, 3, 4]),
+        embeddings=mx.zeros((1, 0, 1)),
+        media_regions=[],
+        pixel_values=mx.array([[10.0]]),
+    )
+    model = _FakeNativeModel()
+
+    def _fake_encode_prompt(
+        _tokenizer: TokenizerWrapper, _prompt: str
+    ) -> mx.array:
+        return mx.array([1, 2, 3, 4])
+
+    def _fake_fix_tokens(
+        tokens: mx.array, _tokenizer: TokenizerWrapper
+    ) -> mx.array:
+        return tokens
+
+    def _fake_prepare_vision(**_kwargs: object) -> VisionResult:
+        return vision
+
+    def _fake_make_kv_cache(_model: Model) -> KVCacheType:
+        return cast(KVCacheType, [])
+
+    def _fake_make_sampler(**_kwargs: object) -> Callable[[mx.array], mx.array]:
+        return _identity_sampler
+
+    def _fake_make_logits_processors(
+        **_kwargs: object,
+    ) -> list[Callable[[mx.array, mx.array], mx.array]]:
+        return []
+
+    monkeypatch.setattr(
+        batch_generate_module,
+        "encode_prompt",
+        _fake_encode_prompt,
+    )
+    monkeypatch.setattr(
+        batch_generate_module,
+        "fix_unmatched_think_end_tokens",
+        _fake_fix_tokens,
+    )
+    monkeypatch.setattr(
+        batch_generate_module,
+        "prepare_vision",
+        _fake_prepare_vision,
+    )
+    monkeypatch.setattr(
+        batch_generate_module,
+        "make_kv_cache",
+        _fake_make_kv_cache,
+    )
+    monkeypatch.setattr(
+        batch_generate_module,
+        "make_sampler",
+        _fake_make_sampler,
+    )
+    monkeypatch.setattr(
+        batch_generate_module,
+        "make_logits_processors",
+        _fake_make_logits_processors,
+    )
+
+    def _fake_prefill(
+        prefill_model: object,
+        _tokenizer: object,
+        _sampler: object,
+        prompt_tokens: mx.array,
+        _cache: object,
+        *_args: object,
+    ) -> tuple[float, int, list[CacheSnapshot]]:
+        assert prefill_model is model
+        assert model.pixel_values is not None
+        assert prompt_tokens.tolist() == [1, 2, 3]
+        return 1.0, len(prompt_tokens), []
+
+    monkeypatch.setattr(batch_generate_module, "prefill", _fake_prefill)
+
+    generator = object.__new__(batch_generate_module.SkulkBatchGenerator)
+    object.__setattr__(generator, "model", cast(Model, cast(object, model)))
+    object.__setattr__(generator, "tokenizer", _fake_tokenizer())
+    object.__setattr__(generator, "group", None)
+    object.__setattr__(generator, "kv_prefix_cache", _FailingPrefixCache())
+    object.__setattr__(generator, "vision_processor", _fake_vision_processor())
+    object.__setattr__(generator, "context_token_limit", None)
+    object.__setattr__(generator, "_mlx_gen", _FakeUpstreamBatchGenerator())
+    object.__setattr__(generator, "_active_tasks", {})
+    object.__setattr__(generator, "_next_time_total", 0.0)
+
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/Qwen3-VL-4B-Instruct-4bit"),
+        input=[InputMessage(role="user", content="what is this?")],
+        chat_template_messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "what is this?"},
+                ],
+            }
+        ],
+        images=["ignored"],
+        max_output_tokens=8,
+        temperature=0.0,
+    )
+
+    uid = generator.submit(TaskId("vision-task"), task, "<bos>")
+
+    assert uid == 17
+    assert model.saw_pixel_values is True
+    assert model.pixel_values is None
+
+
 def test_prepare_vision_rejects_images_without_structured_messages() -> None:
     """Missing multimodal prompt structure must not cause images to be ignored."""
     with pytest.raises(ValueError, match="missing chat_template_messages"):
