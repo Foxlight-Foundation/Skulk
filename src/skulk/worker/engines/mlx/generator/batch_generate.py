@@ -42,6 +42,7 @@ from skulk.worker.engines.mlx.generator.generate import (
     extract_top_logprobs,
     patch_embed_tokens,
     prefill,
+    set_native_vision_inputs,
     slice_native_pixel_values_for_uncached_suffix,
 )
 from skulk.worker.engines.mlx.utils_mlx import (
@@ -169,10 +170,19 @@ class SkulkBatchGenerator:
                         model=self.model,
                         task_id=task_id,
                     )
-            except Exception:
-                logger.opt(exception=True).warning(
-                    "Vision processing failed, falling back to text-only"
+            except Exception as exc:
+                logger.opt(exception=True).error(
+                    "Vision processing failed; refusing a text-only fallback"
                 )
+                raise RuntimeError(
+                    f"Vision preprocessing failed for model {task_params.model}"
+                ) from exc
+
+        if task_params.images and vision is None:
+            raise RuntimeError(
+                f"Vision preprocessing produced no image input for model "
+                f"{task_params.model}"
+            )
 
         if vision is not None:
             all_prompt_tokens = vision.prompt_tokens
@@ -239,13 +249,12 @@ class SkulkBatchGenerator:
             )
 
         if native_pixel_values is not None:
-            if hasattr(self.model, "set_pixel_values"):
-                cast(
-                    Callable[[mx.array | list[mx.array] | None], None],
-                    object.__getattribute__(self.model, "set_pixel_values"),
-                )(native_pixel_values)
-            else:
-                object.__setattr__(self.model, "_pixel_values", native_pixel_values)
+            assert vision is not None
+            set_native_vision_inputs(
+                self.model,
+                native_pixel_values,
+                vision.image_grid_thw,
+            )
             vision_ctx = contextlib.nullcontext()
         elif vision is not None and not is_native_vision:
             vision_ctx = patch_embed_tokens(
@@ -271,13 +280,12 @@ class SkulkBatchGenerator:
                     distributed_prompt_progress_callback,
                 )
         finally:
-            if hasattr(self.model, "set_pixel_values"):
-                cast(
-                    Callable[[mx.array | list[mx.array] | None], None],
-                    object.__getattribute__(self.model, "set_pixel_values"),
-                )(None)
-            elif hasattr(self.model, "_pixel_values"):
-                object.__setattr__(self.model, "_pixel_values", None)
+            if (
+                hasattr(self.model, "set_vision_inputs")
+                or hasattr(self.model, "set_pixel_values")
+                or hasattr(self.model, "_pixel_values")
+            ):
+                set_native_vision_inputs(self.model, None)
 
         # We need to clamp rotating kv caches to max size so that mlx lm's _merge_caches behaves
         for c in cache:

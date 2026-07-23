@@ -10,9 +10,11 @@ from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.mlx import KVCacheType, Model
+from skulk.shared.types.tasks import TaskId
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.shared.types.worker.runner_response import GenerationResponse
 from skulk.worker.engines.mlx.cache import CacheSnapshot, KVPrefixCache
+from skulk.worker.engines.mlx.generator import batch_generate as batch_generate_module
 from skulk.worker.engines.mlx.generator import generate as generate_module
 from skulk.worker.engines.mlx.vision import (
     MediaRegion,
@@ -355,6 +357,46 @@ def test_mlx_generate_rejects_failed_vision_preprocessing(
                 group=None,
                 vision_processor=_fake_vision_processor(),
             )
+        )
+
+    assert isinstance(exc_info.value.__cause__, ImportError)
+
+
+def test_batch_generate_rejects_failed_vision_preprocessing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The production batch path must not turn processor errors into guesses."""
+
+    def _fail_prepare_vision(**_kwargs: object) -> VisionResult:
+        raise ImportError("processor dependency unavailable")
+
+    monkeypatch.setattr(batch_generate_module, "prepare_vision", _fail_prepare_vision)
+    generator = object.__new__(batch_generate_module.SkulkBatchGenerator)
+    object.__setattr__(generator, "model", _fake_model())
+    object.__setattr__(generator, "tokenizer", _fake_tokenizer())
+    object.__setattr__(generator, "vision_processor", _fake_vision_processor())
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/Qwen3-VL-4B-Instruct-4bit"),
+        input=[InputMessage(role="user", content="what is this?")],
+        chat_template_messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "what is this?"},
+                ],
+            }
+        ],
+        images=["ignored"],
+        max_output_tokens=8,
+        temperature=0.0,
+    )
+
+    with pytest.raises(RuntimeError, match="Vision preprocessing failed") as exc_info:
+        generator.submit(
+            TaskId("vision-task"),
+            task,
+            "<bos>",
         )
 
     assert isinstance(exc_info.value.__cause__, ImportError)
