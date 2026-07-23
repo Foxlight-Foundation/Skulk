@@ -114,7 +114,13 @@ while the connection that carries its traffic works perfectly, and before
 the session edge existed it rendered as a floating, edgeless node in
 exactly that healthy state. Addresses that repeatedly fail their probes
 are retried on a slower cadence rather than every sweep, so a remote
-membership does not flood logs probing paths that can never work.
+membership does not flood logs probing paths that can never work. An edge
+can also be the first the cluster hears of a peer, minting its graph node
+before the peer has published any node information; if that peer
+disconnects without ever becoming a member, deleting its last edge also
+removes the node, so a crash-looping box cannot litter the graph with
+phantom entries that the membership timeout, which only tracks nodes it
+has heard from, could never reap.
 
 ## Lifecycle of a request
 

@@ -89,6 +89,20 @@ class Topology:
     def contains_node(self, node_id: NodeId) -> bool:
         return node_id in self._vertex_indices
 
+    def node_is_isolated(self, node_id: NodeId) -> bool:
+        """Whether the node has no edges in either direction.
+
+        An absent node counts as isolated. Used by the edge-deletion apply
+        path to reap topology nodes that were minted by an edge alone and
+        never became members (#671).
+        """
+        if node_id not in self._vertex_indices:
+            return True
+        rx_idx = self._vertex_indices[node_id]
+        return (
+            self._graph.in_degree(rx_idx) == 0 and self._graph.out_degree(rx_idx) == 0
+        )
+
     def add_connection(self, conn: Connection) -> None:
         source, sink, edge = conn.source, conn.sink, conn.edge
         del conn

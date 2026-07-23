@@ -225,6 +225,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Topology nodes minted by an edge alone are reaped with their last
+  edge.** A fabric connection can be the first the cluster hears of a peer,
+  creating its topology entry before the peer publishes any node
+  information. A peer that disconnected without ever becoming a member left
+  that entry behind forever, because the membership timeout only reaps nodes
+  it has heard from; a crash-looping box could litter the graph with a new
+  phantom entry per restart attempt. Deleting the last edge touching a
+  never-a-member node now removes the node itself; real members are
+  untouched (#671).
+
 - **A served-MTP model with a missing speculative draft serves without
   speculation instead of crashing.** When a served card declares a
   cross-repo draft (`served_spec_draft_repo`/`served_spec_draft_file`) whose

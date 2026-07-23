@@ -545,4 +545,19 @@ def apply_topology_edge_deleted(event: TopologyEdgeDeleted, state: State) -> Sta
     topology = copy.deepcopy(state.topology)
     topology.remove_connection(event.conn)
     # TODO: Clean up removing the reverse connection
+    # An edge can be the first state event mentioning a peer (a session edge
+    # for a connection that authenticated before the peer ever published
+    # NodeGatheredInfo), and add_connection mints a topology node for it. If
+    # that peer dies before its first publish it never stamps last_seen, so
+    # the master's timeout loop can never reap it and it would linger as a
+    # floating phantom member. When the last edge touching such a
+    # never-a-member node is deleted, drop the node itself. Real members
+    # always carry last_seen and are reaped by NodeTimedOut instead (#671).
+    for endpoint in (event.conn.source, event.conn.sink):
+        if (
+            endpoint not in state.last_seen
+            and topology.contains_node(endpoint)
+            and topology.node_is_isolated(endpoint)
+        ):
+            topology.remove_node(endpoint)
     return state.model_copy(update={"topology": topology})
