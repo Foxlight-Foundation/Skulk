@@ -659,6 +659,13 @@ class Worker:
         self._vision_media_packet_receiver = vision_media_packet_receiver
         self._connection_message_receiver = connection_message_receiver
         self._session_connection_snapshot = session_connection_snapshot
+        # Live-session bookkeeping shared between the session-edge ingress
+        # (which maintains it) and the probe sweep's self-heal pass (which
+        # re-emits any live session edge missing from replicated state; a
+        # state-side reap can misjudge a pre-membership node as dead, and
+        # without re-emission that node would float edgeless forever, #671).
+        self._session_edge_counts: dict[NodeId, int] = {}
+        self._session_emitted_edges: dict[NodeId, SocketConnection] = {}
         # Shared, Node-owned telemetry view (#279). The worker prunes a node's
         # telemetry here when it sees NodeTimedOut, because the worker runs on
         # EVERY node regardless of role - so a --no-api node (or a --no-api
@@ -2884,6 +2891,27 @@ class Worker:
             )
         )
 
+    def _session_edges_missing_from_state(self) -> list[Connection]:
+        """Live session edges this worker emitted that replicated state lost.
+
+        State-side cleanup (the never-member reap, #671) judges liveness
+        from a snapshot, which cannot always distinguish a dead phantom
+        from a live pre-membership peer; a wrong judgment deletes an edge
+        this worker still tracks as live and would never re-emit. The probe
+        sweep re-emits whatever this reports, making any wrong reap heal
+        within one sweep instead of persisting until reconnect.
+        """
+        missing: list[Connection] = []
+        for peer, edge in self._session_emitted_edges.items():
+            if self._session_edge_counts.get(peer, 0) <= 0:
+                continue
+            if edge in self.state.topology.get_all_connections_between(
+                self.node_id, peer
+            ):
+                continue
+            missing.append(Connection(source=self.node_id, sink=peer, edge=edge))
+        return missing
+
     async def _session_edge_ingress(self) -> None:
         """Record authenticated libp2p sessions as topology paths (#662).
 
@@ -2903,8 +2931,8 @@ class Worker:
         sweeps never tear these down.
         """
         assert self._connection_message_receiver is not None
-        session_counts: dict[NodeId, int] = {}
-        emitted_edges: dict[NodeId, SocketConnection] = {}
+        session_counts = self._session_edge_counts
+        emitted_edges = self._session_emitted_edges
         if self._session_connection_snapshot is not None:
             # Seed from connections established before this worker existed
             # (a mid-session worker recreation after master election): those
@@ -3087,5 +3115,15 @@ class Worker:
                 ):
                     logger.debug(f"ping failed to discover {conn=}")
                     await self.event_sender.send(TopologyEdgeDeleted(conn=conn))
+
+            # Session-edge self-heal: re-emit any live session edge that
+            # replicated state lost (a state-side reap misjudging a
+            # pre-membership peer as dead, #671), so the wrong judgment
+            # corrects within one sweep instead of persisting to reconnect.
+            for healed in self._session_edges_missing_from_state():
+                logger.info(
+                    f"re-emitting live session edge lost from state: {healed}"
+                )
+                await self.event_sender.send(TopologyEdgeCreated(conn=healed))
 
             await anyio.sleep(10)

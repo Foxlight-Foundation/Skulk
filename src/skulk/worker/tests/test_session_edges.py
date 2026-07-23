@@ -93,6 +93,58 @@ def test_session_edge_multiaddr_normalizes_mapped_ipv6() -> None:
     assert plain_v4.address == "/ip4/203.0.113.7/tcp/52416"
 
 
+def test_session_edge_self_heal_detects_state_loss() -> None:
+    """Live emitted edges missing from replicated state are re-emitted.
+
+    The never-member reap (#671) judges liveness from a state snapshot and
+    can misjudge a pre-membership peer as dead; the sweep re-emits whatever
+    this detector reports, so a wrong reap heals within one sweep.
+    Exercised on a stub so the test needs no live worker.
+    """
+    from skulk.shared.types.common import NodeId
+    from skulk.shared.types.state import State
+    from skulk.shared.types.topology import (
+        Connection,
+        Multiaddr,
+        SocketConnection,
+    )
+    from skulk.worker.main import Worker
+
+    self_id = NodeId("self-node")
+    peer = NodeId("peer-node")
+    edge = SocketConnection(
+        sink_multiaddr=Multiaddr(address="/ip4/203.0.113.7/tcp/52416"),
+        session=True,
+    )
+
+    class _WorkerStub:
+        node_id = self_id
+        state = State()
+        _session_edge_counts = {peer: 1}
+        _session_emitted_edges = {peer: edge}
+
+        detect = Worker._session_edges_missing_from_state  # pyright: ignore[reportPrivateUsage]
+
+    stub = _WorkerStub()
+
+    # Edge absent from state: report it for re-emission.
+    missing = stub.detect()
+    assert missing == [Connection(source=self_id, sink=peer, edge=edge)]
+
+    # Edge present in state: nothing to heal.
+    present = State()
+    present.topology.add_connection(
+        Connection(source=self_id, sink=peer, edge=edge)
+    )
+    stub.state = present
+    assert stub.detect() == []
+
+    # Session fully closed (count zero): never re-emit a dead edge.
+    stub.state = State()
+    stub._session_edge_counts = {peer: 0}  # pyright: ignore[reportPrivateUsage]
+    assert stub.detect() == []
+
+
 def test_probe_backoff_schedule() -> None:
     """Failing addresses drop to the slow cadence; success resets.
 
