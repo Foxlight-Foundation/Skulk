@@ -15,6 +15,60 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **Remote members join the fabric as first-class nodes.** A node whose
+  advertised addresses are unreachable from its peers (a NAT'd or proxied
+  cloud container reachable only through the connection it dialed in on) is
+  no longer a floating, unplaceable entry in the topology. Every node now
+  records its live, authenticated fabric connections as topology edges in
+  their own right, annotated `session: true` in `GET /state`; placement can
+  select such a member while host selection never mistakes the session's
+  observed endpoint for a dialable address. Advertised addresses that keep
+  failing their reachability probe drop to a slower retry cadence instead of
+  being probed every sweep, so a remote membership no longer floods logs
+  probing paths that can never work (#662).
+
+- **Nodes that cannot reach the model store download directly from Hugging
+  Face.** Store staging previously assumed every member could reach the
+  store host; a remote node outside the store's network starved with a
+  placement it could never fill. The availability probe now distinguishes a
+  store that answered from a store that is unreachable at the transport
+  level (including persistent mid-transfer dropouts), and an unreachable
+  store routes the download to the model's origin on Hugging Face with the
+  card's pinned revision preserved, logged loudly so a misrouted LAN node is
+  still noticed. A reachable store answering with an error remains a store
+  failure and never silently bypasses the store as the source of truth
+  (#657).
+
+- **Bare-install NVIDIA nodes complete the CUDA engine lane on demand.** A
+  GPU-cloud container or plain checkout that never ran the installer's
+  engine step previously degraded to a CPU-tagged engine while the hardware
+  probe plainly saw the GPU. Provisioning now installs the pinned Foxlight
+  CUDA engine wheel on demand (gated on the wheel's compiled compute-
+  capability floor, with resolution pinned to the Foxlight and PyPI indexes
+  and immune to host-level index overrides), verifies the installed wheel
+  before claiming success, and degrades to the Vulkan/tarball chain with a
+  copy-paste remediation when anything fails (#661).
+
+- **Wire-version discipline makes incompatible builds fail loudly at
+  connect.** The networking layer's private-network key now always derives
+  from a `NETWORK_VERSION` constant (with the optional cluster namespace
+  layered on top), so two builds whose wire protocols differ refuse to
+  connect instead of half-working as a node that syncs events yet never
+  appears in membership. Every wire-surface change must bump the version or
+  record a wire-neutral judgment in `rust/networking/WIRE_COMPAT.md`,
+  enforced by CI. The service startup script now rebuilds the Rust bindings
+  whenever a pulled commit touches the Rust tree or workspace manifests and
+  re-executes itself after a self-update, so an auto-updating node cannot
+  keep running stale wire code while reporting itself current (#659).
+
+- **Telemetry diagnostics count publishes that reached nobody.**
+  `GET /v1/diagnostics/telemetry` now reports `noPeerPublishes` (publishes
+  that found no peers subscribed on the telemetry protocol) separately from
+  transport-pressure failures, and a node with live fabric connections whose
+  telemetry has sustainedly reached nobody logs a rate-limited warning
+  naming the consequence: the node will not appear in membership. A lone
+  node, where no-peer outcomes are the normal state, stays quiet (#660).
+
 - **The speech fabric: text-to-speech, transcription, and realtime voice.**
   Mounted TTS models serve OpenAI-compatible `POST /v1/audio/speech`
   (including streamed MP3/PCM for cards with proven streaming support,
@@ -224,6 +278,22 @@ This project records release notes here and mirrors public-facing notes in
   release, so with the flag on, the section shows a placeholder.
 
 ### Fixed
+
+- **The dashboard node card shows VRAM for discrete-GPU nodes.** The card's
+  memory figure treated any reported VRAM as a unified-memory carve-out and
+  added it to system RAM, so a discrete-GPU node on a big-memory host
+  displayed host RAM plus VRAM (a 45GB A40 on a 512GB cloud host read
+  548.5GB) when VRAM governs what the node can serve. Discrete GPUs now show
+  their VRAM pool used/total with an explicit label, classified by the same
+  GTT-aperture signature placement uses, so discrete AMD cards are handled
+  correctly alongside NVIDIA; unified-memory nodes (Apple, AMD APU
+  carve-out) are unchanged. Placement admission was never affected (#669).
+
+- **Automatic repair re-placements honor the operator's node exclusions.** A
+  placement created with `excluded_nodes` stamps those exclusions onto the
+  instance, so when a node dies and the master re-places the instance, the
+  repair search still avoids the operator's excluded nodes instead of
+  silently forgetting them (#658).
 
 - **A served-MTP model with a missing speculative draft serves without
   speculation instead of crashing.** When a served card declares a
