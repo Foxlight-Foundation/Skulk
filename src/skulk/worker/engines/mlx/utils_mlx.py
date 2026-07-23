@@ -26,7 +26,6 @@ try:
 except ImportError:
     pass  # transformers < 5.0 or bytes_to_unicode not available
 
-from mlx_lm.models import cache as mlx_lm_cache
 from mlx_lm.models.cache import KVCache
 from mlx_lm.models.deepseek_v3 import DeepseekV3Model
 from mlx_lm.tokenizer_utils import TokenizerWrapper
@@ -190,64 +189,6 @@ _QWEN_CONVERTED_NORM_SUFFIXES = (
     ".k_norm.weight",
 )
 _VLM_LOAD_PATCH_LOCK = threading.Lock()
-_MLX_LM_CACHE_MASK_PATCH_LOCK = threading.Lock()
-_mlx_lm_cache_mask_patched = False
-
-
-def _call_cache_mask_with_defaults(
-    original: Callable[[int, int, bool, int | None], object],
-    sequence_length: int,
-    offset: int,
-    return_array: bool = False,
-    window_size: int | None = None,
-) -> object:
-    """Call MLX-LM's cache-mask helper with stable Qwen-compatible defaults."""
-    return original(sequence_length, offset, return_array, window_size)
-
-
-def _install_mlx_lm_cache_mask_defaults() -> None:
-    """Restore defaults expected by MLX-VLM's Qwen 3.5 SSM mask call.
-
-    The pinned Foxlight MLX-LM cache helper requires ``return_array`` and
-    ``window_size`` as positional arguments, while MLX-VLM 0.6.4 calls
-    ``KVCache.make_mask(sequence_length)`` from its Qwen 3.5 SSM path. Keep the
-    upstream behavior and supply only the defaults that MLX-VLM assumes.
-    """
-    global _mlx_lm_cache_mask_patched
-
-    with _MLX_LM_CACHE_MASK_PATCH_LOCK:
-        if _mlx_lm_cache_mask_patched:
-            return
-        module_dict = cast(
-            dict[str, object],
-            cast(object, vars(mlx_lm_cache)),
-        )
-        current = cast(
-            Callable[[int, int, bool, int | None], object],
-            module_dict["create_attention_mask"],
-        )
-
-        def compatible_create_attention_mask(
-            sequence_length: int,
-            offset: int,
-            return_array: bool = False,
-            window_size: int | None = None,
-        ) -> object:
-            return _call_cache_mask_with_defaults(
-                current,
-                sequence_length,
-                offset,
-                return_array,
-                window_size,
-            )
-
-        module_dict["create_attention_mask"] = compatible_create_attention_mask
-        _mlx_lm_cache_mask_patched = True
-        logger.info(
-            "Applying MLX-LM cache-mask defaults required by MLX-VLM Qwen 3.5"
-        )
-
-
 def _has_mlx_safetensors(model_path: Path) -> bool:
     """Return whether a local model bundle contains converted MLX weights."""
     for weight_path in sorted(model_path.glob("*.safetensors")):
@@ -670,6 +611,20 @@ class _VlmModelWrapper(nn.Module):
         object.__setattr__(self, "_pixel_values", pixel_values)
         object.__setattr__(self, "_image_grid_thw", image_grid_thw)
 
+    def make_cache(self) -> list[object]:
+        """Create the native language model's cache, including hybrid SSM state."""
+        inner = cast(object, self._inner)
+        language_model = getattr(inner, "language_model", None)
+        cache_owner = language_model if language_model is not None else inner
+        if hasattr(cache_owner, "make_cache"):
+            factory = cast(
+                Callable[[], list[object]],
+                object.__getattribute__(cache_owner, "make_cache"),
+            )
+            return factory()
+        layers = cast(Model, inner).layers
+        return [KVCache() for _ in layers]
+
     def __call__(self, *args: object, **kwargs: object) -> mx.array:
         pixel_values = cast(
             mx.array | list[mx.array] | None,
@@ -687,6 +642,12 @@ class _VlmModelWrapper(nn.Module):
             )
             if image_grid_thw is not None:
                 kwargs["image_grid_thw"] = image_grid_thw
+            # Pixels belong only to the prompt forward that contains their
+            # image-token span. mlx-lm's prefill helper performs an additional
+            # one-token forward before returning, so retaining them here would
+            # inject image features into a decode token with no image markers.
+            object.__setattr__(self, "_pixel_values", None)
+            object.__setattr__(self, "_image_grid_thw", None)
         result = cast(object, self._inner(*args, **kwargs))
         if hasattr(result, "logits"):
             return cast(_HasLogits, result).logits
@@ -706,7 +667,6 @@ class _VlmModelWrapper(nn.Module):
 
 def _load_vlm_model(model_path: Path, **kwargs: object) -> tuple[nn.Module, object]:
     """Load and wrap one native multimodal model through MLX-VLM."""
-    _install_mlx_lm_cache_mask_defaults()
     mlx_vlm_utils = import_module("mlx_vlm.utils")
     mlx_vlm_utils_dict = cast(dict[str, object], vars(mlx_vlm_utils))
     mlx_vlm_load_model = cast(
