@@ -1428,6 +1428,16 @@ def create_vision_embeddings(
             n = min(n_placeholders, image_features.shape[0])
             image_features = image_features[:n]
 
+        # Gemma 4's text trunk multiplies every value returned by
+        # ``embed_tokens`` by sqrt(hidden_size). Its native multimodal model
+        # scatters projected image features *after* applying that text-only
+        # scale. Distributed placement uses this precomputed-embedding path,
+        # so compensate before ``patch_embed_tokens`` returns the mixed tensor;
+        # the trunk then restores image features to their native magnitude.
+        embed_scale = getattr(cast(object, inner), "embed_scale", None)
+        if isinstance(embed_scale, (int, float)) and embed_scale != 0:
+            image_features = image_features / embed_scale
+
         # Map each image-token position to its feature row via cumulative sum:
         # cumsum over the boolean mask gives 1-based indices; subtract 1 for 0-based.
         # Clip so non-image positions (which get -1) don't go out of bounds.
