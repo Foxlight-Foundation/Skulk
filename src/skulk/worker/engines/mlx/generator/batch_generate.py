@@ -200,6 +200,7 @@ class SkulkBatchGenerator:
         )
 
         is_bench = task_params.bench
+        has_vision = vision is not None
         is_native_vision = vision is not None and vision.pixel_values is not None
 
         prefix_hit_length = 0
@@ -207,15 +208,16 @@ class SkulkBatchGenerator:
         prompt_tokens = all_prompt_tokens
 
         use_prefix_cache = (
-            self.kv_prefix_cache is not None and not is_bench and not is_native_vision
+            self.kv_prefix_cache is not None and not is_bench and not has_vision
         )
-        if self.kv_prefix_cache is not None and is_native_vision and not is_bench:
-            # Native VLM caches contain image-expanded language state whose
-            # restore position cannot be reconstructed from text-token offsets.
-            # Reusing one across independent batched requests progressively
-            # leaks chat-template tokens and drops image detail from responses.
+        if self.kv_prefix_cache is not None and has_vision and not is_bench:
+            # VLM caches contain image-conditioned language state whose restore
+            # position cannot be reconstructed from text-token offsets. The
+            # distributed embedding path is affected as well as native pixels.
+            # Reuse across independent requests progressively leaks chat-template
+            # tokens and drops image detail from responses.
             logger.info(
-                "Disabling KV prefix cache for batched native vision request isolation"
+                "Disabling KV prefix cache for batched vision request isolation"
             )
 
         if use_prefix_cache:

@@ -1,5 +1,6 @@
 """Tests for native-vision generation routing."""
 
+import contextlib
 from collections.abc import Callable, Generator
 from importlib import import_module
 from typing import cast
@@ -402,17 +403,19 @@ def test_batch_generate_rejects_failed_vision_preprocessing(
     assert isinstance(exc_info.value.__cause__, ImportError)
 
 
-def test_batch_generate_native_vision_bypasses_prefix_cache(
+@pytest.mark.parametrize("native_pixels", [False, True])
+def test_batch_generate_vision_bypasses_prefix_cache(
     monkeypatch: pytest.MonkeyPatch,
+    native_pixels: bool,
 ) -> None:
-    """Production batch requests must not restore native multimodal cache state."""
+    """Batch requests must isolate native pixels and precomputed embeddings."""
 
     class _FailingPrefixCache:
         def get_kv_cache(self, *_args: object, **_kwargs: object) -> object:
-            raise AssertionError("native vision must not read the prefix cache")
+            raise AssertionError("vision must not read the prefix cache")
 
         def add_kv_cache(self, *_args: object, **_kwargs: object) -> None:
-            raise AssertionError("native vision must not write the prefix cache")
+            raise AssertionError("vision must not write the prefix cache")
 
     class _FakeNativeModel:
         def __init__(self) -> None:
@@ -436,7 +439,7 @@ def test_batch_generate_native_vision_bypasses_prefix_cache(
         prompt_tokens=mx.array([1, 2, 3, 4]),
         embeddings=mx.zeros((1, 0, 1)),
         media_regions=[],
-        pixel_values=mx.array([[10.0]]),
+        pixel_values=mx.array([[10.0]]) if native_pixels else None,
     )
     model = _FakeNativeModel()
 
@@ -463,6 +466,11 @@ def test_batch_generate_native_vision_bypasses_prefix_cache(
         **_kwargs: object,
     ) -> list[Callable[[mx.array, mx.array], mx.array]]:
         return []
+
+    def _fake_patch_embed_tokens(
+        *_args: object, **_kwargs: object
+    ) -> contextlib.AbstractContextManager[None]:
+        return contextlib.nullcontext()
 
     monkeypatch.setattr(
         batch_generate_module,
@@ -494,6 +502,11 @@ def test_batch_generate_native_vision_bypasses_prefix_cache(
         "make_logits_processors",
         _fake_make_logits_processors,
     )
+    monkeypatch.setattr(
+        batch_generate_module,
+        "patch_embed_tokens",
+        _fake_patch_embed_tokens,
+    )
 
     def _fake_prefill(
         prefill_model: object,
@@ -504,7 +517,7 @@ def test_batch_generate_native_vision_bypasses_prefix_cache(
         *_args: object,
     ) -> tuple[float, int, list[CacheSnapshot]]:
         assert prefill_model is model
-        assert model.pixel_values is not None
+        assert (model.pixel_values is not None) is native_pixels
         assert prompt_tokens.tolist() == [1, 2, 3]
         return 1.0, len(prompt_tokens), []
 
@@ -541,7 +554,7 @@ def test_batch_generate_native_vision_bypasses_prefix_cache(
     uid = generator.submit(TaskId("vision-task"), task, "<bos>")
 
     assert uid == 17
-    assert model.saw_pixel_values is True
+    assert model.saw_pixel_values is native_pixels
     assert model.pixel_values is None
 
 
