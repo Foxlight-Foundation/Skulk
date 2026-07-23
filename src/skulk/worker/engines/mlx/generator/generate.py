@@ -2627,19 +2627,18 @@ def mlx_generate(
     if is_bench:
         kv_prefix_cache = None
 
-    if vision is not None and vision.pixel_values is not None and kv_prefix_cache is not None:
-        # Native VLM caches carry image-expanded language state whose restore
-        # position is not safely described by text-token offsets alone. A cache
-        # hit on a later independent request can therefore resume inside the
-        # prior chat template (observed as leaked ``<|im_start|>`` tokens and
-        # progressively truncated image answers). Until native families expose
-        # a restorable multimodal cache contract, re-prefill their bounded image
-        # prompts for correctness and request isolation.
-        logger.info("Disabling KV prefix cache for native vision request isolation")
+    if vision is not None and kv_prefix_cache is not None:
+        # VLM caches carry image-conditioned language state whose restore
+        # position is not safely described by text-token offsets alone. This is
+        # true both for native pixel tensors and for distributed paths that
+        # precompute image embeddings. A later independent request can otherwise
+        # resume inside the prior chat template (observed as leaked
+        # ``<|im_start|>`` tokens and progressively truncated image answers).
+        logger.info("Disabling KV prefix cache for vision request isolation")
         record_runner_phase(
             "kv_cache_lookup",
-            event="native_vision_prefix_cache_disabled",
-            detail="native multimodal cache restore is not request-safe",
+            event="vision_prefix_cache_disabled",
+            detail="multimodal cache restore is not request-safe",
             attrs={**_media_region_attrs(media_regions)},
             task_id=trace_task_id,
         )
