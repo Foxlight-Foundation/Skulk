@@ -23,6 +23,7 @@ import io
 import json
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Protocol, cast
@@ -84,9 +85,10 @@ MxArrayInput = (
 
 def _object_dict(value: object) -> JsonDict:
     """Return a string-keyed object mapping for dynamic config data."""
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {
-            str(key): item for key, item in cast(dict[object, object], value).items()
+            str(key): item
+            for key, item in cast(Mapping[object, object], value).items()
         }
     return {}
 

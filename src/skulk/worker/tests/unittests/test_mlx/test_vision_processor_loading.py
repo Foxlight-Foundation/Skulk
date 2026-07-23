@@ -2,7 +2,6 @@
 
 """Tests for MLX-native image processor discovery."""
 
-from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -207,10 +206,11 @@ def test_gemma3n_processor_uses_configured_pil_backend_without_torchvision(
     processor = encoder.processor
     assert processor is not None
     assert type(processor).__name__ == "SiglipImageProcessorPil"
-    raw = cast(
-        Mapping[str, object],
-        processor(images=[Image.new("RGB", (32, 24))], return_tensors="np"),
+    pixel_values, grid_thw, token_counts = encoder.preprocess_images(
+        [Image.new("RGB", (32, 24))]
     )
-    pixel_values = cast(np.ndarray[tuple[int, ...], np.dtype[np.float32]], raw["pixel_values"])
+    assert not isinstance(pixel_values, list)
     assert pixel_values.shape == (1, 3, 768, 768)
-    assert pixel_values.dtype == np.float32
+    assert grid_thw is None
+    assert token_counts == [256]
+    assert np.asarray(pixel_values).dtype == np.float32
