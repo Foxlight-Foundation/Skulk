@@ -704,7 +704,15 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     initiative in the foxlight-docs hub (Phase C).
     """
     served_spec_type: (
-        Literal["none", "draft_mtp", "draft_eagle3", "draft_simple", "ngram"] | None
+        Literal[
+            "none",
+            "draft_mtp",
+            "draft_eagle3",
+            "draft_simple",
+            "draft_dflash",
+            "ngram",
+        ]
+        | None
     ) = None
     """Speculative-decoding mode for the ``llama_server`` (served-backend) engine.
 

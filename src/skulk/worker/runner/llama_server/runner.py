@@ -98,6 +98,7 @@ _SPEC_TYPE_FLAG: Final[dict[str, str]] = {
     "draft_mtp": "draft-mtp",
     "draft_eagle3": "draft-eagle3",
     "draft_simple": "draft-simple",
+    "draft_dflash": "draft-dflash",
     "ngram": "ngram-cache",
 }
 
@@ -105,7 +106,7 @@ _SPEC_TYPE_FLAG: Final[dict[str, str]] = {
 # optional (Qwen/DeepSeek/GLM bake the heads into the base GGUF; Gemma 4 instead
 # supplies its assistant as a draft), and ``ngram`` needs no model at all.
 _DRAFT_MODEL_REQUIRED: Final[frozenset[str]] = frozenset(
-    {"draft_simple", "draft_eagle3"}
+    {"draft_simple", "draft_eagle3", "draft_dflash"}
 )
 
 

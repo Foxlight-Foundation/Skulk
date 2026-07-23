@@ -15,6 +15,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **Laguna S 2.1 on the llama.cpp engines, with native DFlash speculative
+  decoding.** The managed llama-server pin advances to b10092, whose window
+  landed the Laguna 2 model family and the full native DFlash arc upstream,
+  ending the fork-only era for the drafter. The served engine gains the
+  `draft_dflash` speculative type (`--spec-type draft-dflash` plus a
+  same-repo drafter companion), and a bundled card serves Poolside's
+  official Laguna S 2.1 Q4_K_M with its in-repo DFlash sidecar co-fetched
+  automatically; the Q8_0 quantization serves through the multi-node
+  llama_server pool.
+
 - **Remote members join the fabric as first-class nodes.** A node whose
   advertised addresses are unreachable from its peers (a NAT'd or proxied
   cloud container reachable only through the connection it dialed in on) is
