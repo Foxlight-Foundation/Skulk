@@ -1,6 +1,7 @@
 # pyright: reportPrivateUsage=false, reportUnknownVariableType=false
 # pyright: reportUnknownArgumentType=false, reportUnknownMemberType=false
 # pyright: reportIndexIssue=false, reportArgumentType=false
+# pyright: reportMissingTypeStubs=false
 """Unit tests for the reference-snapshot semantics of SSM cache rollback.
 
 ``snapshot_ssm_states`` reference-clones ArraysCache entries instead of
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import mlx.core as mx
 from mlx_lm.models.cache import ArraysCache, KVCache, RotatingKVCache
+from mlx_vlm.models.cache import ArraysCache as VlmArraysCache
 
 from skulk.worker.engines.mlx.cache import (
     snapshot_ssm_states,
@@ -83,6 +85,22 @@ class TestArraysCacheSnapshot:
 
         trim_cache(live, 2, snapshot)
         assert kv.offset == 4
+
+    def test_mlx_vlm_arrays_cache_is_snapshotted_and_restored(self) -> None:
+        """Native hybrid VLM caches need the same rollback as MLX-LM caches."""
+        ssm = VlmArraysCache(2)
+        ssm[0] = mx.full((1, 4), 1.0)
+        ssm[1] = mx.full((1, 4), 2.0)
+        live: list[object] = [ssm]
+        snapshot = snapshot_ssm_states(live)
+
+        ssm[0] = mx.full((1, 4), 9.0)
+        trim_cache(live, 1, snapshot)
+
+        restored = live[0]
+        assert isinstance(restored, VlmArraysCache)
+        assert mx.allclose(restored[0], mx.full((1, 4), 1.0))
+        assert mx.allclose(restored[1], mx.full((1, 4), 2.0))
 
 
 class TestRotatingKVCacheSnapshot:
