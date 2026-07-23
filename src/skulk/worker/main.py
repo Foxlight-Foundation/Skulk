@@ -61,6 +61,7 @@ from skulk.shared.types.events import (
     IndexedEvent,
     NodeDownloadProgress,
     NodeGatheredInfo,
+    NodeTimedOut,
     StagedModelEvicted,
     StateSnapshotHydrated,
     TaskCreated,
@@ -1803,6 +1804,18 @@ class Worker:
                 # and --no-worker nodes (#279 slice 2).
                 if self._telemetry_view is not None:
                     record_membership_from_event(self._telemetry_view, event)
+
+                # A timed-out peer's libp2p socket can outlive the timeout (a
+                # wedged host keeps TCP open, no disconnect event fires), so
+                # the session-edge self-heal would otherwise re-mint the
+                # pruned node as an edge the master can never time out again
+                # (its last_seen entry is gone). The cluster's timeout
+                # verdict outranks the socket: drop the session bookkeeping
+                # so nothing re-emits; a genuinely recovering peer re-enters
+                # through fresh connect events (PR #674 review).
+                if isinstance(event, NodeTimedOut):
+                    self._session_edge_counts.pop(event.node_id, None)
+                    self._session_emitted_edges.pop(event.node_id, None)
 
                 if isinstance(event, TaskCreated) and isinstance(
                     event.task, (TextGeneration, ImageEdits)
