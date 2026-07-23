@@ -482,7 +482,13 @@ export function ChatMessages({
   return (
     <Container ref={containerRef} className={className}>
       {messages.map((msg, i) => (
-        <MessageCard key={msg.id} $role={msg.role}>
+        <MessageCard
+          key={msg.id}
+          $role={msg.role}
+          aria-label={msg.role === 'assistant'
+            ? t('chat.messages.assistantMessage', 'Assistant message')
+            : t('chat.messages.userMessage', 'User message')}
+        >
           {/* Header */}
           <MsgHeader>
             {msg.role === 'assistant' ? (
@@ -671,7 +677,10 @@ export function ChatMessages({
 
       {/* Streaming response (not yet a full message) */}
       {(streamingContent != null || streamingThinking) && (
-        <MessageCard $role="assistant">
+        <MessageCard
+          $role="assistant"
+          aria-label={t('chat.messages.assistantMessage', 'Assistant message')}
+        >
           <MsgHeader>
             <Dot $color={theme.colors.gold} />
             <RoleLabel $role="assistant">{t('chat.messages.assistantRole', 'Skulk')}</RoleLabel>

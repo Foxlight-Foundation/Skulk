@@ -623,7 +623,12 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
               <Button variant="danger" size="sm" onClick={() => setPurgeConfirm(true)}>
                 <TrashIcon /> {t('downloads.actions.purgeNodeCaches', 'Purge Node Caches')}
               </Button>
-              <Button variant="primary" size="sm" onClick={() => setSearchOpen(true)}>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => setSearchOpen(true)}
+                aria-label={t('downloads.actions.findModels', 'Find Models')}
+              >
                 <SearchIcon /> {t('downloads.actions.findModels', 'Find Models')}
               </Button>
             </>

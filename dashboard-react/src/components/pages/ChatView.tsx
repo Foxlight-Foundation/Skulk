@@ -29,6 +29,7 @@ import {
   fetchSpeechVoiceCatalog,
 } from '../../audio/speechVoiceSelection';
 import { buildSpeechSynthesisRequest } from '../../audio/speechSynthesisRequest';
+import { buildApiMessages, type ApiMessagePayload } from './chatApiPayload';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -189,8 +190,6 @@ const GPT_OSS_BROWSER_TOOLS = {
 } as const;
 
 type BuiltinBrowserToolName = keyof typeof GPT_OSS_BROWSER_TOOLS;
-
-type ApiMessagePayload = Record<string, unknown>;
 
 function isAudioResponseFormat(value: string | null | undefined): value is AudioResponseFormat {
   return AUDIO_RESPONSE_FORMATS.includes(value as AudioResponseFormat);
@@ -391,24 +390,6 @@ function mergeThinkingContent(existing: string, incoming: string): string {
     return existing;
   }
   return existing + incoming;
-}
-
-function buildApiMessages(messages: ChatMessage[]): ApiMessagePayload[] {
-  return messages.map((message) => {
-    if (message.attachments?.some((attachment) => attachment.type.startsWith('image/') && attachment.preview)) {
-      const parts: Array<{ type: string; text?: string; image_url?: { url: string } }> = [];
-      for (const attachment of message.attachments) {
-        if (attachment.type.startsWith('image/') && attachment.preview) {
-          parts.push({ type: 'image_url', image_url: { url: attachment.preview } });
-        }
-      }
-      if (message.content) {
-        parts.push({ type: 'text', text: message.content });
-      }
-      return { role: message.role, content: parts };
-    }
-    return { role: message.role, content: message.content };
-  });
 }
 
 function normalizeToolArguments(rawArguments: string | undefined): { query: string; top_k?: number } {
@@ -1621,7 +1602,11 @@ export function ChatView({
   }
 
   const modelSelector = readyModels.length > 1 ? (
-    <ModelSelect value={selectedModelId ?? ''} onChange={(e) => selectModel(e.target.value)}>
+    <ModelSelect
+      value={selectedModelId ?? ''}
+      onChange={(e) => selectModel(e.target.value)}
+      aria-label={t('chat.view.selectModel', 'Select chat model')}
+    >
       {readyModels.map((m) => (
         <option key={m.instanceId} value={m.modelId}>
           {m.modelId.split('/').pop()}

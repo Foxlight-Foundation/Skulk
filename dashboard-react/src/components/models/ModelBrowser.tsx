@@ -183,6 +183,7 @@ export function ModelBrowser({
                   : t('modelBrowser.searchHuggingFace', 'Search all of HuggingFace...'))
               : t('modelBrowser.searchModels', 'Search models...')}
             autoFocus
+            ariaLabel={t('modelBrowser.searchAriaLabel', 'Search models')}
           />
           {isHf && onToggleMlxOnly && (
             <FilterBtn

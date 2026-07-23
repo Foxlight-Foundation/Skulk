@@ -319,6 +319,36 @@ releasable state. Open pull requests against `dev` (the repository
 default); release promotion PRs from `dev` to `main` are opened by the
 maintainers.
 
+### Fresh-install release qualification
+
+An end-to-end run against an existing configured fleet is regression coverage,
+not proof that a new installation works. Before a release promotion, the
+candidate commit must pass the fresh-install qualification matrix through the
+public `skulk-test-harness` command. After `dev` is promoted to `main`, the
+shipping qualification repeats the matrix using the literal installer command
+from the README. The release or tag is not published until both runs are green.
+
+The candidate profile installs a full commit ID; the shipping profile supplies
+no ref or Skulk runtime overrides. Both profiles require the installer-generated
+single-node configuration and the shipped transport/backend defaults.
+
+Release operators run:
+
+```bash
+# Before dev -> main
+uv run skulk-harness fresh-install qualify \
+  --profile candidate --expected-commit <full-dev-sha> \
+  --config <private-fresh-install-config>
+
+# After promotion, before release/tag publication
+uv run skulk-harness fresh-install qualify \
+  --profile shipping \
+  --config <private-fresh-install-config>
+```
+
+The green reports must cover Apple Silicon, AMD Linux, and a clean RunPod
+NVIDIA pod. A configured-fleet battery is not an acceptable substitute.
+
 ## Submitting Changes
 
 1. Fork the repository

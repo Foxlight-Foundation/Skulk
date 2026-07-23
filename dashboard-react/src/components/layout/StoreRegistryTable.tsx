@@ -773,7 +773,15 @@ export function StoreRegistryTable({
                         </DisabledBtn>
                       </InfoTooltip>
                     ) : (
-                      <PlayBtn onClick={() => onLaunch(entry.model_id)} title={t('storeRegistry.launchModel', 'Launch model')}>
+                      <PlayBtn
+                        onClick={() => onLaunch(entry.model_id)}
+                        title={t('storeRegistry.launchModel', 'Launch model')}
+                        aria-label={t(
+                          'storeRegistry.launchNamedModel',
+                          'Launch {modelId}',
+                          { modelId: entry.model_id },
+                        )}
+                      >
                         <MdPlayArrow size={20} />
                       </PlayBtn>
                     )
@@ -837,7 +845,15 @@ export function StoreRegistryTable({
                         </InfoTooltip>
                       ) : badge}
                       {ready && onChat && supportsTextChat && (
-                        <ChatBubble onClick={() => onChat(entry.model_id)} title={t('storeRegistry.chatWithModel', 'Chat with model')}>
+                        <ChatBubble
+                          onClick={() => onChat(entry.model_id)}
+                          title={t('storeRegistry.chatWithModel', 'Chat with model')}
+                          aria-label={t(
+                            'storeRegistry.chatWithNamedModel',
+                            'Chat with {modelId}',
+                            { modelId: entry.model_id },
+                          )}
+                        >
                           <BsChatDotsFill size={14} />
                         </ChatBubble>
                       )}

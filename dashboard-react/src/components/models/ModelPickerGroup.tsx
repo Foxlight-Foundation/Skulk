@@ -340,7 +340,26 @@ export function ModelPickerGroup({
 
   return (
     <div>
-      <Row $disabled={disabled} $highlighted={isHighlighted} onClick={handleRowClick}>
+      <Row
+        $disabled={disabled}
+        $highlighted={isHighlighted}
+        onClick={handleRowClick}
+        role="button"
+        tabIndex={disabled ? -1 : 0}
+        aria-label={singleVariant
+          ? t('modelPickerGroup.selectModel', 'Download {modelId}', {
+              modelId: singleVariant.id,
+            })
+          : t('modelPickerGroup.expandGroup', 'Expand {groupName}', {
+              groupName: group.name,
+            })}
+        onKeyDown={(event) => {
+          if (!disabled && (event.key === 'Enter' || event.key === ' ')) {
+            event.preventDefault();
+            handleRowClick();
+          }
+        }}
+      >
         {/* Chevron */}
         {hasMultipleVariants ? (
           <Chevron $open={isExpanded}>▶</Chevron>
@@ -407,7 +426,21 @@ export function ModelPickerGroup({
             const vSelected = selectedModelId === v.id;
 
             return (
-              <VariantRow key={v.id} onClick={() => onSelectModel(v.id)}>
+              <VariantRow
+                key={v.id}
+                onClick={() => onSelectModel(v.id)}
+                role="button"
+                tabIndex={0}
+                aria-label={t('modelPickerGroup.selectModel', 'Download {modelId}', {
+                  modelId: v.id,
+                })}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    onSelectModel(v.id);
+                  }
+                }}
+              >
                 {v.quantization && <Badge>{v.quantization}</Badge>}
                 <span style={{ color: fitColor(vFit, theme), flex: 1 }}>
                   {sizeText(v.storage_size_megabytes)}
