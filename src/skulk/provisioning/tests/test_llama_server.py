@@ -480,6 +480,28 @@ def test_cuda_wheel_install_gates_on_capability_and_uv(
     assert not _REAL_TRY_INSTALL_CUDA_WHEEL(make_facts(gpus=(NVIDIA_A40,)))
 
 
+def test_cuda_wheel_install_degrades_when_uv_cannot_execute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A which()-found uv that fails to exec degrades, never crashes.
+
+    A stale path, stripped exec bit, or exec-format error surfaces from
+    subprocess.run as OSError; letting it propagate would break
+    ensure_llama_server's degrade-never-crash startup contract
+    (PR #665 review).
+    """
+
+    def _uv_on_path(_name: str) -> str:
+        return "/usr/bin/uv"
+
+    def _cannot_exec(*args: object, **kwargs: object) -> None:
+        raise OSError(8, "Exec format error")
+
+    monkeypatch.setattr(provisioning.shutil, "which", _uv_on_path)
+    monkeypatch.setattr(provisioning.subprocess, "run", _cannot_exec)
+    assert not _REAL_TRY_INSTALL_CUDA_WHEEL(make_facts(gpus=(NVIDIA_A40,)))
+
+
 def test_ensure_installs_cuda_wheel_on_demand(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

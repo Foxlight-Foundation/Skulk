@@ -307,6 +307,17 @@ def try_install_cuda_wheel(facts: NodeFacts) -> bool:
             f"manually: {manual_command})"
         )
         return False
+    except OSError as error:
+        # A which()-found uv that cannot actually execute (stale path,
+        # stripped exec bit, exec-format error) must degrade like every
+        # other installer failure, never crash node startup (PR #665
+        # review).
+        logger.warning(
+            f"could not execute uv for the CUDA engine wheel install "
+            f"({error}); the node degrades to the Vulkan/tarball chain "
+            f"(install manually: {manual_command})"
+        )
+        return False
     if completed.returncode != 0:
         logger.warning(
             "CUDA engine wheel install failed (exit "
