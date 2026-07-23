@@ -286,9 +286,13 @@ This project records release notes here and mirrors public-facing notes in
   that entry behind forever, because the membership timeout only reaps nodes
   it has heard from; a crash-looping box could litter the graph with a new
   phantom entry per restart attempt. Deleting the last edge pointing at a
-  never-a-member node now removes the node itself, along with any dangling
-  edges the dead peer emitted that nobody remains to delete; real members
-  are untouched (#671).
+  never-a-member node now removes the node itself, cascading through any
+  dangling edges the dead peer emitted that nobody remains to delete; real
+  members are untouched. Session edges are additionally emitted only for
+  current members, and each node re-emits its live member edges if state
+  loses them, so a timed-out peer's lingering socket cannot re-mint a
+  phantom while a recovering peer's edge returns within one sweep of its
+  membership republication (#671).
 
 - **The dashboard node card shows VRAM for discrete-GPU nodes.** The card's
   memory figure treated any reported VRAM as a unified-memory carve-out and

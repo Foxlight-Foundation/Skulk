@@ -117,9 +117,13 @@ def test_session_edge_self_heal_detects_state_loss() -> None:
         session=True,
     )
 
+    from datetime import datetime, timezone
+
+    member_state = State(last_seen={peer: datetime.now(timezone.utc)})
+
     class _WorkerStub:
         node_id = self_id
-        state = State()
+        state = member_state
         _session_edge_counts = {peer: 1}
         _session_emitted_edges = {peer: edge}
 
@@ -127,20 +131,26 @@ def test_session_edge_self_heal_detects_state_loss() -> None:
 
     stub = _WorkerStub()
 
-    # Edge absent from state: report it for re-emission.
+    # Member peer, edge absent from state: report it for re-emission.
     missing = stub.detect()
     assert missing == [Connection(source=self_id, sink=peer, edge=edge)]
 
     # Edge present in state: nothing to heal.
-    present = State()
+    present = State(last_seen={peer: datetime.now(timezone.utc)})
     present.topology.add_connection(
         Connection(source=self_id, sink=peer, edge=edge)
     )
     stub.state = present
     assert stub.detect() == []
 
-    # Session fully closed (count zero): never re-emit a dead edge.
+    # NOT a member (pre-membership, or timed out with a lingering socket):
+    # membership is the emission gate, so nothing is emitted or healed
+    # until a NodeGatheredInfo stamps last_seen.
     stub.state = State()
+    assert stub.detect() == []
+
+    # Session fully closed (count zero): never re-emit a dead edge.
+    stub.state = member_state
     stub._session_edge_counts = {peer: 0}  # pyright: ignore[reportPrivateUsage]
     assert stub.detect() == []
 

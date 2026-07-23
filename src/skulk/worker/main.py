@@ -61,7 +61,6 @@ from skulk.shared.types.events import (
     IndexedEvent,
     NodeDownloadProgress,
     NodeGatheredInfo,
-    NodeTimedOut,
     StagedModelEvicted,
     StateSnapshotHydrated,
     TaskCreated,
@@ -1805,17 +1804,6 @@ class Worker:
                 if self._telemetry_view is not None:
                     record_membership_from_event(self._telemetry_view, event)
 
-                # A timed-out peer's libp2p socket can outlive the timeout (a
-                # wedged host keeps TCP open, no disconnect event fires), so
-                # the session-edge self-heal would otherwise re-mint the
-                # pruned node as an edge the master can never time out again
-                # (its last_seen entry is gone). The cluster's timeout
-                # verdict outranks the socket: drop the session bookkeeping
-                # so nothing re-emits; a genuinely recovering peer re-enters
-                # through fresh connect events (PR #674 review).
-                if isinstance(event, NodeTimedOut):
-                    self._session_edge_counts.pop(event.node_id, None)
-                    self._session_emitted_edges.pop(event.node_id, None)
 
                 if isinstance(event, TaskCreated) and isinstance(
                     event.task, (TextGeneration, ImageEdits)
@@ -2918,6 +2906,16 @@ class Worker:
         for peer, edge in self._session_emitted_edges.items():
             if self._session_edge_counts.get(peer, 0) <= 0:
                 continue
+            # MEMBERSHIP is the emission gate (here and at connect time): a
+            # session edge exists in state only for a peer with a current
+            # last_seen entry. A timed-out peer whose socket lingers is not
+            # re-minted (the cluster's verdict outranks the socket), a
+            # pre-membership peer gets its edge within one sweep of its
+            # first NodeGatheredInfo, and a recovering same-process peer
+            # heals from this preserved endpoint memory once it republishes
+            # membership (PR #674 review).
+            if peer not in self.state.last_seen:
+                continue
             if edge in self.state.topology.get_all_connections_between(
                 self.node_id, peer
             ):
@@ -2972,6 +2970,12 @@ class Worker:
                     session=True,
                 )
                 emitted_edges[peer] = edge
+                # Membership emission gate: only current members get edges
+                # (see _session_edges_missing_from_state); a non-member
+                # peer's edge is held as endpoint memory and emitted by the
+                # self-heal sweep once membership appears (PR #674 review).
+                if peer not in self.state.last_seen:
+                    continue
                 await self.event_sender.send(
                     TopologyEdgeCreated(
                         conn=Connection(source=self.node_id, sink=peer, edge=edge)
@@ -2998,6 +3002,11 @@ class Worker:
                         session=True,
                     )
                     emitted_edges[peer] = edge
+                    # Membership emission gate; the self-heal sweep emits
+                    # once the peer's NodeGatheredInfo stamps last_seen
+                    # (PR #674 review).
+                    if peer not in self.state.last_seen:
+                        continue
                     await self.event_sender.send(
                         TopologyEdgeCreated(
                             conn=Connection(
