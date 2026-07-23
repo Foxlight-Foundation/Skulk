@@ -2,6 +2,13 @@
 export interface MactopMemory {
   ram_usage: number;
   ram_total: number;
+  /**
+   * True when the figures describe a discrete GPU's VRAM pool rather than
+   * system/unified RAM. Discrete-GPU nodes serve models out of VRAM, so the
+   * node card shows that pool (labeled) instead of host RAM, which on
+   * big-host GPU clouds overstates useful capacity by an order of magnitude.
+   */
+  is_vram?: boolean;
 }
 
 /** Temperature sample returned by the topology polling layer. */
