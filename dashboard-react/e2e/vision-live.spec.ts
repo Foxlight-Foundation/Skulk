@@ -85,16 +85,21 @@ test('the built-in dashboard sends and understands a real portrait', async ({ pa
   const attachButton = page.getByRole('button', { name: 'Attach file' });
   await expect(attachButton).toBeEnabled();
   await page.locator('input[type="file"][accept="image/*"]').setInputFiles(exactImagePath);
-  await expect(page.getByText(basename(exactImagePath))).toBeVisible();
+  await expect(page.getByRole('img', { name: basename(exactImagePath) })).toBeVisible();
 
   const prompt = 'Identify the person in this image. Then report the clothing colors and the background color. Be concise.';
   await page.locator('textarea').fill(prompt);
-  const completionRequestPromise = page.waitForRequest(
-    (request) => request.method() === 'POST' && new URL(request.url()).pathname === '/v1/chat/completions',
+  const completionResponsePromise = page.waitForResponse(
+    (response) => response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/v1/chat/completions',
   );
   await page.getByRole('button', { name: 'Send message' }).click();
 
-  const request = await completionRequestPromise;
+  const response = await completionResponsePromise;
+  await response.finished();
+  expect(response.ok()).toBe(true);
+  await expect(page.getByRole('button', { name: 'Send message' })).toBeVisible();
+  const request = response.request();
   const body = completionBody(request);
   expect(body.model).toBe(exactModelId);
   const content = finalUserContent(body);
