@@ -1020,7 +1020,12 @@ Behavior note:
 }
 ```
 
-Fetches metadata and adds a custom model card to the cluster catalog. The
+Fetches metadata and adds a custom model card to the cluster catalog. A
+generated GGUF card is compatible with both llama.cpp engines and prefers
+the served `llama_server` tags, so on a node running llama-server it gets
+that engine's concurrency slots and is eligible for multi-node pooling via
+RPC; nodes without a served binary fall through to the in-process engine.
+The
 `model_id` field is required. `gguf_file` is optional; when supplied it must be
 an exact repo-relative GGUF weight path and the card pins that quant instead of
 using Skulk's default GGUF preference. If the selected quant is split, Skulk

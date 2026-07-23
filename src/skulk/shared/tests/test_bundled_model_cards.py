@@ -150,7 +150,7 @@ def test_bundled_card_invariants(kind: str, path: Path) -> None:
             assert "llama_server" in engines, (
                 "served_spec_type without the llama_server engine (dead config)"
             )
-        if runtime.served_spec_type in ("draft_simple", "draft_eagle3"):
+        if runtime.served_spec_type in ("draft_simple", "draft_eagle3", "draft_dflash"):
             assert runtime.served_spec_draft_repo and runtime.served_spec_draft_file, (
                 f"served_spec_type={runtime.served_spec_type} requires a draft "
                 "repo and file"

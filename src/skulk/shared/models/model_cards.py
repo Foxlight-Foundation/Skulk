@@ -717,8 +717,9 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     """Speculative-decoding mode for the ``llama_server`` (served-backend) engine.
 
     Maps to a ``llama-server --spec-type`` token in the runner
-    (``_SPEC_TYPE_FLAG``): ``draft_mtp`` -> ``draft-mtp`` (the model's own built-in
-    MTP heads, no draft model needed; Qwen3.6/DeepSeek/GLM/Kimi/Nemotron),
+    (``_SPEC_TYPE_FLAG``): ``draft_mtp`` -> ``draft-mtp`` (usually the model's own built-in
+    MTP heads; a separate draft is optional, e.g. Gemma 4's assistant;
+    Qwen3.6/DeepSeek/GLM/Kimi/Nemotron bake theirs in),
     ``draft_eagle3`` -> ``draft-eagle3`` (an EAGLE-3 head), ``draft_simple`` ->
     ``draft-simple`` (a separate draft model), ``draft_dflash`` ->
     ``draft-dflash`` (a separate block-parallel DFlash speculator GGUF via
