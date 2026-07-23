@@ -2917,7 +2917,10 @@ class Worker:
         within one sweep instead of persisting until reconnect.
         """
         missing: list[Connection] = []
-        for peer, edge in self._session_emitted_edges.items():
+        # Snapshot: the ingress task mutates this map; there is no await in
+        # this loop today, but the copy keeps that invariant out of the
+        # correctness argument.
+        for peer, edge in list(self._session_emitted_edges.items()):
             if self._session_edge_counts.get(peer, 0) <= 0:
                 continue
             # MEMBERSHIP on both endpoints is the emission gate (here and
@@ -3181,6 +3184,10 @@ class Worker:
                 if (
                     self._session_edge_counts.get(healed.sink, 0) <= 0
                     or self._session_emitted_edges.get(healed.sink) != healed.edge
+                    # Membership can change between sends: an earlier send's
+                    # await can let the event applier apply NodeTimedOut for
+                    # this peer or for self (PR #674 review).
+                    or not self._session_edge_may_emit(healed.sink)
                 ):
                     continue
                 logger.debug(
