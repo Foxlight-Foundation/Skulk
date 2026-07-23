@@ -1597,3 +1597,43 @@ def test_repair_commands_preserve_original_exclusions() -> None:
         instance, {node_ids[1]}
     )
     assert set(download_failed.excluded_nodes) == {operator_excluded, node_ids[1]}
+
+    # A repair re-placement searches with the union but stamps only the
+    # ORIGINAL intent on the new instance, so a transiently failed node is
+    # not laundered into permanent operator intent across repair
+    # generations (PR #667 review). Use a width-1 placement so the union
+    # (operator exclusion plus the failed node) still leaves a host in the
+    # three-node topology: the failed node may be excluded for THIS
+    # placement yet must not be remembered as caller intent.
+    single = PlaceInstance(
+        model_card=card,
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=1,
+        excluded_nodes=[operator_excluded],
+    )
+    placed_single = place_instance(
+        single,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        excluded_nodes={operator_excluded},
+    )
+    single_instance = next(iter(placed_single.values()))
+    failed_node = next(iter(single_instance.shard_assignments.node_to_runner))
+    repair = replacement_command_for_download_failed_instance(
+        single_instance, {failed_node}
+    )
+    repaired = place_instance(
+        repair,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        excluded_nodes=set(repair.excluded_nodes),
+        stamped_exclusions=set(single_instance.excluded_nodes),
+    )
+    repaired_instance = next(iter(repaired.values()))
+    assert repaired_instance.excluded_nodes == [operator_excluded]
+    assert failed_node not in repaired_instance.shard_assignments.node_to_runner

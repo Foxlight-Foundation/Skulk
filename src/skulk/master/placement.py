@@ -341,6 +341,7 @@ def place_instance(
     excluded_nodes: set[NodeId] | None = None,
     node_resources: Mapping[NodeId, NodeResources] | None = None,
     node_vram: Mapping[NodeId, Memory] | None = None,
+    stamped_exclusions: set[NodeId] | None = None,
 ) -> dict[InstanceId, Instance]:
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
@@ -754,11 +755,18 @@ def place_instance(
     cycle_digraph: Topology = topology.get_subgraph_from_nodes(selected_cycle.node_ids)
 
     instance_id = InstanceId()
-    # Persist the effective per-placement exclusions on the instance (#658):
+    # Persist the CALLER'S per-placement exclusions on the instance (#658):
     # repair re-placements reconstruct intent from the instance, and without
-    # this record they widened eligibility back to the full topology. Sorted
-    # so the replicated placement event is deterministic.
-    stamped_exclusions = sorted(excluded_nodes) if excluded_nodes else []
+    # this record they widened eligibility back to the full topology. Repair
+    # callers pass ``stamped_exclusions`` (the original intent) separately
+    # from ``excluded_nodes`` (intent plus their own transiently failed
+    # nodes), so one transient failure is not laundered into permanent
+    # operator intent across repair generations (PR #667 review). Sorted so
+    # the replicated placement event is deterministic.
+    stamp_source = (
+        stamped_exclusions if stamped_exclusions is not None else excluded_nodes
+    )
+    stamped_exclusions_list = sorted(stamp_source) if stamp_source else []
     target_instances = dict(deepcopy(current_instances))
 
     if selected_is_rpc:
@@ -786,7 +794,7 @@ def place_instance(
             instance_id=instance_id,
             shard_assignments=shard_assignments,
             context_token_limit=context_token_limit,
-            excluded_nodes=stamped_exclusions,
+            excluded_nodes=stamped_exclusions_list,
             driver_node=driver_node,
             donor_endpoints=donor_endpoints,
         )
@@ -833,7 +841,7 @@ def place_instance(
                 instance_id=instance_id,
                 shard_assignments=shard_assignments,
                 context_token_limit=context_token_limit,
-                excluded_nodes=stamped_exclusions,
+                excluded_nodes=stamped_exclusions_list,
                 jaccl_devices=mlx_jaccl_devices,
                 jaccl_coordinators=mlx_jaccl_coordinators,
             )
@@ -851,7 +859,7 @@ def place_instance(
                 instance_id=instance_id,
                 shard_assignments=shard_assignments,
                 context_token_limit=context_token_limit,
-                excluded_nodes=stamped_exclusions,
+                excluded_nodes=stamped_exclusions_list,
                 hosts_by_node=hosts_by_node,
                 ephemeral_port=ephemeral_port,
             )
