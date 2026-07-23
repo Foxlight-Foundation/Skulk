@@ -109,12 +109,12 @@ delivered directly instead of broadcast. This includes generated `DATA`, generic
 `TRACE_DATA`. Zenoh also preserves the order of a single producer's messages,
 which matters for the next section. Zenoh is the shipping default, including on
 a fresh install. With no transport settings, Skulk binds Zenoh to its preferred
-peer-reachable local IPv4 address (or loopback when offline) and uses local
-multicast scouting to discover other zero-config nodes. Supplying
-`SKULK_ZENOH_CONNECT` switches to explicit peer endpoints for routed or
-Tailscale deployments; `SKULK_ZENOH_LISTEN` overrides the selected local
-listener. Set `SKULK_ZENOH_DATA_PLANE=0` only to force the legacy gossip
-fallback.
+private-LAN or CGNAT fabric IPv4 address (or loopback when offline or
+public-only) and uses local multicast scouting to discover other zero-config
+nodes. Supplying `SKULK_ZENOH_CONNECT` switches to explicit peer endpoints for
+routed or Tailscale deployments; `SKULK_ZENOH_LISTEN` overrides the selected
+local listener and is required to bind a public address. Set
+`SKULK_ZENOH_DATA_PLANE=0` only to force the legacy gossip fallback.
 
 **Every node in a cluster must use the same data-plane transport.** Skulk does not
 bridge the two, so a partially configured fleet (Zenoh on some nodes, gossip on

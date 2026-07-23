@@ -253,9 +253,11 @@ treated as unknown during startup; a mismatch requires positive advertisements
 of both transports.
 
 Zenoh is the shipping default, including for a zero-config installation. Startup
-binds a specific peer-reachable local IPv4 and enables local multicast scouting
-when no explicit peer list is configured. Routed and Tailscale deployments can
-set `SKULK_ZENOH_CONNECT`, which keeps multicast off and uses those fixed
+binds a specific private-LAN or CGNAT fabric IPv4, falling back to loopback on
+offline or public-only hosts, and enables local multicast scouting when no
+explicit peer list is configured. A public listener requires an explicit
+`SKULK_ZENOH_LISTEN`. Routed and Tailscale deployments can set
+`SKULK_ZENOH_CONNECT`, which keeps multicast off and uses those fixed
 endpoints; `SKULK_ZENOH_LISTEN` overrides the selected listener.
 `SKULK_ZENOH_DATA_PLANE=0` is the explicit legacy-gossipsub escape hatch. This
 keeps a fresh install on the same data-plane implementation as the regular E2E

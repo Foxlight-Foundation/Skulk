@@ -18,8 +18,9 @@ This project records release notes here and mirrors public-facing notes in
 - **Fresh installs now use the same Zenoh data plane as the E2E qualification
   fleet.** An unset `SKULK_ZENOH_DATA_PLANE` selects Zenoh instead of silently
   falling back to gossipsub. Zero-config startup binds a specific
-  peer-reachable local IPv4 (loopback only when offline) and enables local
-  multicast scouting; an explicit `SKULK_ZENOH_CONNECT` list retains the
+  private-LAN or CGNAT fabric IPv4 (loopback when offline or public-only) and
+  enables local multicast scouting; public listeners require an explicit
+  `SKULK_ZENOH_LISTEN`. An explicit `SKULK_ZENOH_CONNECT` list retains the
   multicast-off routed-fleet posture. `SKULK_ZENOH_DATA_PLANE=0` remains the
   explicit compatibility fallback. The native bindings version advances so
   service updates rebuild the new discovery-aware Zenoh constructor before

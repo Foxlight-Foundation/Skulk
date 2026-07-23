@@ -173,6 +173,30 @@ def _namespace_fingerprint(namespace: str) -> str:
 
 
 _DEFAULT_ZENOH_PORT: Final = 7447
+_PRIVATE_LAN_IPV4_NETWORKS: Final[tuple[ipaddress.IPv4Network, ...]] = (
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+)
+_CGNAT_IPV4_NETWORK: Final = ipaddress.IPv4Network("100.64.0.0/10")
+
+
+def _is_trusted_fabric_ipv4(address: str) -> bool:
+    """Return whether an IPv4 address belongs to an auto-bind-safe fabric.
+
+    Automatic Zenoh listeners may use conventional private LAN or CGNAT
+    overlay addresses. Public addresses require an explicit operator-supplied
+    listener because the default Zenoh session has no transport authentication
+    or TLS.
+    """
+    try:
+        ip = ipaddress.IPv4Address(address)
+    except ipaddress.AddressValueError:
+        return False
+    return (
+        any(ip in network for network in _PRIVATE_LAN_IPV4_NETWORKS)
+        or ip in _CGNAT_IPV4_NETWORK
+    )
 
 
 def _resolve_zenoh_listen(env_value: str) -> str:
@@ -180,14 +204,16 @@ def _resolve_zenoh_listen(env_value: str) -> str:
 
     Fresh installs use Zenoh just like the qualification fleet, but they must
     not silently expose an unauthenticated listener on every interface. When no
-    override is present, bind the best routable local IPv4 selected by the same
-    interface policy used for model-store advertisement. A network-less
-    single-node install falls back to loopback and remains functional.
+    override is present, bind the best private-LAN or CGNAT fabric address
+    selected by the model-store interface policy. An offline or public-only
+    single-node install falls back to loopback and remains functional; binding
+    a public address requires an explicit override.
     """
     listen = env_value.strip()
     if listen:
         return listen
-    host = _routable_local_ipv4() or "127.0.0.1"
+    candidate = _routable_local_ipv4()
+    host = candidate if candidate and _is_trusted_fabric_ipv4(candidate) else "127.0.0.1"
     return f"tcp/{host}:{_DEFAULT_ZENOH_PORT}"
 
 
@@ -293,18 +319,11 @@ def _routable_local_ipv4() -> str | None:
                 continue
             routable.append(address.address)
 
-    lan_nets = (
-        ipaddress.ip_network("10.0.0.0/8"),
-        ipaddress.ip_network("172.16.0.0/12"),
-        ipaddress.ip_network("192.168.0.0/16"),
-    )
-    cgnat_net = ipaddress.ip_network("100.64.0.0/10")
-
     def _rank(address: str) -> int:
-        ip = ipaddress.ip_address(address)
-        if any(ip in network for network in lan_nets):
+        ip = ipaddress.IPv4Address(address)
+        if any(ip in network for network in _PRIVATE_LAN_IPV4_NETWORKS):
             return 0
-        if ip in cgnat_net:
+        if ip in _CGNAT_IPV4_NETWORK:
             return 1
         return 2
 

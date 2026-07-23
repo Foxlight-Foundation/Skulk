@@ -116,6 +116,9 @@ def test_resolve_zenoh_listen_returns_explicit_value() -> None:
     assert _resolve_zenoh_listen("tcp/192.168.0.115:7447") == (
         "tcp/192.168.0.115:7447"
     )
+    assert _resolve_zenoh_listen("tcp/203.0.113.8:7447") == (
+        "tcp/203.0.113.8:7447"
+    )
     assert _resolve_zenoh_listen("  tcp/127.0.0.1:7447  ") == (
         "tcp/127.0.0.1:7447"
     )
@@ -126,6 +129,20 @@ def test_resolve_zenoh_listen_uses_best_routable_address(
 ) -> None:
     monkeypatch.setattr(main, "_routable_local_ipv4", lambda: "192.168.0.115")
     assert _resolve_zenoh_listen("") == "tcp/192.168.0.115:7447"
+
+
+def test_resolve_zenoh_listen_accepts_cgnat_fabric(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main, "_routable_local_ipv4", lambda: "100.64.12.34")
+    assert _resolve_zenoh_listen("") == "tcp/100.64.12.34:7447"
+
+
+def test_resolve_zenoh_listen_rejects_automatic_public_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main, "_routable_local_ipv4", lambda: "203.0.113.8")
+    assert _resolve_zenoh_listen("") == "tcp/127.0.0.1:7447"
 
 
 def test_resolve_zenoh_listen_uses_loopback_without_network(
