@@ -7,6 +7,14 @@ from collections.abc import Iterable
 
 from skulk.shared.types.diagnostics import TelemetryPlaneDiagnostics
 
+# A brief no-peer window is normal (startup, mesh churn); a SUSTAINED one on
+# a node with live connections means telemetry is reaching nobody and the
+# node is invisible to membership. Warn only after the state persists, then
+# at most once per interval so a long outage stays one-line-per-minute loud
+# rather than log-flooding.
+NO_PEER_WARNING_AFTER_SECONDS = 30.0
+NO_PEER_WARNING_INTERVAL_SECONDS = 60.0
+
 
 class TelemetryPlaneObserver:
     """Track telemetry pressure without retaining node or model identifiers."""
@@ -26,9 +34,15 @@ class TelemetryPlaneObserver:
         self.readings_dropped = 0
         self.readings_published = 0
         self.publish_failures = 0
+        self.no_peer_publishes = 0
         self.bytes_published = 0
         self.max_queue_depth = 0
         self.last_successful_publish_at: float | None = None
+        # Sustained no-peer tracking for the operator warning: when the first
+        # no-peer outcome happened (None while healthy) and when the warning
+        # last fired (rate limit).
+        self.no_peers_since: float | None = None
+        self.last_no_peer_warning_at: float | None = None
 
     def record_offered(self) -> None:
         """Record one reading offered by a local telemetry producer."""
@@ -56,11 +70,79 @@ class TelemetryPlaneObserver:
         self.readings_published += 1
         self.bytes_published += size_bytes
         self.last_successful_publish_at = time.monotonic() if now is None else now
+        # A successful publish proves peers exist again: end the sustained
+        # no-peer window AND its warning rate limit, so a later outage is a
+        # fresh incident timed (and warned) from its own start rather than
+        # inheriting a stale rate-limit stamp (PR #663 review).
+        self.restart_no_peer_window()
 
     def record_publish_failure(self) -> None:
-        """Record one rejected isolated telemetry publish."""
+        """Record one rejected isolated telemetry publish.
+
+        Also ends any sustained no-peer window: a transport-pressure
+        rejection means the publish path found somewhere to go (saturated
+        per-peer queues imply peers), so claiming an unbroken no-peer state
+        across it would overstate continuity (PR #663 review).
+        """
 
         self.publish_failures += 1
+        self.no_peers_since = None
+
+    def restart_no_peer_window(self) -> None:
+        """Forget any sustained no-peer state and its warning rate limit.
+
+        Called on publish success and when the node's first swarm connection
+        arrives: a freshly connected peer deserves its own full grace window
+        before any mismatch warning, since gossipsub subscription exchange
+        takes a moment after connect.
+        """
+
+        self.no_peers_since = None
+        self.last_no_peer_warning_at = None
+
+    def record_no_peer_publish(
+        self, *, peers_connected: bool = True, now: float | None = None
+    ) -> bool:
+        """Record one publish that found no telemetry-protocol peers.
+
+        Distinct from :meth:`record_publish_failure` (transport pressure):
+        no-peers means the serialized packet had nowhere to go, which on a
+        node with live connections is the signature of a wire-protocol
+        mismatch — the node stays invisible to membership while looking
+        healthy locally (#660).
+
+        Args:
+            peers_connected: Whether the node currently holds any live swarm
+                connections. A lone node (single-node deployment, or before
+                any peer arrives) hits no-peer outcomes as its NORMAL state;
+                counting stays honest but the mismatch warning would be a
+                false positive, so it never fires without peers
+                (PR #663 review).
+            now: Monotonic clock value, injectable for deterministic tests.
+
+        Returns:
+            ``True`` when the caller should emit the rate-limited operator
+            warning: peers are connected, the no-peer state has persisted
+            past ``NO_PEER_WARNING_AFTER_SECONDS``, and no warning fired in
+            the last ``NO_PEER_WARNING_INTERVAL_SECONDS``.
+        """
+
+        observed_at = time.monotonic() if now is None else now
+        self.no_peer_publishes += 1
+        if self.no_peers_since is None:
+            self.no_peers_since = observed_at
+        if not peers_connected:
+            return False
+        if observed_at - self.no_peers_since < NO_PEER_WARNING_AFTER_SECONDS:
+            return False
+        if (
+            self.last_no_peer_warning_at is not None
+            and observed_at - self.last_no_peer_warning_at
+            < NO_PEER_WARNING_INTERVAL_SECONDS
+        ):
+            return False
+        self.last_no_peer_warning_at = observed_at
+        return True
 
     def snapshot(
         self,
@@ -108,6 +190,7 @@ class TelemetryPlaneObserver:
             readings_dropped=self.readings_dropped,
             readings_published=self.readings_published,
             publish_failures=self.publish_failures,
+            no_peer_publishes=self.no_peer_publishes,
             bytes_published=self.bytes_published,
             oldest_pending_age_seconds=oldest_pending_age,
             last_successful_publish_age_seconds=last_publish_age,

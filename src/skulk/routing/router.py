@@ -53,7 +53,7 @@ from .provider_streams import (
 )
 from .realtime_audio import RealtimeAudioPacket
 from .speech_media import SpeechMediaPacket
-from .telemetry_plane import TelemetryPlaneObserver
+from .telemetry_plane import NO_PEER_WARNING_AFTER_SECONDS, TelemetryPlaneObserver
 from .topics import (
     CONNECTION_MESSAGES,
     DATA,
@@ -554,6 +554,11 @@ class Router:
         # Live libp2p connections by peer: (refcount, first observed remote
         # endpoint). Feeds current_session_connections (#662).
         self._session_connections: dict[str, tuple[int, tuple[str, int] | None]] = {}
+        # Live swarm connections, from PyFromSwarm.Connection updates. Gates
+        # the telemetry no-peer mismatch warning (#660): a lone node hits
+        # no-peer outcomes as its normal state and must not be told to
+        # suspect a wire mismatch (PR #663 review).
+        self._connected_swarm_peers: set[str] = set()
         # Dedicated outbound channel for the Zenoh DATA plane (#309): the DATA
         # path publishes with CongestionControl::Block, so a stuck/slow
         # subscriber can stall its egress. Draining it on its OWN loop (not the
@@ -898,6 +903,16 @@ class Router:
                             f"Received message on connection_messages with payload {message}"
                         )
                         self._track_session_connection(message)
+                        had_peers = bool(self._connected_swarm_peers)
+                        if message.connected:
+                            self._connected_swarm_peers.add(str(message.node_id))
+                        else:
+                            self._connected_swarm_peers.discard(str(message.node_id))
+                        if not had_peers and self._connected_swarm_peers:
+                            # First connection after a peerless stretch: give
+                            # gossipsub subscription exchange its own grace
+                            # window before any mismatch warning can fire.
+                            self._telemetry_plane_observer.restart_no_peer_window()
                         if CONNECTION_MESSAGES.topic in self.topic_routers:
                             router = self.topic_routers[CONNECTION_MESSAGES.topic]
                             assert router.topic.model_type == ConnectionMessage
@@ -967,7 +982,25 @@ class Router:
             if telemetry:
                 self._telemetry_plane_observer.record_published(len(packet.data))
         except NoPeersSubscribedToTopicError:
-            pass
+            # Ordinary topics tolerate this quietly (a lone node publishing
+            # before peers arrive is normal). Telemetry does NOT: a sustained
+            # no-peer state on a node with live connections means its
+            # heartbeats reach nobody and it is invisible to membership while
+            # looking healthy locally — the wire-mismatch ghost (#660). Count
+            # it distinctly and warn once the state persists; the warning is
+            # gated on live swarm connections so a lone node is never told
+            # to suspect a mismatch.
+            if telemetry and self._telemetry_plane_observer.record_no_peer_publish(
+                peers_connected=bool(self._connected_swarm_peers)
+            ):
+                logger.warning(
+                    "Telemetry has had no subscribed peers for over "
+                    f"{NO_PEER_WARNING_AFTER_SECONDS:.0f}s on the isolated "
+                    "telemetry protocol; this node's heartbeats are reaching "
+                    "nobody and it will not appear in cluster membership. If "
+                    "other nodes are connected, suspect a wire-protocol/build "
+                    "mismatch (rebuild bindings, check versions)."
+                )
         except AllQueuesFullError:
             if telemetry:
                 self._telemetry_plane_observer.record_publish_failure()
