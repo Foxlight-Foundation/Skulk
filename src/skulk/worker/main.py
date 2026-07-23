@@ -659,6 +659,13 @@ class Worker:
         self._vision_media_packet_receiver = vision_media_packet_receiver
         self._connection_message_receiver = connection_message_receiver
         self._session_connection_snapshot = session_connection_snapshot
+        # Live-session bookkeeping shared between the session-edge ingress
+        # (which maintains it) and the probe sweep's self-heal pass (which
+        # re-emits any live session edge missing from replicated state; a
+        # state-side reap can misjudge a pre-membership node as dead, and
+        # without re-emission that node would float edgeless forever, #671).
+        self._session_edge_counts: dict[NodeId, int] = {}
+        self._session_emitted_edges: dict[NodeId, SocketConnection] = {}
         # Shared, Node-owned telemetry view (#279). The worker prunes a node's
         # telemetry here when it sees NodeTimedOut, because the worker runs on
         # EVERY node regardless of role - so a --no-api node (or a --no-api
@@ -1797,6 +1804,7 @@ class Worker:
                 if self._telemetry_view is not None:
                     record_membership_from_event(self._telemetry_view, event)
 
+
                 if isinstance(event, TaskCreated) and isinstance(
                     event.task, (TextGeneration, ImageEdits)
                 ):
@@ -2884,6 +2892,75 @@ class Worker:
             )
         )
 
+    def _session_edge_may_emit(self, peer: NodeId) -> bool:
+        """Whether a session edge to *peer* may be published right now.
+
+        Membership on BOTH endpoints is the emission gate: a timed-out peer
+        must not be re-minted by our edges, and a timed-out SELF (a
+        wedged-but-alive node applying its own NodeTimedOut while its
+        sockets live on) must not re-mint itself as the edge's source. Held
+        endpoint memory is emitted by the self-heal sweep once membership
+        (re)appears on both ends (PR #674 review).
+        """
+        return (
+            self.node_id in self.state.last_seen and peer in self.state.last_seen
+        )
+
+    def _session_edges_missing_from_state(self) -> list[Connection]:
+        """Live session edges this worker emitted that replicated state lost.
+
+        State-side cleanup (the never-member reap, #671) judges liveness
+        from a snapshot, which cannot always distinguish a dead phantom
+        from a live pre-membership peer; a wrong judgment deletes an edge
+        this worker still tracks as live and would never re-emit. The probe
+        sweep re-emits whatever this reports, making any wrong reap heal
+        within one sweep instead of persisting until reconnect.
+        """
+        missing: list[Connection] = []
+        # Snapshot: the ingress task mutates this map; there is no await in
+        # this loop today, but the copy keeps that invariant out of the
+        # correctness argument.
+        for peer, edge in list(self._session_emitted_edges.items()):
+            if self._session_edge_counts.get(peer, 0) <= 0:
+                continue
+            # MEMBERSHIP on both endpoints is the emission gate (here and
+            # at connect time; see _session_edge_may_emit). A timed-out
+            # peer, or a timed-out self, is not re-minted; a pre-membership
+            # peer gets its edge within one sweep of its first
+            # NodeGatheredInfo; a recovering same-process peer heals from
+            # this preserved endpoint memory once membership returns
+            # (PR #674 review).
+            if not self._session_edge_may_emit(peer):
+                continue
+            if edge in self.state.topology.get_all_connections_between(
+                self.node_id, peer
+            ):
+                continue
+            missing.append(Connection(source=self.node_id, sink=peer, edge=edge))
+        return missing
+
+    def _session_edges_stale_in_state(self) -> list[Connection]:
+        """Session edges in replicated state that this worker no longer backs.
+
+        The mirror of :meth:`_session_edges_missing_from_state`: the sweep
+        reconciles state toward the socket-truth bookkeeping in BOTH
+        directions, so a create that raced a disconnect (the sweep detected
+        the edge missing, suspended at the send, and the ingress enqueued
+        the delete first) is cleaned up one sweep later instead of claiming
+        a fabric path that no longer exists.
+        """
+        stale: list[Connection] = []
+        for conn in self.state.topology.out_edges(self.node_id):
+            if not isinstance(conn.edge, SocketConnection) or not conn.edge.session:
+                continue
+            if (
+                self._session_edge_counts.get(conn.sink, 0) > 0
+                and self._session_emitted_edges.get(conn.sink) == conn.edge
+            ):
+                continue
+            stale.append(conn)
+        return stale
+
     async def _session_edge_ingress(self) -> None:
         """Record authenticated libp2p sessions as topology paths (#662).
 
@@ -2903,8 +2980,8 @@ class Worker:
         sweeps never tear these down.
         """
         assert self._connection_message_receiver is not None
-        session_counts: dict[NodeId, int] = {}
-        emitted_edges: dict[NodeId, SocketConnection] = {}
+        session_counts = self._session_edge_counts
+        emitted_edges = self._session_emitted_edges
         if self._session_connection_snapshot is not None:
             # Seed from connections established before this worker existed
             # (a mid-session worker recreation after master election): those
@@ -2931,6 +3008,11 @@ class Worker:
                     session=True,
                 )
                 emitted_edges[peer] = edge
+                # Membership emission gate on both endpoints (see
+                # _session_edge_may_emit); held endpoint memory is emitted
+                # by the self-heal sweep once membership appears.
+                if not self._session_edge_may_emit(peer):
+                    continue
                 await self.event_sender.send(
                     TopologyEdgeCreated(
                         conn=Connection(source=self.node_id, sink=peer, edge=edge)
@@ -2957,6 +3039,11 @@ class Worker:
                         session=True,
                     )
                     emitted_edges[peer] = edge
+                    # Membership emission gate on both endpoints (see
+                    # _session_edge_may_emit); the self-heal sweep emits
+                    # once membership appears.
+                    if not self._session_edge_may_emit(peer):
+                        continue
                     await self.event_sender.send(
                         TopologyEdgeCreated(
                             conn=Connection(
@@ -3087,5 +3174,28 @@ class Worker:
                 ):
                     logger.debug(f"ping failed to discover {conn=}")
                     await self.event_sender.send(TopologyEdgeDeleted(conn=conn))
+
+            # Session-edge self-heal, both directions (#671): re-emit any
+            # live edge state lost, and delete any state edge the bookkeeping
+            # no longer backs (a create that raced a disconnect). Eligibility
+            # is rechecked immediately before each send because the awaits
+            # are checkpoints where the ingress can change the bookkeeping.
+            for healed in self._session_edges_missing_from_state():
+                if (
+                    self._session_edge_counts.get(healed.sink, 0) <= 0
+                    or self._session_emitted_edges.get(healed.sink) != healed.edge
+                    # Membership can change between sends: an earlier send's
+                    # await can let the event applier apply NodeTimedOut for
+                    # this peer or for self (PR #674 review).
+                    or not self._session_edge_may_emit(healed.sink)
+                ):
+                    continue
+                logger.debug(
+                    f"re-emitting live session edge lost from state: {healed}"
+                )
+                await self.event_sender.send(TopologyEdgeCreated(conn=healed))
+            for stale in self._session_edges_stale_in_state():
+                logger.debug(f"deleting session edge no longer backed: {stale}")
+                await self.event_sender.send(TopologyEdgeDeleted(conn=stale))
 
             await anyio.sleep(10)

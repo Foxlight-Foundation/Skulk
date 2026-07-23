@@ -93,6 +93,95 @@ def test_session_edge_multiaddr_normalizes_mapped_ipv6() -> None:
     assert plain_v4.address == "/ip4/203.0.113.7/tcp/52416"
 
 
+def test_session_edge_self_heal_detects_state_loss() -> None:
+    """Live emitted edges missing from replicated state are re-emitted.
+
+    The never-member reap (#671) judges liveness from a state snapshot and
+    can misjudge a pre-membership peer as dead; the sweep re-emits whatever
+    this detector reports, so a wrong reap heals within one sweep.
+    Exercised on a stub so the test needs no live worker.
+    """
+    from skulk.shared.types.common import NodeId
+    from skulk.shared.types.state import State
+    from skulk.shared.types.topology import (
+        Connection,
+        Multiaddr,
+        SocketConnection,
+    )
+    from skulk.worker.main import Worker
+
+    self_id = NodeId("self-node")
+    peer = NodeId("peer-node")
+    edge = SocketConnection(
+        sink_multiaddr=Multiaddr(address="/ip4/203.0.113.7/tcp/52416"),
+        session=True,
+    )
+
+    from datetime import datetime, timezone
+
+    member_state = State(
+        last_seen={
+            self_id: datetime.now(timezone.utc),
+            peer: datetime.now(timezone.utc),
+        }
+    )
+
+    class _WorkerStub:
+        node_id = self_id
+        state = member_state
+        _session_edge_counts = {peer: 1}
+        _session_emitted_edges = {peer: edge}
+
+        detect = Worker._session_edges_missing_from_state  # pyright: ignore[reportPrivateUsage]
+        detect_stale = Worker._session_edges_stale_in_state  # pyright: ignore[reportPrivateUsage]
+        _session_edge_may_emit = Worker._session_edge_may_emit  # pyright: ignore[reportPrivateUsage]
+
+    stub = _WorkerStub()
+
+    # Member peer, edge absent from state: report it for re-emission.
+    missing = stub.detect()
+    assert missing == [Connection(source=self_id, sink=peer, edge=edge)]
+
+    # Edge present in state: nothing to heal.
+    present = State(
+        last_seen={
+            self_id: datetime.now(timezone.utc),
+            peer: datetime.now(timezone.utc),
+        }
+    )
+    present.topology.add_connection(
+        Connection(source=self_id, sink=peer, edge=edge)
+    )
+    stub.state = present
+    assert stub.detect() == []
+
+    # Peer NOT a member (pre-membership, or timed out with a lingering
+    # socket): membership gates emission, so nothing is emitted or healed
+    # until a NodeGatheredInfo stamps last_seen.
+    stub.state = State(last_seen={self_id: datetime.now(timezone.utc)})
+    assert stub.detect() == []
+
+    # SELF not a member (a wedged-but-alive node that applied its own
+    # NodeTimedOut): the source side of the gate; nothing may re-mint us.
+    stub.state = State(last_seen={peer: datetime.now(timezone.utc)})
+    assert stub.detect() == []
+
+    # Session fully closed (count zero): never re-emit a dead edge.
+    stub.state = member_state
+    stub._session_edge_counts = {peer: 0}  # pyright: ignore[reportPrivateUsage]
+    assert stub.detect() == []
+
+    # The mirror direction: an edge present in state that the bookkeeping
+    # no longer backs (a create that raced a disconnect) is reported for
+    # deletion, so the reconciliation converges from either side.
+    stub.state = present
+    assert stub.detect_stale() == [
+        Connection(source=self_id, sink=peer, edge=edge)
+    ]
+    stub._session_edge_counts = {peer: 1}  # pyright: ignore[reportPrivateUsage]
+    assert stub.detect_stale() == []
+
+
 def test_probe_backoff_schedule() -> None:
     """Failing addresses drop to the slow cadence; success resets.
 

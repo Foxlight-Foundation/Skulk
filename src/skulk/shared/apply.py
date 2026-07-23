@@ -545,4 +545,37 @@ def apply_topology_edge_deleted(event: TopologyEdgeDeleted, state: State) -> Sta
     topology = copy.deepcopy(state.topology)
     topology.remove_connection(event.conn)
     # TODO: Clean up removing the reverse connection
+    # An edge can be the first state event mentioning a peer (a session edge
+    # for a connection that authenticated before the peer ever published
+    # NodeGatheredInfo), and add_connection mints a topology node for it. If
+    # that peer dies before its first publish it never stamps last_seen, so
+    # the master's timeout loop can never reap it and it would linger as a
+    # floating phantom member. When the last edge POINTING AT such a
+    # never-a-member node is deleted, drop the node itself: in-edges are
+    # what live observers maintain toward the peer, while any out-edges are
+    # the dead peer's own emissions that nobody remains to delete (they
+    # would otherwise pin the phantom forever) and removal clears them.
+    # Real members always carry last_seen and are reaped by NodeTimedOut
+    # instead (#671).
+    # Reap seeds with both endpoints and cascades: removing a phantom
+    # clears its dangling out-edges, which can orphan further never-member
+    # nodes those edges pointed at, including nodes that are not endpoints
+    # of this event at all. Reaping a node here is safe even if it is
+    # actually alive: session-edge EMISSION is membership-gated on the
+    # worker side, so a node without last_seen has no legitimate live edges
+    # in state to lose, and a live node whose entry was removed wrongly is
+    # re-added by its NodeGatheredInfo and re-edged by its peers' self-heal
+    # sweeps within seconds (PR #674 review rounds).
+    candidates: list[NodeId] = [event.conn.sink, event.conn.source]
+    while candidates:
+        candidate = candidates.pop()
+        if (
+            candidate in state.last_seen
+            or not topology.contains_node(candidate)
+            or not topology.node_has_no_incoming_edges(candidate)
+        ):
+            continue
+        unblocked = [conn.sink for conn in topology.out_edges(candidate)]
+        topology.remove_node(candidate)
+        candidates.extend(unblocked)
     return state.model_copy(update={"topology": topology})
