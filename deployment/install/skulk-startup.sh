@@ -137,7 +137,9 @@ run_prep() {
     # it moves. Non-fatal: a failed rebuild keeps the current (stale)
     # bindings and the node still starts; NETWORK_VERSION bumps make a truly
     # wire-incompatible stale build refuse connections loudly.
-    RUST_TREE_COMMIT="$(git log -1 --format=%H -- rust/ 2>/dev/null || true)"
+    # Root Cargo.toml/Cargo.lock are workspace inputs: a dependency bump
+    # changes the built bindings without touching rust/ source.
+    RUST_TREE_COMMIT="$(git log -1 --format=%H -- rust/ Cargo.toml Cargo.lock 2>/dev/null || true)"
     RUST_TREE_MARKER=".venv/.skulk-rust-tree-commit"
     # The marker lives inside the venv (the artifact it describes); no venv
     # yet (first boot, or a fully failed sync) means nothing to mark and the

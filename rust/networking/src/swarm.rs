@@ -300,15 +300,18 @@ mod transport {
         // the hashed byte stream: without it ("v0.0.21", "x") and
         // ("v0.0.2", "1x") hash identically (#659 review). NUL cannot
         // appear in either field (a version literal here; env vars are
-        // NUL-free on POSIX).
+        // NUL-free on POSIX). The delimiter lives INSIDE the namespace arm
+        // so unset and set-to-empty stay distinct streams, matching the
+        // Python token mirror exactly: a pair of nodes disagreeing there
+        // would share a pnet key while splitting Zenoh namespaces (the #312
+        // silent-DATA-drop shape; second review round).
         let builder = Sha3_256::new()
             .update(b"skulk_discovery_network")
-            .update(NETWORK_VERSION)
-            .update(b"\0");
+            .update(NETWORK_VERSION);
 
         if let Ok(var) = env::var(OVERRIDE_VERSION_ENV_VAR) {
             let bytes = var.into_bytes();
-            builder.update(&bytes)
+            builder.update(b"\0").update(&bytes)
         } else {
             builder
         }
