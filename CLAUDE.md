@@ -122,7 +122,8 @@ check registry on demand; `website/docs/node-doctor.md` is GENERATED from the
 registry by `scripts/generate_doctor_docs.py` (rerun after registry changes).
 On Linux, `src/skulk/provisioning/` fetches the pinned, checksum-verified
 upstream llama-server build on demand (Vulkan for visible GPUs, CPU
-otherwise; no upstream Linux CUDA prebuilt exists, vLLM is the CUDA path);
+otherwise; no upstream Linux CUDA prebuilt exists; the CUDA lane is the
+Foxlight wheel, auto-installed on demand for NVIDIA nodes, #661);
 `SKULK_LLAMA_SERVER_BIN` overrides, `SKULK_NO_ENGINE_AUTOPROVISION=1` opts
 out. The CUDA engine also ships as the pip wheel `skulk-llama-server-cuda`
 (packaging/, built by `.github/workflows/engine-wheel.yml`), which outranks

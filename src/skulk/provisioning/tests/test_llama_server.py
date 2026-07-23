@@ -81,6 +81,25 @@ def _isolate_engines_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pat
     return engines
 
 
+@pytest.fixture(autouse=True)
+def _never_install_wheels(  # pyright: ignore[reportUnusedFunction] - autouse
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No test here may attempt a real wheel install (#661 review, P1).
+
+    On a machine with uv on PATH and no CUDA wheel, the on-demand install
+    branch in ensure_llama_server would otherwise run a REAL multi-GB
+    `uv pip install` against the live index from inside the older NVIDIA
+    tarball-path tests. Tests that exercise the install stub it themselves,
+    overriding this default.
+    """
+
+    def _no_install(installed_facts: object) -> bool:
+        return False
+
+    monkeypatch.setattr(provisioning, "try_install_cuda_wheel", _no_install)
+
+
 def test_provision_downloads_verifies_and_installs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -426,3 +445,162 @@ def test_cuda_capability_gate() -> None:
         provisioning._cuda_capability_ok(make_facts(gpus=(NVIDIA_PRESENCE_ONLY,)))
         is False
     )
+
+
+def test_cuda_wheel_install_gates_on_capability_and_uv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wheel install never runs for silicon the wheel cannot serve.
+
+    A pre-Ampere GPU (or NVML-degraded unknown capability) must not pull a
+    multi-GB wheel that would fail at model load; a missing uv degrades with
+    the manual remediation logged instead of crashing provisioning.
+    """
+    calls: list[list[str]] = []
+
+    def _unexpected_run(*args: object, **kwargs: object) -> None:
+        raise AssertionError("uv must not run for gated-out facts")
+
+    monkeypatch.setattr(provisioning.subprocess, "run", _unexpected_run)
+    old_gpu = NVIDIA_A40.model_copy(update={"compute_capability": "7.5"})
+    assert not provisioning.try_install_cuda_wheel(make_facts(gpus=(old_gpu,)))
+
+    # Capability fine, but no uv on PATH: degrade, do not crash.
+    def _no_uv(_name: str) -> None:
+        return None
+
+    monkeypatch.setattr(provisioning.shutil, "which", _no_uv)
+    assert not provisioning.try_install_cuda_wheel(make_facts(gpus=(NVIDIA_A40,)))
+    assert calls == []
+
+
+def test_ensure_installs_cuda_wheel_on_demand(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A bare-install NVIDIA node completes the CUDA lane on demand (#661).
+
+    The tarball chain has no CUDA artifact by design, so without this an
+    NVIDIA container degrades through Vulkan (no ICD) to a CPU-tagged
+    engine. ensure_llama_server must attempt the wheel install once and wire
+    the shim it produces.
+    """
+    _isolate_engines_dir(monkeypatch, tmp_path)
+    monkeypatch.delenv(LLAMA_SERVER_BIN_ENV, raising=False)
+    facts = make_facts(gpus=(NVIDIA_A40,))
+
+    shim = tmp_path / "llama-server-cuda"
+    shim.write_text("#!/bin/sh\n")
+    shim.chmod(0o755)
+    installed = {"done": False}
+
+    def _fake_install(installed_facts: object) -> bool:
+        installed["done"] = True
+        return True
+
+    def _wheel_after_install(
+        vendor: str, wheel_facts: object
+    ) -> tuple[Path, Path | None] | None:
+        return (shim, None) if installed["done"] else None
+
+    def _cuda_usable_tracks_install() -> bool:
+        # Stubbed so the test is hermetic: on a host that actually has the
+        # pin-matched CUDA wheel installed (the documented NVIDIA install
+        # path), the real probe would return True and skip the on-demand
+        # install this test exists to exercise (PR #665 review).
+        return installed["done"]
+
+    monkeypatch.setattr(provisioning, "try_install_cuda_wheel", _fake_install)
+    monkeypatch.setattr(provisioning, "wheel_llama_server", _wheel_after_install)
+    monkeypatch.setattr(
+        provisioning, "_cuda_wheel_usable", _cuda_usable_tracks_install
+    )
+
+    assert ensure_llama_server(facts) == shim
+    assert installed["done"]
+    assert os.environ.get(LLAMA_SERVER_BIN_ENV) == str(shim)
+
+
+def test_ensure_skips_wheel_install_when_offline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """--offline nodes never attempt the network wheel install."""
+    _isolate_engines_dir(monkeypatch, tmp_path)
+    monkeypatch.delenv(LLAMA_SERVER_BIN_ENV, raising=False)
+
+    def _unexpected_install(installed_facts: object) -> bool:
+        raise AssertionError("offline must not attempt a wheel install")
+
+    monkeypatch.setattr(provisioning, "try_install_cuda_wheel", _unexpected_install)
+    def _no_wheel(vendor: str, wheel_facts: object) -> None:
+        return None
+
+    monkeypatch.setattr(provisioning, "wheel_llama_server", _no_wheel)
+
+    assert ensure_llama_server(make_facts(gpus=(NVIDIA_A40,)), allow_download=False) is None
+
+
+def test_installed_vulkan_wheel_does_not_shadow_cuda_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An NVIDIA node with only the Vulkan wheel still completes the CUDA lane.
+
+    The Vulkan shim resolves happily but cannot drive the GPU in a
+    compute-only container; the on-demand install keys on the CUDA wheel
+    itself, not on any-wheel-resolved (PR #665 review).
+    """
+    _isolate_engines_dir(monkeypatch, tmp_path)
+    monkeypatch.delenv(LLAMA_SERVER_BIN_ENV, raising=False)
+    facts = make_facts(gpus=(NVIDIA_A40,))
+
+    vulkan_shim = tmp_path / "llama-server-vulkan"
+    cuda_shim = tmp_path / "llama-server-cuda"
+    for shim in (vulkan_shim, cuda_shim):
+        shim.write_text("#!/bin/sh\n")
+        shim.chmod(0o755)
+    installed = {"done": False}
+
+    def _fake_cuda_usable() -> bool:
+        return installed["done"]
+
+    def _fake_install(installed_facts: object) -> bool:
+        installed["done"] = True
+        return True
+
+    def _resolver(vendor: str, wheel_facts: object) -> tuple[Path, None]:
+        return ((cuda_shim, None) if installed["done"] else (vulkan_shim, None))
+
+    monkeypatch.setattr(provisioning, "_cuda_wheel_usable", _fake_cuda_usable)
+    monkeypatch.setattr(provisioning, "try_install_cuda_wheel", _fake_install)
+    monkeypatch.setattr(provisioning, "wheel_llama_server", _resolver)
+
+    assert ensure_llama_server(facts) == cuda_shim
+    assert installed["done"]
+
+
+def test_install_success_requires_usable_wheel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A zero-exit install that lands no usable wheel is not success.
+
+    uv resolving a different interpreter (or a broken wheel) must degrade to
+    the Vulkan/tarball chain rather than letting the caller believe the CUDA
+    lane is live (#661 review round).
+    """
+
+    class _Completed:
+        returncode = 0
+        stderr = ""
+
+    def _fake_run(*args: object, **kwargs: object) -> "_Completed":
+        return _Completed()
+
+    def _fake_which(_name: str) -> str:
+        return "/usr/bin/uv"
+
+    def _still_unusable() -> bool:
+        return False
+
+    monkeypatch.setattr(provisioning.subprocess, "run", _fake_run)
+    monkeypatch.setattr(provisioning.shutil, "which", _fake_which)
+    monkeypatch.setattr(provisioning, "_cuda_wheel_usable", _still_unusable)
+    assert not provisioning.try_install_cuda_wheel(make_facts(gpus=(NVIDIA_A40,)))
