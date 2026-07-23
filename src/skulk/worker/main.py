@@ -3049,6 +3049,14 @@ class Worker:
             for conn in self.state.topology.out_edges(self.node_id):
                 if not isinstance(conn.edge, SocketConnection):
                     continue
+                # Session edges are owned by _session_edge_ingress, which
+                # deletes them when the last libp2p connection closes. Skip
+                # them EXPLICITLY rather than relying on the port check: a
+                # session's observed remote port can coincidentally be 52415,
+                # and probe-deleting a live session edge would leave the peer
+                # floating until a reconnect (PR #668 review).
+                if conn.edge.session:
+                    continue
                 # ignore mDNS discovered connections
                 if conn.edge.sink_multiaddr.port != 52415:
                     continue
