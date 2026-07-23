@@ -557,11 +557,19 @@ def apply_topology_edge_deleted(event: TopologyEdgeDeleted, state: State) -> Sta
     # would otherwise pin the phantom forever) and removal clears them.
     # Real members always carry last_seen and are reaped by NodeTimedOut
     # instead (#671).
-    for endpoint in (event.conn.source, event.conn.sink):
-        if (
-            endpoint not in state.last_seen
-            and topology.contains_node(endpoint)
-            and topology.node_has_no_incoming_edges(endpoint)
-        ):
-            topology.remove_node(endpoint)
+    # Fixpoint over the two endpoints: removing one node also clears its
+    # dangling out-edges, which can be exactly what still pointed at the
+    # other endpoint (two mutual never-members that died together), so a
+    # single pass could leak the endpoint checked first (PR #674 review).
+    removed_one = True
+    while removed_one:
+        removed_one = False
+        for endpoint in (event.conn.source, event.conn.sink):
+            if (
+                endpoint not in state.last_seen
+                and topology.contains_node(endpoint)
+                and topology.node_has_no_incoming_edges(endpoint)
+            ):
+                topology.remove_node(endpoint)
+                removed_one = True
     return state.model_copy(update={"topology": topology})

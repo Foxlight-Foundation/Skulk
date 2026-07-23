@@ -98,6 +98,30 @@ def test_reap_ignores_the_phantom_dangling_own_edges() -> None:
     assert not list(state.topology.get_all_connections_between(PHANTOM, MEMBER))
 
 
+def test_mutual_phantoms_cascade_out_together() -> None:
+    """Two never-members that died holding edges to each other both reap.
+
+    Deleting A to B first frees B (its only in-edge is gone); removing B
+    clears the dangling B to A edge, which was the only thing pinning A, so
+    the eligibility pass must repeat until nothing changes or A leaks
+    forever (PR #674 review).
+    """
+    second = NodeId("phantom-two")
+    state = State()
+    state = apply_topology_edge_created(
+        TopologyEdgeCreated(conn=_connection(PHANTOM, second)), state
+    )
+    state = apply_topology_edge_created(
+        TopologyEdgeCreated(conn=_connection(second, PHANTOM)), state
+    )
+
+    state = apply_topology_edge_deleted(
+        TopologyEdgeDeleted(conn=_connection(PHANTOM, second)), state
+    )
+    assert not state.topology.contains_node(PHANTOM)
+    assert not state.topology.contains_node(second)
+
+
 def test_never_member_with_remaining_edges_survives() -> None:
     """Only a fully isolated never-member is reaped.
 
