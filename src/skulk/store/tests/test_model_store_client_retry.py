@@ -123,6 +123,32 @@ async def test_exhausted_connection_failures_raise_store_unreachable(
 
 
 @pytest.mark.anyio
+async def test_exhausted_payload_dropouts_raise_store_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A route that keeps dying mid-body is unreachable, not a store bug.
+
+    aiohttp surfaces a mid-transfer route drop from ``iter_chunked()`` as
+    ``ClientPayloadError``; persistently hitting it must reach the direct-HF
+    fallback exactly like a connect failure, or a node with a working
+    Hugging Face path fails placement on the mid-transfer dropout the
+    fallback promises to cover (#657 review).
+    """
+
+    async def drops_mid_body() -> str:
+        raise aiohttp.ClientPayloadError("route dropped mid-transfer")
+
+    monkeypatch.setattr(model_store_client.asyncio, "sleep", _no_sleep)
+
+    with pytest.raises(model_store_client.StoreUnreachableError):
+        await model_store_client._retry_store_http(
+            drops_mid_body,
+            description="staging file body for org/model",
+            attempts=2,
+        )
+
+
+@pytest.mark.anyio
 async def test_exhausted_response_errors_are_not_unreachability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

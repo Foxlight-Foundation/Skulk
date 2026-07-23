@@ -112,13 +112,18 @@ _STORE_PROBE_RETRY_ATTEMPTS = 3
 _STORE_POLL_UNREACHABLE_THRESHOLD = 12
 _STORE_HTTP_RETRY_BASE_SECONDS = 0.5
 _STORE_HTTP_RETRY_MAX_DELAY_SECONDS = 8.0
-# The failure classes that mean the store never ANSWERED. aiohttp.ClientError
-# is broader: it also covers response-level errors (ContentTypeError, status
-# errors) where the store answered with a bad reply — a store bug, not
-# unreachability — and those must never divert a node onto the direct-HF
-# fallback, which exists solely for hosts the node cannot reach (#657 review).
+# The failure classes that mean the store never answered OR stopped
+# delivering: connect failures, timeouts, and mid-body transfer dropouts
+# (aiohttp.ClientPayloadError, a route that died while the body streamed —
+# the mid-transfer shape the fallback explicitly promises to cover).
+# aiohttp.ClientError is broader still: it also covers response-level
+# errors (ContentTypeError, status errors) where the store answered with a
+# bad reply — a store bug, not unreachability — and those must never divert
+# a node onto the direct-HF fallback, which exists solely for stores the
+# node cannot reach (#657 review).
 _STORE_CONNECTION_ERRORS = (
     aiohttp.ClientConnectionError,
+    aiohttp.ClientPayloadError,
     TimeoutError,
     asyncio.TimeoutError,
 )
@@ -896,6 +901,11 @@ class ModelStoreClient:
                 transport level (exhausted request retries, or
                 ``_STORE_POLL_UNREACHABLE_THRESHOLD`` consecutive failed
                 status polls).
+            aiohttp.ClientError: If a reachable store answered with a
+                response-level protocol error (for example
+                ``aiohttp.ContentTypeError`` on a malformed body) for the
+                whole retry budget; a store failure, deliberately not
+                unreachability.
         """
         import asyncio as _asyncio
 
