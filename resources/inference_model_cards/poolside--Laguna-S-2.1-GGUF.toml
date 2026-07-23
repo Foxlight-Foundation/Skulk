@@ -1,7 +1,7 @@
 # Laguna S 2.1 GGUF for the llama.cpp engines: Poolside's 117B-A10B-class MoE
 # coding/agentic model (48 layers, 256-expert sparse MLP with 10 active plus a
-# shared expert, 1-full : 3-sliding attention layer mix, YaRN-extended 1M
-# context), official Poolside quantizations. Q4_K_M (~63.6 GiB) serves on one
+# shared expert, 1-full : 3-sliding attention layer mix), official Poolside
+# quantizations. Q4_K_M (~63.6 GiB) serves on one
 # 128 GB Strix Halo node; Q8_0 (~120 GiB) needs a two-node llama_server pool.
 # Requires engine pin >= b10092 (Laguna 2 family support).
 # DFlash speculative decoding via the served engine's native
@@ -19,9 +19,12 @@
 # The vLLM lane deliberately lives on the safetensors base repo, not here
 # (vLLM does not serve this MoE from GGUF); a base-repo card is out of scope
 # until hardware that fits ~235 GB BF16 joins the fleet.
-# Architecture facts from the base repo's config.json; context_length is the
-# YaRN max_position_embeddings. storage_size covers the Q4_K_M base plus the
-# DFlash companion. supports_tensor = false: llama.cpp sharding is the
+# Architecture facts from the base repo's config.json. context_length is the
+# GGUF's CONFIGURED 262144, not the base model's YaRN-extended 1M: the 1M
+# mode needs explicit rope-scaling overrides the served runner does not
+# pass, so advertising it would admit requests the engine would serve with
+# the wrong rope configuration; raise only alongside carded rope flags.
+# storage_size covers the Q4_K_M base plus the DFlash companion. supports_tensor = false: llama.cpp sharding is the
 # llama_server RPC pool, not tensor parallelism.
 # License: OpenMDW-1.1 (permissive; retain notices on redistribution).
 model_id = "poolside/Laguna-S-2.1-GGUF"
@@ -34,7 +37,7 @@ family = "laguna"
 quantization = "Q4_K_M"
 base_model = "Laguna S 2.1"
 capabilities = ["text", "thinking", "thinking_toggle"]
-context_length = 1048576
+context_length = 262144
 gguf_file = "laguna-s-2.1-Q4_K_M.gguf"
 trust_remote_code = false
 

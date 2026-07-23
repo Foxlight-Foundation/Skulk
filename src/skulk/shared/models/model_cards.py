@@ -720,8 +720,11 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     (``_SPEC_TYPE_FLAG``): ``draft_mtp`` -> ``draft-mtp`` (the model's own built-in
     MTP heads, no draft model needed; Qwen3.6/DeepSeek/GLM/Kimi/Nemotron),
     ``draft_eagle3`` -> ``draft-eagle3`` (an EAGLE-3 head), ``draft_simple`` ->
-    ``draft-simple`` (a separate draft model), ``ngram`` -> ``ngram-cache``
-    (prompt-lookup), ``none``/``None`` plain decoding. Only the served engine reads
+    ``draft-simple`` (a separate draft model), ``draft_dflash`` ->
+    ``draft-dflash`` (a separate block-parallel DFlash speculator GGUF via
+    ``served_spec_draft_repo``/``served_spec_draft_file``; llama-server >=
+    b10092), ``ngram`` -> ``ngram-cache`` (prompt-lookup), ``none``/``None``
+    plain decoding. Only the served engine reads
     this; the in-process ``mlx`` and ``llama_cpp`` engines ignore it (MLX
     speculation is the ``mtp_*`` / ``assistant_model_repo`` fields above)."""
     served_spec_n_max: int | None = Field(default=None, gt=0)
