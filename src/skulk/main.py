@@ -172,47 +172,43 @@ def _namespace_fingerprint(namespace: str) -> str:
     return hashlib.sha256(namespace.encode("utf-8")).hexdigest()[:12]
 
 
-def _require_zenoh_listen(env_value: str) -> str:
-    """Return the explicit Zenoh listen endpoint, or raise (#308 bind restriction).
+_DEFAULT_ZENOH_PORT: Final = 7447
 
-    When the Zenoh data plane is enabled, the listen endpoint must be set
-    explicitly; Skulk refuses to default it to ``tcp/0.0.0.0:7447`` (all
-    interfaces) so a shared-network deployment doesn't silently expose the plane.
+
+def _resolve_zenoh_listen(env_value: str) -> str:
+    """Return the configured Zenoh listener or a safe zero-config default.
+
+    Fresh installs use Zenoh just like the qualification fleet, but they must
+    not silently expose an unauthenticated listener on every interface. When no
+    override is present, bind the best routable local IPv4 selected by the same
+    interface policy used for model-store advertisement. A network-less
+    single-node install falls back to loopback and remains functional.
     """
     listen = env_value.strip()
-    if not listen:
-        raise ValueError(
-            "SKULK_ZENOH_DATA_PLANE is enabled but SKULK_ZENOH_LISTEN is unset. "
-            "Set it explicitly (e.g. tcp/<this-node-ip>:7447); Skulk refuses to "
-            "default the Zenoh listen endpoint to 0.0.0.0 / all interfaces "
-            "(#308 bind restriction)."
-        )
-    return listen
+    if listen:
+        return listen
+    host = _routable_local_ipv4() or "127.0.0.1"
+    return f"tcp/{host}:{_DEFAULT_ZENOH_PORT}"
 
 
 def _resolve_zenoh_enabled(data_plane_env: str, listen_env: str) -> bool:
-    """Resolve whether the Zenoh DATA plane is enabled (soft default-on, #315).
+    """Resolve whether the Zenoh DATA plane is enabled.
 
-    The DATA plane defaults to Zenoh when a node is configured for it, but never
-    crashes a bare node:
+    The shipping default is Zenoh, including on a zero-config fresh install:
 
-    - Explicit truthy (``1``/``true``/``yes``/``on``) -> enabled. The caller
-      still requires an explicit listen endpoint via :func:`_require_zenoh_listen`,
-      so an explicit opt-in with no listen is a loud error, not a silent default.
+    - Explicit truthy (``1``/``true``/``yes``/``on``) -> enabled.
     - Explicit falsy (``0``/``false``/``no``/``off``) -> disabled (gossipsub).
-    - Unset/blank -> soft default: enabled only when ``SKULK_ZENOH_LISTEN`` is
-      configured. A node with no Zenoh config at all (e.g. a fresh ``uv run
-      skulk``) stays on gossipsub instead of failing the #308 listen
-      requirement, so the listen endpoint is the opt-in signal under the default.
+    - Unset/blank -> enabled. The listener is selected safely by
+      :func:`_resolve_zenoh_listen`.
     - Any other non-empty value -> ``ValueError``. An unrecognized value
       (a typo, or a boolean spelling we don't accept) must NOT silently fall
-      through to the listen-based default, or an operator who wrote
-      ``SKULK_ZENOH_DATA_PLANE=disable`` could unexpectedly get Zenoh ON; we
-      refuse to guess the transport (#315 review).
+      through to the default; refuse to guess the transport.
 
-    ``listen_env`` is the raw ``SKULK_ZENOH_LISTEN`` value; only its presence
-    (after stripping) matters here.
+    ``listen_env`` remains in the internal signature for callers and tests
+    written against the former soft-default resolver. Listener presence no
+    longer controls transport selection.
     """
+    del listen_env
     value = data_plane_env.strip().lower()
     if value in ("1", "true", "yes", "on"):
         return True
@@ -221,11 +217,10 @@ def _resolve_zenoh_enabled(data_plane_env: str, listen_env: str) -> bool:
     if value:
         raise ValueError(
             f"SKULK_ZENOH_DATA_PLANE={data_plane_env!r} is not a recognized "
-            "boolean. Use 1/true/yes/on or 0/false/no/off, or leave it unset to "
-            "use the default (Zenoh when SKULK_ZENOH_LISTEN is set, else "
-            "gossipsub). Refusing to guess the DATA transport (#315)."
+            "boolean. Use 1/true/yes/on or 0/false/no/off, or leave it unset "
+            "to use the Zenoh default. Refusing to guess the DATA transport."
         )
-    return bool(listen_env.strip())
+    return True
 
 
 def _add_model_search_path(path: Path) -> None:
@@ -274,6 +269,49 @@ def _is_virtual_iface(name: str) -> bool:
     return lowered.startswith(_VIRTUAL_IFACE_PREFIXES)
 
 
+def _routable_local_ipv4() -> str | None:
+    """Return this node's best peer-reachable IPv4 address.
+
+    Virtual, loopback, link-local, and unspecified interfaces are excluded.
+    Prefer a conventional private LAN, then Tailscale's CGNAT range, then any
+    remaining routable IPv4. The policy is shared by zero-config Zenoh binding
+    and model-store advertisement so both planes choose the same kind of
+    peer-reachable interface.
+    """
+    routable: list[str] = []
+    for iface_name, addresses in psutil.net_if_addrs().items():
+        if _is_virtual_iface(iface_name):
+            continue
+        for address in addresses:
+            if address.family != socket.AF_INET:
+                continue
+            try:
+                ip = ipaddress.ip_address(address.address)
+            except ValueError:
+                continue
+            if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+                continue
+            routable.append(address.address)
+
+    lan_nets = (
+        ipaddress.ip_network("10.0.0.0/8"),
+        ipaddress.ip_network("172.16.0.0/12"),
+        ipaddress.ip_network("192.168.0.0/16"),
+    )
+    cgnat_net = ipaddress.ip_network("100.64.0.0/10")
+
+    def _rank(address: str) -> int:
+        ip = ipaddress.ip_address(address)
+        if any(ip in network for network in lan_nets):
+            return 0
+        if ip in cgnat_net:
+            return 1
+        return 2
+
+    routable.sort(key=lambda address: (_rank(address), address))
+    return routable[0] if routable else None
+
+
 def _routable_store_advertise_host(configured: str | None, hostname_fallback: str) -> str:
     """Pick an address other nodes can actually reach the model store host at.
 
@@ -306,45 +344,7 @@ def _routable_store_advertise_host(configured: str | None, hostname_fallback: st
         ):
             return configured
 
-    routable: list[str] = []
-    for iface_name, addresses in psutil.net_if_addrs().items():
-        # Skip virtual bridge / container interfaces (docker0, br-*, virbr*,
-        # vmnet*, vboxnet*, veth*, k8s): they carry RFC1918 IPs that peers on the
-        # real LAN cannot route to and could otherwise outrank the LAN address.
-        if _is_virtual_iface(iface_name):
-            continue
-        for address in addresses:
-            if address.family != socket.AF_INET:
-                continue
-            try:
-                ip = ipaddress.ip_address(address.address)
-            except ValueError:
-                continue
-            if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
-                continue
-            routable.append(address.address)
-
-    # Prefer an RFC1918 LAN address (fast, reachable across the local switch)
-    # over a Tailscale/CGNAT (100.64.0.0/10) address over anything else; all beat
-    # the hostname fallback. CGNAT is also "private", so rank the ranges
-    # explicitly rather than relying on ``is_private``.
-    lan_nets = (
-        ipaddress.ip_network("10.0.0.0/8"),
-        ipaddress.ip_network("172.16.0.0/12"),
-        ipaddress.ip_network("192.168.0.0/16"),
-    )
-    cgnat_net = ipaddress.ip_network("100.64.0.0/10")
-
-    def _rank(address: str) -> int:
-        ip = ipaddress.ip_address(address)
-        if any(ip in net for net in lan_nets):
-            return 0
-        if ip in cgnat_net:
-            return 1
-        return 2
-
-    routable.sort(key=_rank)
-    return routable[0] if routable else hostname_fallback
+    return _routable_local_ipv4() or hostname_fallback
 
 
 def _configure_model_store_runtime(
@@ -430,23 +430,15 @@ class Node:
         session_id = SessionId(master_node_id=node_id, election_clock=0)
         # Zenoh data plane (#279 follow-on). Node-addressed model output,
         # provider media, and realtime PCM ingress ride a Zenoh peer session;
-        # all other planes stay on libp2p. Endpoints are per-node (multicast
-        # off), so they come from
-        # the environment, not the gossip-synced config. Soft default-on (#315):
-        # Zenoh is the default WHEN configured (SKULK_ZENOH_LISTEN set) and a bare
-        # node with no Zenoh config falls back to gossipsub rather than crashing
-        # on the #308 listen requirement; SKULK_ZENOH_DATA_PLANE=1/0 forces it
-        # on/off explicitly. See _resolve_zenoh_enabled.
+        # all other planes stay on libp2p. Endpoint overrides are per-node, so
+        # they come from the environment rather than gossip-synced config.
+        # Zenoh is the shipping default, including for a fresh zero-config node.
+        # SKULK_ZENOH_DATA_PLANE can force it off; listen/connect overrides
+        # remain available for routed or locked-down deployments. See
+        # _resolve_zenoh_enabled.
         _zenoh_data_plane_env = os.environ.get("SKULK_ZENOH_DATA_PLANE", "")
         _zenoh_listen_env = os.environ.get("SKULK_ZENOH_LISTEN", "")
         _zenoh_on = _resolve_zenoh_enabled(_zenoh_data_plane_env, _zenoh_listen_env)
-        if not _zenoh_on and not _zenoh_data_plane_env.strip():
-            # Default path on a node with no listen configured: say why we're on
-            # gossipsub so the operator knows how to opt into Zenoh.
-            logger.info(
-                "DATA plane on gossipsub (default): SKULK_ZENOH_LISTEN unset. "
-                "Set it to use the Zenoh data plane."
-            )
         _zenoh_connect = [
             endpoint.strip()
             for endpoint in os.environ.get("SKULK_ZENOH_CONNECT", "").split(",")
@@ -455,14 +447,7 @@ class Node:
         _zenoh_listen_endpoints: list[str] | None = None
         _zenoh_namespace: str | None = None
         if _zenoh_on:
-            # Bind restriction (#308): require SKULK_ZENOH_LISTEN explicitly
-            # rather than silently defaulting to tcp/0.0.0.0:7447 (all
-            # interfaces). The operator picks the interface (a private IP on a
-            # shared network); an explicit 0.0.0.0 is still allowed but is then
-            # a deliberate choice, not a silent default.
-            _zenoh_listen = _require_zenoh_listen(
-                os.environ.get("SKULK_ZENOH_LISTEN", "")
-            )
+            _zenoh_listen = _resolve_zenoh_listen(_zenoh_listen_env)
             _zenoh_listen_endpoints = [_zenoh_listen]
             # Namespace isolation (#308): Zenoh transparently prefixes all keys
             # with this segment, so a peer on a different namespace cannot read
@@ -504,6 +489,7 @@ class Node:
             zenoh_connect_endpoints=_zenoh_connect,
             node_id=str(node_id),
             zenoh_namespace=_zenoh_namespace,
+            zenoh_multicast_scouting=not _zenoh_connect,
         )
         await router.register_topic(topics.GLOBAL_EVENTS)
         await router.register_topic(topics.LOCAL_EVENTS)

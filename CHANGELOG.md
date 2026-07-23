@@ -13,6 +13,16 @@ This project records release notes here and mirrors public-facing notes in
 
 - Fixed HTTP model-store staging progress to use the canonical registry byte total across fresh and resumed multi-file transfers, restoring the bounded fraction gate that prevents progress telemetry from flooding the ordered control plane (#520).
 
+### Changed
+
+- **Fresh installs now use the same Zenoh data plane as the E2E qualification
+  fleet.** An unset `SKULK_ZENOH_DATA_PLANE` selects Zenoh instead of silently
+  falling back to gossipsub. Zero-config startup binds a specific
+  peer-reachable local IPv4 (loopback only when offline) and enables local
+  multicast scouting; an explicit `SKULK_ZENOH_CONNECT` list retains the
+  multicast-off routed-fleet posture. `SKULK_ZENOH_DATA_PLANE=0` remains the
+  explicit compatibility fallback.
+
 ### Added
 
 - **Laguna S 2.1 on the llama.cpp engines.** The managed llama-server pin
