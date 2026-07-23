@@ -200,12 +200,26 @@ class SkulkBatchGenerator:
         )
 
         is_bench = task_params.bench
+        is_native_vision = vision is not None and vision.pixel_values is not None
 
         prefix_hit_length = 0
         matched_index: int | None = None
         prompt_tokens = all_prompt_tokens
 
-        if self.kv_prefix_cache is not None and not is_bench:
+        use_prefix_cache = (
+            self.kv_prefix_cache is not None and not is_bench and not is_native_vision
+        )
+        if self.kv_prefix_cache is not None and is_native_vision and not is_bench:
+            # Native VLM caches contain image-expanded language state whose
+            # restore position cannot be reconstructed from text-token offsets.
+            # Reusing one across independent batched requests progressively
+            # leaks chat-template tokens and drops image detail from responses.
+            logger.info(
+                "Disabling KV prefix cache for batched native vision request isolation"
+            )
+
+        if use_prefix_cache:
+            assert self.kv_prefix_cache is not None
             cache, remaining_tokens, matched_index = self.kv_prefix_cache.get_kv_cache(
                 self.model, all_prompt_tokens, media_regions=media_regions
             )
@@ -237,7 +251,6 @@ class SkulkBatchGenerator:
             top_k=task_params.top_k if task_params.top_k is not None else 0,
         )
 
-        is_native_vision = vision is not None and vision.pixel_values is not None
         native_pixel_values: mx.array | list[mx.array] | None = None
         if is_native_vision:
             assert vision is not None
@@ -300,7 +313,7 @@ class SkulkBatchGenerator:
                 c.values = c._trim(trim_size, c.values)
                 c._idx = c.max_size
 
-        if not is_bench:
+        if use_prefix_cache:
             min_prefix_hit_length = max(
                 1000, system_prompt_token_count(task_params, self.tokenizer)
             )
