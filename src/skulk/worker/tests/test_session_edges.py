@@ -119,7 +119,12 @@ def test_session_edge_self_heal_detects_state_loss() -> None:
 
     from datetime import datetime, timezone
 
-    member_state = State(last_seen={peer: datetime.now(timezone.utc)})
+    member_state = State(
+        last_seen={
+            self_id: datetime.now(timezone.utc),
+            peer: datetime.now(timezone.utc),
+        }
+    )
 
     class _WorkerStub:
         node_id = self_id
@@ -128,6 +133,7 @@ def test_session_edge_self_heal_detects_state_loss() -> None:
         _session_emitted_edges = {peer: edge}
 
         detect = Worker._session_edges_missing_from_state  # pyright: ignore[reportPrivateUsage]
+        _session_edge_may_emit = Worker._session_edge_may_emit  # pyright: ignore[reportPrivateUsage]
 
     stub = _WorkerStub()
 
@@ -136,17 +142,27 @@ def test_session_edge_self_heal_detects_state_loss() -> None:
     assert missing == [Connection(source=self_id, sink=peer, edge=edge)]
 
     # Edge present in state: nothing to heal.
-    present = State(last_seen={peer: datetime.now(timezone.utc)})
+    present = State(
+        last_seen={
+            self_id: datetime.now(timezone.utc),
+            peer: datetime.now(timezone.utc),
+        }
+    )
     present.topology.add_connection(
         Connection(source=self_id, sink=peer, edge=edge)
     )
     stub.state = present
     assert stub.detect() == []
 
-    # NOT a member (pre-membership, or timed out with a lingering socket):
-    # membership is the emission gate, so nothing is emitted or healed
+    # Peer NOT a member (pre-membership, or timed out with a lingering
+    # socket): membership gates emission, so nothing is emitted or healed
     # until a NodeGatheredInfo stamps last_seen.
-    stub.state = State()
+    stub.state = State(last_seen={self_id: datetime.now(timezone.utc)})
+    assert stub.detect() == []
+
+    # SELF not a member (a wedged-but-alive node that applied its own
+    # NodeTimedOut): the source side of the gate; nothing may re-mint us.
+    stub.state = State(last_seen={peer: datetime.now(timezone.utc)})
     assert stub.detect() == []
 
     # Session fully closed (count zero): never re-emit a dead edge.
