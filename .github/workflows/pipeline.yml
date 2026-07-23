@@ -32,7 +32,10 @@ jobs:
         run: |
           set -euo pipefail
           base="origin/${{ github.base_ref }}"
-          git fetch origin "${{ github.base_ref }}" --depth=1
+          # Full-depth fetch: a --depth=1 fetch here can shallow the base ref
+          # in the otherwise-full checkout and break the merge-base that
+          # "$base"...HEAD needs, failing or mis-scoping the guard.
+          git fetch origin "${{ github.base_ref }}"
           # Dependency manifests are wire surfaces too: a libp2p or zenoh
           # upgrade can change protocol behavior without touching our source.
           # The workspace manifest and lockfile live at the REPO ROOT.

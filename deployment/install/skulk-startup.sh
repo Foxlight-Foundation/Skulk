@@ -90,8 +90,25 @@ run_prep() {
     # exit code so an operator can spot a long-running silent failure.
     if [[ -d .git ]]; then
         log "git pull (non-fatal)"
+        PRE_PULL_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
         if ! git pull --ff-only 2>&1 | tee -a "$PREP_LOG" >&2; then
             log "warning: git pull failed (continuing with on-disk revision)"
+        fi
+        # If the pull updated THIS script, the running shell still executes
+        # the old body it already read, so new prep steps (e.g. the bindings
+        # rebuild below) would not run until a second restart. Re-exec the
+        # freshly pulled script once so prep changes take effect on the same
+        # restart that delivered them. Single-shot via the env guard: the
+        # re-exec'd script pulls again (a no-op) and proceeds normally.
+        POST_PULL_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
+        if [[ -z "${SKULK_STARTUP_REEXECED:-}" \
+            && -n "$PRE_PULL_HEAD" && -n "$POST_PULL_HEAD" \
+            && "$PRE_PULL_HEAD" != "$POST_PULL_HEAD" ]] \
+            && ! git diff --quiet "$PRE_PULL_HEAD" "$POST_PULL_HEAD" \
+                -- deployment/install/skulk-startup.sh 2>/dev/null; then
+            log "startup script changed by git pull; re-executing the updated script"
+            export SKULK_STARTUP_REEXECED=1
+            exec bash "$REPO_ROOT/deployment/install/skulk-startup.sh"
         fi
     else
         log "not a git checkout — skipping git pull"
