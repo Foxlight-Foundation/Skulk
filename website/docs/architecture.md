@@ -636,8 +636,10 @@ An installed wheel is wired automatically, including its bundled
 no usable CUDA wheel installed (a bare checkout or a GPU-cloud container
 that skipped the installer's engine step), provisioning first installs the
 Foxlight CUDA wheel on demand from the wheel index, so the CUDA lane
-completes itself instead of degrading; only if that fails does the
-checksum-verified tarball fallback apply: a visible
+completes itself instead of degrading; only if that fails does the node fall
+back to the Vulkan lane, where an already-installed Vulkan wheel still
+outranks tarball provisioning and otherwise the
+checksum-verified tarball fallback applies: a visible
 NVIDIA GPU tries tarball variants in order: first a CUDA build (upstream publishes no
 Linux CUDA prebuilt, so this slot is reserved for a Foxlight-built artifact
 and is skipped until one is pinned in the manifest), then the Vulkan build
