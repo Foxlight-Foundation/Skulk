@@ -21,7 +21,6 @@ from mlx_lm.generate import (
     stream_generate,
 )
 from mlx_lm.models import base as _mlx_lm_base
-from mlx_lm.models.cache import ArraysCache, RotatingKVCache
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 from packaging.version import InvalidVersion, Version
@@ -60,6 +59,7 @@ from skulk.worker.engines.mlx.cache import (
     KVPrefixCache,
     encode_prompt,
     has_non_kv_caches,
+    is_non_kv_cache_entry,
     make_kv_cache,
     snapshot_ssm_states,
     trim_cache,
@@ -1025,12 +1025,12 @@ def prefill(
     # Because of needing to roll back arrays cache, we will generate on 2 tokens so trim 1 more.
     pre_gen = deepcopy(snapshots[-2]) if has_ssm else None
     for i, c in enumerate(cache):
-        if has_ssm and isinstance(c, (ArraysCache, RotatingKVCache)):
+        if has_ssm and is_non_kv_cache_entry(c):
             assert pre_gen is not None
             if pre_gen.states[i] is not None:
                 cache[i] = deepcopy(pre_gen.states[i])  # type: ignore
         else:
-            assert not isinstance(c, (ArraysCache, RotatingKVCache))
+            assert not is_non_kv_cache_entry(c)
             trim_fn = getattr(c, "trim", None)
             assert callable(trim_fn)
             trim_fn(2)
