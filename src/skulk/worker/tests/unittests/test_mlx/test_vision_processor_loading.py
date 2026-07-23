@@ -2,11 +2,14 @@
 
 """Tests for MLX-native image processor discovery."""
 
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
+import numpy as np
 import pytest
+from PIL import Image
 
 from skulk.shared.models.model_cards import VisionCardConfig
 from skulk.shared.types.common import ModelId
@@ -147,3 +150,67 @@ def test_processor_loader_reports_transformers_torchvision_failure(
 
     with pytest.raises(RuntimeError, match="requires the Torchvision library"):
         encoder.ensure_processor_loaded()
+
+
+def test_gemma3n_processor_uses_configured_pil_backend_without_torchvision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Gemma 3n should produce its configured image tensor on the PIL backend."""
+    (tmp_path / "config.json").write_text(
+        '{"vision_config": {"model_type": "gemma3n"}}',
+        encoding="utf-8",
+    )
+    (tmp_path / "preprocessor_config.json").write_text(
+        """{
+          "do_convert_rgb": true,
+          "do_normalize": false,
+          "do_rescale": true,
+          "do_resize": true,
+          "image_mean": [0.5, 0.5, 0.5],
+          "image_processor_type": "SiglipImageProcessorFast",
+          "image_std": [0.5, 0.5, 0.5],
+          "resample": 2,
+          "rescale_factor": 0.00392156862745098,
+          "size": {"height": 768, "width": 768}
+        }""",
+        encoding="utf-8",
+    )
+
+    def _model_path(*_args: object) -> Path:
+        return tmp_path
+
+    def _no_upstream_processor(_repo: str) -> None:
+        return None
+
+    def _fail_transformers_loader(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Gemma 3n should use the concrete PIL backend")
+
+    monkeypatch.setattr(vision_module, "build_model_path", _model_path)
+    monkeypatch.setattr(vision_module, "load_image_processor", _no_upstream_processor)
+    monkeypatch.setattr(
+        vision_module,
+        "AutoImageProcessor",
+        SimpleNamespace(from_pretrained=_fail_transformers_loader),
+    )
+
+    encoder = VisionEncoder(
+        VisionCardConfig(
+            image_token_id=262145,
+            model_type="gemma3n",
+            weights_repo="mlx-community/example",
+        ),
+        ModelId("mlx-community/example"),
+    )
+    encoder.ensure_processor_loaded()
+
+    processor = encoder.processor
+    assert processor is not None
+    assert type(processor).__name__ == "SiglipImageProcessorPil"
+    raw = cast(
+        Mapping[str, object],
+        processor(images=[Image.new("RGB", (32, 24))], return_tensors="np"),
+    )
+    pixel_values = cast(np.ndarray[tuple[int, ...], np.dtype[np.float32]], raw["pixel_values"])
+    assert pixel_values.shape == (1, 3, 768, 768)
+    assert pixel_values.dtype == np.float32

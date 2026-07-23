@@ -137,6 +137,12 @@ class _FromPretrainedProcessor(Protocol):
     def from_pretrained(cls, repo: str, **kwargs: object) -> _ProcessorContainer: ...
 
 
+class _ImageProcessorFactory(Protocol):
+    """Dynamic Transformers image processor factory surface."""
+
+    def from_pretrained(self, repo: str, **kwargs: object) -> object: ...
+
+
 def _filter_config(cls: type, d: JsonDict) -> JsonDict:
     valid = set(inspect.signature(cls.__init__).parameters.keys()) - {"self"}
     return {k: v for k, v in d.items() if k in valid}
@@ -237,6 +243,26 @@ def _instantiate_mlx_vlm_image_processor(
                 logger.info(f"Using mlx_vlm {obj.__name__} as image processor")
                 return cast(_ImageProcessorProtocol, processor)
     return None
+
+
+def _load_gemma3n_pil_image_processor(repo: str) -> _ImageProcessorProtocol:
+    """Load Gemma 3n's configured SigLIP processor without torchvision.
+
+    Transformers 5 exposes ``AutoImageProcessor`` as a torchvision-gated dummy
+    when torchvision is absent, even when callers request its portable PIL
+    backend. Importing the concrete PIL implementation preserves every value in
+    ``preprocessor_config.json`` while keeping Skulk's MLX runtime independent
+    from PyTorch and torchvision.
+    """
+    from transformers.models.siglip.image_processing_pil_siglip import (
+        SiglipImageProcessorPil,
+    )
+
+    factory = cast(_ImageProcessorFactory, cast(object, SiglipImageProcessorPil))
+    return cast(
+        _ImageProcessorProtocol,
+        factory.from_pretrained(repo),
+    )
 
 
 def _gemma4_native_processor_kwargs(
@@ -976,6 +1002,16 @@ class VisionEncoder:
         except (ImportError, OSError, ValueError) as exc:
             load_failures.append(f"mlx_vlm.utils.load_image_processor: {exc}")
             logger.info(f"mlx_vlm image processor loader failed for {repo}: {exc}")
+
+        if image_proc is None and self._config.model_type == "gemma3n":
+            try:
+                image_proc = _load_gemma3n_pil_image_processor(repo)
+                logger.info("Using Transformers PIL SigLIP image processor")
+            except (ImportError, OSError, TypeError, ValueError) as exc:
+                load_failures.append(f"Transformers PIL SigLIP processor: {exc}")
+                logger.info(
+                    f"Transformers PIL SigLIP processor failed for {repo}: {exc}"
+                )
 
         processor_modules = _mlx_vlm_processor_modules(self._config.model_type)
         if image_proc is None:
