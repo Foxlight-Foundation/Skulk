@@ -3,10 +3,10 @@
 //! This runs ALONGSIDE the libp2p [`crate::swarm::Swarm`]: control, telemetry,
 //! and election stay on gossipsub; only the DATA topic (per-token output) is
 //! routed here when the `zenoh_data_plane` flag is on. The session is a Zenoh
-//! `peer` with **multicast scouting disabled** and gossip + explicit endpoints,
-//! which is the posture proven (Phase 0) to form a mesh on the macOS fleet over
-//! both the LAN and the Thunderbolt chain without tripping Local Network
-//! Privacy.
+//! `peer` with gossip discovery. Explicitly configured fleets use fixed connect
+//! endpoints with multicast scouting disabled. A zero-config installation uses
+//! multicast scouting so local peers discover each other without a fleet-
+//! specific endpoint list.
 //!
 //! Ordering discipline: publishers are declared `Reliable` with
 //! `CongestionControl::Block` on a single fixed `Priority`, so a single
@@ -37,8 +37,11 @@ const INBOUND_BUFFER_CAPACITY: usize = 4096;
 pub struct ZenohConfig {
     /// Local endpoints to listen on, e.g. `tcp/0.0.0.0:7447`.
     pub listen_endpoints: Vec<String>,
-    /// Peer endpoints to connect to (explicit, since multicast is off).
+    /// Peer endpoints to connect to in an explicitly routed deployment.
     pub connect_endpoints: Vec<String>,
+    /// Whether local multicast scouting discovers peers when no explicit
+    /// fleet endpoint list is available.
+    pub multicast_scouting: bool,
     /// Optional session namespace (#308): a non-wildcard key-expr prefix that
     /// Zenoh transparently prepends to every published/subscribed key. Foreign
     /// peers on a different namespace cannot subscribe to this fleet's `data`,
@@ -73,8 +76,7 @@ pub struct ZenohSession {
 }
 
 impl ZenohSession {
-    /// Open a Zenoh `peer` session with multicast off, gossip on, and the
-    /// supplied explicit endpoints.
+    /// Open a Zenoh `peer` session with gossip on and configured discovery.
     pub async fn open(config: ZenohConfig) -> AnyResult<Self> {
         let mut zconfig = zenoh::Config::default();
         let set = |c: &mut zenoh::Config, key: &str, val: &str| -> AnyResult<()> {
@@ -82,7 +84,15 @@ impl ZenohSession {
                 .map_err(|e| -> AnyError { format!("zenoh config {key}: {e}").into() })
         };
         set(&mut zconfig, "mode", "\"peer\"")?;
-        set(&mut zconfig, "scouting/multicast/enabled", "false")?;
+        set(
+            &mut zconfig,
+            "scouting/multicast/enabled",
+            if config.multicast_scouting {
+                "true"
+            } else {
+                "false"
+            },
+        )?;
         set(&mut zconfig, "scouting/gossip/enabled", "true")?;
         // Namespace isolation (#308): Zenoh transparently prefixes every key
         // with this non-wildcard key-expr, so a peer on a different namespace

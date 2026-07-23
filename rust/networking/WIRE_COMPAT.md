@@ -33,6 +33,11 @@ bindings while `versionStatus` reported "consistent".
 
 ## Entries (newest first)
 
+- **wire-neutral** (2026-07-23): Zenoh multicast scouting can now be enabled for
+  zero-config local peer discovery. Explicit-endpoint fleets retain multicast
+  off, and Zenoh keys, namespace derivation, QoS, framing, topics, and payloads
+  are unchanged. Old and new Zenoh peers therefore remain wire-compatible; this
+  changes default discovery/configuration, not the protocol.
 - **wire-neutral** (2026-07-22, #662): `FromSwarm::Discovered` gains
   `remote_ip`/`remote_tcp_port` fields describing the connection's observed
   remote endpoint. This enum crosses only the in-process PyO3 boundary to
