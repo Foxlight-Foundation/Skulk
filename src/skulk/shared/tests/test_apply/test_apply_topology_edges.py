@@ -98,28 +98,52 @@ def test_reap_ignores_the_phantom_dangling_own_edges() -> None:
     assert not list(state.topology.get_all_connections_between(PHANTOM, MEMBER))
 
 
-def test_mutual_phantoms_cascade_out_together() -> None:
-    """Two never-members that died holding edges to each other both reap.
+def test_reap_cascades_through_the_phantom_chain() -> None:
+    """Reaping a phantom frees nodes its dangling edges were pinning.
 
-    Deleting A to B first frees B (its only in-edge is gone); removing B
-    clears the dangling B to A edge, which was the only thing pinning A, so
-    the eligibility pass must repeat until nothing changes or A leaks
-    forever (PR #674 review).
+    A phantom's own emitted edge can be the only in-edge of ANOTHER
+    never-member (a peer that also died pre-publish); clearing it with the
+    first removal must cascade, even though that second node is not an
+    endpoint of the deletion event at all (PR #674 review).
     """
     second = NodeId("phantom-two")
-    state = State()
+    state = _member_state()
+    state = apply_topology_edge_created(
+        TopologyEdgeCreated(conn=_connection(MEMBER, PHANTOM)), state
+    )
+    # The phantom's own emission toward another dead peer, indexed before
+    # both died; it is the only edge referencing phantom-two.
     state = apply_topology_edge_created(
         TopologyEdgeCreated(conn=_connection(PHANTOM, second)), state
     )
-    state = apply_topology_edge_created(
-        TopologyEdgeCreated(conn=_connection(second, PHANTOM)), state
-    )
 
     state = apply_topology_edge_deleted(
-        TopologyEdgeDeleted(conn=_connection(PHANTOM, second)), state
+        TopologyEdgeDeleted(conn=_connection(MEMBER, PHANTOM)), state
     )
     assert not state.topology.contains_node(PHANTOM)
     assert not state.topology.contains_node(second)
+    assert state.topology.contains_node(MEMBER)
+
+
+def test_live_source_is_never_reaped_by_its_own_deletion() -> None:
+    """The deletion's emitter is alive by construction and must survive.
+
+    A live node can emit session edges and deletions before its first
+    NodeGatheredInfo stamps last_seen; reaping it here would silently drop
+    its other live edges, which the worker deliberately does not re-emit
+    (PR #674 review).
+    """
+    live_early = NodeId("live-not-yet-member")
+    state = _member_state()
+    state = apply_topology_edge_created(
+        TopologyEdgeCreated(conn=_connection(live_early, MEMBER)), state
+    )
+
+    state = apply_topology_edge_deleted(
+        TopologyEdgeDeleted(conn=_connection(live_early, MEMBER)), state
+    )
+    assert state.topology.contains_node(live_early)
+    assert state.topology.contains_node(MEMBER)
 
 
 def test_never_member_with_remaining_edges_survives() -> None:

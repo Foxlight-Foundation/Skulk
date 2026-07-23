@@ -557,19 +557,25 @@ def apply_topology_edge_deleted(event: TopologyEdgeDeleted, state: State) -> Sta
     # would otherwise pin the phantom forever) and removal clears them.
     # Real members always carry last_seen and are reaped by NodeTimedOut
     # instead (#671).
-    # Fixpoint over the two endpoints: removing one node also clears its
-    # dangling out-edges, which can be exactly what still pointed at the
-    # other endpoint (two mutual never-members that died together), so a
-    # single pass could leak the endpoint checked first (PR #674 review).
-    removed_one = True
-    while removed_one:
-        removed_one = False
-        for endpoint in (event.conn.source, event.conn.sink):
-            if (
-                endpoint not in state.last_seen
-                and topology.contains_node(endpoint)
-                and topology.node_has_no_incoming_edges(endpoint)
-            ):
-                topology.remove_node(endpoint)
-                removed_one = True
+    # Reap starts from the SINK (the node that just lost an in-edge) and
+    # cascades: removing a phantom clears its dangling out-edges, which can
+    # orphan further never-member nodes those edges pointed at, including
+    # nodes that are not endpoints of this event at all. The SOURCE is never
+    # eligible: only a live worker emits deletions for its own edges, so the
+    # emitter is alive by construction, and reaping it here would silently
+    # drop its other live session edges, which the worker deliberately does
+    # not re-emit while it tracks them as already-emitted (PR #674 review).
+    candidates: list[NodeId] = [event.conn.sink]
+    while candidates:
+        candidate = candidates.pop()
+        if (
+            candidate == event.conn.source
+            or candidate in state.last_seen
+            or not topology.contains_node(candidate)
+            or not topology.node_has_no_incoming_edges(candidate)
+        ):
+            continue
+        unblocked = [conn.sink for conn in topology.out_edges(candidate)]
+        topology.remove_node(candidate)
+        candidates.extend(unblocked)
     return state.model_copy(update={"topology": topology})
