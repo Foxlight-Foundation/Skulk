@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import io
+import ipaddress
 import sys
 import time
 from collections import defaultdict, deque
@@ -632,7 +633,7 @@ class Worker:
         vision_media_packet_receiver: Receiver[VisionMediaPacket] | None = None,
         connection_message_receiver: Receiver[ConnectionMessage] | None = None,
         session_connection_snapshot: (
-            Callable[[], dict[str, tuple[str, int]]] | None
+            Callable[[], dict[str, tuple[str, int, int]]] | None
         ) = None,
         store_client: ModelStoreClient | None = None,
         staging_config: StagingNodeConfig | None = None,
@@ -2855,6 +2856,34 @@ class Worker:
                 for model_id in report.evicted_model_ids
             )
 
+    @staticmethod
+    def _session_edge_multiaddr(ip: str, port: int) -> Multiaddr:
+        """Build the multiaddr for a session edge's observed remote endpoint.
+
+        Dual-stack listeners can report IPv4 peers as IPv4-mapped IPv6
+        literals (``::ffff:203.0.113.7``); normalize those to plain IPv4 so
+        the same host never appears under two address families and the
+        ``/ip6/`` form never carries a dotted literal. Falls back to the
+        codebase-wide ":"-means-v6 heuristic when the string does not parse
+        as an IP at all (defensive; the transport hands us real addresses).
+        """
+        try:
+            parsed = ipaddress.ip_address(ip)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, ipaddress.IPv6Address):
+            mapped = parsed.ipv4_mapped
+            if mapped is not None:
+                return Multiaddr(address=f"/ip4/{mapped}/tcp/{port}")
+            return Multiaddr(address=f"/ip6/{ip}/tcp/{port}")
+        if isinstance(parsed, ipaddress.IPv4Address):
+            return Multiaddr(address=f"/ip4/{ip}/tcp/{port}")
+        return Multiaddr(
+            address=(
+                f"/ip6/{ip}/tcp/{port}" if ":" in ip else f"/ip4/{ip}/tcp/{port}"
+            )
+        )
+
     async def _session_edge_ingress(self) -> None:
         """Record authenticated libp2p sessions as topology paths (#662).
 
@@ -2884,18 +2913,21 @@ class Worker:
             # An event for a seeded connection may still sit buffered in the
             # receiver (created before this loop started), which can
             # overcount its refs; the cost is a session edge lingering until
-            # node removal, never a missing edge.
-            for peer_str, (ip, port) in self._session_connection_snapshot().items():
+            # node removal, never a missing edge. The snapshot's live count
+            # seeds the refs directly: a multi-homed peer seeded at one ref
+            # would lose its edge on the first later disconnect while other
+            # connections remain (PR #668 review).
+            for peer_str, (
+                ip,
+                port,
+                live_count,
+            ) in self._session_connection_snapshot().items():
                 peer = NodeId(peer_str)
-                session_counts[peer] = session_counts.get(peer, 0) + 1
+                session_counts[peer] = session_counts.get(peer, 0) + live_count
                 if peer in emitted_edges:
                     continue
                 edge = SocketConnection(
-                    sink_multiaddr=(
-                        Multiaddr(address=f"/ip6/{ip}/tcp/{port}")
-                        if ":" in ip
-                        else Multiaddr(address=f"/ip4/{ip}/tcp/{port}")
-                    ),
+                    sink_multiaddr=self._session_edge_multiaddr(ip, port),
                     session=True,
                 )
                 emitted_edges[peer] = edge
@@ -2918,17 +2950,9 @@ class Worker:
                         # missing one (defensive) must not mint a /tcp/0
                         # multiaddr.
                         continue
-                    port = message.remote_tcp_port
-                    # ":" selects the v6 form, matching the codebase-wide
-                    # convention: "." would misclassify IPv4-mapped IPv6
-                    # literals, which contain dots.
                     edge = SocketConnection(
-                        sink_multiaddr=(
-                            Multiaddr(address=f"/ip6/{message.remote_ip}/tcp/{port}")
-                            if ":" in message.remote_ip
-                            else Multiaddr(
-                                address=f"/ip4/{message.remote_ip}/tcp/{port}"
-                            )
+                        sink_multiaddr=self._session_edge_multiaddr(
+                            message.remote_ip, message.remote_tcp_port
                         ),
                         session=True,
                     )

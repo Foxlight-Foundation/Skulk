@@ -857,11 +857,18 @@ class Router:
             else:
                 self._session_connections[peer] = (count - 1, endpoint)
 
-    def current_session_connections(self) -> dict[str, tuple[str, int]]:
-        """Snapshot of live peers with a known remote endpoint (#662)."""
+    def current_session_connections(self) -> dict[str, tuple[str, int, int]]:
+        """Snapshot of live peers as ``(ip, port, live_connection_count)`` (#662).
+
+        The live count rides along so a consumer seeding its own refcounts
+        (the worker's session-edge ingress after a mid-session recreation)
+        starts from the true number of connections: seeding one ref for a
+        multi-homed peer would let the first later disconnect delete the
+        session edge while other connections remain (PR #668 review).
+        """
         return {
-            peer: endpoint
-            for peer, (_count, endpoint) in self._session_connections.items()
+            peer: (endpoint[0], endpoint[1], count)
+            for peer, (count, endpoint) in self._session_connections.items()
             if endpoint is not None
         }
 
