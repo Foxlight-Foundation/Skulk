@@ -489,6 +489,7 @@ class Router:
         zenoh_connect_endpoints: Sequence[str] = (),
         node_id: str | None = None,
         zenoh_namespace: str | None = None,
+        zenoh_multicast_scouting: bool = False,
     ) -> "Router":
         # When zenoh_listen_endpoints is provided the data plane (DATA topic)
         # rides a Zenoh peer session instead of gossipsub (the zenoh_data_plane
@@ -500,6 +501,7 @@ class Router:
                 list(zenoh_listen_endpoints),
                 list(zenoh_connect_endpoints),
                 zenoh_namespace,
+                zenoh_multicast_scouting,
             )
         # The Zenoh data plane addresses output per owner (key data/<node_id>),
         # so the Router subscribes only to its own id; default to the keypair's
@@ -521,8 +523,8 @@ class Router:
         send, recv = channel[OutboundPacket]()
         self.networking_receiver: Receiver[OutboundPacket] = recv
         self._net: NetworkingHandle = handle
-        # Optional Zenoh transport for the data plane; None keeps everything on
-        # gossipsub (default, until the flag is proven in production).
+        # Optional Zenoh transport for the data plane; None is the explicit
+        # gossipsub fallback.
         self._zenoh: ZenohHandle | None = zenoh
         # This node's id, used as the Zenoh data-plane subscription suffix so a
         # node receives only output addressed to it (#279 Phase 2). Required when

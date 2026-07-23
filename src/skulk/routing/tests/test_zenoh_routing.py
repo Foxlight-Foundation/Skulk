@@ -1,8 +1,8 @@
 """Unit tests for the Router's data-plane transport selection (Zenoh, #279).
 
-The Router routes the DATA topic over Zenoh only when a ZenohHandle is present
-(the SKULK_ZENOH_DATA_PLANE flag); every other topic, and all topics when the
-flag is off, stay on libp2p gossipsub. These tests pin that decision without
+The Router routes the DATA topic over Zenoh when a ZenohHandle is present;
+every other topic, and all topics when the explicit compatibility fallback is
+selected, stay on libp2p gossipsub. These tests pin that decision without
 opening a network session.
 """
 
