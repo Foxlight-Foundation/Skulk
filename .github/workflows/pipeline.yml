@@ -36,10 +36,12 @@ jobs:
           # in the otherwise-full checkout and break the merge-base that
           # "$base"...HEAD needs, failing or mis-scoping the guard.
           git fetch origin "${{ github.base_ref }}"
-          # Dependency manifests are wire surfaces too: a libp2p or zenoh
-          # upgrade can change protocol behavior without touching our source.
-          # The workspace manifest and lockfile live at the REPO ROOT.
-          wire_files="rust/networking/src/swarm.rs rust/networking/src/discovery.rs rust/networking/src/zenoh_session.rs rust/networking/Cargo.toml Cargo.toml Cargo.lock"
+          # The whole networking src tree is the wire surface (lib.rs helpers
+          # feed discovery/address classification too). Dependency manifests
+          # count as well: a libp2p or zenoh upgrade can change protocol
+          # behavior without touching our source. The workspace manifest and
+          # lockfile live at the REPO ROOT.
+          wire_files="rust/networking/src rust/networking/Cargo.toml Cargo.toml Cargo.lock"
           # shellcheck disable=SC2086
           touched=$(git diff --name-only "$base"...HEAD -- $wire_files)
           if [ -z "$touched" ]; then
@@ -56,8 +58,12 @@ jobs:
           if git diff -U0 "$base"...HEAD -- rust/networking/src/swarm.rs | grep -Eq "^[+-].*NETWORK_VERSION.*=" ; then
             version_changed=true
           fi
+          # The log must both change AND still exist at HEAD: without the
+          # existence check, deleting WIRE_COMPAT.md would count as an
+          # "update" and let a wire change remove the audit log while passing.
           compat_updated=false
-          if git diff --name-only "$base"...HEAD -- rust/networking/WIRE_COMPAT.md | grep -q .; then
+          if git diff --name-only "$base"...HEAD -- rust/networking/WIRE_COMPAT.md | grep -q . \
+            && [ -f rust/networking/WIRE_COMPAT.md ]; then
             compat_updated=true
           fi
           if [ "$compat_updated" = "true" ]; then

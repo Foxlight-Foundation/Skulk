@@ -7,12 +7,14 @@ here. The pnet pre-shared key derives from `NETWORK_VERSION`, so a bump
 makes wire-incompatible builds refuse to connect, loudly, instead of
 half-working.
 
-CI enforces the pairing: a PR touching `src/swarm.rs`, `src/discovery.rs`,
-or `src/zenoh_session.rs` must either change the `NETWORK_VERSION` line or
-add an entry below explicitly recording that the change is wire-neutral
-(timing, comments, logging, refactors that provably keep protocol behavior
-identical). Deciding wire-neutrality is a review judgment; recording it
-here makes that judgment auditable.
+CI enforces the pairing: a PR touching anything under this crate's `src/`
+tree, this crate's `Cargo.toml`, or the workspace `Cargo.toml`/`Cargo.lock`
+at the repo root (a libp2p or zenoh dependency bump changes protocol
+behavior without touching our source) must either change the
+`NETWORK_VERSION` line or add an entry below explicitly recording that the
+change is wire-neutral (timing, comments, logging, refactors that provably
+keep protocol behavior identical). Deciding wire-neutrality is a review
+judgment; recording it here makes that judgment auditable.
 
 Why this exists: the telemetry-isolation change (31e3f333, 2026-07-14)
 moved TELEMETRY onto its own gossipsub protocol without a bump. A fresh
