@@ -48,21 +48,30 @@ def test_session_snapshot_carries_live_connection_count() -> None:
 
     stub = _RouterStub()
 
-    def update(connected: bool, ip: str = "100.95.14.7", port: int = 52416) -> None:
+    def connect(ip: str, port: int = 52416) -> None:
         stub._track(  # pyright: ignore[reportPrivateUsage]
             ConnectionMessage.from_update(
-                PyFromSwarm.Connection("12D3KooWTestPeer", connected, ip, port)
+                PyFromSwarm.Connection("12D3KooWTestPeer", True, ip, port)
             )
         )
 
-    update(True)
-    update(True, ip="10.99.0.2", port=52416)  # second, multi-homed connection
+    def disconnect() -> None:
+        # Disconnect updates from the bindings carry no endpoint: an empty
+        # string and port 0, which from_update maps to None.
+        stub._track(  # pyright: ignore[reportPrivateUsage]
+            ConnectionMessage.from_update(
+                PyFromSwarm.Connection("12D3KooWTestPeer", False, "", 0)
+            )
+        )
+
+    connect("100.95.14.7")
+    connect("10.99.0.2")  # second, multi-homed connection
     assert stub.snapshot() == {"12D3KooWTestPeer": ("100.95.14.7", 52416, 2)}
 
-    update(False)
+    disconnect()
     assert stub.snapshot() == {"12D3KooWTestPeer": ("100.95.14.7", 52416, 1)}
 
-    update(False)
+    disconnect()
     assert stub.snapshot() == {}
 
 

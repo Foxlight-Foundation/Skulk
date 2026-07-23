@@ -3009,8 +3009,15 @@ class Worker:
                 return sweep % self._PROBE_BACKOFF_RETRY_ROUNDS == 0
 
             probed: set[str] = set()
+            considered: set[str] = set()
 
-            def _should_probe(ip: str, *, sweep_probed: set[str] = probed) -> bool:
+            def _should_probe(
+                ip: str,
+                *,
+                sweep_probed: set[str] = probed,
+                sweep_considered: set[str] = considered,
+            ) -> bool:
+                sweep_considered.add(ip)
                 due = _due_this_sweep(ip)
                 if due:
                     sweep_probed.add(ip)
@@ -3045,6 +3052,10 @@ class Worker:
             verified = {ip for ips in conns.values() for ip in ips}
             for ip in probed - verified:
                 probe_failures[ip] += 1
+            # Addresses that stopped being advertised entirely would
+            # otherwise accumulate failure counters forever.
+            for ip in [k for k in probe_failures if k not in considered]:
+                probe_failures.pop(ip, None)
 
             for conn in self.state.topology.out_edges(self.node_id):
                 if not isinstance(conn.edge, SocketConnection):
@@ -3060,10 +3071,15 @@ class Worker:
                 # ignore mDNS discovered connections
                 if conn.edge.sink_multiaddr.port != 52415:
                     continue
-                # An edge whose address sat out this sweep (backoff) was not
-                # disproven; deleting it on a skipped probe would flap the
-                # topology at the backoff cadence.
-                if conn.edge.sink_multiaddr.ip_address not in probed:
+                # An edge whose address sat out this sweep due to BACKOFF was
+                # not disproven; deleting it on a skipped probe would flap
+                # the topology at the backoff cadence. An address the sweep
+                # never even CONSIDERED is different: the peer no longer
+                # advertises it (interface down, DHCP/VPN change), so the
+                # edge must fall through to deletion exactly as it did
+                # before backoff existed (PR #668 review).
+                edge_ip = conn.edge.sink_multiaddr.ip_address
+                if edge_ip in considered and edge_ip not in probed:
                     continue
                 if (
                     conn.sink not in conns
