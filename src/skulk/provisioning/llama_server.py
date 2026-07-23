@@ -52,9 +52,9 @@ AUTOPROVISION_OPT_OUT_ENV = "SKULK_NO_ENGINE_AUTOPROVISION"
 
 _DOWNLOAD_TIMEOUT_SECONDS = 300.0
 
-# The CUDA engine wheel is multi-GB and pip resolution adds overhead on slow
-# pipes; give its one-time install a generous budget before degrading to the
-# Vulkan/tarball chain.
+# The CUDA engine wheel is large (hundreds of MB) and pip resolution adds
+# overhead on slow pipes; give its one-time install a generous budget before
+# degrading to the Vulkan/tarball chain.
 _WHEEL_INSTALL_TIMEOUT_SECONDS = 900.0
 
 # Mirrors install.sh's ENGINE_INDEX_FLAGS: the Foxlight PEP 503 index is the
@@ -267,9 +267,15 @@ def try_install_cuda_wheel(facts: NodeFacts) -> bool:
     # BEFORE the default index, so the Foxlight wheel wins, while pip's
     # --extra-index-url picks the best version across ALL indexes, letting a
     # same-name package on PyPI or a mirror satisfy the 0.<pin>.* specifier
-    # and replace the pinned engine binary (PR #665 review). Quoted and
-    # targeting THIS interpreter so it is copy/paste safe.
+    # and replace the pinned engine binary (PR #665 review). The env -u
+    # prefix reproduces the sanitized subprocess environment: UV_INDEX and
+    # friends outrank CLI flags, so without it the copied command is not
+    # equivalent to the automated one on a host with a corporate mirror
+    # configured. Quoted and targeting THIS interpreter for copy/paste
+    # safety.
     manual_command = (
+        "env -u UV_INDEX -u UV_INDEX_URL -u UV_EXTRA_INDEX_URL "
+        "-u UV_DEFAULT_INDEX -u UV_FIND_LINKS -u UV_CONFIG_FILE "
         f"uv pip install --no-config --python {sys.executable} '{specifier}' "
         f"--extra-index-url {FOXLIGHT_WHEEL_INDEX} --index-url {_PYPI_INDEX}"
     )
