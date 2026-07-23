@@ -273,7 +273,9 @@ opts in through its card's `compatible_backends` (`llama_server-…`) plus the
 GGUF, but some speculative modes need a separate small draft model: a card names it
 with `served_spec_draft_repo` / `served_spec_draft_file` and the worker downloads it
 as a companion and passes it to the server as `--model-draft` (this is how Gemma 4
-runs MTP, via its assistant as the draft model). The engine coexists with the
+runs MTP, via its assistant as the draft model; `draft_dflash` engages a separate
+block-parallel DFlash speculator the same way, for the drafter families
+upstream's dflash architecture implements). The engine coexists with the
 in-process llama.cpp runner; the same managed-server-plus-proxy shape carries the
 `vllm` engine described next. See the setup notes for a non-Mac node in
 [AMD / Strix Halo nodes](amd-strix-halo-nodes) and the env vars

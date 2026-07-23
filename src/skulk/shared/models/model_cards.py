@@ -704,16 +704,28 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     initiative in the foxlight-docs hub (Phase C).
     """
     served_spec_type: (
-        Literal["none", "draft_mtp", "draft_eagle3", "draft_simple", "ngram"] | None
+        Literal[
+            "none",
+            "draft_mtp",
+            "draft_eagle3",
+            "draft_simple",
+            "draft_dflash",
+            "ngram",
+        ]
+        | None
     ) = None
     """Speculative-decoding mode for the ``llama_server`` (served-backend) engine.
 
     Maps to a ``llama-server --spec-type`` token in the runner
-    (``_SPEC_TYPE_FLAG``): ``draft_mtp`` -> ``draft-mtp`` (the model's own built-in
-    MTP heads, no draft model needed; Qwen3.6/DeepSeek/GLM/Kimi/Nemotron),
+    (``_SPEC_TYPE_FLAG``): ``draft_mtp`` -> ``draft-mtp`` (usually the model's own built-in
+    MTP heads; a separate draft is optional, e.g. Gemma 4's assistant;
+    Qwen3.6/DeepSeek/GLM/Kimi/Nemotron bake theirs in),
     ``draft_eagle3`` -> ``draft-eagle3`` (an EAGLE-3 head), ``draft_simple`` ->
-    ``draft-simple`` (a separate draft model), ``ngram`` -> ``ngram-cache``
-    (prompt-lookup), ``none``/``None`` plain decoding. Only the served engine reads
+    ``draft-simple`` (a separate draft model), ``draft_dflash`` ->
+    ``draft-dflash`` (a separate block-parallel DFlash speculator GGUF via
+    ``served_spec_draft_repo``/``served_spec_draft_file``; llama-server >=
+    b10092), ``ngram`` -> ``ngram-cache`` (prompt-lookup), ``none``/``None``
+    plain decoding. Only the served engine reads
     this; the in-process ``mlx`` and ``llama_cpp`` engines ignore it (MLX
     speculation is the ``mtp_*`` / ``assistant_model_repo`` fields above)."""
     served_spec_n_max: int | None = Field(default=None, gt=0)
@@ -1163,21 +1175,36 @@ class ModelCard(CamelCaseModel):
             trust_remote_code=False,
             is_custom=True,
             placement=PlacementCardConfig(
+                # Both llama.cpp engines, mirroring the bundled GGUF text
+                # cards (#607): the served llama_server tags rank first so a
+                # node running llama-server gets its concurrency slots, and
+                # only the served engine can pool multiple nodes via RPC
+                # (a llama_cpp-only card is silently ineligible for every
+                # multi-node GGUF placement). Nodes without a served binary
+                # fall through to in-process llama_cpp unchanged.
                 compatible_backends=frozenset(
                     {
+                        "llama_server-vulkan",
+                        "llama_server-rocm",
+                        "llama_server-cuda",
+                        "llama_server-cpu",
                         "llama_cpp-vulkan",
                         "llama_cpp-rocm",
                         "llama_cpp-cuda",
                         "llama_cpp-cpu",
                     }
                 ),
-                # Prefer a GPU backend over CPU; the GPU ordering is a sensible
-                # default a card author can tune per model (Vulkan vs ROCm
-                # performance is model-dependent).
+                # Served engine first, then a GPU backend over CPU; the GPU
+                # ordering is a sensible default a card author can tune per
+                # model (Vulkan vs ROCm performance is model-dependent).
                 backend_preference=(
+                    "llama_server-vulkan",
+                    "llama_server-rocm",
+                    "llama_server-cuda",
                     "llama_cpp-vulkan",
                     "llama_cpp-rocm",
                     "llama_cpp-cuda",
+                    "llama_server-cpu",
                     "llama_cpp-cpu",
                 ),
             ),

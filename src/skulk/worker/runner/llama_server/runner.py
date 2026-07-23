@@ -93,19 +93,22 @@ from skulk.worker.runner.llama_server.channel_text_parser import (
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 
 # Card ``served_spec_type`` value -> the ``llama-server --spec-type`` token.
-# ``draft_mtp`` uses the model's own built-in MTP heads (no draft model needed).
+# ``draft_mtp`` usually uses the model's own built-in MTP heads; a separate
+# draft is optional (Gemma 4 supplies its assistant as one).
 _SPEC_TYPE_FLAG: Final[dict[str, str]] = {
     "draft_mtp": "draft-mtp",
     "draft_eagle3": "draft-eagle3",
     "draft_simple": "draft-simple",
+    "draft_dflash": "draft-dflash",
     "ngram": "ngram-cache",
 }
 
-# Served spec modes that REQUIRE a separate `--model-draft` GGUF. ``draft_mtp`` is
-# optional (Qwen/DeepSeek/GLM bake the heads into the base GGUF; Gemma 4 instead
-# supplies its assistant as a draft), and ``ngram`` needs no model at all.
+# Served spec modes that REQUIRE a separate ``--model-draft`` GGUF (DFlash's
+# block-parallel drafter always ships separately). For ``draft_mtp`` a draft is
+# optional (Qwen/DeepSeek/GLM bake the heads into the base GGUF; Gemma 4
+# instead supplies its assistant as one), and ``ngram`` needs no model at all.
 _DRAFT_MODEL_REQUIRED: Final[frozenset[str]] = frozenset(
-    {"draft_simple", "draft_eagle3"}
+    {"draft_simple", "draft_eagle3", "draft_dflash"}
 )
 
 

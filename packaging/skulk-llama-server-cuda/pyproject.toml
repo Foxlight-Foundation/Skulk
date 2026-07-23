@@ -19,7 +19,7 @@
 
 [project]
 name = "skulk-llama-server-cuda"
-version = "0.10068.0"
+version = "0.10092.0"
 description = "Pinned CUDA llama-server build for Skulk's served GGUF engine (Linux x86_64)"
 readme = "README.md"
 requires-python = ">=3.10"

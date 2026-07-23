@@ -1,0 +1,69 @@
+# Laguna S 2.1 GGUF for the llama.cpp engines: Poolside's 117B-A10B-class MoE
+# coding/agentic model (48 layers, 256-expert sparse MLP with 10 active plus a
+# shared expert, 1-full : 3-sliding attention layer mix), official Poolside
+# quantizations. Q4_K_M (~63.6 GiB) serves on one
+# 128 GB Strix Halo node; Q8_0 (~120 GiB) needs a two-node llama_server pool.
+# Requires engine pin >= b10092 (Laguna 2 family support).
+# DFlash speculative decoding is deliberately NOT enabled: upstream
+# llama.cpp's DFLASH drafter arch implements the Qwen3-style drafter and
+# lacks Laguna's per-block gated attention (the loader consumes 69 of the
+# vendor drafter's 76 tensors; measured on b10092 against both the official
+# BF16 drafter and a community requant), so every available Laguna drafter
+# fails to load and would fail the instance. The vendor's fork carries the
+# missing gate; enable served_spec_type = "draft_dflash" with the same-repo
+# companion (laguna-s-2.1-DFlash-BF16.gguf) once upstream's dflash arch
+# grows attn_gate support. Base decode measured 28.5 tok/s on one Strix
+# Halo node at this quant.
+# Model truth notes, mirroring the poolside--Laguna-XS-2.1-FP8 card:
+# - Thinking: <think>-delimited with a template enable_thinking toggle that
+#   DEFAULTS OFF (unprompted requests get direct answers).
+# - Tool calling: the repo's chat template carries the tool grammar and the
+#   served engine dispatches tools generically.
+# The vLLM lane deliberately lives on the safetensors base repo, not here
+# (vLLM does not serve this MoE from GGUF); a base-repo card is out of scope
+# until hardware that fits ~235 GB BF16 joins the fleet.
+# Architecture facts from the base repo's config.json. context_length is the
+# GGUF's CONFIGURED 262144, not the base model's YaRN-extended 1M: the 1M
+# mode needs explicit rope-scaling overrides the served runner does not
+# pass, so advertising it would admit requests the engine would serve with
+# the wrong rope configuration; raise only alongside carded rope flags.
+# storage_size is the Q4_K_M base alone (no drafter co-fetch while
+# speculation is disabled). supports_tensor = false: llama.cpp sharding is the
+# llama_server RPC pool, not tensor parallelism.
+# License: OpenMDW-1.1 (permissive; retain notices on redistribution).
+model_id = "poolside/Laguna-S-2.1-GGUF"
+n_layers = 48
+hidden_size = 3072
+num_key_value_heads = 8
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "laguna"
+quantization = "Q4_K_M"
+base_model = "Laguna S 2.1"
+capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 262144
+gguf_file = "laguna-s-2.1-Q4_K_M.gguf"
+trust_remote_code = false
+
+[reasoning]
+# Laguna is not a family the capability resolver knows, so without this the
+# resolved profile would advertise thinking with thinking_format "none".
+# Model truth: <think>-token-delimited with a template enable_thinking
+# toggle (same resolved shape as the Laguna XS FP8 card).
+supports_toggle = true
+format = "token_delimited"
+
+[tooling]
+supports_tool_calling = true
+tool_call_format = "generic"
+
+[placement]
+# Served engine only: the 63.6 GiB Q4 needs the GPU-serving path, and the
+# multi-node Q8 shape requires the llama_server RPC pool; the in-process
+# llama_cpp runner is deliberately excluded so placement never routes this
+# model to a single-stream in-process load.
+compatible_backends = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda"]
+backend_preference = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda"]
+
+[storage_size]
+in_bytes = 68248759648

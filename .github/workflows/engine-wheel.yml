@@ -34,7 +34,7 @@ on:
 env:
   # Must match src/skulk/provisioning/manifest.py LLAMA_SERVER_PIN and both
   # packaging versions (0.<build>.<rev>); the guard step enforces all of them.
-  LLAMA_CPP_PIN: b10068
+  LLAMA_CPP_PIN: b10092
   CUDA_ARCHITECTURES: "80-real;86-real;89-real;90"
 
 jobs:
