@@ -557,20 +557,20 @@ def apply_topology_edge_deleted(event: TopologyEdgeDeleted, state: State) -> Sta
     # would otherwise pin the phantom forever) and removal clears them.
     # Real members always carry last_seen and are reaped by NodeTimedOut
     # instead (#671).
-    # Reap starts from the SINK (the node that just lost an in-edge) and
-    # cascades: removing a phantom clears its dangling out-edges, which can
-    # orphan further never-member nodes those edges pointed at, including
-    # nodes that are not endpoints of this event at all. The SOURCE is never
-    # eligible: only a live worker emits deletions for its own edges, so the
-    # emitter is alive by construction, and reaping it here would silently
-    # drop its other live session edges, which the worker deliberately does
-    # not re-emit while it tracks them as already-emitted (PR #674 review).
-    candidates: list[NodeId] = [event.conn.sink]
+    # Reap seeds with both endpoints and cascades: removing a phantom
+    # clears its dangling out-edges, which can orphan further never-member
+    # nodes those edges pointed at, including nodes that are not endpoints
+    # of this event at all. Reaping a node here is safe even if it is
+    # actually alive: session-edge EMISSION is membership-gated on the
+    # worker side, so a node without last_seen has no legitimate live edges
+    # in state to lose, and a live node whose entry was removed wrongly is
+    # re-added by its NodeGatheredInfo and re-edged by its peers' self-heal
+    # sweeps within seconds (PR #674 review rounds).
+    candidates: list[NodeId] = [event.conn.sink, event.conn.source]
     while candidates:
         candidate = candidates.pop()
         if (
-            candidate == event.conn.source
-            or candidate in state.last_seen
+            candidate in state.last_seen
             or not topology.contains_node(candidate)
             or not topology.node_has_no_incoming_edges(candidate)
         ):

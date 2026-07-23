@@ -125,25 +125,49 @@ def test_reap_cascades_through_the_phantom_chain() -> None:
     assert state.topology.contains_node(MEMBER)
 
 
-def test_live_source_is_never_reaped_by_its_own_deletion() -> None:
-    """The deletion's emitter is alive by construction and must survive.
+def test_non_member_source_reaps_with_its_own_deletion() -> None:
+    """An isolated no-membership source is reaped alongside its deletion.
 
-    A live node can emit session edges and deletions before its first
-    NodeGatheredInfo stamps last_seen; reaping it here would silently drop
-    its other live edges, which the worker deliberately does not re-emit
-    (PR #674 review).
+    Source immunity was dropped once emission became membership-gated: a
+    node without last_seen has no legitimate live edges in state to lose,
+    a genuinely live one is re-added by its NodeGatheredInfo and re-edged
+    by self-heal sweeps, and a dead one whose deletion was indexed
+    posthumously must not linger (PR #674 review rounds).
     """
-    live_early = NodeId("live-not-yet-member")
+    early = NodeId("not-yet-member")
     state = _member_state()
     state = apply_topology_edge_created(
-        TopologyEdgeCreated(conn=_connection(live_early, MEMBER)), state
+        TopologyEdgeCreated(conn=_connection(early, MEMBER)), state
     )
 
     state = apply_topology_edge_deleted(
-        TopologyEdgeDeleted(conn=_connection(live_early, MEMBER)), state
+        TopologyEdgeDeleted(conn=_connection(early, MEMBER)), state
     )
-    assert state.topology.contains_node(live_early)
+    assert not state.topology.contains_node(early)
     assert state.topology.contains_node(MEMBER)
+
+
+def test_mutual_pair_reaps_on_a_single_posthumous_deletion() -> None:
+    """One observed disconnect clears a dead mutual never-member pair.
+
+    With edges A to B and B to A in the log and only A's deletion of its
+    side indexed (posthumously), reaping B clears the stale reverse edge
+    and the cascade must then take A too (PR #674 review).
+    """
+    second = NodeId("phantom-two")
+    state = State()
+    state = apply_topology_edge_created(
+        TopologyEdgeCreated(conn=_connection(PHANTOM, second)), state
+    )
+    state = apply_topology_edge_created(
+        TopologyEdgeCreated(conn=_connection(second, PHANTOM)), state
+    )
+
+    state = apply_topology_edge_deleted(
+        TopologyEdgeDeleted(conn=_connection(PHANTOM, second)), state
+    )
+    assert not state.topology.contains_node(PHANTOM)
+    assert not state.topology.contains_node(second)
 
 
 def test_never_member_with_remaining_edges_survives() -> None:

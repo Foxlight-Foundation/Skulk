@@ -3155,7 +3155,7 @@ class Worker:
             # pre-membership peer as dead, #671), so the wrong judgment
             # corrects within one sweep instead of persisting to reconnect.
             for healed in self._session_edges_missing_from_state():
-                logger.info(
+                logger.debug(
                     f"re-emitting live session edge lost from state: {healed}"
                 )
                 await self.event_sender.send(TopologyEdgeCreated(conn=healed))
