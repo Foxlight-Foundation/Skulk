@@ -573,12 +573,21 @@ def _vision_safe_prefill_chunk_sizes(
     return chunk_sizes
 
 
-def _set_native_pixel_values(
+def set_native_vision_inputs(
     model: Model,
     pixel_values: mx.array | list[mx.array] | None,
+    image_grid_thw: mx.array | None = None,
 ) -> None:
     """Set native vision tensors on wrappers that inject them into prefill calls."""
-    if hasattr(model, "set_pixel_values"):
+    if hasattr(model, "set_vision_inputs"):
+        cast(
+            Callable[
+                [mx.array | list[mx.array] | None, mx.array | None],
+                None,
+            ],
+            object.__getattribute__(model, "set_vision_inputs"),
+        )(pixel_values, image_grid_thw)
+    elif hasattr(model, "set_pixel_values"):
         cast(
             Callable[[mx.array | list[mx.array] | None], None],
             object.__getattribute__(model, "set_pixel_values"),
@@ -766,7 +775,7 @@ def pipeline_parallel_prefill(
                         prompt_token_offset + chunk_start,
                         prompt_token_offset + chunk_end,
                     )
-                    _set_native_pixel_values(model, chunk_pixel_values)
+                    set_native_vision_inputs(model, chunk_pixel_values)
                     record_runner_phase(
                         "prefill_pipeline",
                         event="pipeline_prefill_native_pixel_values",
@@ -801,7 +810,7 @@ def pipeline_parallel_prefill(
 
     # Post-loop: process remaining 1 token + add +1 entry to match stream_generate.
     if native_pixel_values is not None:
-        _set_native_pixel_values(model, None)
+        set_native_vision_inputs(model, None)
     for _ in range(2):
         with mx.stream(generation_stream):
             model(prompt[-1:][None], cache=_prompt_cache)
@@ -2865,7 +2874,11 @@ def mlx_generate(
             task_id=trace_task_id,
             include_memory=True,
         ):
-            _set_native_pixel_values(model, native_pixel_values)
+            set_native_vision_inputs(
+                model,
+                native_pixel_values,
+                vision.image_grid_thw if vision is not None else None,
+            )
         maybe_vision_ctx = contextlib.nullcontext()
     elif vision is not None and not is_native_vision:
         maybe_vision_ctx = patch_embed_tokens(
@@ -2913,8 +2926,12 @@ def mlx_generate(
             task_id=trace_task_id,
             include_memory=True,
         )
-        if hasattr(model, "set_pixel_values") or hasattr(model, "_pixel_values"):
-            _set_native_pixel_values(model, None)
+        if (
+            hasattr(model, "set_vision_inputs")
+            or hasattr(model, "set_pixel_values")
+            or hasattr(model, "_pixel_values")
+        ):
+            set_native_vision_inputs(model, None)
         record_runner_phase(
             "vision_preprocess",
             event="clear_pixel_values_complete",
