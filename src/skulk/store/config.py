@@ -176,8 +176,11 @@ class DownloadStoreConfig(FrozenModel):
     Attributes:
         allow_hf_fallback: When ``True`` (the default), nodes fall back to
             downloading from HuggingFace if a requested model is not present
-            in the store.  Set to ``False`` for air-gapped clusters where all
-            models must be pre-staged in the store.
+            in the store, or if the store host is unreachable at the
+            transport level (a store-answered "not present" routes through
+            the store host; an unanswered store downloads directly, #657).
+            Set to ``False`` for air-gapped clusters where all models must
+            be pre-staged in the store.
     """
 
     allow_hf_fallback: bool = True

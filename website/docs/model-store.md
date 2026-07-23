@@ -280,7 +280,8 @@ Absolute path on the store host where shared models live.
 
 ### `model_store.download.allow_hf_fallback`
 
-Controls what happens if a requested model is not already in the store.
+Controls what happens if a requested model is not already in the store, or
+the store cannot be reached at all.
 
 | Value | Behavior |
 |-------|----------|
@@ -288,6 +289,22 @@ Controls what happens if a requested model is not already in the store.
 | `false` | Fail instead of downloading from Hugging Face |
 
 Use `false` if you want stricter offline or air-gapped behavior.
+
+The fallback covers two distinct situations, and the node logs which one it
+is in:
+
+- **Model not in the store** (the store answered): the node asks the *store
+  host* to download it from Hugging Face, then stages from the store. The
+  store stays the single source of truth for model files.
+- **Store unreachable** (the store could not be reached, whether it never
+  answered or dropped off mid-transfer): the node downloads
+  *directly* from Hugging Face, preserving the card's pinned source
+  revision. This is the expected shape for a remote fabric member whose
+  route to the store does not exist while its public-internet path works;
+  on a node that should be able to reach the store, treat the logged
+  warning as a network problem to fix. With the fallback disabled, an
+  unreachable store fails with an error naming unreachability rather than
+  claiming the model is missing.
 
 ### `model_store.staging.node_cache_path`
 
