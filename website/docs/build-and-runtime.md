@@ -25,12 +25,23 @@ the `/next/` docs), pass a ref:
 curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash -s -- --ref dev
 ```
 
+`--ref` also accepts a full 40-character commit ID. This is the deterministic
+path used by release-candidate qualification: the installer fetches that exact
+object and checks it out detached, so a moving branch cannot change the code
+between approval and installation.
+
 The installer fetches prerequisites (git, a C toolchain, rustup, uv), clones
 the repo into `~/skulk`, syncs the environment, builds the dashboard when npm
 is available, and finishes with `skulk doctor --fix`, which audits the node
 (GPU detection, engine availability, storage headroom) and applies safe
 remediations, printing the consequence and fix for anything it cannot repair.
 Re-running the installer is safe: every step is idempotent.
+
+Skulk releases qualify this same path on clean Apple Silicon, AMD Linux, and
+NVIDIA Linux environments. A candidate run pins the proposed commit; after
+promotion, the shipping run executes the literal `main` command above. Tests
+that attach to an already-configured fleet remain valuable regression coverage,
+but do not substitute for fresh-install qualification.
 
 At any later point, `uv run skulk doctor` re-audits the node; see
 [Node doctor](node-doctor) for the check list and verdicts.

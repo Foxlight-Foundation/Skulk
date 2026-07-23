@@ -170,11 +170,28 @@ export function HuggingFaceResultItem({
       {isInStore ? (
         <AddedBadge><FiCheck size={16} color={theme.colors.accent} strokeWidth={2.5} /> {t('huggingFaceResult.inStore', 'In Store')}</AddedBadge>
       ) : isAdded ? (
-        <SelectBtn variant="primary" size="sm" onClick={onSelect}>
+        <SelectBtn
+          variant="primary"
+          size="sm"
+          onClick={onSelect}
+          aria-label={t('huggingFaceResult.downloadModel', 'Download {modelId}', {
+            modelId: model.id,
+          })}
+        >
           <StoreDownloadIcon /> {t('huggingFaceResult.download', 'Download')}
         </SelectBtn>
       ) : (
-        <Button variant="outline" size="sm" onClick={onAdd} disabled={isAdding}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onAdd}
+          disabled={isAdding}
+          aria-label={t(
+            'huggingFaceResult.addAndDownloadModel',
+            'Add and download {modelId}',
+            { modelId: model.id },
+          )}
+        >
           {isAdding ? '…' : <><StoreDownloadIcon /> {t('huggingFaceResult.addAndDownload', 'Add & Download')}</>}
         </Button>
       )}

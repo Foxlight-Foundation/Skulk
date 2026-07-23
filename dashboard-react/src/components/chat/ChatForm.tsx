@@ -1396,6 +1396,7 @@ export function ChatForm({
           placeholder={inputPlaceholder}
           rows={1}
           autoFocus={autoFocus}
+          aria-label={t('chat.form.message', 'Chat message')}
         />
         {isLoading ? (
           <SendBtn
@@ -1439,6 +1440,7 @@ export function ChatForm({
         multiple
         accept="image/*"
         style={{ display: 'none' }}
+        aria-label={t('chat.form.imageAttachmentFile', 'Image attachment file')}
         onChange={(e) => {
           if (e.target.files) addFiles(Array.from(e.target.files));
           e.target.value = '';

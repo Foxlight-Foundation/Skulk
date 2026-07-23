@@ -132,10 +132,24 @@ if [[ -d "$INSTALL_DIR/.git" ]]; then
     git -C "$INSTALL_DIR" pull --ff-only origin "$INSTALL_REF" 2>/dev/null || true
 else
     log "cloning Skulk into $INSTALL_DIR (ref: $INSTALL_REF)"
-    git clone --branch "$INSTALL_REF" \
-        https://github.com/Foxlight-Foundation/Skulk.git "$INSTALL_DIR"
+    if [[ "$INSTALL_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        # `git clone --branch` rejects commit object IDs even though `--ref`
+        # promises a git ref. Release qualification pins the exact candidate
+        # commit so a moving dev branch cannot change between approval and
+        # installation; fetch the object directly and detach at FETCH_HEAD.
+        git init "$INSTALL_DIR"
+        git -C "$INSTALL_DIR" remote add origin \
+            https://github.com/Foxlight-Foundation/Skulk.git
+        git -C "$INSTALL_DIR" fetch --depth 1 origin "$INSTALL_REF"
+        git -C "$INSTALL_DIR" checkout --detach FETCH_HEAD
+    else
+        git clone --branch "$INSTALL_REF" \
+            https://github.com/Foxlight-Foundation/Skulk.git "$INSTALL_DIR"
+    fi
 fi
 cd "$INSTALL_DIR"
+RESOLVED_COMMIT="$(git rev-parse HEAD)"
+log "resolved ref $INSTALL_REF to commit $RESOLVED_COMMIT"
 
 # --- filesystem sanity -------------------------------------------------------
 
