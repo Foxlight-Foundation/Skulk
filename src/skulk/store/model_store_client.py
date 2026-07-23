@@ -112,6 +112,16 @@ _STORE_PROBE_RETRY_ATTEMPTS = 3
 _STORE_POLL_UNREACHABLE_THRESHOLD = 12
 _STORE_HTTP_RETRY_BASE_SECONDS = 0.5
 _STORE_HTTP_RETRY_MAX_DELAY_SECONDS = 8.0
+# The failure classes that mean the store never ANSWERED. aiohttp.ClientError
+# is broader: it also covers response-level errors (ContentTypeError, status
+# errors) where the store answered with a bad reply — a store bug, not
+# unreachability — and those must never divert a node onto the direct-HF
+# fallback, which exists solely for hosts the node cannot reach (#657 review).
+_STORE_CONNECTION_ERRORS = (
+    aiohttp.ClientConnectionError,
+    TimeoutError,
+    asyncio.TimeoutError,
+)
 _T = TypeVar("_T")
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
 _SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
@@ -233,9 +243,12 @@ async def _retry_store_http(
     The model store sits behind normal node networking, so route flaps can last
     longer than a single TCP connect timeout during cluster churn or macOS
     interface changes. Keep retrying for roughly a minute of no-route failures
-    before surfacing a terminal download failure. Exhausted transport retries
-    raise :class:`StoreUnreachableError` (wrapping the last error) so callers
-    can distinguish "store never answered" from in-protocol failures.
+    before surfacing a terminal download failure. When retries are exhausted,
+    only connection-class failures (the store never answered) are wrapped in
+    :class:`StoreUnreachableError`; response-level errors such as
+    ``aiohttp.ContentTypeError`` mean the store answered badly and re-raise
+    as-is, so a reachable-but-buggy store surfaces as a store failure instead
+    of diverting the node onto the direct-HF fallback.
 
     Args:
         operation: Coroutine factory performing one store HTTP request.
@@ -250,9 +263,15 @@ async def _retry_store_http(
             return await operation()
         except (aiohttp.ClientError, TimeoutError, asyncio.TimeoutError) as error:
             if attempt == attempts:
-                raise StoreUnreachableError(
-                    f"store host unreachable during {description}: {error}"
-                ) from error
+                # Retry treats the whole ClientError family as transient (a
+                # proxy 502 or truncated body can be a blip worth retrying),
+                # but the terminal classification is stricter: only failures
+                # where the store never answered may report unreachability.
+                if isinstance(error, _STORE_CONNECTION_ERRORS):
+                    raise StoreUnreachableError(
+                        f"store host unreachable during {description}: {error}"
+                    ) from error
+                raise
             delay = min(
                 _STORE_HTTP_RETRY_BASE_SECONDS * (2 ** (attempt - 1)),
                 _STORE_HTTP_RETRY_MAX_DELAY_SECONDS,
@@ -976,11 +995,7 @@ class ModelStoreClient:
                                 advanced = True
             except RuntimeError:
                 raise
-            except (
-                aiohttp.ClientConnectionError,
-                TimeoutError,
-                asyncio.TimeoutError,
-            ) as exc:
+            except _STORE_CONNECTION_ERRORS as exc:
                 logger.debug(f"ModelStoreClient: download status poll failed: {exc}")
                 # A store that stops ANSWERING is a different failure from a
                 # download that stops ADVANCING: the stall clock exists for
