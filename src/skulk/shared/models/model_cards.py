@@ -1174,21 +1174,36 @@ class ModelCard(CamelCaseModel):
             trust_remote_code=False,
             is_custom=True,
             placement=PlacementCardConfig(
+                # Both llama.cpp engines, mirroring the bundled GGUF text
+                # cards (#607): the served llama_server tags rank first so a
+                # node running llama-server gets its concurrency slots, and
+                # only the served engine can pool multiple nodes via RPC
+                # (a llama_cpp-only card is silently ineligible for every
+                # multi-node GGUF placement). Nodes without a served binary
+                # fall through to in-process llama_cpp unchanged.
                 compatible_backends=frozenset(
                     {
+                        "llama_server-vulkan",
+                        "llama_server-rocm",
+                        "llama_server-cuda",
+                        "llama_server-cpu",
                         "llama_cpp-vulkan",
                         "llama_cpp-rocm",
                         "llama_cpp-cuda",
                         "llama_cpp-cpu",
                     }
                 ),
-                # Prefer a GPU backend over CPU; the GPU ordering is a sensible
-                # default a card author can tune per model (Vulkan vs ROCm
-                # performance is model-dependent).
+                # Served engine first, then a GPU backend over CPU; the GPU
+                # ordering is a sensible default a card author can tune per
+                # model (Vulkan vs ROCm performance is model-dependent).
                 backend_preference=(
+                    "llama_server-vulkan",
+                    "llama_server-rocm",
+                    "llama_server-cuda",
                     "llama_cpp-vulkan",
                     "llama_cpp-rocm",
                     "llama_cpp-cuda",
+                    "llama_server-cpu",
                     "llama_cpp-cpu",
                 ),
             ),

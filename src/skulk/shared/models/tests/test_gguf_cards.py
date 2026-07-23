@@ -131,7 +131,7 @@ def test_shard_base_detection() -> None:
     )
 
 
-async def test_fetch_gguf_card_stamps_llama_cpp_backends(
+async def test_fetch_gguf_card_stamps_both_llama_engines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(model_cards, "model_info", _fake_model_info(["model-q4.gguf"]))
@@ -147,11 +147,24 @@ async def test_fetch_gguf_card_stamps_llama_cpp_backends(
     monkeypatch.setattr(model_cards, "fetch_config_data", _fake_config)
 
     card = await ModelCard.fetch_from_hf(ModelId("some/gguf-repo"))
+    # Both llama.cpp engines, served first (mirrors the bundled GGUF cards,
+    # #607): only llama_server pools multiple nodes via RPC, and a
+    # llama_cpp-only card would be silently ineligible for every multi-node
+    # GGUF placement.
     assert card.placement.compatible_backends == frozenset(
-        {"llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"}
+        {
+            "llama_server-vulkan",
+            "llama_server-rocm",
+            "llama_server-cuda",
+            "llama_server-cpu",
+            "llama_cpp-vulkan",
+            "llama_cpp-rocm",
+            "llama_cpp-cuda",
+            "llama_cpp-cpu",
+        }
     )
-    assert card.placement.backend_preference[0] == "llama_cpp-vulkan"
-    assert card.supports_tensor is False  # single-node engine
+    assert card.placement.backend_preference[0] == "llama_server-vulkan"
+    assert card.supports_tensor is False  # no tensor parallelism either way
     assert card.n_layers == 32 and card.hidden_size == 4096
     assert card.storage_size.in_bytes == 100  # the single selected gguf
 
