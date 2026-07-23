@@ -164,6 +164,9 @@ test('the built-in dashboard sends and understands a real portrait', async ({ pa
   expect(answer).toMatch(/(?:white|light(?:-colored)?).{0,30}(?:shirt|collar)|(?:shirt|collar).{0,30}(?:white|light(?:-colored)?)/is);
   expect(answer).toMatch(/(?:black|dark).{0,30}(?:background|backdrop)|(?:background|backdrop).{0,30}(?:black|dark)/is);
   expect(answer).not.toMatch(/bedroom|furniture|potted plant/i);
+  expect(answer).not.toMatch(
+    /<\|(?:im_start|im_end|image|video|assistant|user)\|>|<(?:start|end)_of_turn>/i,
+  );
 
   await page.screenshot({
     path: testInfo.outputPath(`vision-${exactModelId.replace(/[^A-Za-z0-9.-]+/g, '-')}.png`),
