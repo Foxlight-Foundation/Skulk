@@ -1428,6 +1428,18 @@ bridge traffic. Configure and restart every node uniformly before serving
 inference. The API includes fresh telemetry-only management nodes, local or
 remote, even when replicated worker membership does not carry their entries.
 
+The `topology` map lists each node's connections. A socket edge carries the
+peer's `sinkMultiaddr` plus a boolean `session` annotation distinguishing its
+two sources: `session: false` (the default) marks an HTTP-probe-verified
+advertised address, which is dialable and eligible as a placement host, while
+`session: true` marks a live, authenticated fabric connection recorded as a
+path in its own right. Session edges are what keep a NAT'd or proxied remote
+member visible and placeable when none of its advertised addresses are
+reachable; their recorded address is the connection's observed remote
+endpoint, so placement host selection never uses them as a dial target.
+Consumers rendering or analyzing the graph should treat `session` edges as
+proof of connectivity, not as routable addresses.
+
 Operational note:
 
 - a follower may briefly report a local view that is behind the elected master
