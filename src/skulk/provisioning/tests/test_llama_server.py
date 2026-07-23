@@ -81,6 +81,14 @@ def _isolate_engines_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pat
     return engines
 
 
+# The real installer, captured before the autouse stub below replaces the
+# module attribute: tests that cover try_install_cuda_wheel ITSELF call this
+# reference (its internals still resolve subprocess/shutil/_cuda_wheel_usable
+# through the module, so per-test monkeypatches apply), while everything
+# routed through ensure_llama_server gets the safe stub (PR #665 review).
+_REAL_TRY_INSTALL_CUDA_WHEEL = provisioning.try_install_cuda_wheel
+
+
 @pytest.fixture(autouse=True)
 def _never_install_wheels(  # pyright: ignore[reportUnusedFunction] - autouse
     monkeypatch: pytest.MonkeyPatch,
@@ -91,7 +99,8 @@ def _never_install_wheels(  # pyright: ignore[reportUnusedFunction] - autouse
     branch in ensure_llama_server would otherwise run a REAL multi-GB
     `uv pip install` against the live index from inside the older NVIDIA
     tarball-path tests. Tests that exercise the install stub it themselves,
-    overriding this default.
+    overriding this default; tests of the installer itself use
+    ``_REAL_TRY_INSTALL_CUDA_WHEEL`` with its effects patched.
     """
 
     def _no_install(installed_facts: object) -> bool:
@@ -456,22 +465,19 @@ def test_cuda_wheel_install_gates_on_capability_and_uv(
     multi-GB wheel that would fail at model load; a missing uv degrades with
     the manual remediation logged instead of crashing provisioning.
     """
-    calls: list[list[str]] = []
-
     def _unexpected_run(*args: object, **kwargs: object) -> None:
         raise AssertionError("uv must not run for gated-out facts")
 
     monkeypatch.setattr(provisioning.subprocess, "run", _unexpected_run)
     old_gpu = NVIDIA_A40.model_copy(update={"compute_capability": "7.5"})
-    assert not provisioning.try_install_cuda_wheel(make_facts(gpus=(old_gpu,)))
+    assert not _REAL_TRY_INSTALL_CUDA_WHEEL(make_facts(gpus=(old_gpu,)))
 
     # Capability fine, but no uv on PATH: degrade, do not crash.
     def _no_uv(_name: str) -> None:
         return None
 
     monkeypatch.setattr(provisioning.shutil, "which", _no_uv)
-    assert not provisioning.try_install_cuda_wheel(make_facts(gpus=(NVIDIA_A40,)))
-    assert calls == []
+    assert not _REAL_TRY_INSTALL_CUDA_WHEEL(make_facts(gpus=(NVIDIA_A40,)))
 
 
 def test_ensure_installs_cuda_wheel_on_demand(
@@ -603,4 +609,4 @@ def test_install_success_requires_usable_wheel(
     monkeypatch.setattr(provisioning.subprocess, "run", _fake_run)
     monkeypatch.setattr(provisioning.shutil, "which", _fake_which)
     monkeypatch.setattr(provisioning, "_cuda_wheel_usable", _still_unusable)
-    assert not provisioning.try_install_cuda_wheel(make_facts(gpus=(NVIDIA_A40,)))
+    assert not _REAL_TRY_INSTALL_CUDA_WHEEL(make_facts(gpus=(NVIDIA_A40,)))
