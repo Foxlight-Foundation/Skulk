@@ -90,8 +90,25 @@ run_prep() {
     # exit code so an operator can spot a long-running silent failure.
     if [[ -d .git ]]; then
         log "git pull (non-fatal)"
+        PRE_PULL_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
         if ! git pull --ff-only 2>&1 | tee -a "$PREP_LOG" >&2; then
             log "warning: git pull failed (continuing with on-disk revision)"
+        fi
+        # If the pull updated THIS script, the running shell still executes
+        # the old body it already read, so new prep steps (e.g. the bindings
+        # rebuild below) would not run until a second restart. Re-exec the
+        # freshly pulled script once so prep changes take effect on the same
+        # restart that delivered them. Single-shot via the env guard: the
+        # re-exec'd script pulls again (a no-op) and proceeds normally.
+        POST_PULL_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
+        if [[ -z "${SKULK_STARTUP_REEXECED:-}" \
+            && -n "$PRE_PULL_HEAD" && -n "$POST_PULL_HEAD" \
+            && "$PRE_PULL_HEAD" != "$POST_PULL_HEAD" ]] \
+            && ! git diff --quiet "$PRE_PULL_HEAD" "$POST_PULL_HEAD" \
+                -- deployment/install/skulk-startup.sh 2>/dev/null; then
+            log "startup script changed by git pull; re-executing the updated script"
+            export SKULK_STARTUP_REEXECED=1
+            exec bash "$REPO_ROOT/deployment/install/skulk-startup.sh"
         fi
     else
         log "not a git checkout — skipping git pull"
@@ -125,6 +142,37 @@ run_prep() {
     # shellcheck disable=SC2086
     if ! uv sync $SYNC_FLAGS 2>&1 | tee -a "$PREP_LOG" >&2; then
         log "warning: uv sync failed (continuing with current venv)"
+    fi
+
+    # Rust bindings rebuild (#659). `uv sync` reuses the cached
+    # skulk_pyo3_bindings wheel unless the PROJECT VERSION changes, so a git
+    # pull that changes rust/ source leaves the venv running the OLD wire
+    # code indefinitely: the live fleet ran pre-telemetry-isolation bindings
+    # for eight days while reporting itself up to date, and a fresh build
+    # joining it became a fully-synced node invisible to membership. Track
+    # the last commit that touched rust/ and force a bindings reinstall when
+    # it moves. Non-fatal: a failed rebuild keeps the current (stale)
+    # bindings and the node still starts; NETWORK_VERSION bumps make a truly
+    # wire-incompatible stale build refuse connections loudly.
+    # Root Cargo.toml/Cargo.lock are workspace inputs: a dependency bump
+    # changes the built bindings without touching rust/ source.
+    RUST_TREE_COMMIT="$(git log -1 --format=%H -- rust/ Cargo.toml Cargo.lock 2>/dev/null || true)"
+    RUST_TREE_MARKER=".venv/.skulk-rust-tree-commit"
+    # The marker lives inside the venv (the artifact it describes); no venv
+    # yet (first boot, or a fully failed sync) means nothing to mark and the
+    # reinstall below would fail the same way the sync just did.
+    if [ -n "$RUST_TREE_COMMIT" ] && [ -d .venv ]; then
+        if [ "$(cat "$RUST_TREE_MARKER" 2>/dev/null || true)" != "$RUST_TREE_COMMIT" ]; then
+            log "rust/ tree moved to ${RUST_TREE_COMMIT}; rebuilding skulk_pyo3_bindings (non-fatal)"
+            # shellcheck disable=SC2086
+            if uv sync $SYNC_FLAGS --reinstall-package skulk_pyo3_bindings 2>&1 | tee -a "$PREP_LOG" >&2; then
+                printf '%s\n' "$RUST_TREE_COMMIT" > "$RUST_TREE_MARKER"
+            else
+                log "warning: bindings rebuild failed (continuing with current bindings)"
+            fi
+        else
+            log "rust bindings current (rust/ tree at ${RUST_TREE_COMMIT})"
+        fi
     fi
 
     # GPU llama.cpp wheel self-heal (#568). --inexact above PRESERVES a

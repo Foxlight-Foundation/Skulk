@@ -95,7 +95,7 @@ Run all checks in sequence:
 uv run basedpyright && uv run ruff check && nix fmt && uv run pytest
 ```
 
-If `nix fmt` changes any files, stage them before committing. The CI runs `nix flake check` which verifies formatting, linting, and runs Rust tests.
+If `nix fmt` changes any files, stage them before committing. The CI runs `nix flake check` which verifies formatting, linting, and runs Rust tests. A PR touching the networking crate's wire surfaces (swarm.rs, discovery.rs, zenoh_session.rs, its Cargo.toml, or the root workspace Cargo.toml/Cargo.lock) must update `rust/networking/WIRE_COMPAT.md`: bump `NETWORK_VERSION` and record it for wire-behavior changes, or record the wire-neutrality judgment (CI enforces via the wire-compat-guard job). The service startup script rebuilds the Rust bindings whenever the last commit touching rust/ or the root Cargo inputs moves.
 
 ## Architecture
 
