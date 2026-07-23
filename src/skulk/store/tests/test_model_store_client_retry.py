@@ -6,6 +6,8 @@ from pathlib import Path
 
 import aiohttp
 import pytest
+import yarl
+from multidict import CIMultiDict, CIMultiDictProxy
 
 from skulk.store import model_store_client
 from skulk.store.model_store_client import ModelStoreClient
@@ -99,6 +101,84 @@ async def test_store_http_retry_covers_minute_scale_route_flaps(
     assert result == "ok"
     assert attempts == model_store_client._STORE_HTTP_RETRY_ATTEMPTS
     assert delays == [0.5, 1.0, 2.0, 4.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0]
+
+
+@pytest.mark.anyio
+async def test_exhausted_connection_failures_raise_store_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Connection-class exhaustion is the only path to StoreUnreachableError."""
+
+    async def never_answers() -> str:
+        raise aiohttp.ClientConnectionError("no route to store host")
+
+    monkeypatch.setattr(model_store_client.asyncio, "sleep", _no_sleep)
+
+    with pytest.raises(model_store_client.StoreUnreachableError):
+        await model_store_client._retry_store_http(
+            never_answers,
+            description="availability probe for org/model",
+            attempts=2,
+        )
+
+
+@pytest.mark.anyio
+async def test_exhausted_payload_dropouts_raise_store_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A route that keeps dying mid-body is unreachable, not a store bug.
+
+    aiohttp surfaces a mid-transfer route drop from ``iter_chunked()`` as
+    ``ClientPayloadError``; persistently hitting it must reach the direct-HF
+    fallback exactly like a connect failure, or a node with a working
+    Hugging Face path fails placement on the mid-transfer dropout the
+    fallback promises to cover (#657 review).
+    """
+
+    async def drops_mid_body() -> str:
+        raise aiohttp.ClientPayloadError("route dropped mid-transfer")
+
+    monkeypatch.setattr(model_store_client.asyncio, "sleep", _no_sleep)
+
+    with pytest.raises(model_store_client.StoreUnreachableError):
+        await model_store_client._retry_store_http(
+            drops_mid_body,
+            description="staging file body for org/model",
+            attempts=2,
+        )
+
+
+@pytest.mark.anyio
+async def test_exhausted_response_errors_are_not_unreachability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A store that ANSWERS with a bad reply must not trigger HF fallback.
+
+    aiohttp.ContentTypeError (malformed JSON from a reachable store or an
+    interposed proxy) is a store bug: after the retry budget it must re-raise
+    as itself so the download fails attributed to the store, rather than
+    masquerade as unreachability and silently bypass the store as the single
+    source of truth (#657 review).
+    """
+
+    request_info = aiohttp.RequestInfo(
+        url=yarl.URL("http://store.local:58080/models"),
+        method="GET",
+        headers=CIMultiDictProxy(CIMultiDict[str]()),
+        real_url=yarl.URL("http://store.local:58080/models"),
+    )
+
+    async def answers_badly() -> str:
+        raise aiohttp.ContentTypeError(request_info, ())
+
+    monkeypatch.setattr(model_store_client.asyncio, "sleep", _no_sleep)
+
+    with pytest.raises(aiohttp.ContentTypeError):
+        await model_store_client._retry_store_http(
+            answers_badly,
+            description="availability probe for org/model",
+            attempts=2,
+        )
 
 
 @pytest.mark.anyio

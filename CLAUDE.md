@@ -308,6 +308,14 @@ Skulk now treats model capability handling as two layers:
 
 This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, speech/TTS/STT metadata, and additive `/v1/models` metadata consumed by the dashboard.
 
+Store staging is reachability-aware (#657): "model not in store" (the
+store answered) fetches via the store host, keeping the store the source
+of truth; a store that cannot be reached at the transport level
+(`StoreUnreachableError`, small probe budget, bounded poll-dropout
+detection) falls back to DIRECT Hugging Face download on the node when
+`allow_hf_fallback` is on, preserving revision/GGUF pinning. The expected
+shape for store-unreachable remote members; a loud log cue elsewhere.
+
 Model cards may pin qualified Hugging Face artifacts with `source_revision`, a
 full commit hash. Metadata probes, direct downloads, model-store registry
 entries, and worker staging must preserve that revision. Never collapse a
