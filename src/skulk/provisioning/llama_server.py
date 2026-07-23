@@ -22,8 +22,12 @@ Opt out with ``SKULK_NO_ENGINE_AUTOPROVISION=1`` (node-local launch policy).
 from __future__ import annotations
 
 import hashlib
+import importlib
 import os
 import platform as platform_module
+import shutil
+import subprocess
+import sys
 import sysconfig
 import tarfile
 import tempfile
@@ -47,6 +51,18 @@ AUTOPROVISION_OPT_OUT_ENV = "SKULK_NO_ENGINE_AUTOPROVISION"
 """Set to ``1`` to disable engine auto-provisioning on this node."""
 
 _DOWNLOAD_TIMEOUT_SECONDS = 300.0
+
+# The CUDA engine wheel is large (hundreds of MB) and pip resolution adds
+# overhead on slow pipes; give its one-time install a generous budget before
+# degrading to the Vulkan/tarball chain.
+_WHEEL_INSTALL_TIMEOUT_SECONDS = 900.0
+
+# Mirrors install.sh's ENGINE_INDEX_FLAGS: the Foxlight PEP 503 index is the
+# source of truth for engine wheels (the CUDA wheel exceeds PyPI's size
+# limit), with the default index pinned explicitly so a host exporting
+# UV_INDEX_URL cannot redirect resolution to its own mirror.
+FOXLIGHT_WHEEL_INDEX = "https://wheels.foxlight.ai/simple/"
+_PYPI_INDEX = "https://pypi.org/simple/"
 
 
 def select_variant_chain(facts: NodeFacts) -> tuple[EngineVariant, ...]:
@@ -111,7 +127,7 @@ _WHEELS_BY_VENDOR: dict[str, tuple[tuple[str, str, str, str], ...]] = {
 }
 
 
-def _wheel_version_matches_pin(distribution: str) -> bool:
+def _wheel_version_matches_pin(distribution: str, *, quiet: bool = False) -> bool:
     """Whether the installed engine wheel packages the pinned build.
 
     The wheel version scheme is ``0.<llama.cpp build>.<packaging rev>``; a
@@ -119,6 +135,13 @@ def _wheel_version_matches_pin(distribution: str) -> bool:
     ignored (with a log line) rather than silently overriding the validated
     pin, since ``ensure_llama_server`` prefers wheels over the
     checksum-verified tarball path.
+
+    Args:
+        distribution: The engine wheel's distribution name.
+        quiet: Suppress the mismatch warning. The install-decision probe
+            (:func:`_cuda_wheel_usable`) runs alongside the resolver's own
+            check, which already warns; a second identical line per startup
+            is noise (PR #665 review).
     """
     from importlib.metadata import PackageNotFoundError, version
 
@@ -129,11 +152,12 @@ def _wheel_version_matches_pin(distribution: str) -> bool:
     expected_prefix = f"0.{LLAMA_SERVER_PIN.removeprefix('b')}."
     if installed.startswith(expected_prefix):
         return True
-    logger.warning(
-        f"installed {distribution} {installed} does not package the pinned "
-        f"llama.cpp build {LLAMA_SERVER_PIN}; ignoring the wheel (install "
-        f"{distribution}=={expected_prefix}* to use it)"
-    )
+    if not quiet:
+        logger.warning(
+            f"installed {distribution} {installed} does not package the pinned "
+            f"llama.cpp build {LLAMA_SERVER_PIN}; ignoring the wheel (install "
+            f"{distribution}=={expected_prefix}* to use it)"
+        )
     return False
 
 
@@ -198,6 +222,159 @@ def wheel_llama_server(
         rpc_usable = rpc.is_file() and os.access(rpc, os.X_OK)
         return server, (rpc if rpc_usable else None)
     return None
+
+
+def _cuda_wheel_usable() -> bool:
+    """Whether the pinned CUDA engine wheel is installed and pin-matched.
+
+    Distinct from :func:`wheel_llama_server` returning something: on an
+    NVIDIA node with only the VULKAN wheel installed (install.sh fell back,
+    or a bare-metal environment reused in a compute-only container), the
+    resolver happily returns the Vulkan shim, but that shim cannot drive the
+    GPU where no Vulkan ICD exists. The on-demand CUDA install must key on
+    the CUDA wheel itself, not on any-wheel-resolved (PR #665 review).
+    """
+    return find_spec("skulk_llama_server_cuda") is not None and (
+        _wheel_version_matches_pin("skulk-llama-server-cuda", quiet=True)
+    )
+
+
+def try_install_cuda_wheel(facts: NodeFacts) -> bool:
+    """Install the pinned CUDA engine wheel from the Foxlight index.
+
+    Completes the CUDA lane for nodes that never ran ``install.sh``'s engine
+    step (bare ``uv sync`` checkouts, GPU-cloud containers, #661): the
+    tarball chain has no CUDA artifact by design (no upstream Linux CUDA
+    prebuilt exists), so without the wheel an NVIDIA container degrades
+    through Vulkan (no ICD in compute-only driver stacks) to a CPU-tagged
+    engine while the facts probe plainly sees the GPU. Uses ``uv`` (the
+    canonical Skulk runtime path) into the current interpreter's
+    environment; a missing ``uv`` logs the manual remediation and degrades.
+
+    Args:
+        facts: The facts snapshot (gates on the CUDA wheel's SM floor).
+
+    Returns:
+        ``True`` when the wheel is installed and importable afterward.
+    """
+    if not _cuda_capability_ok(facts):
+        return False
+    uv = shutil.which("uv")
+    pin = LLAMA_SERVER_PIN.removeprefix("b")
+    specifier = f"skulk-llama-server-cuda==0.{pin}.*"
+    # The remediation mirrors the automated uv invocation exactly, because
+    # the resolution semantics are load-bearing: uv consults extra indexes
+    # BEFORE the default index, so the Foxlight wheel wins, while pip's
+    # --extra-index-url picks the best version across ALL indexes, letting a
+    # same-name package on PyPI or a mirror satisfy the 0.<pin>.* specifier
+    # and replace the pinned engine binary (PR #665 review). The env -u
+    # prefix reproduces the sanitized subprocess environment: UV_INDEX and
+    # friends outrank CLI flags, so without it the copied command is not
+    # equivalent to the automated one on a host with a corporate mirror
+    # configured. Quoted and targeting THIS interpreter for copy/paste
+    # safety.
+    manual_command = (
+        "env -u UV_INDEX -u UV_INDEX_URL -u UV_EXTRA_INDEX_URL "
+        "-u UV_DEFAULT_INDEX -u UV_FIND_LINKS -u UV_CONFIG_FILE "
+        f"uv pip install --no-config --python {sys.executable} '{specifier}' "
+        f"--extra-index-url {FOXLIGHT_WHEEL_INDEX} --index-url {_PYPI_INDEX}"
+    )
+    if uv is None:
+        logger.warning(
+            "no uv on PATH to install the CUDA engine wheel; install uv "
+            "(https://docs.astral.sh/uv/getting-started/installation/) and "
+            f"run: {manual_command}"
+        )
+        return False
+    logger.info(
+        f"installing the CUDA engine wheel ({specifier}) from "
+        f"{FOXLIGHT_WHEEL_INDEX}; multi-GB, one-time"
+    )
+    # Env-provided index settings outrank CLI flags in uv's resolution
+    # (UV_INDEX is consulted before --extra-index-url, and the default
+    # first-index strategy stops at the first index carrying the package),
+    # so a host-level corporate mirror or cache index could serve a stale
+    # or non-Foxlight engine build despite the explicit pins. Strip every
+    # index/find-links override so resolution uses exactly the two indexes
+    # named on the command line (PR #665 review).
+    sanitized_env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("UV_INDEX", "UV_EXTRA_INDEX", "UV_DEFAULT_INDEX"))
+        and key
+        not in (
+            "UV_FIND_LINKS",
+            "UV_CONFIG_FILE",
+            "PIP_INDEX_URL",
+            "PIP_EXTRA_INDEX_URL",
+            "PIP_FIND_LINKS",
+        )
+    }
+    try:
+        completed = subprocess.run(
+            [
+                uv,
+                "pip",
+                "install",
+                # --no-config: a discovered pyproject.toml/uv.toml (or an
+                # operator UV_CONFIG_FILE) can carry [[index]]/find-links
+                # settings that outrank the CLI flags; the automated install
+                # must resolve from exactly the two indexes named below
+                # (PR #665 review).
+                "--no-config",
+                "--python",
+                sys.executable,
+                specifier,
+                "--extra-index-url",
+                FOXLIGHT_WHEEL_INDEX,
+                "--index-url",
+                _PYPI_INDEX,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_WHEEL_INSTALL_TIMEOUT_SECONDS,
+            check=False,
+            env=sanitized_env,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "CUDA engine wheel install timed out; the node degrades to the "
+            "Vulkan/tarball chain (retry via `skulk doctor --fix` or install "
+            f"manually: {manual_command})"
+        )
+        return False
+    except OSError as error:
+        # A which()-found uv that cannot actually execute (stale path,
+        # stripped exec bit, exec-format error) must degrade like every
+        # other installer failure, never crash node startup (PR #665
+        # review).
+        logger.warning(
+            f"could not execute uv for the CUDA engine wheel install "
+            f"({error}); the node degrades to the Vulkan/tarball chain "
+            f"(install manually: {manual_command})"
+        )
+        return False
+    if completed.returncode != 0:
+        logger.warning(
+            "CUDA engine wheel install failed (exit "
+            f"{completed.returncode}): {completed.stderr.strip()[-500:]}; the "
+            f"node degrades to the Vulkan/tarball chain ({manual_command})"
+        )
+        return False
+    # find_spec caches negative lookups from before the install.
+    importlib.invalidate_caches()
+    if not _cuda_wheel_usable():
+        # A zero exit that did not land a usable pin-matched wheel in THIS
+        # environment (uv resolved a different interpreter, a broken wheel)
+        # must not read as success: the caller would skip the Vulkan/tarball
+        # chain believing the CUDA lane is live (PR #665 review).
+        logger.warning(
+            "CUDA engine wheel install reported success but the wheel is "
+            "not importable and pin-matched in this environment; the node "
+            f"degrades to the Vulkan/tarball chain ({manual_command})"
+        )
+        return False
+    return True
 
 
 def managed_llama_server_path() -> Path | None:
@@ -412,6 +589,24 @@ def ensure_llama_server(
         # A pip-installed engine wheel outranks tarball provisioning: it is
         # the standard-tooling path and already on disk (works offline too).
         wheel = wheel_llama_server(vendor, facts)
+        if (
+            vendor == "nvidia"
+            and not _cuda_wheel_usable()
+            and allow_download
+            and try_install_cuda_wheel(facts)
+        ):
+            # Completing the CUDA lane on demand (#661): the tarball chain
+            # below has no CUDA artifact by design, and in a compute-only
+            # container the Vulkan fallback sees no devices — the node would
+            # advertise a CPU engine while the facts probe plainly reports
+            # the GPU. install.sh's engine step covers curl-installed nodes;
+            # this covers every other entry path (bare checkouts, GPU-cloud
+            # containers) and self-heals a stale wheel after a pin advance.
+            # Keyed on the CUDA wheel itself, not any-wheel-resolved: an
+            # installed VULKAN wheel must not shadow the attempt, since its
+            # shim cannot drive the GPU in a compute-only container
+            # (PR #665 review).
+            wheel = wheel_llama_server(vendor, facts)
         if wheel is not None:
             server_shim, rpc_shim = wheel
             os.environ[LLAMA_SERVER_BIN_ENV] = str(server_shim)

@@ -657,14 +657,21 @@ through the same standard tooling as every other dependency:
 official PyPI packages) and `skulk-llama-server-vulkan` on AMD (Khronos
 Vulkan loader bundled; the driver's ICD remains the one OS prerequisite).
 An installed wheel is wired automatically, including its bundled
-`ggml-rpc-server` donor binary for multi-node GGUF. Failing that, the
+`ggml-rpc-server` donor binary for multi-node GGUF. On an NVIDIA node with
+no usable CUDA wheel installed (a bare checkout or a GPU-cloud container
+that skipped the installer's engine step), provisioning first installs the
+Foxlight CUDA wheel on demand from the wheel index, so the CUDA lane
+completes itself instead of degrading; only if that fails does the node fall
+back to the Vulkan lane, where an already-installed Vulkan wheel still
+outranks tarball provisioning and otherwise the
 checksum-verified tarball fallback applies: a visible
 NVIDIA GPU tries tarball variants in order: first a CUDA build (upstream publishes no
 Linux CUDA prebuilt, so this slot is reserved for a Foxlight-built artifact
 and is skipped until one is pinned in the manifest), then the Vulkan build
 (NVIDIA's bare-metal driver ships a working Vulkan ICD; container GPU clouds
-inject compute-only driver stacks where Vulkan cannot initialize, and there
-vLLM remains the first-class CUDA serving path). A visible AMD GPU selects
+inject compute-only driver stacks where Vulkan cannot initialize; there the
+on-demand CUDA wheel is what keeps GGUF serving alive, with vLLM as the
+concurrent-serving complement). A visible AMD GPU selects
 the Vulkan variant, and no GPU selects the CPU variant. An explicit override
 always wins, and an invalid override is never masked by a managed binary: it
 stays a loud `invalid_engine_binary` conflict, because silently substituting a
