@@ -10,11 +10,16 @@ use tokio::sync::{mpsc, oneshot};
 /// The current version of the network: this prevents devices running different versions of the
 /// software from interacting with each other.
 ///
-/// TODO: right now this is a hardcoded constant; figure out what the versioning semantics should
-///       even be, and how to inject the right version into this config/initialization. E.g. should
-///       this be passed in as a parameter? What about rapidly changing versions in debug builds?
-///       this is all VERY very hard to figure out and needs to be mulled over as a team.
-pub const NETWORK_VERSION: &[u8] = b"v0.0.1";
+/// THE RULE (#659): any change to wire behavior in this crate — protocol ids,
+/// topics, message framing, behaviour composition — bumps this constant IN
+/// THE SAME COMMIT and adds an entry to `rust/networking/WIRE_COMPAT.md`
+/// (CI enforces the pairing). The pnet pre-shared key derives from this
+/// value, so a bump makes wire-incompatible builds fail loudly at connect
+/// instead of half-working: the telemetry-isolation change (31e3f333)
+/// shipped without a bump, and a fresh build against a stale fleet
+/// produced a fully-synced node that was invisible to membership because
+/// its telemetry protocol had no peers while events flowed fine.
+pub const NETWORK_VERSION: &[u8] = b"v0.0.2";
 pub const OVERRIDE_VERSION_ENV_VAR: &str = "SKULK_LIBP2P_NAMESPACE";
 const ELECTION_TOPIC: &str = "election_messages";
 const ELECTION_PROTOCOL_PREFIX: &str = "/skulk/election/meshsub";
@@ -283,13 +288,29 @@ mod transport {
         // Seed for the libp2p private-network pre-shared key. Changing this is a
         // wire-compatibility break (nodes with a different seed cannot form a
         // cluster), so it lands only as a coordinated whole-fleet upgrade (#324).
-        let builder = Sha3_256::new().update(b"skulk_discovery_network");
+        //
+        // NETWORK_VERSION ALWAYS contributes to the key; a configured
+        // namespace layers cluster isolation on top rather than replacing
+        // it. The previous either/or derivation silently disabled the wire
+        // version gate on every deployment that sets a namespace — which
+        // the installed service template does by default — so a version
+        // bump changed nothing exactly where the loud-connect-failure
+        // guarantee was needed (#659 review, P1).
+        // The NUL delimiter keeps (version, namespace) pairs injective in
+        // the hashed byte stream: without it ("v0.0.21", "x") and
+        // ("v0.0.2", "1x") hash identically (#659 review). NUL cannot
+        // appear in either field (a version literal here; env vars are
+        // NUL-free on POSIX).
+        let builder = Sha3_256::new()
+            .update(b"skulk_discovery_network")
+            .update(NETWORK_VERSION)
+            .update(b"\0");
 
         if let Ok(var) = env::var(OVERRIDE_VERSION_ENV_VAR) {
             let bytes = var.into_bytes();
             builder.update(&bytes)
         } else {
-            builder.update(NETWORK_VERSION)
+            builder
         }
         .finalize()
     });
