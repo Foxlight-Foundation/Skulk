@@ -65,8 +65,20 @@ function normalizeNodeLabel(value?: string): string {
     .replace(/[\s._-]+/g, '');
 }
 
-// Exported for unit tests (the memory-pool selection in #669); production
-// consumers go through useClusterState.
+/**
+ * Build the dashboard's per-node topology view from the raw `/state` maps.
+ *
+ * Joins identity, memory, system/accelerator, network, Thunderbolt, RDMA,
+ * and health records by node id, selects each node's display memory pool
+ * (system/unified RAM, reassembled Strix carve-out, or a discrete GPU's
+ * labeled VRAM pool, #669), and converts the raw connection map into
+ * renderable edges.
+ *
+ * Exported for unit tests of the memory-pool selection; production
+ * consumers go through {@link useClusterState}.
+ *
+ * @returns The nodes keyed by id plus the edge list the topology view renders.
+ */
 export function transformTopology(
   raw: RawTopology,
   identities: Record<string, RawNodeIdentity>,
@@ -106,13 +118,20 @@ export function transformTopology(
     // models serve out of VRAM, so the card shows the VRAM pool (labeled).
     // Adding the pools, as the carve-out branch would, showed a 512GB-host
     // GPU-cloud A40 node as "548.5GB" when 45GB governs what it can serve
-    // (#669). NVIDIA is always discrete here; AMD with reported VRAM stays
-    // on the carve-out interpretation because the fleet's AMD nodes are
-    // Strix APUs and telemetry carries no integrated-vs-discrete signal yet.
+    // (#669). Discrete vs unified is decided by placement's UMA signature
+    // rather than vendor strings: a unified APU's GTT aperture spans the
+    // whole system (gttTotal > vramTotal AND gttTotal >= ramTotal), while a
+    // discrete card's GTT is ~= its VRAM and NVIDIA reports none at all
+    // (see usable_vram_by_node in master/placement_utils.py). A missing RAM
+    // reading falls to the discrete side, matching placement's conservative
+    // fallback.
     const vramTotal = sys?.accelerator?.vramTotalBytes ?? 0;
     const vramUsed = sys?.accelerator?.vramUsedBytes ?? 0;
-    const isDiscreteGpu = sys?.accelerator?.vendor === 'nvidia' && vramTotal > 0;
-    const hasCarveoutVram = !isDiscreteGpu && vramTotal > 0;
+    const gttTotal = sys?.accelerator?.gttTotalBytes ?? 0;
+    const isUnifiedCarveout =
+      vramTotal > 0 && ramTotal > 0 && gttTotal > vramTotal && gttTotal >= ramTotal;
+    const isDiscreteGpu = vramTotal > 0 && !isUnifiedCarveout;
+    const hasCarveoutVram = isUnifiedCarveout;
     const unifiedTotal = isDiscreteGpu
       ? vramTotal
       : hasCarveoutVram

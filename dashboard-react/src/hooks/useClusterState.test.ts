@@ -54,7 +54,9 @@ describe('transformTopology memory pool selection', () => {
 
   it('reassembles the unified pool for an AMD carve-out node', () => {
     // Strix Halo: the BIOS VRAM carve-out is not counted as system RAM, so
-    // the full unified pool is their sum.
+    // the full unified pool is their sum. The UMA signature is the GTT
+    // aperture spanning the whole system (mirrors placement's
+    // usable_vram_by_node rule).
     const node = transformOne(
       {
         ramTotal: { inBytes: 96 * GIB },
@@ -66,6 +68,7 @@ describe('transformTopology memory pool selection', () => {
           name: 'AMD Radeon Graphics',
           vramTotalBytes: 32 * GIB,
           vramUsedBytes: 2 * GIB,
+          gttTotalBytes: 120 * GIB,
         },
       },
     );
@@ -73,6 +76,32 @@ describe('transformTopology memory pool selection', () => {
       ram_usage: 6 * GIB + 2 * GIB,
       ram_total: 128 * GIB,
       is_vram: undefined,
+    });
+  });
+
+  it('shows the VRAM pool for a discrete AMD card', () => {
+    // A discrete AMD GPU also reports a GTT total, but it is ~= its VRAM
+    // and far short of system RAM, so it must take the discrete path, not
+    // the carve-out sum.
+    const node = transformOne(
+      {
+        ramTotal: { inBytes: 256 * GIB },
+        ramAvailable: { inBytes: 200 * GIB },
+      },
+      {
+        accelerator: {
+          vendor: 'amd',
+          name: 'AMD Radeon PRO W7800',
+          vramTotalBytes: 32 * GIB,
+          vramUsedBytes: 4 * GIB,
+          gttTotalBytes: 32 * GIB,
+        },
+      },
+    );
+    expect(node.mactop_info?.memory).toEqual({
+      ram_usage: 4 * GIB,
+      ram_total: 32 * GIB,
+      is_vram: true,
     });
   });
 

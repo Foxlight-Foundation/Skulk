@@ -23,6 +23,11 @@ export interface RawAcceleratorMetrics {
   utilizationRatio?: number | null;
   vramTotalBytes?: number | null;
   vramUsedBytes?: number | null;
+  /**
+   * GTT (GPU-addressable system memory) aperture size. The UMA signature:
+   * an APU's GTT spans the whole system, a discrete card's is ~= its VRAM.
+   */
+  gttTotalBytes?: number | null;
   powerWatts?: number | null;
   temperatureCelsius?: number | null;
   clockMhz?: number | null;
