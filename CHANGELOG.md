@@ -21,7 +21,9 @@ This project records release notes here and mirrors public-facing notes in
   peer-reachable local IPv4 (loopback only when offline) and enables local
   multicast scouting; an explicit `SKULK_ZENOH_CONNECT` list retains the
   multicast-off routed-fleet posture. `SKULK_ZENOH_DATA_PLANE=0` remains the
-  explicit compatibility fallback.
+  explicit compatibility fallback. The native bindings version advances so
+  service updates rebuild the new discovery-aware Zenoh constructor before
+  startup.
 
 ### Added
 
