@@ -262,19 +262,22 @@ def try_install_cuda_wheel(facts: NodeFacts) -> bool:
     uv = shutil.which("uv")
     pin = LLAMA_SERVER_PIN.removeprefix("b")
     specifier = f"skulk-llama-server-cuda==0.{pin}.*"
-    # Quoted, fully index-pinned, and targeting THIS interpreter so the
-    # remediation is copy/paste safe: the * would glob in a shell, an
-    # exported UV_INDEX_URL/PIP_INDEX_URL must not redirect resolution, and
-    # a bare `pip` could install into a different environment than the one
-    # the running node resolves wheels from (PR #665 review).
+    # The remediation mirrors the automated uv invocation exactly, because
+    # the resolution semantics are load-bearing: uv consults extra indexes
+    # BEFORE the default index, so the Foxlight wheel wins, while pip's
+    # --extra-index-url picks the best version across ALL indexes, letting a
+    # same-name package on PyPI or a mirror satisfy the 0.<pin>.* specifier
+    # and replace the pinned engine binary (PR #665 review). Quoted and
+    # targeting THIS interpreter so it is copy/paste safe.
     manual_command = (
-        f"{sys.executable} -m pip install '{specifier}' "
+        f"uv pip install --no-config --python {sys.executable} '{specifier}' "
         f"--extra-index-url {FOXLIGHT_WHEEL_INDEX} --index-url {_PYPI_INDEX}"
     )
     if uv is None:
         logger.warning(
-            "no uv on PATH to install the CUDA engine wheel; install it "
-            f"manually with: {manual_command}"
+            "no uv on PATH to install the CUDA engine wheel; install uv "
+            "(https://docs.astral.sh/uv/getting-started/installation/) and "
+            f"run: {manual_command}"
         )
         return False
     logger.info(
