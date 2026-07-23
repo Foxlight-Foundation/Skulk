@@ -95,7 +95,7 @@ Run all checks in sequence:
 uv run basedpyright && uv run ruff check && nix fmt && uv run pytest
 ```
 
-If `nix fmt` changes any files, stage them before committing. The CI runs `nix flake check` which verifies formatting, linting, and runs Rust tests.
+If `nix fmt` changes any files, stage them before committing. The CI runs `nix flake check` which verifies formatting, linting, and runs Rust tests. A PR touching the networking crate's wire surfaces (swarm.rs, discovery.rs, zenoh_session.rs, its Cargo.toml, or the root workspace Cargo.toml/Cargo.lock) must update `rust/networking/WIRE_COMPAT.md`: bump `NETWORK_VERSION` and record it for wire-behavior changes, or record the wire-neutrality judgment (CI enforces via the wire-compat-guard job). The service startup script rebuilds the Rust bindings whenever the last commit touching rust/ or the root Cargo inputs moves.
 
 ## Architecture
 
@@ -308,6 +308,14 @@ Skulk now treats model capability handling as two layers:
 - **Resolved capability profiles**: normalized runtime behavior contracts derived from the card plus conservative family defaults
 
 This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, speech/TTS/STT metadata, and additive `/v1/models` metadata consumed by the dashboard.
+
+Store staging is reachability-aware (#657): "model not in store" (the
+store answered) fetches via the store host, keeping the store the source
+of truth; a store that cannot be reached at the transport level
+(`StoreUnreachableError`, small probe budget, bounded poll-dropout
+detection) falls back to DIRECT Hugging Face download on the node when
+`allow_hf_fallback` is on, preserving revision/GGUF pinning. The expected
+shape for store-unreachable remote members; a loud log cue elsewhere.
 
 Model cards may pin qualified Hugging Face artifacts with `source_revision`, a
 full commit hash. Metadata probes, direct downloads, model-store registry

@@ -91,6 +91,19 @@ Any node's API can serve any request: the API forwards work to the placed runner
 
 Operational diagnostics are the narrow exception required to observe and finish a staggered deployment safely. Peer diagnostic responses ignore unknown additive fields recursively, additive counters use compatibility defaults, and the collector compares each peer's reported package version and source commit. `GET /v1/diagnostics/cluster` returns aggregate and per-node `versionStatus`; `GET /state` adds a warning-level `version_mismatch` health reason while known live builds disagree. This tolerance does not extend to events, commands, state snapshots, model traffic, or inference compatibility.
 
+The wire itself enforces build compatibility one level deeper. The
+networking layer derives its private-network key from a wire version
+constant (`NETWORK_VERSION`), so two builds whose network protocols differ
+refuse to connect at all (loudly) rather than half-working. Any change to
+wire behavior in the networking crate bumps that constant in the same
+commit (CI enforces the pairing against a wire-compatibility log), because
+the half-working alternative is the worst failure this system knows: a
+node that connects, syncs the event log, participates in election, and yet
+never appears in membership because one protocol silently reaches nobody.
+The service startup script complements this by rebuilding the Rust
+bindings whenever a pulled commit touches the Rust tree, so a fleet cannot
+silently run stale wire code while its source tree reports current.
+
 One more note on the graph the dashboard draws and placement searches: it
 is built from two sources. Workers probe each other's advertised addresses
 and record the paths that verify, and every node also records its live,
@@ -796,7 +809,7 @@ Models live under `SKULK_MODELS_DIR`: by default that resolves to `SKULK_DATA_HO
 
 ### Model store (optional)
 
-For multi-node deployments with shared filesystems, a model store hosts canonical model artifacts on one machine. Other nodes stage from the store (rsync-like) rather than each downloading from Hugging Face independently. On the store host itself, staging hardlinks the store's files into the staging directory instead of copying them (store files are immutable once registered, and staged files are never mutated in place), so a model staged on the same filesystem as its canonical copy costs no extra disk; a filesystem that cannot link falls back to a real copy. This is a config-driven feature; without a store, each node downloads independently. See [Model Store](model-store) for setup details.
+For multi-node deployments with shared filesystems, a model store hosts canonical model artifacts on one machine. Other nodes stage from the store (rsync-like) rather than each downloading from Hugging Face independently. On the store host itself, staging hardlinks the store's files into the staging directory instead of copying them (store files are immutable once registered, and staged files are never mutated in place), so a model staged on the same filesystem as its canonical copy costs no extra disk; a filesystem that cannot link falls back to a real copy. This is a config-driven feature; without a store, each node downloads independently. When a model is missing from the store, the node asks the store host to fetch it from Hugging Face and then stages from the store, keeping the store the single source of truth. A node that cannot reach the store at all is handled differently: rather than starving with a working internet path, it downloads directly from Hugging Face (preserving any pinned source revision) and logs the topology problem loudly. That is the expected shape for a remote fabric member whose route to the home store does not exist; on a node that should reach the store, the same log line is the cue to fix the route. See [Model Store](model-store) for setup details.
 
 A model card can bind its artifacts to an immutable Hugging Face commit through `source_revision`, and the pin is part of artifact identity rather than a download hint. Metadata probes and byte downloads read at exactly that commit, the store registry persists it, and every staged copy records it in an on-disk revision marker; a staged or canonical directory carrying a different revision is the wrong artifact and is replaced rather than reused, with the replacement landing only after the requested revision has fully downloaded so a failed fetch never destroys the previous copy. Pinned models load from a revision-qualified canonical directory, so pinned bytes never occupy the mutable-`main` path and a changed upstream `main` can never silently substitute different weights for a qualified artifact.
 

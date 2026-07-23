@@ -13,6 +13,74 @@ on:
       - dev
 
 jobs:
+  wire-compat-guard:
+    # Any PR touching the networking crate's wire surfaces must either bump
+    # NETWORK_VERSION or record a wire-neutral entry in WIRE_COMPAT.md
+    # (#659). The pnet key derives from NETWORK_VERSION, so an unbumped wire
+    # change makes incompatible builds half-work instead of failing loudly
+    # at connect; the 31e3f333 telemetry-isolation change shipped that way
+    # and produced a fully-synced node invisible to membership.
+    name: Wire compatibility guard
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require NETWORK_VERSION bump or WIRE_COMPAT entry
+        run: |
+          set -euo pipefail
+          base="origin/${{ github.base_ref }}"
+          # Full-depth fetch: a --depth=1 fetch here can shallow the base ref
+          # in the otherwise-full checkout and break the merge-base that
+          # "$base"...HEAD needs, failing or mis-scoping the guard.
+          git fetch origin "${{ github.base_ref }}"
+          # The whole networking src tree is the wire surface (lib.rs helpers
+          # feed discovery/address classification too). Dependency manifests
+          # count as well: a libp2p or zenoh upgrade can change protocol
+          # behavior without touching our source. The workspace manifest and
+          # lockfile live at the REPO ROOT.
+          wire_files="rust/networking/src rust/networking/Cargo.toml Cargo.toml Cargo.lock"
+          # shellcheck disable=SC2086
+          touched=$(git diff --name-only "$base"...HEAD -- $wire_files)
+          if [ -z "$touched" ]; then
+            echo "no wire-surface files touched; guard passes"
+            exit 0
+          fi
+          echo "wire-surface files touched:"; echo "$touched"
+          # Every wire-surface change requires a WIRE_COMPAT.md entry: a bump
+          # records itself there, and a wire-neutral change records the
+          # neutrality judgment. Version detection matches only ADDED or
+          # REMOVED lines (-U0) so context lines near the constant cannot
+          # satisfy the guard.
+          version_changed=false
+          if git diff -U0 "$base"...HEAD -- rust/networking/src/swarm.rs | grep -Eq "^[+-].*NETWORK_VERSION.*=" ; then
+            version_changed=true
+          fi
+          # The log must both change AND still exist at HEAD: without the
+          # existence check, deleting WIRE_COMPAT.md would count as an
+          # "update" and let a wire change remove the audit log while passing.
+          compat_updated=false
+          if git diff --name-only "$base"...HEAD -- rust/networking/WIRE_COMPAT.md | grep -q . \
+            && [ -f rust/networking/WIRE_COMPAT.md ]; then
+            compat_updated=true
+          fi
+          if [ "$compat_updated" = "true" ]; then
+            if [ "$version_changed" = "true" ]; then
+              echo "NETWORK_VERSION changed and WIRE_COMPAT.md updated; guard passes"
+            else
+              echo "WIRE_COMPAT.md updated (wire-neutral change recorded); guard passes"
+            fi
+            exit 0
+          fi
+          if [ "$version_changed" = "true" ]; then
+            echo "::error::NETWORK_VERSION changed without a WIRE_COMPAT.md entry. Every bump records itself in rust/networking/WIRE_COMPAT.md (what changed on the wire and why)."
+            exit 1
+          fi
+          echo "::error::This PR touches rust/networking wire surfaces without updating rust/networking/WIRE_COMPAT.md. Wire-behavior changes MUST bump NETWORK_VERSION (rust/networking/src/swarm.rs) and record the bump there (the pnet key derives from the version, making incompatible builds fail loudly at connect); provably wire-neutral changes (comments, timing, logging) record the neutrality judgment instead. See rust/networking/WIRE_COMPAT.md for the doctrine."
+          exit 1
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

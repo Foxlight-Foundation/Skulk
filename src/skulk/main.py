@@ -83,9 +83,11 @@ def _derive_zenoh_namespace(raw: str) -> str:
     return "ns" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-# Keep in sync with rust/networking/src/swarm.rs: NETWORK_VERSION default and
-# the OVERRIDE_VERSION_ENV_VAR name used to build the libp2p private-network key.
-_LIBP2P_NETWORK_VERSION = "v0.0.1"
+# Keep in sync with rust/networking/src/swarm.rs: NETWORK_VERSION and the
+# OVERRIDE_VERSION_ENV_VAR name used to build the libp2p private-network key
+# (a lockstep test in tests/test_zenoh_namespace_lockstep.py parses the Rust
+# source and fails on drift).
+_LIBP2P_NETWORK_VERSION = "v0.0.2"
 _LIBP2P_NAMESPACE_ENV_VAR = "SKULK_LIBP2P_NAMESPACE"
 _NODE_RESOURCES_POLL_INTERVAL_SECONDS = 2.0
 
@@ -141,16 +143,19 @@ def _libp2p_namespace_token(environ: Mapping[str, str]) -> str:
     The Zenoh namespace MUST derive from the identical token that builds the
     libp2p private-network key in ``swarm.rs`` (``PNET_PRESHARED_KEY``); otherwise
     two nodes in the same libp2p cluster can land in different Zenoh namespaces
-    and silently drop all cross-node generation output. ``swarm.rs`` uses
-    ``SKULK_LIBP2P_NAMESPACE`` when the var is *present* (Rust ``env::var``
-    returns ``Ok`` even for an empty value) and the ``NETWORK_VERSION`` default
-    (``v0.0.1``) otherwise.
-    We mirror that precisely: presence (not truthiness) selects the override, and
-    an unset var falls back to ``v0.0.1`` rather than a Skulk-only default.
+    and silently drop all cross-node generation output. Since #659, ``swarm.rs``
+    ALWAYS feeds ``NETWORK_VERSION`` into the key and layers
+    ``SKULK_LIBP2P_NAMESPACE`` on top when the var is *present* (Rust
+    ``env::var`` returns ``Ok`` even for an empty value). We mirror that
+    precisely: the token is the version alone when the var is unset, and the
+    version concatenated with the namespace when it is present, so a version
+    bump re-keys BOTH transports together on every deployment shape.
     """
     override = environ.get(_LIBP2P_NAMESPACE_ENV_VAR)
     if override is not None:
-        return override
+        # NUL-delimited to keep (version, namespace) pairs injective in the
+        # token, mirroring the Rust key derivation's delimiter (#659 review).
+        return _LIBP2P_NETWORK_VERSION + "\0" + override
     return _LIBP2P_NETWORK_VERSION
 
 
