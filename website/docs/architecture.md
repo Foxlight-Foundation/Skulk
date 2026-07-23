@@ -104,6 +104,18 @@ The service startup script complements this by rebuilding the Rust
 bindings whenever a pulled commit touches the Rust tree, so a fleet cannot
 silently run stale wire code while its source tree reports current.
 
+One more note on the graph the dashboard draws and placement searches: it
+is built from two sources. Workers probe each other's advertised addresses
+and record the paths that verify, and every node also records its live,
+authenticated fabric connections as edges in their own right. The second
+source is what keeps a member behind NAT or a proxy visible and placeable:
+such a node's advertised addresses may all be unreachable from its peers
+while the connection that carries its traffic works perfectly, and before
+the session edge existed it rendered as a floating, edgeless node in
+exactly that healthy state. Addresses that repeatedly fail their probes
+are retried on a slower cadence rather than every sweep, so a remote
+membership does not flood logs probing paths that can never work.
+
 ## Lifecycle of a request
 
 This is the path a chat completion takes from HTTP through to SSE response:

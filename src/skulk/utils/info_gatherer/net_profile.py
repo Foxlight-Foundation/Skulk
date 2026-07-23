@@ -1,6 +1,6 @@
 import ipaddress
 from collections import defaultdict
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import suppress
 
 import anyio
@@ -140,6 +140,7 @@ async def check_reachable(
     node_network: Mapping[NodeId, NodeNetworkInfo],
     attempts: int = REACHABILITY_ATTEMPTS,
     timeout_seconds: float = 5.0,
+    should_probe: Callable[[str], bool] | None = None,
 ) -> AsyncGenerator[tuple[str, NodeId], None]:
     """Yield (ip, node_id) pairs as reachability probes complete.
 
@@ -147,7 +148,9 @@ async def check_reachable(
     tolerates slow links and deliberately retries. Interactive callers (the
     dashboard diagnostics fan-out) pass ``SWEEP_ATTEMPTS`` /
     ``SWEEP_TIMEOUT_SECONDS`` so one dead advertised address cannot stall
-    them (#558).
+    them (#558). ``should_probe`` lets the caller skip addresses this
+    sweep (the worker's unreachable-address backoff, #662) on top of the
+    built-in loopback filtering.
     """
 
     send, recv = channel[tuple[str, NodeId]]()
@@ -191,6 +194,8 @@ async def check_reachable(
                 continue
             for iface in node_network[node_id].interfaces:
                 if not _should_probe_remote_ip(iface.ip_address):
+                    continue
+                if should_probe is not None and not should_probe(iface.ip_address):
                     continue
                 tg.start_soon(_probe, iface.ip_address, node_id, client, send.clone())
         send.close()

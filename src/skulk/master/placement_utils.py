@@ -859,9 +859,15 @@ def _find_connection_ip(
     node_j: NodeId,
     cycle_digraph: Topology,
 ) -> Generator[str, None, None]:
-    """Find all IP addresses that connect node i to node j."""
+    """Find all IP addresses that connect node i to node j.
+
+    Session edges are skipped (#662): they prove connectivity, but their
+    annotated address is the observed remote endpoint of a libp2p
+    connection, which for a NAT'd or proxied member is not a dialable
+    listener address and must never become a ring/coordinator host.
+    """
     for connection in cycle_digraph.get_all_connections_between(node_i, node_j):
-        if isinstance(connection, SocketConnection):
+        if isinstance(connection, SocketConnection) and not connection.session:
             yield connection.sink_multiaddr.ip_address
 
 

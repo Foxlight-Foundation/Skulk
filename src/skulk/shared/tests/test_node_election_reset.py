@@ -45,6 +45,9 @@ class _FakeRouter:
     def receiver_with_origin(self, _topic: object) -> object:
         return object()
 
+    def current_session_connections(self) -> dict[str, tuple[str, int]]:
+        return {}
+
 
 class _OldEventRouter:
     def __init__(self, events: list[str]) -> None:
