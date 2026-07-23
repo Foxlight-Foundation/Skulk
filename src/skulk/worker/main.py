@@ -4,7 +4,7 @@ import io
 import sys
 import time
 from collections import defaultdict, deque
-from collections.abc import Container, Mapping
+from collections.abc import Callable, Container, Mapping
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -631,6 +631,9 @@ class Worker:
         vision_media_packet_sender: Sender[VisionMediaPacket] | None = None,
         vision_media_packet_receiver: Receiver[VisionMediaPacket] | None = None,
         connection_message_receiver: Receiver[ConnectionMessage] | None = None,
+        session_connection_snapshot: (
+            Callable[[], dict[str, tuple[str, int]]] | None
+        ) = None,
         store_client: ModelStoreClient | None = None,
         staging_config: StagingNodeConfig | None = None,
     ):
@@ -654,6 +657,7 @@ class Worker:
         self._vision_media_packet_sender = vision_media_packet_sender
         self._vision_media_packet_receiver = vision_media_packet_receiver
         self._connection_message_receiver = connection_message_receiver
+        self._session_connection_snapshot = session_connection_snapshot
         # Shared, Node-owned telemetry view (#279). The worker prunes a node's
         # telemetry here when it sees NodeTimedOut, because the worker runs on
         # EVERY node regardless of role - so a --no-api node (or a --no-api
@@ -2872,22 +2876,61 @@ class Worker:
         assert self._connection_message_receiver is not None
         session_counts: dict[NodeId, int] = {}
         emitted_edges: dict[NodeId, SocketConnection] = {}
+        if self._session_connection_snapshot is not None:
+            # Seed from connections established before this worker existed
+            # (a mid-session worker recreation after master election): those
+            # never re-emit ConnectionMessage, so without the seed the new
+            # session's topology would miss their edges (PR #668 review).
+            # An event for a seeded connection may still sit buffered in the
+            # receiver (created before this loop started), which can
+            # overcount its refs; the cost is a session edge lingering until
+            # node removal, never a missing edge.
+            for peer_str, (ip, port) in self._session_connection_snapshot().items():
+                peer = NodeId(peer_str)
+                session_counts[peer] = session_counts.get(peer, 0) + 1
+                if peer in emitted_edges:
+                    continue
+                edge = SocketConnection(
+                    sink_multiaddr=(
+                        Multiaddr(address=f"/ip6/{ip}/tcp/{port}")
+                        if ":" in ip
+                        else Multiaddr(address=f"/ip4/{ip}/tcp/{port}")
+                    ),
+                    session=True,
+                )
+                emitted_edges[peer] = edge
+                await self.event_sender.send(
+                    TopologyEdgeCreated(
+                        conn=Connection(source=self.node_id, sink=peer, edge=edge)
+                    )
+                )
         with self._connection_message_receiver as messages:
             async for message in messages:
                 peer = message.node_id
                 if message.connected:
                     session_counts[peer] = session_counts.get(peer, 0) + 1
-                    if peer in emitted_edges or message.remote_ip is None:
+                    if (
+                        peer in emitted_edges
+                        or message.remote_ip is None
+                        or message.remote_tcp_port is None
+                    ):
+                        # A connect event always carries its endpoint; a
+                        # missing one (defensive) must not mint a /tcp/0
+                        # multiaddr.
                         continue
-                    port = message.remote_tcp_port or 0
+                    port = message.remote_tcp_port
+                    # ":" selects the v6 form, matching the codebase-wide
+                    # convention: "." would misclassify IPv4-mapped IPv6
+                    # literals, which contain dots.
                     edge = SocketConnection(
                         sink_multiaddr=(
-                            Multiaddr(address=f"/ip4/{message.remote_ip}/tcp/{port}")
-                            if "." in message.remote_ip
+                            Multiaddr(address=f"/ip6/{message.remote_ip}/tcp/{port}")
+                            if ":" in message.remote_ip
                             else Multiaddr(
-                                address=f"/ip6/{message.remote_ip}/tcp/{port}"
+                                address=f"/ip4/{message.remote_ip}/tcp/{port}"
                             )
                         ),
+                        session=True,
                     )
                     emitted_edges[peer] = edge
                     await self.event_sender.send(

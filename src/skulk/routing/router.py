@@ -551,6 +551,9 @@ class Router:
             admission_capacity=_TELEMETRY_ADMISSION_CAPACITY,
             network_queue_capacity=_TELEMETRY_OUTBOUND_BUFFER,
         )
+        # Live libp2p connections by peer: (refcount, first observed remote
+        # endpoint). Feeds current_session_connections (#662).
+        self._session_connections: dict[str, tuple[int, tuple[str, int] | None]] = {}
         # Dedicated outbound channel for the Zenoh DATA plane (#309): the DATA
         # path publishes with CongestionControl::Block, so a stuck/slow
         # subscriber can stall its egress. Draining it on its OWN loop (not the
@@ -826,6 +829,42 @@ class Router:
             )
             raise
 
+    def _track_session_connection(self, message: ConnectionMessage) -> None:
+        """Maintain the live-connection snapshot for late consumers (#662).
+
+        A worker recreated mid-session (master election recreates it) starts
+        its session-edge ingress with a fresh receiver, so connections
+        established BEFORE that receiver existed would never re-emit and the
+        new session's topology would miss their edges. The router outlives
+        worker recreation, so it keeps the authoritative per-peer refcount
+        and one representative endpoint, and ``current_session_connections``
+        hands a snapshot to each newly started ingress.
+        """
+        peer = str(message.node_id)
+        if message.connected:
+            count, endpoint = self._session_connections.get(peer, (0, None))
+            if (
+                endpoint is None
+                and message.remote_ip is not None
+                and message.remote_tcp_port is not None
+            ):
+                endpoint = (message.remote_ip, message.remote_tcp_port)
+            self._session_connections[peer] = (count + 1, endpoint)
+        else:
+            count, endpoint = self._session_connections.get(peer, (1, None))
+            if count <= 1:
+                self._session_connections.pop(peer, None)
+            else:
+                self._session_connections[peer] = (count - 1, endpoint)
+
+    def current_session_connections(self) -> dict[str, tuple[str, int]]:
+        """Snapshot of live peers with a known remote endpoint (#662)."""
+        return {
+            peer: endpoint
+            for peer, (_count, endpoint) in self._session_connections.items()
+            if endpoint is not None
+        }
+
     async def _networking_recv(self):
         try:
             while True:
@@ -851,6 +890,7 @@ class Router:
                         logger.trace(
                             f"Received message on connection_messages with payload {message}"
                         )
+                        self._track_session_connection(message)
                         if CONNECTION_MESSAGES.topic in self.topic_routers:
                             router = self.topic_routers[CONNECTION_MESSAGES.topic]
                             assert router.topic.model_type == ConnectionMessage
