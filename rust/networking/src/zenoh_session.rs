@@ -213,4 +213,16 @@ impl ZenohSession {
         let mut rx = self.inbound_rx.lock().await;
         rx.recv().await
     }
+
+    /// Count the Zenoh peers this session currently holds a live transport to.
+    ///
+    /// This is the data plane's only connectivity ground truth: a node whose
+    /// count stays at zero while cluster peers advertise Zenoh is isolated
+    /// (e.g. a zero-config remote member that multicast scouting cannot
+    /// reach), and every remote stream to or from it dies with transport
+    /// errors while the control plane still looks healthy. Surfacing the
+    /// count lets Python advertise isolation instead of failing silently.
+    pub async fn connected_peer_count(&self) -> usize {
+        self.session.info().peers_zid().await.count()
+    }
 }

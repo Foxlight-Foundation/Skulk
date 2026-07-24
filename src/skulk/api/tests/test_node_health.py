@@ -318,6 +318,80 @@ def test_missing_transport_telemetry_does_not_create_false_mismatch() -> None:
     assert all(node.level == "ok" for node in health.values())
 
 
+def test_zenoh_isolated_node_is_error() -> None:
+    """A trustworthy 0 peer count with a live Zenoh fleet names the node."""
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_resources={
+            _NODE: NodeResources(data_transport="zenoh", zenoh_connected_peers=0),
+            other: NodeResources(data_transport="zenoh", zenoh_connected_peers=1),
+        },
+        now=_NOW,
+    )
+    isolated = health["node-a"]
+    assert isolated.level == "error"
+    reason = next(r for r in isolated.reasons if r.code == "zenoh_isolated")
+    assert "0 peer transports" in reason.message
+    assert "SKULK_ZENOH_CONNECT" in reason.remediation
+    # The connected node is not flagged.
+    assert all(r.code != "zenoh_isolated" for r in health["node-b"].reasons)
+
+
+def test_zenoh_unknown_count_does_not_flag() -> None:
+    """None (startup grace / sample failure) is not isolation evidence."""
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_resources={
+            _NODE: NodeResources(data_transport="zenoh", zenoh_connected_peers=None),
+            other: NodeResources(data_transport="zenoh", zenoh_connected_peers=2),
+        },
+        now=_NOW,
+    )
+    assert all(node.level == "ok" for node in health.values())
+
+
+def test_zenoh_zero_peers_without_zenoh_fleet_does_not_flag() -> None:
+    """A lone Zenoh node (or an all-gossipsub fleet) has no mesh to join."""
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_resources={
+            _NODE: NodeResources(data_transport="zenoh", zenoh_connected_peers=0),
+            other: NodeResources(data_transport="gossipsub"),
+        },
+        now=_NOW,
+    )
+    assert all(
+        reason.code != "zenoh_isolated"
+        for node in health.values()
+        for reason in node.reasons
+    )
+
+
+def test_zenoh_isolated_ignores_dead_peer_advertisements() -> None:
+    """Stale resources from a departed node cannot manufacture isolation."""
+    departed = NodeId("node-dead")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW},
+        downloads={},
+        node_disk={},
+        node_resources={
+            _NODE: NodeResources(data_transport="zenoh", zenoh_connected_peers=0),
+            departed: NodeResources(data_transport="zenoh", zenoh_connected_peers=1),
+        },
+        now=_NOW,
+    )
+    assert all(r.code != "zenoh_isolated" for r in health["node-a"].reasons)
+
+
 def test_mixed_source_commits_warn_on_every_live_node() -> None:
     """Equal package versions at different commits are a degraded rollout."""
 

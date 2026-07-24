@@ -7,6 +7,7 @@ import resource
 import signal
 import socket
 import sys
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,7 @@ from skulk.extensions import load_extensions
 from skulk.master.main import Master
 from skulk.routing.event_router import EventRouter
 from skulk.routing.router import Router, TelemetrySender, get_node_id_keypair
+from skulk.routing.zenoh_status import ZenohPeerSampler
 from skulk.shared.constants import SKULK_LOG
 from skulk.shared.election import Election, ElectionResult
 from skulk.shared.logging import (
@@ -90,12 +92,19 @@ def _derive_zenoh_namespace(raw: str) -> str:
 _LIBP2P_NETWORK_VERSION = "v0.0.2"
 _LIBP2P_NAMESPACE_ENV_VAR = "SKULK_LIBP2P_NAMESPACE"
 _NODE_RESOURCES_POLL_INTERVAL_SECONDS = 2.0
+# Cadence of the local zenoh-isolation check, and the floor between repeated
+# operator warnings while the condition persists. The check is a cheap local
+# session introspection; the warning floor keeps a permanently isolated node
+# from flooding its log.
+_ZENOH_ISOLATION_CHECK_INTERVAL_SECONDS = 30.0
+_ZENOH_ISOLATION_WARNING_INTERVAL_SECONDS = 300.0
 
 
 async def _publish_management_node_resources(
     node_id: NodeId,
     data_transport: NodeDataTransport,
     telemetry_sender: TelemetrySender | Sender[NodeTelemetry],
+    zenoh_peer_sampler: "ZenohPeerSampler | None" = None,
     poll_interval: float = _NODE_RESOURCES_POLL_INTERVAL_SECONDS,
 ) -> None:
     """Advertise resource truth for a node started without a worker.
@@ -109,6 +118,9 @@ async def _publish_management_node_resources(
         node_id: Stable identity attached to the telemetry reading.
         data_transport: DATA transport already resolved during node startup.
         telemetry_sender: Existing latest-value telemetry admission handle.
+        zenoh_peer_sampler: Live data-plane connectivity sampler; a
+            management node owns DATA receivers, so its isolation matters to
+            the fleet exactly like a worker's. ``None`` advertises unknown.
         poll_interval: Seconds between repeated advertisements for late joiners
             and fallback liveness. The default matches the worker heartbeat
             cadence and stays below the node-health warning threshold.
@@ -117,13 +129,18 @@ async def _publish_management_node_resources(
         Publishes one immediate and then periodic ``NodeResources`` reading until
         the owning task is cancelled or telemetry admission closes.
     """
-    resources = NodeResources(
-        backends=frozenset(),
-        participation="management",
-        data_transport=data_transport,
-    )
     while True:
         try:
+            resources = NodeResources(
+                backends=frozenset(),
+                participation="management",
+                data_transport=data_transport,
+                zenoh_connected_peers=(
+                    await zenoh_peer_sampler.advertised_count()
+                    if zenoh_peer_sampler is not None
+                    else None
+                ),
+            )
             await telemetry_sender.send(
                 NodeTelemetry(node_id=node_id, info=resources)
             )
@@ -440,6 +457,10 @@ class Node:
     telemetry_view: TelemetryView
     telemetry_receiver: Receiver[NodeTelemetry]
     data_plane_zenoh: bool = False
+    # Samples the router's live Zenoh peer-transport count for NodeResources
+    # advertisement and the local isolation warning. None only in tests that
+    # construct Node without create().
+    zenoh_peer_sampler: ZenohPeerSampler | None = None
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
 
     @classmethod
@@ -510,6 +531,11 @@ class Node:
             zenoh_namespace=_zenoh_namespace,
             zenoh_multicast_scouting=not _zenoh_connect,
         )
+        # Data-plane connectivity ground truth (zenoh isolation visibility):
+        # sampled at every NodeResources advertisement and by the local
+        # isolation monitor. Created unconditionally; it reports None (unknown)
+        # when DATA rides gossipsub.
+        zenoh_peer_sampler = ZenohPeerSampler(router.zenoh_connected_peer_count)
         await router.register_topic(topics.GLOBAL_EVENTS)
         await router.register_topic(topics.LOCAL_EVENTS)
         await router.register_topic(topics.COMMANDS)
@@ -683,6 +709,7 @@ class Node:
                 telemetry_sender=router.telemetry_sender(),
                 telemetry_view=telemetry_view,
                 data_transport="zenoh" if _zenoh_on else "gossipsub",
+                zenoh_peer_sampler=zenoh_peer_sampler,
                 data_sender=router.sender(topics.DATA),
                 trace_data_sender=router.sender(topics.TRACE_DATA),
                 realtime_audio_receiver=realtime_audio_receiver,
@@ -753,6 +780,7 @@ class Node:
             telemetry_view,
             router.receiver(topics.TELEMETRY),
             _zenoh_on,
+            zenoh_peer_sampler,
         )
 
     async def run(self):
@@ -769,7 +797,9 @@ class Node:
                     self.node_id,
                     "zenoh" if self.data_plane_zenoh else "gossipsub",
                     self.router.telemetry_sender(),
+                    self.zenoh_peer_sampler,
                 )
+            tg.start_soon(self._monitor_zenoh_isolation)
             if self.store_server:
                 tg.start_soon(self.store_server.start)
             if self.download_coordinator:
@@ -792,6 +822,50 @@ class Node:
         with self.telemetry_receiver as messages:
             async for message in messages:
                 self.telemetry_view.apply(message)
+
+    async def _monitor_zenoh_isolation(self) -> None:
+        """Warn loudly while this node's Zenoh data plane has zero peers.
+
+        The libp2p control plane keeps working when the Zenoh mesh never
+        forms (the canonical shape: a zero-config remote member that
+        multicast scouting cannot reach), so without this monitor the only
+        symptom is remote streams dying one at a time. Warns only when the
+        sampler reports a trustworthy 0 (post-grace) AND at least one other
+        node advertises Zenoh on telemetry, i.e. there is genuinely a mesh
+        this node should have joined. Cluster health raises the matching
+        ``zenoh_isolated`` reason from the advertised count; this local
+        warning is for the operator tailing THIS node's log.
+        """
+        if not self.data_plane_zenoh or self.zenoh_peer_sampler is None:
+            return
+        last_warning = 0.0
+        while True:
+            await anyio.sleep(_ZENOH_ISOLATION_CHECK_INTERVAL_SECONDS)
+            count = await self.zenoh_peer_sampler.advertised_count()
+            if count != 0:
+                continue
+            zenoh_peers = [
+                node_id
+                for node_id, resources in self.telemetry_view.node_resources.items()
+                if node_id != self.node_id and resources.data_transport == "zenoh"
+            ]
+            if not zenoh_peers:
+                continue
+            now = time.monotonic()
+            if now - last_warning < _ZENOH_ISOLATION_WARNING_INTERVAL_SECONDS:
+                continue
+            last_warning = now
+            logger.warning(
+                f"Zenoh data plane ISOLATED: this node has 0 Zenoh peer "
+                f"transports while {len(zenoh_peers)} other node(s) advertise "
+                f"the Zenoh data plane. Remote model/provider streams to and "
+                f"from this node WILL fail even though cluster membership "
+                f"looks healthy. If this node cannot reach peers via local "
+                f"multicast (e.g. it joined over a routed/overlay network), "
+                f"set SKULK_ZENOH_CONNECT to a reachable peer's Zenoh "
+                f"endpoint (tcp/<peer-ip>:7447) and ensure SKULK_ZENOH_LISTEN "
+                f"binds an address peers can dial."
+            )
 
     def shutdown(self):
         # if this is our second call to shutdown, just sys.exit
@@ -1104,6 +1178,7 @@ class Node:
                             data_transport=(
                                 "zenoh" if self.data_plane_zenoh else "gossipsub"
                             ),
+                            zenoh_peer_sampler=self.zenoh_peer_sampler,
                             # Must ALSO match Node.create's wiring: without this
                             # the recreated worker has no data sender, so every
                             # generation output chunk falls back to the event

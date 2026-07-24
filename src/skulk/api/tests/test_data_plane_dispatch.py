@@ -111,12 +111,14 @@ async def test_state_surfaces_split_data_transport_health() -> None:
             "backends": [],
             "participation": "management",
             "dataTransport": "zenoh",
+            "zenohConnectedPeers": None,
             "capabilityConflicts": [],
         },
         "worker-node": {
             "backends": ["mlx"],
             "participation": "full",
             "dataTransport": "gossipsub",
+            "zenohConnectedPeers": None,
             "capabilityConflicts": [],
         },
     }

@@ -252,6 +252,18 @@ cross-transport output timeout unexplained. A missing first resource reading is
 treated as unknown during startup; a mismatch requires positive advertisements
 of both transports.
 
+Uniform transport advertisement is not the same as a formed mesh, so
+`NodeResources` also carries `zenohConnectedPeers`: the node's live Zenoh
+peer-transport count, sampled from the session that owns the data plane at
+each advertisement. A startup grace window advertises unknown (`null`) while
+mesh formation is still in flight; after it, a count of exactly 0 on a node
+whose fleet has other live Zenoh members raises the error-level
+`zenoh_isolated` health reason, and the node itself logs a recurring warning
+naming the fix. This closes the silent-failure shape where a member that
+multicast scouting cannot reach (for example one joined over a routed or
+overlay network) looks healthy on the control plane while every remote stream
+through it dies with transport errors.
+
 Zenoh is the shipping default, including for a zero-config installation. Startup
 binds a specific private-LAN or CGNAT fabric IPv4, falling back to loopback on
 offline or public-only hosts, and enables local multicast scouting when no

@@ -1417,7 +1417,10 @@ deployment before starting new inference work.
 
 The response carries a live `nodeResources` map as well. Each node entry includes
 its placement `backends`, declared `participation`, resolved `dataTransport`
-(`gossipsub` or `zenoh`), and `capabilityConflicts`: loud
+(`gossipsub` or `zenoh`), `zenohConnectedPeers` (the node's live Zenoh
+peer-transport count, sampled at each advertisement; `null` when the node runs
+gossipsub or while the count is not yet trustworthy after startup), and
+`capabilityConflicts`: loud
 observation-vs-declaration disagreements from backend derivation, each with a
 `code`, `message`, and `remediation`. Conflicts also surface as `nodeHealth`
 reasons on the same response: `gpu_serving_disabled` (error level: a visible
@@ -1430,7 +1433,14 @@ honored). A live fleet that advertises both transports receives
 the error-level `data_transport_mismatch` reason in every `nodeHealth` entry.
 Mixed DATA transports are unsupported: the signal is diagnostic and does not
 bridge traffic. Configure and restart every node uniformly before serving
-inference. The API includes fresh telemetry-only management nodes, local or
+inference. A node advertising Zenoh with a trustworthy peer-transport count of
+exactly 0 while at least one other live node also advertises Zenoh receives
+the error-level `zenoh_isolated` reason: its control plane looks healthy but
+every remote model or provider stream through it will fail. The typical cause
+is a node that cannot reach peers via local multicast (for example one joined
+over a routed or overlay network); the remediation is an explicit
+`SKULK_ZENOH_CONNECT` peer endpoint plus a dialable `SKULK_ZENOH_LISTEN`
+address. The API includes fresh telemetry-only management nodes, local or
 remote, even when replicated worker membership does not carry their entries.
 
 The `topology` map lists each node's connections. A socket edge carries the

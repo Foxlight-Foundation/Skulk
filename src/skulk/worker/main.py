@@ -22,6 +22,7 @@ from skulk.routing.router import TelemetrySender
 from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.routing.trace_data import TraceDataPacket
 from skulk.routing.vision_media import VisionMediaPacket
+from skulk.routing.zenoh_status import ZenohPeerSampler
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
 from skulk.shared.models.memory_estimate import (
@@ -624,6 +625,7 @@ class Worker:
         telemetry_sender: TelemetrySender | Sender[NodeTelemetry] | None = None,
         telemetry_view: TelemetryView | None = None,
         data_transport: NodeDataTransport = "gossipsub",
+        zenoh_peer_sampler: ZenohPeerSampler | None = None,
         data_sender: Sender[DataChunk] | None = None,
         trace_data_sender: Sender[TraceDataPacket] | None = None,
         realtime_audio_receiver: Receiver[RealtimeAudioInputFrame] | None = None,
@@ -645,6 +647,9 @@ class Worker:
         self.download_command_sender = download_command_sender
         self._telemetry_sender = telemetry_sender
         self._data_transport: NodeDataTransport = data_transport
+        # Data-plane connectivity sampler threaded into the InfoGatherer so
+        # NodeResources advertisements carry live Zenoh peer counts (#680).
+        self._zenoh_peer_sampler: ZenohPeerSampler | None = zenoh_peer_sampler
         # Data plane (#279 Phase 2): per-token output chunks stream direct to the
         # owning API node via this sender (DATA topic), bypassing the master's
         # event log. Threaded into each RunnerSupervisor. A missing sender is a
@@ -930,6 +935,7 @@ class Worker:
             # published), so a plugin advertising a capability rides the same
             # telemetry emit path as native node readings.
             capabilities_provider=self._local_capabilities_provider,
+            zenoh_peer_sampler=self._zenoh_peer_sampler,
         )
 
         try:

@@ -28,6 +28,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **A Zenoh-isolated node is now named, not silently broken.** Every node
+  advertises `zenohConnectedPeers` on `nodeResources`: the live peer-transport
+  count of its Zenoh data-plane session, sampled at each advertisement behind
+  a startup grace window so normal mesh formation never trips it. A node
+  advertising Zenoh with a trustworthy count of 0 while other live nodes run
+  Zenoh receives the error-level `zenoh_isolated` health reason in `GET
+  /state` (dashboard badge included) and logs a recurring local warning with
+  the fix, closing the shape where a member that multicast scouting cannot
+  reach (for example one joined over a routed or overlay network) looks
+  healthy while every remote stream through it dies with transport errors.
+  The native bindings version advances so service updates rebuild the
+  peer-count introspection before startup.
+
 - **Laguna S 2.1 on the llama.cpp engines.** The managed llama-server pin
   advances to b10092, whose window landed the Laguna 2 model family and the
   native DFlash speculative arc upstream. The served engine gains the
