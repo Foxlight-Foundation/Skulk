@@ -130,37 +130,34 @@ def _force_no_spec() -> bool:
 
 
 _LLAMA_SERVER_PARALLEL_ENV: Final = "SKULK_LLAMA_SERVER_PARALLEL"
-# Fallback when the override is unparseable: serial, the most conservative
-# interpretation of a value we could not understand.
+# Concurrency stays OPT-IN (default 1) for now, on purpose. A derived default
+# was attempted in the 2026-07-24 defaults audit and reverted in review:
+# llama-server splits one fixed ``-c`` window evenly across slots
+# (n_ctx_slot = n_ctx / n_parallel) while Skulk's API admission keeps
+# advertising the instance's FULL context window, so any silently derived
+# N > 1 shrinks the real per-request window to n_ctx/N and long prompts that
+# worked under the serial default start truncating or 400ing. An operator
+# setting the override makes that trade knowingly; a shipped default cannot.
+# Deriving this for fresh installs is blocked on slot-aware admission (#685).
 _DEFAULT_LLAMA_SERVER_PARALLEL: Final = 1
-# Derived-default ceiling when no override is set. Concurrency is the served
-# engine's reason to exist (llama-server batches across slots while the
-# in-process engines serialize), so a fresh node must not ship serial: that
-# was the single biggest fleet-vs-shipped performance gap (defaults audit,
-# 2026-07-24). 16 is the level the qualification fleet and the harness
-# concurrency suite exercise; the context floor below still shrinks it on
-# small windows, so the derived value is always memory-safe.
-_LLAMA_SERVER_PARALLEL_AUTO_CAP: Final = 16
 
 
 def _llama_server_parallel(context_token_limit: int) -> int:
     """Return the safe parallel-slot count for this served context window.
 
-    With no ``SKULK_LLAMA_SERVER_PARALLEL`` set, the slot count is DERIVED:
-    the context-funded slot count capped at ``_LLAMA_SERVER_PARALLEL_AUTO_CAP``,
-    so a fresh node serves concurrent load out of the box. An explicit value
-    overrides in either direction (``1`` forces serial, a larger value raises
-    the ceiling), but is always an upper bound: llama-server splits its fixed
-    ``-c`` window evenly across the slots, so the runner caps the count to keep
-    at least ``KV_CONTEXT_BUDGET_TOKENS`` in each slot. Without the cap, a
-    memory-constrained placement can start successfully but silently truncate
-    every generation after only a handful of tokens. An unparseable or below-1
-    value falls back to serial.
+    Concurrency is OPT-IN for the served llama.cpp engine (default 1; see the
+    comment above for why a derived default is blocked on slot-aware
+    admission). ``SKULK_LLAMA_SERVER_PARALLEL`` is an upper bound: llama-server
+    splits its fixed ``-c`` window evenly across the slots, so the runner caps the
+    requested count to keep at least ``KV_CONTEXT_BUDGET_TOKENS`` in each slot.
+    Without the cap, a memory-constrained placement can start successfully but
+    silently truncate every generation after only a handful of tokens. An
+    unparseable or below-1 value falls back to the default.
     """
     context_limited_parallel = max(1, context_token_limit // KV_CONTEXT_BUDGET_TOKENS)
     raw = os.environ.get(_LLAMA_SERVER_PARALLEL_ENV, "").strip()
     if not raw:
-        return min(_LLAMA_SERVER_PARALLEL_AUTO_CAP, context_limited_parallel)
+        return _DEFAULT_LLAMA_SERVER_PARALLEL
     try:
         value = int(raw)
     except ValueError:

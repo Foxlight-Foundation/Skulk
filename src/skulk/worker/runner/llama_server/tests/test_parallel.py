@@ -4,32 +4,18 @@
 import pytest
 
 from skulk.shared.models.memory_estimate import KV_CONTEXT_BUDGET_TOKENS
-from skulk.worker.runner.llama_server.runner import (
-    _LLAMA_SERVER_PARALLEL_AUTO_CAP,
-    _llama_server_parallel,
-)
+from skulk.worker.runner.llama_server.runner import _llama_server_parallel
 
 
-def test_parallel_derives_concurrency_by_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """With no override, a fresh node serves concurrent load out of the box."""
+def test_parallel_defaults_to_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unset node override preserves serial served-engine behavior.
+
+    Deliberate: a derived default was reverted in #683 review because API
+    admission advertises the full context window while llama-server gives
+    each slot only n_ctx/N, so silent N > 1 breaks long prompts that worked
+    under serial. Blocked on slot-aware admission (#685).
+    """
     monkeypatch.delenv("SKULK_LLAMA_SERVER_PARALLEL", raising=False)
-
-    # A large context funds the full derived ceiling.
-    assert (
-        _llama_server_parallel(_LLAMA_SERVER_PARALLEL_AUTO_CAP * KV_CONTEXT_BUDGET_TOKENS)
-        == _LLAMA_SERVER_PARALLEL_AUTO_CAP
-    )
-    # A smaller context shrinks the derived count to its funded slots.
-    assert _llama_server_parallel(4 * KV_CONTEXT_BUDGET_TOKENS) == 4
-    # A tiny context still gets one full-context slot.
-    assert _llama_server_parallel(KV_CONTEXT_BUDGET_TOKENS // 2) == 1
-
-
-def test_parallel_explicit_one_forces_serial(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An explicit 1 remains the serial opt-out."""
-    monkeypatch.setenv("SKULK_LLAMA_SERVER_PARALLEL", "1")
 
     assert _llama_server_parallel(131072) == 1
 
