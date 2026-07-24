@@ -533,8 +533,8 @@ SSE or progressive NDJSON, with a client disconnect cancelling the underlying
 command. The batch path is also exposed as the first-party `stt@1.0.0`
 provider: callers send bounded encoded audio as binary frames, half-close input
 to start inference, and receive one final transcript. Translation-capable cards
-additionally serve `POST /v1/audio/translations` when both the node's
-experimental mode and the `experiments.speech_translation` toggle are on.
+additionally serve `POST /v1/audio/translations` as a standard capability,
+gated only by the mounted card declaring `audio.supports_translation = true`.
 
 ### Realtime transcription
 
@@ -1053,24 +1053,26 @@ regardless of fleet settings.
 
 Skulk stages in-development features behind a single node-local switch,
 `SKULK_ENABLE_EXPERIMENTAL_MODE`, so a released build can carry work-in-progress
-UX without exposing it by default. When the switch is on, the dashboard reveals
-an "Experiments" section in Settings; when it is off, the section is hidden and
-any feature that opts into the gate stays inert, so the node behaves exactly as
-it does today. The gate (`src/skulk/shared/experimental.py`) is deliberately
-feature-agnostic: it knows about no particular experiment. A feature that wants
-to be gated reads the flag and, when it needs an operator-facing switch, adds
-its own toggle under the same section, so its UX is built alongside it. This is
-the fabric's discipline for shipping unfinished work safely, and it composes
-with extensions: an out-of-tree capability can ride the fabric as a plugin and
-still surface a gated toggle here.
+UX without exposing it by default. When a release carries active experiments,
+the switch reveals an "Experiments" section in the dashboard's Settings; when
+it is off, any feature that opts into the gate stays inert, so the node behaves
+exactly as it does today. The gate (`src/skulk/shared/experimental.py`) is
+deliberately feature-agnostic: it knows about no particular experiment. A
+feature that wants to be gated reads the flag and, when it needs an
+operator-facing switch, adds its own toggle under the same section, so its UX
+is built alongside it. This is the fabric's discipline for shipping unfinished
+work safely, and it composes with extensions: an out-of-tree capability can
+ride the fabric as a plugin and still surface a gated toggle here.
 
-Current built-in experiment toggles live under the persisted `experiments`
-config section. `experiments.tts_streaming` remains as a deprecated parsing
-compatibility field; stable `/v1/audio/speech` streaming ignores it and relies
-on the mounted card's validated `audio.supports_streaming` declaration.
-`experiments.speech_translation` enables `/v1/audio/translations` only on nodes
-running with experimental mode and only for mounted cards that explicitly
-declare `audio.supports_translation = true`.
+No built-in experiment is currently active: every speech feature that
+incubated here has graduated to standard. The persisted `experiments` config
+section remains as deprecated parsing compatibility (the strict config would
+otherwise refuse an existing `skulk.yaml` that still carries it):
+`tts_streaming`, `stt_realtime`, and `speech_translation` are all accepted but
+ignored. Stable `/v1/audio/speech` streaming follows the mounted card's
+validated `audio.supports_streaming` declaration, realtime STT follows card
+truth plus runner readiness, and `/v1/audio/translations` serves for any
+mounted card that declares `audio.supports_translation = true`.
 
 ## The dashboard
 

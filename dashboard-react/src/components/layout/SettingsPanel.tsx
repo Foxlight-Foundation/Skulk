@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import styled, { keyframes } from 'styled-components';
 import { generateInstallId } from './TelemetryConsentModal';
-import { useConfig, type StoreConfig, type FullConfig, type LoggingConfig, type ExperimentsConfig, type TelemetryConfig } from '../../hooks/useConfig';
+import { useConfig, type StoreConfig, type FullConfig, type LoggingConfig, type TelemetryConfig } from '../../hooks/useConfig';
 import { Button } from '../common/Button';
 import { Field } from '../common/Field';
 import { InfoTooltip } from '../common/InfoTooltip';
@@ -30,12 +30,6 @@ const defaultStoreConfig = (): StoreConfig => ({
     node_cache_path: '~/.skulk/staging',
     cleanup_on_deactivate: true,
   },
-});
-
-const defaultExperimentsConfig = (): ExperimentsConfig => ({
-  tts_streaming: false,
-  stt_realtime: false,
-  speech_translation: false,
 });
 
 /* ---- animations ---- */
@@ -267,8 +261,6 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const [loggingDraft, setLoggingDraft] = useState<LoggingConfig>({
     enabled: false, ingest_url: '',
   });
-  const [experimentsDraft, setExperimentsDraft] = useState<ExperimentsConfig>(defaultExperimentsConfig());
-
   // Fetch config when panel opens
   useEffect(() => {
     if (open) fetchConfig();
@@ -296,7 +288,6 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
         ingest_url: 'https://skulk-ledger-ingest.thomastupper92618.workers.dev',
       },
     );
-    setExperimentsDraft(fullConfig?.experiments ? { ...fullConfig.experiments } : defaultExperimentsConfig());
   }, [fullConfig, effective]);
 
   const modelStoreDraft = draft ?? defaultStoreConfig();
@@ -337,9 +328,6 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
         consented_at: telemetryDraft.consented_at || new Date().toISOString(),
       };
     }
-    if (effective?.experimental_mode_enabled) {
-      updated.experiments = { ...experimentsDraft };
-    }
     // Only send hf_token when user entered a new one
     if (hfToken && hfToken !== '') updated.hf_token = hfToken;
     const ok = await saveFullConfig(updated);
@@ -355,7 +343,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     } else {
       addToast({ type: 'error', message: t('settings.toasts.saveFailed', 'Failed to save settings') });
     }
-  }, [draft, effective?.experimental_mode_enabled, experimentsDraft, fullConfig, hfToken, kvBackend, loggingDraft, telemetryDraft, onClose, saveFullConfig, t]);
+  }, [draft, fullConfig, hfToken, kvBackend, loggingDraft, telemetryDraft, onClose, saveFullConfig, t]);
 
   // ESC to close
   useEffect(() => {
@@ -754,47 +742,6 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
             </Fieldset>
           )}
 
-          {/* Experiments: only shown when the node runs with
-              SKULK_ENABLE_EXPERIMENTAL_MODE. This is the fabric's staging
-              area for in-development features: each such feature adds its own
-              toggle here so its UX is built alongside it. */}
-          {effective?.experimental_mode_enabled && (
-            <Fieldset>
-              <Legend>
-                {t('settings.experiments.legend', 'Experiments')}
-                <InfoTooltip
-                  filled
-                  content={t(
-                    'settings.experiments.legendTooltip',
-                    'Opt-in, in-development features. This section is visible because this node runs with SKULK_ENABLE_EXPERIMENTAL_MODE. Features here are unfinished and off by default.',
-                  )}
-                />
-              </Legend>
-              <Row>
-                <FieldLabel>
-                  {t('settings.experiments.speechTranslation', 'Speech translation')}
-                  <InfoTooltip
-                    content={t(
-                      'settings.experiments.speechTranslationTooltip',
-                      'Enables /v1/audio/translations for mounted models with validated speech translation support.',
-                    )}
-                  />
-                </FieldLabel>
-                <Toggle
-                  type="button"
-                  $on={experimentsDraft.speech_translation}
-                  aria-pressed={experimentsDraft.speech_translation}
-                  aria-label={t('settings.experiments.speechTranslation', 'Speech translation')}
-                  onClick={() =>
-                    setExperimentsDraft((prev) => ({
-                      ...prev,
-                      speech_translation: !prev.speech_translation,
-                    }))
-                  }
-                />
-              </Row>
-            </Fieldset>
-          )}
         </Body>
 
         <Footer>

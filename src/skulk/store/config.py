@@ -297,6 +297,12 @@ class ExperimentsConfig(FrozenModel):
     ``SKULK_ENABLE_EXPERIMENTAL_MODE``. Each flag defaults to ``False`` so
     released builds can carry unfinished work without exposing it by accident.
 
+    Every speech flag has graduated: the whole section is currently
+    deprecated compatibility surface, retained because the strict config
+    (``extra="forbid"``) would otherwise refuse to start on an existing
+    ``skulk.yaml`` that still carries it. Future experiments add fresh fields
+    here rather than reusing the graduated names.
+
     Attributes:
         tts_streaming: Deprecated compatibility field. Stable TTS streaming is
             controlled by mounted model capability metadata; this value is
@@ -304,9 +310,9 @@ class ExperimentsConfig(FrozenModel):
         stt_realtime: Deprecated compatibility field. Realtime STT is a stable
             capability selected from mounted model truth and runner readiness;
             this value is accepted but ignored.
-        speech_translation: Enables the experimental speech-to-English
-            translation endpoint for mounted cards that explicitly declare
-            ``audio.supports_translation``.
+        speech_translation: Deprecated compatibility field. Speech translation
+            is a standard capability gated only by the mounted card declaring
+            ``audio.supports_translation``; this value is accepted but ignored.
     """
 
     tts_streaming: bool = Field(
@@ -317,7 +323,13 @@ class ExperimentsConfig(FrozenModel):
         ),
     )
     stt_realtime: bool = False
-    speech_translation: bool = False
+    speech_translation: bool = Field(
+        default=False,
+        description=(
+            "Deprecated compatibility field; speech translation is standard "
+            "and gated only by mounted model capability metadata."
+        ),
+    )
 
 
 @final

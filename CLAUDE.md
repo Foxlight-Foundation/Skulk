@@ -180,8 +180,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
   8/16/32/48 kHz mono PCM16. It emits typed turn boundaries with bounded
   minimum speech, silence hangover, preroll, and maximum utterance duration;
   media is processed per call and never retained. Translation-capable STT cards
-  serve experimental `/v1/audio/translations` only with global experimental
-  mode and `experiments.speech_translation`; TTS cards may expose static voices
+  serve `/v1/audio/translations` as a standard capability (card
+  `audio.supports_translation` is the only gate; the whole `experiments`
+  config section is now deprecated compatibility surface, accepted but
+  ignored); TTS cards may expose static voices
   plus preferred-language metadata through the Skulk `/v1/audio/voices`
   extension. Dashboard Auto selection pins the first language match across all
   sentence-sized requests in one response. The realtime transcription

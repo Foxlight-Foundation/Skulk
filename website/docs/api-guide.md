@@ -742,11 +742,11 @@ curl -X POST http://localhost:52415/v1/audio/translations \
 | `response_format` | string | `json`, `text`, `verbose_json`, `srt`, `vtt`, or `ndjson`; default `json` |
 | `temperature` | number or null | Optional model-specific sampling temperature |
 
-The route is inert unless the node runs with
-`SKULK_ENABLE_EXPERIMENTAL_MODE=1` and cluster settings enable
-`experiments.speech_translation`. Translation target is English. Skulk maps the
-generic request to model-family arguments inside the speech runner. The bundled
-`CogniSoftOrg/canary-1b-v2-mlx-bf16` card is the initial experimental candidate;
+Translation target is English. The only gates are model truth and instance
+availability: the mounted card must declare `audio.supports_translation =
+true`, matching every other speech endpoint. Skulk maps the generic request to
+model-family arguments inside the speech runner. The bundled
+`CogniSoftOrg/canary-1b-v2-mlx-bf16` card is the initial supported model;
 requests for that model return **400 Bad Request** when `language` is omitted.
 Its upstream CC-BY-4.0 terms and NVIDIA attribution continue to apply.
 
@@ -1308,20 +1308,23 @@ The response also carries an `effective` block describing runtime-resolved value
 
 - `kv_cache_backend`: the KV cache backend actually in effect (config value or `SKULK_KV_CACHE_BACKEND` override)
 - `has_hf_token`: whether a HuggingFace token is configured (via the file or `HF_TOKEN`), without exposing the token
-- `experimental_mode_enabled`: whether this node runs with `SKULK_ENABLE_EXPERIMENTAL_MODE` set; the dashboard uses it to reveal the gated Experiments settings section
+- `experimental_mode_enabled`: whether this node runs with `SKULK_ENABLE_EXPERIMENTAL_MODE` set; when a release carries active experiments, the dashboard uses it to reveal the gated Experiments settings section
 
-The persisted `experiments` section holds per-feature opt-ins shown inside that
-gated dashboard section. Current fields:
+The persisted `experiments` section is deprecated compatibility surface: every
+speech feature that incubated there has graduated to standard, and no built-in
+experiment is currently active. The fields remain accepted (the strict config
+would otherwise refuse an existing `skulk.yaml` that carries them) but are all
+ignored:
 
 - `experiments.tts_streaming`: deprecated compatibility field. Stable TTS
   streaming ignores this value and follows mounted model capability metadata.
 - `experiments.stt_realtime`: deprecated compatibility field. It remains
   accepted in existing configuration but is ignored; realtime STT is selected
   from card truth, reachable transport, and ready mounted capacity.
-- `experiments.speech_translation`: enables experimental
-  `/v1/audio/translations` on nodes that also run with
-  `SKULK_ENABLE_EXPERIMENTAL_MODE`. The mounted card must declare
-  `audio.supports_translation = true`.
+- `experiments.speech_translation`: deprecated compatibility field. Speech
+  translation is a standard capability; `/v1/audio/translations` serves for
+  any mounted card declaring `audio.supports_translation = true`, and this
+  value is accepted but ignored.
 
 ### Update config
 

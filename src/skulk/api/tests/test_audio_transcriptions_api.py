@@ -16,7 +16,6 @@ import skulk.api.main as api_main
 from skulk.api.main import API
 from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.shared.election import ElectionMessage
-from skulk.shared.experimental import EXPERIMENTAL_MODE_ENV_VAR
 from skulk.shared.models.model_cards import (
     AudioCardConfig,
     AudioCardKind,
@@ -166,7 +165,7 @@ def test_audio_transcriptions_route_is_documented_in_openapi() -> None:
 
 
 def test_audio_translations_route_is_documented_in_openapi() -> None:
-    """The experimental translation endpoint must appear in OpenAPI."""
+    """The translation endpoint must appear in OpenAPI."""
 
     api = _build_api()
     schema = cast(dict[str, object], api.app.openapi())
@@ -259,20 +258,33 @@ async def test_audio_translations_rejects_before_reading_upload(
 
 
 @pytest.mark.anyio
-async def test_audio_translations_requires_experiment_before_reading_upload(
+async def test_audio_translations_is_standard_without_experimental_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The feature gate must reject translation before consuming media."""
+    """Translation is a standard capability: no experimental gate applies.
+
+    With experimental mode unset and no experiments config, validation must
+    proceed straight to model truth (here: the model is not mounted, so 404),
+    never a 400 asking for an experiment flag.
+    """
 
     api = _build_api()
     upload = _upload(b"RIFFtestWAVE")
-    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
-    monkeypatch.setattr(api, "_speech_translation_experiment_enabled", lambda: False)
+    monkeypatch.delenv("SKULK_ENABLE_EXPERIMENTAL_MODE", raising=False)
+
+    triggered: list[ModelId] = []
+
+    async def _notify(self: API, requested: ModelId) -> None:
+        assert self is api
+        triggered.append(requested)
+
+    monkeypatch.setattr(API, "_trigger_notify_user_to_download_model", _notify)
 
     with pytest.raises(HTTPException) as exc_info:
-        await api.audio_translations(file=upload, model="org/canary")
+        await api.audio_translations(file=upload, model="org/not-mounted")
 
-    assert exc_info.value.status_code == 400
+    assert exc_info.value.status_code == 404
+    assert triggered == [ModelId("org/not-mounted")]
     assert upload.file.tell() == 0
 
 
@@ -316,8 +328,6 @@ async def test_audio_translation_validation_rejects_unsupported_mounted_model(
     def _unsupported_profile(*_args: object, **_kwargs: object) -> object:
         return type("_Profile", (), {"supports_speech_translation": False})()
 
-    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
-    monkeypatch.setattr(api, "_speech_translation_experiment_enabled", lambda: True)
     monkeypatch.setattr(API, "_get_running_model_card", _running_card)
     monkeypatch.setattr(
         api_main,
@@ -372,8 +382,6 @@ async def test_canary_translation_requires_source_language(
     def _translation_profile(*_args: object, **_kwargs: object) -> object:
         return type("_Profile", (), {"supports_speech_translation": True})()
 
-    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
-    monkeypatch.setattr(api, "_speech_translation_experiment_enabled", lambda: True)
     monkeypatch.setattr(API, "_get_running_model_card", _running_card)
     monkeypatch.setattr(
         api_main,
