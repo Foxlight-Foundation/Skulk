@@ -15,6 +15,27 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- **Fresh installs serve concurrent load by default.** The served llama.cpp
+  engine's slot count is now derived when `SKULK_LLAMA_SERVER_PARALLEL` is
+  unset: the context-funded slot count capped at 16, instead of the previous
+  serial default of 1 (the largest performance gap between the qualification
+  fleet and a fresh install). Each slot still retains the 8192-token placement
+  admission floor, so the derived value is always memory-safe; an explicit
+  `SKULK_LLAMA_SERVER_PARALLEL=1` forces serial and larger values raise the
+  ceiling as before. The in-process MLX engine's concurrent-admission default
+  (`SKULK_MAX_CONCURRENT_REQUESTS`) rises from 8 to 16 to match the
+  qualification fleet; excess requests queue as before.
+
+- **The service template no longer pins a cluster namespace.** The installed
+  `skulk.env` template used to set `SKULK_LIBP2P_NAMESPACE=foxlight-main`,
+  which put every template-based install on one shared namespace while nodes
+  launched manually with `uv run skulk` landed on the default namespace, so a
+  serviced node and a manual node on the same network could silently fail to
+  form a cluster. The template now leaves the namespace unset (the shipped
+  default for every launch path) and documents it as the opt-in isolation
+  knob for running multiple Skulk clusters on one network. Existing installs
+  keep their env files; only fresh installs see the new template.
+
 - **Speech translation is now a standard capability.** `POST
   /v1/audio/translations` no longer requires `SKULK_ENABLE_EXPERIMENTAL_MODE`
   or the `experiments.speech_translation` config flag; like every other speech

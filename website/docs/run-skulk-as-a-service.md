@@ -165,7 +165,7 @@ Common things to change:
 | `SKULK_AUTO_UPDATE` | `1` = auto-update on every boot, `0` = run whatever's already on disk | `1` |
 | `SKULK_VERBOSITY` | Verbosity flag passed to skulk. Empty (the default) is info-only, `-v` is verbose, `-vv` is debug. Debug logs the libp2p transport at a high rate, so leave it empty unless you are actively debugging | empty (info) |
 | `SKULK_CAPTURE_KEEP_BYTES` | How much of the previous run's captured stdout/stderr to keep (as `*.log.1`) when the service restarts. The live capture file is truncated on each launch so it cannot grow without bound | `5242880` (5 MB) |
-| `SKULK_LIBP2P_NAMESPACE` | Cluster namespace: nodes only join clusters with the same value. Use a unique value per cluster | `foxlight-main` |
+| `SKULK_LIBP2P_NAMESPACE` | Cluster namespace: nodes only join clusters with the same value. Leave it unset unless you run more than one Skulk cluster on the same network and need them isolated; then set the same value on every node of a cluster, including nodes launched manually with `uv run skulk` (a node with a different value, or none, cannot see the others) | unset (shared default namespace) |
 | `SKULK_LOGGING_INGEST_URL` | Where Vector ships logs (only relevant if you have the Vector agent installed) | the in-house VictoriaLogs endpoint |
 
 The env file you edit is **yours**; Skulk's `git pull` only updates the template at `deployment/install/skulk.env.example`. Diff against that template if you ever want to pick up a new default.

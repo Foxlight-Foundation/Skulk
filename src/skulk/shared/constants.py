@@ -168,8 +168,13 @@ SKULK_IMAGE_TRANSPORT_DEBUG = (
     or "false"
 ).lower() == "true"
 
+# MLX batch-generator admission width. Default 16 mirrors the qualification
+# fleet (defaults audit, 2026-07-24): the fleet ran 16 via env override while
+# fresh installs got 8, so shipped throughput under concurrent load was half
+# of what we validate. The batch generator queues excess tasks, so a higher
+# ceiling degrades to queueing, never to memory pressure.
 SKULK_MAX_CONCURRENT_REQUESTS = int(
-    _env("SKULK_MAX_CONCURRENT_REQUESTS", "8") or "8"
+    _env("SKULK_MAX_CONCURRENT_REQUESTS", "16") or "16"
 )
 
 

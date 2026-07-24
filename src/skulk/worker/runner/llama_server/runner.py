@@ -130,23 +130,37 @@ def _force_no_spec() -> bool:
 
 
 _LLAMA_SERVER_PARALLEL_ENV: Final = "SKULK_LLAMA_SERVER_PARALLEL"
+# Fallback when the override is unparseable: serial, the most conservative
+# interpretation of a value we could not understand.
 _DEFAULT_LLAMA_SERVER_PARALLEL: Final = 1
+# Derived-default ceiling when no override is set. Concurrency is the served
+# engine's reason to exist (llama-server batches across slots while the
+# in-process engines serialize), so a fresh node must not ship serial: that
+# was the single biggest fleet-vs-shipped performance gap (defaults audit,
+# 2026-07-24). 16 is the level the qualification fleet and the harness
+# concurrency suite exercise; the context floor below still shrinks it on
+# small windows, so the derived value is always memory-safe.
+_LLAMA_SERVER_PARALLEL_AUTO_CAP: Final = 16
 
 
 def _llama_server_parallel(context_token_limit: int) -> int:
     """Return the safe parallel-slot count for this served context window.
 
-    Concurrency is OPT-IN for the served llama.cpp engine (default 1, unchanged
-    behavior). ``SKULK_LLAMA_SERVER_PARALLEL`` is an upper bound: llama-server
-    splits its fixed ``-c`` window evenly across the slots, so the runner caps the
-    requested count to keep at least ``KV_CONTEXT_BUDGET_TOKENS`` in each slot.
-    Without the cap, a memory-constrained placement can start successfully but
-    silently truncate every generation after only a handful of tokens. An
-    unparseable or below-1 value falls back to the default.
+    With no ``SKULK_LLAMA_SERVER_PARALLEL`` set, the slot count is DERIVED:
+    the context-funded slot count capped at ``_LLAMA_SERVER_PARALLEL_AUTO_CAP``,
+    so a fresh node serves concurrent load out of the box. An explicit value
+    overrides in either direction (``1`` forces serial, a larger value raises
+    the ceiling), but is always an upper bound: llama-server splits its fixed
+    ``-c`` window evenly across the slots, so the runner caps the count to keep
+    at least ``KV_CONTEXT_BUDGET_TOKENS`` in each slot. Without the cap, a
+    memory-constrained placement can start successfully but silently truncate
+    every generation after only a handful of tokens. An unparseable or below-1
+    value falls back to serial.
     """
+    context_limited_parallel = max(1, context_token_limit // KV_CONTEXT_BUDGET_TOKENS)
     raw = os.environ.get(_LLAMA_SERVER_PARALLEL_ENV, "").strip()
     if not raw:
-        return _DEFAULT_LLAMA_SERVER_PARALLEL
+        return min(_LLAMA_SERVER_PARALLEL_AUTO_CAP, context_limited_parallel)
     try:
         value = int(raw)
     except ValueError:
@@ -161,7 +175,6 @@ def _llama_server_parallel(context_token_limit: int) -> int:
             f"using {_DEFAULT_LLAMA_SERVER_PARALLEL}"
         )
         return _DEFAULT_LLAMA_SERVER_PARALLEL
-    context_limited_parallel = max(1, context_token_limit // KV_CONTEXT_BUDGET_TOKENS)
     effective_parallel = min(value, context_limited_parallel)
     if effective_parallel < value:
         logger.warning(
