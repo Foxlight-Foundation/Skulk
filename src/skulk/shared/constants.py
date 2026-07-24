@@ -168,6 +168,15 @@ SKULK_IMAGE_TRANSPORT_DEBUG = (
     or "false"
 ).lower() == "true"
 
+# MLX batch-generator admission width: how many generations are ACTIVE at
+# once (each admitted task owns its own KV cache after prefill; excess tasks
+# queue). Unlike the served llama.cpp engine, whose slots split one fixed
+# context window, MLX has no aggregate KV admission budget, so raising this
+# raises worst-case memory with it - on smaller unified-memory Macs that is
+# the Metal OOM path. The default therefore stays at the memory-safe 8 (the
+# qualification fleet's 16 is an operator override on known hardware); do not
+# raise it until admission accounts for aggregate KV (#683 review, the
+# adaptive-concurrency arc).
 SKULK_MAX_CONCURRENT_REQUESTS = int(
     _env("SKULK_MAX_CONCURRENT_REQUESTS", "8") or "8"
 )

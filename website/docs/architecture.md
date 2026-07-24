@@ -408,7 +408,10 @@ advertises a llama-server binary the model serves through the served proxy; on
 a node without one, the preference is a soft order intersected with the node's
 advertised backends, so the same card falls through to the in-process runner
 unchanged. The per-node `SKULK_LLAMA_SERVER_PARALLEL` setting (default 1) is the
-requested slot ceiling. llama-server splits its total context budget evenly
+requested slot ceiling; the default stays serial because each slot receives
+only an equal share of the fixed context window while admission advertises
+the full window, so concurrency is an explicit operator trade until
+admission is slot-aware. llama-server splits its total context budget evenly
 across slots, so the runner lowers that count when necessary to retain the
 placement admission floor (8192 tokens) in every slot. This preserves a usable
 per-request window on memory-constrained and pooled placements instead of

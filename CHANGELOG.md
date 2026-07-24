@@ -15,6 +15,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- **The service template no longer pins a cluster namespace.** The installed
+  `skulk.env` template used to set `SKULK_LIBP2P_NAMESPACE=foxlight-main`,
+  which put every template-based install on one shared namespace while nodes
+  launched manually with `uv run skulk` landed on the default namespace, so a
+  serviced node and a manual node on the same network could silently fail to
+  form a cluster. The template now leaves the namespace unset (the shipped
+  default for every launch path) and documents it as the opt-in isolation
+  knob for running multiple Skulk clusters on one network. Existing installs
+  keep their env files; only fresh installs see the new template.
+
 - **Speech translation is now a standard capability.** `POST
   /v1/audio/translations` no longer requires `SKULK_ENABLE_EXPERIMENTAL_MODE`
   or the `experiments.speech_translation` config flag; like every other speech

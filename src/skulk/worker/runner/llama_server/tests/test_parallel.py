@@ -8,7 +8,13 @@ from skulk.worker.runner.llama_server.runner import _llama_server_parallel
 
 
 def test_parallel_defaults_to_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unset node override preserves serial served-engine behavior."""
+    """An unset node override preserves serial served-engine behavior.
+
+    Deliberate: a derived default was reverted in #683 review because API
+    admission advertises the full context window while llama-server gives
+    each slot only n_ctx/N, so silent N > 1 breaks long prompts that worked
+    under serial. Blocked on slot-aware admission (#685).
+    """
     monkeypatch.delenv("SKULK_LLAMA_SERVER_PARALLEL", raising=False)
 
     assert _llama_server_parallel(131072) == 1

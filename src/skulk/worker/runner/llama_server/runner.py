@@ -130,20 +130,31 @@ def _force_no_spec() -> bool:
 
 
 _LLAMA_SERVER_PARALLEL_ENV: Final = "SKULK_LLAMA_SERVER_PARALLEL"
+# Concurrency stays OPT-IN (default 1) for now, on purpose. A derived default
+# was attempted in the 2026-07-24 defaults audit and reverted in review:
+# llama-server splits one fixed ``-c`` window evenly across slots
+# (n_ctx_slot = n_ctx / n_parallel) while Skulk's API admission keeps
+# advertising the instance's FULL context window, so any silently derived
+# N > 1 shrinks the real per-request window to n_ctx/N and long prompts that
+# worked under the serial default start truncating or 400ing. An operator
+# setting the override makes that trade knowingly; a shipped default cannot.
+# Deriving this for fresh installs is blocked on slot-aware admission (#685).
 _DEFAULT_LLAMA_SERVER_PARALLEL: Final = 1
 
 
 def _llama_server_parallel(context_token_limit: int) -> int:
     """Return the safe parallel-slot count for this served context window.
 
-    Concurrency is OPT-IN for the served llama.cpp engine (default 1, unchanged
-    behavior). ``SKULK_LLAMA_SERVER_PARALLEL`` is an upper bound: llama-server
+    Concurrency is OPT-IN for the served llama.cpp engine (default 1; see the
+    comment above for why a derived default is blocked on slot-aware
+    admission). ``SKULK_LLAMA_SERVER_PARALLEL`` is an upper bound: llama-server
     splits its fixed ``-c`` window evenly across the slots, so the runner caps the
     requested count to keep at least ``KV_CONTEXT_BUDGET_TOKENS`` in each slot.
     Without the cap, a memory-constrained placement can start successfully but
     silently truncate every generation after only a handful of tokens. An
     unparseable or below-1 value falls back to the default.
     """
+    context_limited_parallel = max(1, context_token_limit // KV_CONTEXT_BUDGET_TOKENS)
     raw = os.environ.get(_LLAMA_SERVER_PARALLEL_ENV, "").strip()
     if not raw:
         return _DEFAULT_LLAMA_SERVER_PARALLEL
@@ -161,7 +172,6 @@ def _llama_server_parallel(context_token_limit: int) -> int:
             f"using {_DEFAULT_LLAMA_SERVER_PARALLEL}"
         )
         return _DEFAULT_LLAMA_SERVER_PARALLEL
-    context_limited_parallel = max(1, context_token_limit // KV_CONTEXT_BUDGET_TOKENS)
     effective_parallel = min(value, context_limited_parallel)
     if effective_parallel < value:
         logger.warning(
