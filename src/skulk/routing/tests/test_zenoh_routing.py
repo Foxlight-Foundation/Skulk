@@ -44,6 +44,26 @@ def _router(*, zenoh: bool) -> Router:
     return Router(handle=fake_net, zenoh=fake_zenoh, node_id="test-node")
 
 
+async def test_connected_peer_count_none_without_zenoh() -> None:
+    # Gossipsub fallback: there is no session to introspect, and None must be
+    # distinguishable from a real 0 (which means isolation).
+    router = _router(zenoh=False)
+    assert await router.zenoh_connected_peer_count() is None
+
+
+async def test_connected_peer_count_delegates_to_session() -> None:
+    class _CountingHandle:
+        async def zenoh_connected_peer_count(self) -> int:
+            return 3
+
+    router = Router(
+        handle=cast(NetworkingHandle, object()),
+        zenoh=cast(ZenohHandle, cast(object, _CountingHandle())),
+        node_id="test-node",
+    )
+    assert await router.zenoh_connected_peer_count() == 3
+
+
 def test_data_routes_over_zenoh_when_enabled() -> None:
     router = _router(zenoh=True)
     assert router.uses_zenoh(DATA.topic) is True

@@ -51,6 +51,7 @@ DISK_FULL_THRESHOLD = Memory.from_gb(2.0)
 HealthLevel = Literal["ok", "warn", "error"]
 HealthCode = Literal[
     "data_transport_mismatch",
+    "zenoh_isolated",
     "version_mismatch",
     "download_failed",
     "disk_low",
@@ -108,7 +109,13 @@ def _aggregate_level(reasons: Sequence[NodeHealthReason]) -> HealthLevel:
     for reason in reasons:
         level: HealthLevel = (
             "error"
-            if reason.code in ("data_transport_mismatch", "download_failed", "disk_full")
+            if reason.code
+            in (
+                "data_transport_mismatch",
+                "zenoh_isolated",
+                "download_failed",
+                "disk_full",
+            )
             or reason.code in CONFLICT_ERROR_CODES
             else "warn"
         )
@@ -223,6 +230,55 @@ def _data_transport_mismatch_reason(
             "Configure every node to use the same DATA transport, restart the "
             "fleet, and confirm nodeResources reports one transport before "
             "serving inference."
+        ),
+    )
+
+
+def _zenoh_isolated_reason(
+    *,
+    node_id: NodeId,
+    live_nodes: Mapping[NodeId, datetime],
+    node_resources: Mapping[NodeId, NodeResources],
+) -> NodeHealthReason | None:
+    """A reason when a node's Zenoh data plane has no peers it should have.
+
+    Fires only on positive evidence: the node advertises ``data_transport``
+    ``zenoh`` with a trustworthy peer count of exactly 0 (its sampler shields
+    the startup window by advertising ``None``), and at least one OTHER live
+    node also advertises Zenoh, so a mesh exists that this node failed to
+    join. The canonical shape is a zero-config remote member that multicast
+    scouting cannot reach: its control plane stays healthy while every remote
+    stream dies with transport errors, so without this reason the dashboard
+    looks green while inference through the node is broken.
+    """
+    resources = node_resources.get(node_id)
+    if resources is None or resources.data_transport != "zenoh":
+        return None
+    if resources.zenoh_connected_peers != 0:
+        return None
+    other_zenoh_nodes = sum(
+        1
+        for other_id, other in node_resources.items()
+        if other_id != node_id
+        and other_id in live_nodes
+        and other.data_transport == "zenoh"
+    )
+    if other_zenoh_nodes == 0:
+        return None
+    return NodeHealthReason(
+        code="zenoh_isolated",
+        message=(
+            "This node's Zenoh data plane has 0 peer transports while "
+            f"{other_zenoh_nodes} other live node(s) advertise Zenoh. Remote "
+            "model and provider streams to and from this node will fail even "
+            "though cluster membership looks healthy."
+        ),
+        remediation=(
+            "If the node cannot reach peers via local multicast (for example "
+            "it joined over a routed or overlay network), set "
+            "SKULK_ZENOH_CONNECT to a reachable peer's Zenoh endpoint "
+            "(tcp/<peer-ip>:7447) and ensure SKULK_ZENOH_LISTEN binds an "
+            "address peers can dial, then restart skulk on the node."
         ),
     )
 
@@ -392,6 +448,13 @@ def compute_node_health(
                     transports=transports,
                 )
             )
+        zenoh_isolated = _zenoh_isolated_reason(
+            node_id=node_id,
+            live_nodes=live_nodes,
+            node_resources=node_resources,
+        )
+        if zenoh_isolated is not None:
+            reasons.append(zenoh_isolated)
         if build_mismatch:
             reasons.append(
                 _version_mismatch_reason(

@@ -303,6 +303,13 @@ class NodeResources(CamelCaseModel):
     backends: frozenset[str] = frozenset({"mlx"})
     participation: NodeParticipation = "full"
     data_transport: NodeDataTransport = "gossipsub"
+    zenoh_connected_peers: int | None = None
+    """Live Zenoh peer transports on this node's data-plane session, sampled at
+    each advertisement. ``None`` when DATA rides gossipsub or during the
+    post-startup grace window before isolation is trustworthy. Zero after that
+    window, while other live nodes advertise Zenoh, means this node's data
+    plane is isolated (its remote streams will fail even though the control
+    plane is healthy); cluster health raises ``zenoh_isolated`` from it."""
     capability_conflicts: tuple[CapabilityConflict, ...] = ()
     """Loud observation-vs-declaration disagreements from backend derivation
     (#614): each entry names a way this node's serving capability is degraded
@@ -340,7 +347,10 @@ class NodeResources(CamelCaseModel):
 
     @classmethod
     async def gather(
-        cls, *, data_transport: NodeDataTransport = "gossipsub"
+        cls,
+        *,
+        data_transport: NodeDataTransport = "gossipsub",
+        zenoh_connected_peers: int | None = None,
     ) -> "NodeResources":
         """Probe backends and read node policy plus the resolved DATA transport.
 
@@ -348,6 +358,9 @@ class NodeResources(CamelCaseModel):
             data_transport: Transport already resolved during node startup. Passing
                 the resolved value avoids reinterpreting environment configuration
                 independently from the router that actually owns DATA delivery.
+            zenoh_connected_peers: Live Zenoh peer transports sampled from the
+                router that owns the session (``None`` when DATA rides gossipsub
+                or while isolation is not yet trustworthy after startup).
 
         Returns:
             The capability and policy facts this node advertises to the fleet.
@@ -365,6 +378,7 @@ class NodeResources(CamelCaseModel):
             backends=derivation.backends,
             participation=participation,
             data_transport=data_transport,
+            zenoh_connected_peers=zenoh_connected_peers,
             capability_conflicts=derivation.conflicts,
         )
 

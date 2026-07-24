@@ -18,6 +18,7 @@ from anyio.streams.buffered import BufferedByteReceiveStream
 from loguru import logger
 from pydantic import ValidationError, field_serializer, field_validator
 
+from skulk.routing.zenoh_status import ZenohPeerSampler
 from skulk.shared.constants import SKULK_CONFIG_FILE, SKULK_MODELS_DIR
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
@@ -585,6 +586,10 @@ class InfoGatherer:
     # the monitor is inert and never publishes.
     capabilities_provider: Callable[[], frozenset[str]] | None = None
     capabilities_poll_interval: float | None = 30
+    # Data-plane Zenoh connectivity, sampled from the router that owns the
+    # session at each NodeResources advertisement. Optional so callers without
+    # a router (tests, tools) stay unchanged; absent means "unknown", never 0.
+    zenoh_peer_sampler: ZenohPeerSampler | None = None
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
 
     async def run(self):
@@ -690,9 +695,15 @@ class InfoGatherer:
         while True:
             try:
                 with fail_after(30):
+                    zenoh_connected_peers = (
+                        await self.zenoh_peer_sampler.advertised_count()
+                        if self.zenoh_peer_sampler is not None
+                        else None
+                    )
                     await self.info_sender.send(
                         await NodeResources.gather(
-                            data_transport=self.data_transport
+                            data_transport=self.data_transport,
+                            zenoh_connected_peers=zenoh_connected_peers,
                         )
                     )
             except (ClosedResourceError, BrokenResourceError):

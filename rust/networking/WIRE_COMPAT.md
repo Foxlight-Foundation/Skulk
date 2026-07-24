@@ -33,6 +33,14 @@ bindings while `versionStatus` reported "consistent".
 
 ## Entries (newest first)
 
+- **wire-neutral** (2026-07-24): `ZenohSession` gains `connected_peer_count()`,
+  a read-only introspection of the local session's live peer transports via
+  `session.info().peers_zid()`, exposed to Python for data-plane isolation
+  health. Nothing about the session posture (mode/scouting/namespace), Zenoh
+  keys, QoS, framing, topics, or payloads changes, and no gossipsub or pnet
+  surface is touched, so no `NETWORK_VERSION` bump. The bindings package
+  version bumps to 0.2.4 so auto-updating nodes rebuild and expose the new
+  method on first restart.
 - **wire-neutral** (2026-07-23): Zenoh multicast scouting can now be enabled for
   zero-config local peer discovery. Explicit-endpoint fleets retain multicast
   off, and Zenoh keys, namespace derivation, QoS, framing, topics, and payloads

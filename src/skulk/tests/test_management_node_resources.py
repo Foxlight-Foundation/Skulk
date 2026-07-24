@@ -22,6 +22,7 @@ async def test_management_node_advertises_transport_without_placement() -> None:
                 NodeId("api-only-node"),
                 "zenoh",
                 telemetry_send,
+                None,
                 0.01,
             )
             telemetry = await telemetry_recv.receive()

@@ -392,6 +392,17 @@ impl PyZenohHandle {
             .pyerr()
     }
 
+    /// Count the Zenoh peers this session currently holds a live transport to.
+    ///
+    /// Zero while cluster peers advertise Zenoh means this node's data plane
+    /// is isolated (its remote streams will fail) even though the libp2p
+    /// control plane is healthy; Python advertises the count so cluster
+    /// health can say so instead of streams dying silently.
+    async fn zenoh_connected_peer_count(&self) -> PyResult<usize> {
+        let session = Arc::clone(&self.session);
+        Ok(session.connected_peer_count().allow_threads_py().await)
+    }
+
     /// Await the next inbound `(topic, data)` sample.
     #[gen_stub(skip)]
     fn recv<'py>(&'py self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
