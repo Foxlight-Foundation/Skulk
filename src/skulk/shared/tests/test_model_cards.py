@@ -88,6 +88,130 @@ async def test_custom_card_overrides_bundled(
     assert restored.quantization == "fp16"
 
 
+_STAMPED_CARD = """\
+model_id = "testorg/override-model"
+n_layers = 4
+hidden_size = 64
+supports_tensor = false
+tasks = ["TextGeneration"]
+quantization = "{quantization}"
+generator_revision = {generator_revision}
+
+[storage_size]
+in_bytes = 1024
+"""
+
+
+async def _load_both(
+    builtin_dir: pathlib.Path,
+    custom_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> ModelCard:
+    """Load a builtin then a custom dir into a fresh cache; return the winner."""
+    monkeypatch.setattr(model_cards_module, "_card_cache", {})
+    await model_cards_module._load_cards_from_dir(
+        Path(str(builtin_dir)), is_custom=False
+    )
+    await model_cards_module._load_cards_from_dir(Path(str(custom_dir)), is_custom=True)
+    return model_cards_module._card_cache[ModelId("testorg/override-model")]
+
+
+@pytest.mark.anyio
+async def test_stale_generated_card_is_superseded_by_bundled(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A machine-generated card older than the generator loses its override.
+
+    A generated card is a cache of Hugging Face metadata plus generator
+    logic, not operator intent: left in place it silently pins the model to
+    whatever the old generator got wrong (the fresh-fleet audit found
+    pre-#652-fix cards forcing the in-process engine over the served one).
+    """
+    builtin_dir = tmp_path / "builtin"
+    custom_dir = tmp_path / "custom"
+    builtin_dir.mkdir()
+    custom_dir.mkdir()
+    (builtin_dir / "override-model.toml").write_text(
+        _MINIMAL_CARD.format(quantization="fp16")
+    )
+    stale_revision = model_cards_module.CARD_GENERATOR_REVISION - 1
+    (custom_dir / "testorg--override-model.toml").write_text(
+        _STAMPED_CARD.format(quantization="int4", generator_revision=stale_revision)
+    )
+
+    card = await _load_both(builtin_dir, custom_dir, monkeypatch)
+
+    assert not card.is_custom, "the bundled card must supersede a stale one"
+    assert card.quantization == "fp16"
+
+
+@pytest.mark.anyio
+async def test_current_generated_card_keeps_override(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A card stamped with the current generator revision overrides normally."""
+    builtin_dir = tmp_path / "builtin"
+    custom_dir = tmp_path / "custom"
+    builtin_dir.mkdir()
+    custom_dir.mkdir()
+    (builtin_dir / "override-model.toml").write_text(
+        _MINIMAL_CARD.format(quantization="fp16")
+    )
+    (custom_dir / "testorg--override-model.toml").write_text(
+        _STAMPED_CARD.format(
+            quantization="int4",
+            generator_revision=model_cards_module.CARD_GENERATOR_REVISION,
+        )
+    )
+
+    card = await _load_both(builtin_dir, custom_dir, monkeypatch)
+
+    assert card.is_custom
+    assert card.quantization == "int4"
+
+
+@pytest.mark.anyio
+async def test_stale_generated_card_without_bundled_still_serves(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no bundled counterpart, a stale generated card still serves."""
+    builtin_dir = tmp_path / "builtin"
+    custom_dir = tmp_path / "custom"
+    builtin_dir.mkdir()
+    custom_dir.mkdir()
+    stale_revision = model_cards_module.CARD_GENERATOR_REVISION - 1
+    (custom_dir / "testorg--override-model.toml").write_text(
+        _STAMPED_CARD.format(quantization="int4", generator_revision=stale_revision)
+    )
+
+    card = await _load_both(builtin_dir, custom_dir, monkeypatch)
+
+    assert card.is_custom
+    assert card.quantization == "int4"
+
+
+@pytest.mark.anyio
+async def test_generated_cards_are_stamped_and_stamp_round_trips(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The stamp persists through save/load so staleness survives restarts."""
+    card = ModelCard(
+        model_id=ModelId("testorg/stamped-model"),
+        storage_size=model_cards_module.Memory(in_bytes=1024),
+        n_layers=4,
+        hidden_size=64,
+        supports_tensor=False,
+        tasks=[model_cards_module.ModelTask.TextGeneration],
+        generator_revision=model_cards_module.CARD_GENERATOR_REVISION,
+    )
+    path = tmp_path / "stamped.toml"
+    await card.save(Path(str(path)))
+
+    loaded = await ModelCard.load_from_path(Path(str(path)))
+
+    assert loaded.generator_revision == model_cards_module.CARD_GENERATOR_REVISION
+
+
 def test_vllm_spec_pairing_validator() -> None:
     """The vllm speculative fields must be internally consistent at card load.
 
