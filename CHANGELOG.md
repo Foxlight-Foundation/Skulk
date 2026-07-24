@@ -15,6 +15,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- **Speech translation is now a standard capability.** `POST
+  /v1/audio/translations` no longer requires `SKULK_ENABLE_EXPERIMENTAL_MODE`
+  or the `experiments.speech_translation` config flag; like every other speech
+  endpoint, its only gates are model truth (a mounted card declaring
+  `audio.supports_translation = true`) and instance availability. With this
+  graduation no built-in experiment remains active: the entire `experiments`
+  config section (`tts_streaming`, `stt_realtime`, `speech_translation`) is
+  deprecated accepted-but-ignored compatibility surface, and the dashboard no
+  longer renders an Experiments settings section. The experimental-mode gate
+  machinery stays in place for future features.
+
 - **Fresh installs now use the same Zenoh data plane as the E2E qualification
   fleet.** An unset `SKULK_ZENOH_DATA_PLANE` selects Zenoh instead of silently
   falling back to gossipsub. Zero-config startup binds a specific

@@ -275,10 +275,7 @@ from skulk.shared.constants import (
     preferred_env_value,
 )
 from skulk.shared.election import ElectionMessage
-from skulk.shared.experimental import (
-    EXPERIMENTAL_MODE_ENV_VAR,
-    experimental_mode_enabled,
-)
+from skulk.shared.experimental import experimental_mode_enabled
 from skulk.shared.logging import InterceptLogger
 from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.model_cards import (
@@ -1834,9 +1831,9 @@ class API:
             tags=["Audio"],
             summary="Translate speech audio to English",
             description=(
-                "Experimental OpenAI-compatible speech translation endpoint. "
-                "The requested mounted model must explicitly support translation, "
-                "and speech_translation must be enabled in experiment settings."
+                "OpenAI-compatible speech translation endpoint (translation "
+                "target is English). The requested mounted model must "
+                "explicitly declare translation support on its model card."
             ),
         )(self.audio_translations)
         self.app.get(
@@ -4220,23 +4217,6 @@ class API:
         _, _, instance_id, target_node = min(candidates)
         return instance_id, target_node
 
-    def _speech_translation_experiment_enabled(self) -> bool:
-        """Return whether config opts into experimental speech translation."""
-
-        try:
-            config = load_skulk_config(self._config_path)
-        except Exception as exc:
-            logger.warning(
-                "Failed to load config while checking speech translation "
-                f"experiment toggle; treating it as disabled: {exc}"
-            )
-            return False
-        return bool(
-            config is not None
-            and config.experiments is not None
-            and config.experiments.speech_translation
-        )
-
     def _streaming_tts_model_is_ready(
         self,
         model_id: ModelId | None = None,
@@ -4492,17 +4472,13 @@ class API:
         model_id: ModelId,
         source_language: str | None,
     ) -> ModelId:
-        """Validate an experimentally enabled mounted translation model."""
+        """Validate a mounted translation-capable model for `/v1/audio/translations`.
 
-        if not experimental_mode_enabled() or not self._speech_translation_experiment_enabled():
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Speech translation is experimental and requires "
-                    f"{EXPERIMENTAL_MODE_ENV_VAR}=1 and "
-                    "experiments.speech_translation=true"
-                ),
-            )
+        Speech translation is a standard capability: the only gates are model
+        truth (a mounted card that declares translation support) and instance
+        availability, matching every other speech endpoint.
+        """
+
         if not any(
             instance.shard_assignments.model_id == model_id
             for instance in self.state.instances.values()
