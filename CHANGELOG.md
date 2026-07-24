@@ -23,8 +23,10 @@ This project records release notes here and mirrors public-facing notes in
   admission floor, so the derived value is always memory-safe; an explicit
   `SKULK_LLAMA_SERVER_PARALLEL=1` forces serial and larger values raise the
   ceiling as before. The in-process MLX engine's concurrent-admission default
-  (`SKULK_MAX_CONCURRENT_REQUESTS`) rises from 8 to 16 to match the
-  qualification fleet; excess requests queue as before.
+  (`SKULK_MAX_CONCURRENT_REQUESTS`) stays at 8: each admitted MLX task owns
+  its own KV cache with no aggregate admission budget, so a higher default
+  would raise worst-case memory on small unified-memory nodes; raising it
+  waits on aggregate-KV-aware admission.
 
 - **The service template no longer pins a cluster namespace.** The installed
   `skulk.env` template used to set `SKULK_LIBP2P_NAMESPACE=foxlight-main`,
