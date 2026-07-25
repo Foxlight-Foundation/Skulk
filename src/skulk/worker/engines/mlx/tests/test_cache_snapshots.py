@@ -1,6 +1,7 @@
 # pyright: reportPrivateUsage=false, reportUnknownVariableType=false
 # pyright: reportUnknownArgumentType=false, reportUnknownMemberType=false
 # pyright: reportIndexIssue=false, reportArgumentType=false
+# pyright: reportMissingTypeStubs=false
 """Unit tests for the reference-snapshot semantics of SSM cache rollback.
 
 ``snapshot_ssm_states`` reference-clones ArraysCache entries instead of
@@ -12,13 +13,56 @@ the stored arrays in place. These tests pin that contract.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
+
 import mlx.core as mx
+import pytest
 from mlx_lm.models.cache import ArraysCache, KVCache, RotatingKVCache
+
+try:
+    from mlx_vlm.models.cache import ArraysCache as VlmArraysCache
+except ModuleNotFoundError:
+    VlmArraysCache = None
 
 from skulk.worker.engines.mlx.cache import (
     snapshot_ssm_states,
     trim_cache,
 )
+
+
+def test_cache_module_imports_without_optional_mlx_vlm() -> None:
+    """Linux text-only MLX must not require the macOS-only VLM package."""
+    script = textwrap.dedent(
+        """
+        import builtins
+
+        real_import = builtins.__import__
+
+        def import_without_mlx_vlm(name, *args, **kwargs):
+            if name == "mlx_vlm" or name.startswith("mlx_vlm."):
+                raise ModuleNotFoundError(
+                    "No module named 'mlx_vlm'",
+                    name="mlx_vlm",
+                )
+            return real_import(name, *args, **kwargs)
+
+        builtins.__import__ = import_without_mlx_vlm
+
+        from skulk.worker.engines.mlx import cache
+
+        assert cache.VlmArraysCache is cache.ArraysCache
+        assert cache.VlmRotatingKVCache is cache.RotatingKVCache
+        """
+    )
+
+    subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _arrays_cache(values: list[float]) -> ArraysCache:
@@ -83,6 +127,24 @@ class TestArraysCacheSnapshot:
 
         trim_cache(live, 2, snapshot)
         assert kv.offset == 4
+
+    def test_mlx_vlm_arrays_cache_is_snapshotted_and_restored(self) -> None:
+        """Native hybrid VLM caches need the same rollback as MLX-LM caches."""
+        if VlmArraysCache is None:
+            pytest.skip("mlx-vlm is not installed on this platform")
+        ssm = VlmArraysCache(2)
+        ssm[0] = mx.full((1, 4), 1.0)
+        ssm[1] = mx.full((1, 4), 2.0)
+        live: list[object] = [ssm]
+        snapshot = snapshot_ssm_states(live)
+
+        ssm[0] = mx.full((1, 4), 9.0)
+        trim_cache(live, 1, snapshot)
+
+        restored = live[0]
+        assert isinstance(restored, VlmArraysCache)
+        assert mx.allclose(restored[0], mx.full((1, 4), 1.0))
+        assert mx.allclose(restored[1], mx.full((1, 4), 2.0))
 
 
 class TestRotatingKVCacheSnapshot:

@@ -42,6 +42,7 @@ from skulk.worker.engines.mlx.generator.generate import (
     extract_top_logprobs,
     patch_embed_tokens,
     prefill,
+    set_native_vision_inputs,
     slice_native_pixel_values_for_uncached_suffix,
 )
 from skulk.worker.engines.mlx.utils_mlx import (
@@ -50,6 +51,7 @@ from skulk.worker.engines.mlx.utils_mlx import (
 )
 from skulk.worker.engines.mlx.vision import (
     MediaRegion,
+    VisionPreprocessingError,
     VisionProcessor,
     VisionResult,
     prepare_vision,
@@ -57,6 +59,60 @@ from skulk.worker.engines.mlx.vision import (
 from skulk.worker.runner.bootstrap import logger
 
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
+
+
+def resolve_request_vision(
+    *,
+    vision_processor: VisionProcessor | None,
+    task_params: TextGenerationTaskParams,
+    tokenizer: TokenizerWrapper,
+    model: Model,
+    task_id: TaskId,
+) -> VisionResult | None:
+    """Turn a request's images into prompt input, or refuse to answer it.
+
+    Returns ``None`` only for a request that carried no images, which is the
+    ordinary text path. A request that did carry images either comes back with
+    them encoded or raises ``VisionPreprocessingError``.
+
+    Everything here used to be a warning and a fallthrough to text-only. That
+    was the most misleading result the engine could produce: the chat template
+    had already expanded the image placeholders, so the model received vision
+    markers with no embeddings behind them, and it answered anyway by inventing
+    the picture. A single missing wheel degraded every vision model on the node
+    that way while the API kept reporting success.
+    """
+
+    requested_image_count = len(task_params.images or ())
+
+    if vision_processor is None:
+        if requested_image_count:
+            # Images for a model whose card declares no [vision] section, so no
+            # processor was ever built. Dropping them is the same fiction
+            # reached by a different route.
+            raise VisionPreprocessingError(
+                f"model {task_params.model} received {requested_image_count} "
+                "image(s) but has no vision configuration, so the images "
+                "cannot be given to it"
+            )
+        return None
+
+    try:
+        return prepare_vision(
+            images=task_params.images,
+            chat_template_messages=task_params.chat_template_messages,
+            vision_processor=vision_processor,
+            tokenizer=tokenizer,
+            model=model,
+            task_id=task_id,
+        )
+    except VisionPreprocessingError:
+        raise
+    except Exception as error:
+        raise VisionPreprocessingError(
+            f"failed to process {requested_image_count} image(s) for model "
+            f"{task_params.model}: {error}"
+        ) from error
 
 
 def _stop_sequences(task_params: TextGenerationTaskParams) -> list[str]:
@@ -150,29 +206,16 @@ class SkulkBatchGenerator:
             all_prompt_tokens, self.tokenizer
         )
 
-        vision: VisionResult | None = None
         media_regions: list[MediaRegion] = []
 
-        if self.vision_processor is not None:
-            try:
-                with trace(
-                    "native_vision_preprocess",
-                    trace_rank,
-                    "vision",
-                    task_id=task_id,
-                ):
-                    vision = prepare_vision(
-                        images=task_params.images,
-                        chat_template_messages=task_params.chat_template_messages,
-                        vision_processor=self.vision_processor,
-                        tokenizer=self.tokenizer,
-                        model=self.model,
-                        task_id=task_id,
-                    )
-            except Exception:
-                logger.opt(exception=True).warning(
-                    "Vision processing failed, falling back to text-only"
-                )
+        with trace("native_vision_preprocess", trace_rank, "vision", task_id=task_id):
+            vision = resolve_request_vision(
+                vision_processor=self.vision_processor,
+                task_params=task_params,
+                tokenizer=self.tokenizer,
+                model=self.model,
+                task_id=task_id,
+            )
 
         if vision is not None:
             all_prompt_tokens = vision.prompt_tokens
@@ -190,12 +233,28 @@ class SkulkBatchGenerator:
         )
 
         is_bench = task_params.bench
+        has_vision = vision is not None
+        is_native_vision = vision is not None and vision.pixel_values is not None
 
         prefix_hit_length = 0
         matched_index: int | None = None
         prompt_tokens = all_prompt_tokens
 
-        if self.kv_prefix_cache is not None and not is_bench:
+        use_prefix_cache = (
+            self.kv_prefix_cache is not None and not is_bench and not has_vision
+        )
+        if self.kv_prefix_cache is not None and has_vision and not is_bench:
+            # VLM caches contain image-conditioned language state whose restore
+            # position cannot be reconstructed from text-token offsets. The
+            # distributed embedding path is affected as well as native pixels.
+            # Reuse across independent requests progressively leaks chat-template
+            # tokens and drops image detail from responses.
+            logger.info(
+                "Disabling KV prefix cache for batched vision request isolation"
+            )
+
+        if use_prefix_cache:
+            assert self.kv_prefix_cache is not None
             cache, remaining_tokens, matched_index = self.kv_prefix_cache.get_kv_cache(
                 self.model, all_prompt_tokens, media_regions=media_regions
             )
@@ -227,7 +286,6 @@ class SkulkBatchGenerator:
             top_k=task_params.top_k if task_params.top_k is not None else 0,
         )
 
-        is_native_vision = vision is not None and vision.pixel_values is not None
         native_pixel_values: mx.array | list[mx.array] | None = None
         if is_native_vision:
             assert vision is not None
@@ -239,13 +297,12 @@ class SkulkBatchGenerator:
             )
 
         if native_pixel_values is not None:
-            if hasattr(self.model, "set_pixel_values"):
-                cast(
-                    Callable[[mx.array | list[mx.array] | None], None],
-                    object.__getattribute__(self.model, "set_pixel_values"),
-                )(native_pixel_values)
-            else:
-                object.__setattr__(self.model, "_pixel_values", native_pixel_values)
+            assert vision is not None
+            set_native_vision_inputs(
+                self.model,
+                native_pixel_values,
+                vision.image_grid_thw,
+            )
             vision_ctx = contextlib.nullcontext()
         elif vision is not None and not is_native_vision:
             vision_ctx = patch_embed_tokens(
@@ -271,13 +328,12 @@ class SkulkBatchGenerator:
                     distributed_prompt_progress_callback,
                 )
         finally:
-            if hasattr(self.model, "set_pixel_values"):
-                cast(
-                    Callable[[mx.array | list[mx.array] | None], None],
-                    object.__getattribute__(self.model, "set_pixel_values"),
-                )(None)
-            elif hasattr(self.model, "_pixel_values"):
-                object.__setattr__(self.model, "_pixel_values", None)
+            if (
+                hasattr(self.model, "set_vision_inputs")
+                or hasattr(self.model, "set_pixel_values")
+                or hasattr(self.model, "_pixel_values")
+            ):
+                set_native_vision_inputs(self.model, None)
 
         # We need to clamp rotating kv caches to max size so that mlx lm's _merge_caches behaves
         for c in cache:
@@ -292,7 +348,7 @@ class SkulkBatchGenerator:
                 c.values = c._trim(trim_size, c.values)
                 c._idx = c.max_size
 
-        if not is_bench:
+        if use_prefix_cache:
             min_prefix_hit_length = max(
                 1000, system_prompt_token_count(task_params, self.tokenizer)
             )

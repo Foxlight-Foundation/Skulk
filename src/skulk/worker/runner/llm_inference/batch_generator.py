@@ -38,7 +38,10 @@ from skulk.worker.engines.mlx.utils_mlx import (
     mx_all_gather_tasks,
     mx_any,
 )
-from skulk.worker.engines.mlx.vision import VisionProcessor
+from skulk.worker.engines.mlx.vision import (
+    VisionPreprocessingError,
+    VisionProcessor,
+)
 from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
 
@@ -335,6 +338,26 @@ class SequentialGenerator(InferenceGenerator):
             record_runner_phase(
                 "completion",
                 event="context_admission_rejected",
+                task_id=task.task_id,
+                command_id=str(task.command_id),
+                include_memory=True,
+            )
+            output.append((task.task_id, Finished()))
+            self._active = None
+            if self._queue:
+                self._start_next()
+
+        except VisionPreprocessingError as e:
+            # A request whose images could not be prepared fails as a request.
+            # Every rank reaches the same verdict from the same images and the
+            # same install, so terminating just this task keeps the ring in
+            # lockstep, and the node goes on serving text and other vision
+            # requests instead of crash-looping on one bad one.
+            self._record_decode_span(task.task_id)
+            self._send_error(task, e)
+            record_runner_phase(
+                "completion",
+                event="vision_preprocessing_failed",
                 task_id=task.task_id,
                 command_id=str(task.command_id),
                 include_memory=True,
@@ -713,6 +736,20 @@ class BatchGenerator(InferenceGenerator):
                 record_runner_phase(
                     "completion",
                     event="context_admission_rejected",
+                    task_id=task.task_id,
+                    command_id=str(task.command_id),
+                    include_memory=True,
+                )
+                rejected.append((task.task_id, Finished()))
+                continue
+            except VisionPreprocessingError as e:
+                # Same lockstep argument as the admission arm above: the images
+                # and the install are identical on every rank, so rejecting the
+                # one request leaves the batch engine consistent.
+                self._send_error(task, e)
+                record_runner_phase(
+                    "completion",
+                    event="vision_preprocessing_failed",
                     task_id=task.task_id,
                     command_id=str(task.command_id),
                     include_memory=True,
