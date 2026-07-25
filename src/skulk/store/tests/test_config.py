@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from skulk.store.config import (
+    DEFAULT_MODEL_STORE_PORT,
     ExperimentsConfig,
     ModelStoreConfig,
     NodeOverrideConfig,
@@ -13,6 +14,15 @@ from skulk.store.config import (
     node_matches_store_host,
     resolve_node_staging,
 )
+
+
+def test_model_store_default_port_avoids_dynamic_client_range() -> None:
+    """Fresh listeners must not race ordinary outbound client connections."""
+
+    config = ModelStoreConfig(store_host="store.local", store_path="/models")
+
+    assert DEFAULT_MODEL_STORE_PORT == 12415
+    assert config.store_port == DEFAULT_MODEL_STORE_PORT
 
 
 def test_hostname_aliases_include_short_and_local_variants() -> None:

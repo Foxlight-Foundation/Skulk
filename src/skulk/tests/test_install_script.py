@@ -3,6 +3,8 @@
 
 from pathlib import Path
 
+from skulk.store.config import DEFAULT_MODEL_STORE_PORT
+
 
 def _installer() -> str:
     return (Path(__file__).parents[3] / "install.sh").read_text()
@@ -35,3 +37,9 @@ def test_full_commit_ref_fetches_exact_object_and_detaches() -> None:
     assert 'git -C "$INSTALL_DIR" checkout --detach FETCH_HEAD' in installer
     assert 'RESOLVED_COMMIT="$(git rev-parse HEAD)"' in installer
     assert 'log "resolved ref $INSTALL_REF to commit $RESOLVED_COMMIT"' in installer
+
+
+def test_generated_config_pins_safe_model_store_port() -> None:
+    """The installer must materialize the same safe port as runtime defaults."""
+
+    assert f"store_port: {DEFAULT_MODEL_STORE_PORT}" in _installer()

@@ -47,7 +47,7 @@ Example ``skulk.yaml``::
     model_store:
       enabled: true
       store_host: mac-studio-1    # hostname of the node with attached storage
-      store_port: 58080
+      store_port: 12415
       store_path: /Volumes/ModelStore/models
 
       download:
@@ -70,12 +70,18 @@ from __future__ import annotations
 
 import socket
 from pathlib import Path
-from typing import Literal, final
+from typing import Final, Literal, final
 
 import yaml
 from pydantic import Field
 
 from skulk.utils.pydantic_ext import FrozenModel
+
+# Keep the shipped listener outside the IANA dynamic/private range and the
+# lower ephemeral ranges commonly used by Linux. A fresh macOS install failed
+# to restart when mDNSResponder legitimately acquired the old 58080 default as
+# an outbound source port before Skulk could bind it.
+DEFAULT_MODEL_STORE_PORT: Final = 12415
 
 
 def _normalize_hostname(hostname: str) -> str:
@@ -245,7 +251,7 @@ class ModelStoreConfig(FrozenModel):
     enabled: bool = True
     store_host: str
     store_http_host: str | None = None
-    store_port: int = 58080
+    store_port: int = DEFAULT_MODEL_STORE_PORT
     store_path: str
     download: DownloadStoreConfig = DownloadStoreConfig()
     staging: StagingNodeConfig = StagingNodeConfig()

@@ -47,7 +47,9 @@ Make sure:
 - that machine has enough storage for the models you want to share
 - the chosen `store_path` is mounted and writable
 
-The store server uses port `58080` by default.
+The store server uses port `12415` by default. This listener is deliberately
+outside the dynamic client-port ranges used by supported operating systems, so
+an unrelated outbound connection cannot claim it before Skulk starts.
 
 ## Recommended Setup: Dashboard First
 
@@ -87,7 +89,7 @@ For most users:
 model_store:
   enabled: true
   store_host: mac-studio-1
-  store_port: 58080
+  store_port: 12415
   store_path: /Volumes/ModelStore/models
 
   download:
@@ -132,7 +134,7 @@ For most users, hostname is the easiest and most reliable choice.
 
 HTTP port used for store transfers.
 
-Default: `58080`
+Default: `12415`
 
 ### `model_store.store_path`
 
@@ -213,12 +215,12 @@ Check:
 
 - that the store host is running
 - that `store_host` matches the real hostname
-- that port `58080` is reachable on your LAN
+- that port `12415` is reachable on your LAN
 
 Useful check:
 
 ```bash
-curl http://STORE_HOST:58080/health
+curl http://STORE_HOST:12415/health
 ```
 
 ### The model is on disk but does not appear in the store registry

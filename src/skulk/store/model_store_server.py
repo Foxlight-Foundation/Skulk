@@ -23,7 +23,7 @@ Design decisions
 * **Path traversal protection**: all requested file paths are resolved and
   checked to be within the model directory before any I/O is performed.
 * The server does **not** require authentication — it is intended for
-  trusted LAN use only.  Do not expose port 58080 to untrusted networks.
+  trusted LAN use only.  Do not expose port 12415 to untrusted networks.
 
 HTTP API
 --------
@@ -54,11 +54,11 @@ All endpoints return JSON unless noted.
 
 Example requests::
 
-    curl http://mac-studio-1:58080/health
-    curl http://mac-studio-1:58080/models
-    curl http://mac-studio-1:58080/models/mlx-community%2FQwen3-30B-A3B-4bit/files
+    curl http://mac-studio-1:12415/health
+    curl http://mac-studio-1:12415/models
+    curl http://mac-studio-1:12415/models/mlx-community%2FQwen3-30B-A3B-4bit/files
     curl -H "Range: bytes=0-8388607" \\
-         http://mac-studio-1:58080/models/mlx-community%2FQwen3-30B-A3B-4bit/config.json
+         http://mac-studio-1:12415/models/mlx-community%2FQwen3-30B-A3B-4bit/config.json
 """
 
 from __future__ import annotations
@@ -72,6 +72,7 @@ import aiofiles.os as aios
 import aiohttp.web as web
 from loguru import logger
 
+from skulk.store.config import DEFAULT_MODEL_STORE_PORT
 from skulk.store.model_store import ModelStore
 
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB per streaming chunk
@@ -119,7 +120,7 @@ class ModelStoreServer:
 
     Lifecycle::
 
-        server = ModelStoreServer(store, port=58080)
+        server = ModelStoreServer(store, port=DEFAULT_MODEL_STORE_PORT)
         await server.start()   # called once on startup
         # ... runs until shutdown ...
         await server.stop()    # called on graceful shutdown
@@ -133,7 +134,7 @@ class ModelStoreServer:
         self,
         store: ModelStore,
         host: str = "0.0.0.0",
-        port: int = 58080,
+        port: int = DEFAULT_MODEL_STORE_PORT,
     ) -> None:
         """
         Args:

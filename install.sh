@@ -320,6 +320,9 @@ if [[ ! -f skulk.yaml ]]; then
 # the docs).
 model_store:
   store_host: "$(hostname -s)"
+  # Kept outside operating-system dynamic client-port ranges so an unrelated
+  # outbound connection cannot claim the listener before Skulk starts.
+  store_port: 12415
   # Loopback keeps the single-node client working even when the short
   # hostname is not locally resolvable; on the store host, skulk replaces a
   # loopback literal with its best routable IPv4 before broadcasting to
