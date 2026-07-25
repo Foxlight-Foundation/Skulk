@@ -44,10 +44,14 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.tasks import AudioTranscription as AudioTranscriptionTask
 from skulk.shared.types.tasks import (
+    DownloadModel,
+    TaskId,
+    TaskStatus,
+)
+from skulk.shared.types.tasks import (
     RealtimeAudioTranscription as RealtimeAudioTranscriptionTask,
 )
 from skulk.shared.types.tasks import SpeechSynthesis as SpeechSynthesisTask
-from skulk.shared.types.tasks import TaskStatus
 from skulk.shared.types.tasks import TextGeneration as TextGenerationTask
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
@@ -481,6 +485,50 @@ async def test_realtime_stt_master_reserves_before_task_event_round_trip() -> No
     assert second_failed.error_type == "instance_busy"
     assert first.command_id in master.command_task_mapping
     assert second.command_id in master.command_task_mapping
+
+
+@pytest.mark.asyncio
+async def test_realtime_stt_master_ignores_running_lifecycle_task() -> None:
+    """Ready realtime runners remain usable while lifecycle state converges."""
+
+    master, node_id, command_sender, event_receiver = _build_master()
+    instance = _single_node_transcription_instance(node_id)
+    shard = next(iter(instance.shard_assignments.runner_to_shard.values()))
+    stale_download = DownloadModel(
+        task_id=TaskId("stale-download-task"),
+        instance_id=instance.instance_id,
+        task_status=TaskStatus.Running,
+        shard_metadata=shard,
+    )
+    master.state = master.state.model_copy(
+        update={
+            "instances": {instance.instance_id: instance},
+            "tasks": {stale_download.task_id: stale_download},
+        }
+    )
+    command = RealtimeAudioTranscription(
+        command_id=CommandId("realtime-after-ready"),
+        owner_node=NodeId("remote-api"),
+        target_instance_id=instance.instance_id,
+        task_params=RealtimeAudioTranscriptionTaskParams(
+            model=instance.shard_assignments.model_id,
+            input_sample_rate=16000,
+            transcription_delay_ms=480,
+        ),
+    )
+    event: Event | None = None
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(master._command_processor)  # pyright: ignore[reportPrivateUsage]
+        await command_sender.send(
+            ForwarderCommand(origin=SystemId("API"), command=command)
+        )
+        event = await event_receiver.receive()
+        task_group.cancel_scope.cancel()
+
+    assert isinstance(event, TaskCreated)
+    assert isinstance(event.task, RealtimeAudioTranscriptionTask)
+    assert event.task.task_status is TaskStatus.Pending
 
 
 @pytest.mark.asyncio
