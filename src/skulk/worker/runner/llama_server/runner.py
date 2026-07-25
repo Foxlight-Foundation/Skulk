@@ -162,8 +162,11 @@ def _llama_server_parallel() -> int:
     person running the node knows.
 
     Returns:
-        The declared slot count, or ``1`` when unset, unparseable, or below one
-        (each loudly logged, never silently applied).
+        The declared slot count, or ``1`` when unset. An unparseable or
+        below-one value also yields ``1``, but is warned about first: an
+        operator who declared something meant it, so a rejected declaration is
+        never applied silently. An absent declaration is not a mistake and
+        stays quiet.
     """
     raw = os.environ.get(_LLAMA_SERVER_PARALLEL_ENV, "").strip()
     if not raw:
