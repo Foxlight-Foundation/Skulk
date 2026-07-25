@@ -24,6 +24,13 @@ if [[ -f "$ENV_FILE" ]]; then
     set +a
 fi
 
+# Vector expands one environment expression per scalar but does not recursively
+# expand a nested ${HOME} inside a default value. Resolve these defaults in the
+# shell so fresh service installs never create a literal "${HOME}" directory
+# underneath the repository working directory.
+export SKULK_VECTOR_DATA_DIR="${SKULK_VECTOR_DATA_DIR:-$HOME/.skulk/vector}"
+export SKULK_LOG_FILE="${SKULK_LOG_FILE:-$HOME/.skulk/logs/skulk.stdout.log}"
+
 if ! command -v vector >/dev/null 2>&1; then
     echo "error: 'vector' not found on PATH. Install Vector (https://vector.dev/docs/setup/installation/) and re-run." >&2
     exit 1

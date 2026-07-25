@@ -25,3 +25,24 @@ def test_service_installer_resolves_fresh_uv_location(relative_path: str) -> Non
     assert path_resolution < uv_guard
     assert "PATH=\"$candidate_dir:$PATH\"" in script
     assert "export PATH" in script[path_resolution:uv_guard]
+
+
+def test_vector_startup_resolves_home_defaults_before_exec() -> None:
+    """External Vector paths must not retain an unexpanded nested HOME token."""
+
+    script = (
+        _REPO_ROOT / "deployment/install/vector-startup.sh"
+    ).read_text()
+    config = (
+        _REPO_ROOT / "deployment/logging/vector-external.yaml"
+    ).read_text()
+
+    data_dir_default = script.index("export SKULK_VECTOR_DATA_DIR=")
+    log_file_default = script.index("export SKULK_LOG_FILE=")
+    vector_exec = script.index('exec vector --config "$CONFIG"')
+
+    assert data_dir_default < vector_exec
+    assert log_file_default < vector_exec
+    assert "data_dir: ${SKULK_VECTOR_DATA_DIR}" in config
+    assert "- ${SKULK_LOG_FILE}" in config
+    assert ":-${HOME}" not in config

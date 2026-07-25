@@ -23,13 +23,13 @@
 #   SKULK_LOG_FILE           Override the source file path. Defaults to
 #                            ~/.skulk/logs/skulk.stdout.log.
 
-data_dir: ${SKULK_VECTOR_DATA_DIR:-${HOME}/.skulk/vector}
+data_dir: ${SKULK_VECTOR_DATA_DIR}
 
 sources:
   skulk_log:
     type: file
     include:
-      - ${SKULK_LOG_FILE:-${HOME}/.skulk/logs/skulk.stdout.log}
+      - ${SKULK_LOG_FILE}
     # Read from the beginning on first start so we ship the full log,
     # then resume from the checkpoint stored under data_dir on restart.
     read_from: beginning
