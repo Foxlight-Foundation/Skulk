@@ -40,7 +40,6 @@ import httpx
 
 from skulk.api.types import GenerationStats
 from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
-from skulk.shared.models.memory_estimate import KV_CONTEXT_BUDGET_TOKENS
 from skulk.shared.models.model_cards import OutputParserType
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
@@ -130,31 +129,45 @@ def _force_no_spec() -> bool:
 
 
 _LLAMA_SERVER_PARALLEL_ENV: Final = "SKULK_LLAMA_SERVER_PARALLEL"
-# Concurrency stays OPT-IN (default 1) for now, on purpose. A derived default
-# was attempted in the 2026-07-24 defaults audit and reverted in review:
-# llama-server splits one fixed ``-c`` window evenly across slots
-# (n_ctx_slot = n_ctx / n_parallel) while Skulk's API admission keeps
-# advertising the instance's FULL context window, so any silently derived
-# N > 1 shrinks the real per-request window to n_ctx/N and long prompts that
-# worked under the serial default start truncating or 400ing. An operator
-# setting the override makes that trade knowingly; a shipped default cannot.
-# Deriving this for fresh installs is blocked on slot-aware admission (#685).
+# Concurrency stays OPT-IN (default 1). Not because concurrency is unsafe -- a
+# unified KV buffer gives every slot the full window (see _llama_server_parallel)
+# -- but because the shared pool is finite, and how much of it to hand out is a
+# per-deployment judgement Skulk cannot make from the outside. A fresh install
+# gets the serial behavior every earlier release had.
 _DEFAULT_LLAMA_SERVER_PARALLEL: Final = 1
 
 
-def _llama_server_parallel(context_token_limit: int) -> int:
-    """Return the safe parallel-slot count for this served context window.
+def _llama_server_parallel() -> int:
+    """Return the operator-declared concurrent-generation slot count.
 
-    Concurrency is OPT-IN for the served llama.cpp engine (default 1; see the
-    comment above for why a derived default is blocked on slot-aware
-    admission). ``SKULK_LLAMA_SERVER_PARALLEL`` is an upper bound: llama-server
-    splits its fixed ``-c`` window evenly across the slots, so the runner caps the
-    requested count to keep at least ``KV_CONTEXT_BUDGET_TOKENS`` in each slot.
-    Without the cap, a memory-constrained placement can start successfully but
-    silently truncate every generation after only a handful of tokens. An
-    unparseable or below-1 value falls back to the default.
+    The declared value is honored EXACTLY (#689). It used to be capped to
+    ``floor(n_ctx / 8192)`` because llama.cpp sliced the one
+    ``-c`` window into fixed per-slot shares, so a high count silently shrank
+    every request's real window to ``n_ctx / N`` while Skulk's API kept admitting
+    against the full one. That slicing is not a llama.cpp law, it is a
+    consequence of how the server is launched: ``llama_context`` sets
+    ``n_ctx_seq = n_ctx`` under a unified KV buffer and only falls back to
+    ``n_ctx / n_seq_max`` without one (``src/llama-context.cpp``). The runner now
+    passes ``--kv-unified`` whenever it asks for more than one slot, so each slot
+    sees the whole window, the stamped ``context_token_limit`` stays the truth,
+    and there is nothing left for a cap to protect.
+
+    What the operator owns instead is contention. Under a unified buffer the
+    slots draw from ONE pool of ``n_ctx`` tokens rather than N private slices, so
+    concurrent long-context requests can collectively exhaust it. llama.cpp
+    responds by purging idle slots' cached prompts and retrying with a smaller
+    batch, and treats total exhaustion as fatal. Declaring a slot count is
+    therefore a statement about the workload ("my requests are short enough to
+    share this window N ways"), which is exactly the kind of thing only the
+    person running the node knows.
+
+    Returns:
+        The declared slot count, or ``1`` when unset. An unparseable or
+        below-one value also yields ``1``, but is warned about first: an
+        operator who declared something meant it, so a rejected declaration is
+        never applied silently. An absent declaration is not a mistake and
+        stays quiet.
     """
-    context_limited_parallel = max(1, context_token_limit // KV_CONTEXT_BUDGET_TOKENS)
     raw = os.environ.get(_LLAMA_SERVER_PARALLEL_ENV, "").strip()
     if not raw:
         return _DEFAULT_LLAMA_SERVER_PARALLEL
@@ -172,15 +185,40 @@ def _llama_server_parallel(context_token_limit: int) -> int:
             f"using {_DEFAULT_LLAMA_SERVER_PARALLEL}"
         )
         return _DEFAULT_LLAMA_SERVER_PARALLEL
-    effective_parallel = min(value, context_limited_parallel)
-    if effective_parallel < value:
-        logger.warning(
-            f"{_LLAMA_SERVER_PARALLEL_ENV}={value} exceeds the safe slot count "
-            f"for a {context_token_limit}-token server context; capping to "
-            f"{effective_parallel} so every slot retains at least "
-            f"{KV_CONTEXT_BUDGET_TOKENS} tokens"
-        )
-    return effective_parallel
+    return value
+
+
+def _slot_server_args(max_concurrency: int) -> list[str]:
+    """llama-server flags that govern slot count and how slots share the window.
+
+    Returns ``--parallel N``, plus ``--kv-unified`` above one slot (#689).
+
+    The unified flag is what makes concurrency honest. llama.cpp sets a slot's
+    context to the whole ``-c`` window under a unified KV buffer and to
+    ``n_ctx / n_seq_max`` without one (``src/llama-context.cpp``: ``n_ctx_seq``),
+    and the server reads exactly that for each slot
+    (``tools/server/server-context.cpp``: ``llama_n_ctx_seq``). So without it,
+    asking for N slots silently reduces every request's real window to a
+    fraction of the ``context_token_limit`` that placement stamped and the API
+    admits against, and a long prompt truncates mid-generation instead of being
+    refused. It costs no extra memory: the cache allocates
+    ``n_ctx_seq * n_stream`` cells and ``n_stream`` collapses to 1 when unified,
+    so the same buffer is shared rather than sliced.
+
+    Passed only above one slot, so the serial default's command line is
+    byte-identical to previous releases and the validated single-slot paths
+    (draft-mtp speculation, RPC driver) are untouched.
+
+    Args:
+        max_concurrency: Slot count, as declared by the operator.
+
+    Returns:
+        The flags to splice into the llama-server command line.
+    """
+    args = ["--parallel", str(max_concurrency)]
+    if max_concurrency > 1:
+        args.append("--kv-unified")
+    return args
 
 
 def _draft_model_args(
@@ -477,12 +515,20 @@ class Runner(ServedConcurrentDispatch):
         self._serving_context_tokens = serving_n_ctx(
             self.context_token_limit, logits_all=False
         )
-        # The configured parallelism is a ceiling. Preserve the placement
-        # contract's minimum useful context in every llama-server slot instead of
-        # letting a high node-wide value silently truncate all generations.
-        self._init_concurrent_dispatch(
-            _llama_server_parallel(self._serving_context_tokens), "llama-gen"
-        )
+        # The declared slot count is honored exactly; --kv-unified (added in
+        # _spawn_server) keeps every slot's context at the full stamped window,
+        # so dispatching N generations cannot shrink what any one of them serves.
+        self._init_concurrent_dispatch(_llama_server_parallel(), "llama-gen")
+        if self._max_concurrency > 1:
+            # Loud once per runner: the operator traded a private per-slot window
+            # for a shared one, and the size of that pool did not change.
+            logger.warning(
+                f"serving up to {self._max_concurrency} concurrent generations "
+                f"from one shared {self._serving_context_tokens}-token KV pool "
+                f"({_LLAMA_SERVER_PARALLEL_ENV}); each request may use the full "
+                "window, but concurrent long-context requests contend for it and "
+                "exhausting the pool terminates the server"
+            )
         logger.info("llama-server runner created")
         self.update_status(RunnerIdle())
 
@@ -603,7 +649,10 @@ class Runner(ServedConcurrentDispatch):
                     "gguf_file": gguf_path.name,
                     "n_ctx": n_ctx,
                     "parallel": self._max_concurrency,
-                    "slot_context_tokens": n_ctx // self._max_concurrency,
+                    # Every slot sees the whole window: above one slot the
+                    # server runs with --kv-unified, and at one slot there is
+                    # nothing to divide.
+                    "slot_context_tokens": n_ctx,
                 },
             ):
                 self._spawn_server(
@@ -650,11 +699,7 @@ class Runner(ServedConcurrentDispatch):
             n_gpu_layers,
             "-c",
             str(n_ctx),
-            # Parallel slots for continuous batching. The configured value is a
-            # ceiling; _llama_server_parallel caps it against n_ctx so each slot
-            # retains the placement contract's minimum useful context.
-            "--parallel",
-            str(self._max_concurrency),
+            *_slot_server_args(self._max_concurrency),
             "--host",
             "127.0.0.1",
             "--port",

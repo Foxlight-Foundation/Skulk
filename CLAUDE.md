@@ -211,9 +211,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
   whose orchestration lives in the server app, not `libllama` / the Python binding.
   Enabled per node via `SKULK_LLAMA_SERVER_BIN`; configured per model via the card
   `served_spec_type` / `served_spec_n_max` runtime fields. The node's
-  `SKULK_LLAMA_SERVER_PARALLEL` value is a ceiling: because llama-server divides
-  its fixed context across slots, the runner caps the effective width so each
-  slot retains the 8192-token placement admission floor. Single-node; coexists
+  `SKULK_LLAMA_SERVER_PARALLEL` slot count (default 1) is honored exactly, with
+  `--kv-unified` above one slot so every slot keeps the full stamped window
+  rather than `n_ctx / N` (#689); it stays opt-in because the unified pool is
+  shared and exhausting it terminates the server. Single-node; coexists
   with `llama_cpp`; the managed-server-plus-proxy shape is shared with `vllm`.
 - **`vllm`** (`worker/runner/vllm/`): second served-backend engine; the worker
   launches an external `vllm serve` process and proxies its OpenAI HTTP API. The
