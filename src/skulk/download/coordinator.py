@@ -104,6 +104,22 @@ class DownloadCoordinator:
     def __post_init__(self) -> None:
         self.shard_downloader.on_progress(self._download_progress_callback)
 
+    def reconfigure_store(
+        self,
+        shard_downloader: ShardDownloader,
+        staging_cache_path: Path | None,
+    ) -> None:
+        """Apply synchronized model-store client wiring to future downloads.
+
+        In-flight operations retain any downloader object they have already
+        entered. New status checks and downloads use the synchronized store
+        endpoint immediately.
+        """
+
+        self.shard_downloader = shard_downloader
+        self.staging_cache_path = staging_cache_path
+        self.shard_downloader.on_progress(self._download_progress_callback)
+
     def _model_dir(self, model_id: ModelId) -> str:
         return str(SKULK_MODELS_DIR / model_id.normalize())
 

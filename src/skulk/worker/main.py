@@ -708,6 +708,7 @@ class Worker:
         self._speech_media_chunks: dict[
             CommandId, dict[int, SpeechMediaPacket]
         ] = {}
+
         self._speech_media_completed: dict[CommandId, SpeechMediaPacket] = {}
         self._speech_media_ready: set[CommandId] = set()
         self._speech_media_pending_bytes: dict[CommandId, int] = {}
@@ -750,6 +751,16 @@ class Worker:
             _RUNNER_CRASH_THRESHOLD, _RUNNER_CRASH_WINDOW_SECONDS
         )
         self._stopped: anyio.Event = anyio.Event()
+
+    def reconfigure_store(
+        self,
+        store_client: ModelStoreClient | None,
+        staging_config: StagingNodeConfig | None,
+    ) -> None:
+        """Apply synchronized model-store client and staging configuration."""
+
+        self._store_client = store_client
+        self._staging_config = staging_config
 
     def _effective_downloads(self) -> dict[NodeId, list[DownloadProgress]]:
         """Return durable outcomes overlaid with live download telemetry."""

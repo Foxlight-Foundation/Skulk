@@ -28,6 +28,7 @@ from skulk.connectivity.local_network import (
 from skulk.connectivity.tailscale import query_tailscale_status
 from skulk.download.coordinator import DownloadCoordinator
 from skulk.download.impl_shard_downloader import skulk_shard_downloader
+from skulk.download.shard_downloader import ShardDownloader
 from skulk.extensions import load_extensions
 from skulk.master.main import Master
 from skulk.routing.event_router import EventRouter
@@ -383,18 +384,18 @@ def _routable_store_advertise_host(configured: str | None, hostname_fallback: st
     return _routable_local_ipv4() or hostname_fallback
 
 
-def _configure_model_store_runtime(
+def _configure_model_store_client(
     node_id: NodeId,
     skulk_config: SkulkConfig | None,
-) -> tuple[ModelStoreClient | None, ModelStoreServer | None]:
-    """Build store client/server wiring from the current config."""
+) -> ModelStoreClient | None:
+    """Build model-store client wiring from the current config."""
 
     if (
         skulk_config is None
         or skulk_config.model_store is None
         or not skulk_config.model_store.enabled
     ):
-        return None, None
+        return None
 
     ms = skulk_config.model_store
     is_store_host = node_matches_store_host(
@@ -404,20 +405,11 @@ def _configure_model_store_runtime(
     )
 
     local_store_path: Path | None = Path(ms.store_path) if is_store_host else None
-    store_client = ModelStoreClient(
+    client = ModelStoreClient(
         store_host=ms.store_http_host or ms.store_host,
         store_port=ms.store_port,
         local_store_path=local_store_path,
     )
-
-    store_server: ModelStoreServer | None = None
-    if is_store_host:
-        model_store = ModelStore(Path(ms.store_path))
-        store_server = ModelStoreServer(model_store, port=ms.store_port)
-        logger.info(
-            f"ModelStore: this node is the store host — "
-            f"store at {ms.store_path}, server on port {ms.store_port}"
-        )
 
     staging_cfg = resolve_node_staging(ms, str(node_id))
     staging_path = Path(staging_cfg.node_cache_path)
@@ -433,7 +425,69 @@ def _configure_model_store_runtime(
             f"ModelStore: store host — added store root {store_root.expanduser()} to SKULK_MODELS_PATH (skip staging)"
         )
 
-    return store_client, store_server
+    return client
+
+
+def _configure_model_store_runtime(
+    node_id: NodeId,
+    skulk_config: SkulkConfig | None,
+) -> tuple[ModelStoreClient | None, ModelStoreServer | None]:
+    """Build store client/server wiring from the current config."""
+
+    client = _configure_model_store_client(node_id, skulk_config)
+    if (
+        client is None
+        or skulk_config is None
+        or skulk_config.model_store is None
+    ):
+        return client, None
+
+    ms = skulk_config.model_store
+    if not node_matches_store_host(
+        ms.store_host,
+        str(node_id),
+        hostname=socket.gethostname(),
+    ):
+        return client, None
+
+    model_store = ModelStore(Path(ms.store_path))
+    server = ModelStoreServer(model_store, port=ms.store_port)
+    logger.info(
+        f"ModelStore: this node is the store host — "
+        f"store at {ms.store_path}, server on port {ms.store_port}"
+    )
+    return client, server
+
+
+def _configure_store_download_runtime(
+    node_id: NodeId,
+    skulk_config: SkulkConfig | None,
+    store_client: ModelStoreClient | None,
+    *,
+    offline: bool,
+) -> tuple[ShardDownloader, Path | None]:
+    """Build the downloader and staging path for the current store config."""
+
+    base_downloader = skulk_shard_downloader(offline=offline)
+    if (
+        skulk_config is None
+        or skulk_config.model_store is None
+        or not skulk_config.model_store.enabled
+        or store_client is None
+    ):
+        return base_downloader, None
+
+    model_store_config = skulk_config.model_store
+    staging_config = resolve_node_staging(model_store_config, str(node_id))
+    return (
+        ModelStoreDownloader(
+            inner=base_downloader,
+            store_client=store_client,
+            staging_config=staging_config,
+            allow_hf_fallback=model_store_config.download.allow_hf_fallback,
+        ),
+        Path(staging_config.node_cache_path),
+    )
 
 
 @dataclass
@@ -601,34 +655,13 @@ class Node:
 
         # Create DownloadCoordinator (unless --no-downloads)
         if not args.no_downloads:
-            base_downloader = skulk_shard_downloader(offline=args.offline)
-            if (
-                skulk_config is not None
-                and skulk_config.model_store is not None
-                and skulk_config.model_store.enabled
-                and store_client is not None
-            ):
-                ms = skulk_config.model_store
-                staging_cfg = resolve_node_staging(ms, str(node_id))
-                shard_downloader = ModelStoreDownloader(
-                    inner=base_downloader,
-                    store_client=store_client,
-                    staging_config=staging_cfg,
-                    allow_hf_fallback=ms.download.allow_hf_fallback,
+            shard_downloader, coordinator_staging_path = (
+                _configure_store_download_runtime(
+                    node_id,
+                    skulk_config,
+                    store_client,
+                    offline=args.offline,
                 )
-            else:
-                shard_downloader = base_downloader
-
-            coordinator_staging_path = (
-                Path(
-                    resolve_node_staging(
-                        skulk_config.model_store, str(node_id)
-                    ).node_cache_path
-                )
-                if skulk_config is not None
-                and skulk_config.model_store is not None
-                and skulk_config.model_store.enabled
-                else None
             )
             download_coordinator = DownloadCoordinator(
                 node_id,
@@ -682,11 +715,6 @@ class Node:
             )
         else:
             api = None
-
-        if download_coordinator is not None and api is not None:
-            download_coordinator.config_applied_callback = (
-                api.refresh_config_dependent_capabilities
-            )
 
         if not args.no_worker:
             worker_store_client: ModelStoreClient | None = store_client
@@ -763,7 +791,7 @@ class Node:
             election_result_sender=er_send,
         )
 
-        return cls(
+        node = cls(
             router,
             event_router,
             download_coordinator,
@@ -782,6 +810,11 @@ class Node:
             _zenoh_on,
             zenoh_peer_sampler,
         )
+        if download_coordinator is not None:
+            download_coordinator.config_applied_callback = (
+                node._refresh_runtime_config_from_disk
+            )
+        return node
 
     async def run(self):
         async with self._tg as tg:
@@ -907,12 +940,73 @@ class Node:
                     await anyio.sleep(0.2)
         return None
 
+    def _refresh_runtime_config_from_disk(self) -> None:
+        """Rebind live config consumers after cluster config synchronization.
+
+        Model-store server ownership remains restart-gated because changing
+        which process owns the canonical HTTP listener is a service lifecycle
+        operation. Client-side consumers can and must switch immediately:
+        otherwise a fresh node keeps using the installer's loopback store
+        client after the elected store host advertises its routable address.
+        """
+
+        refreshed_config = load_skulk_config(resolve_config_path())
+        previous_model_store = (
+            self.skulk_config.model_store
+            if self.skulk_config is not None
+            else None
+        )
+        refreshed_model_store = (
+            refreshed_config.model_store
+            if refreshed_config is not None
+            else None
+        )
+        model_store_changed = previous_model_store != refreshed_model_store
+        self.skulk_config = refreshed_config
+        if not model_store_changed:
+            if self.api is not None:
+                self.api.apply_synced_config(refreshed_config, self.store_client)
+            return
+
+        refreshed_client = _configure_model_store_client(
+            self.node_id,
+            refreshed_config,
+        )
+        self.store_client = refreshed_client
+
+        if self.download_coordinator is not None:
+            downloader, staging_path = _configure_store_download_runtime(
+                self.node_id,
+                refreshed_config,
+                refreshed_client,
+                offline=self.offline,
+            )
+            self.download_coordinator.reconfigure_store(
+                downloader,
+                staging_path,
+            )
+
+        staging_config = (
+            resolve_node_staging(
+                refreshed_config.model_store,
+                str(self.node_id),
+            )
+            if refreshed_config is not None
+            and refreshed_config.model_store is not None
+            and refreshed_config.model_store.enabled
+            else None
+        )
+        if self.worker is not None:
+            self.worker.reconfigure_store(refreshed_client, staging_config)
+        if self.api is not None:
+            self.api.apply_synced_config(refreshed_config, refreshed_client)
+
     def _apply_cluster_config_yaml(self, config_yaml: str) -> None:
         """Persist cluster config locally and rebuild derived runtime wiring."""
 
         config_path = resolve_config_path()
         config_path.write_text(config_yaml)
-        self.skulk_config = load_skulk_config(config_path)
+        self._refresh_runtime_config_from_disk()
 
     async def _broadcast_config_if_store_host(self) -> None:
         """If this node is the store host, broadcast a valid config to all nodes.

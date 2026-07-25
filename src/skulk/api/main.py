@@ -1543,6 +1543,29 @@ class API:
 
         self._vision_media_ingress_provider = provider
 
+    def apply_synced_config(
+        self,
+        skulk_config: "SkulkConfig | None",
+        store_client: "ModelStoreClient | None",
+    ) -> None:
+        """Apply cluster-synchronized config to live API-owned services."""
+
+        self._skulk_config = skulk_config
+        self._store_client = store_client
+        self._model_optimizer = None
+        if (
+            skulk_config is not None
+            and skulk_config.model_store is not None
+            and skulk_config.model_store.enabled
+        ):
+            from skulk.store.model_optimizer import ModelOptimizer
+
+            self._model_optimizer = ModelOptimizer(
+                store_path=Path(skulk_config.model_store.store_path)
+            )
+        self._telemetry_config_cached_until = 0.0
+        self.refresh_config_dependent_capabilities()
+
     def _vision_media_ingress_diagnostics(self) -> VisionMediaIngressDiagnostics:
         """Combine local API admission pressure with worker ingress occupancy."""
 
