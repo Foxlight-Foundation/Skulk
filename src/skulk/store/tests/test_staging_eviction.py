@@ -12,9 +12,13 @@ from pathlib import Path
 
 from skulk.store.staging_eviction import (
     LAST_USED_MARKER_FILENAME,
+    STAGING_MIN_FREE_BYTES,
     enforce_staging_budget,
+    evict_staging_bytes,
     list_staged_models,
     model_id_from_staging_directory_name,
+    required_staging_free_bytes,
+    staged_model_size_bytes,
     touch_last_used,
 )
 
@@ -122,6 +126,58 @@ def test_budget_counts_only_candidates_not_in_use_bytes(tmp_path: Path) -> None:
 
     assert report.evicted_model_ids == []
     assert report.retained_candidate_bytes == 50
+
+
+def test_capacity_reclaims_oldest_idle_models_below_grace_budget(
+    tmp_path: Path,
+) -> None:
+    _stage_model(tmp_path, "org/newest", size_bytes=100, last_used_age_seconds=10)
+    _stage_model(tmp_path, "org/middle", size_bytes=100, last_used_age_seconds=100)
+    _stage_model(tmp_path, "org/oldest", size_bytes=100, last_used_age_seconds=1000)
+
+    report = evict_staging_bytes(tmp_path, bytes_to_reclaim=150)
+
+    assert report.evicted_model_ids == ["org/oldest", "org/middle"]
+    assert report.evicted_bytes == 200
+    assert report.retained_candidate_bytes == 100
+    assert (tmp_path / "org--newest").exists()
+
+
+def test_capacity_never_evicts_in_use_or_resumable_model(tmp_path: Path) -> None:
+    incoming = _stage_model(
+        tmp_path, "org/incoming", size_bytes=80, last_used_age_seconds=1000
+    )
+    _stage_model(tmp_path, "org/idle", size_bytes=50, last_used_age_seconds=10)
+
+    report = evict_staging_bytes(
+        tmp_path,
+        bytes_to_reclaim=100,
+        in_use_model_ids=frozenset({"org/incoming"}),
+    )
+
+    assert report.evicted_model_ids == ["org/idle"]
+    assert incoming.exists()
+    assert staged_model_size_bytes(tmp_path, "org/incoming") == 80
+
+
+def test_required_free_space_accounts_for_partial_and_reserve() -> None:
+    required = required_staging_free_bytes(
+        model_total_bytes=20 * _GIB,
+        staged_model_bytes=8 * _GIB,
+        filesystem_total_bytes=400 * _GIB,
+    )
+
+    assert required == 32 * _GIB
+
+
+def test_required_free_space_uses_minimum_reserve_on_small_disk() -> None:
+    required = required_staging_free_bytes(
+        model_total_bytes=20 * _GIB,
+        staged_model_bytes=8 * _GIB,
+        filesystem_total_bytes=100 * _GIB,
+    )
+
+    assert required == 12 * _GIB + STAGING_MIN_FREE_BYTES
 
 
 def test_store_host_direct_load_is_never_evicted(tmp_path: Path) -> None:

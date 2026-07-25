@@ -38,7 +38,10 @@ There is one eviction mechanism with three trigger points:
 1. **Instance deactivation**: when a model instance shuts down.
 2. **Node startup**, which reconciles staged copies orphaned by a crashed
    session (a node that died never got to clean up).
-3. **Operator tooling**: `POST /store/purge-staging` (see below).
+3. **Pre-download capacity**: before staging a newly launched model, Skulk
+   evicts the oldest idle copies when the remaining artifact plus filesystem
+   headroom would not fit.
+4. **Operator tooling**: `POST /store/purge-staging` (see below).
 
 A staged model becomes an **eviction candidate** when no live runner uses
 it. Candidates are kept newest-first by last use up to the
@@ -61,7 +64,10 @@ entirely by hand.
 budget. Eviction never reduces the staging cache below this much of
 recently-used, not-in-use model data. The budget exists so that node deaths,
 restarts, and repeated place/delete cycles of the same model do not re-pay
-the staging copy every time.
+the staging copy every time. It is subordinate to capacity: a new launch may
+evict idle entries inside the grace budget rather than run the filesystem out
+of space. Live models, active downloads, and resumable bytes for the incoming
+model remain protected.
 
 Tune it in the `staging` section of `skulk.yaml`, or per node via
 `node_overrides`:
@@ -77,7 +83,8 @@ model_store:
   evict-on-deactivate**: every not-in-use copy is removed the moment its
   instance stops.
 - **Disk is plentiful and you re-launch the same few models**: raise it, so
-  the next launch of a recently-used model skips the staging copy.
+  the next launch of a recently-used model skips the staging copy when free
+  space permits.
 - **Store host that loads directly from the store**: set
   `cleanup_on_deactivate: false` in that node's override (it is loading from
   `store_path`, not making a separate staged copy).

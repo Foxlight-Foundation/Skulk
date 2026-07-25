@@ -1052,8 +1052,12 @@ Staged copies are managed automatically when the model store is on: when an
 instance shuts down (and at node startup, which reconciles copies orphaned
 by a crash), not-in-use staged models are kept newest-first up to the
 `staging_keep_recent_gb` grace budget (default 40 GiB) and evicted beyond
-it. Set `cleanup_on_deactivate: false` in the staging config to keep every
-staged copy and manage cleanup manually via `POST /store/purge-staging`.
+it. Before a new model is staged, the default cleanup policy may also evict
+the oldest idle entries inside that grace budget when the model's remaining
+bytes plus filesystem headroom would not fit. Live and actively downloading
+models remain protected. Set `cleanup_on_deactivate: false` to keep every
+staged copy; launches that do not fit then fail before writing more bytes, and
+cleanup is manual via `POST /store/purge-staging`.
 
 ## Placement and Instance Management
 

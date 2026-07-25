@@ -15,6 +15,7 @@ from skulk.store.model_store import ModelStore, StoreDownloadStatus
 from skulk.store.model_store_client import (
     ModelStoreClient,
     _staged_source_revision_matches,
+    reusable_staged_model_bytes,
 )
 
 _OLD_REVISION = "0" * 40
@@ -339,6 +340,24 @@ async def test_pinned_staging_retry_preserves_partial_files(
     assert (staged / "model.gguf").read_bytes() == b"partial"
     assert (staged / ".skulk-source-revision").read_text().strip() == _NEW_REVISION
     assert not (staged / ".skulk-source-revision-staging").exists()
+
+
+def test_capacity_counts_only_bytes_reusable_for_requested_revision(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "org--model"
+    destination.mkdir()
+    (destination / "model.gguf.partial").write_bytes(b"partial")
+    (destination / ".skulk-source-revision-staging").write_text(
+        f"{_NEW_REVISION}\n"
+    )
+
+    assert (
+        reusable_staged_model_bytes(tmp_path, "org/model", _NEW_REVISION)
+        == len(b"partial") + len(_NEW_REVISION) + 1
+    )
+    assert reusable_staged_model_bytes(tmp_path, "org/model", _OLD_REVISION) == 0
+    assert reusable_staged_model_bytes(tmp_path, "org/model", None) == 0
 
 
 async def test_unpinned_staging_rejects_interrupted_pinned_cache(

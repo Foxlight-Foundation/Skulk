@@ -90,7 +90,7 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.downloads import RepoDownloadProgress
 from skulk.shared.types.worker.shards import ShardMetadata
 from skulk.store.config import DEFAULT_MODEL_STORE_PORT, StagingNodeConfig
-from skulk.store.staging_eviction import touch_last_used
+from skulk.store.staging_eviction import staged_model_size_bytes, touch_last_used
 
 if TYPE_CHECKING:
     from skulk.shared.models.model_cards import ModelCard
@@ -230,6 +230,43 @@ def _write_staged_source_revision_staging(
     temporary_marker = marker.with_suffix(f"{marker.suffix}.partial")
     temporary_marker.write_text(f"{source_revision}\n")
     temporary_marker.replace(marker)
+
+
+def reusable_staged_model_bytes(
+    staging_root: Path,
+    model_id: str,
+    source_revision: str | None,
+) -> int:
+    """Return staged bytes that a transfer for one revision can safely resume.
+
+    Args:
+        staging_root: Root directory containing node-local staged models.
+        model_id: Repository-form model identifier.
+        source_revision: Requested immutable revision, or ``None`` for mutable
+            main.
+
+    Returns:
+        Existing bytes when the completed or in-progress revision marker
+        matches the request; otherwise zero because :meth:`stage_shard` will
+        replace that directory before downloading.
+    """
+
+    staged_path = _staging_dir(str(staging_root), model_id)
+    if not staged_path.exists():
+        return 0
+    final_revision_matches = _staged_source_revision_matches(
+        staged_path, source_revision
+    )
+    resumable_staging_matches = (
+        not (staged_path / _SOURCE_REVISION_MARKER).exists()
+        and _staged_source_revision_staging_matches(
+            staged_path,
+            source_revision,
+        )
+    )
+    if not (final_revision_matches or resumable_staging_matches):
+        return 0
+    return staged_model_size_bytes(staging_root, model_id)
 
 
 def _staging_dir(node_cache_path: str, model_id: str) -> Path:

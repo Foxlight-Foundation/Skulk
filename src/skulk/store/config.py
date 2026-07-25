@@ -159,8 +159,12 @@ class StagingNodeConfig(FrozenModel):
             recreate from the LAN store, while local disk on small-disk
             nodes is the scarce resource — unbounded staging filled two
             nodes to 58-70 GB and killed one of them during the 2026-06-06
-            launch smoke. Set ``False`` to keep every staged copy and
-            manage cleanup manually via the purge endpoints.
+            launch smoke. The same toggle allows a pre-download capacity
+            preflight to evict the oldest idle entries inside that grace
+            budget rather than filling the filesystem; live and actively
+            downloading models remain protected. Set ``False`` to keep every
+            staged copy and make insufficient-capacity launches fail before
+            writing more bytes, with cleanup managed through purge endpoints.
         staging_keep_recent_gb: Most-recently-used grace budget, in GiB.
             Eviction never reduces the staging cache below this much of
             recently used, not-in-use model data — so node crashes,

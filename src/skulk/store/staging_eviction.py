@@ -1,4 +1,4 @@
-"""Staging-cache eviction: one budget mechanism, three triggers.
+"""Staging-cache eviction for lifecycle and pre-download disk pressure.
 
 The staging directory holds node-local copies of store-served models. Left
 unmanaged it grows without bound — every model ever staged survives both
@@ -16,9 +16,11 @@ The policy here is deliberately a single mechanism:
   repeated place/delete cycles of the same model should not re-pay the
   staging copy every time.
 
-The same enforcement runs at instance deactivation, at node startup (which
-is what reconciles orphans left by a crashed session), and may be invoked
-by operator tooling.
+The same budget enforcement runs at instance deactivation, at node startup
+(which reconciles orphans left by a crashed session), and may be invoked by
+operator tooling. Before a new store-backed model is staged, the worker can
+also sacrifice idle entries inside the grace budget when the filesystem would
+otherwise run out of space.
 """
 
 import contextlib
@@ -37,6 +39,12 @@ LAST_USED_MARKER_FILENAME = ".last_used"
 Directory mtimes change on content writes, not reads, so without the
 marker a model staged long ago but used constantly would look idle to the
 LRU ordering."""
+
+STAGING_MIN_FREE_BYTES = 10 * 1024**3
+"""Minimum filesystem headroom retained after a predicted staging transfer."""
+
+STAGING_MIN_FREE_FRACTION = 0.05
+"""Minimum fraction of the staging filesystem retained as free headroom."""
 
 
 class StagedModelInfo(CamelCaseModel):
@@ -96,6 +104,50 @@ def _directory_size_bytes(directory: Path) -> int:
         except OSError:
             continue
     return total
+
+
+def staged_model_size_bytes(staging_root: Path, model_id: str) -> int:
+    """Return bytes already present for one staged or partially staged model.
+
+    Args:
+        staging_root: Root directory containing node-local staged models.
+        model_id: Repository-form model identifier.
+
+    Returns:
+        Total bytes currently present below that model's staging directory.
+    """
+
+    return _directory_size_bytes(staging_root / staging_directory_name(model_id))
+
+
+def required_staging_free_bytes(
+    *,
+    model_total_bytes: int,
+    staged_model_bytes: int,
+    filesystem_total_bytes: int,
+) -> int:
+    """Calculate free bytes required before resuming a staging transfer.
+
+    The model's existing partial bytes are reusable, so only the remaining
+    artifact bytes need new capacity. The transfer also preserves the larger
+    of 10 GiB or five percent of the filesystem as operating-system headroom.
+
+    Args:
+        model_total_bytes: Expected final artifact size from the model card.
+        staged_model_bytes: Bytes already present in the resumable staging
+            directory.
+        filesystem_total_bytes: Total capacity of the staging filesystem.
+
+    Returns:
+        Required free bytes before the transfer starts or resumes.
+    """
+
+    remaining_model_bytes = max(model_total_bytes - staged_model_bytes, 0)
+    reserve_bytes = max(
+        STAGING_MIN_FREE_BYTES,
+        int(filesystem_total_bytes * STAGING_MIN_FREE_FRACTION),
+    )
+    return remaining_model_bytes + reserve_bytes
 
 
 def _last_used_epoch_seconds(directory: Path) -> float:
@@ -196,4 +248,68 @@ def enforce_staging_budget(
             f"{keep_recent_bytes / 2**30:.0f} GiB recent-use budget"
         )
     report.retained_candidate_bytes = retained_bytes
+    return report
+
+
+def evict_staging_bytes(
+    staging_root: Path,
+    bytes_to_reclaim: int,
+    in_use_model_ids: frozenset[str] = frozenset(),
+) -> StagingEvictionReport:
+    """Evict oldest idle staged models until the requested bytes are reclaimed.
+
+    This is the disk-pressure counterpart to :func:`enforce_staging_budget`.
+    It deliberately ignores the recent-use grace budget: retaining a warm
+    cache cannot take priority over completing a model the user just launched.
+    Live models, active downloads, and the incoming resumable directory remain
+    protected through ``in_use_model_ids``.
+
+    Args:
+        staging_root: Root directory containing node-local staged models.
+        bytes_to_reclaim: Minimum number of bytes to attempt to reclaim.
+        in_use_model_ids: Repository-form model IDs that must never be evicted.
+
+    Returns:
+        Eviction report naming removed models and the bytes they occupied.
+    """
+
+    report = StagingEvictionReport()
+    candidates = [
+        info
+        for info in list_staged_models(staging_root, in_use_model_ids)
+        if not info.in_use
+    ]
+    if bytes_to_reclaim <= 0:
+        report.retained_candidate_bytes = sum(
+            candidate.size_bytes for candidate in candidates
+        )
+        return report
+
+    evicted_directories: set[str] = set()
+    for info in reversed(candidates):
+        if report.evicted_bytes >= bytes_to_reclaim:
+            break
+        try:
+            shutil.rmtree(info.directory)
+        except OSError as error:
+            logger.warning(
+                f"Staging pressure eviction could not remove {info.directory}: "
+                f"{error}"
+            )
+            continue
+        report.evicted_model_ids.append(info.model_id)
+        report.evicted_bytes += info.size_bytes
+        evicted_directories.add(info.directory)
+        age_hours = (time.time() - info.last_used_epoch_seconds) / 3600
+        logger.info(
+            f"Evicted staged model {info.model_id} "
+            f"({info.size_bytes / 2**30:.1f} GiB, last used "
+            f"~{age_hours:.1f}h ago) to make room for an incoming model"
+        )
+
+    report.retained_candidate_bytes = sum(
+        candidate.size_bytes
+        for candidate in candidates
+        if candidate.directory not in evicted_directories
+    )
     return report

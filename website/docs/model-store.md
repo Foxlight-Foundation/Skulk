@@ -211,10 +211,14 @@ never evicted automatically.
 
 Idle (not-in-use) staged copies are kept newest-first up to
 `staging_keep_recent_gb` (default 40 GiB); anything beyond that budget is
-deleted. The budget is a floor for recently used data, not a disk-pressure
-threshold. Nothing watches free space and triggers eviction when the disk fills:
-the check runs at two specific moments, and only when `cleanup_on_deactivate` is
-`true`:
+deleted. The budget is a warm-cache grace target, not permission to fill the
+filesystem. With `cleanup_on_deactivate: true`, Skulk also runs a capacity
+preflight before staging a newly launched model. If the model's remaining bytes
+plus filesystem headroom do not fit, the oldest idle entries inside the grace
+budget are evicted until they do. Live models, active downloads, and the
+incoming model's resumable partial files are never candidates.
+
+The recency-budget check also runs at two lifecycle moments:
 
 - when a model instance is shut down, and
 - at node startup, which reconciles copies orphaned by a crash or kill.
@@ -223,15 +227,15 @@ the check runs at two specific moments, and only when `cleanup_on_deactivate` is
 
 | Setting | Behavior |
 |---------|----------|
-| `true` (default, recommended) | Keep the newest ~40 GiB of idle copies warm; delete older idle copies when an instance shuts down and at node startup. The in-use set is always kept and does not count against the budget. Warm and bounded. |
-| `false` | Never evict automatically. Every staged copy is kept until you reclaim space manually. Warm, but unbounded: a busy node can fill its disk. |
+| `true` (default, recommended) | Keep the newest ~40 GiB of idle copies warm; delete older idle copies at shutdown/startup, and sacrifice the oldest idle entries before a new transfer would exhaust disk. The in-use set is always protected. Warm and bounded. |
+| `false` | Never evict automatically. Every staged copy is kept until you reclaim space manually; a launch that cannot fit fails its capacity preflight before writing more bytes. |
 
 Set `staging_keep_recent_gb` to `0` for strict evict-on-deactivate (keep only
 what is in use). Raise it on nodes with large disks to keep more models warm.
 
 The in-use set rides on top of the budget rather than inside it: a node always
 keeps everything its live runners need, plus up to 40 GiB of the most recently
-used idle copies.
+used idle copies when disk capacity permits.
 
 > The store host is a special case. When a node points `node_cache_path` at the
 > same directory as `store_path` (so it loads directly from the store without a
@@ -316,17 +320,19 @@ Where a node stages files before loading them.
 
 Controls automatic eviction of idle staged copies. Default `true` (recommended):
 when a model is shut down, or at node startup, idle staged copies beyond the
-`staging_keep_recent_gb` budget are deleted, keeping the cache warm but bounded.
+`staging_keep_recent_gb` budget are deleted; a pre-download capacity check may
+also evict idle copies inside the grace budget rather than fill the filesystem.
 Set to `false` to keep every staged copy and reclaim disk only via
-`POST /store/purge-staging`. See
+`POST /store/purge-staging`; a launch that cannot fit then fails before writing
+more bytes. See
 [Staging Cache and Disk Management](#staging-cache-and-disk-management).
 
 ### `model_store.staging.staging_keep_recent_gb`
 
 Recency budget in GiB for idle staged copies (default `40`). Eviction keeps the
 newest idle copies up to this size and deletes the rest; `0` evicts everything
-not in use, and larger values keep more models warm on big-disk nodes. Applies
-only when `cleanup_on_deactivate` is `true`.
+not in use, and larger values keep more models warm on big-disk nodes when
+capacity permits. Applies only when `cleanup_on_deactivate` is `true`.
 
 ## Typical Flow
 
@@ -435,10 +441,11 @@ without bound (reclaim disk with `POST /store/purge-staging`).
 
 ### Staged files are not being cleaned up
 
-With `cleanup_on_deactivate: false`, nothing is evicted automatically, so
-staging keeps growing. Either leave it at the `true` default (which keeps the
-newest ~40 GiB warm and evicts the rest on deactivation/startup) or reclaim
-space on demand with `POST /store/purge-staging`. Note that the store host never
+With `cleanup_on_deactivate: false`, nothing is evicted automatically; an
+undersized new launch fails its capacity preflight before writing more bytes.
+Either leave cleanup at the `true` default (which keeps the newest ~40 GiB warm,
+evicts the rest on deactivation/startup, and reclaims idle cache under launch
+pressure) or reclaim space on demand with `POST /store/purge-staging`. Note that the store host never
 auto-evicts its own canonical copies when `node_cache_path` equals `store_path`.
 
 ## Good Defaults for Most Clusters

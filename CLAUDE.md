@@ -327,6 +327,12 @@ detection) falls back to DIRECT Hugging Face download on the node when
 `allow_hf_fallback` is on, preserving revision/GGUF pinning. The expected
 shape for store-unreachable remote members; a loud log cue elsewhere.
 
+Before a store-backed transfer, worker staging performs a capacity preflight:
+it reuses resumable partial bytes, preserves filesystem headroom, and evicts
+only idle cache entries when the incoming artifact otherwise would not fit.
+Live runners, active downloads, and the incoming model remain protected; with
+automatic cleanup disabled, insufficient capacity fails before writing.
+
 Model cards may pin qualified Hugging Face artifacts with `source_revision`, a
 full commit hash. Metadata probes, direct downloads, model-store registry
 entries, and worker staging must preserve that revision. Never collapse a

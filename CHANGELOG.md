@@ -25,6 +25,10 @@ This project records release notes here and mirrors public-facing notes in
 - Persisted each node's libp2p identity across ordinary restarts while binding
   it to a hashed physical-machine owner, so restarts no longer leave ghost
   topology identities and cloned machine backups cannot create duplicate peers.
+- Added a staging-capacity preflight that reclaims the oldest idle model copies
+  inside the warm-cache grace budget before a new model transfer would fill the
+  filesystem. Active and resumable model data remains protected, and nodes that
+  still cannot fit the model now fail before writing more bytes.
 
 - Fixed the documented launchd/systemd install step failing immediately after a
   successful one-command install because `uv` lived under `~/.local/bin` but

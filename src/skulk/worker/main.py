@@ -1,7 +1,9 @@
 import base64
+import errno
 import hashlib
 import io
 import ipaddress
+import shutil
 import sys
 import time
 from collections import defaultdict, deque
@@ -101,6 +103,7 @@ from skulk.shared.types.topology import Connection, SocketConnection
 from skulk.shared.types.worker.downloads import (
     DownloadAttemptId,
     DownloadCompleted,
+    DownloadFailed,
     DownloadOngoing,
     DownloadPending,
     DownloadProgress,
@@ -109,10 +112,15 @@ from skulk.shared.types.worker.instances import InstanceId, LlamaRpcInstance
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerStatus
 from skulk.shared.types.worker.shards import ShardMetadata, TensorShardMetadata
 from skulk.store.config import StagingNodeConfig
-from skulk.store.model_store_client import ModelStoreClient
+from skulk.store.model_store_client import (
+    ModelStoreClient,
+    reusable_staged_model_bytes,
+)
 from skulk.store.staging_eviction import (
     StagingEvictionReport,
     enforce_staging_budget,
+    evict_staging_bytes,
+    required_staging_free_bytes,
     staging_directory_name,
     touch_last_used,
 )
@@ -2062,6 +2070,32 @@ class Worker:
                             )
                         )
                     else:
+                        capacity_error = await self._prepare_staging_capacity(shard)
+                        if capacity_error is not None:
+                            assert self._staging_config is not None
+                            logger.error(capacity_error)
+                            await self.event_sender.send(
+                                NodeDownloadProgress(
+                                    download_progress=DownloadFailed(
+                                        shard_metadata=shard,
+                                        node_id=self.node_id,
+                                        error_message=capacity_error,
+                                        model_directory=str(
+                                            Path(
+                                                self._staging_config.node_cache_path
+                                            ).expanduser()
+                                            / staging_directory_name(str(model_id))
+                                        ),
+                                    )
+                                )
+                            )
+                            await self.event_sender.send(
+                                TaskStatusUpdated(
+                                    task_id=task.task_id,
+                                    task_status=TaskStatus.Failed,
+                                )
+                            )
+                            continue
                         await self.download_command_sender.send(
                             ForwarderDownloadCommand(
                                 origin=self._system_id,
@@ -2617,6 +2651,87 @@ class Worker:
             if isinstance(progress, DownloadOngoing):
                 _add_card(progress.shard_metadata.model_card)
         return frozenset(in_use)
+
+    async def _prepare_staging_capacity(
+        self, shard: ShardMetadata
+    ) -> str | None:
+        """Reclaim idle cache entries before a store-backed staging transfer.
+
+        The recency budget keeps a warm cache, but it cannot be a promise to
+        preserve idle bytes while a newly launched model exhausts the same
+        filesystem. This preflight protects live and actively downloading
+        models, reuses the incoming model's partial bytes, and sacrifices the
+        oldest idle entries only when predicted free space is insufficient.
+
+        Args:
+            shard: Incoming shard whose model artifact will be staged locally.
+
+        Returns:
+            ``None`` when the transfer has enough predicted capacity, otherwise
+            an operator-facing error string. The caller publishes the latter as
+            ``DownloadFailed`` without writing more model bytes.
+        """
+
+        if self._staging_config is None or not self._staging_config.enabled:
+            return None
+        staging_root = Path(self._staging_config.node_cache_path).expanduser()
+        if self._store_client is not None:
+            local_store_path = self._store_client.local_store_path
+            if (
+                local_store_path is not None
+                and local_store_path.expanduser().resolve() == staging_root.resolve()
+            ):
+                return None
+
+        await to_thread.run_sync(staging_root.mkdir, 0o755, True, True)
+        model_id = str(shard.model_card.model_id)
+        models_in_use = self._models_in_use() | frozenset({model_id})
+
+        def _capacity() -> tuple[int, int]:
+            usage = shutil.disk_usage(staging_root)
+            required_free = required_staging_free_bytes(
+                model_total_bytes=shard.model_card.storage_size.in_bytes,
+                staged_model_bytes=reusable_staged_model_bytes(
+                    staging_root,
+                    model_id,
+                    shard.model_card.source_revision,
+                ),
+                filesystem_total_bytes=usage.total,
+            )
+            return required_free, usage.free
+
+        required_free, available_free = await to_thread.run_sync(_capacity)
+        report = StagingEvictionReport()
+        if (
+            available_free < required_free
+            and self._staging_config.cleanup_on_deactivate
+        ):
+            report = await to_thread.run_sync(
+                evict_staging_bytes,
+                staging_root,
+                required_free - available_free,
+                models_in_use,
+            )
+            await self._reset_download_state_for_evicted(report, shard)
+            required_free, available_free = await to_thread.run_sync(_capacity)
+
+        if available_free >= required_free:
+            if report.evicted_model_ids:
+                logger.info(
+                    "Worker: staging capacity preflight reclaimed "
+                    f"{report.evicted_bytes / 2**30:.1f} GiB from "
+                    f"{len(report.evicted_model_ids)} idle model(s) before "
+                    f"staging {model_id}"
+                )
+            return None
+
+        return (
+            f"[Errno {errno.ENOSPC}] Insufficient staging capacity for {model_id}: "
+            f"requires {required_free / 2**30:.1f} GiB free for remaining "
+            f"artifact bytes and filesystem headroom, but "
+            f"{available_free / 2**30:.1f} GiB is available after reclaiming "
+            f"{report.evicted_bytes / 2**30:.1f} GiB of idle staging data"
+        )
 
     async def _evict_staged_model(self, model_id: ModelId) -> None:
         """Remove this node's staged copy of a store-deleted model (#427).
