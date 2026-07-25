@@ -416,6 +416,8 @@ class AudioCardConfig(CamelCaseModel):
     """Speech serving kind: ``tts`` for text-to-speech or ``stt`` for speech-to-text."""
     default_response_format: AudioResponseFormat | None = None
     """Default encoded audio response format for TTS requests."""
+    default_temperature: float | None = Field(default=None, ge=0)
+    """Sampling temperature used when a TTS request omits one."""
     response_formats: tuple[AudioResponseFormat, ...] = ()
     """Encoded audio formats this model can produce for TTS requests."""
     supports_streaming: bool | None = None
@@ -541,6 +543,11 @@ class AudioCardConfig(CamelCaseModel):
             and self.kind != AudioCardKind.SpeechToText
         ):
             raise ValueError("supports_translation requires kind to be stt")
+        if (
+            self.default_temperature is not None
+            and self.kind != AudioCardKind.TextToSpeech
+        ):
+            raise ValueError("default_temperature requires kind to be tts")
         if self.voices and self.kind != AudioCardKind.TextToSpeech:
             raise ValueError("voices requires kind to be tts")
         if self.voices and self.supports_voice_listing is not True:

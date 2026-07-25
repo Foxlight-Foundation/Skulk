@@ -183,6 +183,17 @@ def test_audio_card_config_requires_stt_kind_for_translation() -> None:
         )
 
 
+def test_audio_card_config_requires_tts_kind_for_default_temperature() -> None:
+    with pytest.raises(ValidationError, match="default_temperature"):
+        AudioCardConfig(default_temperature=0.0)
+
+    with pytest.raises(ValidationError, match="default_temperature"):
+        AudioCardConfig(
+            kind=AudioCardKind.SpeechToText,
+            default_temperature=0.0,
+        )
+
+
 def test_audio_card_config_validates_static_voice_catalog() -> None:
     config = AudioCardConfig(
         kind=AudioCardKind.TextToSpeech,

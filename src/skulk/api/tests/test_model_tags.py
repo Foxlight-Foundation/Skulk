@@ -112,6 +112,7 @@ def test_model_list_entry_exposes_audio_capabilities() -> None:
         audio=AudioCardConfig(
             kind=AudioCardKind.TextToSpeech,
             default_response_format=AudioResponseFormat.Mp3,
+            default_temperature=0.0,
             response_formats=(AudioResponseFormat.Mp3, AudioResponseFormat.Wav),
             supports_streaming=True,
             supports_realtime=False,
@@ -128,6 +129,7 @@ def test_model_list_entry_exposes_audio_capabilities() -> None:
     assert entry.audio is not None
     assert entry.audio.kind == "tts"
     assert entry.audio.default_response_format == "mp3"
+    assert entry.audio.default_temperature == 0.0
     assert entry.audio.response_formats == ["mp3", "wav"]
     assert entry.audio.supports_streaming is True
     assert entry.audio.supports_voice_listing is True

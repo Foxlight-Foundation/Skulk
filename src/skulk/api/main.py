@@ -10669,12 +10669,12 @@ class API:
             reference_audio_sha256=reference_audio_sha256,
         )
 
-    async def _apply_default_speech_voice(
+    async def _apply_speech_model_defaults(
         self,
         request: AudioSpeechRequest,
         model_id: ModelId,
     ) -> AudioSpeechRequest:
-        """Validate explicit voices and apply the card default when omitted."""
+        """Validate explicit speech options and apply omitted card defaults."""
 
         matching_instances = tuple(
             instance
@@ -10698,6 +10698,7 @@ class API:
             card = await self._get_running_model_card(model_id)
         if card.audio is None:
             return request
+        updates: dict[str, object] = {}
         if request.voice is not None:
             if card.audio.voices and request.voice not in card.audio.voices:
                 raise HTTPException(
@@ -10707,10 +10708,16 @@ class API:
                         f"{model_id}; use GET /v1/audio/voices"
                     ),
                 )
+        elif card.audio.default_voice is not None:
+            updates["voice"] = card.audio.default_voice
+        if (
+            request.temperature is None
+            and card.audio.default_temperature is not None
+        ):
+            updates["temperature"] = card.audio.default_temperature
+        if not updates:
             return request
-        if card.audio.default_voice is None:
-            return request
-        return request.model_copy(update={"voice": card.audio.default_voice})
+        return request.model_copy(update=updates)
 
     async def _start_speech_synthesis(
         self,
@@ -10821,7 +10828,7 @@ class API:
             request.response_format,
             stream=True,
         )
-        request = await self._apply_default_speech_voice(request, model_id)
+        request = await self._apply_speech_model_defaults(request, model_id)
         if response_format != AudioResponseFormat.Mp3:
             raise HTTPException(
                 status_code=400,
@@ -11635,7 +11642,7 @@ class API:
             AudioResponseFormat.Mp3,
             stream=True,
         )
-        request = await self._apply_default_speech_voice(
+        request = await self._apply_speech_model_defaults(
             AudioSpeechRequest(
                 model=str(model_id),
                 input=text,
@@ -11675,7 +11682,7 @@ class API:
             AudioResponseFormat.Mp3,
             stream=True,
         )
-        await self._apply_default_speech_voice(
+        await self._apply_speech_model_defaults(
             AudioSpeechRequest(
                 model=str(model_id),
                 input="realtime participant readiness probe",
@@ -11853,7 +11860,7 @@ class API:
         model_id, response_format = await self._validate_speech_synthesis_model(
             ModelId(request.model), requested_response_format, stream=request.stream
         )
-        request = await self._apply_default_speech_voice(request, model_id)
+        request = await self._apply_speech_model_defaults(request, model_id)
         if request.stream and response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
             supported = ", ".join(
                 audio_format.value

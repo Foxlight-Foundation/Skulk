@@ -143,6 +143,9 @@ names. Mounted `supports_speech_synthesis` models serve `/v1/audio/speech`.
 Cards with a fixed speaker inventory may declare `default_voice`; Skulk applies
 it only when the caller omits `voice`, and schema validation requires it to be
 one of the card's `voices`.
+TTS cards may similarly declare a live-qualified `default_temperature`; Skulk
+applies it only when the caller omits `temperature`, so an explicit sampling
+control always wins over card metadata.
 When the card declares `audio.supports_streaming = true`, clients can pass
 `stream=true` for stable chunked HTTP MP3 output; bundled cards keep that flag
 off until a real MLX model has passed streaming validation. Mounted

@@ -181,6 +181,10 @@ Declares speech serving metadata for TTS and STT models:
   - `tts` for text-to-speech or `stt` for speech-to-text
 - `default_response_format`
   - default encoded audio format for TTS, such as `mp3`
+- `default_temperature`
+  - sampling temperature applied when a TTS request omits `temperature`; use
+    this only for a live-qualified model default, and explicit requests still
+    take precedence
 - `response_formats`
   - encoded audio formats the model can produce, such as `mp3`, `wav`, `flac`, `ogg`, or `opus`
 - `supports_streaming`
@@ -387,6 +391,7 @@ backend_preference = ["mlx_audio-metal", "mlx_audio"]
 [audio]
 kind = "tts"
 default_response_format = "mp3"
+default_temperature = 0.0
 response_formats = ["mp3", "wav"]
 # Set true only after the Skulk runtime validates this model/backend streaming path.
 supports_streaming = true

@@ -604,7 +604,7 @@ Request fields:
 | `stream` | boolean | Optional. When `true`, Skulk returns a chunked HTTP response and yields MP3 or raw PCM bytes as the speech runner emits them; accepted only when the mounted TTS card explicitly declares `audio.supports_streaming = true` and every routable instance of the requested model has a ready runner |
 | `streaming_interval` | number or null | Optional positive model-specific streaming cadence hint, accepted only with `stream=true` |
 | `instruct`, `lang_code` | string or null | Optional model-specific generation hints |
-| `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number or integer | Optional model-specific sampling controls |
+| `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number or integer | Optional model-specific sampling controls. When `temperature` is omitted, Skulk applies the mounted card's `audio.default_temperature` when declared; an explicit value always wins. |
 | `reference_audio` | multipart file or null | Optional request-scoped voice-conditioning audio. Accepted only as a multipart upload for a mounted card declaring `audio.supports_reference_audio = true`; server-local paths are rejected |
 | `reference_text` | string or null | Optional transcript of `reference_audio`; accepted only when the multipart upload is present |
 
@@ -1272,7 +1272,7 @@ Important fields:
 | `tags` | array | UI-friendly derived labels such as `vision`, `thinking`, `embedding`, `tts`, `stt`, `tensor`, and `optiq` |
 | `supports_tensor` | boolean | Whether tensor parallel launch is supported |
 | `base_model` | string | Base family or upstream source model when known |
-| `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
+| `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, `default_temperature`, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
 | `resolved_capabilities.supports_speech_synthesis` | boolean | Whether clients should treat the model as a text-to-speech model |
 | `resolved_capabilities.supports_transcription` | boolean | Whether clients should treat the model as a speech-to-text model |
 | `resolved_capabilities.supports_speech_translation` | boolean | Whether clients should treat the model as supporting speech translation |

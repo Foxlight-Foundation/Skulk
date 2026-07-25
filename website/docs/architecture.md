@@ -506,7 +506,10 @@ validated default voice, and ordered `audio.voice_catalog` display/language
 metadata. The Skulk `GET /v1/audio/voices` extension exposes that model truth;
 the dashboard can choose the first preferred-language match and pins it across
 all sentence-sized requests in one response. The API applies the card default
-only when callers omit `voice`.
+only when callers omit `voice`. A TTS card can also declare a qualified
+`audio.default_temperature`; the API applies it only when the request omits
+`temperature`, preventing an upstream library default from silently replacing
+the model's shipped, validated behavior.
 
 Cards declaring reference-audio support accept a bounded multipart upload on
 the same route. The API pins the command to one ready instance and sends the

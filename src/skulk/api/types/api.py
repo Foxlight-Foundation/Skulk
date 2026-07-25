@@ -341,6 +341,12 @@ class AudioCapabilitySection(BaseModel):
         default=None,
         description="Default encoded audio response format for TTS requests.",
     )
+    default_temperature: float | None = Field(
+        default=None,
+        description=(
+            "Sampling temperature applied when a TTS request omits an explicit value."
+        ),
+    )
     response_formats: list[str] = Field(
         default_factory=list,
         description="Encoded audio response formats declared for TTS requests.",
@@ -393,6 +399,7 @@ class AudioCapabilitySection(BaseModel):
                 if config.default_response_format is not None
                 else None
             ),
+            default_temperature=config.default_temperature,
             response_formats=[item.value for item in config.response_formats],
             supports_streaming=config.supports_streaming,
             supports_realtime=config.supports_realtime,

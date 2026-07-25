@@ -244,3 +244,17 @@ def test_qwen_custom_voice_card_exposes_upstream_speaker_inventory() -> None:
     assert tuple(voice.id for voice in card.audio.voice_catalog) == card.audio.voices
     assert card.audio.voice_catalog[3].name == "Ryan"
     assert card.audio.voice_catalog[3].preferred_languages == ("en",)
+
+
+def test_fish_tts_card_uses_qualified_greedy_default() -> None:
+    """Fresh Fish runners must not inherit the flaky upstream sampling default."""
+
+    path = (
+        Path(RESOURCES_DIR)
+        / "speech_model_cards"
+        / "mlx-community--fish-audio-s2-pro-8bit.toml"
+    )
+    card = _load(path)
+
+    assert card.audio is not None
+    assert card.audio.default_temperature == 0.0

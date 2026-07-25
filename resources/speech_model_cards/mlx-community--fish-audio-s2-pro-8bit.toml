@@ -12,6 +12,10 @@ context_length = 32768
 [audio]
 kind = "tts"
 default_response_format = "wav"
+# The upstream stochastic 0.7 default occasionally degenerates into non-speech
+# after a fresh runner start. Greedy decoding passed the semantic qualification
+# set and makes omitted API controls deterministic.
+default_temperature = 0.0
 response_formats = ["wav"]
 supports_streaming = false
 supports_realtime = false

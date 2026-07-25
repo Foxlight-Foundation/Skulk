@@ -679,9 +679,61 @@ async def test_audio_speech_applies_card_default_voice(
     api.state = _state_with_running_card(card)
     request = AudioSpeechRequest(model=str(card.model_id), input="hello")
 
-    resolved = await api._apply_default_speech_voice(request, card.model_id)
+    resolved = await api._apply_speech_model_defaults(request, card.model_id)
 
     assert resolved.voice == "ryan"
+
+
+@pytest.mark.anyio
+async def test_audio_speech_applies_card_default_temperature_when_omitted() -> None:
+    """A qualified card default replaces an unsafe upstream sampler default."""
+
+    api = _build_api()
+    card = _tts_card()
+    assert card.audio is not None
+    card = card.model_copy(
+        update={
+            "audio": card.audio.model_copy(
+                update={"default_temperature": 0.0}
+            )
+        }
+    )
+    api.state = _state_with_running_card(card)
+
+    resolved = await api._apply_speech_model_defaults(
+        AudioSpeechRequest(model=str(card.model_id), input="hello"),
+        card.model_id,
+    )
+
+    assert resolved.temperature == 0.0
+
+
+@pytest.mark.anyio
+async def test_audio_speech_preserves_explicit_temperature_over_card_default() -> None:
+    """Caller sampling controls take precedence over the mounted model card."""
+
+    api = _build_api()
+    card = _tts_card()
+    assert card.audio is not None
+    card = card.model_copy(
+        update={
+            "audio": card.audio.model_copy(
+                update={"default_temperature": 0.0}
+            )
+        }
+    )
+    api.state = _state_with_running_card(card)
+
+    resolved = await api._apply_speech_model_defaults(
+        AudioSpeechRequest(
+            model=str(card.model_id),
+            input="hello",
+            temperature=0.4,
+        ),
+        card.model_id,
+    )
+
+    assert resolved.temperature == 0.4
 
 
 @pytest.mark.anyio
@@ -716,7 +768,7 @@ async def test_audio_speech_default_voice_uses_model_card_fallback(
         "_model_card_for_instance",
         staticmethod(missing_card),
     )
-    resolved = await api._apply_default_speech_voice(
+    resolved = await api._apply_speech_model_defaults(
         AudioSpeechRequest(model=str(card.model_id), input="hello"),
         card.model_id,
     )
@@ -737,7 +789,7 @@ async def test_audio_speech_rejects_unknown_explicit_catalog_voice() -> None:
     api.state = _state_with_running_card(card)
 
     with pytest.raises(HTTPException) as exc_info:
-        await api._apply_default_speech_voice(
+        await api._apply_speech_model_defaults(
             AudioSpeechRequest(
                 model=str(card.model_id),
                 input="hello",
