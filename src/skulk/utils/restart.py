@@ -12,10 +12,13 @@ import sys
 import threading
 from collections.abc import Iterable
 
+import psutil
 from loguru import logger
 
 _restart_scheduled = False
 _restart_lock = threading.Lock()
+_CHILD_TERMINATION_TIMEOUT_SECONDS = 5.0
+_CHILD_KILL_TIMEOUT_SECONDS = 1.0
 
 
 def _iter_open_file_descriptors() -> Iterable[int]:
@@ -46,6 +49,40 @@ def _mark_open_file_descriptors_close_on_exec() -> None:
             continue
 
 
+def _terminate_child_processes() -> None:
+    """Terminate and reap descendants before replacing the Skulk process.
+
+    ``exec`` replaces only the current process. Runner, resource-tracker, and
+    telemetry children otherwise survive under the replacement process and can
+    retain model mappings or GPU allocations that no longer exist in Skulk
+    state.
+    """
+
+    try:
+        children = psutil.Process().children(recursive=True)
+    except psutil.Error as exc:
+        logger.warning(f"Could not enumerate child processes before restart: {exc}")
+        return
+
+    for child in children:
+        try:
+            child.terminate()
+        except psutil.Error:
+            continue
+
+    _, survivors = psutil.wait_procs(
+        children,
+        timeout=_CHILD_TERMINATION_TIMEOUT_SECONDS,
+    )
+    for child in survivors:
+        try:
+            child.kill()
+        except psutil.Error:
+            continue
+    if survivors:
+        psutil.wait_procs(survivors, timeout=_CHILD_KILL_TIMEOUT_SECONDS)
+
+
 def schedule_restart(delay: float = 1.0) -> bool:
     """Schedule an in-place process restart after *delay* seconds.
 
@@ -67,6 +104,7 @@ def schedule_restart(delay: float = 1.0) -> bool:
             # Use `python -m skulk` so restart works even when invoked via the
             # `skulk` console script (where sys.argv[0] is just "skulk", not a
             # valid Python file path). Preserve all original arguments.
+            _terminate_child_processes()
             _mark_open_file_descriptors_close_on_exec()
             os.execv(sys.executable, [sys.executable, "-m", "skulk", *sys.argv[1:]])
         except Exception as exc:

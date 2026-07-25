@@ -17,6 +17,7 @@ def test_schedule_restart_calls_execv() -> None:
     _reset_restart_state()
 
     with (
+        patch.object(restart, "_terminate_child_processes") as mock_terminate,
         patch.object(restart, "_mark_open_file_descriptors_close_on_exec") as mock_close,
         patch.object(restart.os, "execv") as mock_execv,
         patch.object(restart.threading, "Thread") as mock_thread_cls,
@@ -33,6 +34,7 @@ def test_schedule_restart_calls_execv() -> None:
         with patch("time.sleep"):
             target_fn()
 
+        mock_terminate.assert_called_once()
         mock_close.assert_called_once()
         mock_execv.assert_called_once()
 
@@ -42,6 +44,7 @@ def test_schedule_restart_uses_python_m_skulk() -> None:
     _reset_restart_state()
 
     with (
+        patch.object(restart, "_terminate_child_processes"),
         patch.object(restart.os, "execv") as mock_execv,
         patch.object(restart.sys, "executable", "/usr/bin/python3"),
         patch.object(restart.sys, "argv", ["skulk", "--port", "8080"]),
@@ -80,6 +83,7 @@ def test_schedule_restart_recovers_on_execv_failure() -> None:
     _reset_restart_state()
 
     with (
+        patch.object(restart, "_terminate_child_processes"),
         patch.object(
             restart.os, "execv", side_effect=OSError("exec failed")
         ) as mock_execv,
@@ -125,3 +129,28 @@ def test_mark_open_file_descriptors_close_on_exec_skips_standard_fds() -> None:
         restart._mark_open_file_descriptors_close_on_exec()
 
     assert calls == [(3, False), (7, False)]
+
+
+def test_terminate_child_processes_reaps_and_kills_survivors() -> None:
+    """Restart preparation must not leave old runner descendants alive."""
+
+    exited = MagicMock()
+    survivor = MagicMock()
+    parent = MagicMock()
+    parent.children.return_value = [exited, survivor]
+
+    with (
+        patch.object(restart.psutil, "Process", return_value=parent),
+        patch.object(
+            restart.psutil,
+            "wait_procs",
+            side_effect=[([exited], [survivor]), ([survivor], [])],
+        ) as wait_procs,
+    ):
+        restart._terminate_child_processes()
+
+    parent.children.assert_called_once_with(recursive=True)
+    exited.terminate.assert_called_once()
+    survivor.terminate.assert_called_once()
+    survivor.kill.assert_called_once()
+    assert wait_procs.call_count == 2

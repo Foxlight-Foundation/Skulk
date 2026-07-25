@@ -20,6 +20,8 @@ This project records release notes here and mirrors public-facing notes in
   macOS install cannot create a literal `${HOME}` directory in its checkout.
 - Corrected the bundled GLM-4.7-Flash 4-bit storage estimate to the measured
   store artifact size so valid three-node Apple placements are not rejected.
+- Made in-place admin restarts terminate and reap runner, resource-tracker, and
+  telemetry descendants before replacing the Skulk process.
 
 - Fixed the documented launchd/systemd install step failing immediately after a
   successful one-command install because `uv` lived under `~/.local/bin` but
