@@ -60,6 +60,60 @@ from skulk.worker.runner.bootstrap import logger
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
 
 
+def resolve_request_vision(
+    *,
+    vision_processor: VisionProcessor | None,
+    task_params: TextGenerationTaskParams,
+    tokenizer: TokenizerWrapper,
+    model: Model,
+    task_id: TaskId,
+) -> VisionResult | None:
+    """Turn a request's images into prompt input, or refuse to answer it.
+
+    Returns ``None`` only for a request that carried no images, which is the
+    ordinary text path. A request that did carry images either comes back with
+    them encoded or raises ``VisionPreprocessingError``.
+
+    Everything here used to be a warning and a fallthrough to text-only. That
+    was the most misleading result the engine could produce: the chat template
+    had already expanded the image placeholders, so the model received vision
+    markers with no embeddings behind them, and it answered anyway by inventing
+    the picture. A single missing wheel degraded every vision model on the node
+    that way while the API kept reporting success.
+    """
+
+    requested_image_count = len(task_params.images or ())
+
+    if vision_processor is None:
+        if requested_image_count:
+            # Images for a model whose card declares no [vision] section, so no
+            # processor was ever built. Dropping them is the same fiction
+            # reached by a different route.
+            raise VisionPreprocessingError(
+                f"model {task_params.model} received {requested_image_count} "
+                "image(s) but has no vision configuration, so the images "
+                "cannot be given to it"
+            )
+        return None
+
+    try:
+        return prepare_vision(
+            images=task_params.images,
+            chat_template_messages=task_params.chat_template_messages,
+            vision_processor=vision_processor,
+            tokenizer=tokenizer,
+            model=model,
+            task_id=task_id,
+        )
+    except VisionPreprocessingError:
+        raise
+    except Exception as error:
+        raise VisionPreprocessingError(
+            f"failed to process {requested_image_count} image(s) for model "
+            f"{task_params.model}: {error}"
+        ) from error
+
+
 def _stop_sequences(task_params: TextGenerationTaskParams) -> list[str]:
     if task_params.stop is None:
         return []
@@ -151,50 +205,15 @@ class SkulkBatchGenerator:
             all_prompt_tokens, self.tokenizer
         )
 
-        vision: VisionResult | None = None
         media_regions: list[MediaRegion] = []
 
-        requested_image_count = len(task_params.images or ())
-
-        if self.vision_processor is not None:
-            try:
-                with trace(
-                    "native_vision_preprocess",
-                    trace_rank,
-                    "vision",
-                    task_id=task_id,
-                ):
-                    vision = prepare_vision(
-                        images=task_params.images,
-                        chat_template_messages=task_params.chat_template_messages,
-                        vision_processor=self.vision_processor,
-                        tokenizer=self.tokenizer,
-                        model=self.model,
-                        task_id=task_id,
-                    )
-            except VisionPreprocessingError:
-                raise
-            except Exception as error:
-                # This arm used to log a warning and continue text-only, which
-                # produced the most misleading result the engine can return:
-                # the chat template had already expanded the image
-                # placeholders, so the model was handed vision markers with no
-                # embeddings behind them and answered anyway, inventing the
-                # picture it was asked about. A missing torchvision wheel
-                # degraded every VLM on the node this way while the API went on
-                # reporting success.
-                raise VisionPreprocessingError(
-                    f"failed to process {requested_image_count} image(s) for "
-                    f"model {task_params.model}: {error}"
-                ) from error
-        elif requested_image_count:
-            # Images arrived for a model whose card declares no [vision]
-            # section, so no processor was ever built. Dropping them here is
-            # the same fiction reached by a different route.
-            raise VisionPreprocessingError(
-                f"model {task_params.model} received {requested_image_count} "
-                "image(s) but has no vision configuration, so the images "
-                "cannot be given to it"
+        with trace("native_vision_preprocess", trace_rank, "vision", task_id=task_id):
+            vision = resolve_request_vision(
+                vision_processor=self.vision_processor,
+                task_params=task_params,
+                tokenizer=self.tokenizer,
+                model=self.model,
+                task_id=task_id,
             )
 
         if vision is not None:

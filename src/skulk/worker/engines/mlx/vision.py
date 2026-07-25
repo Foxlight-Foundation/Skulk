@@ -23,6 +23,7 @@ import io
 import json
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Protocol, cast, final
@@ -83,10 +84,19 @@ MxArrayInput = (
 
 
 def _object_dict(value: object) -> JsonDict:
-    """Return a string-keyed object mapping for dynamic config data."""
-    if isinstance(value, dict):
+    """Return a string-keyed object mapping for dynamic config or processor data.
+
+    Accepts any mapping rather than only ``dict``. Hugging Face image
+    processors return ``BatchFeature``, which derives from ``UserDict`` and so
+    fails an ``isinstance(value, dict)`` test despite behaving like a mapping.
+    Narrowing to ``dict`` turned every processor result into an empty mapping,
+    and the caller's ``raw_dict["pixel_values"]`` then raised ``KeyError`` on
+    every image the model was sent.
+    """
+    if isinstance(value, Mapping):
         return {
-            str(key): item for key, item in cast(dict[object, object], value).items()
+            str(key): item
+            for key, item in cast(Mapping[object, object], value).items()
         }
     return {}
 
