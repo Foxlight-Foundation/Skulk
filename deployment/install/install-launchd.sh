@@ -56,6 +56,18 @@ if [[ "$OSTYPE" != darwin* ]]; then
     exit 1
 fi
 
+# The one-command installer places uv under ~/.local/bin without modifying its
+# parent shell. A user who follows the printed service command immediately
+# therefore has the binary installed but not yet visible on PATH. Resolve the
+# same user-space locations as the runtime wrapper before rejecting the setup.
+for candidate_dir in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+    if [[ -d "$candidate_dir" && ":$PATH:" != *":$candidate_dir:"* ]]; then
+        PATH="$candidate_dir:$PATH"
+    fi
+done
+export PATH
+unset candidate_dir
+
 uid="$(id -u)"
 
 bootout_if_loaded() {

@@ -7,6 +7,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+- Fixed the documented launchd/systemd install step failing immediately after a
+  successful one-command install because `uv` lived under `~/.local/bin` but
+  the parent shell had not reloaded its PATH. Both service installers now
+  resolve the same user-space tool locations as the runtime wrapper.
+
 - Fixed fresh-install model-store startup failures caused by the old `58080`
   listener racing normal outbound connections in operating-system dynamic
   client-port ranges. The runtime, installer-generated config, dashboard, and
