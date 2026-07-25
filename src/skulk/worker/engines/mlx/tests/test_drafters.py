@@ -1220,6 +1220,7 @@ class TestDeferredReplay:
         draft_token_id: int | list[int],
         max_tokens: int,
         depth: int = 1,
+        native_rollback: Callable[..., None] | None = None,
     ) -> tuple[list[int], object]:
         """Run the loop on a real ArraysCache+KVCache pair, logging every
         trunk forward's sequence width."""
@@ -1235,10 +1236,15 @@ class TestDeferredReplay:
                 draft_token_id=draft_token_id,
             )
         )
-        # MagicMock would auto-provide language_model.rollback_speculative_cache
-        # as a callable, silently routing the loop down the native-rollback
-        # branch instead of the snapshot path under test.
-        model.language_model = None
+        if native_rollback is None:
+            # MagicMock would auto-provide
+            # language_model.rollback_speculative_cache as a callable,
+            # silently routing pure-KV tests down the native-rollback branch.
+            model.language_model = None
+        else:
+            language_model = MagicMock(spec=[])
+            language_model.rollback_speculative_cache = native_rollback
+            model.language_model = language_model
 
         widths: list[int] = []
 
@@ -1302,6 +1308,30 @@ class TestDeferredReplay:
         # prefill(2), first-bonus(1), verify(2: reject), verify(3: 1
         # pending, full accept), verify(2: pending cleared), ...
         assert widths[:5] == [2, 1, 2, 3, 2]
+
+    def test_hybrid_cache_ignores_native_rollback_without_verifier_states(
+        self,
+    ) -> None:
+        """Qwen3.5 native rollback cannot consume Skulk's pre-norm verify.
+
+        mlx-vlm's helper requires the GDN intermediates returned by its own
+        speculative verifier. Skulk uses a pre-norm trunk instead because the
+        sidecar is trained on those hiddens, so hybrid caches must stay on the
+        snapshot/restore path rather than calling the native helper with None.
+        """
+        native_rollback = MagicMock(
+            side_effect=AssertionError("native rollback must not receive None")
+        )
+
+        widths, _ = self._run_ssm_logged(
+            main_token_ids=[5, 3, 9, 11, 0],
+            draft_token_id=31,
+            max_tokens=4,
+            native_rollback=native_rollback,
+        )
+
+        assert widths == [2, 1, 2, 3, 4, 3]
+        native_rollback.assert_not_called()
 
     def test_pending_window_is_capped(self) -> None:
         from skulk.worker.engines.mlx.generator.generate import (

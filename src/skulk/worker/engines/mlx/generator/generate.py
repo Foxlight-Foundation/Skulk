@@ -1545,7 +1545,7 @@ def _stream_generate_with_mtp(
     # does not represent the sampled trajectory beyond the first draft.
     depth = max(depth, 1) if sampling.is_greedy else 1
 
-    # Model-native speculative rollback (gemma4): no snapshots, no replay.
+    # Model-native speculative rollback (Gemma 4): no snapshots, no replay.
     _lm: object | None = getattr(model, "language_model", None)
     native_rollback = cast(
         "Callable[..., None] | None",
@@ -1553,9 +1553,17 @@ def _stream_generate_with_mtp(
     )
     # Hybrid models (e.g. Qwen3.5 GDN) carry recurrent SSM state that cannot
     # be trimmed positionally — and trim_cache without a snapshot ZEROES it.
-    # Rejects must restore a pre-verify snapshot instead (unless the model
-    # provides native rollback, which handles its own cache types).
-    mtp_has_ssm = has_non_kv_caches(prompt_cache) and not callable(native_rollback)
+    # Rejects must restore a pre-verify snapshot even when the model exposes a
+    # native rollback helper. Qwen3.5's mlx-vlm helper requires GDN verifier
+    # intermediates produced by its own post-norm speculative-verify method;
+    # Skulk deliberately verifies through a pre-norm trunk because that is what
+    # the sidecar was trained against. Passing None crashes on the first reject,
+    # while switching to the upstream verifier would destroy draft acceptance.
+    # VlmArraysCache is snapshot-aware, so the existing restore path preserves
+    # both correctness contracts. Native rollback remains the fast path for
+    # pure-KV families such as Gemma 4.
+    mtp_has_ssm = has_non_kv_caches(prompt_cache)
+    use_native_rollback = callable(native_rollback) and not mtp_has_ssm
 
     # Deferred replay (snapshot path only): committed tokens whose cache
     # entries were lost to a reject-restore. Instead of paying a dedicated
@@ -1919,9 +1927,10 @@ def _stream_generate_with_mtp(
         # NOT forwarded (next round's verify carries it).
         if not full_accept:
             rejected = chain_len - prefix_len
-            if callable(native_rollback):
+            if use_native_rollback:
                 # Native rollback never coexists with deferred replay
                 # (pending accrues on the snapshot path only).
+                assert native_rollback is not None
                 with mx.stream(generation_stream):
                     native_rollback(prompt_cache, None, prefix_len, chain_len + 1)
             elif pre_verify_snapshot is not None:
