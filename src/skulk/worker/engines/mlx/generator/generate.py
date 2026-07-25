@@ -88,6 +88,7 @@ from skulk.worker.engines.mlx.utils_mlx import (
 )
 from skulk.worker.engines.mlx.vision import (
     MediaRegion,
+    VisionPreprocessingError,
     VisionProcessor,
     VisionResult,
     get_inner_model,
@@ -2211,6 +2212,7 @@ def _mlx_generate_native_vision(
     task: TextGenerationTaskParams,
     all_prompt_tokens: mx.array,
     vision: VisionResult,
+    max_tokens: int,
     sampler: Callable[[mx.array], mx.array],
     logits_processors: list[Callable[[mx.array, mx.array], mx.array]],
     on_prefill_progress: Callable[[int, int], None] | None,
@@ -2238,7 +2240,6 @@ def _mlx_generate_native_vision(
         raise ValueError("Native vision generation requires pixel values")
 
     prompt_token_count = len(all_prompt_tokens)
-    max_tokens = task.max_output_tokens or MAX_TOKENS
     stop_sequences: list[str] = (
         ([task.stop] if isinstance(task.stop, str) else task.stop)
         if task.stop is not None
@@ -2533,7 +2534,7 @@ def mlx_generate(
             task_id=trace_task_id,
             include_memory=True,
         )
-        raise RuntimeError(
+        raise VisionPreprocessingError(
             f"Model {task.model} received image input without a vision processor"
         )
     if vision_processor is not None:
@@ -2566,6 +2567,15 @@ def mlx_generate(
                     model=model,
                     task_id=trace_task_id,
                 )
+        except VisionPreprocessingError:
+            record_runner_phase(
+                "vision_preprocess",
+                event="prepare_vision_failed",
+                detail="request failed",
+                task_id=trace_task_id,
+                include_memory=True,
+            )
+            raise
         except Exception as exc:
             logger.opt(exception=True).error(
                 "Vision processing failed; refusing a text-only fallback"
@@ -2577,11 +2587,11 @@ def mlx_generate(
                 task_id=trace_task_id,
                 include_memory=True,
             )
-            raise RuntimeError(
+            raise VisionPreprocessingError(
                 f"Vision preprocessing failed for model {task.model}"
             ) from exc
     if task.images and vision is None:
-        raise RuntimeError(
+        raise VisionPreprocessingError(
             f"Vision preprocessing produced no image input for model {task.model}"
         )
     if vision is not None:
@@ -2767,6 +2777,7 @@ def mlx_generate(
                 task=task,
                 all_prompt_tokens=all_prompt_tokens,
                 vision=vision,
+                max_tokens=max_tokens,
                 sampler=sampler,
                 logits_processors=logits_processors,
                 on_prefill_progress=on_prefill_progress,

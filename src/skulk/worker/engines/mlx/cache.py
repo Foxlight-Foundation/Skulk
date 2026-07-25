@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import importlib
 import os
 from copy import deepcopy
@@ -12,12 +14,6 @@ from mlx_lm.models.cache import (
     RotatingKVCache,
 )
 from mlx_lm.tokenizer_utils import TokenizerWrapper
-from mlx_vlm.models.cache import (  # pyright: ignore[reportMissingTypeStubs]
-    ArraysCache as VlmArraysCache,
-)
-from mlx_vlm.models.cache import (  # pyright: ignore[reportMissingTypeStubs]
-    RotatingKVCache as VlmRotatingKVCache,
-)
 
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.mlx import KVCacheType, Model
@@ -44,7 +40,27 @@ from skulk.worker.engines.mlx.turboquant.cache import ensure_standard_attention
 from skulk.worker.runner.bootstrap import logger
 
 if TYPE_CHECKING:
+    from mlx_vlm.models.cache import (  # pyright: ignore[reportMissingTypeStubs]
+        ArraysCache as VlmArraysCache,
+    )
+    from mlx_vlm.models.cache import (  # pyright: ignore[reportMissingTypeStubs]
+        RotatingKVCache as VlmRotatingKVCache,
+    )
+
     from skulk.worker.engines.mlx.vision import MediaRegion
+else:
+    try:
+        from mlx_vlm.models.cache import ArraysCache as VlmArraysCache
+        from mlx_vlm.models.cache import RotatingKVCache as VlmRotatingKVCache
+    except ModuleNotFoundError as error:
+        if error.name is None or not error.name.startswith("mlx_vlm"):
+            raise
+        # Linux intentionally ships mlx[cpu] without mlx-vlm. No VLM cache
+        # instances can exist there, so aliasing the optional cache classes to
+        # their MLX-LM counterparts keeps text-only imports and isinstance
+        # checks valid without inventing a second fallback implementation.
+        VlmArraysCache = ArraysCache
+        VlmRotatingKVCache = RotatingKVCache
 
 
 # Fraction of device memory above which LRU eviction kicks in.

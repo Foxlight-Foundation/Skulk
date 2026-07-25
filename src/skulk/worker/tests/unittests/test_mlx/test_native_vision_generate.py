@@ -201,6 +201,7 @@ def test_native_vision_generation_uses_mlx_vlm_generate_step(
             on_prefill_progress=None,
             on_generation_token=None,
             group=None,
+            max_tokens=8,
         )
     )
 
@@ -305,7 +306,10 @@ def test_mlx_generate_rejects_image_input_without_vision_processor() -> None:
         temperature=0.0,
     )
 
-    with pytest.raises(RuntimeError, match="without a vision processor"):
+    with pytest.raises(
+        VisionPreprocessingError,
+        match="without a vision processor",
+    ):
         list(
             mlx_generate(
                 model=_fake_model(),
@@ -348,7 +352,10 @@ def test_mlx_generate_rejects_failed_vision_preprocessing(
         temperature=0.0,
     )
 
-    with pytest.raises(RuntimeError, match="Vision preprocessing failed") as exc_info:
+    with pytest.raises(
+        VisionPreprocessingError,
+        match="Vision preprocessing failed",
+    ) as exc_info:
         list(
             mlx_generate(
                 model=_fake_model(),
@@ -362,6 +369,52 @@ def test_mlx_generate_rejects_failed_vision_preprocessing(
         )
 
     assert isinstance(exc_info.value.__cause__, ImportError)
+
+
+def test_mlx_generate_preserves_request_scoped_vision_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed vision request must not be promoted to a runner crash."""
+    failure = VisionPreprocessingError("malformed image request")
+
+    def _fail_prepare_vision(**_kwargs: object) -> VisionResult:
+        raise failure
+
+    monkeypatch.setattr(
+        "skulk.worker.engines.mlx.generator.generate.prepare_vision",
+        _fail_prepare_vision,
+    )
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/Qwen3-VL-4B-Instruct-4bit"),
+        input=[InputMessage(role="user", content="what is this?")],
+        chat_template_messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "what is this?"},
+                ],
+            }
+        ],
+        images=["ignored"],
+        max_output_tokens=8,
+        temperature=0.0,
+    )
+
+    with pytest.raises(VisionPreprocessingError) as error:
+        list(
+            mlx_generate(
+                model=_fake_model(),
+                tokenizer=_fake_tokenizer(),
+                task=task,
+                prompt="<bos>",
+                kv_prefix_cache=None,
+                group=None,
+                vision_processor=_fake_vision_processor(),
+            )
+        )
+
+    assert error.value is failure
 
 
 def test_batch_generate_rejects_failed_vision_preprocessing(
@@ -686,6 +739,7 @@ def test_mlx_generate_uses_native_reference_path_for_local_vision(
     def _fake_native_generate(**kwargs: object):
         native_vision = cast(VisionResult, kwargs["vision"])
         assert native_vision.image_grid_thw is not None
+        assert kwargs["max_tokens"] == 5
         yield GenerationResponse(text="native", token=101, usage=None)
 
     def _fail_stream_generate(*_args: object, **_kwargs: object):
@@ -725,7 +779,6 @@ def test_mlx_generate_uses_native_reference_path_for_local_vision(
             }
         ],
         images=["ignored"],
-        max_output_tokens=8,
         temperature=0.0,
     )
 
@@ -738,6 +791,7 @@ def test_mlx_generate_uses_native_reference_path_for_local_vision(
             kv_prefix_cache=None,
             group=None,
             vision_processor=_fake_vision_processor(),
+            context_token_limit=8,
         )
     )
 

@@ -13,6 +13,10 @@ the stored arrays in place. These tests pin that contract.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
+
 import mlx.core as mx
 from mlx_lm.models.cache import ArraysCache, KVCache, RotatingKVCache
 from mlx_vlm.models.cache import ArraysCache as VlmArraysCache
@@ -21,6 +25,39 @@ from skulk.worker.engines.mlx.cache import (
     snapshot_ssm_states,
     trim_cache,
 )
+
+
+def test_cache_module_imports_without_optional_mlx_vlm() -> None:
+    """Linux text-only MLX must not require the macOS-only VLM package."""
+    script = textwrap.dedent(
+        """
+        import builtins
+
+        real_import = builtins.__import__
+
+        def import_without_mlx_vlm(name, *args, **kwargs):
+            if name == "mlx_vlm" or name.startswith("mlx_vlm."):
+                raise ModuleNotFoundError(
+                    "No module named 'mlx_vlm'",
+                    name="mlx_vlm",
+                )
+            return real_import(name, *args, **kwargs)
+
+        builtins.__import__ = import_without_mlx_vlm
+
+        from skulk.worker.engines.mlx import cache
+
+        assert cache.VlmArraysCache is cache.ArraysCache
+        assert cache.VlmRotatingKVCache is cache.RotatingKVCache
+        """
+    )
+
+    subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _arrays_cache(values: list[float]) -> ArraysCache:
