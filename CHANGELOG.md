@@ -7,6 +7,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+- Fixed fresh-install model-store startup failures caused by the old `58080`
+  listener racing normal outbound connections in operating-system dynamic
+  client-port ranges. The runtime, installer-generated config, dashboard, and
+  docs now use the explicit `12415` default; existing configurations that set
+  `store_port` remain unchanged.
+
 - Fixed Fish Audio S2 synthesis returning speech unrelated to the input by
   pinning a minimal `mlx-audio 0.4.3.post1` maintenance carry of the upstream
   hidden-state generation fix.

@@ -26,7 +26,7 @@ model_store:
   # store_http_host: 192.168.1.10
 
   # HTTP port used by the model store server.
-  store_port: 58080
+  store_port: 12415
 
   # Absolute path to the directory that holds store-managed models.
   store_path: /Volumes/ModelStore/models
