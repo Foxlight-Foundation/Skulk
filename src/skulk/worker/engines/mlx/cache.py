@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import importlib
 import os
 from copy import deepcopy
@@ -38,7 +40,27 @@ from skulk.worker.engines.mlx.turboquant.cache import ensure_standard_attention
 from skulk.worker.runner.bootstrap import logger
 
 if TYPE_CHECKING:
+    from mlx_vlm.models.cache import (  # pyright: ignore[reportMissingTypeStubs]
+        ArraysCache as VlmArraysCache,
+    )
+    from mlx_vlm.models.cache import (  # pyright: ignore[reportMissingTypeStubs]
+        RotatingKVCache as VlmRotatingKVCache,
+    )
+
     from skulk.worker.engines.mlx.vision import MediaRegion
+else:
+    try:
+        from mlx_vlm.models.cache import ArraysCache as VlmArraysCache
+        from mlx_vlm.models.cache import RotatingKVCache as VlmRotatingKVCache
+    except ModuleNotFoundError as error:
+        if error.name is None or not error.name.startswith("mlx_vlm"):
+            raise
+        # Linux intentionally ships mlx[cpu] without mlx-vlm. No VLM cache
+        # instances can exist there, so aliasing the optional cache classes to
+        # their MLX-LM counterparts keeps text-only imports and isinstance
+        # checks valid without inventing a second fallback implementation.
+        VlmArraysCache = ArraysCache
+        VlmRotatingKVCache = RotatingKVCache
 
 
 # Fraction of device memory above which LRU eviction kicks in.
@@ -63,7 +85,15 @@ class CacheSnapshot:
     """Snapshot of states at a known token position."""
 
     def __init__(
-        self, states: list[RotatingKVCache | ArraysCache | None], token_count: int
+        self,
+        states: list[
+            RotatingKVCache
+            | VlmRotatingKVCache
+            | ArraysCache
+            | VlmArraysCache
+            | None
+        ],
+        token_count: int,
     ):
         self.states = states
         self.token_count = token_count
@@ -75,7 +105,17 @@ class _OptiqKVCacheFactory(Protocol):
     def __call__(self, *, head_dim: int, bits: int, seed: int) -> object: ...
 
 
-def _clone_arrays_cache(source: ArraysCache) -> ArraysCache:
+class _MutableCacheState(Protocol):
+    """Typed view shared by MLX-LM and MLX-VLM cache implementations."""
+
+    state: object
+    left_padding: object
+    lengths: object
+
+
+def _clone_arrays_cache(
+    source: ArraysCache | VlmArraysCache,
+) -> ArraysCache | VlmArraysCache:
     """Reference-clone an ArraysCache without copying its arrays.
 
     SSM layers (GDN / Mamba-style) *replace* their cache slots wholesale on
@@ -86,33 +126,61 @@ def _clone_arrays_cache(source: ArraysCache) -> ArraysCache:
     the GPU sync it forces) that ``deepcopy`` would pay — which matters in
     the MTP verify loop, where a snapshot is taken every round.
     """
-    clone = ArraysCache(len(source.state))
-    clone.state = list(source.state)
+    source_view = cast(_MutableCacheState, cast(object, source))
+    source_state = cast(list[object | None], source_view.state)
+    clone = (
+        ArraysCache(len(source_state))
+        if isinstance(source, ArraysCache)
+        else VlmArraysCache(len(source_state))
+    )
+    clone_view = cast(_MutableCacheState, cast(object, clone))
+    clone_view.state = list(source_state)
     # Batch-mode bookkeeping (None on the single-sequence decode path);
     # carried across so the clone matches deepcopy semantics for batched
     # callers. Dynamic attrs in mlx-lm, hence the targeted ignores.
-    clone.left_padding = source.left_padding  # type: ignore[reportAttributeAccessIssue]
-    clone.lengths = source.lengths  # type: ignore[reportAttributeAccessIssue]
+    clone_view.left_padding = source_view.left_padding
+    clone_view.lengths = source_view.lengths
     return clone
 
 
 def _copy_cache_entry(
-    entry: ArraysCache | RotatingKVCache,
-) -> ArraysCache | RotatingKVCache:
+    entry: ArraysCache | VlmArraysCache | RotatingKVCache | VlmRotatingKVCache,
+) -> ArraysCache | VlmArraysCache | RotatingKVCache | VlmRotatingKVCache:
     """Copy a non-trimmable cache entry as cheaply as correctness allows.
 
     RotatingKVCache writes into preallocated buffers in place, so reference
     sharing would alias live state into the snapshot — it needs a real copy.
     """
-    if isinstance(entry, ArraysCache):
+    if isinstance(entry, (ArraysCache, VlmArraysCache)):
         return _clone_arrays_cache(entry)
     return deepcopy(entry)
 
 
+def is_non_kv_cache_entry(entry: object) -> bool:
+    """Return whether an MLX-LM or MLX-VLM cache needs snapshot restoration."""
+    return isinstance(
+        entry,
+        (ArraysCache, VlmArraysCache, RotatingKVCache, VlmRotatingKVCache),
+    )
+
+
 def snapshot_ssm_states(cache: KVCacheType) -> CacheSnapshot:
-    states: list[ArraysCache | RotatingKVCache | None] = []
+    states: list[
+        ArraysCache
+        | VlmArraysCache
+        | RotatingKVCache
+        | VlmRotatingKVCache
+        | None
+    ] = []
     for c in cache:
-        if isinstance(c, (ArraysCache, RotatingKVCache)):
+        if is_non_kv_cache_entry(c):
+            c = cast(
+                ArraysCache
+                | VlmArraysCache
+                | RotatingKVCache
+                | VlmRotatingKVCache,
+                c,
+            )
             states.append(_copy_cache_entry(c))
         else:
             states.append(None)
@@ -135,7 +203,7 @@ def _find_nearest_snapshot(
 
 def has_non_kv_caches(cache: KVCacheType) -> bool:
     """Check if a cache contains any ArraysCache (SSM) entries."""
-    return any(isinstance(c, (ArraysCache, RotatingKVCache)) for c in cache)
+    return any(is_non_kv_cache_entry(c) for c in cache)
 
 
 class KVPrefixCache:
@@ -398,7 +466,7 @@ def trim_cache(
     snapshot: CacheSnapshot | None = None,
 ) -> None:
     for i, c in enumerate(cache):
-        if isinstance(c, (ArraysCache, RotatingKVCache)):
+        if is_non_kv_cache_entry(c):
             snapshot_state = snapshot.states[i] if snapshot is not None else None
             if snapshot_state is not None:
                 # Copy on restore too: snapshots can be restored more than
@@ -406,7 +474,12 @@ def trim_cache(
                 # the snapshot's stored object.
                 cache[i] = _copy_cache_entry(snapshot_state)  # type: ignore
             else:
-                c.state = [None] * len(c.state)
+                cache_view = cast(_MutableCacheState, c)
+                state = cast(
+                    list[object | None] | tuple[object | None, ...],
+                    cache_view.state,
+                )
+                cache_view.state = [None] * len(state)
         else:
             trim_fn = getattr(c, "trim", None)
             if callable(trim_fn):

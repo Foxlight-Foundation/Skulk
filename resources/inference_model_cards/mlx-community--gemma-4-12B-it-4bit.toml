@@ -7,17 +7,19 @@ tasks = ["TextGeneration"]
 family = "gemma"
 quantization = "4bit"
 base_model = "Gemma 4 12B"
-capabilities = ["text", "vision", "thinking"]
+capabilities = ["text", "thinking"]
 context_length = 131072
+
+# The current upstream artifact contains the language model plus projection and
+# patch-embedding layers, but no `vision_tower.*` weights. Advertising vision
+# would let placement succeed before the runner fails on its first image.
+# Re-enable it only after selecting and qualifying a complete immutable revision.
 
 [reasoning]
 supports_toggle = true
 format = "channel_delimited"
 default_effort = "medium"
 disabled_effort = "none"
-
-[modalities]
-supports_native_multimodal = true
 
 [tooling]
 tool_call_format = "gemma4"
@@ -37,11 +39,5 @@ mtp_max_depth = 2
 # queue stalls under the ring backend in pipeline-parallel paths.
 metal_fast_synch = false
 
-[vision]
-image_token_id = 258880
-model_type = "gemma4"
-boi_token_id = 255999
-eoi_token_id = 258882
-
 [storage_size]
-in_bytes = 11020226560
+in_bytes = 6740867168

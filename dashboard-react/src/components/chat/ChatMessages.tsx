@@ -485,6 +485,7 @@ export function ChatMessages({
         <MessageCard
           key={msg.id}
           $role={msg.role}
+          data-message-role={msg.role}
           aria-label={msg.role === 'assistant'
             ? t('chat.messages.assistantMessage', 'Assistant message')
             : t('chat.messages.userMessage', 'User message')}
@@ -679,6 +680,7 @@ export function ChatMessages({
       {(streamingContent != null || streamingThinking) && (
         <MessageCard
           $role="assistant"
+          data-message-role="assistant"
           aria-label={t('chat.messages.assistantMessage', 'Assistant message')}
         >
           <MsgHeader>

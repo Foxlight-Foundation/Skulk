@@ -68,6 +68,18 @@ def test_no_duplicate_model_ids() -> None:
         seen[model_id] = path.name
 
 
+def test_gemma4_12b_card_does_not_advertise_missing_vision_tower() -> None:
+    """Keep the incomplete upstream 12B artifact out of vision placement."""
+    card = _load(
+        _CARD_DIRS["inference"]
+        / "mlx-community--gemma-4-12B-it-4bit.toml"
+    )
+
+    assert "vision" not in card.capabilities
+    assert card.vision is None
+    assert card.modalities is None
+
+
 @pytest.mark.parametrize(("kind", "path"), _CARD_FILES, ids=_CARD_IDS)
 def test_bundled_card_invariants(kind: str, path: Path) -> None:
     card = _load(path)  # validation itself is the first gate

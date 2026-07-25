@@ -89,7 +89,7 @@ from skulk.download.shard_downloader import ShardDownloader
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.downloads import RepoDownloadProgress
 from skulk.shared.types.worker.shards import ShardMetadata
-from skulk.store.config import StagingNodeConfig
+from skulk.store.config import DEFAULT_MODEL_STORE_PORT, StagingNodeConfig
 from skulk.store.staging_eviction import touch_last_used
 
 if TYPE_CHECKING:
@@ -461,7 +461,7 @@ class ModelStoreClient:
     def __init__(
         self,
         store_host: str,
-        store_port: int = 58080,
+        store_port: int = DEFAULT_MODEL_STORE_PORT,
         local_store_path: Path | None = None,
     ) -> None:
         self._store_host = store_host

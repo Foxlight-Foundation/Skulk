@@ -16,11 +16,13 @@ export interface SettingsPanelProps {
   onClose: () => void;
 }
 
+const DEFAULT_MODEL_STORE_PORT = 12415;
+
 const defaultStoreConfig = (): StoreConfig => ({
   enabled: false,
   store_host: '',
   store_http_host: '',
-  store_port: 58080,
+  store_port: DEFAULT_MODEL_STORE_PORT,
   store_path: '',
   download: {
     allow_hf_fallback: true,
@@ -444,7 +446,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                       size="sm"
                       type="number"
                       value={String(modelStoreDraft.store_port)}
-                      onChange={(e) => update({ store_port: parseInt((e.target as HTMLInputElement).value) || 58080 })}
+                      onChange={(e) => update({ store_port: parseInt((e.target as HTMLInputElement).value) || DEFAULT_MODEL_STORE_PORT })}
                       style={{ maxWidth: 80 }}
                     />
                   </Row>
