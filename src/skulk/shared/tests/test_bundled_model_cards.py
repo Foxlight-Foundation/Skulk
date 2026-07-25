@@ -80,6 +80,17 @@ def test_gemma4_12b_card_does_not_advertise_missing_vision_tower() -> None:
     assert card.modalities is None
 
 
+def test_glm_47_flash_card_matches_store_artifact_size() -> None:
+    """Placement admission must use the measured GLM store artifact size."""
+
+    card = _load(
+        _CARD_DIRS["inference"]
+        / "mlx-community--GLM-4.7-Flash-4bit.toml"
+    )
+
+    assert card.storage_size.in_bytes == 16_872_850_407
+
+
 @pytest.mark.parametrize(("kind", "path"), _CARD_FILES, ids=_CARD_IDS)
 def test_bundled_card_invariants(kind: str, path: Path) -> None:
     card = _load(path)  # validation itself is the first gate
