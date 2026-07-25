@@ -19,6 +19,7 @@ from skulk.worker.engines.mlx.generator import batch_generate as batch_generate_
 from skulk.worker.engines.mlx.generator import generate as generate_module
 from skulk.worker.engines.mlx.vision import (
     MediaRegion,
+    VisionPreprocessingError,
     VisionProcessor,
     VisionResult,
     prepare_vision,
@@ -393,7 +394,10 @@ def test_batch_generate_rejects_failed_vision_preprocessing(
         temperature=0.0,
     )
 
-    with pytest.raises(RuntimeError, match="Vision preprocessing failed") as exc_info:
+    with pytest.raises(
+        VisionPreprocessingError,
+        match="failed to process 1 image",
+    ) as exc_info:
         generator.submit(
             TaskId("vision-task"),
             task,
@@ -560,7 +564,10 @@ def test_batch_generate_vision_bypasses_prefix_cache(
 
 def test_prepare_vision_rejects_images_without_structured_messages() -> None:
     """Missing multimodal prompt structure must not cause images to be ignored."""
-    with pytest.raises(ValueError, match="missing chat_template_messages"):
+    with pytest.raises(
+        VisionPreprocessingError,
+        match="without chat_template_messages",
+    ):
         prepare_vision(
             images=["ignored"],
             chat_template_messages=None,
@@ -568,6 +575,95 @@ def test_prepare_vision_rejects_images_without_structured_messages() -> None:
             tokenizer=_fake_tokenizer(),
             model=_fake_model(),
         )
+
+
+def test_resolve_request_vision_rejects_images_without_processor() -> None:
+    """An image sent to a text-only card must fail instead of disappearing."""
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/text-only"),
+        input=[InputMessage(role="user", content="what is this?")],
+        images=["ignored"],
+        max_output_tokens=8,
+        temperature=0.0,
+    )
+
+    with pytest.raises(
+        VisionPreprocessingError,
+        match="has no vision configuration",
+    ):
+        batch_generate_module.resolve_request_vision(
+            vision_processor=None,
+            task_params=task,
+            tokenizer=_fake_tokenizer(),
+            model=_fake_model(),
+            task_id=TaskId("vision-task"),
+        )
+
+
+def test_resolve_request_vision_preserves_text_only_requests() -> None:
+    """A request without images should stay on the ordinary text path."""
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/text-only"),
+        input=[InputMessage(role="user", content="hello")],
+        max_output_tokens=8,
+        temperature=0.0,
+    )
+
+    assert (
+        batch_generate_module.resolve_request_vision(
+            vision_processor=None,
+            task_params=task,
+            tokenizer=_fake_tokenizer(),
+            model=_fake_model(),
+            task_id=TaskId("text-task"),
+        )
+        is None
+    )
+
+
+def test_resolve_request_vision_wraps_processor_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unexpected processor errors must become request-scoped vision errors."""
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/vision-model"),
+        input=[InputMessage(role="user", content="what is this?")],
+        chat_template_messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "what is this?"},
+                ],
+            }
+        ],
+        images=["ignored"],
+        max_output_tokens=8,
+        temperature=0.0,
+    )
+
+    def _fail_prepare_vision(**_kwargs: object) -> None:
+        raise KeyError("pixel_values")
+
+    monkeypatch.setattr(
+        batch_generate_module,
+        "prepare_vision",
+        _fail_prepare_vision,
+    )
+
+    with pytest.raises(
+        VisionPreprocessingError,
+        match="failed to process 1 image",
+    ) as error:
+        batch_generate_module.resolve_request_vision(
+            vision_processor=_fake_vision_processor(),
+            task_params=task,
+            tokenizer=_fake_tokenizer(),
+            model=_fake_model(),
+            task_id=TaskId("vision-task"),
+        )
+
+    assert isinstance(error.value.__cause__, KeyError)
 
 
 def test_mlx_generate_uses_native_reference_path_for_local_vision(

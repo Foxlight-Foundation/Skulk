@@ -2,9 +2,10 @@
 
 """Tests for MLX-native image processor discovery."""
 
+from collections import UserDict
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Callable, cast
 
 import numpy as np
 import pytest
@@ -41,6 +42,18 @@ class _FakeFamilyProcessor:
         cls.seen_repo = repo
         cls.seen_trust_remote_code = cast(bool, kwargs["trust_remote_code"])
         return _FakeCombinedProcessor()
+
+
+def test_processor_output_accepts_mapping_implementations() -> None:
+    """Hugging Face BatchFeature-style mappings must retain pixel values."""
+    object_dict = cast(
+        Callable[[object], dict[str, object]],
+        vision_module.__dict__["_object_dict"],
+    )
+    pixel_values = np.zeros((1, 3, 8, 8), dtype=np.float32)
+    processor_output = UserDict[str, object]({"pixel_values": pixel_values})
+
+    assert object_dict(processor_output)["pixel_values"] is pixel_values
 
 
 @pytest.mark.parametrize(
