@@ -26,6 +26,23 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- **Concurrent slots on the served llama.cpp engine no longer shrink each
+  request's context window.** `SKULK_LLAMA_SERVER_PARALLEL` asks a node to serve
+  N generations at once. Until now that came with a hidden cost: llama.cpp gave
+  each slot only an equal share (`n_ctx / N`) of the model's context window,
+  while Skulk's API kept advertising and admitting against the full window, so a
+  prompt that fit could be truncated by the engine rather than refused. Skulk
+  compensated by silently capping the requested slot count, which meant an
+  operator asking for 8 slots could quietly get 2. The runner now launches the
+  server with a unified KV cache above one slot, which gives every slot the
+  whole window at no extra memory cost, and the declared slot count is honored
+  exactly with no cap. The default stays 1, and a node running serially produces
+  exactly the command line it did in previous releases. Above one slot, the
+  slots share a single pool instead of holding private shares, so concurrent
+  long-context requests contend for it and can exhaust it; the runner logs that
+  trade loudly at startup. Sizing a node's concurrency to its workload remains
+  an operator decision (#689).
+
 - **The service template no longer pins a cluster namespace.** The installed
   `skulk.env` template used to set `SKULK_LIBP2P_NAMESPACE=foxlight-main`,
   which put every template-based install on one shared namespace while nodes

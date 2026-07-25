@@ -407,16 +407,24 @@ tokens per second then scale with concurrency instead. On a node that
 advertises a llama-server binary the model serves through the served proxy; on
 a node without one, the preference is a soft order intersected with the node's
 advertised backends, so the same card falls through to the in-process runner
-unchanged. The per-node `SKULK_LLAMA_SERVER_PARALLEL` setting (default 1) is the
-requested slot ceiling; the default stays serial because each slot receives
-only an equal share of the fixed context window while admission advertises
-the full window, so concurrency is an explicit operator trade until
-admission is slot-aware. llama-server splits its total context budget evenly
-across slots, so the runner lowers that count when necessary to retain the
-placement admission floor (8192 tokens) in every slot. This preserves a usable
-per-request window on memory-constrained and pooled placements instead of
-silently truncating generations; nodes with a larger memory-fit context still
-use more of the requested slots.
+unchanged. The per-node `SKULK_LLAMA_SERVER_PARALLEL` setting (default 1) names
+how many generations that node serves at once, and the runner honors it exactly.
+
+Above one slot the runner launches the server with a unified KV cache, which is
+what makes that count honest. llama.cpp gives a slot the whole `-c` window when
+the cache is unified and only an equal share of it (`n_ctx / N`) when it is not,
+so without the unified cache asking for more slots would silently shrink every
+request's real window below the limit placement stamped and the API admits
+against. The unified cache costs no extra memory: the same total number of cells
+is shared across slots rather than partitioned between them.
+
+What the operator takes on instead is contention. The slots draw from one pool
+rather than from private shares, so concurrent long-context requests can
+collectively exhaust it; llama.cpp responds by evicting idle slots' cached
+prompts, and treats total exhaustion as fatal to the server process. Whether a
+node's workload fits a shared window N ways is a judgement only the person
+running that node can make, which is why the shipped default stays serial and
+the declared count is applied without a ceiling of Skulk's own.
 
 Context sizing for the GGUF engines is dynamic rather than a fixed constant.
 Placement reserves KV cache for an 8192-token admission floor, but the window a
