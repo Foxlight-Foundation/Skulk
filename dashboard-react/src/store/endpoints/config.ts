@@ -17,6 +17,19 @@ export interface StoreConfig {
   };
 }
 
+/**
+ * Persisted model-store configuration returned by `GET /config`.
+ *
+ * Skulk returns the YAML mapping exactly as written, so fields with Pydantic
+ * defaults can be absent even though the running server has effective values
+ * for them. Consumers must normalize this shape before rendering it.
+ */
+export interface PersistedStoreConfig
+  extends Partial<Omit<StoreConfig, 'download' | 'staging'>> {
+  download?: Partial<StoreConfig['download']>;
+  staging?: Partial<StoreConfig['staging']>;
+}
+
 export interface InferenceConfig {
   kv_cache_backend: string;
 }
@@ -52,7 +65,7 @@ export interface TelemetryConfig {
 }
 
 export interface FullConfig {
-  model_store?: StoreConfig;
+  model_store?: PersistedStoreConfig;
   inference?: InferenceConfig;
   logging?: LoggingConfig;
   experiments?: ExperimentsConfig;
