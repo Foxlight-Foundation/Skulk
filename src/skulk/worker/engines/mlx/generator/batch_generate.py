@@ -51,6 +51,7 @@ from skulk.worker.engines.mlx.utils_mlx import (
 )
 from skulk.worker.engines.mlx.vision import (
     MediaRegion,
+    VisionPreprocessingError,
     VisionProcessor,
     VisionResult,
     prepare_vision,
@@ -154,6 +155,8 @@ class SkulkBatchGenerator:
         vision: VisionResult | None = None
         media_regions: list[MediaRegion] = []
 
+        requested_image_count = len(task_params.images or ())
+
         if self.vision_processor is not None:
             try:
                 with trace(
@@ -170,18 +173,29 @@ class SkulkBatchGenerator:
                         model=self.model,
                         task_id=task_id,
                     )
-            except Exception as exc:
-                logger.opt(exception=True).error(
-                    "Vision processing failed; refusing a text-only fallback"
-                )
-                raise RuntimeError(
-                    f"Vision preprocessing failed for model {task_params.model}"
-                ) from exc
-
-        if task_params.images and vision is None:
-            raise RuntimeError(
-                f"Vision preprocessing produced no image input for model "
-                f"{task_params.model}"
+            except VisionPreprocessingError:
+                raise
+            except Exception as error:
+                # This arm used to log a warning and continue text-only, which
+                # produced the most misleading result the engine can return:
+                # the chat template had already expanded the image
+                # placeholders, so the model was handed vision markers with no
+                # embeddings behind them and answered anyway, inventing the
+                # picture it was asked about. A missing torchvision wheel
+                # degraded every VLM on the node this way while the API went on
+                # reporting success.
+                raise VisionPreprocessingError(
+                    f"failed to process {requested_image_count} image(s) for "
+                    f"model {task_params.model}: {error}"
+                ) from error
+        elif requested_image_count:
+            # Images arrived for a model whose card declares no [vision]
+            # section, so no processor was ever built. Dropping them here is
+            # the same fiction reached by a different route.
+            raise VisionPreprocessingError(
+                f"model {task_params.model} received {requested_image_count} "
+                "image(s) but has no vision configuration, so the images "
+                "cannot be given to it"
             )
 
         if vision is not None:
