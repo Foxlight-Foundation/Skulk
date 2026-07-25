@@ -9,6 +9,7 @@ from skulk.shared.models.model_cards import (
     ModelTask,
     PromptRendererType,
     RuntimeCapabilityCardConfig,
+    VisionCardConfig,
 )
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.events import Event
@@ -123,6 +124,45 @@ def test_builder_forces_sequential_for_gemma4_runtime(
             tasks=[ModelTask.TextGeneration],
             runtime=RuntimeCapabilityCardConfig(
                 prompt_renderer=PromptRendererType.Gemma4
+            ),
+        ),
+    )
+
+    generator = builder.build()
+
+    assert isinstance(generator, SequentialGenerator)
+    assert not isinstance(generator, BatchGenerator)
+
+
+def test_builder_forces_sequential_for_native_vision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Card-declared VLMs must use the family-specific reference generator."""
+    _, cancel_recv = mp_channel[TaskId]()
+    event_send, _ = mp_channel[Event]()
+
+    monkeypatch.setattr(
+        "skulk.worker.runner.llm_inference.runner.get_kv_cache_backend",
+        lambda: "default",
+    )
+
+    builder = Builder(
+        model_id=ModelId("local/custom-qwen-vl"),
+        event_sender=event_send,
+        cancel_receiver=cancel_recv,
+        inference_model=cast(Model, cast(object, _FakeModel())),
+        tokenizer=cast(TokenizerWrapper, cast(object, _FakeTokenizer())),
+        group=cast(mx.distributed.Group | None, None),
+        model_card=ModelCard(
+            model_id=ModelId("local/custom-qwen-vl"),
+            storage_size=Memory(),
+            n_layers=1,
+            hidden_size=1,
+            supports_tensor=False,
+            tasks=[ModelTask.TextGeneration],
+            vision=VisionCardConfig(
+                image_token_id=1,
+                model_type="qwen3_vl",
             ),
         ),
     )

@@ -18,8 +18,13 @@ import sys
 import textwrap
 
 import mlx.core as mx
+import pytest
 from mlx_lm.models.cache import ArraysCache, KVCache, RotatingKVCache
-from mlx_vlm.models.cache import ArraysCache as VlmArraysCache
+
+try:
+    from mlx_vlm.models.cache import ArraysCache as VlmArraysCache
+except ModuleNotFoundError:
+    VlmArraysCache = None
 
 from skulk.worker.engines.mlx.cache import (
     snapshot_ssm_states,
@@ -125,6 +130,8 @@ class TestArraysCacheSnapshot:
 
     def test_mlx_vlm_arrays_cache_is_snapshotted_and_restored(self) -> None:
         """Native hybrid VLM caches need the same rollback as MLX-LM caches."""
+        if VlmArraysCache is None:
+            pytest.skip("mlx-vlm is not installed on this platform")
         ssm = VlmArraysCache(2)
         ssm[0] = mx.full((1, 4), 1.0)
         ssm[1] = mx.full((1, 4), 2.0)

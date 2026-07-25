@@ -816,6 +816,15 @@ class Builder:
         force_sequential_for_gemma4 = is_gemma4_family(
             self.model_card, model_id=self.model_id
         )
+        # MLX-LM's BatchGenerator only accepts language-model caches and token
+        # ids after Skulk's generic prefill. Native VLM families also require
+        # mlx-vlm's family-specific multimodal positions during generation;
+        # using the batch engine can read the image yet terminate with a
+        # partial answer. Keep card-declared vision models on the reference
+        # sequential path until the batch engine has an equivalent VLM adapter.
+        force_sequential_for_vision = (
+            self.model_card is not None and self.model_card.vision is not None
+        )
         # CARD-derived, never asset-derived: on multi-node placements only the
         # decider rank loads drafter weights (#254), so keying this off local
         # assets would put the decider on SequentialGenerator and every other
@@ -849,6 +858,7 @@ class Builder:
             no_batch_requested
             or force_sequential_for_kv_backend
             or force_sequential_for_gemma4
+            or force_sequential_for_vision
             or force_sequential_for_mtp
         ):
             if force_sequential_for_kv_backend and not no_batch_requested:
@@ -864,6 +874,11 @@ class Builder:
                     "mode yet; forcing SequentialGenerator"
                 )
                 logger.info("using SequentialGenerator (model_family=gemma4)")
+            elif force_sequential_for_vision and not no_batch_requested:
+                logger.info(
+                    "Native vision requires the mlx-vlm reference generation path; "
+                    "using SequentialGenerator"
+                )
             elif force_sequential_for_mtp and not no_batch_requested:
                 logger.info("MTP speculative decoding requires SequentialGenerator; forcing (mtp_heads=true)")
             else:

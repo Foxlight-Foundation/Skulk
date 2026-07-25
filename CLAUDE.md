@@ -147,8 +147,11 @@ A model card's `placement.compatible_backends` selects which engine serves it
   generation loop, the multi-node ring, and MTP/speculative decoding. Single-node
   bundled vision models load through their native `mlx-vlm` family implementation
   so processor-specific image grids and multimodal positional encoding are
-  preserved without PyTorch or `torchvision`. Vision processor/preprocessing
-  failures are terminal rather than falling back to text-only generation.
+  preserved without routing supported native processors through PyTorch or
+  `torchvision`; macOS still installs pinned `torchvision` for supported families
+  that require Transformers' `AutoImageProcessor` fallback. Vision
+  processor/preprocessing failures are terminal rather than falling back to
+  text-only generation.
 - **`mlx_audio`**: single-node speech backend vocabulary for upstream
   `mlx-audio` TTS/STT models. Skulk probes and advertises `mlx_audio` /
   `mlx_audio-metal` when `mlx_audio` imports on macOS. Mounted TTS models serve

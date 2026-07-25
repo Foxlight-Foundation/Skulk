@@ -534,6 +534,38 @@ def _native_pixel_values_for_media_range(
     return _slice_native_pixel_values_by_indices(pixel_values, region_indices)
 
 
+def _slice_native_image_grid_thw_by_indices(
+    image_grid_thw: mx.array | None,
+    indices: list[int],
+) -> mx.array | None:
+    """Select native image-grid rows by media-region order."""
+    if image_grid_thw is None or not indices:
+        return None
+
+    available_images = int(image_grid_thw.shape[0])
+    valid_indices = [idx for idx in indices if idx < available_images]
+    if not valid_indices:
+        return None
+    if valid_indices == list(range(valid_indices[0], valid_indices[-1] + 1)):
+        return image_grid_thw[valid_indices[0] : valid_indices[-1] + 1]
+    return mx.stack([image_grid_thw[idx] for idx in valid_indices], axis=0)
+
+
+def _native_image_grid_thw_for_media_range(
+    image_grid_thw: mx.array | None,
+    media_regions: list[MediaRegion],
+    start_pos: int,
+    end_pos: int,
+) -> mx.array | None:
+    """Return image-grid rows whose media spans overlap a prompt token range."""
+    region_indices = [
+        idx
+        for idx, region in enumerate(media_regions)
+        if region.end_pos > start_pos and region.start_pos < end_pos
+    ]
+    return _slice_native_image_grid_thw_by_indices(image_grid_thw, region_indices)
+
+
 def _vision_safe_prefill_chunk_sizes(
     total_tokens: int,
     max_chunk_size: int,
@@ -663,6 +695,7 @@ def pipeline_parallel_prefill(
     distributed_prompt_progress_callback: Callable[[], None] | None,
     group: mx.distributed.Group,
     native_pixel_values: mx.array | list[mx.array] | None = None,
+    native_image_grid_thw: mx.array | None = None,
     native_media_regions: list[MediaRegion] | None = None,
     prompt_token_offset: int = 0,
 ) -> None:
@@ -776,7 +809,17 @@ def pipeline_parallel_prefill(
                         prompt_token_offset + chunk_start,
                         prompt_token_offset + chunk_end,
                     )
-                    set_native_vision_inputs(model, chunk_pixel_values)
+                    chunk_image_grid_thw = _native_image_grid_thw_for_media_range(
+                        native_image_grid_thw,
+                        native_media_regions,
+                        prompt_token_offset + chunk_start,
+                        prompt_token_offset + chunk_end,
+                    )
+                    set_native_vision_inputs(
+                        model,
+                        chunk_pixel_values,
+                        chunk_image_grid_thw,
+                    )
                     record_runner_phase(
                         "prefill_pipeline",
                         event="pipeline_prefill_native_pixel_values",
@@ -852,6 +895,7 @@ def prefill(
     on_prefill_progress: Callable[[int, int], None] | None,
     distributed_prompt_progress_callback: Callable[[], None] | None,
     native_pixel_values: mx.array | list[mx.array] | None = None,
+    native_image_grid_thw: mx.array | None = None,
     native_media_regions: list[MediaRegion] | None = None,
     prompt_token_offset: int = 0,
 ) -> tuple[float, int, list[CacheSnapshot]]:
@@ -975,6 +1019,7 @@ def prefill(
                     distributed_prompt_progress_callback=pipeline_distributed_callback,
                     group=group,
                     native_pixel_values=native_pixel_values,
+                    native_image_grid_thw=native_image_grid_thw,
                     native_media_regions=native_media_regions,
                     prompt_token_offset=prompt_token_offset,
                 )
@@ -2813,6 +2858,7 @@ def mlx_generate(
 
     is_native_vision = vision is not None and vision.pixel_values is not None
     native_pixel_values: mx.array | list[mx.array] | None = None
+    native_image_grid_thw: mx.array | None = None
     native_media_regions: list[MediaRegion] | None = None
     if is_native_vision:
         assert vision is not None
@@ -2827,6 +2873,14 @@ def mlx_generate(
             vision.pixel_values,
             media_regions,
             prefix_hit_length,
+        )
+        native_image_grid_thw = _slice_native_image_grid_thw_by_indices(
+            vision.image_grid_thw,
+            [
+                idx
+                for idx, region in enumerate(media_regions)
+                if region.end_pos > prefix_hit_length
+            ],
         )
     decode_context = _decode_debug_context(
         task=task,
@@ -2881,6 +2935,7 @@ def mlx_generate(
         prefix_hit_length = 0
         matched_index = None
         native_pixel_values = vision.pixel_values
+        native_image_grid_thw = vision.image_grid_thw
         native_media_regions = media_regions
         decode_context = _decode_debug_context(
             task=task,
@@ -2905,7 +2960,7 @@ def mlx_generate(
             set_native_vision_inputs(
                 model,
                 native_pixel_values,
-                vision.image_grid_thw if vision is not None else None,
+                native_image_grid_thw,
             )
         maybe_vision_ctx = contextlib.nullcontext()
     elif vision is not None and not is_native_vision:
@@ -2944,6 +2999,7 @@ def mlx_generate(
                 on_prefill_progress,
                 distributed_prompt_progress_callback,
                 native_pixel_values=native_pixel_values,
+                native_image_grid_thw=native_image_grid_thw,
                 native_media_regions=native_media_regions,
                 prompt_token_offset=prefix_hit_length,
             )

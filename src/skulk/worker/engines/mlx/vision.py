@@ -218,8 +218,8 @@ def _mlx_vlm_processor_modules(model_type: str) -> list[object]:
     MLX-VLM is not consistent about where it exports the combined processor:
     Qwen 3.5 exposes ``Qwen3VLProcessor`` from the family package while older
     families often keep it in ``processing_<model_type>``. Trying both paths
-    keeps image preprocessing on the native MLX stack and avoids making
-    torchvision/PyTorch a hidden runtime dependency.
+    keeps image preprocessing on the native MLX stack instead of routing those
+    families through the installed Transformers/torchvision fallback.
     """
     module_names = (
         f"mlx_vlm.models.{model_type}",
@@ -261,8 +261,9 @@ def _load_gemma3n_pil_image_processor(repo: str) -> _ImageProcessorProtocol:
     Transformers 5 exposes ``AutoImageProcessor`` as a torchvision-gated dummy
     when torchvision is absent, even when callers request its portable PIL
     backend. Importing the concrete PIL implementation preserves every value in
-    ``preprocessor_config.json`` while keeping Skulk's MLX runtime independent
-    from PyTorch and torchvision.
+    ``preprocessor_config.json`` and avoids invoking torchvision on this path.
+    The macOS runtime still installs torchvision because other supported
+    processor families require Transformers' gated fallback.
     """
     from transformers.models.siglip.image_processing_pil_siglip import (
         SiglipImageProcessorPil,
