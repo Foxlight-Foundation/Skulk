@@ -22,6 +22,9 @@ This project records release notes here and mirrors public-facing notes in
   store artifact size so valid three-node Apple placements are not rejected.
 - Made in-place admin restarts terminate and reap runner, resource-tracker, and
   telemetry descendants before replacing the Skulk process.
+- Persisted each node's libp2p identity across ordinary restarts while binding
+  it to a hashed physical-machine owner, so restarts no longer leave ghost
+  topology identities and cloned machine backups cannot create duplicate peers.
 
 - Fixed the documented launchd/systemd install step failing immediately after a
   successful one-command install because `uv` lived under `~/.local/bin` but

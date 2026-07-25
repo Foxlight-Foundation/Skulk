@@ -1081,7 +1081,7 @@ curl -X POST http://localhost:52415/place_instance \
 | `sharding` | `Pipeline` or `Tensor` |
 | `instance_meta` | `MlxRing`, `MlxJaccl`, or `LlamaRpc` (multi-node GGUF pooling: one driver node holds the model and each donor node lends GPU memory over the network) |
 | `min_nodes` | Minimum nodes required for the placement |
-| `excluded_nodes` | Optional. Node IDs the master should treat as if absent when scoring this placement. Already-running instances on those nodes are unaffected (exclusion is per-placement, not cluster-wide), and automatic repair re-placements of this instance (memory refusal, download failure) keep honoring the same exclusions. Default: `[]`. Note: node IDs are per-session, so they change when a cluster session restarts. |
+| `excluded_nodes` | Optional. Node IDs the master should treat as if absent when scoring this placement. Already-running instances on those nodes are unaffected (exclusion is per-placement, not cluster-wide), and automatic repair re-placements of this instance (memory refusal, download failure) keep honoring the same exclusions. Default: `[]`. Node IDs persist across ordinary restarts. |
 
 The placement is validated against the current cluster state **before** the
 command is forwarded, so an impossible placement fails at the API instead of
@@ -1354,7 +1354,11 @@ Returns hostname, preferred IP, and node identity information used by the dashbo
 
 `GET /node_id` is the minimal companion route: it returns only this node's ID
 (the same value `/node/identity` reports, without the hostname and IP fields).
-Node IDs are per-session and change when the process restarts.
+Node IDs persist across ordinary process and service restarts. Skulk stores the
+private identity with mode `600` and binds it to a hashed physical-machine
+owner marker. Restoring or cloning the Skulk configuration onto a different
+machine rotates the identity before that host joins a cluster, preventing two
+physical nodes from using the same peer ID.
 
 ### Restart a node
 

@@ -1,3 +1,7 @@
+import hashlib
+import os
+import subprocess
+import sys
 import time
 from collections import OrderedDict, deque
 from collections.abc import Callable, Sequence
@@ -1549,33 +1553,153 @@ class Router:
 
 
 def get_node_id_keypair(
-    path: str | bytes | PathLike[str] | PathLike[bytes] = SKULK_NODE_ID_KEYPAIR,
+    path: str | bytes | PathLike[str] | PathLike[bytes] | None = None,
 ) -> Keypair:
+    """Load or create the host-bound persistent libp2p node identity.
+
+    The key remains stable across ordinary process and service restarts. A
+    hashed machine-owner marker prevents a home-directory or Time Machine clone
+    from giving two physical hosts the same libp2p identity: a mismatched or
+    legacy ownerless key is rotated under the same cross-process lock.
+
+    Args:
+        path: Private key file. Its owner marker and lock file are stored beside
+            it. When omitted, uses Skulk's platform configuration directory.
+
+    Returns:
+        The persistent keypair for the current physical host.
     """
-    Obtains the :class:`Keypair` associated with this node-ID.
-    Obtain the :class:`PeerId` by from it.
-    """
-    # TODO(evan): bring back node id persistence once we figure out how to deal with duplicates
-    return Keypair.generate()
 
-    def lock_path(path: str | bytes | PathLike[str] | PathLike[bytes]) -> Path:
-        return Path(str(path) + ".lock")
+    if path is None and os.environ.get("SKULK_TESTS") == "1":
+        # Unit tests construct many independent in-process nodes and must never
+        # mutate the developer's real platform identity.
+        return Keypair.generate()
 
-    # operate with cross-process lock to avoid race conditions
-    with FileLock(lock_path(path)):
-        with open(path, "a+b") as f:  # opens in append-mode => starts at EOF
-            # if non-zero EOF, then file exists => use to get node-ID
-            if f.tell() != 0:
-                f.seek(0)  # go to start & read protobuf-encoded bytes
-                protobuf_encoded = f.read()
+    selected_path = SKULK_NODE_ID_KEYPAIR if path is None else path
+    keypair_path = Path(os.fsdecode(selected_path))
+    owner_path = keypair_path.with_name(f"{keypair_path.name}.owner")
+    lock_path = keypair_path.with_name(f"{keypair_path.name}.lock")
+    machine_owner = _machine_identity_fingerprint()
+    keypair_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
-                try:  # if decoded successfully, save & return
-                    return Keypair.from_bytes(protobuf_encoded)
-                except ValueError as e:  # on runtime error, assume corrupt file
-                    logger.warning(f"Encountered error when trying to get keypair: {e}")
+    with FileLock(lock_path):
+        existing_keypair = _read_keypair(keypair_path)
+        existing_owner = _read_owner(owner_path)
+        if existing_keypair is not None and (
+            machine_owner is None or existing_owner == machine_owner
+        ):
+            os.chmod(keypair_path, 0o600)
+            return existing_keypair
 
-        # if no valid credentials, create new ones and persist
-        with open(path, "w+b") as f:
-            keypair = Keypair.generate()
-            f.write(keypair.to_bytes())
-            return keypair
+        if existing_keypair is not None:
+            reason = (
+                "missing its machine-owner marker"
+                if existing_owner is None
+                else "belongs to a different physical host"
+            )
+            logger.warning(
+                f"Persistent node identity {reason}; rotating it before joining "
+                "the cluster"
+            )
+
+        keypair = Keypair.generate()
+        _write_private_file(keypair_path, keypair.to_bytes())
+        if machine_owner is not None:
+            _write_private_file(owner_path, machine_owner.encode("ascii"))
+        else:
+            with suppress(FileNotFoundError):
+                owner_path.unlink()
+        return keypair
+
+
+def _read_keypair(path: Path) -> Keypair | None:
+    """Decode an existing node keypair, returning ``None`` when unusable."""
+
+    try:
+        encoded = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    if not encoded:
+        return None
+    try:
+        return Keypair.from_bytes(encoded)
+    except ValueError as exc:
+        logger.warning(f"Persistent node identity is corrupt; rotating it: {exc}")
+        return None
+
+
+def _read_owner(path: Path) -> str | None:
+    """Read a machine-owner fingerprint without exposing machine identity."""
+
+    try:
+        owner = path.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        return None
+    return owner or None
+
+
+def _write_private_file(path: Path, payload: bytes) -> None:
+    """Atomically replace a file with mode 600 and durable contents."""
+
+    temporary_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor = os.open(
+        temporary_path,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+        os.chmod(path, 0o600)
+    except BaseException:
+        with suppress(FileNotFoundError):
+            temporary_path.unlink()
+        raise
+
+
+def _machine_identity_fingerprint() -> str | None:
+    """Return a non-reversible fingerprint of the current physical host."""
+
+    machine_identity = _read_machine_identity()
+    if machine_identity is None:
+        return None
+    digest = hashlib.sha256()
+    digest.update(b"skulk-node-owner-v1\0")
+    digest.update(machine_identity.encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _read_machine_identity() -> str | None:
+    """Read a stable platform identity used only to detect cloned key files."""
+
+    if sys.platform == "linux":
+        for candidate in (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id")):
+            try:
+                identity = candidate.read_text(encoding="ascii").strip()
+            except (OSError, UnicodeError):
+                continue
+            if identity:
+                return identity
+        return None
+
+    if sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        for line in result.stdout.splitlines():
+            if '"IOPlatformUUID"' not in line:
+                continue
+            _, separator, raw_identity = line.partition("=")
+            identity = raw_identity.strip().strip('"') if separator else ""
+            return identity or None
+    return None

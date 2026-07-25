@@ -162,12 +162,14 @@ What to do: **wait a few seconds and retry.** The 15-second internal grace
 covers most cases; a `503` means the info still had not arrived, so a second
 attempt shortly after almost always succeeds.
 
-### Node IDs are per-session
+### Node IDs persist across restarts
 
 `excluded_nodes` (and the preview `excluded_node_ids`) take libp2p node IDs.
-**Node IDs change when a cluster session restarts**: they are per-session,
-not stable identifiers. Re-read current IDs from `GET /state` before
-constructing an exclusion list; an old ID is simply ignored.
+Ordinary process and service restarts preserve each physical host's node ID.
+Re-read current IDs from `GET /state` after restoring a machine backup onto
+different hardware: Skulk detects the copied machine-owner marker and rotates
+the key before joining, so cloned hosts cannot share an identity. An old ID in
+an exclusion list is simply ignored.
 
 Preview before you place to see which combinations are valid and why the
 others fail:
