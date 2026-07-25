@@ -4316,7 +4316,17 @@ class API:
                     if active_call_id != call_id
                 )
                 or any(
-                    task.instance_id == instance_id
+                    # Runner readiness can arrive before lifecycle task status
+                    # converges across the cluster. Only inference tasks consume
+                    # mounted STT capacity once the runner is ready.
+                    isinstance(
+                        task,
+                        (
+                            task_types.AudioTranscription,
+                            task_types.RealtimeAudioTranscription,
+                        ),
+                    )
+                    and task.instance_id == instance_id
                     and task.task_status not in _TERMINAL_TASK_STATUSES
                     for task in self.state.tasks.values()
                 )
