@@ -42,6 +42,16 @@ dependencies = [
   # carries only upstream mlx-audio #693 on top of the 0.4.3 tag.
   "mlx-audio @ https://github.com/Foxlight-Foundation/mlx-audio/archive/7f87787fe8a48faffe2a6fb16c87d457b5fac289.tar.gz ; sys_platform == 'darwin'",
   "transformers>=5.5.0,<6.0.0",
+  # HARD dependency of the MLX vision path, not an extra (#614's rule: nothing
+  # optional may be load-bearing). transformers 5.x routes every
+  # AutoImageProcessor through a torchvision backend, so without this wheel
+  # `AutoImageProcessor.from_pretrained` raises and the image never reaches the
+  # model. That failure used to be inaudible: the runner caught it, logged a
+  # warning, and answered from the text alone, so the model confabulated a
+  # fluent description of a picture it had never seen. Pinned to the release
+  # paired with the torch mlx-vlm already resolves, so adding image support
+  # does not quietly move the torch under the rest of the stack.
+  "torchvision==0.26.0; sys_platform == 'darwin'",
   "jsonschema>=4.26.0",
   "webrtcvad-wheels>=2.0.14,<3",
   # Platform-conditional HARD dependency (#614): nothing optional may be

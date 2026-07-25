@@ -25,7 +25,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Protocol, cast
+from typing import TYPE_CHECKING, Any, Callable, Protocol, cast, final
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -1750,6 +1750,23 @@ class VisionProcessor:
         )
 
 
+@final
+class VisionPreprocessingError(Exception):
+    """A request whose images could not be turned into model input.
+
+    Answering a vision request without its image is the worst outcome this
+    engine can produce. The model still replies, fluently and in the requested
+    format, but every visual claim in that reply is invented, and nothing
+    downstream can tell it apart from a real answer. A caller who asked what is
+    in a picture is better served by an error than by a confident fiction, so
+    every path that loses the image raises this instead of continuing.
+
+    The runner terminates just the affected task on this error and stays alive,
+    the same treatment context-admission rejections get: the condition is a
+    property of the request and the node's install, not a corrupted engine.
+    """
+
+
 def prepare_vision(
     images: list[str] | None,
     chat_template_messages: list[dict[str, Any]] | None,
@@ -1759,16 +1776,20 @@ def prepare_vision(
     *,
     task_id: TaskId | str | None = None,
 ) -> VisionResult | None:
-    """Top-level entry point: encode images and build the vision-augmented prompt.
+    """Encode images and build the vision-augmented prompt.
 
-    Returns ``None`` if no images are provided or chat template messages are missing."""
+    Returns ``None`` only when the request carried no images. A request that
+    does carry images either gets them spliced into the prompt or raises
+    ``VisionPreprocessingError``; it never quietly degrades to text.
+    """
     if not images:
         return None
     if chat_template_messages is None:
-        logger.warning(
-            "Vision request missing chat_template_messages — ignoring images"
+        raise VisionPreprocessingError(
+            f"cannot place {len(images)} image(s) in the prompt: the request "
+            "arrived without chat_template_messages, so there is no message "
+            "structure to attach them to"
         )
-        return None
 
     return vision_processor.process(
         images=images,
