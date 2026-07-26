@@ -1,8 +1,10 @@
 # pyright: reportPrivateUsage=false
 """Worker tests for exact-transfer staging capacity admission."""
 
+import threading
 from pathlib import Path
 
+import anyio
 import pytest
 
 from skulk.routing.router import get_node_id_keypair
@@ -17,7 +19,10 @@ from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import Event, IndexedEvent, NodeDownloadProgress
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
+from skulk.shared.types.tasks import CreateRunner
 from skulk.shared.types.worker.downloads import DownloadCompleted, DownloadPending
+from skulk.shared.types.worker.instances import InstanceId
+from skulk.shared.types.worker.runners import RunnerId
 from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.store.config import StagingNodeConfig
 from skulk.store.model_store_client import ModelStoreClient
@@ -27,6 +32,7 @@ from skulk.store.staging_eviction import (
 )
 from skulk.utils.channels import Receiver, channel
 from skulk.worker.main import Worker, _staging_model_ids
+from skulk.worker.tests.unittests.conftest import get_mlx_ring_instance
 
 
 def _shard(model_id: str, storage_bytes: int) -> PipelineShardMetadata:
@@ -201,3 +207,61 @@ async def test_preflight_fails_closed_when_disk_capacity_cannot_be_read(
 
     assert "Could not verify staging disk capacity" in str(raised.value)
     assert "download was not started" in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_runner_creation_waits_for_capacity_eviction_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    incoming = _shard("org/incoming", storage_bytes=100)
+    worker, _event_receiver = _worker(tmp_path)
+    runner_id = RunnerId()
+    instance_id = InstanceId()
+    instance = get_mlx_ring_instance(
+        instance_id=instance_id,
+        model_id=incoming.model_card.model_id,
+        node_to_runner={worker.node_id: runner_id},
+        runner_to_shard={runner_id: incoming},
+    )
+    worker.state = State(instances={instance_id: instance})
+
+    eviction_started = threading.Event()
+    release_eviction = threading.Event()
+
+    def _blocking_capacity_pass(
+        _models_in_use: frozenset[str],
+        _required_free_bytes: int,
+        _enforce_recent_budget: bool,
+        _fail_on_error: bool,
+    ) -> None:
+        eviction_started.set()
+        assert release_eviction.wait(timeout=2)
+
+    monkeypatch.setattr(worker, "_enforce_staging_budget", _blocking_capacity_pass)
+    runner_creation_started = anyio.Event()
+
+    async def _record_runner_creation(
+        _worker: Worker, _task: CreateRunner
+    ) -> None:
+        runner_creation_started.set()
+
+    monkeypatch.setattr(Worker, "_execute_create_runner", _record_runner_creation)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(
+            worker.prepare_staging_transfer,
+            incoming,
+            frozenset({"org/incoming"}),
+            0,
+        )
+        with anyio.fail_after(2):
+            while not eviction_started.is_set():
+                await anyio.sleep(0.01)
+
+        task_group.start_soon(worker._plan_next_task_with_staging_guard)
+        await anyio.sleep(0.05)
+        assert not runner_creation_started.is_set()
+
+        release_eviction.set()
+        with anyio.fail_after(2):
+            await runner_creation_started.wait()

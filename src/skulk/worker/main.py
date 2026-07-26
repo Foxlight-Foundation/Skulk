@@ -713,6 +713,12 @@ class Worker:
         self._stale_downloads_pending_reset: set[str] = set()
         self._stale_resets_sent: set[str] = set()
         self._stale_reset_wait_ticks: int = 0
+        # Runtime eviction takes a filesystem snapshot on the event loop and
+        # deletes from a worker thread. Keep that whole interval atomic with
+        # stale-state reconciliation plus CreateRunner planning/registration:
+        # otherwise a newly planned runner can begin lazy-loading a directory
+        # that the already-snapshotted eviction pass still considers idle.
+        self._staging_runner_transition_lock = anyio.Lock()
         self._tg: TaskGroup = TaskGroup()
 
         self._system_id = SystemId()
@@ -1911,27 +1917,6 @@ class Worker:
     async def plan_step(self):
         while True:
             await anyio.sleep(0.1)
-            if self._stale_downloads_pending_reset:
-                await self._reset_stale_downloads_from_state()
-                if self._state_still_advertises_evicted_downloads():
-                    # The DownloadPending resets round-trip through the
-                    # master before our replicated state drops the stale
-                    # DownloadCompleted entries; planning against the
-                    # stale state could dispatch a load straight at the
-                    # files we just deleted. Skip planning until the
-                    # resets land (bounded: see the deadline below).
-                    self._stale_reset_wait_ticks += 1
-                    if self._stale_reset_wait_ticks <= _STALE_RESET_MAX_WAIT_TICKS:
-                        continue
-                    logger.warning(
-                        "Worker: stale download resets have not applied "
-                        f"after {_STALE_RESET_MAX_WAIT_TICKS} planning "
-                        "ticks; resuming planning anyway (the coordinator "
-                        "self-heals missing files at download time)"
-                    )
-                    self._stale_downloads_pending_reset.clear()
-                    self._stale_resets_sent.clear()
-                    self._stale_reset_wait_ticks = 0
             # Bound the crash breaker's memory: drop entries for instances that
             # no longer exist. We deliberately don't clear on give-up (that would
             # let a lingering instance re-trip and re-send DeleteInstance), so
@@ -1975,16 +1960,7 @@ class Worker:
                         "not stall pre-init coordination forever.",
                     )
 
-            task: Task | None = plan(
-                self.node_id,
-                self.runners,
-                self._effective_downloads(),
-                self.state.instances,
-                self.state.runners,
-                self.state.tasks,
-                self.input_chunk_buffer,
-                self._speech_media_ready,
-            )
+            task = await self._plan_next_task_with_staging_guard()
             if task is None:
                 continue
 
@@ -2001,42 +1977,6 @@ class Worker:
 
             # lets not kill the worker if a runner is unresponsive
             match task:
-                case CreateRunner():
-                    # The local fit guard sizes a shard's footprint against this
-                    # node's memory, but an RPC placement's shares are decided
-                    # by llama.cpp at load (the driver's shard nominally spans
-                    # ALL layers and a donor holds none), so per-shard sizing
-                    # is meaningless here. Pooled admission already used the
-                    # strict per-node VRAM figure; a genuine misfit fails at
-                    # llama-server load and the crash cascade recovers (#328).
-                    fit_error = (
-                        None
-                        if isinstance(task.bound_instance.instance, LlamaRpcInstance)
-                        else self._local_shard_fit_error(
-                            task.bound_instance.bound_shard,
-                            task.bound_instance.instance.context_token_limit,
-                        )
-                    )
-                    if fit_error is not None:
-                        logger.error(fit_error)
-                        await self.event_sender.send(
-                            TaskStatusUpdated(
-                                task_id=task.task_id, task_status=TaskStatus.Failed
-                            )
-                        )
-                        # Memory refusal (not a crash/wedge): ask the master to
-                        # re-place wider instead of silently deleting (#290).
-                        if self._crash_breaker.record(task.instance_id):
-                            await self._refuse_instance_placement(
-                                task.instance_id, fit_error
-                            )
-                    else:
-                        self._create_supervisor(task)
-                        await self.event_sender.send(
-                            TaskStatusUpdated(
-                                task_id=task.task_id, task_status=TaskStatus.Complete
-                            )
-                        )
                 case DownloadModel(shard_metadata=shard):
                     model_id = shard.model_card.model_id
                     self._download_backoff.record_attempt(model_id)
@@ -2419,6 +2359,95 @@ class Worker:
                 case task:
                     await self._start_runner_task(task)
 
+    async def _plan_next_task_with_staging_guard(self) -> Task | None:
+        """Plan one task while excluding runtime staging eviction.
+
+        Most task kinds can safely leave the guard after planning because an
+        existing runner already protects every lazily loaded model directory.
+        ``CreateRunner`` is different: its model is not represented in
+        ``self.runners`` until registration. Handle that task completely under
+        the guard so an eviction snapshot occurs either before planning (where
+        the stale-download gate suppresses it) or after registration (where
+        ``_models_in_use`` protects it).
+        """
+
+        async with self._staging_runner_transition_lock:
+            if self._stale_downloads_pending_reset:
+                await self._reset_stale_downloads_from_state()
+                if self._state_still_advertises_evicted_downloads():
+                    # The DownloadPending resets round-trip through the
+                    # master before our replicated state drops the stale
+                    # DownloadCompleted entries; planning against the stale
+                    # state could dispatch a load straight at deleted files.
+                    self._stale_reset_wait_ticks += 1
+                    if self._stale_reset_wait_ticks <= _STALE_RESET_MAX_WAIT_TICKS:
+                        return None
+                    logger.warning(
+                        "Worker: stale download resets have not applied "
+                        f"after {_STALE_RESET_MAX_WAIT_TICKS} planning "
+                        "ticks; resuming planning anyway (the coordinator "
+                        "self-heals missing files at download time)"
+                    )
+                    self._stale_downloads_pending_reset.clear()
+                    self._stale_resets_sent.clear()
+                    self._stale_reset_wait_ticks = 0
+
+            task: Task | None = plan(
+                self.node_id,
+                self.runners,
+                self._effective_downloads(),
+                self.state.instances,
+                self.state.runners,
+                self.state.tasks,
+                self.input_chunk_buffer,
+                self._speech_media_ready,
+            )
+            if not isinstance(task, CreateRunner):
+                return task
+
+            logger.info(f"Worker plan: {_summarize_worker_task(task)}")
+            assert task.task_status
+            await self.event_sender.send(
+                TaskCreated(task_id=task.task_id, task=task)
+            )
+            await self._execute_create_runner(task)
+            return None
+
+    async def _execute_create_runner(self, task: CreateRunner) -> None:
+        """Validate and register one planned runner under the staging guard."""
+
+        # The local fit guard sizes a shard's footprint against this node's
+        # memory, but an RPC placement's shares are decided by llama.cpp at
+        # load (the driver's shard nominally spans ALL layers and a donor holds
+        # none), so per-shard sizing is meaningless here. Pooled admission
+        # already used the strict per-node VRAM figure; a genuine misfit fails
+        # at llama-server load and the crash cascade recovers (#328).
+        fit_error = (
+            None
+            if isinstance(task.bound_instance.instance, LlamaRpcInstance)
+            else self._local_shard_fit_error(
+                task.bound_instance.bound_shard,
+                task.bound_instance.instance.context_token_limit,
+            )
+        )
+        if fit_error is not None:
+            logger.error(fit_error)
+            await self.event_sender.send(
+                TaskStatusUpdated(
+                    task_id=task.task_id, task_status=TaskStatus.Failed
+                )
+            )
+            # Memory refusal (not a crash/wedge): ask the master to re-place
+            # wider instead of silently deleting (#290).
+            if self._crash_breaker.record(task.instance_id):
+                await self._refuse_instance_placement(task.instance_id, fit_error)
+            return
+
+        self._create_supervisor(task)
+        await self.event_sender.send(
+            TaskStatusUpdated(task_id=task.task_id, task_status=TaskStatus.Complete)
+        )
+
     async def shutdown(self):
         self._tg.cancel_tasks()
         await self._stopped.wait()
@@ -2648,19 +2677,22 @@ class Worker:
             raise ValueError("additional_bytes must be non-negative")
 
         required_free_bytes = additional_bytes + MINIMUM_STAGING_FREE_DISK_BYTES
-        protected_model_ids = (
-            self._models_in_use()
-            | active_staging_model_ids
-            | _staging_model_ids(shard.model_card)
-        )
         try:
-            report = await to_thread.run_sync(
-                self._enforce_staging_budget,
-                protected_model_ids,
-                required_free_bytes,
-                False,
-                True,
-            )
+            async with self._staging_runner_transition_lock:
+                protected_model_ids = (
+                    self._models_in_use()
+                    | active_staging_model_ids
+                    | _staging_model_ids(shard.model_card)
+                )
+                report = await to_thread.run_sync(
+                    self._enforce_staging_budget,
+                    protected_model_ids,
+                    required_free_bytes,
+                    False,
+                    True,
+                )
+                if report is not None:
+                    await self._reset_download_state_for_evicted(report, shard)
         except Exception as error:
             logger.exception(
                 "Worker: staging capacity preflight failed for "
@@ -2674,7 +2706,6 @@ class Worker:
             raise StagingCapacityError(message) from error
         if report is None:
             return
-        await self._reset_download_state_for_evicted(report, shard)
         if report.capacity_satisfied:
             if report.evicted_model_ids:
                 logger.info(
@@ -2742,11 +2773,14 @@ class Worker:
         # other worker tasks. The in-use snapshot is taken HERE, on the
         # loop thread: the threaded pass must not iterate self.runners /
         # self.state while the loop mutates them.
-        models_in_use = self._models_in_use()
-        report = await to_thread.run_sync(self._enforce_staging_budget, models_in_use)
-        if report is None:
-            return
-        await self._reset_download_state_for_evicted(report, shard)
+        async with self._staging_runner_transition_lock:
+            models_in_use = self._models_in_use()
+            report = await to_thread.run_sync(
+                self._enforce_staging_budget, models_in_use
+            )
+            if report is None:
+                return
+            await self._reset_download_state_for_evicted(report, shard)
 
     async def _reset_download_state_for_evicted(
         self, report: StagingEvictionReport, deactivated_shard: ShardMetadata
@@ -2786,6 +2820,7 @@ class Worker:
                 # reset (e.g. a companion repo staged without its own
                 # download entry).
                 continue
+            self._stale_downloads_pending_reset.add(evicted_directory)
             pending = DownloadPending(
                 shard_metadata=shard_metadata,
                 node_id=self.node_id,
@@ -2795,6 +2830,7 @@ class Worker:
             await self.event_sender.send(
                 NodeDownloadProgress(download_progress=pending)
             )
+            self._stale_resets_sent.add(evicted_directory)
 
     def _touch_staged_model_and_companions(self, card: ModelCard) -> None:
         """Refresh .last_used for a model (and companions) just taken out of use."""
