@@ -25,3 +25,11 @@ def test_service_installer_resolves_fresh_uv_location(relative_path: str) -> Non
     assert path_resolution < uv_guard
     assert "PATH=\"$candidate_dir:$PATH\"" in script
     assert "export PATH" in script[path_resolution:uv_guard]
+
+
+def test_systemd_runner_oom_does_not_stop_skulk_node() -> None:
+    """An OOM-killed runner child must not take down the API and model store."""
+
+    unit = (_REPO_ROOT / "deployment/systemd/skulk.service").read_text()
+
+    assert "OOMPolicy=continue" in unit

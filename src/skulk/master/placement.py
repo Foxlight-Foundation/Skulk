@@ -138,6 +138,7 @@ def add_instance_to_placements(
     current_instances: Mapping[InstanceId, Instance],
     node_memory: Mapping[NodeId, MemoryUsage],
     node_vram: Mapping[NodeId, Memory] | None = None,
+    unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
 ) -> Mapping[InstanceId, Instance]:
     # TODO: validate against topology
 
@@ -160,6 +161,7 @@ def add_instance_to_placements(
             if node_id in node_memory
         },
         node_vram=node_vram,
+        unified_memory_gpu_nodes=unified_memory_gpu_nodes,
     )
     instance = command.instance.model_copy(update={"context_token_limit": ceiling})
     return {**current_instances, instance.instance_id: instance}
@@ -341,6 +343,7 @@ def place_instance(
     excluded_nodes: set[NodeId] | None = None,
     node_resources: Mapping[NodeId, NodeResources] | None = None,
     node_vram: Mapping[NodeId, Memory] | None = None,
+    unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
     stamped_exclusions: set[NodeId] | None = None,
 ) -> dict[InstanceId, Instance]:
     cycles = topology.get_cycles()
@@ -750,6 +753,7 @@ def place_instance(
             for node_id in selected_cycle.node_ids
         },
         node_vram=node_vram,
+        unified_memory_gpu_nodes=unified_memory_gpu_nodes,
     )
 
     cycle_digraph: Topology = topology.get_subgraph_from_nodes(selected_cycle.node_ids)

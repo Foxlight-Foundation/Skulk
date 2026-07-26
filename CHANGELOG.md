@@ -7,6 +7,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+- Kept fixed-window llama.cpp contexts at the safe 8192-token floor on
+  unified-memory AMD APUs. Placement still uses their combined VRAM/GTT pool,
+  but no longer misclassifies that pool as discrete VRAM and lets a large
+  startup KV allocation OOM the node and its co-hosted model store. The shipped
+  systemd unit also contains any future runner OOM to the child process instead
+  of stopping the entire Skulk service.
+
 - Fixed the documented launchd/systemd install step failing immediately after a
   successful one-command install because `uv` lived under `~/.local/bin` but
   the parent shell had not reloaded its PATH. Both service installers now
