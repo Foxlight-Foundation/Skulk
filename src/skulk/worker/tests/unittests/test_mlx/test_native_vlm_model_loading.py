@@ -179,6 +179,20 @@ def test_vlm_wrapper_uses_native_language_model_cache_factory() -> None:
     assert make_cache() == ["native-ssm-cache", "native-kv-cache"]
 
 
+def test_gemma4_native_vision_batches_single_image_pixels() -> None:
+    """A single CHW image must reach Gemma 4 as a BCHW tensor."""
+
+    batch_pixel_values = cast(
+        Callable[[mx.array], mx.array],
+        vars(utils_mlx)["_batch_gemma4_pixel_values"],
+    )
+    single_image = mx.zeros((3, 768, 768))
+    already_batched = mx.zeros((1, 3, 768, 768))
+
+    assert batch_pixel_values(single_image).shape == (1, 3, 768, 768)
+    assert batch_pixel_values(already_batched) is already_batched
+
+
 def test_vlm_loader_restores_qwen_sanitizer_after_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
