@@ -43,6 +43,27 @@ def test_canonical_capacity_counts_resumable_and_replaced_bytes(
     )
 
 
+def test_canonical_capacity_does_not_credit_hardlinked_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "org--model"
+    staging = tmp_path / "staging"
+    target.mkdir()
+    staging.mkdir()
+    canonical = target / "replace.gguf"
+    canonical.write_bytes(b"x" * 3)
+    (staging / "replace.gguf").hardlink_to(canonical)
+
+    assert canonical.stat().st_nlink == 2
+    assert (
+        model_store_module._remaining_store_download_bytes(
+            target,
+            [FileListEntry(type="file", path="replace.gguf", size=8)],
+        )
+        == 8
+    )
+
+
 def test_canonical_capacity_rejects_unknown_manifest_sizes(tmp_path: Path) -> None:
     with pytest.raises(model_store_module.ModelStoreCapacityError, match="unknown size"):
         model_store_module._remaining_store_download_bytes(

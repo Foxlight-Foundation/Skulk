@@ -96,15 +96,24 @@ def _remaining_store_download_bytes(
         expected_size = file_entry.size
         target = target_directory / file_entry.path
         partial = target_directory / f"{file_entry.path}.partial"
-        target_bytes = target.stat().st_size if target.is_file() else 0
-        if target_bytes == expected_size and target.is_file():
+        target_stat = target.stat() if target.is_file() else None
+        target_bytes = target_stat.st_size if target_stat is not None else 0
+        if target_bytes == expected_size:
             continue
         resumable_bytes = partial.stat().st_size if partial.is_file() else 0
-        # A mismatched target is removed before download, returning its current
-        # blocks to the same filesystem; a partial is grown in place.
+        # A mismatched single-link target is removed before download, returning
+        # its current blocks to this filesystem. When staging hardlinked the
+        # canonical file, unlinking only its store name leaves those blocks
+        # owned by the staged link, so none of its bytes can be credited.
+        reclaimable_target_bytes = (
+            target_bytes
+            if target_stat is not None and target_stat.st_nlink == 1
+            else 0
+        )
+        # A partial is grown in place, so its existing bytes remain reusable.
         remaining_bytes += max(
             0,
-            expected_size - target_bytes - resumable_bytes,
+            expected_size - reclaimable_target_bytes - resumable_bytes,
         )
     return remaining_bytes
 

@@ -253,6 +253,35 @@ async def test_preflight_fails_closed_when_disk_capacity_cannot_be_read(
 
 
 @pytest.mark.asyncio
+async def test_zero_allocation_preflight_skips_reserve_and_eviction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hardlink staging remains available below the free-space reserve."""
+    incoming = _shard("org/incoming", storage_bytes=100)
+    worker, _event_receiver = _worker(tmp_path)
+
+    def _unexpected_capacity_pass(
+        _models_in_use: frozenset[str],
+        _required_free_bytes: int,
+        _enforce_recent_budget: bool,
+        _fail_on_error: bool,
+    ) -> None:
+        raise AssertionError("zero-allocation staging must not enforce reserve")
+
+    monkeypatch.setattr(
+        worker,
+        "_enforce_staging_budget",
+        _unexpected_capacity_pass,
+    )
+
+    await worker.prepare_staging_transfer(
+        incoming,
+        frozenset({"org/incoming"}),
+        additional_bytes=0,
+    )
+
+
+@pytest.mark.asyncio
 async def test_runner_creation_waits_for_capacity_eviction_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -295,7 +324,7 @@ async def test_runner_creation_waits_for_capacity_eviction_snapshot(
             worker.prepare_staging_transfer,
             incoming,
             frozenset({"org/incoming"}),
-            0,
+            1,
         )
         with anyio.fail_after(2):
             while not eviction_started.is_set():

@@ -2682,6 +2682,12 @@ class Worker:
             return
         if additional_bytes < 0:
             raise ValueError("additional_bytes must be non-negative")
+        if additional_bytes == 0:
+            # Same-filesystem staging uses hardlinks, and exact reuse writes no
+            # file data. The reserve protects transfers that allocate model
+            # bytes; it must not evict warm models or reject a zero-allocation
+            # launch merely because the filesystem is already below the floor.
+            return
 
         required_free_bytes = additional_bytes + MINIMUM_STAGING_FREE_DISK_BYTES
         try:
