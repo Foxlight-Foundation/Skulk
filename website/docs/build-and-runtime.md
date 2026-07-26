@@ -31,11 +31,14 @@ object and checks it out detached, so a moving branch cannot change the code
 between approval and installation.
 
 The installer fetches prerequisites (git, a C toolchain, rustup, uv), clones
-the repo into `~/skulk`, syncs the environment, builds the dashboard when npm
-is available, and finishes with `skulk doctor --fix`, which audits the node
+the repo into `~/skulk`, syncs the environment, and builds the dashboard with
+Skulk's bundled cross-platform Node.js runtime (falling back to a compatible
+system toolchain if necessary). It finishes with `skulk doctor --fix`, which audits the node
 (GPU detection, engine availability, storage headroom) and applies safe
 remediations, printing the consequence and fix for anything it cannot repair.
-Re-running the installer is safe: every step is idempotent.
+Re-running the installer is safe: every step is idempotent. Pass `--headless`
+only for an intentionally API-only node; a normal fresh install always
+includes the dashboard.
 
 Skulk releases qualify this same path on clean Apple Silicon, AMD Linux, and
 NVIDIA Linux environments. A candidate run pins the proposed commit; after

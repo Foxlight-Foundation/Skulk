@@ -66,6 +66,10 @@ dependencies = [
   # a tiny pure-Python NVML binding, inert without an NVIDIA driver, so
   # non-NVIDIA Linux nodes pay only a few kilobytes.
   "nvidia-ml-py>=12.535.108; sys_platform == 'linux'",
+  # HARD dependency of the normal installer on macOS and Linux. A fresh Skulk
+  # node includes the dashboard without relying on a separately installed
+  # Node.js toolchain; --headless is the explicit API-only opt-out.
+  "nodejs-wheel-binaries==25.2.1rc0; sys_platform == 'darwin' or sys_platform == 'linux'",
 ]
 
 [project.scripts]

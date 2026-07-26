@@ -43,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/inst
 
 On a Linux machine where `nvidia-smi` reports a GPU, the installer provisions,
 beyond the usual toolchain (uv, Rust, the repo checkout, the Python
-environment, and the dashboard when npm is present):
+environment, and the dashboard built by Skulk's bundled Node.js runtime):
 
 - **The `skulk-llama-server-cuda` engine wheel**, fetched from the Foxlight
   wheel index at `wheels.foxlight.ai` (the CUDA wheel exceeds PyPI's per-file

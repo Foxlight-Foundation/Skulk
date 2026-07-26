@@ -252,7 +252,10 @@ You no longer need to build `llama-server` by hand to get this: Skulk's
 one-command installer (`install.sh` at the repo root) detects an AMD GPU and
 installs the prebuilt `skulk-llama-server-vulkan` engine wheel (a pinned
 Vulkan `llama-server` + `ggml-rpc-server` build), which Skulk's engine
-provisioning discovers and wires automatically. A manual build remains a
+provisioning discovers and wires automatically. The same normal install builds
+the dashboard through Skulk's bundled Node.js runtime even when the Linux host
+has no system Node/npm; use `--headless` only for an intentionally API-only
+worker. A manual build remains a
 supported override for a custom or newer llama.cpp: point
 `SKULK_LLAMA_SERVER_BIN` at your own binary and it always wins over the
 managed one. Native MTP (`--spec-type draft-mtp`) landed in llama.cpp build
