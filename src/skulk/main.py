@@ -1004,6 +1004,7 @@ class Node:
                 # - Shut down and re-create the API
 
                 start_replacement_event_router = False
+                start_replacement_download_coordinator = False
                 previous_store_server = self.store_server
                 if result.is_new_master:
                     await anyio.sleep(0)
@@ -1153,7 +1154,12 @@ class Node:
                                 else None
                             ),
                         )
-                        self._tg.start_soon(self.download_coordinator.run)
+                        # Do not start receiving StartDownload commands until
+                        # the replacement worker below has attached the
+                        # staging-capacity callback. Worker shutdown yields,
+                        # so starting here creates a window where store-backed
+                        # transfers bypass disk admission entirely.
+                        start_replacement_download_coordinator = True
                     if self.worker:
                         await self.worker.shutdown()
                         ms2 = (
@@ -1236,6 +1242,9 @@ class Node:
                             self.api.set_vision_media_ingress_provider(
                                 self.worker.collect_vision_media_ingress_diagnostics
                             )
+                    if start_replacement_download_coordinator:
+                        assert self.download_coordinator is not None
+                        self._tg.start_soon(self.download_coordinator.run)
                     if self.api:
                         self.api.reset(
                             result.won_clock,
