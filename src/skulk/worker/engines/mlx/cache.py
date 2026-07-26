@@ -164,6 +164,11 @@ def is_non_kv_cache_entry(entry: object) -> bool:
     )
 
 
+def has_recurrent_state_caches(cache: KVCacheType) -> bool:
+    """Return whether a cache contains recurrent state requiring restoration."""
+    return any(isinstance(entry, (ArraysCache, VlmArraysCache)) for entry in cache)
+
+
 def snapshot_ssm_states(cache: KVCacheType) -> CacheSnapshot:
     states: list[
         ArraysCache
