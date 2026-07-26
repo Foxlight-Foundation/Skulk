@@ -115,7 +115,7 @@ from skulk.store.staging_eviction import (
     MINIMUM_STAGING_FREE_DISK_BYTES,
     StagingEvictionReport,
     enforce_staging_budget,
-    list_staged_models,
+    staged_model_size_bytes,
     staging_directory_name,
     touch_last_used,
 )
@@ -2664,14 +2664,10 @@ class Worker:
             return None
 
         staging_root = Path(self._staging_config.node_cache_path).expanduser()
-        incoming_directory = staging_directory_name(str(shard.model_card.model_id))
-        staged_bytes = next(
-            (
-                info.size_bytes
-                for info in list_staged_models(staging_root)
-                if Path(info.directory).name == incoming_directory
-            ),
-            0,
+        staged_bytes = await to_thread.run_sync(
+            staged_model_size_bytes,
+            staging_root,
+            str(shard.model_card.model_id),
         )
         remaining_model_bytes = max(
             0, shard.model_card.storage_size.in_bytes - staged_bytes

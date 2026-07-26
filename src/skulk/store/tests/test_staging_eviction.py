@@ -18,6 +18,7 @@ from skulk.store.staging_eviction import (
     enforce_staging_budget,
     list_staged_models,
     model_id_from_staging_directory_name,
+    staged_model_size_bytes,
     touch_last_used,
 )
 
@@ -103,6 +104,14 @@ def test_touch_last_used_refreshes_lru_position(tmp_path: Path) -> None:
     staged = list_staged_models(tmp_path)
 
     assert [info.model_id for info in staged] == ["org/stale", "org/fresh"]
+
+
+def test_staged_model_size_walks_only_requested_directory(tmp_path: Path) -> None:
+    _stage_model(tmp_path, "org/requested", size_bytes=17, last_used_age_seconds=10)
+    _stage_model(tmp_path, "org/unrelated", size_bytes=29, last_used_age_seconds=10)
+
+    assert staged_model_size_bytes(tmp_path, "org/requested") == 17
+    assert staged_model_size_bytes(tmp_path, "org/missing") == 0
 
 
 def test_missing_staging_root_is_empty(tmp_path: Path) -> None:

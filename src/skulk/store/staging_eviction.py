@@ -110,6 +110,14 @@ def _directory_size_bytes(directory: Path) -> int:
     return total
 
 
+def staged_model_size_bytes(staging_root: Path, model_id: str) -> int:
+    """Return the bytes already present for one resumable staged model."""
+    directory = staging_root / staging_directory_name(model_id)
+    if not directory.is_dir():
+        return 0
+    return _directory_size_bytes(directory)
+
+
 def _last_used_epoch_seconds(directory: Path) -> float:
     marker = directory / LAST_USED_MARKER_FILENAME
     try:
