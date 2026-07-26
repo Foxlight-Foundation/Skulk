@@ -9,29 +9,33 @@ from skulk.worker.runner.llama_server.runner import (
 )
 
 
-def test_parallel_defaults_to_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unset node override preserves serial served-engine behavior.
+def test_parallel_defaults_to_sixteen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unset node serves the fleet-qualified concurrent width.
 
-    Deliberate, and unrelated to whether concurrency is safe: with a unified KV
-    buffer every slot serves the full stamped window, so N > 1 no longer shrinks
-    what a request gets. What it does share is a finite pool, and how much of it
-    to hand out is a per-deployment judgement (#689).
+    The served engine exists to batch requests, and a unified KV buffer keeps
+    the full stamped window available to every slot. Shipping one slot made a
+    fresh install serial while the release fleet exercised sixteen.
     """
     monkeypatch.delenv("SKULK_LLAMA_SERVER_PARALLEL", raising=False)
 
-    assert _llama_server_parallel() == 1
+    assert _llama_server_parallel() == 16
+    assert _slot_server_args(_llama_server_parallel()) == [
+        "--parallel",
+        "16",
+        "--kv-unified",
+    ]
 
 
 def test_parallel_rejects_invalid_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Invalid and non-positive overrides fall back to one slot."""
+    """Invalid and non-positive overrides fall back to the shipped width."""
     monkeypatch.setenv("SKULK_LLAMA_SERVER_PARALLEL", "not-an-integer")
-    assert _llama_server_parallel() == 1
+    assert _llama_server_parallel() == 16
 
     monkeypatch.setenv("SKULK_LLAMA_SERVER_PARALLEL", "0")
-    assert _llama_server_parallel() == 1
+    assert _llama_server_parallel() == 16
 
     monkeypatch.setenv("SKULK_LLAMA_SERVER_PARALLEL", "-4")
-    assert _llama_server_parallel() == 1
+    assert _llama_server_parallel() == 16
 
 
 def test_parallel_honors_the_declared_count_exactly(

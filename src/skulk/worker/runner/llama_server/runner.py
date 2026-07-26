@@ -129,12 +129,12 @@ def _force_no_spec() -> bool:
 
 
 _LLAMA_SERVER_PARALLEL_ENV: Final = "SKULK_LLAMA_SERVER_PARALLEL"
-# Concurrency stays OPT-IN (default 1). Not because concurrency is unsafe -- a
-# unified KV buffer gives every slot the full window (see _llama_server_parallel)
-# -- but because the shared pool is finite, and how much of it to hand out is a
-# per-deployment judgement Skulk cannot make from the outside. A fresh install
-# gets the serial behavior every earlier release had.
-_DEFAULT_LLAMA_SERVER_PARALLEL: Final = 1
+# The served engine exists to batch concurrent requests; shipping it serial made
+# fresh installs behave materially worse than the fleet used to qualify them.
+# Sixteen is the exercised fleet setting. A unified KV buffer keeps every slot's
+# advertised context window truthful without allocating N private caches; users
+# dominated by near-window prompts can still opt back to serial explicitly.
+_DEFAULT_LLAMA_SERVER_PARALLEL: Final = 16
 
 
 def _llama_server_parallel() -> int:
@@ -152,18 +152,17 @@ def _llama_server_parallel() -> int:
     sees the whole window, the stamped ``context_token_limit`` stays the truth,
     and there is nothing left for a cap to protect.
 
-    What the operator owns instead is contention. Under a unified buffer the
+    What the deployment owns instead is contention. Under a unified buffer the
     slots draw from ONE pool of ``n_ctx`` tokens rather than N private slices, so
     concurrent long-context requests can collectively exhaust it. llama.cpp
     responds by purging idle slots' cached prompts and retrying with a smaller
-    batch, and treats total exhaustion as fatal. Declaring a slot count is
-    therefore a statement about the workload ("my requests are short enough to
-    share this window N ways"), which is exactly the kind of thing only the
-    person running the node knows.
+    batch, and treats total exhaustion as fatal. The shipped 16-slot default
+    favors normal interactive and API traffic; setting the override to ``1`` is
+    the explicit escape hatch for workloads dominated by near-window prompts.
 
     Returns:
-        The declared slot count, or ``1`` when unset. An unparseable or
-        below-one value also yields ``1``, but is warned about first: an
+        The declared slot count, or ``16`` when unset. An unparseable or
+        below-one value also yields ``16``, but is warned about first: an
         operator who declared something meant it, so a rejected declaration is
         never applied silently. An absent declaration is not a mistake and
         stays quiet.
@@ -205,12 +204,13 @@ def _slot_server_args(max_concurrency: int) -> list[str]:
     ``n_ctx_seq * n_stream`` cells and ``n_stream`` collapses to 1 when unified,
     so the same buffer is shared rather than sliced.
 
-    Passed only above one slot, so the serial default's command line is
-    byte-identical to previous releases and the validated single-slot paths
-    (draft-mtp speculation, RPC driver) are untouched.
+    Passed only above one slot, so an explicit serial override keeps the
+    validated single-slot command line used by draft-mtp speculation and the
+    RPC driver.
 
     Args:
-        max_concurrency: Slot count, as declared by the operator.
+        max_concurrency: Effective slot count from the shipped default or an
+            operator override.
 
     Returns:
         The flags to splice into the llama-server command line.
@@ -520,12 +520,20 @@ class Runner(ServedConcurrentDispatch):
         # so dispatching N generations cannot shrink what any one of them serves.
         self._init_concurrent_dispatch(_llama_server_parallel(), "llama-gen")
         if self._max_concurrency > 1:
-            # Loud once per runner: the operator traded a private per-slot window
-            # for a shared one, and the size of that pool did not change.
-            logger.warning(
+            # The shipped default uses the shared buffer, so normal startup
+            # records the trade without presenting the supported default as an
+            # operator error. Explicit non-default concurrency remains visible
+            # at warning level because it changes the exercised admission width.
+            log_slot_contract = (
+                logger.warning
+                if os.environ.get(_LLAMA_SERVER_PARALLEL_ENV, "").strip()
+                else logger.info
+            )
+            log_slot_contract(
                 f"serving up to {self._max_concurrency} concurrent generations "
                 f"from one shared {self._serving_context_tokens}-token KV pool "
-                f"({_LLAMA_SERVER_PARALLEL_ENV}); each request may use the full "
+                f"(set {_LLAMA_SERVER_PARALLEL_ENV}=1 for serial service); "
+                "each request may use the full "
                 "window, but concurrent long-context requests contend for it and "
                 "exhausting the pool terminates the server"
             )
