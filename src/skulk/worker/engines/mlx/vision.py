@@ -995,7 +995,15 @@ class VisionEncoder:
         vision_cfg: JsonDict | None = None,
     ) -> None:
         """Load the image processor without forcing vision-weight initialization."""
-        _patch_video_processor()
+        if self._config.model_type != "gemma4":
+            _patch_video_processor()
+        # Gemma 4's MLX-VLM processor ships its own NumPy-only video processor,
+        # so it does not need torchvision. Removing Transformers'
+        # ``video_processor`` slot prevents Gemma4Processor.from_pretrained from
+        # constructing that processor and incorrectly falls through to the
+        # Hugging Face image processor, whose pre-patchified [B, patches,
+        # patch_dim] output is incompatible with MLX-VLM's raw BCHW vision
+        # tower.
         config = config or self._load_config_json()
         if not config:
             raise FileNotFoundError(f"config.json not found in {self._model_path}")

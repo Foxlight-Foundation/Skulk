@@ -171,6 +171,68 @@ def test_processor_loader_uses_mlx_vlm_family_without_torchvision(
     assert _FakeFamilyProcessor.seen_trust_remote_code is True
 
 
+def test_gemma4_processor_keeps_numpy_video_slot_without_torchvision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Gemma 4 must not disable the slot required by its NumPy-only processor."""
+    (tmp_path / "config.json").write_text(
+        '{"vision_config": {"model_type": "gemma4"}}',
+        encoding="utf-8",
+    )
+    _FakeFamilyProcessor.seen_repo = None
+    _FakeFamilyProcessor.seen_trust_remote_code = None
+
+    def _model_path(*_args: object) -> Path:
+        return tmp_path
+
+    def _no_upstream_processor(_repo: str) -> None:
+        return None
+
+    def _must_not_patch_video_processor() -> None:
+        raise AssertionError(
+            "Gemma 4's NumPy video processor does not require torchvision"
+        )
+
+    def _fake_import_module(module_name: str) -> object:
+        if module_name == "mlx_vlm.models.gemma4":
+            return SimpleNamespace(Gemma4Processor=_FakeFamilyProcessor)
+        raise ModuleNotFoundError(name=module_name)
+
+    def _fail_transformers_loader(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError(
+            "Gemma 4 must not fall through to the pre-patchified HF processor"
+        )
+
+    monkeypatch.setattr(vision_module, "build_model_path", _model_path)
+    monkeypatch.setattr(vision_module, "load_image_processor", _no_upstream_processor)
+    monkeypatch.setattr(
+        vision_module,
+        "_patch_video_processor",
+        _must_not_patch_video_processor,
+    )
+    monkeypatch.setattr(vision_module.importlib, "import_module", _fake_import_module)
+    monkeypatch.setattr(
+        vision_module,
+        "AutoImageProcessor",
+        SimpleNamespace(from_pretrained=_fail_transformers_loader),
+    )
+
+    encoder = VisionEncoder(
+        VisionCardConfig(
+            image_token_id=1,
+            model_type="gemma4",
+            weights_repo="mlx-community/example",
+        ),
+        ModelId("mlx-community/example"),
+    )
+    encoder.ensure_processor_loaded()
+
+    assert isinstance(encoder.processor, _FakeImageProcessor)
+    assert _FakeFamilyProcessor.seen_repo == str(tmp_path)
+    assert _FakeFamilyProcessor.seen_trust_remote_code is True
+
+
 def test_processor_loader_reports_transformers_torchvision_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
