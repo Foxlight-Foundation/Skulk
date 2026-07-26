@@ -418,14 +418,16 @@ request's real window below the limit placement stamped and the API admits
 against. The unified cache costs no extra memory: the same total number of cells
 is shared across slots rather than partitioned between them.
 
-The trade is contention. The slots draw from one pool
-rather than from private shares, so concurrent long-context requests can
-collectively exhaust it; llama.cpp responds by evicting idle slots' cached
-prompts, and treats total exhaustion as fatal to the server process. The shipped
-16-slot default matches the release-qualified fleet and favors normal
-interactive/API traffic; a workload dominated by near-window prompts can set
-`SKULK_LLAMA_SERVER_PARALLEL=1` to opt into serial service. The declared count
-is applied without a ceiling of Skulk's own.
+The slots still contend for one pool rather than private shares, so Skulk gates
+generation by aggregate token reservations. It asks llama-server's
+chat-completion token-count endpoint for the exact rendered prompt length,
+adds the request's maximum output, and queues the request until that reservation
+fits. An omitted `max_tokens` receives Skulk's normal 4096-token default; if
+token counting is unavailable, the request reserves the whole pool and runs
+alone instead of risking an underestimate. Thus the shipped 16-slot ceiling
+supports concurrent bounded traffic without allowing a burst of long requests
+to exhaust and terminate the server. `SKULK_LLAMA_SERVER_PARALLEL=1` remains an
+explicit serial-isolation option.
 
 Context sizing for the GGUF engines is dynamic rather than a fixed constant.
 Placement reserves KV cache for an 8192-token admission floor, but the window a

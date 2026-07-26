@@ -369,6 +369,24 @@ class ServedConcurrentDispatch:
             captured = self._admission_inflight.get(task_id)
         return captured if captured is not None else self._inflight_count()
 
+    def _set_admission_concurrency(self, task_id: TaskId, concurrency: int) -> None:
+        """Replace a task's stamp with engine-resource-active concurrency.
+
+        The generic dispatch count is correct when the external server admits
+        every submitted request immediately. An engine with an additional
+        resource budget may refine it after that gate opens so envelope samples
+        count active competitors rather than requests still waiting for budget.
+
+        Args:
+            task_id: The admitted generation whose stamp should be refined.
+            concurrency: Positive count of resource-active generations.
+        """
+        if concurrency < 1:
+            raise ValueError("admission concurrency must be positive")
+        with self._admission_lock:
+            if task_id in self._admission_inflight:
+                self._admission_inflight[task_id] = concurrency
+
     def stamp_runner_stats(
         self, stats: GenerationStats, in_flight_at_admission: int
     ) -> GenerationStats:
