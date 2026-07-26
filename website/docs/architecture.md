@@ -421,13 +421,14 @@ is shared across slots rather than partitioned between them.
 The slots still contend for one pool rather than private shares, so Skulk gates
 generation by aggregate token reservations. It asks llama-server's
 chat-completion token-count endpoint for the exact rendered prompt length,
-adds the request's maximum output, and queues the request until that reservation
-fits. An omitted `max_tokens` receives Skulk's normal 4096-token default; if
-token counting is unavailable, the request reserves the whole pool and runs
-alone instead of risking an underestimate. Thus the shipped 16-slot ceiling
-supports concurrent bounded traffic without allowing a burst of long requests
-to exhaust and terminate the server. `SKULK_LLAMA_SERVER_PARALLEL=1` remains an
-explicit serial-isolation option.
+adds the request's maximum output, and queues the request FIFO until that
+reservation fits. FIFO ordering prevents a large reservation from starving
+behind a sustained stream of later small ones. An omitted `max_tokens` receives
+Skulk's normal 4096-token default; if token counting is unavailable, the request
+reserves the whole pool and runs alone instead of risking an underestimate.
+Thus the shipped 16-slot ceiling supports concurrent bounded traffic without
+allowing a burst of long requests to exhaust and terminate the server.
+`SKULK_LLAMA_SERVER_PARALLEL=1` remains an explicit serial-isolation option.
 
 Context sizing for the GGUF engines is dynamic rather than a fixed constant.
 Placement reserves KV cache for an 8192-token admission floor, but the window a

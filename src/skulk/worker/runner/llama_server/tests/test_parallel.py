@@ -2,6 +2,8 @@
 """Tests for llama-server parallel-slot sizing."""
 
 import threading
+import time
+from collections import deque
 from unittest.mock import MagicMock
 
 import pytest
@@ -132,6 +134,7 @@ def test_context_budget_tracks_only_resource_active_requests() -> None:
     runner._context_budget_condition = threading.Condition()
     runner._reserved_context_tokens = 0
     runner._context_active_requests = 0
+    runner._context_waiters = deque()
     runner.server_proc = None
     runner._init_concurrent_dispatch(16, "test")
     runner.cancel_receiver = MagicMock()
@@ -162,6 +165,7 @@ def test_context_budget_queues_until_capacity_is_released() -> None:
     runner._context_budget_condition = threading.Condition()
     runner._reserved_context_tokens = 0
     runner._context_active_requests = 0
+    runner._context_waiters = deque()
     runner.server_proc = None
     runner._init_concurrent_dispatch(16, "test")
     runner.cancel_receiver = MagicMock()
@@ -192,6 +196,124 @@ def test_context_budget_queues_until_capacity_is_released() -> None:
     waiter.join(timeout=1)
     runner._release_context_budget(4096)
     assert not waiter.is_alive()
+
+
+def test_context_budget_does_not_starve_an_earlier_large_request() -> None:
+    """Later small reservations cannot bypass the FIFO head indefinitely."""
+    runner = Runner.__new__(Runner)
+    runner._serving_context_tokens = 8192
+    runner._context_budget_condition = threading.Condition()
+    runner._reserved_context_tokens = 0
+    runner._context_active_requests = 0
+    runner._context_waiters = deque()
+    runner.server_proc = None
+    runner._init_concurrent_dispatch(16, "test")
+    runner.cancel_receiver = MagicMock()
+    runner.cancel_receiver.receive_nowait.side_effect = WouldBlock
+    runner.cancelled_tasks = set()
+    active = TaskId("active")
+    large = TaskId("large")
+    small = TaskId("small")
+    with runner._admission_lock:
+        runner._admission_inflight[active] = 1
+        runner._admission_inflight[large] = 2
+        runner._admission_inflight[small] = 3
+
+    assert runner._acquire_context_budget(active, 4096)
+    large_admitted = threading.Event()
+    small_admitted = threading.Event()
+
+    def acquire_large() -> None:
+        if runner._acquire_context_budget(large, 8192):
+            large_admitted.set()
+
+    def acquire_small() -> None:
+        if runner._acquire_context_budget(small, 1024):
+            small_admitted.set()
+
+    large_waiter = threading.Thread(target=acquire_large)
+    large_waiter.start()
+    deadline = time.monotonic() + 1
+    while len(runner._context_waiters) < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(runner._context_waiters) == 1
+
+    small_waiter = threading.Thread(target=acquire_small)
+    small_waiter.start()
+    deadline = time.monotonic() + 1
+    while len(runner._context_waiters) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(runner._context_waiters) == 2
+    assert not small_admitted.is_set()
+
+    runner._release_context_budget(4096)
+    assert large_admitted.wait(timeout=1)
+    assert not small_admitted.is_set()
+    runner._release_context_budget(8192)
+    assert small_admitted.wait(timeout=1)
+    runner._release_context_budget(1024)
+    large_waiter.join(timeout=1)
+    small_waiter.join(timeout=1)
+    assert not large_waiter.is_alive()
+    assert not small_waiter.is_alive()
+
+
+def test_cancelling_fifo_head_unblocks_the_next_reservation() -> None:
+    """A cancelled large waiter cannot strand smaller work behind it."""
+    runner = Runner.__new__(Runner)
+    runner._serving_context_tokens = 8192
+    runner._context_budget_condition = threading.Condition()
+    runner._reserved_context_tokens = 0
+    runner._context_active_requests = 0
+    runner._context_waiters = deque()
+    runner.server_proc = None
+    runner._init_concurrent_dispatch(16, "test")
+    runner.cancel_receiver = MagicMock()
+    runner.cancel_receiver.receive_nowait.side_effect = WouldBlock
+    runner.cancelled_tasks = set()
+    active = TaskId("active")
+    large = TaskId("large")
+    small = TaskId("small")
+    with runner._admission_lock:
+        runner._admission_inflight[active] = 1
+        runner._admission_inflight[large] = 2
+        runner._admission_inflight[small] = 3
+
+    assert runner._acquire_context_budget(active, 4096)
+    large_results: list[bool] = []
+    small_admitted = threading.Event()
+
+    def acquire_large() -> None:
+        large_results.append(runner._acquire_context_budget(large, 8192))
+
+    def acquire_small() -> None:
+        if runner._acquire_context_budget(small, 1024):
+            small_admitted.set()
+
+    large_waiter = threading.Thread(target=acquire_large)
+    large_waiter.start()
+    deadline = time.monotonic() + 1
+    while len(runner._context_waiters) < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    small_waiter = threading.Thread(target=acquire_small)
+    small_waiter.start()
+    deadline = time.monotonic() + 1
+    while len(runner._context_waiters) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(runner._context_waiters) == 2
+
+    with runner._cancel_lock:
+        runner.cancelled_tasks.add(large)
+    with runner._context_budget_condition:
+        runner._context_budget_condition.notify_all()
+
+    large_waiter.join(timeout=1)
+    assert large_results == [False]
+    assert small_admitted.wait(timeout=1)
+    runner._release_context_budget(1024)
+    runner._release_context_budget(4096)
+    small_waiter.join(timeout=1)
+    assert not small_waiter.is_alive()
 
 
 def test_count_input_tokens_uses_llama_server_chat_template(

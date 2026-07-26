@@ -216,9 +216,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
   `SKULK_LLAMA_SERVER_PARALLEL` slot count (default 16) is honored exactly, with
   `--kv-unified` above one slot so every slot keeps the full stamped window
   rather than `n_ctx / N` (#689). Exact prompt-plus-output reservations queue
-  against that shared pool before generation, and an unavailable token-count
-  probe reserves the whole pool as a fail-safe. Single-node; coexists with
-  `llama_cpp`; the managed-server-plus-proxy shape is shared with `vllm`.
+  FIFO against that shared pool before generation, and an unavailable
+  token-count probe reserves the whole pool as a fail-safe. Single-node;
+  coexists with `llama_cpp`; the managed-server-plus-proxy shape is shared with
+  `vllm`.
 - **`vllm`** (`worker/runner/vllm/`): second served-backend engine; the worker
   launches an external `vllm serve` process and proxies its OpenAI HTTP API. The
   GPU-serving fast path: continuous batching + paged attention hold latency flat

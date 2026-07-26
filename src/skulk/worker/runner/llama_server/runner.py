@@ -34,6 +34,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple, cast
 
@@ -159,13 +160,12 @@ def _llama_server_parallel() -> int:
     sees the whole window, the stamped ``context_token_limit`` stays the truth,
     and there is nothing left for a cap to protect.
 
-    What the deployment owns instead is contention. Under a unified buffer the
-    slots draw from ONE pool of ``n_ctx`` tokens rather than N private slices, so
-    concurrent long-context requests can collectively exhaust it. llama.cpp
-    responds by purging idle slots' cached prompts and retrying with a smaller
-    batch, and treats total exhaustion as fatal. The shipped 16-slot default
-    favors normal interactive and API traffic; setting the override to ``1`` is
-    the explicit escape hatch for workloads dominated by near-window prompts.
+    Under a unified buffer the slots draw from ONE pool of ``n_ctx`` tokens
+    rather than N private slices. The runner therefore counts each exact
+    rendered input and admits prompt-plus-output reservations in FIFO order
+    only while their aggregate fits the pool. The shipped 16-slot default is a
+    real concurrency ceiling without making aggregate exhaustion possible;
+    setting the override to ``1`` remains an explicit serial-isolation option.
 
     Returns:
         The declared slot count, or ``16`` when unset. An unparseable or
@@ -424,6 +424,13 @@ class _StreamDelta(NamedTuple):
     timings: dict[str, object] | None = None
 
 
+class _ContextWaiter(NamedTuple):
+    """One FIFO admission request against llama-server's shared KV pool."""
+
+    task_id: TaskId
+    reservation_tokens: int
+
+
 def _gpu_layers_for_backend(resolved_backend: str | None) -> str:
     """The ``-ngl`` (n-gpu-layers) value to pass llama-server for a backend tag.
 
@@ -568,6 +575,7 @@ class Runner(ServedConcurrentDispatch):
         self._context_budget_condition = threading.Condition()
         self._reserved_context_tokens = 0
         self._context_active_requests = 0
+        self._context_waiters: deque[_ContextWaiter] = deque()
         # The declared slot count is honored exactly; --kv-unified (added in
         # _spawn_server) keeps every slot's context at the full stamped window,
         # while the weighted gate below prevents their aggregate reservations
@@ -950,7 +958,7 @@ class Runner(ServedConcurrentDispatch):
             return None
 
     def _acquire_context_budget(self, task_id: TaskId, reservation: int) -> bool:
-        """Wait until ``reservation`` fits the shared KV pool.
+        """Wait in FIFO order until ``reservation`` fits the shared KV pool.
 
         Args:
             task_id: Generation waiting for admission.
@@ -961,20 +969,40 @@ class Runner(ServedConcurrentDispatch):
             queued.
         """
         reservation = min(max(1, reservation), self._serving_context_tokens)
-        while True:
-            if self._is_cancelled(task_id):
-                return False
-            with self._context_budget_condition:
-                if (
-                    self._reserved_context_tokens + reservation
-                    <= self._serving_context_tokens
-                ):
-                    self._reserved_context_tokens += reservation
-                    self._context_active_requests += 1
-                    active_requests = self._context_active_requests
-                    break
-                self._context_budget_condition.wait(timeout=_LIVENESS_POLL_S)
-            self._ensure_server_alive()
+        waiter = _ContextWaiter(task_id, reservation)
+        admitted = False
+        with self._context_budget_condition:
+            self._context_waiters.append(waiter)
+            self._context_budget_condition.notify_all()
+        try:
+            while True:
+                if self._is_cancelled(task_id):
+                    return False
+                with self._context_budget_condition:
+                    is_next = (
+                        bool(self._context_waiters)
+                        and self._context_waiters[0] == waiter
+                    )
+                    if (
+                        is_next
+                        and self._reserved_context_tokens + reservation
+                        <= self._serving_context_tokens
+                    ):
+                        self._context_waiters.popleft()
+                        self._reserved_context_tokens += reservation
+                        self._context_active_requests += 1
+                        active_requests = self._context_active_requests
+                        admitted = True
+                        self._context_budget_condition.notify_all()
+                        break
+                    self._context_budget_condition.wait(timeout=_LIVENESS_POLL_S)
+                self._ensure_server_alive()
+        finally:
+            if not admitted:
+                with self._context_budget_condition:
+                    with contextlib.suppress(ValueError):
+                        self._context_waiters.remove(waiter)
+                    self._context_budget_condition.notify_all()
         # Refine the generic submitted-task stamp: only requests past this gate
         # actively compete inside llama-server.
         self._set_admission_concurrency(task_id, active_requests)

@@ -280,7 +280,7 @@ for chunk in stream:
 | `top_p` | number | Nucleus sampling. |
 | `top_k` | integer | Top-k sampling. |
 | `min_p` | number | Minimum-probability threshold. |
-| `max_tokens` | integer | Max generated tokens. When omitted, Skulk uses the shared default of 4096 generated tokens (`DEFAULT_MAX_OUTPUT_TOKENS`); operators can override it with `SKULK_MAX_OUTPUT_TOKENS` (or the legacy `SKULK_MAX_TOKENS`). The served llama.cpp engine uses this finite bound with its exact rendered input-token count to reserve shared KV capacity before generation. |
+| `max_tokens` | integer | Max generated tokens. When omitted, Skulk uses the shared default of 4096 generated tokens (`DEFAULT_MAX_OUTPUT_TOKENS`); operators can override it with `SKULK_MAX_OUTPUT_TOKENS` (or the legacy `SKULK_MAX_TOKENS`). The served llama.cpp engine uses this finite bound with its exact rendered input-token count to reserve shared KV capacity before generation; waiters enter that pool FIFO. |
 | `stop` | string or array | Stop sequences. |
 | `seed` | integer | Reproducibility helper. |
 | `frequency_penalty` | number | Frequency penalty. |

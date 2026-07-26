@@ -90,9 +90,11 @@ This project records release notes here and mirrors public-facing notes in
   slot, the slots share a single pool instead of holding private shares. Before
   each generation Skulk asks llama-server for the exact rendered prompt length,
   reserves that input plus the bounded maximum output, and queues until the sum
-  fits. A failed token-count probe reserves the whole pool and runs alone. This
-  preserves real concurrency for bounded requests without allowing aggregate
-  long-context traffic to terminate the server (#689).
+  fits. Reservation waiters are admitted FIFO so sustained short traffic cannot
+  starve an earlier long request. A failed token-count probe reserves the whole
+  pool and runs alone. This preserves real concurrency for bounded requests
+  without allowing aggregate long-context traffic to terminate the server
+  (#689).
 
 - **The service template no longer pins a cluster namespace.** The installed
   `skulk.env` template used to set `SKULK_LIBP2P_NAMESPACE=foxlight-main`,
