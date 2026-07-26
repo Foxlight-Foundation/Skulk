@@ -223,3 +223,50 @@ async def test_alternatives_use_ranked_single_node_shape(
     assert len(alternatives) == 1
     assert alternatives[0]["sharding"] == "Tensor"
     assert "alt" in seen_shardings
+
+
+async def test_placement_apis_forward_unified_memory_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Placement responses must stamp the same UMA-safe context as launch."""
+
+    api = _build_api()
+    node_id = NodeId("uma-host")
+    api.state.topology.add_node(node_id)
+    expected_unified_nodes = frozenset({node_id})
+
+    async def _load(_model_id: object) -> ModelCard:
+        return _card()
+
+    def _classify_uma(
+        *_args: object, **_kwargs: object
+    ) -> frozenset[NodeId]:
+        return expected_unified_nodes
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    monkeypatch.setattr(
+        api_main,
+        "unified_memory_gpu_node_ids",
+        _classify_uma,
+    )
+
+    seen_unified_nodes: list[object] = []
+
+    def _fake_placements(
+        command: PlaceInstance,
+        **kwargs: object,
+    ) -> dict[InstanceId, MlxRingInstance]:
+        del command
+        seen_unified_nodes.append(kwargs.get("unified_memory_gpu_nodes"))
+        instance = _single_node_instance(str(node_id))
+        return {instance.instance_id: instance}
+
+    monkeypatch.setattr(api_main, "get_instance_placements", _fake_placements)
+
+    placement = await api.get_placement(_MODEL_ID)
+    previews = await api.get_placement_previews(_MODEL_ID)
+
+    assert placement.shard_assignments.node_to_runner.keys() == {node_id}
+    assert previews.previews
+    assert seen_unified_nodes
+    assert all(value == expected_unified_nodes for value in seen_unified_nodes)

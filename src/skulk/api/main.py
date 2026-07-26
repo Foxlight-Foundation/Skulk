@@ -255,7 +255,10 @@ from skulk.extensions import (
 from skulk.master.image_store import ImageStore
 from skulk.master.placement import PlacementInfoPendingError
 from skulk.master.placement import place_instance as get_instance_placements
-from skulk.master.placement_utils import usable_vram_by_node
+from skulk.master.placement_utils import (
+    unified_memory_gpu_node_ids,
+    usable_vram_by_node,
+)
 from skulk.routing.provider_streams import ProviderStreamPacket
 from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.routing.speech_media import SpeechMediaPacket
@@ -2491,6 +2494,11 @@ class API:
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
                     ),
+                    unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                        self._telemetry_view.node_system,
+                        self._telemetry_view.node_resources,
+                        node_memory=self._telemetry_view.node_memory,
+                    ),
                 )
                 break
             except PlacementInfoPendingError as exc:
@@ -2566,6 +2574,11 @@ class API:
                     self._telemetry_view.node_resources,
                     node_memory=self._telemetry_view.node_memory,
                 ),
+                unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                    self._telemetry_view.node_system,
+                    self._telemetry_view.node_resources,
+                    node_memory=self._telemetry_view.node_memory,
+                ),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2602,6 +2615,16 @@ class API:
             raise HTTPException(
                 status_code=400, detail=f"Failed to load model card: {exc}"
             ) from exc
+        placement_node_vram = usable_vram_by_node(
+            self._telemetry_view.node_system,
+            self._telemetry_view.node_resources,
+            node_memory=self._telemetry_view.node_memory,
+        )
+        placement_unified_memory_gpu_nodes = unified_memory_gpu_node_ids(
+            self._telemetry_view.node_system,
+            self._telemetry_view.node_resources,
+            node_memory=self._telemetry_view.node_memory,
+        )
         instance_combinations: list[tuple[Sharding, InstanceMeta, int]] = []
         for sharding in (Sharding.Pipeline, Sharding.Tensor):
             for instance_meta in (InstanceMeta.MlxRing, InstanceMeta.MlxJaccl):
@@ -2635,11 +2658,8 @@ class API:
                     ),
                     excluded_nodes=excluded_nodes,
                     node_resources=self._telemetry_view.node_resources,
-                    node_vram=usable_vram_by_node(
-                        self._telemetry_view.node_system,
-                        self._telemetry_view.node_resources,
-                        node_memory=self._telemetry_view.node_memory,
-                    ),
+                    node_vram=placement_node_vram,
+                    unified_memory_gpu_nodes=placement_unified_memory_gpu_nodes,
                 )
             except ValueError as exc:
                 if (model_card.model_id, sharding, instance_meta, 0) not in seen:
@@ -2752,11 +2772,6 @@ class API:
                     single_node_shapes.append(shape)
             # Hoisted: both depend only on telemetry snapshots and current
             # instances, not on the candidate.
-            alt_node_vram = usable_vram_by_node(
-                self._telemetry_view.node_system,
-                self._telemetry_view.node_resources,
-                node_memory=self._telemetry_view.node_memory,
-            )
             existing_instance_ids = set(self.state.instances.keys())
             for candidate in self.state.topology.list_nodes():
                 if candidate in winner_hosts:
@@ -2782,7 +2797,8 @@ class API:
                             ),
                             excluded_nodes=excluded_nodes,
                             node_resources=self._telemetry_view.node_resources,
-                            node_vram=alt_node_vram,
+                            node_vram=placement_node_vram,
+                            unified_memory_gpu_nodes=placement_unified_memory_gpu_nodes,
                         )
                     except ValueError:
                         continue
