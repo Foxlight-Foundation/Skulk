@@ -184,6 +184,57 @@ def usable_vram_by_node(
     return usable
 
 
+def unified_memory_gpu_node_ids(
+    node_system: Mapping[NodeId, SystemPerformanceProfile],
+    node_resources: Mapping[NodeId, NodeResources] | None = None,
+    node_memory: Mapping[NodeId, MemoryUsage] | None = None,
+) -> frozenset[NodeId]:
+    """Return GPU-offload nodes whose accelerator pool includes host RAM.
+
+    A Strix-class APU reports a BIOS VRAM carve-out plus a GTT aperture spanning
+    all remaining system RAM. Placement may use that combined pool, but served
+    engines that allocate a fixed context window at startup cannot treat it as
+    discrete VRAM: amdgpu may need host pages while constructing the GPU
+    buffers, so the steady-state combined-pool fit does not bound peak host
+    memory. The returned set lets context admission preserve the conservative
+    served-engine floor on those nodes without giving up UMA-aware placement.
+
+    Args:
+        node_system: Per-node accelerator telemetry.
+        node_resources: Optional backend telemetry. When supplied, only nodes
+            advertising a GPU-offload backend are considered.
+        node_memory: Per-node system-memory telemetry required to prove that GTT
+            spans the whole host-memory pool.
+
+    Returns:
+        Immutable IDs of confirmed unified-memory GPU-offload nodes.
+    """
+    node_memory = node_memory or {}
+    unified: set[NodeId] = set()
+    for node_id, profile in node_system.items():
+        accelerator = profile.accelerator
+        memory = node_memory.get(node_id)
+        if (
+            accelerator is None
+            or accelerator.vendor != "amd"
+            or not accelerator.vram_total_bytes
+            or accelerator.vram_total_bytes <= 0
+            or accelerator.gtt_total_bytes is None
+            or memory is None
+        ):
+            continue
+        if node_resources is not None:
+            resources = node_resources.get(node_id)
+            if resources is None or not _has_gpu_offload_backend(resources.backends):
+                continue
+        if (
+            accelerator.gtt_total_bytes > accelerator.vram_total_bytes
+            and accelerator.gtt_total_bytes >= memory.ram_total.in_bytes
+        ):
+            unified.add(node_id)
+    return frozenset(unified)
+
+
 def _per_node_required_memory(
     cycle: Cycle,
     node_memory: Mapping[NodeId, MemoryUsage],

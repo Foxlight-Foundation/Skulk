@@ -37,6 +37,13 @@ KillSignal=SIGTERM
 KillMode=mixed
 TimeoutStopSec=30
 
+# A runner is an isolated subprocess and its supervisor already reports an
+# abnormal exit back to Skulk. systemd's default OOMPolicy=stop escalates an OOM
+# kill of that child into stopping the whole unit, which also removes the node's
+# API and any co-hosted model store. Keep the parent alive so the runner crash
+# breaker can contain the failure as designed.
+OOMPolicy=continue
+
 # Crash recovery: only restart on abnormal exit. Planned shutdowns
 # (`systemctl --user stop skulk` → SIGTERM → exit 0) stay stopped.
 # `RestartSec` avoids a tight loop when the cause is a config error;

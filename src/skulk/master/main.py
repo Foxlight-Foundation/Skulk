@@ -23,7 +23,10 @@ from skulk.master.placement import (
     replacement_command_for_download_failed_instance,
     replacement_command_for_refused_instance,
 )
-from skulk.master.placement_utils import usable_vram_by_node
+from skulk.master.placement_utils import (
+    unified_memory_gpu_node_ids,
+    usable_vram_by_node,
+)
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_EVENT_LOG_DIR, SKULK_TRACING_ENABLED
 from skulk.shared.models.memory_estimate import (
@@ -1358,6 +1361,11 @@ class Master:
                                             self._telemetry_view.node_resources,
                                             node_memory=self._telemetry_view.node_memory,
                                         ),
+                                        unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                                            self._telemetry_view.node_system,
+                                            self._telemetry_view.node_resources,
+                                            node_memory=self._telemetry_view.node_memory,
+                                        ),
                                     )
                                     logger.warning(
                                         "Re-placing "
@@ -1409,6 +1417,11 @@ class Master:
                                             ),
                                             node_resources=self._telemetry_view.node_resources,
                                             node_vram=usable_vram_by_node(
+                                                self._telemetry_view.node_system,
+                                                self._telemetry_view.node_resources,
+                                                node_memory=self._telemetry_view.node_memory,
+                                            ),
+                                            unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                                                 self._telemetry_view.node_system,
                                                 self._telemetry_view.node_resources,
                                                 node_memory=self._telemetry_view.node_memory,
@@ -1473,6 +1486,11 @@ class Master:
                                 excluded_nodes=set(command.excluded_nodes),
                                 node_resources=self._telemetry_view.node_resources,
                                 node_vram=credited_vram,
+                                unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                                    self._telemetry_view.node_system,
+                                    self._telemetry_view.node_resources,
+                                    node_memory=credited_memory,
+                                ),
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
@@ -1491,6 +1509,11 @@ class Master:
                                 self.state.instances,
                                 credited_memory,
                                 node_vram=credited_vram,
+                                unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                                    self._telemetry_view.node_system,
+                                    self._telemetry_view.node_resources,
+                                    node_memory=credited_memory,
+                                ),
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
@@ -1783,6 +1806,11 @@ class Master:
                     stamped_exclusions=set(instance.excluded_nodes),
                     node_resources=self._telemetry_view.node_resources,
                     node_vram=usable_vram_by_node(
+                        self._telemetry_view.node_system,
+                        self._telemetry_view.node_resources,
+                        node_memory=self._telemetry_view.node_memory,
+                    ),
+                    unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                         self._telemetry_view.node_system,
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,

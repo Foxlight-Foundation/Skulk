@@ -328,6 +328,34 @@ def test_instance_limit_gguf_not_capped_to_kv_budget_on_vram_node():
     assert limit <= 131072  # never above the card's advertised max
 
 
+def test_instance_limit_gguf_uma_node_clamps_to_floor():
+    """A combined UMA pool may place GGUF but cannot justify a fixed-window lift."""
+    node_id = NodeId("n0")
+    card = _card(17, kv_heads=4, n_layers=65, gguf_file="m.gguf").model_copy(
+        update={"context_length": 262144}
+    )
+    gpu_shard = _pipeline_shard(card, start=0, end=65).model_copy(
+        update={"resolved_backend": "llama_server-vulkan"}
+    )
+    assignments = _assignments(card, {"r0": (gpu_shard, str(node_id))})
+
+    discrete_limit = instance_context_token_limit(
+        assignments,
+        {node_id: Memory.from_gb(32)},
+        node_vram={node_id: Memory.from_gb(42)},
+    )
+    uma_limit = instance_context_token_limit(
+        assignments,
+        {node_id: Memory.from_gb(32)},
+        node_vram={node_id: Memory.from_gb(42)},
+        unified_memory_gpu_nodes=frozenset({node_id}),
+    )
+
+    assert discrete_limit is not None
+    assert discrete_limit > KV_CONTEXT_BUDGET_TOKENS
+    assert uma_limit == KV_CONTEXT_BUDGET_TOKENS
+
+
 def test_instance_limit_gguf_cpu_resolved_on_vram_node_clamps_to_floor():
     # A gguf shard that resolves to a CPU/bare backend on a node WITH discrete VRAM
     # runs -ngl 0 and preallocates KV in SYSTEM RAM, so the VRAM-sized lift is
