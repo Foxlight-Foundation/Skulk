@@ -2804,7 +2804,15 @@ def mlx_generate(
     max_stop_len = max((len(s) for s in stop_sequences), default=0)
 
     if vision is not None and vision.pixel_values is not None:
-        if group is None or _should_use_native_vision_reference_path():
+        # A one-rank placement still receives an MLX distributed group, but it
+        # has no pipeline peers to serve. Keep it on mlx-vlm's family-aware
+        # reference path; the generic pipeline path can produce valid-looking
+        # yet incorrect tokens for native Qwen vision models.
+        if (
+            group is None
+            or group.size() <= 1
+            or _should_use_native_vision_reference_path()
+        ):
             if kv_prefix_cache is not None:
                 logger.info(
                     "Disabling KV prefix cache for native vision generation to follow "

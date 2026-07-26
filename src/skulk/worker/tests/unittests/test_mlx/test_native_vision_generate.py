@@ -125,8 +125,8 @@ class _FakeGroup:
         return self._size
 
 
-def _fake_group() -> mx.distributed.Group:
-    return cast(mx.distributed.Group, cast(object, _FakeGroup()))
+def _fake_group(*, size: int = 3) -> mx.distributed.Group:
+    return cast(mx.distributed.Group, cast(object, _FakeGroup(size=size)))
 
 
 def _noop_barrier(_group: object) -> None:
@@ -212,10 +212,20 @@ def test_native_vision_generation_uses_mlx_vlm_generate_step(
     assert responses[-1].usage.completion_tokens == 2
 
 
-def test_mlx_generate_routes_native_vision_through_reference_path(
+@pytest.mark.parametrize(
+    ("group", "reference_path_enabled"),
+    [
+        (None, False),
+        (_fake_group(size=1), False),
+        (_fake_group(size=3), True),
+    ],
+)
+def test_mlx_generate_routes_eligible_native_vision_through_reference_path(
     monkeypatch: pytest.MonkeyPatch,
+    group: mx.distributed.Group | None,
+    reference_path_enabled: bool,
 ) -> None:
-    """``mlx_generate`` should bypass generic text generation for native vision."""
+    """Single-rank and compatibility-gated VLMs must use reference generation."""
 
     vision = VisionResult(
         prompt="ignored",
@@ -240,7 +250,7 @@ def test_mlx_generate_routes_native_vision_through_reference_path(
     )
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.generator.generate._should_use_native_vision_reference_path",
-        cast(Callable[[], bool], lambda: True),
+        lambda: reference_path_enabled,
     )
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.generator.generate._mlx_generate_native_vision",
@@ -279,7 +289,7 @@ def test_mlx_generate_routes_native_vision_through_reference_path(
             task=task,
             prompt="<bos>",
             kv_prefix_cache=None,
-            group=None,
+            group=group,
             vision_processor=_fake_vision_processor(),
         )
     )
