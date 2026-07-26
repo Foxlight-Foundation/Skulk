@@ -1530,13 +1530,19 @@ class ModelStoreDownloader(ShardDownloader):
             await self._emit_progress(shard, status="complete")
             return path
         finally:
-            async with self._staging_transfer_lock:
-                for model_id in protected_model_ids:
-                    remaining = self._active_staging_model_ids[model_id] - 1
-                    if remaining == 0:
-                        del self._active_staging_model_ids[model_id]
-                    else:
-                        self._active_staging_model_ids[model_id] = remaining
+            # Cleanup deliberately has no await: DownloadCoordinator cancels
+            # this coroutine through an AnyIO cancel scope, and awaiting the
+            # transfer lock here can be cancelled again before refcounts are
+            # removed. Deregistration need not hold the lock after this
+            # request has stopped writing. A transfer that already snapshotted
+            # the set keeps its immutable copy; a later preflight should no
+            # longer protect this inactive request.
+            for model_id in protected_model_ids:
+                remaining = self._active_staging_model_ids[model_id] - 1
+                if remaining == 0:
+                    del self._active_staging_model_ids[model_id]
+                else:
+                    self._active_staging_model_ids[model_id] = remaining
 
     async def _ensure_companion_shards(self, shard: ShardMetadata) -> None:
         """Ensure every companion repo declared by the shard's model card.

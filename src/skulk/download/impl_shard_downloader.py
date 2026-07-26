@@ -148,6 +148,12 @@ class ResumableShardDownloader(ShardDownloader):
             target_directory,
             file_list,
         )
+        if additional_bytes == 0:
+            # Reusing an exact, complete artifact writes no model bytes. The
+            # reserve prevents a transfer from filling the filesystem; it
+            # must not make already-downloaded models unavailable after
+            # coordinator state is rebuilt.
+            return
         free_bytes = await asyncio.to_thread(
             lambda: shutil.disk_usage(target_directory).free
         )

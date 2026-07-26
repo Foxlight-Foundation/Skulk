@@ -1,4 +1,4 @@
-# pyright: reportAny=false
+# pyright: reportAny=false, reportPrivateUsage=false
 """Companion-repo handling in ModelStoreDownloader.
 
 The launch smoke (2026-06-06) found that three of the store downloader's
@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import cast
 
+import anyio
 import pytest
 
 from skulk.download.download_utils import RepoDownloadProgress
@@ -232,6 +233,45 @@ async def test_concurrent_staging_transfers_are_serialized(tmp_path: Path) -> No
 
     assert maximum_active_preflights == 1
     assert set(store.staged) == {_BASE_MODEL, second_model}
+
+
+@pytest.mark.anyio
+async def test_cancellation_clears_active_staging_protection(tmp_path: Path) -> None:
+    """Cancellation cannot strand model IDs in the staging protection set."""
+    transfer_started = anyio.Event()
+
+    class _BlockingStoreClient(_RecordingStoreClient):
+        async def stage_shard(
+            self,
+            model_id: str,
+            staging_root: Path,
+            on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+            source_revision: str | None = None,
+            capacity_preflight: Callable[[int], Awaitable[None]] | None = None,
+        ) -> Path:
+            del model_id, staging_root, on_progress, source_revision
+            if capacity_preflight is not None:
+                await capacity_preflight(4)
+            transfer_started.set()
+            await anyio.sleep_forever()
+            raise AssertionError("cancelled transfer unexpectedly resumed")
+
+    store = _BlockingStoreClient(available={_BASE_MODEL})
+    downloader = _downloader(store, tmp_path)
+    base_without_sidecar = _shard_with_sidecar().model_copy(
+        update={
+            "model_card": _shard_with_sidecar().model_card.model_copy(
+                update={"runtime": None}
+            )
+        }
+    )
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(downloader.ensure_shard, base_without_sidecar)
+        await transfer_started.wait()
+        task_group.cancel_scope.cancel()
+
+    assert downloader._active_staging_model_ids == {}
 
 
 @pytest.mark.anyio

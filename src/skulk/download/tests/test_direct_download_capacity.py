@@ -95,6 +95,29 @@ async def test_direct_download_fails_before_transfer_without_headroom(
 
 
 @pytest.mark.anyio
+async def test_direct_download_reuses_complete_artifact_without_reserve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downloader = ResumableShardDownloader()
+    (tmp_path / "model.gguf").write_bytes(b"complete")
+
+    def unexpected_disk_usage(_path: Path) -> object:
+        raise AssertionError("zero-byte reuse must not inspect free space")
+
+    monkeypatch.setattr(
+        impl_shard_downloader.shutil,
+        "disk_usage",
+        unexpected_disk_usage,
+    )
+
+    await downloader._ensure_direct_download_capacity(
+        tmp_path,
+        [FileListEntry(type="file", path="model.gguf", size=len(b"complete"))],
+    )
+
+
+@pytest.mark.anyio
 async def test_direct_download_admission_and_transfer_are_serialized(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
