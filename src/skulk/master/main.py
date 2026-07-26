@@ -1196,7 +1196,17 @@ class Master:
                             instance_busy = command.target_instance_id in (
                                 self._realtime_instance_by_command.values()
                             ) or any(
-                                task.instance_id == command.target_instance_id
+                                # Runner readiness can precede lifecycle-task
+                                # convergence. Only transcription inference
+                                # consumes mounted STT capacity once ready.
+                                isinstance(
+                                    task,
+                                    (
+                                        AudioTranscriptionTask,
+                                        RealtimeAudioTranscriptionTask,
+                                    ),
+                                )
+                                and task.instance_id == command.target_instance_id
                                 and task.task_status
                                 in (TaskStatus.Pending, TaskStatus.Running)
                                 for task in self.state.tasks.values()
