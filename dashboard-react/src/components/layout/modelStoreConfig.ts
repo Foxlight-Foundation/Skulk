@@ -3,7 +3,7 @@ import type {
   StoreConfig,
 } from '../../hooks/useConfig';
 
-const DEFAULT_MODEL_STORE_PORT = 12415;
+export const DEFAULT_MODEL_STORE_PORT = 12415;
 
 function defaultStoreConfig(enabled: boolean): StoreConfig {
   return {

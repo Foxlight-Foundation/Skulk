@@ -119,5 +119,18 @@ describe('SettingsPanel persisted config handling', () => {
         'input[value="~/.skulk/staging"]',
       ),
     ).not.toBeNull();
+
+    const portInput =
+      container.querySelector<HTMLInputElement>('input[value="12415"]');
+    expect(portInput).not.toBeNull();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      valueSetter?.call(portInput, '');
+      portInput?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(portInput?.value).toBe('12415');
   });
 });

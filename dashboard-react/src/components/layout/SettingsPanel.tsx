@@ -8,7 +8,10 @@ import {
   type LoggingConfig,
   type TelemetryConfig,
 } from '../../hooks/useConfig';
-import { normalizeStoreConfig } from './modelStoreConfig';
+import {
+  DEFAULT_MODEL_STORE_PORT,
+  normalizeStoreConfig,
+} from './modelStoreConfig';
 import { Button } from '../common/Button';
 import { Field } from '../common/Field';
 import { InfoTooltip } from '../common/InfoTooltip';
