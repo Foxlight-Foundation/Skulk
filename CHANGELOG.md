@@ -7,6 +7,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+- Fixed store-backed model launches exhausting a worker's filesystem while
+  recently used staging data was still inside the 40 GiB warm-cache budget.
+  Before every staged download, Skulk now protects live and partially
+  downloaded models, evicts only idle copies in least-recently-used order until
+  the declared remaining model bytes fit, and preserves 10 GiB of
+  operating-system headroom. If even a fully reclaimed idle cache cannot meet
+  that target, the placement receives an actionable `DownloadFailed` before
+  any more bytes are written.
+
 - Kept fixed-window llama.cpp contexts at the safe 8192-token floor on
   unified-memory AMD APUs. Placement still uses their combined VRAM/GTT pool,
   but no longer misclassifies that pool as discrete VRAM and lets a large

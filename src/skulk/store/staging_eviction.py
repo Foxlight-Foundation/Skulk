@@ -1,4 +1,4 @@
-"""Staging-cache eviction: one budget mechanism, three triggers.
+"""Staging-cache eviction with recency and free-space safety.
 
 The staging directory holds node-local copies of store-served models. Left
 unmanaged it grows without bound — every model ever staged survives both
@@ -15,10 +15,13 @@ The policy here is deliberately a single mechanism:
   deleted. The grace budget exists because node deaths, restarts, and
   repeated place/delete cycles of the same model should not re-pay the
   staging copy every time.
+* Before a new store-backed download, the same least-recently-used
+  eviction mechanism may override that grace budget to make room for the
+  incoming model while preserving operating-system headroom.
 
-The same enforcement runs at instance deactivation, at node startup (which
-is what reconciles orphans left by a crashed session), and may be invoked
-by operator tooling.
+Lifecycle enforcement runs at instance deactivation and node startup
+(which reconciles orphans left by a crashed session). Capacity enforcement
+runs immediately before a store-backed download.
 """
 
 import contextlib
@@ -37,6 +40,15 @@ LAST_USED_MARKER_FILENAME = ".last_used"
 Directory mtimes change on content writes, not reads, so without the
 marker a model staged long ago but used constantly would look idle to the
 LRU ordering."""
+
+MINIMUM_STAGING_FREE_DISK_BYTES = 10 * 1024**3
+"""Free space Skulk preserves after staging an incoming model.
+
+The staging cache contains reproducible copies while the rest of the volume
+contains the operating system, logs, package caches, and user data. Keeping
+10 GiB uncommitted prevents an otherwise successful model copy from leaving
+the host at the filesystem's hard-stop boundary.
+"""
 
 
 class StagedModelInfo(CamelCaseModel):
@@ -151,49 +163,120 @@ class StagingEvictionReport(CamelCaseModel):
     evicted_bytes: int = 0
     retained_candidate_bytes: int = 0
     """Bytes of not-in-use staged data kept under the grace budget."""
+    required_free_bytes: int = 0
+    """Free bytes the caller required after eviction."""
+    free_bytes_before: int | None = None
+    """Filesystem free bytes before capacity-driven eviction, when requested."""
+    free_bytes_after: int | None = None
+    """Filesystem free bytes after capacity-driven eviction, when requested."""
+    capacity_satisfied: bool = True
+    """Whether the requested free-space target was reached."""
+
+
+def _filesystem_free_bytes(path: Path) -> int:
+    """Return free bytes for ``path`` or its nearest existing parent."""
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    return shutil.disk_usage(probe).free
+
+
+def _remove_staged_model(
+    info: StagedModelInfo,
+    report: StagingEvictionReport,
+    *,
+    reason: str,
+) -> bool:
+    """Remove one idle staged model and record the successful reclamation."""
+    try:
+        shutil.rmtree(info.directory)
+    except OSError as error:
+        logger.warning(f"Staging eviction could not remove {info.directory}: {error}")
+        return False
+    report.evicted_model_ids.append(info.model_id)
+    report.evicted_bytes += info.size_bytes
+    age_hours = (time.time() - info.last_used_epoch_seconds) / 3600
+    logger.info(
+        f"Evicted staged model {info.model_id} "
+        f"({info.size_bytes / 2**30:.1f} GiB, last used "
+        f"~{age_hours:.1f}h ago) — {reason}"
+    )
+    return True
 
 
 def enforce_staging_budget(
     staging_root: Path,
     keep_recent_bytes: int,
     in_use_model_ids: frozenset[str] = frozenset(),
+    *,
+    required_free_bytes: int = 0,
+    enforce_recent_budget: bool = True,
 ) -> StagingEvictionReport:
-    """Evict least-recently-used staging candidates beyond the grace budget.
+    """Evict idle staged models to enforce recency and free-space constraints.
 
-    In-use models are never touched. Candidates are retained newest-first
-    until the grace budget is spent; the rest are deleted. With a budget of
-    0 this is strict evict-on-deactivate.
+    In-use models are never touched. When ``enforce_recent_budget`` is true,
+    candidates are retained newest-first until the grace budget is spent and
+    the older tail is deleted. With a budget of 0 this is strict
+    evict-on-deactivate.
 
-    Deletion failures are logged and skipped — a partially evicted cache is
-    still a smaller cache, and the next enforcement pass retries.
+    When ``required_free_bytes`` is non-zero, least-recently-used retained
+    candidates are also removed until the filesystem reaches that target.
+    This pressure pass intentionally overrides the warm-cache grace budget,
+    but never the in-use set. Deletion failures are logged and skipped.
     """
-    report = StagingEvictionReport()
+    if keep_recent_bytes < 0:
+        raise ValueError("keep_recent_bytes must be non-negative")
+    if required_free_bytes < 0:
+        raise ValueError("required_free_bytes must be non-negative")
+
+    report = StagingEvictionReport(required_free_bytes=required_free_bytes)
     candidates = [
         info
         for info in list_staged_models(staging_root, in_use_model_ids)
         if not info.in_use
     ]
 
+    retained: list[StagedModelInfo] = []
+    over_budget: list[StagedModelInfo] = []
     retained_bytes = 0
     for info in candidates:
-        if retained_bytes + info.size_bytes <= keep_recent_bytes:
+        if (
+            not enforce_recent_budget
+            or retained_bytes + info.size_bytes <= keep_recent_bytes
+        ):
+            retained.append(info)
             retained_bytes += info.size_bytes
             continue
-        try:
-            shutil.rmtree(info.directory)
-        except OSError as error:
-            logger.warning(
-                f"Staging eviction could not remove {info.directory}: {error}"
-            )
-            continue
-        report.evicted_model_ids.append(info.model_id)
-        report.evicted_bytes += info.size_bytes
-        age_hours = (time.time() - info.last_used_epoch_seconds) / 3600
-        logger.info(
-            f"Evicted staged model {info.model_id} "
-            f"({info.size_bytes / 2**30:.1f} GiB, last used "
-            f"~{age_hours:.1f}h ago) — staging held to the "
-            f"{keep_recent_bytes / 2**30:.0f} GiB recent-use budget"
+        over_budget.append(info)
+
+    for info in reversed(over_budget):
+        _remove_staged_model(
+            info,
+            report,
+            reason=(
+                "staging held to the "
+                f"{keep_recent_bytes / 2**30:.0f} GiB recent-use budget"
+            ),
         )
+
+    if required_free_bytes:
+        report.free_bytes_before = _filesystem_free_bytes(staging_root)
+        free_bytes = report.free_bytes_before
+        for info in reversed(retained):
+            if free_bytes >= required_free_bytes:
+                break
+            if _remove_staged_model(
+                info,
+                report,
+                reason=(
+                    "free-space pressure required "
+                    f"{required_free_bytes / 2**30:.1f} GiB before staging"
+                ),
+            ):
+                retained_bytes -= info.size_bytes
+                free_bytes = _filesystem_free_bytes(staging_root)
+        report.free_bytes_after = _filesystem_free_bytes(staging_root)
+        report.capacity_satisfied = report.free_bytes_after >= required_free_bytes
+
     report.retained_candidate_bytes = retained_bytes
     return report

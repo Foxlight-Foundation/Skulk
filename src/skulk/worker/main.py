@@ -101,6 +101,7 @@ from skulk.shared.types.topology import Connection, SocketConnection
 from skulk.shared.types.worker.downloads import (
     DownloadAttemptId,
     DownloadCompleted,
+    DownloadFailed,
     DownloadOngoing,
     DownloadPending,
     DownloadProgress,
@@ -111,8 +112,10 @@ from skulk.shared.types.worker.shards import ShardMetadata, TensorShardMetadata
 from skulk.store.config import StagingNodeConfig
 from skulk.store.model_store_client import ModelStoreClient
 from skulk.store.staging_eviction import (
+    MINIMUM_STAGING_FREE_DISK_BYTES,
     StagingEvictionReport,
     enforce_staging_budget,
+    list_staged_models,
     staging_directory_name,
     touch_last_used,
 )
@@ -453,6 +456,20 @@ def _summarize_worker_task(task: Task) -> str:
             f"stream={params.stream!r})"
         )
     return task.__class__.__name__
+
+
+def _staging_model_ids(card: ModelCard) -> frozenset[str]:
+    """Return the base and companion repo IDs a card needs while loading."""
+    model_ids = {str(card.model_id)}
+    if card.vision and card.vision.weights_repo:
+        model_ids.add(card.vision.weights_repo)
+    runtime = card.runtime
+    if runtime is not None:
+        if runtime.mtp_sidecar_repo:
+            model_ids.add(runtime.mtp_sidecar_repo)
+        if runtime.assistant_model_repo:
+            model_ids.add(runtime.assistant_model_repo)
+    return frozenset(model_ids)
 
 
 def _inject_assembled_image_edit(task: ImageEdits, assembled_image: str) -> ImageEdits:
@@ -2051,21 +2068,42 @@ class Worker:
                             )
                         )
                     else:
-                        await self.download_command_sender.send(
-                            ForwarderDownloadCommand(
-                                origin=self._system_id,
-                                command=StartDownload(
-                                    target_node_id=self.node_id,
-                                    shard_metadata=shard,
-                                ),
+                        capacity_error = await self._prepare_staging_for_download(shard)
+                        if capacity_error is not None:
+                            await self.event_sender.send(
+                                NodeDownloadProgress(
+                                    download_progress=DownloadFailed(
+                                        node_id=self.node_id,
+                                        shard_metadata=shard,
+                                        model_directory=self._staging_model_directory(
+                                            model_id
+                                        ),
+                                        error_message=capacity_error,
+                                    )
+                                )
                             )
-                        )
-                        await self.event_sender.send(
-                            TaskStatusUpdated(
-                                task_id=task.task_id,
-                                task_status=TaskStatus.Running,
+                            await self.event_sender.send(
+                                TaskStatusUpdated(
+                                    task_id=task.task_id,
+                                    task_status=TaskStatus.Failed,
+                                )
                             )
-                        )
+                        else:
+                            await self.download_command_sender.send(
+                                ForwarderDownloadCommand(
+                                    origin=self._system_id,
+                                    command=StartDownload(
+                                        target_node_id=self.node_id,
+                                        shard_metadata=shard,
+                                    ),
+                                )
+                            )
+                            await self.event_sender.send(
+                                TaskStatusUpdated(
+                                    task_id=task.task_id,
+                                    task_status=TaskStatus.Running,
+                                )
+                            )
                 case Shutdown(runner_id=runner_id):
                     runner = self.runners.pop(runner_id)
                     shard_for_eviction = runner.shard_metadata
@@ -2584,28 +2622,107 @@ class Worker:
         weights lazily.
         """
 
-        def _add_card(card: ModelCard) -> None:
-            in_use.add(str(card.model_id))
-            if card.vision and card.vision.weights_repo:
-                in_use.add(card.vision.weights_repo)
-            runtime = card.runtime
-            if runtime is not None:
-                if runtime.mtp_sidecar_repo:
-                    in_use.add(runtime.mtp_sidecar_repo)
-                if runtime.assistant_model_repo:
-                    in_use.add(runtime.assistant_model_repo)
-
         in_use: set[str] = set()
         for runner in self.runners.values():
-            _add_card(runner.shard_metadata.model_card)
+            in_use.update(_staging_model_ids(runner.shard_metadata.model_card))
         # A store-backed download in progress has already created its
         # staging directory but no runner exists yet - a concurrent
         # teardown's budget pass must not delete a directory that is
         # actively being written.
         for progress in self._effective_downloads().get(self.node_id, []):
             if isinstance(progress, DownloadOngoing):
-                _add_card(progress.shard_metadata.model_card)
+                in_use.update(_staging_model_ids(progress.shard_metadata.model_card))
         return frozenset(in_use)
+
+    def _staging_model_directory(self, model_id: ModelId) -> str:
+        """Return this node's staging path for ``model_id``, when configured."""
+        if self._staging_config is None:
+            return ""
+        cache_path = Path(self._staging_config.node_cache_path).expanduser()
+        return str(cache_path / staging_directory_name(str(model_id)))
+
+    async def _prepare_staging_for_download(
+        self, shard: ShardMetadata
+    ) -> str | None:
+        """Make safe disk room for an incoming store-backed model.
+
+        The card's declared storage size is reduced by bytes already present
+        in its resumable staging directory. Idle staged models are then evicted
+        least-recently-used until that remaining transfer plus a fixed
+        operating-system reserve fits. The incoming model, all of its
+        companions, active downloads, and live runners are protected.
+
+        Returns:
+            ``None`` when staging may proceed, otherwise an actionable error
+            message that the worker publishes as ``DownloadFailed``.
+        """
+        if (
+            self._store_client is None
+            or self._staging_config is None
+            or not self._staging_config.enabled
+        ):
+            return None
+
+        staging_root = Path(self._staging_config.node_cache_path).expanduser()
+        incoming_directory = staging_directory_name(str(shard.model_card.model_id))
+        staged_bytes = next(
+            (
+                info.size_bytes
+                for info in list_staged_models(staging_root)
+                if Path(info.directory).name == incoming_directory
+            ),
+            0,
+        )
+        remaining_model_bytes = max(
+            0, shard.model_card.storage_size.in_bytes - staged_bytes
+        )
+        required_free_bytes = (
+            remaining_model_bytes + MINIMUM_STAGING_FREE_DISK_BYTES
+        )
+        protected_model_ids = (
+            self._models_in_use() | _staging_model_ids(shard.model_card)
+        )
+        try:
+            report = await to_thread.run_sync(
+                self._enforce_staging_budget,
+                protected_model_ids,
+                required_free_bytes,
+                False,
+                True,
+            )
+        except Exception as error:
+            logger.exception(
+                "Worker: staging capacity preflight failed for "
+                f"{shard.model_card.model_id}"
+            )
+            return (
+                f"Could not verify staging disk capacity for "
+                f"{shard.model_card.model_id} ({type(error).__name__}). "
+                "The download was not started to avoid filling the filesystem."
+            )
+        if report is None:
+            return None
+        await self._reset_download_state_for_evicted(report, shard)
+        if report.capacity_satisfied:
+            if report.evicted_model_ids:
+                logger.info(
+                    "Worker: staging preflight evicted "
+                    f"{len(report.evicted_model_ids)} idle model(s) and reclaimed "
+                    f"{report.evicted_bytes / 2**30:.1f} GiB before downloading "
+                    f"{shard.model_card.model_id}"
+                )
+            return None
+
+        available = report.free_bytes_after or 0
+        message = (
+            f"Insufficient staging disk capacity for {shard.model_card.model_id}: "
+            f"need {required_free_bytes / 2**30:.1f} GiB free for the remaining "
+            "model transfer and operating-system reserve, but only "
+            f"{available / 2**30:.1f} GiB is available after evicting every idle "
+            "staged model. Free disk space or choose another node."
+        )
+        logger.error(message)
+        return message
 
     async def _evict_staged_model(self, model_id: ModelId) -> None:
         """Remove this node's staged copy of a store-deleted model (#427).
@@ -2712,27 +2829,25 @@ class Worker:
         if self._staging_config is None:
             return
         cache_path = Path(self._staging_config.node_cache_path).expanduser()
-        model_ids = [str(card.model_id)]
-        if card.vision and card.vision.weights_repo:
-            model_ids.append(card.vision.weights_repo)
-        if card.runtime is not None:
-            if card.runtime.mtp_sidecar_repo:
-                model_ids.append(card.runtime.mtp_sidecar_repo)
-            if card.runtime.assistant_model_repo:
-                model_ids.append(card.runtime.assistant_model_repo)
-        for model_id in model_ids:
+        for model_id in _staging_model_ids(card):
             staged_dir = cache_path / model_id.replace("/", "--")
             if staged_dir.is_dir():
                 touch_last_used(staged_dir)
 
     def _enforce_staging_budget(
-        self, models_in_use: frozenset[str]
+        self,
+        models_in_use: frozenset[str],
+        required_free_bytes: int = 0,
+        enforce_recent_budget: bool = True,
+        fail_on_error: bool = False,
     ) -> StagingEvictionReport | None:
-        """Run one staging-budget enforcement pass (best-effort).
+        """Run one staging-budget or capacity enforcement pass.
 
         ``models_in_use`` is snapshotted by the caller on the event-loop
         thread - this method may run in a worker thread and must not touch
-        the loop's mutable structures.
+        the loop's mutable structures. Lifecycle callers keep the historical
+        best-effort behavior; capacity callers set ``fail_on_error`` because
+        starting a download after an unverifiable safety check risks ENOSPC.
         """
         if self._staging_config is None or not self._staging_config.enabled:
             return None
@@ -2761,9 +2876,13 @@ class Worker:
                 staging_root,
                 keep_recent_bytes,
                 models_in_use,
+                required_free_bytes=required_free_bytes,
+                enforce_recent_budget=enforce_recent_budget,
             )
         except Exception as exc:
             logger.warning(f"Worker: staging budget enforcement failed: {exc}")
+            if fail_on_error:
+                raise
             return None
 
     def _state_still_advertises_evicted_downloads(self) -> bool:

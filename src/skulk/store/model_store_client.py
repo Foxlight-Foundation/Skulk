@@ -48,12 +48,13 @@ so pinned bytes never occupy mutable-main's normalized path.
 
 Eviction
 --------
-When an inference instance is deactivated (``Shutdown`` task received by the
-:class:`~skulk.worker.main.Worker`), the worker calls
-``ModelStoreClient.evict_shard()`` to remove the staged files from the
-node-local cache.  The canonical copy in the store is **never touched**.
-Eviction is skipped if ``cleanup_on_deactivate`` is ``False`` for the node
-(useful when staging is on fast local NVMe and warm cache is preferred).
+At instance deactivation and node startup, the worker holds idle staging to
+its configured recent-use budget. Before each new store-backed download, it
+also evicts least-recently-used idle copies when needed to fit the remaining
+model bytes plus operating-system headroom. This capacity safety pass applies
+even when lifecycle cleanup is disabled; live runners, active downloads, and
+the incoming partial model remain protected. The canonical copy in the store
+is **never touched**.
 
 Resume protocol
 ---------------
