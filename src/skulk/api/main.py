@@ -4310,6 +4310,18 @@ class API:
                 )
                 or any(
                     task.instance_id == instance_id
+                    # RunnerReady is authoritative for lifecycle completion.
+                    # Download/load bookkeeping can remain non-terminal briefly
+                    # on another API node after the runner becomes ready, but it
+                    # does not occupy STT inference capacity. Only active STT
+                    # workloads must block cross-owner admission here.
+                    and isinstance(
+                        task,
+                        (
+                            task_types.AudioTranscription,
+                            task_types.RealtimeAudioTranscription,
+                        ),
+                    )
                     and task.task_status not in _TERMINAL_TASK_STATUSES
                     for task in self.state.tasks.values()
                 )
