@@ -46,3 +46,11 @@ def test_vector_startup_resolves_home_defaults_before_exec() -> None:
     assert "data_dir: ${SKULK_VECTOR_DATA_DIR}" in config
     assert "- ${SKULK_LOG_FILE}" in config
     assert ":-${HOME}" not in config
+
+
+def test_systemd_runner_oom_does_not_stop_skulk_node() -> None:
+    """An OOM-killed runner child must not take down the API and model store."""
+
+    unit = (_REPO_ROOT / "deployment/systemd/skulk.service").read_text()
+
+    assert "OOMPolicy=continue" in unit

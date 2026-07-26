@@ -7,6 +7,7 @@ from skulk.master.placement_utils import (
     get_shard_assignments,
     get_shard_assignments_for_pipeline_parallel,
     get_smallest_cycles,
+    unified_memory_gpu_node_ids,
     usable_vram_by_node,
 )
 from skulk.master.tests.conftest import (
@@ -626,6 +627,51 @@ def test_usable_vram_by_node_uma_counts_gtt():
         node_vram=usable,
     )
     assert len(fitting) == 1, diagnostics.rejection_reasons
+
+
+def test_unified_memory_gpu_node_ids_requires_uma_and_gpu_backend():
+    """Only an AMD APU with host-spanning GTT and GPU offload is classified UMA."""
+    uma = NodeId()
+    discrete = NodeId()
+    cpu_only_uma = NodeId()
+    memory = {
+        node_id: create_node_memory(
+            Memory.from_gb(30).in_bytes, ram_total=Memory.from_gb(32).in_bytes
+        )
+        for node_id in (uma, discrete, cpu_only_uma)
+    }
+    node_system = {
+        uma: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=Memory.from_gb(32).in_bytes,
+                gtt_total_bytes=Memory.from_gb(60).in_bytes,
+            )
+        ),
+        discrete: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=Memory.from_gb(32).in_bytes,
+                gtt_total_bytes=Memory.from_gb(16).in_bytes,
+            )
+        ),
+        cpu_only_uma: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=Memory.from_gb(32).in_bytes,
+                gtt_total_bytes=Memory.from_gb(60).in_bytes,
+            )
+        ),
+    }
+    resources = {
+        uma: NodeResources(backends=frozenset({"llama_server-vulkan"})),
+        discrete: NodeResources(backends=frozenset({"llama_server-vulkan"})),
+        cpu_only_uma: NodeResources(backends=frozenset({"llama_server-cpu"})),
+    }
+
+    assert unified_memory_gpu_node_ids(
+        node_system, resources, node_memory=memory
+    ) == frozenset({uma})
 
 
 def test_usable_vram_by_node_discrete_without_gtt_uses_vram_only():

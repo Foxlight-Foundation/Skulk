@@ -16,6 +16,7 @@ on real loads.
 """
 
 from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 from typing import Final
 
 from skulk.shared.models.model_cards import ModelCard
@@ -296,6 +297,7 @@ def instance_context_token_limit(
     shard_assignments: ShardAssignments,
     node_ram_totals: Mapping[NodeId, Memory],
     node_vram: Mapping[NodeId, Memory] | None = None,
+    unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
 ) -> int | None:
     """Deterministic context-token ceiling for one placed instance.
 
@@ -312,16 +314,22 @@ def instance_context_token_limit(
     master has indexed memory for every hosting node, so every worker computes
     the identical value. Time-varying ``ram_available`` must NOT be used here.
 
-    ``node_vram`` (a node's usable discrete-GPU VRAM, see ``usable_vram_by_node``)
-    is the working-set ceiling for a GPU-offload node, mirroring the memory-fit
+    ``node_vram`` (a node's usable GPU memory, see ``usable_vram_by_node``) is
+    the working-set ceiling for a GPU-offload node, mirroring the memory-fit
     admission: without it a model whose weights exceed ``0.75 * ram_total`` but
-    fit in VRAM would get a negative KV budget and a 0-token ceiling (every
-    request rejected), even though placement admitted it against VRAM.
+    fit in GPU memory would get a negative KV budget and a 0-token ceiling
+    (every request rejected), even though placement admitted it against that
+    pool. ``unified_memory_gpu_nodes`` distinguishes APUs whose usable pool
+    includes host RAM from true discrete VRAM. Fixed-window served engines may
+    lift above the conservative context floor only on the latter: on an APU,
+    llama.cpp's load-time GPU allocation also consumes host pages and a
+    combined-pool steady-state fit does not bound that transient allocation.
 
     Returns ``None`` when no ceiling is enforceable (unknown KV cost or
     missing node memory, falling back to the card limit when that exists).
     """
     node_vram = node_vram or {}
+    unified_memory_gpu_nodes = unified_memory_gpu_nodes or frozenset()
     model_card: ModelCard | None = None
     memory_limit: int | None = None
     for shard in shard_assignments.runner_to_shard.values():
@@ -373,16 +381,21 @@ def instance_context_token_limit(
     # budget floor; the memory-fit lift applies to discrete-VRAM (GPU) nodes.
     # ``node_vram`` membership is static per node, so this stays deterministic.
     if served_preallocates and memory_limit is not None:
-        # Keep the lift only where the served window lands in DISCRETE VRAM (the pool
-        # placement admitted against): every hosting shard must both resolve to a
-        # GPU-offload backend (``-cuda`` / ``-rocm``; a ``-cpu`` / bare tag does not
-        # offload to the GPU and commits the window in SYSTEM RAM, which competes with
-        # live ram_available) AND run on a node reporting discrete VRAM (a
-        # ram_total-derived fit likewise competes with ram_available). Anything
-        # else -- CPU-resolved on a GPU node, a non-VRAM node, or an unresolved
-        # backend -- clamps to the floor to avoid a load-time OOM.
+        # Keep the lift only where the served window lands in DISCRETE VRAM (the
+        # pool placement admitted against): every hosting shard must both resolve
+        # to a GPU-offload backend (``-cuda`` / ``-rocm``; a ``-cpu`` / bare tag
+        # does not offload to the GPU and commits the window in SYSTEM RAM, which
+        # competes with live ram_available) AND run on a node reporting discrete
+        # VRAM. A unified-memory APU remains in ``node_vram`` for placement because
+        # its GPU can use the combined carve-out + GTT pool, but it is explicitly
+        # excluded here: llama.cpp's load-time amdgpu allocations consume host
+        # pages too, so a steady-state combined-pool fit can still globally OOM the
+        # node while committing a large fixed KV window. Anything else -- UMA,
+        # CPU-resolved on a GPU node, a non-VRAM node, or an unresolved backend --
+        # clamps to the floor to avoid a load-time OOM.
         lift_in_vram = all(
             node_vram.get(node_id) is not None
+            and node_id not in unified_memory_gpu_nodes
             and backend_offloads_to_vram(
                 shard_assignments.runner_to_shard[runner_id].resolved_backend
             )

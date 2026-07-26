@@ -18,7 +18,7 @@ The design choices that shape almost everything else:
 - **One master at a time.** A bully election picks the master; only the master indexes events. Failover is automatic, and the promoted node seeds the new session from its replicated state, so placed instances survive a master restart: workers rebuild their runners and serving resumes after a model-reload-sized gap. Instances with a rank on the dead master are cleaned up once live topology confirms the node is gone.
 - **libp2p pub/sub for transport.** Topics carry commands, events, telemetry, and connection updates between nodes. Election and telemetry each use dedicated Python egress plus their own gossipsub behavior, protocol, and per-peer handler queues on the same libp2p swarm, so telemetry pressure cannot consume control or election capacity. Election alone retains its temporary legacy-protocol compatibility copy.
 - **MLX as the inference backend.** Pipeline-parallel and tensor-parallel sharding strategies sit on top of `mlx.distributed`'s ring or jaccl/RDMA backends.
-- **Subprocess isolation for runners.** Each model instance runs in its own `mp.Process` with its own MLX/Metal context, so a crash or hang in one runner can't bring down the rest of the node.
+- **Subprocess isolation for runners.** Each model instance runs in its own `mp.Process` with its own MLX/Metal context, so a crash or hang in one runner can't bring down the rest of the node. The shipped systemd unit sets `OOMPolicy=continue` for the same boundary: if Linux OOM-kills a runner child, systemd leaves the Skulk parent, API, and co-hosted model store alive while the supervisor and crash breaker handle the failed runner.
 
 ## The shape of a node
 
@@ -448,15 +448,18 @@ VRAM total, never the time-varying available-memory reading
 The engines that commit their whole context window at load (in-process
 llama.cpp, llama-server, vLLM) get the lifted window only where it lands in
 discrete GPU VRAM, the same pool placement admitted the model against. A GGUF
-placement on a node without discrete VRAM keeps the 8192-token floor, because
-its fit is derived from total system RAM while the load-time window competes
-with live available memory, and an uncomputable fit (a card without KV-head
-metadata, or a pooled RPC placement) clamps back to the floor rather than
-committing a fictitious window that would fail at load. MLX is unaffected
-either way: it grows its KV cache lazily per request and keeps the full
-memory/card fit. The practical effect is that a large-VRAM GPU node serves a
-model at the largest context that actually fits it, instead of a fixed clamp
-that makes served models unusable for real-context work. The
+placement on a node without discrete VRAM keeps the 8192-token floor. That
+includes unified-memory AMD APUs: placement can use their combined BIOS
+VRAM/GTT pool, but llama.cpp's load-time amdgpu allocation also consumes host
+pages, so a steady-state combined-pool fit cannot safely justify a larger fixed
+window. CPU fits similarly derive from total system RAM while the load-time
+window competes with live available memory. An uncomputable fit (a card without
+KV-head metadata, or a pooled RPC placement) also clamps back to the floor
+rather than committing a fictitious window that would fail at load. MLX is
+unaffected either way: it grows its KV cache lazily per request and keeps the
+full memory/card fit. The practical effect is that a true discrete-VRAM GPU
+node serves a model at the largest context that actually fits it, instead of a
+fixed clamp that makes served models unusable for real-context work. The
 [Architecture Reference](architecture-reference) carries the exact admission
 arithmetic.
 
