@@ -1,6 +1,8 @@
 # Copyright 2026 Foxlight Foundation
 """Regression contracts for the documented supervised-service installers."""
 
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -33,3 +35,42 @@ def test_systemd_runner_oom_does_not_stop_skulk_node() -> None:
     unit = (_REPO_ROOT / "deployment/systemd/skulk.service").read_text()
 
     assert "OOMPolicy=continue" in unit
+
+
+def test_vector_startup_expands_home_defaults_before_vector(
+    tmp_path: Path,
+) -> None:
+    """Vector must receive absolute user paths instead of literal shell syntax."""
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_vector = fake_bin / "vector"
+    fake_vector.write_text(
+        "#!/bin/sh\n"
+        'printf "data=%s\\nlog=%s\\n" '
+        '"$SKULK_VECTOR_DATA_DIR" "$SKULK_LOG_FILE"\n'
+    )
+    fake_vector.chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir()
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "HOME": str(home),
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+            "SKULK_ENV_FILE": str(tmp_path / "missing.env"),
+        }
+    )
+
+    result = subprocess.run(
+        [_REPO_ROOT / "deployment/install/vector-startup.sh"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.stdout.splitlines() == [
+        f"data={home}/.skulk/vector",
+        f"log={home}/.skulk/logs/skulk.stdout.log",
+    ]
