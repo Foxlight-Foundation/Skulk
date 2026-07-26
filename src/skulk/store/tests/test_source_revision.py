@@ -43,6 +43,14 @@ def test_canonical_capacity_counts_resumable_and_replaced_bytes(
     )
 
 
+def test_canonical_capacity_rejects_unknown_manifest_sizes(tmp_path: Path) -> None:
+    with pytest.raises(model_store_module.ModelStoreCapacityError, match="unknown size"):
+        model_store_module._remaining_store_download_bytes(
+            tmp_path,
+            [FileListEntry(type="file", path="missing.safetensors", size=None)],
+        )
+
+
 async def test_canonical_download_fails_before_transfer_without_headroom(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

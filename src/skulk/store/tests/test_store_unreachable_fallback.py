@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import cast
 
+import anyio
 import pytest
 
 from skulk.download.download_utils import RepoDownloadProgress
@@ -91,6 +92,33 @@ class _ReachableThenUnreachableClient:
         raise StoreUnreachableError("route dropped mid staging")
 
 
+class _RecordingStageClient:
+    """Store client that records when a staging transfer actually enters."""
+
+    def __init__(self) -> None:
+        self.stage_entered = anyio.Event()
+
+    async def stage_shard(self, *args: object, **kwargs: object) -> Path:
+        self.stage_entered.set()
+        return Path("/unused")
+
+
+class _BlockingInnerDownloader(_RecordingInnerDownloader):
+    """Direct downloader held open to expose cross-path lock ordering."""
+
+    def __init__(self, dest: Path) -> None:
+        super().__init__(dest)
+        self.entered = anyio.Event()
+        self.release = anyio.Event()
+
+    async def ensure_shard(
+        self, shard: ShardMetadata, config_only: bool = False
+    ) -> Path:
+        self.entered.set()
+        await self.release.wait()
+        return await super().ensure_shard(shard, config_only)
+
+
 def _shard() -> PipelineShardMetadata:
     return PipelineShardMetadata(
         model_card=ModelCard(
@@ -175,6 +203,42 @@ async def test_store_dropping_mid_transfer_falls_back(tmp_path: Path) -> None:
 
     assert path == inner.dest
     assert inner.ensure_calls == [(_MODEL_ID, False)]
+
+
+@pytest.mark.anyio
+async def test_store_staging_waits_for_direct_fallback_transfer(
+    tmp_path: Path,
+) -> None:
+    """Store and fallback paths cannot spend one filesystem's bytes together."""
+
+    inner = _BlockingInnerDownloader(tmp_path / "hf")
+    store = _RecordingStageClient()
+    downloader = _downloader(store, inner, tmp_path)
+    shard = _shard()
+
+    async def _run_fallback() -> None:
+        await downloader._fallback_for_unreachable_store(
+            shard,
+            False,
+            cause=StoreUnreachableError("route unavailable"),
+        )
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(_run_fallback)
+        with anyio.fail_after(2):
+            await inner.entered.wait()
+
+        task_group.start_soon(
+            downloader._stage_from_store,
+            shard,
+            _MODEL_ID,
+        )
+        await anyio.sleep(0.05)
+        assert not store.stage_entered.is_set()
+
+        inner.release.set()
+        with anyio.fail_after(2):
+            await store.stage_entered.wait()
 
 
 @pytest.mark.anyio

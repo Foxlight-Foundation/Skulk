@@ -55,6 +55,14 @@ def test_remaining_bytes_credit_partial_and_replaced_files(tmp_path: Path) -> No
     assert _remaining_direct_download_bytes(tmp_path, file_list) == 5 + 5 + 7
 
 
+def test_remaining_bytes_reject_unknown_manifest_sizes(tmp_path: Path) -> None:
+    with pytest.raises(DirectDownloadCapacityError, match="unknown size"):
+        _remaining_direct_download_bytes(
+            tmp_path,
+            [FileListEntry(type="file", path="missing.safetensors", size=None)],
+        )
+
+
 @pytest.mark.anyio
 async def test_direct_download_fails_before_transfer_without_headroom(
     tmp_path: Path,

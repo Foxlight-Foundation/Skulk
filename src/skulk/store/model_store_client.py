@@ -1749,7 +1749,14 @@ class ModelStoreDownloader(ShardDownloader):
             "host; if it is a remote member, direct-origin staging is "
             "expected."
         )
-        return await self._inner.ensure_shard(shard, config_only)
+        # Store staging and direct fallback commonly write to separate
+        # directories on the same home filesystem. Share the outer staging
+        # lock across both paths so a route flap cannot let their independent
+        # preflights spend the same free bytes concurrently. The inner direct
+        # downloader retains its own lock for callers that use it without a
+        # model-store wrapper.
+        async with self._staging_transfer_lock:
+            return await self._inner.ensure_shard(shard, config_only)
 
     async def get_shard_download_status(
         self,

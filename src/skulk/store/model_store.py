@@ -87,7 +87,13 @@ def _remaining_store_download_bytes(
 
     remaining_bytes = 0
     for file_entry in file_list:
-        expected_size = file_entry.size or 0
+        if file_entry.size is None:
+            raise ModelStoreCapacityError(
+                "Cannot verify canonical model-store disk capacity because "
+                "the selected manifest contains a file with unknown size. "
+                "Retry after repository metadata is available."
+            )
+        expected_size = file_entry.size
         target = target_directory / file_entry.path
         partial = target_directory / f"{file_entry.path}.partial"
         target_bytes = target.stat().st_size if target.is_file() else 0
