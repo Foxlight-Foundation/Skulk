@@ -29,6 +29,7 @@ from skulk.store.model_store_client import ModelStoreClient
 from skulk.store.staging_eviction import (
     LAST_USED_MARKER_FILENAME,
     StagingCapacityError,
+    StagingEvictionReport,
 )
 from skulk.utils.channels import Receiver, channel
 from skulk.worker.main import Worker, _staging_model_ids
@@ -144,6 +145,48 @@ async def test_preflight_protects_partial_incoming_and_resets_evicted_state(
     assert len(reset_events) == 1
     assert isinstance(reset_events[0].download_progress, DownloadPending)
     assert reset_events[0].download_progress.shard_metadata == idle
+
+
+@pytest.mark.asyncio
+async def test_runtime_eviction_counters_delayed_download_completion(
+    tmp_path: Path,
+) -> None:
+    """Remember an eviction until a just-completed transfer becomes visible."""
+    completed = _shard("org/completed", storage_bytes=120)
+    incoming = _shard("org/incoming", storage_bytes=100)
+    worker, event_receiver = _worker(tmp_path)
+    completed_directory = tmp_path / "org--completed"
+
+    await worker._reset_download_state_for_evicted(
+        StagingEvictionReport(evicted_model_ids=["org/completed"]),
+        incoming,
+    )
+
+    assert "org--completed" in worker._stale_downloads_pending_reset
+    assert event_receiver.collect() == []
+
+    worker.state = State(
+        downloads={
+            worker.node_id: [
+                DownloadCompleted(
+                    node_id=worker.node_id,
+                    shard_metadata=completed,
+                    total=completed.model_card.storage_size,
+                    model_directory=str(completed_directory),
+                )
+            ]
+        }
+    )
+    await worker._reset_stale_downloads_from_state()
+
+    reset_events = [
+        event
+        for event in event_receiver.collect()
+        if isinstance(event, NodeDownloadProgress)
+    ]
+    assert len(reset_events) == 1
+    assert isinstance(reset_events[0].download_progress, DownloadPending)
+    assert reset_events[0].download_progress.shard_metadata == completed
 
 
 @pytest.mark.asyncio

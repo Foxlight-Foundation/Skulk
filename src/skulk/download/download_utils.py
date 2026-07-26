@@ -1162,6 +1162,17 @@ async def _download_file(
             assert r.status in [200, 206], (
                 f"Failed to download {path} from {url}: {r.status}"
             )
+            if resume_byte_pos and r.status == 200:
+                # Some artifact hosts ignore Range and return the complete
+                # object. Appending that response would temporarily consume
+                # both the partial and full sizes, violate the capacity
+                # preflight's partial-byte credit, and fail integrity after
+                # the transfer. Restart this file in place instead.
+                logger.warning(
+                    f"Server ignored resume range for {path}; restarting download"
+                )
+                resume_byte_pos = None
+                n_read = 0
             async with aiofiles.open(
                 partial_path, "ab" if resume_byte_pos else "wb"
             ) as f:

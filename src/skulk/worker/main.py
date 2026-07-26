@@ -712,6 +712,12 @@ class Worker:
         # event is still round-tripping through the master.
         self._stale_downloads_pending_reset: set[str] = set()
         self._stale_resets_sent: set[str] = set()
+        # Runtime capacity eviction can remove a just-completed transfer in
+        # the short interval before its DownloadCompleted event reaches this
+        # worker. Keep those directory names long enough to counter a delayed
+        # completion, while eventually expiring companion directories that
+        # are never advertised independently.
+        self._stale_downloads_awaiting_completion: dict[str, int] = {}
         self._stale_reset_wait_ticks: int = 0
         # Runtime eviction takes a filesystem snapshot on the event loop and
         # deletes from a worker thread. Keep that whole interval atomic with
@@ -2390,6 +2396,7 @@ class Worker:
                     )
                     self._stale_downloads_pending_reset.clear()
                     self._stale_resets_sent.clear()
+                    self._stale_downloads_awaiting_completion.clear()
                     self._stale_reset_wait_ticks = 0
 
             task: Task | None = plan(
@@ -2815,12 +2822,18 @@ class Worker:
                 if evicted_directory == deactivated_directory
                 else own_downloads.get(evicted_directory)
             )
-            if shard_metadata is None:
-                # Never advertised as downloaded on this node - nothing to
-                # reset (e.g. a companion repo staged without its own
-                # download entry).
-                continue
             self._stale_downloads_pending_reset.add(evicted_directory)
+            if shard_metadata is None:
+                # This can be either a companion repo, which is never
+                # advertised independently, or a just-completed transfer
+                # whose event has not reached our local state yet. Retain the
+                # marker for one stale-reset window so a delayed completion
+                # cannot make the planner load files this pass deleted.
+                self._stale_downloads_awaiting_completion.setdefault(
+                    evicted_directory, 0
+                )
+                continue
+            self._stale_downloads_awaiting_completion.pop(evicted_directory, None)
             pending = DownloadPending(
                 shard_metadata=shard_metadata,
                 node_id=self.node_id,
@@ -2919,6 +2932,7 @@ class Worker:
         if self._staging_config is None:
             self._stale_downloads_pending_reset.clear()
             self._stale_resets_sent.clear()
+            self._stale_downloads_awaiting_completion.clear()
             return
         cache_path = Path(self._staging_config.node_cache_path).expanduser()
         still_completed: set[str] = set()
@@ -2934,8 +2948,10 @@ class Worker:
                 # Re-staged since eviction - state is truthful again.
                 self._stale_downloads_pending_reset.discard(directory_name)
                 self._stale_resets_sent.discard(directory_name)
+                self._stale_downloads_awaiting_completion.pop(directory_name, None)
                 continue
             still_completed.add(directory_name)
+            self._stale_downloads_awaiting_completion.pop(directory_name, None)
             if directory_name in self._stale_resets_sent:
                 continue  # reset in flight; keep gating until it applies
             pending = DownloadPending(
@@ -2958,6 +2974,23 @@ class Worker:
             if directory_name not in still_completed:
                 self._stale_downloads_pending_reset.discard(directory_name)
                 self._stale_resets_sent.discard(directory_name)
+                self._stale_downloads_awaiting_completion.pop(directory_name, None)
+        for directory_name, wait_ticks in list(
+            self._stale_downloads_awaiting_completion.items()
+        ):
+            next_wait_ticks = wait_ticks + 1
+            if next_wait_ticks <= _STALE_RESET_MAX_WAIT_TICKS:
+                self._stale_downloads_awaiting_completion[directory_name] = (
+                    next_wait_ticks
+                )
+                continue
+            self._stale_downloads_awaiting_completion.pop(directory_name, None)
+            self._stale_downloads_pending_reset.discard(directory_name)
+            logger.debug(
+                "Worker: evicted staging directory was not advertised as "
+                "complete within the stale-reset window; treating it as an "
+                "unadvertised companion"
+            )
         if not self._stale_downloads_pending_reset:
             self._stale_reset_wait_ticks = 0
 
