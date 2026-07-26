@@ -118,6 +118,55 @@ async def test_canonical_download_fails_before_transfer_without_headroom(
     assert not transfer_started
 
 
+async def test_canonical_download_reuses_complete_artifact_without_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = ModelStore(tmp_path)
+    model_id = "org/model"
+    target = tmp_path / "org--model"
+    target.mkdir()
+    (target / "model.gguf").write_bytes(b"complete")
+    store._active_downloads[model_id] = StoreDownloadStatus(model_id=model_id)
+
+    async def file_list(
+        _model_id: ModelId,
+        _revision: str,
+        recursive: bool,
+    ) -> list[FileListEntry]:
+        assert recursive
+        return [
+            FileListEntry(type="file", path="model.gguf", size=len(b"complete"))
+        ]
+
+    async def reuse_file(
+        _model_id: ModelId,
+        _revision: str,
+        path: str,
+        target_dir: Path,
+        _on_progress: Callable[[int, int, bool], None],
+        *_args: object,
+        **_kwargs: object,
+    ) -> Path:
+        return target_dir / path
+
+    def unexpected_disk_usage(_path: Path) -> object:
+        raise AssertionError("zero-byte canonical reuse must not inspect free space")
+
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", file_list)
+    monkeypatch.setattr(download_utils, "download_file_with_retry", reuse_file)
+    monkeypatch.setattr(
+        model_store_module.shutil,
+        "disk_usage",
+        unexpected_disk_usage,
+    )
+
+    await store._do_download(model_id)
+
+    assert store._active_downloads[model_id].status == "complete"
+    assert store.get_entry(model_id) is not None
+
+
 async def test_canonical_download_stays_pending_until_transfer_lock(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

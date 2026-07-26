@@ -876,20 +876,21 @@ class ModelStore:
                 target_dir,
                 file_list,
             )
-            free_bytes = await asyncio.to_thread(
-                lambda: shutil.disk_usage(target_dir).free
-            )
-            required_free_bytes = (
-                additional_bytes + MINIMUM_STAGING_FREE_DISK_BYTES
-            )
-            if free_bytes < required_free_bytes:
-                raise ModelStoreCapacityError(
-                    f"Insufficient canonical model-store disk capacity for "
-                    f"{model_id}: need {required_free_bytes / 2**30:.1f} GiB "
-                    "free for the remaining transfer and operating-system "
-                    f"reserve, but only {free_bytes / 2**30:.1f} GiB is "
-                    "available. Free disk space or move the model store."
+            if additional_bytes > 0:
+                free_bytes = await asyncio.to_thread(
+                    lambda: shutil.disk_usage(target_dir).free
                 )
+                required_free_bytes = (
+                    additional_bytes + MINIMUM_STAGING_FREE_DISK_BYTES
+                )
+                if free_bytes < required_free_bytes:
+                    raise ModelStoreCapacityError(
+                        f"Insufficient canonical model-store disk capacity for "
+                        f"{model_id}: need {required_free_bytes / 2**30:.1f} GiB "
+                        "free for the remaining transfer and operating-system "
+                        f"reserve, but only {free_bytes / 2**30:.1f} GiB is "
+                        "available. Free disk space or move the model store."
+                    )
             downloaded_bytes = 0
 
             for f in file_list:
