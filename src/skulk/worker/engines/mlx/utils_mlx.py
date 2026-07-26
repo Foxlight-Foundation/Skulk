@@ -551,12 +551,18 @@ class _Gemma4DynamicVisionTower(nn.Module):
                 encoded = self._encode_one(batched)
                 features.append(encoded[0] if encoded.ndim == 3 else encoded)
             return mx.concatenate(features, axis=0)[None]
-        return self._encode_one(pixel_values)
+        return self._encode_one(_batch_gemma4_pixel_values(pixel_values))
 
     def __getattr__(self, name: str) -> object:
         if name == "_inner":
             return cast(object, object.__getattribute__(self, name))
         return cast(object, getattr(self._inner, name))
+
+
+def _batch_gemma4_pixel_values(pixel_values: mx.array) -> mx.array:
+    """Add the image batch dimension omitted by single-image processors."""
+
+    return pixel_values[None] if pixel_values.ndim == 3 else pixel_values
 
 
 def _patch_gemma4_native_vision(model: nn.Module) -> nn.Module:
