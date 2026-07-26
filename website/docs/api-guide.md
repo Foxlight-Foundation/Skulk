@@ -1107,6 +1107,12 @@ runtime-overhead factor (KV cache, activations, runner) on top of the raw
 weight bytes. A model that exactly equals a node's free memory is rejected,
 because that placement would thrash, not run.
 
+The dry-run uses the same hardware-memory classification as the master. In
+particular, a unified-memory GPU may use its combined VRAM/GTT pool for model
+fit while fixed-window llama.cpp engines keep their conservative startup
+context. The accepted command therefore cannot change context policy between
+API validation and master placement.
+
 ### Preview valid placements
 
 **GET** `/instance/previews?model_id=...`
@@ -1122,6 +1128,9 @@ mint for that combination, not the shape that was asked about: for example a
 GGUF model previewed at two GPU nodes reports `LlamaRpc` (driver plus memory
 donors) even though the request enumerates the generic metas. Trust the
 preview's reported meta when constructing a follow-up `POST /place_instance`.
+The embedded instance's `contextTokenLimit` is also the exact limit launch
+would stamp. Unified-memory GPUs are not previewed with a discrete-VRAM context
+lift that the master would later remove.
 
 Besides the planner's ranked pick per shape, the response also contains
 per-host single-node previews marked `"alternative": true` for every other
@@ -1146,7 +1155,9 @@ curl "http://localhost:52415/instance/previews?model_id=mlx-community/Qwen3.5-9B
 
 **GET** `/instance/placement`
 
-Use this when you want a specific combination and want to inspect the exact instance shape before launch.
+Use this when you want a specific combination and want to inspect the exact
+instance shape before launch, including the hardware-aware
+`contextTokenLimit` that the master would stamp.
 
 ### Create an instance from a fully specified placement
 
