@@ -250,6 +250,11 @@ not the guard that prevents a new transfer from filling the host filesystem.
 If removing every idle staged model still cannot meet the target, Skulk reports
 `DownloadFailed` before writing more model bytes.
 
+If the configured store is unreachable and Hugging Face fallback is enabled,
+the staging check does not run against the wrong filesystem. The direct
+downloader resolves the exact filtered artifact set, serializes admission with
+transfer, and applies the same reserve to the actual model-cache filesystem.
+
 > The store host is a special case. When a node points `node_cache_path` at the
 > same directory as `store_path` (so it loads directly from the store without a
 > second copy), the recency budget is skipped on that node whatever the toggle

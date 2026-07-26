@@ -85,6 +85,10 @@ downloads instead serialize exact selected-manifest admission with transfer and
 fail before writing if the authoritative volume cannot retain the same 10 GiB
 reserve.
 
+When a node falls back to direct Hugging Face because the store is unreachable,
+it performs that same exact, serialized check against the actual model cache.
+It does not evict or reject based on the unrelated staging filesystem.
+
 Tune it in the `staging` section of `skulk.yaml`, or per node via
 `node_overrides`:
 

@@ -1065,6 +1065,8 @@ partial model stay protected; an unsatisfied capacity target becomes
 The canonical store host applies the same exact-byte, serialized admission to
 its Hugging Face download transaction. It never evicts authoritative models;
 insufficient canonical capacity fails the store download before file transfer.
+Store-unreachable direct fallback applies the reserve to the node's actual
+model-cache filesystem and does not run staging eviction.
 
 ## Placement and Instance Management
 

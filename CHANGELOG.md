@@ -16,8 +16,10 @@ This project records release notes here and mirrors public-facing notes in
   least-recently-used order until the exact additional allocation fits, and
   preserves 10 GiB of operating-system headroom. Canonical model-store
   downloads use the same serialized exact-byte admission without ever evicting
-  authoritative artifacts. If either filesystem cannot meet its target, the
-  placement receives an actionable failure before any more bytes are written.
+  authoritative artifacts, and direct Hugging Face fallback applies it to the
+  actual model-cache filesystem instead of the unrelated staging cache. If any
+  destination cannot meet its target, the placement receives an actionable
+  failure before any more bytes are written.
 
 - Kept fixed-window llama.cpp contexts at the safe 8192-token floor on
   unified-memory AMD APUs. Placement still uses their combined VRAM/GTT pool,

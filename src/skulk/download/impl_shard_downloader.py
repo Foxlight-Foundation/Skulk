@@ -1,4 +1,5 @@
 import asyncio
+import shutil
 from asyncio import create_task
 from collections.abc import Awaitable
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import AsyncIterator, Callable
 from loguru import logger
 
 from skulk.download.download_utils import (
+    DownloadCapacityPreflight,
     RepoDownloadProgress,
     companion_download_specs,
     download_shard,
@@ -17,10 +19,38 @@ from skulk.shared.models.model_cards import (
     ModelId,
     get_model_cards,
 )
+from skulk.shared.types.worker.downloads import FileListEntry
 from skulk.shared.types.worker.shards import (
     PipelineShardMetadata,
     ShardMetadata,
 )
+from skulk.store.staging_eviction import MINIMUM_STAGING_FREE_DISK_BYTES
+
+
+class DirectDownloadCapacityError(RuntimeError):
+    """Raised before a Hugging Face transfer that would consume headroom."""
+
+
+def _remaining_direct_download_bytes(
+    target_directory: Path,
+    file_list: list[FileListEntry],
+) -> int:
+    """Return physical bytes still needed for one filtered direct download."""
+
+    remaining_bytes = 0
+    for file_entry in file_list:
+        expected_size = file_entry.size or 0
+        target = target_directory / file_entry.path
+        partial = target_directory / f"{file_entry.path}.partial"
+        target_bytes = target.stat().st_size if target.is_file() else 0
+        if target.is_file() and target_bytes == expected_size:
+            continue
+        partial_bytes = partial.stat().st_size if partial.is_file() else 0
+        remaining_bytes += max(
+            0,
+            expected_size - target_bytes - partial_bytes,
+        )
+    return remaining_bytes
 
 
 def skulk_shard_downloader(
@@ -95,9 +125,58 @@ class ResumableShardDownloader(ShardDownloader):
     def __init__(self, max_parallel_downloads: int = 8, offline: bool = False):
         self.max_parallel_downloads = max_parallel_downloads
         self.offline = offline
+        self._direct_transfer_lock = asyncio.Lock()
         self.on_progress_callbacks: list[
             Callable[[ShardMetadata, RepoDownloadProgress], Awaitable[None]]
         ] = []
+
+    async def _ensure_direct_download_capacity(
+        self,
+        target_directory: Path,
+        file_list: list[FileListEntry],
+    ) -> None:
+        """Fail before a direct transfer that cannot retain OS headroom."""
+
+        additional_bytes = await asyncio.to_thread(
+            _remaining_direct_download_bytes,
+            target_directory,
+            file_list,
+        )
+        free_bytes = await asyncio.to_thread(
+            lambda: shutil.disk_usage(target_directory).free
+        )
+        required_free_bytes = (
+            additional_bytes + MINIMUM_STAGING_FREE_DISK_BYTES
+        )
+        if free_bytes < required_free_bytes:
+            raise DirectDownloadCapacityError(
+                f"Insufficient Hugging Face model-cache disk capacity: need "
+                f"{required_free_bytes / 2**30:.1f} GiB free for the remaining "
+                "transfer and operating-system reserve, but only "
+                f"{free_bytes / 2**30:.1f} GiB is available. Free disk space "
+                "or move the model cache."
+            )
+
+    async def _download_with_capacity(
+        self,
+        shard: ShardMetadata,
+        *,
+        allow_patterns: list[str] | None = None,
+    ) -> tuple[Path, RepoDownloadProgress]:
+        """Serialize exact capacity admission with one direct transfer."""
+
+        preflight: DownloadCapacityPreflight = (
+            self._ensure_direct_download_capacity
+        )
+        async with self._direct_transfer_lock:
+            return await download_shard(
+                shard,
+                self.on_progress_wrapper,
+                max_parallel_downloads=self.max_parallel_downloads,
+                allow_patterns=allow_patterns,
+                skip_internet=self.offline,
+                capacity_preflight=preflight,
+            )
 
     async def on_progress_wrapper(
         self, shard: ShardMetadata, progress: RepoDownloadProgress
@@ -131,12 +210,9 @@ class ResumableShardDownloader(ShardDownloader):
                 shard.model_card
             ):
                 try:
-                    _, companion_progress = await download_shard(
+                    _, companion_progress = await self._download_with_capacity(
                         companion_shard,
-                        self.on_progress_wrapper,
-                        max_parallel_downloads=self.max_parallel_downloads,
                         allow_patterns=allow,
-                        skip_internet=self.offline,
                     )
                     # download_shard converts repo-level fetch failures
                     # (e.g. FileNotFoundError on the file list) into a
@@ -161,12 +237,9 @@ class ResumableShardDownloader(ShardDownloader):
                         "will be unavailable on this node."
                     )
 
-        target_dir, _ = await download_shard(
+        target_dir, _ = await self._download_with_capacity(
             shard,
-            self.on_progress_wrapper,
-            max_parallel_downloads=self.max_parallel_downloads,
             allow_patterns=allow_patterns,
-            skip_internet=self.offline,
         )
 
         return target_dir

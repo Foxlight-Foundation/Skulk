@@ -47,6 +47,11 @@ from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadat
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
 _SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
 _MODEL_SWAP_BACKUP_SUFFIX = ".skulk-swap-backup"
+DownloadCapacityPreflight = Callable[
+    [Path, list[FileListEntry]],
+    Awaitable[None],
+]
+"""Async capacity check for an exact filtered Hugging Face transfer."""
 
 
 class HuggingFaceAuthenticationError(Exception):
@@ -1309,6 +1314,7 @@ async def download_shard(
     skip_internet: bool = False,
     allow_patterns: list[str] | None = None,
     on_connection_lost: Callable[[], None] = lambda: None,
+    capacity_preflight: DownloadCapacityPreflight | None = None,
 ) -> tuple[Path, RepoDownloadProgress]:
     if not skip_download:
         logger.debug(f"Downloading {shard.model_card.model_id=}")
@@ -1398,6 +1404,12 @@ async def download_shard(
             for f in filtered_file_list
             if "/" in f.path or not f.path.endswith(".safetensors")
         ]
+    if (
+        not skip_download
+        and not skip_internet
+        and capacity_preflight is not None
+    ):
+        await capacity_preflight(target_dir, filtered_file_list)
     file_progress: dict[str, RepoFileDownloadProgress] = {}
 
     def update_file_progress(
