@@ -31,14 +31,20 @@ directly). Staged copies live under `node_cache_path` (default
 Staged copies are cheap to recreate from the LAN store but local disk on
 small-disk nodes is the scarce resource, so staging has a lifecycle.
 
-### The eviction lifecycle and its three triggers
+### The eviction lifecycle and capacity trigger
 
-There is one eviction mechanism with three trigger points:
+Staging space is reclaimed at four trigger points:
 
 1. **Instance deactivation**: when a model instance shuts down.
 2. **Node startup**, which reconciles staged copies orphaned by a crashed
    session (a node that died never got to clean up).
-3. **Operator tooling**: `POST /store/purge-staging` (see below).
+3. **During each store-backed staging transaction**, when disk capacity must
+   fit the exact additional registered artifact bytes plus 10 GiB of
+   operating-system headroom.
+4. **Operator tooling**: `POST /store/purge-staging` (see below).
+
+The first three use the least-recently-used policy below. The operator purge is
+an explicit unconditional reset of staged copies.
 
 A staged model becomes an **eviction candidate** when no live runner uses
 it. Candidates are kept newest-first by last use up to the
@@ -51,9 +57,11 @@ names it directly but also when it is the **companion** of an active model
 are never eviction candidates, so eviction can never pull weights out from
 under a live runner.
 
-This lifecycle only runs when `cleanup_on_deactivate` is `true` (the
-default). Set it to `false` to keep every staged copy and manage cleanup
-entirely by hand.
+The lifecycle recency passes only run when `cleanup_on_deactivate` is `true`
+(the default). Set it to `false` to keep every staged copy while disk is
+healthy. The pre-download capacity pass is an independent safety guard and
+still evicts idle data when necessary to prevent a new transfer from filling
+the filesystem.
 
 ### The grace budget and tuning it
 
@@ -62,6 +70,24 @@ budget. Eviction never reduces the staging cache below this much of
 recently-used, not-in-use model data. The budget exists so that node deaths,
 restarts, and repeated place/delete cycles of the same model do not re-pay
 the staging copy every time.
+
+Before a new download, disk safety may override this grace budget. The incoming
+partial model, live runners, active downloads, and companion repositories stay
+protected; base and companion transfers are admitted one at a time after the
+store reports their exact registered artifact total. Resumable manifest bytes
+reduce the additional allocation and same-filesystem hardlinks count as zero.
+Idle copies are removed oldest-first until that allocation fits with 10 GiB
+free after transfer. When no safe fit exists, the worker emits
+`DownloadFailed` without starting the transfer.
+
+The canonical store is never an eviction source. Store-side Hugging Face
+downloads instead serialize exact selected-manifest admission with transfer and
+fail before writing if the authoritative volume cannot retain the same 10 GiB
+reserve.
+
+When a node falls back to direct Hugging Face because the store is unreachable,
+it performs that same exact, serialized check against the actual model cache.
+It does not evict or reject based on the unrelated staging filesystem.
 
 Tune it in the `staging` section of `skulk.yaml`, or per node via
 `node_overrides`:

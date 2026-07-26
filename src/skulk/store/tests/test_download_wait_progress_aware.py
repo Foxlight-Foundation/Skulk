@@ -84,6 +84,28 @@ async def test_wait_does_not_time_out_while_progress_advances(
     assert ok is True
 
 
+async def test_wait_does_not_count_pending_queue_time_as_a_stall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    polls = [{"status": "pending", "progress": 0.0} for _ in range(4)]
+    polls.extend(
+        [
+            {"status": "downloading", "progress": 0.0},
+            {"status": "complete", "progress": 1.0},
+        ]
+    )
+    _install(monkeypatch, polls)
+    client = ModelStoreClient(store_host="h", store_port=1)
+
+    ok = await client.request_and_wait_for_download(
+        "org/queued",
+        timeout=0.02,
+        poll_interval=0.01,
+    )
+
+    assert ok is True
+
+
 async def test_wait_times_out_on_a_genuine_stall(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

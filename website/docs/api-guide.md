@@ -1053,7 +1053,20 @@ instance shuts down (and at node startup, which reconciles copies orphaned
 by a crash), not-in-use staged models are kept newest-first up to the
 `staging_keep_recent_gb` grace budget (default 40 GiB) and evicted beyond
 it. Set `cleanup_on_deactivate: false` in the staging config to keep every
-staged copy and manage cleanup manually via `POST /store/purge-staging`.
+staged copy while disk is healthy. Independently, before each store-backed
+transfer the worker may evict idle copies inside that grace budget until the
+exact additional registered artifact bytes fit with 10 GiB of
+operating-system headroom. Base and companion transfers are serialized,
+resumable manifest data is credited, and same-filesystem hardlinks count as
+zero allocation. Live runners, active model transactions, and the incoming
+partial model stay protected; an unsatisfied capacity target becomes
+`DownloadFailed` before transfer.
+
+The canonical store host applies the same exact-byte, serialized admission to
+its Hugging Face download transaction. It never evicts authoritative models;
+insufficient canonical capacity fails the store download before file transfer.
+Store-unreachable direct fallback applies the reserve to the node's actual
+model-cache filesystem and does not run staging eviction.
 
 ## Placement and Instance Management
 

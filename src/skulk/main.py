@@ -726,6 +726,16 @@ class Node:
                 store_client=worker_store_client,
                 staging_config=worker_staging_cfg,
             )
+            if (
+                download_coordinator is not None
+                and isinstance(
+                    download_coordinator.shard_downloader,
+                    ModelStoreDownloader,
+                )
+            ):
+                download_coordinator.shard_downloader.set_staging_capacity_callback(
+                    worker.prepare_staging_transfer
+                )
             if api is not None:
                 api.set_runner_diagnostics_provider(worker.collect_runner_diagnostics)
                 api.set_runner_cancel_provider(worker.cancel_runner_task)
@@ -994,6 +1004,7 @@ class Node:
                 # - Shut down and re-create the API
 
                 start_replacement_event_router = False
+                start_replacement_download_coordinator = False
                 previous_store_server = self.store_server
                 if result.is_new_master:
                     await anyio.sleep(0)
@@ -1143,7 +1154,12 @@ class Node:
                                 else None
                             ),
                         )
-                        self._tg.start_soon(self.download_coordinator.run)
+                        # Do not start receiving StartDownload commands until
+                        # the replacement worker below has attached the
+                        # staging-capacity callback. Worker shutdown yields,
+                        # so starting here creates a window where store-backed
+                        # transfers bypass disk admission entirely.
+                        start_replacement_download_coordinator = True
                     if self.worker:
                         await self.worker.shutdown()
                         ms2 = (
@@ -1205,6 +1221,16 @@ class Node:
                                 topics.VISION_MEDIA
                             ),
                         )
+                        if (
+                            self.download_coordinator is not None
+                            and isinstance(
+                                self.download_coordinator.shard_downloader,
+                                ModelStoreDownloader,
+                            )
+                        ):
+                            self.download_coordinator.shard_downloader.set_staging_capacity_callback(
+                                self.worker.prepare_staging_transfer
+                            )
                         self._tg.start_soon(self.worker.run)
                         if self.api is not None:
                             self.api.set_runner_diagnostics_provider(
@@ -1216,6 +1242,9 @@ class Node:
                             self.api.set_vision_media_ingress_provider(
                                 self.worker.collect_vision_media_ingress_diagnostics
                             )
+                    if start_replacement_download_coordinator:
+                        assert self.download_coordinator is not None
+                        self._tg.start_soon(self.download_coordinator.run)
                     if self.api:
                         self.api.reset(
                             result.won_clock,

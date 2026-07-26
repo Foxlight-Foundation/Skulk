@@ -47,6 +47,11 @@ from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadat
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
 _SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
 _MODEL_SWAP_BACKUP_SUFFIX = ".skulk-swap-backup"
+DownloadCapacityPreflight = Callable[
+    [Path, list[FileListEntry]],
+    Awaitable[None],
+]
+"""Async capacity check for an exact filtered Hugging Face transfer."""
 
 
 class HuggingFaceAuthenticationError(Exception):
@@ -330,8 +335,9 @@ def companion_download_specs(
     """Build download shards for every companion repo a model card declares.
 
     Companions are the artifacts a model needs beyond its own repo: a
-    separate vision-weights repo, an MTP sidecar (``mtp_sidecar_repo``), or
-    a speculative-decoding assistant model (``assistant_model_repo``).
+    separate vision-weights repo, an MTP sidecar (``mtp_sidecar_repo``), a
+    speculative-decoding assistant model (``assistant_model_repo``), or a
+    served-engine draft model (``served_spec_draft_repo``).
     Every downloader path that resolves a base model MUST also ensure its
     companions — a base model present on disk without its companion is the
     "model loads, speculative decoding silently unavailable" failure mode
@@ -1156,6 +1162,17 @@ async def _download_file(
             assert r.status in [200, 206], (
                 f"Failed to download {path} from {url}: {r.status}"
             )
+            if resume_byte_pos and r.status == 200:
+                # Some artifact hosts ignore Range and return the complete
+                # object. Appending that response would temporarily consume
+                # both the partial and full sizes, violate the capacity
+                # preflight's partial-byte credit, and fail integrity after
+                # the transfer. Restart this file in place instead.
+                logger.warning(
+                    f"Server ignored resume range for {path}; restarting download"
+                )
+                resume_byte_pos = None
+                n_read = 0
             async with aiofiles.open(
                 partial_path, "ab" if resume_byte_pos else "wb"
             ) as f:
@@ -1308,6 +1325,7 @@ async def download_shard(
     skip_internet: bool = False,
     allow_patterns: list[str] | None = None,
     on_connection_lost: Callable[[], None] = lambda: None,
+    capacity_preflight: DownloadCapacityPreflight | None = None,
 ) -> tuple[Path, RepoDownloadProgress]:
     if not skip_download:
         logger.debug(f"Downloading {shard.model_card.model_id=}")
@@ -1397,6 +1415,12 @@ async def download_shard(
             for f in filtered_file_list
             if "/" in f.path or not f.path.endswith(".safetensors")
         ]
+    if (
+        not skip_download
+        and not skip_internet
+        and capacity_preflight is not None
+    ):
+        await capacity_preflight(target_dir, filtered_file_list)
     file_progress: dict[str, RepoFileDownloadProgress] = {}
 
     def update_file_progress(

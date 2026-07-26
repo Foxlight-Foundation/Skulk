@@ -80,9 +80,12 @@ class _RecordingStoreClient:
         staging_root: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
         source_revision: str | None = None,
+        capacity_preflight: Callable[[int], Awaitable[None]] | None = None,
     ) -> Path:
         assert model_id == _MODEL_ID
         assert source_revision is None
+        if capacity_preflight is not None:
+            await capacity_preflight(8)
         self.stage_calls += 1
         dest_path = staging_root / model_id.replace("/", "--")
         dest_path.mkdir(parents=True, exist_ok=True)

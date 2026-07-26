@@ -40,20 +40,23 @@ How staging works
 Store host optimisation
 -----------------------
 When this node IS the store host (``local_store_path`` is set in the
-constructor), ``stage_shard()`` uses ``shutil.copy2()`` for a local
-filesystem copy instead of making an HTTP round-trip over loopback. If
-``node_cache_path`` in ``skulk.yaml`` is the same path as ``store_path``, a
-pinned model is loaded directly from its revision-qualified canonical directory
-so pinned bytes never occupy mutable-main's normalized path.
+constructor), ``stage_shard()`` hardlinks immutable files on the same
+filesystem and falls back to ``shutil.copy2()`` when linking is unavailable,
+instead of making an HTTP round-trip over loopback. If ``node_cache_path`` in
+``skulk.yaml`` is the same path as ``store_path``, a pinned model is loaded
+directly from its revision-qualified canonical directory so pinned bytes never
+occupy mutable-main's normalized path.
 
 Eviction
 --------
-When an inference instance is deactivated (``Shutdown`` task received by the
-:class:`~skulk.worker.main.Worker`), the worker calls
-``ModelStoreClient.evict_shard()`` to remove the staged files from the
-node-local cache.  The canonical copy in the store is **never touched**.
-Eviction is skipped if ``cleanup_on_deactivate`` is ``False`` for the node
-(useful when staging is on fast local NVMe and warm cache is preferred).
+At instance deactivation and node startup, the worker holds idle staging to
+its configured recent-use budget. Before each new store-backed download, it
+also serializes exact artifact admission with transfer and evicts
+least-recently-used idle copies when needed to fit the additional physical
+bytes plus operating-system headroom. This capacity safety pass applies even
+when lifecycle cleanup is disabled; live runners, active base-plus-companion
+transactions, and incoming partial data remain protected. The canonical copy
+in the store is **never touched**.
 
 Resume protocol
 ---------------
@@ -128,6 +131,9 @@ _STORE_CONNECTION_ERRORS = (
     asyncio.TimeoutError,
 )
 _T = TypeVar("_T")
+StagingCapacityPreflight = Callable[[int], Awaitable[None]]
+"""Async check run with the exact physical bytes a staging transfer will add."""
+
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
 _SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
 
@@ -562,6 +568,7 @@ class ModelStoreClient:
         staging_root: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
         source_revision: str | None = None,
+        capacity_preflight: StagingCapacityPreflight | None = None,
     ) -> Path:
         """Copy all model files for *model_id* into its staging directory.
 
@@ -577,6 +584,9 @@ class ModelStoreClient:
                 called after each file is staged.
             source_revision: Full immutable Hugging Face commit to stage, or
                 ``None`` for the mutable-main entry.
+            capacity_preflight: Optional async safety check invoked after the
+                exact artifact set and resumable bytes are known but before
+                any new model bytes are written.
 
         Returns:
             The local directory containing the requested model revision. On a
@@ -624,11 +634,19 @@ class ModelStoreClient:
 
         if self._local_store_path is not None:
             staged_path = await self._stage_local(
-                model_id, dest_path, on_progress, source_revision
+                model_id,
+                dest_path,
+                on_progress,
+                source_revision,
+                capacity_preflight,
             )
         else:
             staged_path = await self._stage_http(
-                model_id, dest_path, on_progress, source_revision
+                model_id,
+                dest_path,
+                on_progress,
+                source_revision,
+                capacity_preflight,
             )
         await asyncio.to_thread(
             _write_staged_source_revision, staged_path, source_revision
@@ -877,8 +895,11 @@ class ModelStoreClient:
             timeout: Maximum time to wait WITHOUT download progress, in seconds
                 (a stall timeout, not a total cap). A download that keeps
                 advancing never times out, however large; only a genuine stall
-                does. The store host's file-body transfer is itself uncapped, so
-                a very large model can legitimately take hours.
+                after the store reports ``downloading`` does. Time reported as
+                ``pending`` is queue wait behind another serialized canonical
+                transfer and does not consume this budget. The store host's
+                file-body transfer is itself uncapped, so a very large model can
+                legitimately take hours.
             poll_interval: Seconds between status polls.
             pinned_gguf: The card's pinned GGUF file (``ModelCard.gguf_file``),
                 sent in the POST body so the store fetches that quant's shard
@@ -1000,7 +1021,14 @@ class ModelStoreClient:
                                 raise RuntimeError(
                                     f"Store download of {model_id} failed: {data.get('error', 'unknown')}"
                                 )
-                            if progress > last_progress:
+                            if status == "pending":
+                                # Canonical transfers serialize capacity
+                                # admission with all bytes. A healthy request
+                                # can therefore remain queued behind another
+                                # multi-hour model; queue time is not a stalled
+                                # transfer and must not consume the stall budget.
+                                advanced = True
+                            elif progress > last_progress:
                                 last_progress = progress
                                 advanced = True
             except RuntimeError:
@@ -1044,8 +1072,8 @@ class ModelStoreClient:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _link_or_copy(src_file: Path, dst_file: Path) -> None:
-        """Hardlink ``src_file`` into place, falling back to a full copy.
+    def _replace_with_hardlink(src_file: Path, dst_file: Path) -> bool:
+        """Try to replace ``dst_file`` with a hardlink to ``src_file``.
 
         Store files are immutable once registered and staged files are never
         mutated in place (staging eviction deletes whole directories, and the
@@ -1055,14 +1083,16 @@ class ModelStoreClient:
         is exactly what killed staging on a 50GB-disk store-host node. A stale
         destination is removed first because ``os.link`` refuses to overwrite.
         Filesystems that cannot link (EXDEV cross-device, EPERM on some network
-        mounts) fall back to ``shutil.copy2``.
+        mounts) return ``False`` so the async caller can run capacity admission
+        before falling back to a full copy.
         """
         if dst_file.exists():
             dst_file.unlink()
         try:
             os.link(src_file, dst_file)
         except OSError:
-            shutil.copy2(src_file, dst_file)
+            return False
+        return True
 
     async def _stage_local(
         self,
@@ -1070,6 +1100,7 @@ class ModelStoreClient:
         dest_path: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None,
         source_revision: str | None = None,
+        capacity_preflight: StagingCapacityPreflight | None = None,
     ) -> Path:
         """Stage by local file copy (store host only)."""
         assert self._local_store_path is not None
@@ -1089,22 +1120,46 @@ class ModelStoreClient:
             )
 
         files = [p for p in source_dir.rglob("*") if p.is_file()]
-        total_bytes = sum(p.stat().st_size for p in files)
+        file_sizes = {src_file: src_file.stat().st_size for src_file in files}
+        total_bytes = sum(file_sizes.values())
+        same_filesystem = source_dir.stat().st_dev == dest_path.stat().st_dev
+        if capacity_preflight is not None:
+            additional_bytes = 0
+            if not same_filesystem:
+                for src_file, source_size in file_sizes.items():
+                    dst_file = dest_path / src_file.relative_to(source_dir)
+                    existing_size = (
+                        dst_file.stat().st_size if dst_file.exists() else 0
+                    )
+                    if existing_size != source_size:
+                        additional_bytes += max(0, source_size - existing_size)
+            # Same-filesystem hardlinks add no file data blocks. If an
+            # individual link unexpectedly fails, the fallback copy performs
+            # its own admission below before writing bytes.
+            await capacity_preflight(additional_bytes)
         staged_bytes = 0
 
         for src_file in files:
             rel = src_file.relative_to(source_dir)
             dst_file = dest_path / rel
             dst_file.parent.mkdir(parents=True, exist_ok=True)
+            source_size = file_sizes[src_file]
             # Skip copy if destination already matches source size.
             # Run on a thread to avoid blocking the async event loop
             # during multi-GB safetensor copies.
-            if (
-                not dst_file.exists()
-                or dst_file.stat().st_size != src_file.stat().st_size
-            ):
-                await asyncio.to_thread(self._link_or_copy, src_file, dst_file)
-            staged_bytes += src_file.stat().st_size
+            if not dst_file.exists() or dst_file.stat().st_size != source_size:
+                linked = await asyncio.to_thread(
+                    self._replace_with_hardlink,
+                    src_file,
+                    dst_file,
+                )
+                if not linked:
+                    # The failed hardlink already removed any stale destination,
+                    # so reserve the full copy before writing replacement bytes.
+                    if same_filesystem and capacity_preflight is not None:
+                        await capacity_preflight(source_size)
+                    await asyncio.to_thread(shutil.copy2, src_file, dst_file)
+            staged_bytes += source_size
             if on_progress is not None:
                 await on_progress(staged_bytes, total_bytes)
 
@@ -1256,12 +1311,23 @@ class ModelStoreClient:
         dest_path: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None,
         source_revision: str | None = None,
+        capacity_preflight: StagingCapacityPreflight | None = None,
     ) -> Path:
         """Stage all files for *model_id* over HTTP."""
         file_list, grand_total = await asyncio.gather(
             self._fetch_file_list(model_id, source_revision),
             self._fetch_model_total_bytes(model_id, source_revision),
         )
+        if capacity_preflight is not None:
+            already_staged_bytes = 0
+            for file_path in file_list:
+                target = dest_path / file_path
+                partial = dest_path / f"{file_path}.partial"
+                if target.exists():
+                    already_staged_bytes += target.stat().st_size
+                elif partial.exists():
+                    already_staged_bytes += partial.stat().st_size
+            await capacity_preflight(max(0, grand_total - already_staged_bytes))
 
         # Compute progress baseline from already-staged files
         staged_offset = 0
@@ -1295,6 +1361,12 @@ class ModelStoreClient:
 # ---------------------------------------------------------------------------
 # ModelStoreDownloader — ShardDownloader wrapper
 # ---------------------------------------------------------------------------
+
+StagingCapacityCallback = Callable[
+    [ShardMetadata, frozenset[str], int],
+    Awaitable[None],
+]
+"""Worker callback for one exact, serialized staging transfer."""
 
 
 @final
@@ -1352,9 +1424,54 @@ class ModelStoreDownloader(ShardDownloader):
         self._store_client = store_client
         self._staging_config = staging_config
         self._allow_hf_fallback = allow_hf_fallback
+        self._staging_transfer_lock = asyncio.Lock()
+        self._staging_capacity_callback: StagingCapacityCallback | None = None
+        self._active_staging_model_ids: dict[str, int] = {}
         self._on_progress_callbacks: list[
             Callable[[ShardMetadata, RepoDownloadProgress], Awaitable[None]]
         ] = []
+
+    def set_staging_capacity_callback(
+        self,
+        callback: StagingCapacityCallback,
+    ) -> None:
+        """Attach the worker's live-runner-aware staging capacity check."""
+        self._staging_capacity_callback = callback
+
+    async def _stage_from_store(
+        self,
+        shard: ShardMetadata,
+        model_id: str,
+    ) -> Path:
+        """Serialize capacity admission and byte transfer for one repository.
+
+        A single downloader can service multiple concurrent model requests.
+        Holding this lock through both preflight and transfer prevents two
+        requests from independently spending the same free bytes.
+        """
+
+        async def _capacity_preflight(additional_bytes: int) -> None:
+            callback = self._staging_capacity_callback
+            if callback is not None:
+                await callback(
+                    shard,
+                    frozenset(self._active_staging_model_ids),
+                    additional_bytes,
+                )
+
+        async with self._staging_transfer_lock:
+            return await self._store_client.stage_shard(
+                model_id,
+                Path(self._staging_config.node_cache_path),
+                on_progress=lambda downloaded, total: self._emit_progress(
+                    shard,
+                    status="in_progress",
+                    downloaded_bytes=downloaded,
+                    total_bytes=total,
+                ),
+                source_revision=shard.model_card.source_revision,
+                capacity_preflight=_capacity_preflight,
+            )
 
     def on_progress(
         self,
@@ -1383,17 +1500,49 @@ class ModelStoreDownloader(ShardDownloader):
         best-effort — the runner degrades to run-without-speculation, so
         their failures log loudly without failing a loadable base model.
         """
-        path = await self._ensure_base_shard(shard, config_only)
-        if not config_only:
-            await self._ensure_companion_shards(shard)
-        # Terminal progress is emitted HERE, after companions: the
-        # "complete" status becomes cluster-visible DownloadCompleted state
-        # the moment it fires, and the planner dispatches LoadModel off
-        # that state — emitting it from the base-resolution paths let a
-        # runner load while a companion was still staging and run without
-        # speculation (codex review on #213).
-        await self._emit_progress(shard, status="complete")
-        return path
+        protected_model_ids = {
+            str(shard.model_card.model_id),
+            *(
+                str(companion.model_card.model_id)
+                for companion, _allow_patterns, _required in companion_download_specs(
+                    shard.model_card
+                )
+            ),
+        }
+        # Registration and transfer use the same lock. A request cannot appear
+        # after another transfer snapshots its protected set but before that
+        # transfer's eviction pass finishes.
+        async with self._staging_transfer_lock:
+            for model_id in protected_model_ids:
+                self._active_staging_model_ids[model_id] = (
+                    self._active_staging_model_ids.get(model_id, 0) + 1
+                )
+        try:
+            path = await self._ensure_base_shard(shard, config_only)
+            if not config_only:
+                await self._ensure_companion_shards(shard)
+            # Terminal progress is emitted HERE, after companions: the
+            # "complete" status becomes cluster-visible DownloadCompleted state
+            # the moment it fires, and the planner dispatches LoadModel off
+            # that state — emitting it from the base-resolution paths let a
+            # runner load while a companion was still staging and run without
+            # speculation (codex review on #213).
+            await self._emit_progress(shard, status="complete")
+            return path
+        finally:
+            # Cleanup deliberately has no await: DownloadCoordinator cancels
+            # this coroutine through an AnyIO cancel scope, and awaiting the
+            # transfer lock here can be cancelled again before refcounts are
+            # removed. Deregistration need not hold the lock after this
+            # request has stopped writing. A transfer that already snapshotted
+            # the set keeps its immutable copy; a later preflight should no
+            # longer protect this inactive request.
+            for model_id in protected_model_ids:
+                remaining = self._active_staging_model_ids[model_id] - 1
+                if remaining == 0:
+                    del self._active_staging_model_ids[model_id]
+                else:
+                    self._active_staging_model_ids[model_id] = remaining
 
     async def _ensure_companion_shards(self, shard: ShardMetadata) -> None:
         """Ensure every companion repo declared by the shard's model card.
@@ -1523,17 +1672,7 @@ class ModelStoreDownloader(ShardDownloader):
                 logger.info(
                     f"ModelStoreDownloader: staging {model_id} from store → {dest_path}"
                 )
-                path = await self._store_client.stage_shard(
-                    model_id,
-                    Path(self._staging_config.node_cache_path),
-                    on_progress=lambda downloaded, total: self._emit_progress(
-                        shard,
-                        status="in_progress",
-                        downloaded_bytes=downloaded,
-                        total_bytes=total,
-                    ),
-                    source_revision=shard.model_card.source_revision,
-                )
+                path = await self._stage_from_store(shard, model_id)
                 touch_last_used(path)
                 return path
             except StoreUnreachableError as exc:
@@ -1585,17 +1724,7 @@ class ModelStoreDownloader(ShardDownloader):
                 ) from exc
             # Model now in store — stage it
             try:
-                path = await self._store_client.stage_shard(
-                    model_id,
-                    Path(self._staging_config.node_cache_path),
-                    on_progress=lambda downloaded, total: self._emit_progress(
-                        shard,
-                        status="in_progress",
-                        downloaded_bytes=downloaded,
-                        total_bytes=total,
-                    ),
-                    source_revision=shard.model_card.source_revision,
-                )
+                path = await self._stage_from_store(shard, model_id)
             except StoreUnreachableError as exc:
                 return await self._fallback_for_unreachable_store(
                     shard, config_only, cause=exc
@@ -1636,7 +1765,14 @@ class ModelStoreDownloader(ShardDownloader):
             "host; if it is a remote member, direct-origin staging is "
             "expected."
         )
-        return await self._inner.ensure_shard(shard, config_only)
+        # Store staging and direct fallback commonly write to separate
+        # directories on the same home filesystem. Share the outer staging
+        # lock across both paths so a route flap cannot let their independent
+        # preflights spend the same free bytes concurrently. The inner direct
+        # downloader retains its own lock for callers that use it without a
+        # model-store wrapper.
+        async with self._staging_transfer_lock:
+            return await self._inner.ensure_shard(shard, config_only)
 
     async def get_shard_download_status(
         self,

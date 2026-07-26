@@ -160,13 +160,16 @@ class StagingNodeConfig(FrozenModel):
             nodes is the scarce resource — unbounded staging filled two
             nodes to 58-70 GB and killed one of them during the 2026-06-06
             launch smoke. Set ``False`` to keep every staged copy and
-            manage cleanup manually via the purge endpoints.
+            skip lifecycle cleanup. The independent pre-download capacity
+            safety pass may still reclaim idle copies to keep a new transfer
+            from filling the filesystem.
         staging_keep_recent_gb: Most-recently-used grace budget, in GiB.
             Eviction never reduces the staging cache below this much of
             recently used, not-in-use model data — so node crashes,
             restarts, and repeated place/delete cycles of the same model
-            do not re-pay the staging copy every time. Set to ``0`` for
-            strict evict-on-deactivate.
+            do not re-pay the staging copy every time. The pre-download
+            capacity guard may override this grace budget. Set to ``0`` for
+            strict lifecycle eviction.
     """
 
     enabled: bool = True

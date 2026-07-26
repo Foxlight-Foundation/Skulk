@@ -73,9 +73,49 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict
 
 from skulk.shared.types.worker.downloads import FileListEntry
+from skulk.store.staging_eviction import MINIMUM_STAGING_FREE_DISK_BYTES
 
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
 _SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
+
+
+def _remaining_store_download_bytes(
+    target_directory: Path,
+    file_list: list[FileListEntry],
+) -> int:
+    """Return physical file bytes still needed for one canonical transfer."""
+
+    remaining_bytes = 0
+    for file_entry in file_list:
+        if file_entry.size is None:
+            raise ModelStoreCapacityError(
+                "Cannot verify canonical model-store disk capacity because "
+                "the selected manifest contains a file with unknown size. "
+                "Retry after repository metadata is available."
+            )
+        expected_size = file_entry.size
+        target = target_directory / file_entry.path
+        partial = target_directory / f"{file_entry.path}.partial"
+        target_stat = target.stat() if target.is_file() else None
+        target_bytes = target_stat.st_size if target_stat is not None else 0
+        if target_bytes == expected_size:
+            continue
+        resumable_bytes = partial.stat().st_size if partial.is_file() else 0
+        # A mismatched single-link target is removed before download, returning
+        # its current blocks to this filesystem. When staging hardlinked the
+        # canonical file, unlinking only its store name leaves those blocks
+        # owned by the staged link, so none of its bytes can be credited.
+        reclaimable_target_bytes = (
+            target_bytes
+            if target_stat is not None and target_stat.st_nlink == 1
+            else 0
+        )
+        # A partial is grown in place, so its existing bytes remain reusable.
+        remaining_bytes += max(
+            0,
+            expected_size - reclaimable_target_bytes - resumable_bytes,
+        )
+    return remaining_bytes
 
 
 def select_store_gguf_download_files(
@@ -260,6 +300,10 @@ class StoreDownloadStatus:
     error: str | None = None
 
 
+class ModelStoreCapacityError(RuntimeError):
+    """Raised before a canonical store transfer that would consume headroom."""
+
+
 @final
 class ModelStore:
     """Manages the model registry on the store host node.
@@ -293,6 +337,7 @@ class ModelStore:
         self._registry_path = store_path / "registry.json"
         self._active_downloads: dict[str, StoreDownloadStatus] = {}
         self._download_lock = asyncio.Lock()
+        self._download_transfer_lock = asyncio.Lock()
         self._download_tasks: set[asyncio.Task[None]] = set()
 
     @property
@@ -760,13 +805,13 @@ class ModelStore:
         from skulk.shared.models.model_cards import ModelId
 
         status = self._active_downloads[model_id]
-        status.status = "downloading"
         revision = source_revision or "main"
         sanitized = model_id.replace("/", "--")
         if source_revision is not None:
             sanitized = f"{sanitized}--revision-{source_revision}"
         target_dir = self._store_path / sanitized
         previous_entry = self.get_entry(model_id)
+        transfer_lock_acquired = False
         logger.info(
             f"ModelStore: downloading {model_id} from HuggingFace to {target_dir}"
         )
@@ -815,6 +860,37 @@ class ModelStore:
                 )
             file_list = selected_files
             total_bytes = sum(f.size or 0 for f in file_list)
+            # Store downloads share one canonical filesystem. Serialize exact
+            # admission with transfer so concurrent requests cannot each spend
+            # the same free bytes. The store is authoritative and therefore
+            # never evicted automatically; an unsafe transfer fails closed.
+            await self._download_transfer_lock.acquire()
+            transfer_lock_acquired = True
+            # Keep the public status pending while this request is queued
+            # behind another canonical transfer. Clients deliberately exclude
+            # pending time from their no-progress stall budget; switching only
+            # after lock acquisition makes that status truthful.
+            status.status = "downloading"
+            additional_bytes = await asyncio.to_thread(
+                _remaining_store_download_bytes,
+                target_dir,
+                file_list,
+            )
+            if additional_bytes > 0:
+                free_bytes = await asyncio.to_thread(
+                    lambda: shutil.disk_usage(target_dir).free
+                )
+                required_free_bytes = (
+                    additional_bytes + MINIMUM_STAGING_FREE_DISK_BYTES
+                )
+                if free_bytes < required_free_bytes:
+                    raise ModelStoreCapacityError(
+                        f"Insufficient canonical model-store disk capacity for "
+                        f"{model_id}: need {required_free_bytes / 2**30:.1f} GiB "
+                        "free for the remaining transfer and operating-system "
+                        f"reserve, but only {free_bytes / 2**30:.1f} GiB is "
+                        "available. Free disk space or move the model store."
+                    )
             downloaded_bytes = 0
 
             for f in file_list:
@@ -923,3 +999,6 @@ class ModelStore:
             logger.exception(
                 f"ModelStore: download of {model_id} failed ({type(exc).__name__})"
             )
+        finally:
+            if transfer_lock_acquired:
+                self._download_transfer_lock.release()

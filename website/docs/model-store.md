@@ -197,8 +197,8 @@ the store host into its local staging directory (`node_cache_path`, default
 `~/.skulk/staging`) and loads from there. Staged copies are independent per
 node: the store host keeps the canonical copy, and each worker keeps its own
 staged copy of whatever it has run. Left unmanaged, staging grows without bound,
-so Skulk keeps it in check with a single recency policy plus an explicit delete
-path.
+so Skulk combines a warm-cache recency policy with a pre-download free-space
+safety check and an explicit delete path.
 
 ### What counts as "in use"
 
@@ -211,10 +211,8 @@ never evicted automatically.
 
 Idle (not-in-use) staged copies are kept newest-first up to
 `staging_keep_recent_gb` (default 40 GiB); anything beyond that budget is
-deleted. The budget is a floor for recently used data, not a disk-pressure
-threshold. Nothing watches free space and triggers eviction when the disk fills:
-the check runs at two specific moments, and only when `cleanup_on_deactivate` is
-`true`:
+deleted. This warm-cache check runs at two specific moments, and only when
+`cleanup_on_deactivate` is `true`:
 
 - when a model instance is shut down, and
 - at node startup, which reconciles copies orphaned by a crash or kill.
@@ -224,7 +222,7 @@ the check runs at two specific moments, and only when `cleanup_on_deactivate` is
 | Setting | Behavior |
 |---------|----------|
 | `true` (default, recommended) | Keep the newest ~40 GiB of idle copies warm; delete older idle copies when an instance shuts down and at node startup. The in-use set is always kept and does not count against the budget. Warm and bounded. |
-| `false` | Never evict automatically. Every staged copy is kept until you reclaim space manually. Warm, but unbounded: a busy node can fill its disk. |
+| `false` | Skip lifecycle cleanup. Copies stay warm until reclaimed manually or a future download needs their space. |
 
 Set `staging_keep_recent_gb` to `0` for strict evict-on-deactivate (keep only
 what is in use). Raise it on nodes with large disks to keep more models warm.
@@ -233,10 +231,37 @@ The in-use set rides on top of the budget rather than inside it: a node always
 keeps everything its live runners need, plus up to 40 GiB of the most recently
 used idle copies.
 
+### Pre-download capacity safety
+
+For each base or companion repository, the store client resolves the exact
+registered artifact set and computes only the physical bytes the staging
+transaction will add. Manifest files and partial files already present reduce
+the HTTP allocation; same-filesystem local-store hardlinks add zero file data.
+Capacity admission and transfer are serialized per node so concurrent launches
+cannot spend the same free bytes. The worker retains 10 GiB of
+operating-system headroom and, if necessary, evicts idle copies oldest-first
+even when they are inside the 40 GiB warm-cache budget.
+
+This safety pass protects live runners, every active base-plus-companion
+transaction, the incoming partial model, and its companion repositories. It
+also applies when
+`cleanup_on_deactivate` is `false`: that setting disables lifecycle cleanup,
+not the guard that prevents a new transfer from filling the host filesystem.
+If removing every idle staged model still cannot meet the target, Skulk reports
+`DownloadFailed` before writing more model bytes.
+
+If the configured store is unreachable and Hugging Face fallback is enabled,
+the staging check does not run against the wrong filesystem. The direct
+downloader resolves the exact filtered artifact set, serializes admission with
+transfer, and applies the same reserve to the actual model-cache filesystem.
+
 > The store host is a special case. When a node points `node_cache_path` at the
 > same directory as `store_path` (so it loads directly from the store without a
 > second copy), the recency budget is skipped on that node whatever the toggle
-> says. The store's canonical copies are never auto-evicted.
+> says. The store's canonical copies are never auto-evicted by either the
+> lifecycle or capacity path. New canonical downloads are themselves serialized
+> and admitted from their exact selected manifest, including resumable bytes,
+> and fail before transfer if they cannot preserve the same 10 GiB reserve.
 
 ### Deleting a model from the store
 
@@ -317,8 +342,9 @@ Where a node stages files before loading them.
 Controls automatic eviction of idle staged copies. Default `true` (recommended):
 when a model is shut down, or at node startup, idle staged copies beyond the
 `staging_keep_recent_gb` budget are deleted, keeping the cache warm but bounded.
-Set to `false` to keep every staged copy and reclaim disk only via
-`POST /store/purge-staging`. See
+Set to `false` to skip those lifecycle passes. Pre-download capacity safety
+still reclaims idle copies when required to fit a new model without filling the
+filesystem. See
 [Staging Cache and Disk Management](#staging-cache-and-disk-management).
 
 ### `model_store.staging.staging_keep_recent_gb`
@@ -326,7 +352,8 @@ Set to `false` to keep every staged copy and reclaim disk only via
 Recency budget in GiB for idle staged copies (default `40`). Eviction keeps the
 newest idle copies up to this size and deletes the rest; `0` evicts everything
 not in use, and larger values keep more models warm on big-disk nodes. Applies
-only when `cleanup_on_deactivate` is `true`.
+to lifecycle cleanup when `cleanup_on_deactivate` is `true`; the pre-download
+capacity guard may override this grace budget.
 
 ## Typical Flow
 
@@ -430,16 +457,20 @@ newest ~40 GiB of idle copies stay warm, but a model larger than the budget, or
 one pushed out by other recently used models, is evicted and re-staged on its
 next placement. Raise `staging_keep_recent_gb` to keep more models warm, or set
 it large enough to hold the models you cycle between. Setting
-`cleanup_on_deactivate: false` keeps every copy warm but lets staging grow
-without bound (reclaim disk with `POST /store/purge-staging`).
+`cleanup_on_deactivate: false` keeps every copy warm until a future launch
+needs that space; the pre-download safety pass can still evict idle copies to
+protect the filesystem (reclaim disk immediately with
+`POST /store/purge-staging`).
 
 ### Staged files are not being cleaned up
 
-With `cleanup_on_deactivate: false`, nothing is evicted automatically, so
-staging keeps growing. Either leave it at the `true` default (which keeps the
-newest ~40 GiB warm and evicts the rest on deactivation/startup) or reclaim
-space on demand with `POST /store/purge-staging`. Note that the store host never
-auto-evicts its own canonical copies when `node_cache_path` equals `store_path`.
+With `cleanup_on_deactivate: false`, lifecycle cleanup does not run, so staging
+keeps growing until a new transfer needs the space. Either leave it at the
+`true` default (which keeps the newest ~40 GiB warm and evicts the rest on
+deactivation/startup) or reclaim space on demand with
+`POST /store/purge-staging`. The pre-download capacity guard still protects the
+filesystem. Note that the store host never auto-evicts its own canonical copies
+when `node_cache_path` equals `store_path`.
 
 ## Good Defaults for Most Clusters
 

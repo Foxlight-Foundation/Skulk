@@ -62,6 +62,7 @@ def _capture():
         allow_patterns: list[str] | None = None,
         skip_internet: bool = False,
         skip_download: bool = False,
+        capacity_preflight: Any = None,
     ) -> tuple[Path, Any]:
         calls.append(
             {

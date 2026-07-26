@@ -9,6 +9,7 @@ import anyio
 import pytest
 
 from skulk.api.main import API
+from skulk.download.coordinator import DownloadCoordinator
 from skulk.main import Node
 from skulk.routing.event_router import EventRouter
 from skulk.routing.router import Router
@@ -17,6 +18,8 @@ from skulk.shared.types.common import NodeId, SessionId
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSnapshot, StateSyncMessage
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
+from skulk.store.config import ModelStoreConfig, SkulkConfig
+from skulk.store.model_store_client import ModelStoreClient
 from skulk.utils.channels import channel
 from skulk.worker.main import Worker
 
@@ -96,6 +99,9 @@ class _FakeApi:
 
     def set_vision_media_ingress_provider(self, _provider: object) -> None:
         self._events.append("api.vision_media_ingress_provider")
+
+    def refresh_config_dependent_capabilities(self) -> None:
+        self._events.append("api.refresh_config_dependent_capabilities")
 
 
 @pytest.mark.asyncio
@@ -184,6 +190,137 @@ async def test_election_restarts_event_router_after_receivers_are_rewired(
     assert order_events.index("new_worker.created") < order_events.index(
         "start:NewEventRouter.run"
     )
+
+
+@pytest.mark.asyncio
+async def test_election_attaches_capacity_guard_before_coordinator_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wire staging admission before the replacement coordinator can receive."""
+    order_events: list[str] = []
+
+    class NewEventRouter:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def sender(self) -> object:
+            return object()
+
+        def receiver(self) -> object:
+            return object()
+
+        async def run(self) -> None:
+            return
+
+    class NewWorker:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            order_events.append("new_worker.created")
+
+        async def run(self) -> None:
+            return
+
+        async def prepare_staging_transfer(self, *_args: Any) -> None:
+            return
+
+        def collect_runner_diagnostics(self) -> list[object]:
+            return []
+
+        async def cancel_runner_task(self, *_args: Any, **_kwargs: Any) -> object:
+            return object()
+
+        def collect_vision_media_ingress_diagnostics(self) -> object:
+            return object()
+
+    class NewModelStoreDownloader:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def set_staging_capacity_callback(self, _callback: object) -> None:
+            order_events.append("staging_capacity_callback.attached")
+
+    class NewDownloadCoordinator:
+        def __init__(
+            self,
+            _node_id: NodeId,
+            shard_downloader: object,
+            **_kwargs: Any,
+        ) -> None:
+            self.shard_downloader = shard_downloader
+
+        async def run(self) -> None:
+            return
+
+    class OldDownloadCoordinator:
+        async def shutdown(self) -> None:
+            order_events.append("old_download_coordinator.shutdown")
+
+    monkeypatch.setattr("skulk.main.EventRouter", NewEventRouter)
+    monkeypatch.setattr("skulk.main.Worker", NewWorker)
+    monkeypatch.setattr("skulk.main.ModelStoreDownloader", NewModelStoreDownloader)
+    monkeypatch.setattr("skulk.main.DownloadCoordinator", NewDownloadCoordinator)
+
+    def _fake_shard_downloader(**_kwargs: object) -> object:
+        return object()
+
+    monkeypatch.setattr(
+        "skulk.main.skulk_shard_downloader",
+        _fake_shard_downloader,
+    )
+
+    async def _fake_request_cluster_config(
+        *_args: Any, **_kwargs: Any
+    ) -> str | None:
+        return None
+
+    async def _skip_config_broadcast(*_args: Any, **_kwargs: Any) -> None:
+        return
+
+    monkeypatch.setattr(Node, "_request_cluster_config", _fake_request_cluster_config)
+    monkeypatch.setattr(
+        Node, "_broadcast_config_if_store_host", _skip_config_broadcast
+    )
+
+    election_sender, election_receiver = channel[ElectionResult]()
+    node = Node(
+        router=cast(Router, cast(object, _FakeRouter())),
+        event_router=cast(EventRouter, cast(object, _OldEventRouter(order_events))),
+        download_coordinator=cast(
+            DownloadCoordinator, cast(object, OldDownloadCoordinator())
+        ),
+        worker=cast(Worker, cast(object, _OldWorker(order_events))),
+        election=cast(Election, object()),
+        election_result_receiver=election_receiver,
+        master=None,
+        api=cast(API, cast(object, _FakeApi(order_events))),
+        node_id=NodeId("self"),
+        offline=False,
+        skulk_config=SkulkConfig(
+            model_store=ModelStoreConfig(
+                store_host="store",
+                store_path="/unused/store",
+            )
+        ),
+        store_client=cast(ModelStoreClient, object()),
+        store_server=None,
+        telemetry_view=TelemetryView(),
+        telemetry_receiver=channel[NodeTelemetry]()[1],
+    )
+    node._tg = _FakeTaskGroup(order_events)  # pyright: ignore[reportAttributeAccessIssue]
+
+    await election_sender.send(
+        ElectionResult(
+            session_id=SessionId(master_node_id=NodeId("other"), election_clock=8),
+            won_clock=8,
+            is_new_master=True,
+        )
+    )
+    election_sender.close()
+
+    await node._elect_loop()
+
+    assert order_events.index(
+        "staging_capacity_callback.attached"
+    ) < order_events.index("start:NewDownloadCoordinator.run")
 
 
 @pytest.mark.asyncio

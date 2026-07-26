@@ -7,6 +7,20 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+- Fixed store-backed model launches exhausting a worker's filesystem while
+  recently used staging data was still inside the 40 GiB warm-cache budget.
+  Store transfers now serialize exact capacity admission with the byte
+  transfer, include base and companion repositories, count resumable manifest
+  bytes, and treat same-filesystem hardlinks as zero allocation. Skulk protects
+  every active model transaction and live runner, evicts only idle copies in
+  least-recently-used order until the exact additional allocation fits, and
+  preserves 10 GiB of operating-system headroom. Canonical model-store
+  downloads use the same serialized exact-byte admission without ever evicting
+  authoritative artifacts, and direct Hugging Face fallback applies it to the
+  actual model-cache filesystem instead of the unrelated staging cache. If any
+  destination cannot meet its target, the placement receives an actionable
+  failure before any more bytes are written.
+
 - Kept fixed-window llama.cpp contexts at the safe 8192-token floor on
   unified-memory AMD APUs. Placement still uses their combined VRAM/GTT pool,
   but no longer misclassifies that pool as discrete VRAM and lets a large
