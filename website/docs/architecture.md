@@ -407,7 +407,7 @@ tokens per second then scale with concurrency instead. On a node that
 advertises a llama-server binary the model serves through the served proxy; on
 a node without one, the preference is a soft order intersected with the node's
 advertised backends, so the same card falls through to the in-process runner
-unchanged. The per-node `SKULK_LLAMA_SERVER_PARALLEL` setting (default 1) names
+unchanged. The per-node `SKULK_LLAMA_SERVER_PARALLEL` setting (default 16) names
 how many generations that node serves at once, and the runner honors it exactly.
 
 Above one slot the runner launches the server with a unified KV cache, which is
@@ -418,13 +418,17 @@ request's real window below the limit placement stamped and the API admits
 against. The unified cache costs no extra memory: the same total number of cells
 is shared across slots rather than partitioned between them.
 
-What the operator takes on instead is contention. The slots draw from one pool
-rather than from private shares, so concurrent long-context requests can
-collectively exhaust it; llama.cpp responds by evicting idle slots' cached
-prompts, and treats total exhaustion as fatal to the server process. Whether a
-node's workload fits a shared window N ways is a judgement only the person
-running that node can make, which is why the shipped default stays serial and
-the declared count is applied without a ceiling of Skulk's own.
+The slots still contend for one pool rather than private shares, so Skulk gates
+generation by aggregate token reservations. It asks llama-server's
+chat-completion token-count endpoint for the exact rendered prompt length,
+adds the request's maximum output, and queues the request FIFO until that
+reservation fits. FIFO ordering prevents a large reservation from starving
+behind a sustained stream of later small ones. An omitted `max_tokens` receives
+Skulk's normal 4096-token default; if token counting is unavailable, the request
+reserves the whole pool and runs alone instead of risking an underestimate.
+Thus the shipped 16-slot ceiling supports concurrent bounded traffic without
+allowing a burst of long requests to exhaust and terminate the server.
+`SKULK_LLAMA_SERVER_PARALLEL=1` remains an explicit serial-isolation option.
 
 Context sizing for the GGUF engines is dynamic rather than a fixed constant.
 Placement reserves KV cache for an 8192-token admission floor, but the window a

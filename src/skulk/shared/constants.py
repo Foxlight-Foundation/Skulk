@@ -25,6 +25,21 @@ def preferred_env_value(*keys: str, default: str | None = None) -> str | None:
     return default
 
 
+DEFAULT_MAX_OUTPUT_TOKENS: int = 4096
+_max_output_tokens_value = preferred_env_value(
+    "SKULK_MAX_OUTPUT_TOKENS",
+    "SKULK_MAX_TOKENS",
+    default=str(DEFAULT_MAX_OUTPUT_TOKENS),
+)
+MAX_OUTPUT_TOKENS: int = (
+    int(_max_output_tokens_value)
+    if _max_output_tokens_value
+    else DEFAULT_MAX_OUTPUT_TOKENS
+)
+if MAX_OUTPUT_TOKENS < 1:
+    raise ValueError("SKULK_MAX_OUTPUT_TOKENS must be greater than 0")
+
+
 _SKULK_HOME_ENV = _env("SKULK_HOME")
 
 

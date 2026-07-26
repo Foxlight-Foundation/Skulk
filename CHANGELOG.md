@@ -84,12 +84,17 @@ This project records release notes here and mirrors public-facing notes in
   operator asking for 8 slots could quietly get 2. The runner now launches the
   server with a unified KV cache above one slot, which gives every slot the
   whole window at no extra memory cost, and the declared slot count is honored
-  exactly with no cap. The default stays 1, and a node running serially produces
-  exactly the command line it did in previous releases. Above one slot, the
-  slots share a single pool instead of holding private shares, so concurrent
-  long-context requests contend for it and can exhaust it; the runner logs that
-  trade loudly at startup. Sizing a node's concurrency to its workload remains
-  an operator decision (#689).
+  exactly with no cap. Fresh installs now use the release-qualified 16-slot
+  width instead of silently serving every request serially; an explicit
+  `SKULK_LLAMA_SERVER_PARALLEL=1` retains the prior serial behavior. Above one
+  slot, the slots share a single pool instead of holding private shares. Before
+  each generation Skulk asks llama-server for the exact rendered prompt length,
+  reserves that input plus the bounded maximum output, and queues until the sum
+  fits. Reservation waiters are admitted FIFO so sustained short traffic cannot
+  starve an earlier long request. A failed token-count probe reserves the whole
+  pool and runs alone. This preserves real concurrency for bounded requests
+  without allowing aggregate long-context traffic to terminate the server
+  (#689).
 
 - **The service template no longer pins a cluster namespace.** The installed
   `skulk.env` template used to set `SKULK_LIBP2P_NAMESPACE=foxlight-main`,

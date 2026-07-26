@@ -32,7 +32,9 @@ import signal
 import socket
 import subprocess
 import tempfile
+import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple, cast
 
@@ -40,6 +42,7 @@ import httpx
 
 from skulk.api.types import GenerationStats
 from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
+from skulk.shared.constants import MAX_OUTPUT_TOKENS
 from skulk.shared.models.model_cards import OutputParserType
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
@@ -129,12 +132,17 @@ def _force_no_spec() -> bool:
 
 
 _LLAMA_SERVER_PARALLEL_ENV: Final = "SKULK_LLAMA_SERVER_PARALLEL"
-# Concurrency stays OPT-IN (default 1). Not because concurrency is unsafe -- a
-# unified KV buffer gives every slot the full window (see _llama_server_parallel)
-# -- but because the shared pool is finite, and how much of it to hand out is a
-# per-deployment judgement Skulk cannot make from the outside. A fresh install
-# gets the serial behavior every earlier release had.
-_DEFAULT_LLAMA_SERVER_PARALLEL: Final = 1
+# The served engine exists to batch concurrent requests; shipping it serial made
+# fresh installs behave materially worse than the fleet used to qualify them.
+# Sixteen is the exercised fleet setting. A unified KV buffer keeps every slot's
+# advertised context window truthful without allocating N private caches; users
+# dominated by near-window prompts can still opt back to serial explicitly.
+_DEFAULT_LLAMA_SERVER_PARALLEL: Final = 16
+# An omitted OpenAI ``max_tokens`` value otherwise lets llama-server consume the
+# remainder of the shared KV pool. Bound it to the same normal-generation width
+# as Skulk's MLX path so aggregate admission has a finite reservation and one
+# unconstrained request cannot silently monopolize every concurrent slot.
+_LLAMA_SERVER_MAX_OUTPUT_TOKENS: Final = MAX_OUTPUT_TOKENS
 
 
 def _llama_server_parallel() -> int:
@@ -152,18 +160,16 @@ def _llama_server_parallel() -> int:
     sees the whole window, the stamped ``context_token_limit`` stays the truth,
     and there is nothing left for a cap to protect.
 
-    What the operator owns instead is contention. Under a unified buffer the
-    slots draw from ONE pool of ``n_ctx`` tokens rather than N private slices, so
-    concurrent long-context requests can collectively exhaust it. llama.cpp
-    responds by purging idle slots' cached prompts and retrying with a smaller
-    batch, and treats total exhaustion as fatal. Declaring a slot count is
-    therefore a statement about the workload ("my requests are short enough to
-    share this window N ways"), which is exactly the kind of thing only the
-    person running the node knows.
+    Under a unified buffer the slots draw from ONE pool of ``n_ctx`` tokens
+    rather than N private slices. The runner therefore counts each exact
+    rendered input and admits prompt-plus-output reservations in FIFO order
+    only while their aggregate fits the pool. The shipped 16-slot default is a
+    real concurrency ceiling without making aggregate exhaustion possible;
+    setting the override to ``1`` remains an explicit serial-isolation option.
 
     Returns:
-        The declared slot count, or ``1`` when unset. An unparseable or
-        below-one value also yields ``1``, but is warned about first: an
+        The declared slot count, or ``16`` when unset. An unparseable or
+        below-one value also yields ``16``, but is warned about first: an
         operator who declared something meant it, so a rejected declaration is
         never applied silently. An absent declaration is not a mistake and
         stays quiet.
@@ -188,6 +194,49 @@ def _llama_server_parallel() -> int:
     return value
 
 
+def _request_context_reservation(
+    input_tokens: int,
+    requested_max_output_tokens: int | None,
+    context_pool_tokens: int,
+) -> tuple[int, int]:
+    """Return the bounded output limit and shared-KV reservation for a request.
+
+    ``llama-server``'s unified KV cache keeps each slot's per-request window
+    truthful, but all slots consume cells from one fixed pool. The runner counts
+    the exact rendered input through llama-server's token-count endpoint and
+    reserves ``input + max_output`` before starting generation. This helper
+    normalizes that reservation:
+
+    * an omitted output limit becomes the shipped 4096-token bound;
+    * an over-window request reserves the whole pool and then runs alone so the
+      server can return its normal context error;
+    * a valid bounded request reserves no more than the pool.
+
+    Args:
+        input_tokens: Exact prompt token count reported by llama-server.
+        requested_max_output_tokens: Caller-supplied output bound, when present.
+        context_pool_tokens: Total unified KV cells available to all slots.
+
+    Returns:
+        ``(effective_max_output_tokens, reservation_tokens)``.
+    """
+    if input_tokens < 0:
+        raise ValueError("input token count cannot be negative")
+    if context_pool_tokens < 1:
+        raise ValueError("context pool must contain at least one token")
+    available_output = max(1, context_pool_tokens - input_tokens)
+    effective_max_output = (
+        requested_max_output_tokens
+        if requested_max_output_tokens is not None
+        else min(_LLAMA_SERVER_MAX_OUTPUT_TOKENS, available_output)
+    )
+    reservation = min(
+        context_pool_tokens,
+        input_tokens + max(1, effective_max_output),
+    )
+    return effective_max_output, reservation
+
+
 def _slot_server_args(max_concurrency: int) -> list[str]:
     """llama-server flags that govern slot count and how slots share the window.
 
@@ -205,12 +254,13 @@ def _slot_server_args(max_concurrency: int) -> list[str]:
     ``n_ctx_seq * n_stream`` cells and ``n_stream`` collapses to 1 when unified,
     so the same buffer is shared rather than sliced.
 
-    Passed only above one slot, so the serial default's command line is
-    byte-identical to previous releases and the validated single-slot paths
-    (draft-mtp speculation, RPC driver) are untouched.
+    Passed only above one slot, so an explicit serial override keeps the
+    validated single-slot command line used by draft-mtp speculation and the
+    RPC driver.
 
     Args:
-        max_concurrency: Slot count, as declared by the operator.
+        max_concurrency: Effective slot count from the shipped default or an
+            operator override.
 
     Returns:
         The flags to splice into the llama-server command line.
@@ -374,6 +424,13 @@ class _StreamDelta(NamedTuple):
     timings: dict[str, object] | None = None
 
 
+class _ContextWaiter(NamedTuple):
+    """One FIFO admission request against llama-server's shared KV pool."""
+
+    task_id: TaskId
+    reservation_tokens: int
+
+
 def _gpu_layers_for_backend(resolved_backend: str | None) -> str:
     """The ``-ngl`` (n-gpu-layers) value to pass llama-server for a backend tag.
 
@@ -515,19 +572,31 @@ class Runner(ServedConcurrentDispatch):
         self._serving_context_tokens = serving_n_ctx(
             self.context_token_limit, logits_all=False
         )
+        self._context_budget_condition = threading.Condition()
+        self._reserved_context_tokens = 0
+        self._context_active_requests = 0
+        self._context_waiters: deque[_ContextWaiter] = deque()
         # The declared slot count is honored exactly; --kv-unified (added in
         # _spawn_server) keeps every slot's context at the full stamped window,
-        # so dispatching N generations cannot shrink what any one of them serves.
+        # while the weighted gate below prevents their aggregate reservations
+        # from exhausting the one shared pool.
         self._init_concurrent_dispatch(_llama_server_parallel(), "llama-gen")
         if self._max_concurrency > 1:
-            # Loud once per runner: the operator traded a private per-slot window
-            # for a shared one, and the size of that pool did not change.
-            logger.warning(
+            # The shipped default uses the shared buffer, so normal startup
+            # records the trade without presenting the supported default as an
+            # operator error. Explicit non-default concurrency remains visible
+            # at warning level because it changes the exercised admission width.
+            raw_parallel = os.environ.get(_LLAMA_SERVER_PARALLEL_ENV, "").strip()
+            log_slot_contract = (
+                logger.warning
+                if raw_parallel and raw_parallel != str(_DEFAULT_LLAMA_SERVER_PARALLEL)
+                else logger.info
+            )
+            log_slot_contract(
                 f"serving up to {self._max_concurrency} concurrent generations "
                 f"from one shared {self._serving_context_tokens}-token KV pool "
-                f"({_LLAMA_SERVER_PARALLEL_ENV}); each request may use the full "
-                "window, but concurrent long-context requests contend for it and "
-                "exhausting the pool terminates the server"
+                f"(set {_LLAMA_SERVER_PARALLEL_ENV}=1 for serial service); "
+                "aggregate token reservations queue before the pool can be exhausted"
             )
         logger.info("llama-server runner created")
         self.update_status(RunnerIdle())
@@ -855,6 +924,100 @@ class Runner(ServedConcurrentDispatch):
 
     # --- generation: proxy the server's OpenAI streaming API ------------------
 
+    def _count_input_tokens(self, body: dict[str, Any]) -> int | None:
+        """Ask llama-server to count the exact rendered chat input.
+
+        The endpoint applies the same model chat template and tokenizer as the
+        subsequent completion, including tools and thinking controls. Returning
+        ``None`` is a fail-safe signal: callers reserve the entire shared pool
+        and run alone rather than guessing low and risking server termination.
+
+        Args:
+            body: OpenAI chat-completion body before stream-only fields.
+
+        Returns:
+            Exact input-token count, or ``None`` if the server cannot provide it.
+        """
+        assert self.base_url is not None
+        try:
+            response = httpx.post(
+                f"{self.base_url}/v1/chat/completions/input_tokens",
+                json=body,
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            raw_count = response.json().get("input_tokens")
+            if isinstance(raw_count, int) and not isinstance(raw_count, bool):
+                return max(0, raw_count)
+            raise ValueError("token-count response omitted integer input_tokens")
+        except Exception as exc:  # noqa: BLE001 - safe full-pool fallback
+            logger.opt(exception=exc).warning(
+                "llama-server input-token count unavailable; reserving the "
+                "whole shared KV pool for this request"
+            )
+            return None
+
+    def _acquire_context_budget(self, task_id: TaskId, reservation: int) -> bool:
+        """Wait in FIFO order until ``reservation`` fits the shared KV pool.
+
+        Args:
+            task_id: Generation waiting for admission.
+            reservation: Exact prompt plus bounded maximum output tokens.
+
+        Returns:
+            ``True`` after reserving the budget, or ``False`` if cancelled while
+            queued.
+        """
+        reservation = min(max(1, reservation), self._serving_context_tokens)
+        waiter = _ContextWaiter(task_id, reservation)
+        admitted = False
+        with self._context_budget_condition:
+            self._context_waiters.append(waiter)
+            self._context_budget_condition.notify_all()
+        try:
+            while True:
+                if self._is_cancelled(task_id):
+                    return False
+                with self._context_budget_condition:
+                    is_next = (
+                        bool(self._context_waiters)
+                        and self._context_waiters[0] == waiter
+                    )
+                    if (
+                        is_next
+                        and self._reserved_context_tokens + reservation
+                        <= self._serving_context_tokens
+                    ):
+                        self._context_waiters.popleft()
+                        self._reserved_context_tokens += reservation
+                        self._context_active_requests += 1
+                        active_requests = self._context_active_requests
+                        admitted = True
+                        self._context_budget_condition.notify_all()
+                        break
+                    self._context_budget_condition.wait(timeout=_LIVENESS_POLL_S)
+                self._ensure_server_alive()
+        finally:
+            if not admitted:
+                with self._context_budget_condition:
+                    with contextlib.suppress(ValueError):
+                        self._context_waiters.remove(waiter)
+                    self._context_budget_condition.notify_all()
+        # Refine the generic submitted-task stamp: only requests past this gate
+        # actively compete inside llama-server.
+        self._set_admission_concurrency(task_id, active_requests)
+        return True
+
+    def _release_context_budget(self, reservation: int) -> None:
+        """Release one request's shared-KV reservation and wake queued work."""
+        reservation = min(max(1, reservation), self._serving_context_tokens)
+        with self._context_budget_condition:
+            self._reserved_context_tokens = max(
+                0, self._reserved_context_tokens - reservation
+            )
+            self._context_active_requests = max(0, self._context_active_requests - 1)
+            self._context_budget_condition.notify_all()
+
     def _generate(self, task: Task) -> None:
         # Runs on a pool worker thread. Runner status (Running/Ready) is owned by
         # the dispatch loop's in-flight counter, and the task was already
@@ -871,6 +1034,29 @@ class Runner(ServedConcurrentDispatch):
         # llama-server. Without this a reasoning model thinks on every request and
         # can return empty content under a bounded budget (#428/#420).
         body.update(reasoning_request_overrides(task.task_params))
+        # Tool definitions change the rendered prompt, so include them before the
+        # exact token-count request. _generate_with_tools sets the same fields
+        # again before the real completion for local clarity.
+        if task.task_params.tools:
+            body["tools"] = task.task_params.tools
+            tool_choice = getattr(task.task_params, "tool_choice", None)
+            if tool_choice is not None:
+                body["tool_choice"] = tool_choice
+
+        input_tokens = self._count_input_tokens(body)
+        if input_tokens is None:
+            reservation = self._serving_context_tokens
+            if "max_tokens" not in body:
+                body["max_tokens"] = _LLAMA_SERVER_MAX_OUTPUT_TOKENS
+        else:
+            effective_max_output, reservation = _request_context_reservation(
+                input_tokens,
+                task.task_params.max_output_tokens,
+                self._serving_context_tokens,
+            )
+            body["max_tokens"] = effective_max_output
+        if not self._acquire_context_budget(task.task_id, reservation):
+            return
 
         record_runner_phase(
             "task_submission",
@@ -880,54 +1066,59 @@ class Runner(ServedConcurrentDispatch):
             attrs={"tools": bool(task.task_params.tools)},
         )
         try:
-            # Per-token logprobs are not wired over the SSE proxy yet. Fail loud
-            # rather than return a successful response with logprobs silently
-            # missing, matching the in-process runner's #385 no-silent-empty
-            # contract (the raise surfaces as an ErrorChunk below).
-            if wants_logprobs(task.task_params.logprobs, task.task_params.top_logprobs):
-                body.pop("logprobs", None)
-                body.pop("top_logprobs", None)
-                raise RuntimeError(
-                    "Per-token logprobs are not supported on the served "
-                    "(llama_server) engine: the OpenAI SSE proxy does not surface "
-                    "them. Retry without logprobs/top_logprobs."
+            try:
+                # Per-token logprobs are not wired over the SSE proxy yet. Fail loud
+                # rather than return a successful response with logprobs silently
+                # missing, matching the in-process runner's #385 no-silent-empty
+                # contract (the raise surfaces as an ErrorChunk below).
+                if wants_logprobs(
+                    task.task_params.logprobs, task.task_params.top_logprobs
+                ):
+                    body.pop("logprobs", None)
+                    body.pop("top_logprobs", None)
+                    raise RuntimeError(
+                        "Per-token logprobs are not supported on the served "
+                        "(llama_server) engine: the OpenAI SSE proxy does not "
+                        "surface them. Retry without logprobs/top_logprobs."
+                    )
+                record_runner_phase(
+                    "decode_stream",
+                    event="request_started",
+                    task_id=task.task_id,
+                    command_id=str(command_id),
                 )
-            record_runner_phase(
-                "decode_stream",
-                event="request_started",
-                task_id=task.task_id,
-                command_id=str(command_id),
-            )
-            if task.task_params.tools:
-                self._generate_with_tools(task, body, model_id, command_id)
+                if task.task_params.tools:
+                    self._generate_with_tools(task, body, model_id, command_id)
+                else:
+                    self._generate_streaming(task, body, model_id, command_id)
+            except Exception as exc:  # noqa: BLE001 - surface as an ErrorChunk
+                record_runner_phase(
+                    "error",
+                    event="generation_failed",
+                    detail=f"{type(exc).__name__}: {exc}",
+                    task_id=task.task_id,
+                    command_id=str(command_id),
+                )
+                logger.opt(exception=exc).warning("llama-server generation failed")
+                self.event_sender.send(
+                    ChunkGenerated(
+                        command_id=command_id,
+                        chunk=ErrorChunk(model=model_id, error_message=str(exc)),
+                    )
+                )
             else:
-                self._generate_streaming(task, body, model_id, command_id)
-        except Exception as exc:  # noqa: BLE001 - surface as an ErrorChunk
-            record_runner_phase(
-                "error",
-                event="generation_failed",
-                detail=f"{type(exc).__name__}: {exc}",
-                task_id=task.task_id,
-                command_id=str(command_id),
-            )
-            logger.opt(exception=exc).warning("llama-server generation failed")
-            self.event_sender.send(
-                ChunkGenerated(
-                    command_id=command_id,
-                    chunk=ErrorChunk(model=model_id, error_message=str(exc)),
+                # Read the shared cancel set through the lock-guarded helper:
+                # generations run concurrently, so an unlocked membership read
+                # here races the pool workers mutating cancelled_tasks.
+                was_cancelled = self._was_cancelled(task.task_id)
+                record_runner_phase(
+                    "cancel_observed" if was_cancelled else "completion",
+                    event="generation_finished",
+                    task_id=task.task_id,
+                    command_id=str(command_id),
                 )
-            )
-        else:
-            # Read the shared cancel set through the lock-guarded helper: generations
-            # run concurrently, so an unlocked membership read here races the pool
-            # workers mutating cancelled_tasks.
-            was_cancelled = self._was_cancelled(task.task_id)
-            record_runner_phase(
-                "cancel_observed" if was_cancelled else "completion",
-                event="generation_finished",
-                task_id=task.task_id,
-                command_id=str(command_id),
-            )
+        finally:
+            self._release_context_budget(reservation)
         # Status is NOT flipped here: the dispatch loop returns the runner to Ready
         # only when the LAST in-flight generation drains, so a peer generation still
         # streaming keeps the runner Running.
