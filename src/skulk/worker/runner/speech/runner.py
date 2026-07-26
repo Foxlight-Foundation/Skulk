@@ -8,6 +8,7 @@ import hashlib
 import inspect
 import io
 import os
+import shutil
 import tempfile
 import time
 from collections.abc import Callable, Iterable
@@ -18,7 +19,7 @@ from typing import Any, cast
 import numpy as np
 from anyio import ClosedResourceError, EndOfStream, WouldBlock
 
-from skulk.shared.constants import SKULK_MAX_CHUNK_SIZE
+from skulk.shared.constants import SKULK_CACHE_HOME, SKULK_MAX_CHUNK_SIZE
 from skulk.shared.models.model_cards import AudioCardKind, AudioResponseFormat
 from skulk.shared.tracing import (
     begin_trace_session,
@@ -69,6 +70,14 @@ from skulk.worker.runner.bootstrap import logger
 _DEFAULT_STAGED_TTS_VOICE = "af_heart"
 _AUDIO_BINARY_CHUNK_SIZE = max(1, (SKULK_MAX_CHUNK_SIZE // 4) * 3)
 _CANARY_MASK_COMPAT_MARKER = "_skulk_mask_dtype_compat"
+_FFMPEG_AUDIO_RESPONSE_FORMATS = frozenset(
+    {
+        AudioResponseFormat.Mp3,
+        AudioResponseFormat.Flac,
+        AudioResponseFormat.Ogg,
+        AudioResponseFormat.Opus,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -272,6 +281,64 @@ def _result_audio_and_sample_rate(result: Any) -> tuple[Any | None, int | None]:
     return audio, sample_rate if isinstance(sample_rate, int) else None
 
 
+def _bundled_ffmpeg_executable() -> Path:
+    """Return the executable supplied by Skulk's hard encoder dependency."""
+    try:
+        from imageio_ffmpeg import get_ffmpeg_exe
+    except ImportError as exc:
+        raise RuntimeError(
+            "Skulk's bundled FFmpeg encoder is unavailable; reinstall Skulk "
+            "to restore encoded speech output"
+        ) from exc
+
+    try:
+        executable = Path(get_ffmpeg_exe()).resolve()
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Skulk's bundled FFmpeg encoder could not be resolved; reinstall "
+            "Skulk to restore encoded speech output"
+        ) from exc
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise RuntimeError(
+            "Skulk's bundled FFmpeg encoder is not executable; reinstall Skulk "
+            "to restore encoded speech output"
+        )
+    return executable
+
+
+def _ensure_ffmpeg_available() -> Path:
+    """Expose a bundled encoder to ``mlx_audio`` when none is on ``PATH``."""
+    system_executable = shutil.which("ffmpeg")
+    if system_executable is not None:
+        return Path(system_executable)
+
+    bundled_executable = _bundled_ffmpeg_executable()
+    shim_directory = SKULK_CACHE_HOME / "bin"
+    shim_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ffmpeg_shim = shim_directory / "ffmpeg"
+    temporary_shim = shim_directory / f".ffmpeg-{os.getpid()}-{time.monotonic_ns()}"
+    try:
+        temporary_shim.symlink_to(bundled_executable)
+        os.replace(temporary_shim, ffmpeg_shim)
+    finally:
+        temporary_shim.unlink(missing_ok=True)
+
+    path_entries = os.environ.get("PATH", "").split(os.pathsep)
+    shim_directory_text = os.fspath(shim_directory)
+    if shim_directory_text not in path_entries:
+        os.environ["PATH"] = os.pathsep.join(
+            (shim_directory_text, *filter(None, path_entries))
+        )
+
+    resolved_executable = shutil.which("ffmpeg")
+    if resolved_executable is None:
+        raise RuntimeError(
+            "Skulk prepared its bundled FFmpeg encoder but mlx-audio cannot "
+            "discover it on PATH"
+        )
+    return Path(resolved_executable)
+
+
 def _encode_audio(
     audio: np.ndarray, sample_rate: int, response_format: AudioResponseFormat
 ) -> bytes:
@@ -284,6 +351,9 @@ def _encode_audio(
             )
         clipped = np.clip(normalized, -1.0, 1.0)
         return (clipped * 32767.0).astype("<i2").tobytes()
+
+    if response_format in _FFMPEG_AUDIO_RESPONSE_FORMATS:
+        _ensure_ffmpeg_available()
 
     from mlx_audio.audio_io import write as audio_write
 

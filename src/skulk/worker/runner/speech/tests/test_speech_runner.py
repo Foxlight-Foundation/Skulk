@@ -4,6 +4,7 @@
 import base64
 import hashlib
 import inspect
+import os
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -47,6 +48,7 @@ from skulk.worker.runner.speech import runner as speech_runner
 from skulk.worker.runner.speech.runner import (
     Runner,
     _encode_audio,
+    _ensure_ffmpeg_available,
     _filter_kwargs,
     _install_attention_mask_dtype_compat,
     _install_canary_compatibility,
@@ -96,6 +98,66 @@ def test_encode_audio_rejects_multi_channel_pcm() -> None:
             24000,
             AudioResponseFormat.Pcm,
         )
+
+
+def test_ensure_ffmpeg_available_preserves_system_executable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A system encoder should remain authoritative without preparing a shim."""
+
+    def _unexpected_bundled_lookup() -> Path:
+        raise AssertionError("bundled encoder should not be resolved")
+
+    monkeypatch.setattr(
+        speech_runner, "_bundled_ffmpeg_executable", _unexpected_bundled_lookup
+    )
+    monkeypatch.setattr(
+        speech_runner.shutil, "which", lambda _executable: "/usr/bin/ffmpeg"
+    )
+
+    assert _ensure_ffmpeg_available() == Path("/usr/bin/ffmpeg")
+
+
+def test_ensure_ffmpeg_available_prepares_private_bundled_shim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A fresh install should expose its packaged encoder through runner PATH."""
+
+    executable = tmp_path / "ffmpeg-packaged"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    cache_home = tmp_path / "cache"
+    monkeypatch.setattr(speech_runner, "SKULK_CACHE_HOME", cache_home)
+    monkeypatch.setattr(
+        speech_runner, "_bundled_ffmpeg_executable", lambda: executable
+    )
+    monkeypatch.setenv("PATH", "")
+
+    resolved = _ensure_ffmpeg_available()
+
+    assert resolved == cache_home / "bin" / "ffmpeg"
+    assert resolved.resolve() == executable
+    assert (cache_home / "bin").stat().st_mode & 0o777 == 0o700
+    assert os.environ["PATH"].split(os.pathsep)[0] == os.fspath(cache_home / "bin")
+
+
+def test_encode_audio_mp3_uses_bundled_encoder_on_fresh_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """MP3 encoding should work without a preinstalled system executable."""
+
+    pytest.importorskip("imageio_ffmpeg")
+    pytest.importorskip("mlx_audio.audio_io")
+    monkeypatch.setattr(speech_runner, "SKULK_CACHE_HOME", tmp_path / "cache")
+    monkeypatch.setenv("PATH", "")
+
+    encoded = _encode_audio(
+        np.sin(np.linspace(0.0, np.pi * 2.0, 2400, dtype=np.float32)),
+        24000,
+        AudioResponseFormat.Mp3,
+    )
+
+    assert encoded.startswith((b"ID3", b"\xff"))
 
 
 class _CaptureSender:
