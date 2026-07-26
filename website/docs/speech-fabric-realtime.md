@@ -29,7 +29,10 @@ path is available when the mounted TTS card declares
 `audio.supports_streaming = true`, every routable instance is ready, and the
 request format resolves to MP3 or raw PCM. PCM responses declare sample rate,
 channel count, and sample format in HTTP headers. Other encoded formats remain
-batch-only.
+batch-only. On Apple Silicon, Skulk includes the encoder used for MP3, FLAC,
+OGG, and Opus output; a fresh install does not require a separate Homebrew or
+system `ffmpeg` package. When a system `ffmpeg` is already available, the
+speech runner uses it.
 
 `/v1/audio/transcriptions` accepts a bounded multipart upload. Its stable
 `stream=true` path is available when the mounted STT card declares

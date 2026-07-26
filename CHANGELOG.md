@@ -7,6 +7,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+- Fixed fresh Apple installs returning HTTP 500 for MP3, FLAC, OGG, and Opus
+  speech output because `mlx-audio` expected an external `ffmpeg` executable.
+  Skulk now ships a platform encoder dependency and exposes its bundled binary
+  to speech runners when no system `ffmpeg` is installed.
+
 - Fixed store-backed model launches exhausting a worker's filesystem while
   recently used staging data was still inside the 40 GiB warm-cache budget.
   Store transfers now serialize exact capacity admission with the byte
