@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
 import styled, { keyframes } from 'styled-components';
 import { generateInstallId } from './TelemetryConsentModal';
-import { useConfig, type StoreConfig, type FullConfig, type LoggingConfig, type TelemetryConfig } from '../../hooks/useConfig';
+import {
+  useConfig,
+  type StoreConfig,
+  type FullConfig,
+  type LoggingConfig,
+  type TelemetryConfig,
+} from '../../hooks/useConfig';
+import {
+  DEFAULT_MODEL_STORE_PORT,
+  normalizeStoreConfig,
+} from './modelStoreConfig';
 import { Button } from '../common/Button';
 import { Field } from '../common/Field';
 import { InfoTooltip } from '../common/InfoTooltip';
@@ -15,24 +25,6 @@ export interface SettingsPanelProps {
   open: boolean;
   onClose: () => void;
 }
-
-const DEFAULT_MODEL_STORE_PORT = 12415;
-
-const defaultStoreConfig = (): StoreConfig => ({
-  enabled: false,
-  store_host: '',
-  store_http_host: '',
-  store_port: DEFAULT_MODEL_STORE_PORT,
-  store_path: '',
-  download: {
-    allow_hf_fallback: true,
-  },
-  staging: {
-    enabled: true,
-    node_cache_path: '~/.skulk/staging',
-    cleanup_on_deactivate: true,
-  },
-});
 
 /* ---- animations ---- */
 
@@ -273,7 +265,11 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     && effective.kv_cache_backend !== 'default'
     && effective.kv_cache_backend !== (fullConfig?.inference?.kv_cache_backend ?? 'default');
   useEffect(() => {
-    setDraft(fullConfig?.model_store ? { ...fullConfig.model_store } : null);
+    setDraft(
+      fullConfig?.model_store
+        ? normalizeStoreConfig(fullConfig.model_store)
+        : null,
+    );
     setKvBackend(effective?.kv_cache_backend ?? fullConfig?.inference?.kv_cache_backend ?? 'default');
     setHfToken(fullConfig?.hf_token ?? '');
     setLoggingDraft({
@@ -292,22 +288,22 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     );
   }, [fullConfig, effective]);
 
-  const modelStoreDraft = draft ?? defaultStoreConfig();
+  const modelStoreDraft = normalizeStoreConfig(draft);
 
   const update = useCallback((patch: Partial<StoreConfig>) => {
-    setDraft((prev) => ({ ...(prev ?? defaultStoreConfig()), ...patch }));
+    setDraft((prev) => ({ ...normalizeStoreConfig(prev), ...patch }));
   }, []);
 
   const updateDownload = useCallback((patch: Partial<StoreConfig['download']>) => {
     setDraft((prev) => {
-      const base = prev ?? defaultStoreConfig();
+      const base = normalizeStoreConfig(prev);
       return { ...base, download: { ...base.download, ...patch } };
     });
   }, []);
 
   const updateStaging = useCallback((patch: Partial<StoreConfig['staging']>) => {
     setDraft((prev) => {
-      const base = prev ?? defaultStoreConfig();
+      const base = normalizeStoreConfig(prev);
       return { ...base, staging: { ...base.staging, ...patch } };
     });
   }, []);
