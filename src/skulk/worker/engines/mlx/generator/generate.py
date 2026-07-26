@@ -1547,15 +1547,21 @@ def _stream_generate_with_mtp(
 
     # Model-native speculative rollback (gemma4): no snapshots, no replay.
     _lm: object | None = getattr(model, "language_model", None)
-    native_rollback = cast(
+    native_rollback_candidate = cast(
         "Callable[..., None] | None",
         getattr(_lm, "rollback_speculative_cache", None) if _lm is not None else None,
     )
     # Hybrid models (e.g. Qwen3.5 GDN) carry recurrent SSM state that cannot
     # be trimmed positionally — and trim_cache without a snapshot ZEROES it.
-    # Rejects must restore a pre-verify snapshot instead (unless the model
-    # provides native rollback, which handles its own cache types).
-    mtp_has_ssm = has_non_kv_caches(prompt_cache) and not callable(native_rollback)
+    # Skulk's trunk/head verify path returns hidden states directly, not the
+    # family-specific GDN snapshots required by native Qwen3.5 rollback. Use
+    # Skulk's pre-verify snapshot for every stateful cache; native rollback is
+    # safe only for positionally trimmable caches whose method needs no GDN
+    # state (for example Gemma 4).
+    mtp_has_ssm = has_non_kv_caches(prompt_cache)
+    native_rollback = (
+        None if mtp_has_ssm else native_rollback_candidate
+    )
 
     # Deferred replay (snapshot path only): committed tokens whose cache
     # entries were lost to a reject-restore. Instead of paying a dedicated
