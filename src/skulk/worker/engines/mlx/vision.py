@@ -329,22 +329,56 @@ def _gemma4_native_processor_kwargs(
 
 
 _video_processor_patched = False
+_video_processor_mapping_entry: object | None = None
 
 
 def _patch_video_processor() -> None:
     """Patch so we don't crash horribly when torch vision isn't installed"""
     # TODO: Update if we add torch vision.
-    global _video_processor_patched
+    global _video_processor_mapping_entry, _video_processor_patched
     if _video_processor_patched:
         return
     try:
         from transformers.processing_utils import MODALITY_TO_AUTOPROCESSOR_MAPPING
 
-        mapping = MODALITY_TO_AUTOPROCESSOR_MAPPING._MAPPING_NAMES  # type: ignore
+        mapping = cast(
+            dict[str, object],
+            MODALITY_TO_AUTOPROCESSOR_MAPPING._MAPPING_NAMES,  # type: ignore
+        )
+        _video_processor_mapping_entry = mapping.get("video_processor")
         mapping.pop("video_processor", None)
     except (ImportError, AttributeError):
         pass
     _video_processor_patched = True
+
+
+def _restore_video_processor() -> None:
+    """Restore the Transformers video slot removed by the compatibility patch."""
+    global _video_processor_patched
+    if not _video_processor_patched:
+        return
+    try:
+        from transformers.processing_utils import MODALITY_TO_AUTOPROCESSOR_MAPPING
+
+        mapping = cast(
+            dict[str, object],
+            MODALITY_TO_AUTOPROCESSOR_MAPPING._MAPPING_NAMES,  # type: ignore
+        )
+        if _video_processor_mapping_entry is not None:
+            mapping["video_processor"] = _video_processor_mapping_entry
+    except (ImportError, AttributeError):
+        pass
+    _video_processor_patched = False
+
+
+def _configure_video_processor_compatibility(model_type: str) -> None:
+    """Select the reversible no-torchvision mapping state for one model family."""
+    if model_type == "gemma4":
+        # Gemma 4's MLX-VLM processor ships a NumPy-only video processor and
+        # requires this constructor slot even when callers only process images.
+        _restore_video_processor()
+    else:
+        _patch_video_processor()
 
 
 def decode_base64_image(b64_data: str) -> Image.Image:
@@ -902,7 +936,7 @@ class VisionEncoder:
         self._processor_loaded = True
 
     def _load_weights(self) -> None:
-        _patch_video_processor()
+        _configure_video_processor_compatibility(self._config.model_type)
         logger.info(f"Loading vision weights from {self._model_path}")
         config = self._load_config_json()
         if not config:
@@ -995,7 +1029,7 @@ class VisionEncoder:
         vision_cfg: JsonDict | None = None,
     ) -> None:
         """Load the image processor without forcing vision-weight initialization."""
-        _patch_video_processor()
+        _configure_video_processor_compatibility(self._config.model_type)
         config = config or self._load_config_json()
         if not config:
             raise FileNotFoundError(f"config.json not found in {self._model_path}")

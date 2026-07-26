@@ -171,6 +171,140 @@ def test_processor_loader_uses_mlx_vlm_family_without_torchvision(
     assert _FakeFamilyProcessor.seen_trust_remote_code is True
 
 
+def test_gemma4_processor_restores_numpy_video_slot_without_torchvision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Gemma 4 must restore the slot required by its NumPy-only processor."""
+    (tmp_path / "config.json").write_text(
+        '{"vision_config": {"model_type": "gemma4"}}',
+        encoding="utf-8",
+    )
+    from transformers.processing_utils import MODALITY_TO_AUTOPROCESSOR_MAPPING
+
+    mapping = cast(
+        dict[str, object],
+        MODALITY_TO_AUTOPROCESSOR_MAPPING._MAPPING_NAMES,  # type: ignore
+    )
+    vision_module.__dict__["_restore_video_processor"]()
+    original_video_entry = mapping["video_processor"]
+    monkeypatch.setattr(vision_module, "_video_processor_patched", False)
+    monkeypatch.setattr(
+        vision_module,
+        "_video_processor_mapping_entry",
+        original_video_entry,
+    )
+    monkeypatch.setitem(mapping, "video_processor", original_video_entry)
+    vision_module.__dict__["_patch_video_processor"]()
+    assert "video_processor" not in mapping
+
+    class _FakeGemma4Processor:
+        seen_repo: str | None = None
+
+        @classmethod
+        def from_pretrained(
+            cls,
+            repo: str,
+            **_kwargs: object,
+        ) -> _FakeCombinedProcessor:
+            assert mapping.get("video_processor") == original_video_entry
+            cls.seen_repo = repo
+            return _FakeCombinedProcessor()
+
+    def _model_path(*_args: object) -> Path:
+        return tmp_path
+
+    def _no_upstream_processor(_repo: str) -> None:
+        return None
+
+    def _fake_import_module(module_name: str) -> object:
+        if module_name == "mlx_vlm.models.gemma4":
+            return SimpleNamespace(Gemma4Processor=_FakeGemma4Processor)
+        raise ModuleNotFoundError(name=module_name)
+
+    def _fail_transformers_loader(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError(
+            "Gemma 4 must not fall through to the pre-patchified HF processor"
+        )
+
+    monkeypatch.setattr(vision_module, "build_model_path", _model_path)
+    monkeypatch.setattr(vision_module, "load_image_processor", _no_upstream_processor)
+    monkeypatch.setattr(vision_module.importlib, "import_module", _fake_import_module)
+    monkeypatch.setattr(
+        vision_module,
+        "AutoImageProcessor",
+        SimpleNamespace(from_pretrained=_fail_transformers_loader),
+    )
+
+    encoder = VisionEncoder(
+        VisionCardConfig(
+            image_token_id=1,
+            model_type="gemma4",
+            weights_repo="mlx-community/example",
+        ),
+        ModelId("mlx-community/example"),
+    )
+    encoder.ensure_processor_loaded()
+
+    assert isinstance(encoder.processor, _FakeImageProcessor)
+    assert _FakeGemma4Processor.seen_repo == str(tmp_path)
+    assert mapping.get("video_processor") == original_video_entry
+
+
+def test_gemma4_weight_loading_restores_video_slot_before_model_import(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Distributed Gemma 4 vision must restore the slot before loading weights."""
+    (tmp_path / "config.json").write_text(
+        '{"vision_config": {"model_type": "gemma4"}}',
+        encoding="utf-8",
+    )
+    from transformers.processing_utils import MODALITY_TO_AUTOPROCESSOR_MAPPING
+
+    mapping = cast(
+        dict[str, object],
+        MODALITY_TO_AUTOPROCESSOR_MAPPING._MAPPING_NAMES,  # type: ignore
+    )
+    vision_module.__dict__["_restore_video_processor"]()
+    original_video_entry = mapping["video_processor"]
+    monkeypatch.setattr(vision_module, "_video_processor_patched", False)
+    monkeypatch.setattr(
+        vision_module,
+        "_video_processor_mapping_entry",
+        original_video_entry,
+    )
+    monkeypatch.setitem(mapping, "video_processor", original_video_entry)
+    vision_module.__dict__["_patch_video_processor"]()
+    assert "video_processor" not in mapping
+
+    def _model_path(*_args: object) -> Path:
+        return tmp_path
+
+    class _StopAfterCompatibilityCheckError(Exception):
+        """Stop weight loading after the mapping state has been verified."""
+
+    def _verify_mapping_before_import(*_submodules: str) -> object:
+        assert mapping.get("video_processor") == original_video_entry
+        raise _StopAfterCompatibilityCheckError
+
+    monkeypatch.setattr(vision_module, "build_model_path", _model_path)
+    encoder = VisionEncoder(
+        VisionCardConfig(
+            image_token_id=1,
+            model_type="gemma4",
+            weights_repo="mlx-community/example",
+        ),
+        ModelId("mlx-community/example"),
+    )
+    monkeypatch.setattr(encoder, "_import_mlx_vlm", _verify_mapping_before_import)
+
+    with pytest.raises(_StopAfterCompatibilityCheckError):
+        encoder.ensure_loaded()
+
+    assert mapping.get("video_processor") == original_video_entry
+
+
 def test_processor_loader_reports_transformers_torchvision_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
