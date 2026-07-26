@@ -14,6 +14,7 @@ from skulk.download.download_utils import (
     download_shard,
 )
 from skulk.download.shard_downloader import ShardDownloader
+from skulk.shared.constants import SKULK_MODELS_DIR
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -57,6 +58,29 @@ def _remaining_direct_download_bytes(
             expected_size - target_bytes - partial_bytes,
         )
     return remaining_bytes
+
+
+def _has_local_download_state(model_card: ModelCard) -> bool:
+    """Return whether the canonical cache contains model download data.
+
+    The startup progress scan exists to recover downloads interrupted in an
+    earlier process. Catalog entries with no local files have nothing to
+    recover and must not consume Hugging Face metadata requests merely because
+    they are present in the shipped model-card registry.
+
+    Args:
+        model_card: Catalog card whose canonical direct-download directory
+            should be inspected.
+
+    Returns:
+        ``True`` when at least one file exists below the model's canonical
+        cache directory, including resumable ``.partial`` files.
+    """
+
+    model_directory = SKULK_MODELS_DIR / model_card.model_id.normalize()
+    if not model_directory.is_dir():
+        return False
+    return any(path.is_file() for path in model_directory.rglob("*"))
 
 
 def skulk_shard_downloader(
@@ -279,9 +303,17 @@ class ResumableShardDownloader(ShardDownloader):
             async with semaphore:
                 return await _status_for_model(model_card.model_id)
 
+        model_cards = await get_model_cards()
+        local_model_cards = await asyncio.to_thread(
+            lambda: [
+                model_card
+                for model_card in model_cards
+                if _has_local_download_state(model_card)
+            ]
+        )
         tasks = [
             create_task(download_with_semaphore(model_card))
-            for model_card in await get_model_cards()
+            for model_card in local_model_cards
         ]
 
         for task in asyncio.as_completed(tasks):
