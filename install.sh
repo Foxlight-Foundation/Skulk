@@ -7,7 +7,8 @@
 #
 # The installer is deliberately thin: it fetches prerequisites (uv, rustup, a
 # C toolchain), clones the repo, syncs the environment, builds the dashboard
-# when npm is available, and then hands off to `skulk doctor --fix`, which
+# with either system Node.js or Skulk's bundled runtime, and then hands off to
+# `skulk doctor --fix`, which
 # owns all environment intelligence (GPU detection, engine provisioning,
 # remediation). Anything the doctor cannot fix is printed with its exact
 # consequence and remediation.
@@ -15,7 +16,7 @@
 # Flags / environment:
 #   --dir <path>       install location            (default: ~/skulk, or SKULK_INSTALL_DIR)
 #   --ref <git-ref>    branch or tag to install    (default: main, or SKULK_INSTALL_REF)
-#   --headless         skip the dashboard build even if npm is present
+#   --headless         intentionally skip the dashboard build
 #   --with-vllm        NVIDIA Linux only: create a dedicated vLLM venv with
 #                      Skulk's validated dependency matrix (several GB of
 #                      wheels; the concurrency-serving fast path on CUDA)
@@ -239,16 +240,27 @@ elif [[ "$OS" == "Linux" ]] \
     fi
 fi
 
-# --- dashboard (optional) --------------------------------------------------
+# --- dashboard -------------------------------------------------------------
+
+run_bundled_npm() {
+    uv run --project "$INSTALL_DIR" python \
+        "$INSTALL_DIR/scripts/run_bundled_npm.py" "$@"
+}
 
 if [[ "$HEADLESS" == "1" ]]; then
     log "skipping dashboard build (--headless); the API serves without the web UI"
-elif command -v npm >/dev/null 2>&1; then
-    log "building the dashboard"
+elif run_bundled_npm --version >/dev/null 2>&1; then
+    log "building the dashboard with Skulk's bundled Node.js runtime"
+    (
+        cd dashboard-react
+        run_bundled_npm install --no-fund --no-audit
+        run_bundled_npm run build
+    )
+elif command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+    warn "Skulk's bundled Node.js runtime is unavailable; falling back to the system toolchain"
     (cd dashboard-react && npm install --no-fund --no-audit && npm run build)
 else
-    warn "npm not found: skipping the dashboard build. The API serves without"
-    warn "the web UI; install Node.js and re-run to add it."
+    die "dashboard build requires Node.js, but neither system node/npm nor Skulk's bundled runtime is usable; re-run with --headless only if this node is intentionally API-only"
 fi
 
 # --- vLLM (optional, NVIDIA Linux) ----------------------------------------

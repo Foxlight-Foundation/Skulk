@@ -742,13 +742,15 @@ curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/inst
 ```
 
 It is deliberately thin: it fetches prerequisites (git, a C toolchain, rustup,
-uv), clones the repo, syncs the environment, builds the dashboard when npm is
-present, and hands off to `skulk doctor --fix`, which owns all of the
+uv), clones the repo, syncs the environment, builds the dashboard with the
+cross-platform Node runtime pinned in Skulk's uv environment (with a compatible
+system toolchain as fallback), and hands off to `skulk doctor --fix`, which owns all of the
 environment intelligence described above. On an NVIDIA Linux node,
 `--with-vllm` additionally creates a dedicated vLLM virtual environment with
 Skulk's validated dependency matrix and records `SKULK_VLLM_BIN` (vLLM lives
 in its own venv because Skulk pins a newer transformers than vLLM can use).
-Re-running the installer is safe; every step is idempotent.
+Re-running the installer is safe; every step is idempotent. `--headless` is
+the explicit opt-out for an intentionally API-only node.
 
 ## The inference engine
 

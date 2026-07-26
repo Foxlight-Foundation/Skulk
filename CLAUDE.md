@@ -137,7 +137,9 @@ driver-API-dependent flags to that build. ADVANCING THE ENGINE PIN IS A
 CHECKLIST (architecture-reference.md "Engine pin advancement"): bump pin +
 re-record checksums + bump wheel version + republish + fresh-box gauntlet;
 never advance casually. `install.sh` is the one-command fresh-box installer
-(thin; intelligence lives in doctor). nvidia-ml-py is a HARD Linux
+(thin; intelligence lives in doctor); it builds the dashboard with the required
+`nodejs-wheel-binaries` runtime (compatible system Node.js fallback), and only
+`--headless` may intentionally omit it. nvidia-ml-py is a HARD Linux
 dependency: nothing optional may be load-bearing.
 
 ### Inference engines
