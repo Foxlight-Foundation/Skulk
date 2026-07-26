@@ -9,6 +9,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Prevented a fresh node's startup download-progress scan from exhausting
+  Hugging Face API limits by fetching metadata for every shipped model card.
+  The scan now validates only models that have local files to resume or
+  recover, so a user's first selected model receives the available request
+  budget.
+
 - Realtime STT admission no longer reports a ready runner as overloaded while
   cache-miss download lifecycle state is still converging across API nodes.
 
