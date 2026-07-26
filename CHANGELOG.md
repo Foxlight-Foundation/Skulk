@@ -9,6 +9,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Routed text-only requests on native MLX-VLM models through their language
+  model instead of the multimodal outer model. This prevents Qwen3-VL text
+  chats from producing long corrupted repetition while preserving the native
+  image-generation path.
+
 - Prevented a fresh node's startup download-progress scan from exhausting
   Hugging Face API limits by fetching metadata for every shipped model card.
   The scan now validates only models that have local files to resume or

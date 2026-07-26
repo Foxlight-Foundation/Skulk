@@ -654,7 +654,15 @@ class _VlmModelWrapper(nn.Module):
             # inject image features into a decode token with no image markers.
             object.__setattr__(self, "_pixel_values", None)
             object.__setattr__(self, "_image_grid_thw", None)
-        result = cast(object, self._inner(*args, **kwargs))
+        inner = cast(object, self._inner)
+        language_model = getattr(inner, "language_model", None)
+        call_target = (
+            inner
+            if pixel_values is not None or language_model is None
+            else language_model
+        )
+        call = cast(Callable[..., object], call_target)
+        result = call(*args, **kwargs)
         if hasattr(result, "logits"):
             return cast(_HasLogits, result).logits
         return cast(mx.array, result)
