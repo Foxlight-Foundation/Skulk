@@ -28,7 +28,7 @@ async def _collect_reachable_targets(
 
 
 @pytest.mark.anyio
-async def test_check_reachable_skips_loopback_and_unspecified_addresses(
+async def test_check_reachable_skips_nonportable_remote_addresses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     self_node_id = NodeId("self")
@@ -45,6 +45,7 @@ async def test_check_reachable_skips_loopback_and_unspecified_addresses(
                 NetworkInterfaceInfo(name="lo0", ip_address="::"),
                 NetworkInterfaceInfo(name="lo0", ip_address="localhost"),
                 NetworkInterfaceInfo(name="en0", ip_address="192.168.0.117"),
+                NetworkInterfaceInfo(name="en5", ip_address="169.254.12.34"),
                 NetworkInterfaceInfo(
                     name="en7", ip_address="fe80::20:315a:c2e5:286b%en0"
                 ),
@@ -72,10 +73,10 @@ async def test_check_reachable_skips_loopback_and_unspecified_addresses(
         node_network=node_network,
     )
 
-    assert probed_targets == ["192.168.0.117", "fe80::20:315a:c2e5:286b%en0"]
+    assert probed_targets == ["192.168.0.117", "169.254.12.34"]
     assert reachable_targets == [
         ("192.168.0.117", remote_node_id),
-        ("fe80::20:315a:c2e5:286b%en0", remote_node_id),
+        ("169.254.12.34", remote_node_id),
     ]
 
 
@@ -334,6 +335,56 @@ async def test_check_reachability_no_warning_on_eventual_success(
     assert calls == 2
     assert out == {NodeId("remote"): {"203.0.113.9"}}
     assert warnings == []
+
+
+@pytest.mark.anyio
+async def test_check_reachability_logs_candidate_failure_at_debug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One failed address is a debug diagnostic, not a peer-down warning."""
+
+    debug_messages: list[str] = []
+    warnings: list[str] = []
+
+    def _record_debug(
+        message: object, *_args: object, **_kwargs: object
+    ) -> None:
+        debug_messages.append(str(message))
+
+    def _record_warning(
+        message: object, *_args: object, **_kwargs: object
+    ) -> None:
+        warnings.append(str(message))
+
+    monkeypatch.setattr(
+        net_profile.logger,
+        "debug",
+        _record_debug,
+    )
+    monkeypatch.setattr(
+        net_profile.logger,
+        "warning",
+        _record_warning,
+    )
+
+    class _DeadClient:
+        async def get(self, url: str) -> object:
+            raise httpx.ConnectError(f"dead: {url}")
+
+    out: dict[NodeId, set[str]] = {}
+    await net_profile.check_reachability(
+        "203.0.113.9",
+        NodeId("remote"),
+        out,
+        _DeadClient(),  # pyright: ignore[reportArgumentType]
+        attempts=1,
+    )
+
+    assert warnings == []
+    assert debug_messages == [
+        "address probe failed with ConnectError for "
+        "203.0.113.9 after 1 attempts"
+    ]
 
 
 @pytest.mark.anyio
