@@ -7,6 +7,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- Realtime STT admission no longer reports a ready runner as overloaded while
+  cache-miss download lifecycle state is still converging across API nodes.
+
 - Fixed fresh Apple installs returning HTTP 500 for MP3, FLAC, OGG, and Opus
   speech output because `mlx-audio` expected an external `ffmpeg` executable.
   Skulk now ships a platform encoder dependency and exposes its bundled binary

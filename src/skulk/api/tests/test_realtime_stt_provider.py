@@ -49,9 +49,13 @@ from skulk.shared.types.events import (
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import (
+    DownloadModel,
+    TaskId,
+    TaskStatus,
+)
+from skulk.shared.types.tasks import (
     RealtimeAudioTranscription as RealtimeAudioTranscriptionTask,
 )
-from skulk.shared.types.tasks import TaskId, TaskStatus
 from skulk.shared.types.telemetry import TelemetryView
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
 from skulk.shared.types.worker.runners import (
@@ -818,6 +822,32 @@ async def test_realtime_stt_admission_skips_busy_instance(
         await session.input.cancel("test complete")
         _ = [frame async for frame in session.frames]
         task_group.cancel_scope.cancel()
+
+
+def test_realtime_stt_admission_ignores_ready_instance_download_lifecycle() -> None:
+    """A stale download task must not make a ready STT runner look overloaded."""
+
+    api, _, _ = _build_api()
+    card = _realtime_card()
+    state = _local_state(card)
+    instance_id, instance = next(iter(state.instances.items()))
+    shard = next(iter(instance.shard_assignments.runner_to_shard.values()))
+    download = DownloadModel(
+        task_id=TaskId("stale-download-task"),
+        task_status=TaskStatus.Running,
+        instance_id=instance_id,
+        shard_metadata=shard,
+    )
+    api.state = state.model_copy(update={"tasks": {download.task_id: download}})
+
+    selected = api._realtime_stt_instance(
+        card.model_id,
+        call_id="new-realtime-call",
+        require_idle=True,
+    )
+
+    assert selected is not None
+    assert selected[0] == instance_id
 
 
 @pytest.mark.anyio
