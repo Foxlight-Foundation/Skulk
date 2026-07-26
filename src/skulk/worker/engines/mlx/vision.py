@@ -1287,7 +1287,13 @@ class VisionEncoder:
                     mx.array(cast(MxArrayInput, v)) for v in cast(list[object], pv_raw)
                 ]
                 return pixel_values_list, None, soft_tokens
-            return mx.array(cast(MxArrayInput, pv_raw)), None, soft_tokens
+            pixel_values = mx.array(cast(MxArrayInput, pv_raw))
+            # Gemma 4's single-image processor may omit the batch dimension.
+            # Normalize it here so prefix-cache and pipeline-prefill slicing
+            # count images rather than treating the RGB channels as images.
+            if pixel_values.ndim == 3:
+                pixel_values = pixel_values[None]
+            return pixel_values, None, soft_tokens
 
         # Standard HuggingFace processor (Qwen, SiglipImageProcessor, etc.)
         raw_dict = _object_dict(raw)

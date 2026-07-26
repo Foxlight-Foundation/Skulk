@@ -56,6 +56,62 @@ def test_processor_output_accepts_mapping_implementations() -> None:
     assert object_dict(processor_output)["pixel_values"] is pixel_values
 
 
+def test_gemma4_processor_batches_single_image_before_generation_slicing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Gemma 4 CHW output must be normalized before pipeline media slicing."""
+
+    class _FakeGemma4Processor:
+        max_soft_tokens: int | None = None
+
+        def preprocess(
+            self,
+            _messages: list[dict[str, object]],
+            *,
+            return_tensors: str,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            raise AssertionError("Gemma 4 should use the callable processor path")
+
+        def __call__(
+            self,
+            *,
+            images: list[Image.Image],
+            return_tensors: str,
+            **_kwargs: object,
+        ) -> tuple[dict[str, object], list[int]]:
+            assert len(images) == 1
+            assert return_tensors == "np"
+            return {
+                "pixel_values": np.zeros((3, 768, 768), dtype=np.float32)
+            }, [256]
+
+    def _model_path(*_args: object) -> Path:
+        return tmp_path
+
+    monkeypatch.setattr(vision_module, "build_model_path", _model_path)
+    encoder = VisionEncoder(
+        VisionCardConfig(
+            image_token_id=262144,
+            model_type="gemma4",
+            weights_repo="mlx-community/example",
+        ),
+        ModelId("mlx-community/example"),
+    )
+    vars(encoder)["_processor"] = _FakeGemma4Processor()
+    vars(encoder)["_processor_loaded"] = True
+
+    pixel_values, grid_thw, token_counts = encoder.preprocess_images(
+        [Image.new("RGB", (32, 24))]
+    )
+
+    assert not isinstance(pixel_values, list)
+    assert pixel_values.shape == (1, 3, 768, 768)
+    assert grid_thw is None
+    assert token_counts == [256]
+
+
 @pytest.mark.parametrize(
     ("model_type", "family_module_name"),
     [
