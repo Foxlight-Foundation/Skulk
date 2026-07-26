@@ -97,6 +97,41 @@ async def test_canonical_download_fails_before_transfer_without_headroom(
     assert not transfer_started
 
 
+async def test_canonical_download_stays_pending_until_transfer_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = ModelStore(tmp_path)
+    model_id = "org/queued"
+    status = StoreDownloadStatus(model_id=model_id)
+    store._active_downloads[model_id] = status
+    manifest_resolved = asyncio.Event()
+
+    async def file_list(
+        _model_id: ModelId,
+        _revision: str,
+        recursive: bool,
+    ) -> list[FileListEntry]:
+        assert recursive
+        manifest_resolved.set()
+        return [FileListEntry(type="file", path="model.gguf", size=None)]
+
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", file_list)
+    await store._download_transfer_lock.acquire()
+    download_task = asyncio.create_task(store._do_download(model_id))
+    try:
+        await asyncio.wait_for(manifest_resolved.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert status.status == "pending"
+    finally:
+        store._download_transfer_lock.release()
+        await asyncio.wait_for(download_task, timeout=1)
+
+    assert status.status == "failed"
+    assert status.error is not None
+    assert "ModelStoreCapacityError" in status.error
+
+
 def test_external_pinned_registration_writes_loadable_revision_marker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

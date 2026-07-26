@@ -895,8 +895,11 @@ class ModelStoreClient:
             timeout: Maximum time to wait WITHOUT download progress, in seconds
                 (a stall timeout, not a total cap). A download that keeps
                 advancing never times out, however large; only a genuine stall
-                does. The store host's file-body transfer is itself uncapped, so
-                a very large model can legitimately take hours.
+                after the store reports ``downloading`` does. Time reported as
+                ``pending`` is queue wait behind another serialized canonical
+                transfer and does not consume this budget. The store host's
+                file-body transfer is itself uncapped, so a very large model can
+                legitimately take hours.
             poll_interval: Seconds between status polls.
             pinned_gguf: The card's pinned GGUF file (``ModelCard.gguf_file``),
                 sent in the POST body so the store fetches that quant's shard
@@ -1018,7 +1021,14 @@ class ModelStoreClient:
                                 raise RuntimeError(
                                     f"Store download of {model_id} failed: {data.get('error', 'unknown')}"
                                 )
-                            if progress > last_progress:
+                            if status == "pending":
+                                # Canonical transfers serialize capacity
+                                # admission with all bytes. A healthy request
+                                # can therefore remain queued behind another
+                                # multi-hour model; queue time is not a stalled
+                                # transfer and must not consume the stall budget.
+                                advanced = True
+                            elif progress > last_progress:
                                 last_progress = progress
                                 advanced = True
             except RuntimeError:

@@ -796,7 +796,6 @@ class ModelStore:
         from skulk.shared.models.model_cards import ModelId
 
         status = self._active_downloads[model_id]
-        status.status = "downloading"
         revision = source_revision or "main"
         sanitized = model_id.replace("/", "--")
         if source_revision is not None:
@@ -858,6 +857,11 @@ class ModelStore:
             # never evicted automatically; an unsafe transfer fails closed.
             await self._download_transfer_lock.acquire()
             transfer_lock_acquired = True
+            # Keep the public status pending while this request is queued
+            # behind another canonical transfer. Clients deliberately exclude
+            # pending time from their no-progress stall budget; switching only
+            # after lock acquisition makes that status truthful.
+            status.status = "downloading"
             additional_bytes = await asyncio.to_thread(
                 _remaining_store_download_bytes,
                 target_dir,
