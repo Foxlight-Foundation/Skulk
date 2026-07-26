@@ -12,6 +12,9 @@ This project records release notes here and mirrors public-facing notes in
 - Realtime STT admission no longer reports a ready runner as overloaded while
   cache-miss download lifecycle state is still converging across API nodes.
 
+- Stopped unreachable per-interface IPv6 link-local probe candidates from
+  flooding normal logs with misleading peer-down warnings.
+
 - Fixed fresh Apple installs returning HTTP 500 for MP3, FLAC, OGG, and Opus
   speech output because `mlx-audio` expected an external `ffmpeg` executable.
   Skulk now ships a platform encoder dependency and exposes its bundled binary

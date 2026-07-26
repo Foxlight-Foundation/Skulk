@@ -33,7 +33,11 @@ def _should_probe_remote_ip(target_ip: str) -> bool:
 
     Remote-node probing should ignore loopback and unspecified addresses such as
     ``127.0.0.1`` or ``::1`` because they resolve back to the local node on the
-    probing machine and create misleading identity-mismatch logs.
+    probing machine and create misleading identity-mismatch logs. IPv6
+    link-local addresses are also excluded: their scope identifiers name an
+    interface on the advertising node and are not portable to a different
+    machine. IPv4 link-local addresses remain eligible because Skulk uses them
+    for directly connected Thunderbolt paths.
     """
 
     candidate = target_ip.strip()
@@ -49,7 +53,11 @@ def _should_probe_remote_ip(target_ip: str) -> bool:
     except ValueError:
         return candidate not in {"localhost"}
 
-    return not (parsed.is_loopback or parsed.is_unspecified)
+    return not (
+        parsed.is_loopback
+        or parsed.is_unspecified
+        or (parsed.version == 6 and parsed.is_link_local)
+    )
 
 
 async def check_reachability(
@@ -115,9 +123,14 @@ async def check_reachability(
 
     if remote_node_id is None:
         if last_error is not None:
-            logger.warning(
-                f"peer probe failed with {type(last_error).__name__} from "
-                f"{target_ip} after {attempts} attempts; treating as down"
+            # One peer advertises many address candidates. Failure of a single
+            # candidate says nothing about peer liveness, and the worker
+            # already backs repeatedly failing candidates off. Keep this
+            # diagnostic available at debug level without flooding ordinary
+            # operator logs with one warning per VPN/interface address.
+            logger.debug(
+                f"address probe failed with {type(last_error).__name__} for "
+                f"{target_ip} after {attempts} attempts"
             )
         return
 
