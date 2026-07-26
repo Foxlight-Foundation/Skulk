@@ -330,8 +330,9 @@ def companion_download_specs(
     """Build download shards for every companion repo a model card declares.
 
     Companions are the artifacts a model needs beyond its own repo: a
-    separate vision-weights repo, an MTP sidecar (``mtp_sidecar_repo``), or
-    a speculative-decoding assistant model (``assistant_model_repo``).
+    separate vision-weights repo, an MTP sidecar (``mtp_sidecar_repo``), a
+    speculative-decoding assistant model (``assistant_model_repo``), or a
+    served-engine draft model (``served_spec_draft_repo``).
     Every downloader path that resolves a base model MUST also ensure its
     companions — a base model present on disk without its companion is the
     "model loads, speculative decoding silently unavailable" failure mode

@@ -233,15 +233,18 @@ used idle copies.
 
 ### Pre-download capacity safety
 
-Immediately before a store-backed download, the worker ensures the filesystem
-can hold the card's remaining declared bytes while retaining 10 GiB of
-operating-system headroom. Bytes already present in the incoming model's
-resumable staging directory reduce that estimate. If necessary, Skulk evicts
-idle copies oldest-first even when they are inside the 40 GiB warm-cache
-budget.
+For each base or companion repository, the store client resolves the exact
+registered artifact set and computes only the physical bytes the staging
+transaction will add. Manifest files and partial files already present reduce
+the HTTP allocation; same-filesystem local-store hardlinks add zero file data.
+Capacity admission and transfer are serialized per node so concurrent launches
+cannot spend the same free bytes. The worker retains 10 GiB of
+operating-system headroom and, if necessary, evicts idle copies oldest-first
+even when they are inside the 40 GiB warm-cache budget.
 
-This safety pass protects live runners, active downloads, the incoming partial
-model, and its companion repositories. It also applies when
+This safety pass protects live runners, every active base-plus-companion
+transaction, the incoming partial model, and its companion repositories. It
+also applies when
 `cleanup_on_deactivate` is `false`: that setting disables lifecycle cleanup,
 not the guard that prevents a new transfer from filling the host filesystem.
 If removing every idle staged model still cannot meet the target, Skulk reports
@@ -251,7 +254,9 @@ If removing every idle staged model still cannot meet the target, Skulk reports
 > same directory as `store_path` (so it loads directly from the store without a
 > second copy), the recency budget is skipped on that node whatever the toggle
 > says. The store's canonical copies are never auto-evicted by either the
-> lifecycle or capacity path.
+> lifecycle or capacity path. New canonical downloads are themselves serialized
+> and admitted from their exact selected manifest, including resumable bytes,
+> and fail before transfer if they cannot preserve the same 10 GiB reserve.
 
 ### Deleting a model from the store
 

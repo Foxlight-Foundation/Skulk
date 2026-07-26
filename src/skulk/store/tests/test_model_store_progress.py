@@ -57,9 +57,12 @@ class _FakeStoreClient:
         staging_root: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
         source_revision: str | None = None,
+        capacity_preflight: Callable[[int], Awaitable[None]] | None = None,
     ) -> Path:
         assert source_revision is None
         assert model_id == "mlx-community/gemma-4-26b-a4b-it-4bit"
+        if capacity_preflight is not None:
+            await capacity_preflight(2048)
         assert on_progress is not None
         await on_progress(512, 2048)
         await on_progress(2048, 2048)
@@ -151,6 +154,7 @@ async def test_http_stage_uses_registered_total_for_resumed_progress(
     dest_path.mkdir()
     (dest_path / "config.json").write_bytes(b"x" * 250)
     observed: list[tuple[int, int]] = []
+    admitted_bytes: list[int] = []
     download_sizes = {
         "weights-1.safetensors": 300,
         "weights-2.safetensors": 450,
@@ -186,6 +190,9 @@ async def test_http_stage_uses_registered_total_for_resumed_progress(
     async def record_progress(downloaded: int, total: int) -> None:
         observed.append((downloaded, total))
 
+    async def record_capacity(additional_bytes: int) -> None:
+        admitted_bytes.append(additional_bytes)
+
     monkeypatch.setattr(client, "_fetch_file_list", fetch_file_list)
     monkeypatch.setattr(client, "_fetch_model_total_bytes", fetch_model_total_bytes)
     monkeypatch.setattr(client, "_download_store_file", download_store_file)
@@ -195,10 +202,12 @@ async def test_http_stage_uses_registered_total_for_resumed_progress(
         dest_path,
         record_progress,
         None,
+        record_capacity,
     )
 
     assert path == dest_path
     assert observed == [(550, 1_000), (1_000, 1_000)]
+    assert admitted_bytes == [750]
 
 
 @pytest.mark.anyio

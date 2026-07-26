@@ -1054,10 +1054,17 @@ by a crash), not-in-use staged models are kept newest-first up to the
 `staging_keep_recent_gb` grace budget (default 40 GiB) and evicted beyond
 it. Set `cleanup_on_deactivate: false` in the staging config to keep every
 staged copy while disk is healthy. Independently, before each store-backed
-download the worker may evict idle copies inside that grace budget until the
-remaining declared model bytes fit with 10 GiB of operating-system headroom.
-Live runners, active downloads, and the incoming partial model stay protected;
-an unsatisfied capacity target becomes `DownloadFailed` before transfer.
+transfer the worker may evict idle copies inside that grace budget until the
+exact additional registered artifact bytes fit with 10 GiB of
+operating-system headroom. Base and companion transfers are serialized,
+resumable manifest data is credited, and same-filesystem hardlinks count as
+zero allocation. Live runners, active model transactions, and the incoming
+partial model stay protected; an unsatisfied capacity target becomes
+`DownloadFailed` before transfer.
+
+The canonical store host applies the same exact-byte, serialized admission to
+its Hugging Face download transaction. It never evicts authoritative models;
+insufficient canonical capacity fails the store download before file transfer.
 
 ## Placement and Instance Management
 

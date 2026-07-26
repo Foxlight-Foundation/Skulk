@@ -38,8 +38,9 @@ Staging space is reclaimed at four trigger points:
 1. **Instance deactivation**: when a model instance shuts down.
 2. **Node startup**, which reconciles staged copies orphaned by a crashed
    session (a node that died never got to clean up).
-3. **Before a store-backed download**, when disk capacity must fit the
-   remaining declared model bytes plus 10 GiB of operating-system headroom.
+3. **During each store-backed staging transaction**, when disk capacity must
+   fit the exact additional registered artifact bytes plus 10 GiB of
+   operating-system headroom.
 4. **Operator tooling**: `POST /store/purge-staging` (see below).
 
 The first three use the least-recently-used policy below. The operator purge is
@@ -72,9 +73,17 @@ the staging copy every time.
 
 Before a new download, disk safety may override this grace budget. The incoming
 partial model, live runners, active downloads, and companion repositories stay
-protected; idle copies are removed oldest-first until the remaining declared
-model bytes fit with 10 GiB free after transfer. When no safe fit exists, the
-worker emits `DownloadFailed` without starting the transfer.
+protected; base and companion transfers are admitted one at a time after the
+store reports their exact registered artifact total. Resumable manifest bytes
+reduce the additional allocation and same-filesystem hardlinks count as zero.
+Idle copies are removed oldest-first until that allocation fits with 10 GiB
+free after transfer. When no safe fit exists, the worker emits
+`DownloadFailed` without starting the transfer.
+
+The canonical store is never an eviction source. Store-side Hugging Face
+downloads instead serialize exact selected-manifest admission with transfer and
+fail before writing if the authoritative volume cannot retain the same 10 GiB
+reserve.
 
 Tune it in the `staging` section of `skulk.yaml`, or per node via
 `node_overrides`:

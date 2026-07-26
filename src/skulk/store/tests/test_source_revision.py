@@ -11,6 +11,7 @@ import skulk.shared.constants as constants
 from skulk.download import download_utils
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.worker.downloads import FileListEntry
+from skulk.store import model_store as model_store_module
 from skulk.store.model_store import ModelStore, StoreDownloadStatus
 from skulk.store.model_store_client import (
     ModelStoreClient,
@@ -19,6 +20,73 @@ from skulk.store.model_store_client import (
 
 _OLD_REVISION = "0" * 40
 _NEW_REVISION = "1" * 40
+
+
+def test_canonical_capacity_counts_resumable_and_replaced_bytes(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "org--model"
+    target.mkdir()
+    (target / "complete.gguf").write_bytes(b"x" * 10)
+    (target / "replace.gguf").write_bytes(b"x" * 3)
+    (target / "resume.gguf.partial").write_bytes(b"x" * 4)
+    files = [
+        FileListEntry(type="file", path="complete.gguf", size=10),
+        FileListEntry(type="file", path="replace.gguf", size=8),
+        FileListEntry(type="file", path="resume.gguf", size=9),
+        FileListEntry(type="file", path="new.gguf", size=7),
+    ]
+
+    assert (
+        model_store_module._remaining_store_download_bytes(target, files)
+        == 5 + 5 + 7
+    )
+
+
+async def test_canonical_download_fails_before_transfer_without_headroom(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = ModelStore(tmp_path)
+    model_id = "org/model"
+    store._active_downloads[model_id] = StoreDownloadStatus(model_id=model_id)
+    transfer_started = False
+
+    async def file_list(
+        _model_id: ModelId,
+        _revision: str,
+        recursive: bool,
+    ) -> list[FileListEntry]:
+        assert recursive
+        return [FileListEntry(type="file", path="model.gguf", size=60)]
+
+    async def download_file(*_args: object, **_kwargs: object) -> Path:
+        nonlocal transfer_started
+        transfer_started = True
+        raise AssertionError("unsafe canonical transfer must not start")
+
+    class _DiskUsage:
+        free = 50
+
+    def disk_usage(_path: Path) -> _DiskUsage:
+        return _DiskUsage()
+
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", file_list)
+    monkeypatch.setattr(download_utils, "download_file_with_retry", download_file)
+    monkeypatch.setattr(model_store_module, "MINIMUM_STAGING_FREE_DISK_BYTES", 100)
+    monkeypatch.setattr(
+        model_store_module.shutil,
+        "disk_usage",
+        disk_usage,
+    )
+
+    await store._do_download(model_id)
+
+    status = store._active_downloads[model_id]
+    assert status.status == "failed"
+    assert status.error is not None
+    assert "ModelStoreCapacityError" in status.error
+    assert not transfer_started
 
 
 def test_external_pinned_registration_writes_loadable_revision_marker(
@@ -151,6 +219,7 @@ async def test_staging_replaces_files_from_another_revision(
         dest_path: Path,
         _on_progress: Callable[[int, int], Awaitable[None]] | None,
         source_revision: str | None,
+        _capacity_preflight: Callable[[int], Awaitable[None]] | None,
     ) -> Path:
         assert source_revision == _NEW_REVISION
         assert not (dest_path / "model.gguf").exists()
@@ -270,6 +339,7 @@ async def test_staging_recovers_from_corrupted_revision_marker(
         dest_path: Path,
         _on_progress: Callable[[int, int], Awaitable[None]] | None,
         _source_revision: str | None,
+        _capacity_preflight: Callable[[int], Awaitable[None]] | None,
     ) -> Path:
         (dest_path / "model.gguf").write_bytes(b"new")
         return dest_path
@@ -301,6 +371,7 @@ async def test_pinned_staging_retry_preserves_partial_files(
         dest_path: Path,
         _on_progress: Callable[[int, int], Awaitable[None]] | None,
         source_revision: str | None,
+        _capacity_preflight: Callable[[int], Awaitable[None]] | None,
     ) -> Path:
         nonlocal attempts
         attempts += 1
@@ -362,6 +433,7 @@ async def test_unpinned_staging_rejects_interrupted_pinned_cache(
         dest_path: Path,
         _on_progress: Callable[[int, int], Awaitable[None]] | None,
         source_revision: str | None,
+        _capacity_preflight: Callable[[int], Awaitable[None]] | None,
     ) -> Path:
         assert source_revision is None
         assert not (dest_path / "model.gguf").exists()

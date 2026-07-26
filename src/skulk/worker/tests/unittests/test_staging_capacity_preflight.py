@@ -1,11 +1,17 @@
-"""Worker tests for free-space staging preflight before model downloads."""
+# pyright: reportPrivateUsage=false
+"""Worker tests for exact-transfer staging capacity admission."""
 
 from pathlib import Path
 
 import pytest
 
 from skulk.routing.router import get_node_id_keypair
-from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    RuntimeCapabilityCardConfig,
+)
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import Event, IndexedEvent, NodeDownloadProgress
@@ -15,9 +21,12 @@ from skulk.shared.types.worker.downloads import DownloadCompleted, DownloadPendi
 from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.store.config import StagingNodeConfig
 from skulk.store.model_store_client import ModelStoreClient
-from skulk.store.staging_eviction import LAST_USED_MARKER_FILENAME
+from skulk.store.staging_eviction import (
+    LAST_USED_MARKER_FILENAME,
+    StagingCapacityError,
+)
 from skulk.utils.channels import Receiver, channel
-from skulk.worker.main import Worker
+from skulk.worker.main import Worker, _staging_model_ids
 
 
 def _shard(model_id: str, storage_bytes: int) -> PipelineShardMetadata:
@@ -66,6 +75,20 @@ def _worker(
     return worker, event_receiver
 
 
+def test_staging_protection_includes_separate_served_draft_repo() -> None:
+    card = _shard("org/base", storage_bytes=100).model_card.model_copy(
+        update={
+            "runtime": RuntimeCapabilityCardConfig(
+                served_spec_type="draft_simple",
+                served_spec_draft_repo="org/draft",
+                served_spec_draft_file="draft.gguf",
+            )
+        }
+    )
+
+    assert _staging_model_ids(card) == {"org/base", "org/draft"}
+
+
 @pytest.mark.asyncio
 async def test_preflight_protects_partial_incoming_and_resets_evicted_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -99,9 +122,12 @@ async def test_preflight_protects_partial_incoming_and_resets_evicted_state(
         "skulk.store.staging_eviction._filesystem_free_bytes", _free_bytes
     )
 
-    error = await worker._prepare_staging_for_download(incoming)  # pyright: ignore[reportPrivateUsage]
+    await worker.prepare_staging_transfer(
+        incoming,
+        frozenset({"org/incoming"}),
+        additional_bytes=60,
+    )
 
-    assert error is None
     assert incoming_directory.exists()
     assert not idle_directory.exists()
     reset_events = [
@@ -134,11 +160,15 @@ async def test_preflight_fails_cleanly_when_only_protected_data_remains(
         _free_bytes,
     )
 
-    error = await worker._prepare_staging_for_download(incoming)  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(StagingCapacityError) as raised:
+        await worker.prepare_staging_transfer(
+            incoming,
+            frozenset({"org/incoming"}),
+            additional_bytes=60,
+        )
 
-    assert error is not None
-    assert "need 0.0 GiB free" in error
-    assert "only 0.0 GiB is available" in error
+    assert "need 0.0 GiB free" in str(raised.value)
+    assert "only 0.0 GiB is available" in str(raised.value)
     assert incoming_directory.exists()
 
 
@@ -162,8 +192,12 @@ async def test_preflight_fails_closed_when_disk_capacity_cannot_be_read(
         _unreadable_disk,
     )
 
-    error = await worker._prepare_staging_for_download(incoming)  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(StagingCapacityError) as raised:
+        await worker.prepare_staging_transfer(
+            incoming,
+            frozenset({"org/incoming"}),
+            additional_bytes=60,
+        )
 
-    assert error is not None
-    assert "Could not verify staging disk capacity" in error
-    assert "download was not started" in error
+    assert "Could not verify staging disk capacity" in str(raised.value)
+    assert "download was not started" in str(raised.value)

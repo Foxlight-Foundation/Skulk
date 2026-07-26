@@ -10,6 +10,7 @@ ensures the declared companions, and a companion failure never fails the
 base load.
 """
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import cast
@@ -81,10 +82,13 @@ class _RecordingStoreClient:
         staging_root: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
         source_revision: str | None = None,
+        capacity_preflight: Callable[[int], Awaitable[None]] | None = None,
     ) -> Path:
         assert source_revision is None
         if model_id in self.fail_staging:
             raise RuntimeError(f"simulated staging failure for {model_id}")
+        if capacity_preflight is not None:
+            await capacity_preflight(4)
         self.staged.append(model_id)
         dest_path = staging_root / model_id.replace("/", "--")
         dest_path.mkdir(parents=True, exist_ok=True)
@@ -161,6 +165,76 @@ async def test_store_staged_base_also_stages_companion(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_capacity_callback_receives_base_and_companion_transactions(
+    tmp_path: Path,
+) -> None:
+    store = _RecordingStoreClient(available={_BASE_MODEL, _SIDECAR_REPO})
+    downloader = _downloader(store, tmp_path)
+    observed: list[tuple[str, int]] = []
+
+    async def _capacity(
+        shard: ShardMetadata,
+        protected_model_ids: frozenset[str],
+        additional_bytes: int,
+    ) -> None:
+        assert protected_model_ids == {_BASE_MODEL, _SIDECAR_REPO}
+        observed.append((str(shard.model_card.model_id), additional_bytes))
+
+    downloader.set_staging_capacity_callback(_capacity)
+
+    await downloader.ensure_shard(_shard_with_sidecar())
+
+    assert observed == [(_BASE_MODEL, 4), (_SIDECAR_REPO, 4)]
+
+
+@pytest.mark.anyio
+async def test_concurrent_staging_transfers_are_serialized(tmp_path: Path) -> None:
+    first = _shard_with_sidecar().model_copy(
+        update={
+            "model_card": _shard_with_sidecar().model_card.model_copy(
+                update={"runtime": None}
+            )
+        }
+    )
+    second_model = "mlx-community/other-test-9B-4bit"
+    second = first.model_copy(
+        update={
+            "model_card": first.model_card.model_copy(
+                update={"model_id": ModelId(second_model)}
+            )
+        }
+    )
+    store = _RecordingStoreClient(available={_BASE_MODEL, second_model})
+    downloader = _downloader(store, tmp_path)
+    active_preflights = 0
+    maximum_active_preflights = 0
+
+    async def _capacity(
+        _shard: ShardMetadata,
+        _protected_model_ids: frozenset[str],
+        _additional_bytes: int,
+    ) -> None:
+        nonlocal active_preflights, maximum_active_preflights
+        active_preflights += 1
+        maximum_active_preflights = max(
+            maximum_active_preflights,
+            active_preflights,
+        )
+        await asyncio.sleep(0.01)
+        active_preflights -= 1
+
+    downloader.set_staging_capacity_callback(_capacity)
+
+    await asyncio.gather(
+        downloader.ensure_shard(first),
+        downloader.ensure_shard(second),
+    )
+
+    assert maximum_active_preflights == 1
+    assert set(store.staged) == {_BASE_MODEL, second_model}
+
+
+@pytest.mark.anyio
 async def test_companion_failure_does_not_fail_base_load(tmp_path: Path) -> None:
     """A sidecar that cannot be fetched logs loudly but the base still loads.
 
@@ -225,6 +299,7 @@ async def test_terminal_progress_waits_for_companions(tmp_path: Path) -> None:
         staging_root: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
         source_revision: str | None = None,
+        capacity_preflight: Callable[[int], Awaitable[None]] | None = None,
     ) -> Path:
         ordering.append(f"staged:{model_id}")
         return await original_stage(
@@ -232,6 +307,7 @@ async def test_terminal_progress_waits_for_companions(tmp_path: Path) -> None:
             staging_root,
             on_progress=on_progress,
             source_revision=source_revision,
+            capacity_preflight=capacity_preflight,
         )
 
     store.stage_shard = _recording_stage

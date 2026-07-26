@@ -51,6 +51,10 @@ the host at the filesystem's hard-stop boundary.
 """
 
 
+class StagingCapacityError(RuntimeError):
+    """Raised before transfer when staging cannot preserve disk headroom."""
+
+
 class StagedModelInfo(CamelCaseModel):
     """One staged model directory, as seen by eviction and the storage API."""
 
@@ -238,6 +242,17 @@ def enforce_staging_budget(
         raise ValueError("required_free_bytes must be non-negative")
 
     report = StagingEvictionReport(required_free_bytes=required_free_bytes)
+    initial_free_bytes: int | None = None
+    if required_free_bytes:
+        initial_free_bytes = _filesystem_free_bytes(staging_root)
+        report.free_bytes_before = initial_free_bytes
+        report.free_bytes_after = initial_free_bytes
+        report.capacity_satisfied = initial_free_bytes >= required_free_bytes
+        # Capacity-only admission is the hot path before every store transfer.
+        # A healthy filesystem needs no LRU inventory or recursive size walks.
+        if report.capacity_satisfied and not enforce_recent_budget:
+            return report
+
     candidates = [
         info
         for info in list_staged_models(staging_root, in_use_model_ids)
@@ -268,8 +283,11 @@ def enforce_staging_budget(
         )
 
     if required_free_bytes:
-        report.free_bytes_before = _filesystem_free_bytes(staging_root)
-        free_bytes = report.free_bytes_before
+        free_bytes = (
+            initial_free_bytes
+            if initial_free_bytes is not None
+            else _filesystem_free_bytes(staging_root)
+        )
         for info in reversed(retained):
             if free_bytes >= required_free_bytes:
                 break

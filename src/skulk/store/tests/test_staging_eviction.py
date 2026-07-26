@@ -196,6 +196,39 @@ def test_pressure_only_pass_does_not_apply_recency_budget(
     assert (tmp_path / "org--idle").exists()
 
 
+def test_satisfied_pressure_pass_skips_staging_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Healthy capacity admission does not recursively size the warm cache."""
+
+    def _ample_free_bytes(_path: Path) -> int:
+        return 1_000
+
+    monkeypatch.setattr(
+        "skulk.store.staging_eviction._filesystem_free_bytes",
+        _ample_free_bytes,
+    )
+
+    def _unexpected_inventory(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("capacity-only healthy path must not inventory staging")
+
+    monkeypatch.setattr(
+        "skulk.store.staging_eviction.list_staged_models",
+        _unexpected_inventory,
+    )
+
+    report = enforce_staging_budget(
+        tmp_path,
+        keep_recent_bytes=0,
+        required_free_bytes=100,
+        enforce_recent_budget=False,
+    )
+
+    assert report.capacity_satisfied
+    assert report.free_bytes_before == 1_000
+    assert report.free_bytes_after == 1_000
+
+
 def test_pressure_never_evicts_protected_model_and_reports_shortfall(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

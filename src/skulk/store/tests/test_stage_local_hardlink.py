@@ -29,10 +29,19 @@ async def test_stage_local_hardlinks_on_same_filesystem(tmp_path: Path) -> None:
     store_root.mkdir()
     model_dir = _make_store_model(store_root, "org--model")
     client = ModelStoreClient("localhost", local_store_path=store_root)
+    admitted_bytes: list[int] = []
+
+    async def record_capacity(additional_bytes: int) -> None:
+        admitted_bytes.append(additional_bytes)
 
     dest = tmp_path / "staging" / "org--model"
     dest.mkdir(parents=True)
-    await client._stage_local("org/model", dest, on_progress=None)  # pyright: ignore[reportPrivateUsage]
+    await client._stage_local(  # pyright: ignore[reportPrivateUsage]
+        "org/model",
+        dest,
+        on_progress=None,
+        capacity_preflight=record_capacity,
+    )
 
     staged_weights = dest / "weights.gguf"
     staged_config = dest / "sub" / "config.json"
@@ -41,6 +50,7 @@ async def test_stage_local_hardlinks_on_same_filesystem(tmp_path: Path) -> None:
     # Same inode == hardlink == zero additional data blocks on disk.
     assert staged_weights.stat().st_ino == (model_dir / "weights.gguf").stat().st_ino
     assert staged_config.stat().st_ino == (model_dir / "sub" / "config.json").stat().st_ino
+    assert admitted_bytes == [0]
 
 
 async def test_stage_local_falls_back_to_copy_when_link_fails(
@@ -56,14 +66,24 @@ async def test_stage_local_falls_back_to_copy_when_link_fails(
         raise OSError(18, "Invalid cross-device link")
 
     monkeypatch.setattr("skulk.store.model_store_client.os.link", refuse_link)
+    admitted_bytes: list[int] = []
+
+    async def record_capacity(additional_bytes: int) -> None:
+        admitted_bytes.append(additional_bytes)
 
     dest = tmp_path / "staging" / "org--model"
     dest.mkdir(parents=True)
-    await client._stage_local("org/model", dest, on_progress=None)  # pyright: ignore[reportPrivateUsage]
+    await client._stage_local(  # pyright: ignore[reportPrivateUsage]
+        "org/model",
+        dest,
+        on_progress=None,
+        capacity_preflight=record_capacity,
+    )
 
     staged_weights = dest / "weights.gguf"
     assert staged_weights.read_bytes() == b"g" * 4096
     assert staged_weights.stat().st_ino != (model_dir / "weights.gguf").stat().st_ino
+    assert admitted_bytes == [0, 4096, 2]
 
 
 async def test_stage_local_replaces_stale_partial_destination(tmp_path: Path) -> None:

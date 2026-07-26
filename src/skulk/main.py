@@ -726,6 +726,16 @@ class Node:
                 store_client=worker_store_client,
                 staging_config=worker_staging_cfg,
             )
+            if (
+                download_coordinator is not None
+                and isinstance(
+                    download_coordinator.shard_downloader,
+                    ModelStoreDownloader,
+                )
+            ):
+                download_coordinator.shard_downloader.set_staging_capacity_callback(
+                    worker.prepare_staging_transfer
+                )
             if api is not None:
                 api.set_runner_diagnostics_provider(worker.collect_runner_diagnostics)
                 api.set_runner_cancel_provider(worker.cancel_runner_task)
@@ -1205,6 +1215,16 @@ class Node:
                                 topics.VISION_MEDIA
                             ),
                         )
+                        if (
+                            self.download_coordinator is not None
+                            and isinstance(
+                                self.download_coordinator.shard_downloader,
+                                ModelStoreDownloader,
+                            )
+                        ):
+                            self.download_coordinator.shard_downloader.set_staging_capacity_callback(
+                                self.worker.prepare_staging_transfer
+                            )
                         self._tg.start_soon(self.worker.run)
                         if self.api is not None:
                             self.api.set_runner_diagnostics_provider(
