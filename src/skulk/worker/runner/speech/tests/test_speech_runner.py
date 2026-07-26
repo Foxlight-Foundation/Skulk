@@ -127,6 +127,7 @@ def test_ensure_ffmpeg_available_prepares_private_bundled_shim(
     executable.write_text("#!/bin/sh\nexit 0\n")
     executable.chmod(0o700)
     cache_home = tmp_path / "cache"
+    (cache_home / "bin").mkdir(parents=True, mode=0o755)
     monkeypatch.setattr(speech_runner, "SKULK_CACHE_HOME", cache_home)
     monkeypatch.setattr(
         speech_runner, "_bundled_ffmpeg_executable", lambda: executable

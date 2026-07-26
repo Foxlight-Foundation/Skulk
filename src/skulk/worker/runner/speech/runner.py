@@ -315,6 +315,7 @@ def _ensure_ffmpeg_available() -> Path:
     bundled_executable = _bundled_ffmpeg_executable()
     shim_directory = SKULK_CACHE_HOME / "bin"
     shim_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    shim_directory.chmod(0o700)
     ffmpeg_shim = shim_directory / "ffmpeg"
     temporary_shim = shim_directory / f".ffmpeg-{os.getpid()}-{time.monotonic_ns()}"
     try:
