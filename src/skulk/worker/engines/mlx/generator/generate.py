@@ -59,6 +59,7 @@ from skulk.worker.engines.mlx.cache import (
     KVPrefixCache,
     encode_prompt,
     has_non_kv_caches,
+    has_recurrent_state_caches,
     is_non_kv_cache_entry,
     make_kv_cache,
     snapshot_ssm_states,
@@ -1547,15 +1548,24 @@ def _stream_generate_with_mtp(
 
     # Model-native speculative rollback (gemma4): no snapshots, no replay.
     _lm: object | None = getattr(model, "language_model", None)
-    native_rollback = cast(
+    native_rollback_candidate = cast(
         "Callable[..., None] | None",
         getattr(_lm, "rollback_speculative_cache", None) if _lm is not None else None,
     )
     # Hybrid models (e.g. Qwen3.5 GDN) carry recurrent SSM state that cannot
     # be trimmed positionally — and trim_cache without a snapshot ZEROES it.
-    # Rejects must restore a pre-verify snapshot instead (unless the model
-    # provides native rollback, which handles its own cache types).
-    mtp_has_ssm = has_non_kv_caches(prompt_cache) and not callable(native_rollback)
+    # Skulk's trunk/head verify path returns hidden states directly, not the
+    # family-specific GDN snapshots required by native Qwen3.5 rollback. Use
+    # Skulk's pre-verify snapshot only for recurrent caches. Rotating KV caches
+    # (Gemma 4) have a valid native positional rollback and must keep it to
+    # avoid copying their sliding-window buffers every speculative round.
+    mtp_has_recurrent_state = has_recurrent_state_caches(prompt_cache)
+    native_rollback = (
+        None if mtp_has_recurrent_state else native_rollback_candidate
+    )
+    needs_pre_verify_snapshot = (
+        has_non_kv_caches(prompt_cache) and not callable(native_rollback)
+    )
 
     # Deferred replay (snapshot path only): committed tokens whose cache
     # entries were lost to a reject-restore. Instead of paying a dedicated
@@ -1821,7 +1831,11 @@ def _stream_generate_with_mtp(
         # ---- their rows are discarded (they were scored last round).   ----
         chain_len = len(draft_toks)
         replay_len = len(pending_replay)
-        pre_verify_snapshot = snapshot_ssm_states(prompt_cache) if mtp_has_ssm else None
+        pre_verify_snapshot = (
+            snapshot_ssm_states(prompt_cache)
+            if needs_pre_verify_snapshot
+            else None
+        )
         verify_input = mx.array([*pending_replay, bonus, *draft_toks])
         with mx.stream(generation_stream):
             full_h = trunk_fn(verify_input[None], cache=prompt_cache)  # (1,R+K+1,H)
