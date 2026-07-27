@@ -26,6 +26,7 @@ from skulk.worker.engines.mlx.vision import (
 )
 
 mlx_generate = generate_module.mlx_generate
+resolve_mlx_temperature = generate_module.resolve_mlx_temperature
 
 
 def _mlx_generate_native_vision_fn() -> Callable[
@@ -143,6 +144,31 @@ def _always_false(**_kwargs: object) -> bool:
 
 def _version_map(package: str, *, mlx_version: str, mlx_vlm_version: str) -> str:
     return {"mlx": mlx_version, "mlx-vlm": mlx_vlm_version}[package]
+
+
+@pytest.mark.parametrize(
+    ("temperature", "has_vision", "expected"),
+    [
+        (None, True, 0.0),
+        (None, False, 0.7),
+        (0.35, True, 0.35),
+        (0.35, False, 0.35),
+    ],
+)
+def test_mlx_temperature_uses_upstream_vision_default(
+    temperature: float | None,
+    has_vision: bool,
+    expected: float,
+) -> None:
+    """Omitted VLM temperature must be greedy without changing text defaults."""
+
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/Qwen3-VL-4B-Instruct-4bit"),
+        input=[InputMessage(role="user", content="hello")],
+        temperature=temperature,
+    )
+
+    assert resolve_mlx_temperature(task, has_vision=has_vision) == expected
 
 
 def _raise_patch_embed_tokens_error(*_args: object, **_kwargs: object) -> None:
