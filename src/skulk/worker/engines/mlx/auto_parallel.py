@@ -822,6 +822,49 @@ def _slice_gemma3n_pipeline_state(
     )
 
 
+def _slice_qwen3_vl_deepstack_inputs(
+    inner_model_instance: nn.Module,
+    start_layer: int,
+    end_layer: int,
+) -> None:
+    """Align Qwen3-VL deep-stack image features with rank-local layer indices.
+
+    MLX-VLM enumerates the trunk's current ``layers`` list from zero and adds
+    ``deepstack_visual_embeds[layer_idx]`` to each matching layer. Pipeline
+    slicing also renumbers every rank's local layer list from zero, so without
+    this adapter every later rank injects the image features again into the
+    wrong global layers. The adapter slices the per-layer feature list by the
+    rank's original global range before the upstream trunk consumes it.
+    """
+    if not _is_qwen3_vl_pipeline_trunk(inner_model_instance):
+        return
+
+    inner_model_instance._skulk_deepstack_start_layer = start_layer
+    inner_model_instance._skulk_deepstack_end_layer = end_layer
+    cls = inner_model_instance.__class__
+    if getattr(cls, "_skulk_deepstack_pipeline_patched", False):
+        return
+
+    original_call = cls.__call__
+    call_signature = signature(original_call)
+
+    def patched_call(
+        self: object,
+        *args: object,
+        **kwargs: object,
+    ) -> mx.array:
+        bound = call_signature.bind_partial(self, *args, **kwargs)
+        deepstack = bound.arguments.get("deepstack_visual_embeds")
+        if deepstack is not None:
+            start = cast(int, self._skulk_deepstack_start_layer)  # type: ignore[attr-defined]
+            end = cast(int, self._skulk_deepstack_end_layer)  # type: ignore[attr-defined]
+            bound.arguments["deepstack_visual_embeds"] = deepstack[start:end]
+        return original_call(*bound.args, **bound.kwargs)  # type: ignore[misc]
+
+    cls.__call__ = patched_call
+    cls._skulk_deepstack_pipeline_patched = True  # type: ignore[attr-defined]
+
+
 def pipeline_auto_parallel(
     model: nn.Module,
     group: mx.distributed.Group,
@@ -913,6 +956,11 @@ def pipeline_auto_parallel(
             )
 
     _slice_gemma3n_pipeline_state(
+        inner_model_instance,
+        start_layer,
+        end_layer,
+    )
+    _slice_qwen3_vl_deepstack_inputs(
         inner_model_instance,
         start_layer,
         end_layer,
@@ -1263,6 +1311,14 @@ def _is_native_qwen_vlm_language_model(model: nn.Module) -> bool:
     }:
         return True
     return type(model).__name__ in {"Qwen3_5Model", "Qwen3_5MoeModel"}
+
+
+def _is_qwen3_vl_pipeline_trunk(model: nn.Module) -> bool:
+    """Return whether ``model`` owns Qwen3-VL's deep-stack language layers."""
+    return (
+        type(model).__module__.startswith("mlx_vlm.models.qwen3_vl.language")
+        and type(model).__name__ == "Qwen3VLModel"
+    )
 
 
 class TensorParallelShardingStrategy(ABC):
