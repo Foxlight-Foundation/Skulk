@@ -631,6 +631,24 @@ class _VlmModelWrapper(nn.Module):
         layers = cast(Model, inner).layers
         return [KVCache() for _ in layers]
 
+    def tensor_parallel_target(self) -> nn.Module:
+        """Return the nested language model whose weights tensor sharding owns.
+
+        The wrapper itself owns generation compatibility and the native VLM
+        owns the vision tower, but tensor parallelism shards only the language
+        trunk. Keeping those roles separate also ensures the distributed
+        generation synchronization patch continues to observe plain logits
+        rather than an upstream ``LanguageModelOutput``.
+        """
+        inner = cast(object, self._inner)
+        language_model = getattr(inner, "language_model", None)
+        if not isinstance(language_model, nn.Module):
+            raise ValueError(
+                "Native vision model does not expose a tensor-shardable "
+                "language model"
+            )
+        return language_model
+
     def __call__(self, *args: object, **kwargs: object) -> mx.array:
         pixel_values = cast(
             mx.array | list[mx.array] | None,
@@ -1123,8 +1141,19 @@ def shard_and_load(
     match shard_metadata:
         case TensorShardMetadata():
             logger.info(f"loading model from {model_path} with tensor parallelism")
+            generation_model = model
+            sharding_model = (
+                model.tensor_parallel_target()
+                if isinstance(model, _VlmModelWrapper)
+                else model
+            )
             model = tensor_auto_parallel(
-                model, group, timeout_seconds, on_timeout, on_layer_loaded
+                sharding_model,
+                group,
+                timeout_seconds,
+                on_timeout,
+                on_layer_loaded,
+                generation_model=generation_model,
             )
         case PipelineShardMetadata():
             logger.info(f"loading model from {model_path} with pipeline parallelism")
