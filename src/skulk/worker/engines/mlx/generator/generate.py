@@ -1046,7 +1046,7 @@ def prefill(
                     f"stream_generate prefill rank={rank} group_size={group_size}"
                 ),
             ):
-                for _ in stream_generate(
+                for prefill_response in stream_generate(
                     model=model,
                     tokenizer=tokenizer,
                     prompt=prompt_tokens,
@@ -1059,7 +1059,8 @@ def prefill(
                     prompt_progress_callback=progress_callback,
                 ):
                     logger.info(
-                        f"Prefill stream_generate yielded first token (rank={rank})"
+                        "Prefill stream_generate yielded first token "
+                        f"(rank={rank}, token={getattr(prefill_response, 'token', '<unknown>')})"
                     )
                     break  # Stop after first iteration - cache is now filled
     except PrefillCancelled:
@@ -1198,6 +1199,11 @@ def _stream_generate_without_lookahead(
         last_token = int(sampled.item())
         last_logprobs = logprobs.squeeze(0)
         generated_count = token_index + 1
+        if token_index == 0:
+            logger.info(
+                "Sequential decode selected first token "
+                f"(rank={0 if group is None else group.rank()}, token={last_token})"
+            )
 
         if last_token in eos_token_ids:
             finish_reason = "stop"
