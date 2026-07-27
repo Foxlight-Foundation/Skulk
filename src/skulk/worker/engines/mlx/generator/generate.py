@@ -2281,6 +2281,22 @@ def extract_top_logprobs(
     return selected_logprob, top_logprob_items
 
 
+def _reset_native_vision_position_state(model: Model) -> None:
+    """Clear request-local multimodal RoPE state retained by upstream models.
+
+    Qwen VLM language models cache position IDs and RoPE deltas on the model
+    object. Skulk's text-only startup warmup populates those fields before the
+    first user request, while MLX-VLM's direct generation path starts from a
+    fresh model. Clear the cache at each native multimodal request boundary so
+    image generation cannot inherit text or prior-image coordinates.
+    """
+
+    language_model = getattr(model, "language_model", model)
+    for attribute_name in ("_position_ids", "_rope_deltas"):
+        if hasattr(language_model, attribute_name):
+            object.__setattr__(language_model, attribute_name, None)
+
+
 def _mlx_generate_native_vision(
     model: Model,
     tokenizer: TokenizerWrapper,
@@ -2351,6 +2367,7 @@ def _mlx_generate_native_vision(
 
     logger.info(f"Native decode context: {decode_context}")
     logger.info("Starting native mlx-vlm multimodal decode")
+    _reset_native_vision_position_state(model)
     with (
         runner_phase(
             "decode_barrier",
@@ -2878,6 +2895,7 @@ def mlx_generate(
             "Using pipeline-aware native vision generation path on fixed "
             "mlx/mlx-vlm stack"
         )
+        _reset_native_vision_position_state(model)
         record_runner_phase(
             "vision_preprocess",
             event="pipeline_native_vision_path_selected",
