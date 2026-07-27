@@ -3193,9 +3193,11 @@ class API:
                     finish_reason=finish_reason,
                 )
             ],
-            # Redact internal runner attribution (#596): the envelope-tap-only
-            # serving node / backend / in-flight fields are not client output.
-            generation_stats=stats.redacted_for_client() if stats else None,
+            # The explicit benchmark surface exposes only non-identifying
+            # batching truth; node and backend attribution remain private.
+            generation_stats=(
+                stats.redacted_for_benchmark_client() if stats else None
+            ),
             power_usage=sampler.result(),
         )
 
