@@ -85,7 +85,10 @@ def summarize_command_for_log(command: command_types.Command) -> str:
             f"model={params.model!r}, "
             f"input_sample_rate={params.input_sample_rate})"
         )
-    return repr(command)
+    return (
+        f"{command.__class__.__name__}("
+        f"command_id={command.command_id!r})"
+    )
 
 
 def summarize_task_for_log(task: task_types.Task) -> str:
@@ -221,4 +224,9 @@ def summarize_task_for_log(task: task_types.Task) -> str:
             f"model={params.model!r}, "
             f"input_sample_rate={params.input_sample_rate})"
         )
-    return repr(task)
+    return (
+        f"{task.__class__.__name__}("
+        f"task_id={task.task_id!r}, "
+        f"instance_id={task.instance_id!r}, "
+        f"task_status={task.task_status!r})"
+    )

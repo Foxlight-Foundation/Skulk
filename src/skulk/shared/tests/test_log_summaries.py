@@ -9,6 +9,7 @@ from skulk.shared.types.audio import (
     AudioTranscriptionTaskParams,
     SpeechSynthesisTaskParams,
 )
+from skulk.shared.types.chunks import AudioInputChunk
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
@@ -75,6 +76,18 @@ def test_serving_log_summaries_exclude_user_payloads() -> None:
             command_id=CommandId("transcription-command"),
             task_params=transcription_params,
         ),
+        command_types.SendInputChunk(
+            command_id=CommandId("chunk-command"),
+            chunk=AudioInputChunk(
+                model=ModelId("stt-model"),
+                command_id=CommandId("transcription-command"),
+                data="FALLBACK_AUDIO_PAYLOAD_SENTINEL",
+                chunk_index=0,
+                total_chunks=1,
+                filename="FALLBACK_FILENAME_SENTINEL",
+                audio_sha256="c" * 64,
+            ),
+        ),
     ]
     tasks: list[task_types.Task] = [
         task_types.TextGeneration(
@@ -133,6 +146,8 @@ def test_serving_log_summaries_exclude_user_payloads() -> None:
         "TRANSCRIPTION_AUDIO_SENTINEL",
         "TRANSCRIPTION_PROMPT_SENTINEL",
         "TRANSCRIPTION_CONTEXT_SENTINEL",
+        "FALLBACK_AUDIO_PAYLOAD_SENTINEL",
+        "FALLBACK_FILENAME_SENTINEL",
     ):
         assert sentinel not in joined
 
@@ -141,3 +156,4 @@ def test_serving_log_summaries_exclude_user_payloads() -> None:
     assert "input_texts=1" in joined
     assert "reference_audio_bytes=24" in joined
     assert "audio_payload_chars=28" in joined
+    assert "SendInputChunk(command_id='chunk-command')" in joined
