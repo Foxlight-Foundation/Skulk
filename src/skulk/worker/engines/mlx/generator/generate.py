@@ -284,6 +284,20 @@ def _should_use_native_vision_reference_path() -> bool:
     )
 
 
+def _native_vision_model_requires_reference_path(model: Model) -> bool:
+    """Return whether a model needs family-aware native-vision prefill.
+
+    Qwen3-VL's distributed generic ``mlx_lm`` prefill produces different
+    logits from MLX-VLM's reference embedding path even on the fixed upstream
+    stack. Keep this family on the reference path for correctness while other
+    native VLMs retain Skulk's optimized distributed pipeline.
+    """
+
+    config = getattr(model, "config", None)
+    model_type = cast(str | None, getattr(config, "model_type", None))
+    return model_type == "qwen3_vl"
+
+
 def _native_pixel_values_debug_state(
     pixel_values: mx.array | list[mx.array] | None,
 ) -> str:
@@ -2849,6 +2863,7 @@ def mlx_generate(
             group is None
             or group.size() <= 1
             or _should_use_native_vision_reference_path()
+            or _native_vision_model_requires_reference_path(model)
         ):
             if kv_prefix_cache is not None:
                 logger.info(

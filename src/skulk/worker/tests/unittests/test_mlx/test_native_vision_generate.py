@@ -47,6 +47,14 @@ def _should_use_native_vision_reference_path_fn() -> Callable[[], bool]:
     )
 
 
+def _native_vision_model_requires_reference_path_fn() -> Callable[[Model], bool]:
+    module_dict = cast(dict[str, object], generate_module.__dict__)
+    return cast(
+        Callable[[Model], bool],
+        module_dict["_native_vision_model_requires_reference_path"],
+    )
+
+
 def _slice_native_pixel_values_fn() -> Callable[
     [mx.array | list[mx.array], list[MediaRegion], int],
     mx.array | list[mx.array] | None,
@@ -942,6 +950,33 @@ def test_native_vision_reference_path_keeps_prereleases_on_safe_path(
     )
 
     assert _should_use_native_vision_reference_path_fn()() is True
+
+
+@pytest.mark.parametrize(
+    ("model_type", "expected"),
+    [
+        ("qwen3_vl", True),
+        ("gemma4", False),
+        (None, False),
+    ],
+)
+def test_qwen3_vl_requires_family_aware_reference_path(
+    model_type: str | None,
+    expected: bool,
+) -> None:
+    """Only Qwen3-VL bypasses generic distributed native-vision prefill."""
+
+    class _Config:
+        def __init__(self, configured_model_type: str | None) -> None:
+            self.model_type = configured_model_type
+
+    class _Model:
+        def __init__(self, configured_model_type: str | None) -> None:
+            self.config = _Config(configured_model_type)
+
+    model = cast(Model, cast(object, _Model(model_type)))
+
+    assert _native_vision_model_requires_reference_path_fn()(model) is expected
 
 
 def test_slice_native_pixel_values_for_uncached_suffix_drops_cached_images() -> None:
