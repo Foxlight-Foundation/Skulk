@@ -115,6 +115,7 @@ class ServedConcurrentDispatch:
         self._status_lock = threading.Lock()
         self._cancel_lock = threading.Lock()
         self._inflight: int = 0
+        self._dispatch_waiters: int = 0
         self._dispatch_permits = threading.Semaphore(max_concurrency)
         # In-flight count captured at each task's ADMISSION, on the single
         # dispatch-loop thread (#596). Sampling in the worker thread instead would
@@ -202,10 +203,33 @@ class ServedConcurrentDispatch:
                             # runner never accumulates an unbounded backlog. Wake
                             # periodically while saturated so a dead server is still
                             # caught by the liveness check.
-                            while not self._dispatch_permits.acquire(
-                                timeout=_LIVENESS_POLL_S
-                            ):
-                                self._ensure_server_alive()
+                            self._clear_stale_cancel_all_if_idle()
+                            self._note_dispatch_waiter_started()
+                            permit_acquired = False
+                            cancelled_while_waiting = False
+                            try:
+                                while not permit_acquired:
+                                    permit_acquired = self._dispatch_permits.acquire(
+                                        timeout=_LIVENESS_POLL_S
+                                    )
+                                    if permit_acquired:
+                                        break
+                                    self._ensure_server_alive()
+                                    if self._is_cancelled(task.task_id):
+                                        cancelled_while_waiting = True
+                                        break
+                                if (
+                                    not cancelled_while_waiting
+                                    and self._is_cancelled(task.task_id)
+                                ):
+                                    cancelled_while_waiting = True
+                            finally:
+                                self._note_dispatch_waiter_finished()
+                            if cancelled_while_waiting:
+                                if permit_acquired:
+                                    self._dispatch_permits.release()
+                                self.send_task_status(task, TaskStatus.Cancelled)
+                                continue
                             self._dispatch_generation(task, pool)
                         case Shutdown():
                             self._handle_shutdown(task, pool)
@@ -239,11 +263,6 @@ class ServedConcurrentDispatch:
         self, task: TextGeneration, pool: ThreadPoolExecutor
     ) -> None:
         """Admit a generation and run it on the pool without blocking the loop."""
-        # Recover from a stale cluster-wide cancel: with nothing in flight, a
-        # lingering CANCEL_ALL must not kill this fresh request.
-        if self._inflight_count() == 0:
-            with self._cancel_lock:
-                self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
         self.send_task_status(task, TaskStatus.Running)
         # Capture the admission concurrency atomically with the increment (#596):
         # _note_generation_started returns the post-increment count from inside
@@ -319,7 +338,7 @@ class ServedConcurrentDispatch:
             # flight can't linger and spuriously cancel a later request. Not under
             # _status_lock (lock ordering); skipped during shutdown, which sets
             # CANCEL_ALL deliberately to break the draining streams.
-            if drained_to_idle:
+            if drained_to_idle and not self._has_dispatch_waiters():
                 with self._cancel_lock:
                     if not isinstance(
                         self.current_status, (RunnerShuttingDown, RunnerShutdown)
@@ -354,6 +373,31 @@ class ServedConcurrentDispatch:
     def _inflight_count(self) -> int:
         with self._status_lock:
             return self._inflight
+
+    def _note_dispatch_waiter_started(self) -> None:
+        """Record that an accepted generation is waiting for a dispatch permit."""
+        with self._status_lock:
+            self._dispatch_waiters += 1
+
+    def _note_dispatch_waiter_finished(self) -> None:
+        """Drop the count of accepted generations waiting for a dispatch permit."""
+        with self._status_lock:
+            self._dispatch_waiters = max(0, self._dispatch_waiters - 1)
+
+    def _has_dispatch_waiters(self) -> bool:
+        """Whether any acknowledged generation is blocked behind backpressure."""
+        with self._status_lock:
+            return self._dispatch_waiters > 0
+
+    def _clear_stale_cancel_all_if_idle(self) -> None:
+        """Drop old cancel-all markers before accepting fresh idle work.
+
+        A cancel-all that arrives while another acknowledged task is waiting is
+        still live and must not be cleared by the generation that drains first.
+        """
+        if self._inflight_count() == 0 and not self._has_dispatch_waiters():
+            with self._cancel_lock:
+                self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
 
     def _admission_concurrency(self, task_id: TaskId) -> int:
         """In-flight count captured when ``task_id`` was admitted (#596).

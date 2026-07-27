@@ -861,6 +861,9 @@ class Runner(ServedConcurrentDispatch):
         # which is precisely the ground truth the envelopes need from a serial
         # engine, along with the serving node/backend stamp (#692).
         admission_in_flight = self._admission_concurrency(task.task_id)
+        if self._is_cancelled(task.task_id):
+            logger.info(f"llama.cpp generation skipped (cancelled): {task.task_id}")
+            return
 
         model_id = self.shard_metadata.model_card.model_id
         command_id = task.command_id

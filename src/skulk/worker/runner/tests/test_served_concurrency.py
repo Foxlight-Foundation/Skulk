@@ -156,6 +156,15 @@ def _wait_inflight(host: _FakeHost, target: int, timeout: float = 5.0) -> None:
         time.sleep(0.02)
 
 
+def _wait_dispatch_waiters(
+    host: _FakeHost, target: int, timeout: float = 5.0
+) -> None:
+    """Poll accepted-but-not-dispatched generations to a target."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and host._dispatch_waiters != target:
+        time.sleep(0.02)
+
+
 def test_dispatch_runs_generations_concurrently() -> None:
     host = _FakeHost(max_concurrency=4)
     _load_ready(host)
@@ -297,6 +306,44 @@ def test_cancel_marks_cancelled() -> None:
         host.generate_gate.set()
         host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
         t.join(timeout=5)
+
+
+def test_cancel_all_marks_waiting_generation_cancelled_without_dispatch() -> None:
+    """A cancel-all during backpressure must not be cleared by the running task."""
+    host = _FakeHost(max_concurrency=1)
+    _load_ready(host)
+    host.generate_gate = threading.Event()
+    t = host.start()
+    first = _gen()
+    waiting = _gen()
+    try:
+        host.send(first)
+        assert host.started.acquire(timeout=10)
+        host.send(waiting)
+        _wait_dispatch_waiters(host, 1)
+        assert host._dispatch_waiters == 1
+
+        host._cancel_sender.send(CANCEL_ALL_TASKS)
+        host.generate_gate.set()
+        host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+        t.join(timeout=10)
+
+        assert not t.is_alive()
+        assert not host.started.acquire(timeout=0.5), (
+            "waiting generation entered the engine after cancel-all"
+        )
+        with host._events_lock:
+            waiting_statuses = [
+                e.task_status
+                for e in host.events
+                if isinstance(e, TaskStatusUpdated) and e.task_id == waiting.task_id
+            ]
+        assert waiting_statuses[-1] is TaskStatus.Cancelled
+    finally:
+        host.generate_gate.set()
+        if t.is_alive():
+            host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+            t.join(timeout=5)
 
 
 def test_stale_cancel_all_cleared_on_drain() -> None:
