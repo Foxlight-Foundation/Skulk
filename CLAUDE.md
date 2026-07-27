@@ -153,7 +153,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
   `torchvision`; macOS still installs pinned `torchvision` for supported families
   that require Transformers' `AutoImageProcessor` fallback. Vision
   processor/preprocessing failures are terminal rather than falling back to
-  text-only generation.
+  text-only generation. Vision-capable instances use request-aware dual-mode
+  scheduling: text-only cohorts use `BatchGenerator`, image-bearing requests
+  use `SequentialGenerator`, and the two paths are mutually exclusive with
+  FIFO mode boundaries. Terminal generation provenance is task-local.
 - **`mlx_audio`**: single-node speech backend vocabulary for upstream
   `mlx-audio` TTS/STT models. Skulk probes and advertises `mlx_audio` /
   `mlx_audio-metal` when `mlx_audio` imports on macOS. Mounted TTS models serve
