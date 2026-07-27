@@ -1031,7 +1031,12 @@ def _is_native_qwen_vlm_language_model(model: nn.Module) -> bool:
     if not module_name.startswith("mlx_vlm.models.qwen3_5"):
         return False
     model_type = getattr(model, "model_type", None)
-    return model_type in {"qwen3_5", "qwen3_5_moe"}
+    return model_type in {
+        "qwen3_5",
+        "qwen3_5_text",
+        "qwen3_5_moe",
+        "qwen3_5_moe_text",
+    }
 
 
 class TensorParallelShardingStrategy(ABC):

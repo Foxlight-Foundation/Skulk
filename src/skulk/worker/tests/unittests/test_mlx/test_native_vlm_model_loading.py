@@ -60,7 +60,7 @@ class _NativeQwenLanguageModel(nn.Module):
     """Minimal model carrying MLX-VLM's runtime identity and model type."""
 
     __module__ = "mlx_vlm.models.qwen3_5.language"
-    model_type = "qwen3_5"
+    model_type = "qwen3_5_text"
 
 
 class _VlmWithTensorLanguage(nn.Module):
