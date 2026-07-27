@@ -26,6 +26,7 @@ from skulk.worker.engines.mlx.vision import (
 )
 
 mlx_generate = generate_module.mlx_generate
+resolve_mlx_temperature = generate_module.resolve_mlx_temperature
 
 
 def _mlx_generate_native_vision_fn() -> Callable[
@@ -125,8 +126,8 @@ class _FakeGroup:
         return self._size
 
 
-def _fake_group() -> mx.distributed.Group:
-    return cast(mx.distributed.Group, cast(object, _FakeGroup()))
+def _fake_group(*, size: int = 3) -> mx.distributed.Group:
+    return cast(mx.distributed.Group, cast(object, _FakeGroup(size=size)))
 
 
 def _noop_barrier(_group: object) -> None:
@@ -143,6 +144,31 @@ def _always_false(**_kwargs: object) -> bool:
 
 def _version_map(package: str, *, mlx_version: str, mlx_vlm_version: str) -> str:
     return {"mlx": mlx_version, "mlx-vlm": mlx_vlm_version}[package]
+
+
+@pytest.mark.parametrize(
+    ("temperature", "has_vision", "expected"),
+    [
+        (None, True, 0.0),
+        (None, False, 0.7),
+        (0.35, True, 0.35),
+        (0.35, False, 0.35),
+    ],
+)
+def test_mlx_temperature_uses_upstream_vision_default(
+    temperature: float | None,
+    has_vision: bool,
+    expected: float,
+) -> None:
+    """Omitted VLM temperature must be greedy without changing text defaults."""
+
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/Qwen3-VL-4B-Instruct-4bit"),
+        input=[InputMessage(role="user", content="hello")],
+        temperature=temperature,
+    )
+
+    assert resolve_mlx_temperature(task, has_vision=has_vision) == expected
 
 
 def _raise_patch_embed_tokens_error(*_args: object, **_kwargs: object) -> None:
@@ -212,10 +238,20 @@ def test_native_vision_generation_uses_mlx_vlm_generate_step(
     assert responses[-1].usage.completion_tokens == 2
 
 
-def test_mlx_generate_routes_native_vision_through_reference_path(
+@pytest.mark.parametrize(
+    ("group", "reference_path_enabled"),
+    [
+        (None, False),
+        (_fake_group(size=1), False),
+        (_fake_group(size=3), True),
+    ],
+)
+def test_mlx_generate_routes_eligible_native_vision_through_reference_path(
     monkeypatch: pytest.MonkeyPatch,
+    group: mx.distributed.Group | None,
+    reference_path_enabled: bool,
 ) -> None:
-    """``mlx_generate`` should bypass generic text generation for native vision."""
+    """Single-rank and compatibility-gated VLMs must use reference generation."""
 
     vision = VisionResult(
         prompt="ignored",
@@ -240,7 +276,7 @@ def test_mlx_generate_routes_native_vision_through_reference_path(
     )
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.generator.generate._should_use_native_vision_reference_path",
-        cast(Callable[[], bool], lambda: True),
+        lambda: reference_path_enabled,
     )
     monkeypatch.setattr(
         "skulk.worker.engines.mlx.generator.generate._mlx_generate_native_vision",
@@ -279,7 +315,7 @@ def test_mlx_generate_routes_native_vision_through_reference_path(
             task=task,
             prompt="<bos>",
             kv_prefix_cache=None,
-            group=None,
+            group=group,
             vision_processor=_fake_vision_processor(),
         )
     )

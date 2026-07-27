@@ -42,6 +42,7 @@ from skulk.worker.engines.mlx.generator.generate import (
     extract_top_logprobs,
     patch_embed_tokens,
     prefill,
+    resolve_mlx_temperature,
     set_native_vision_inputs,
     slice_native_pixel_values_for_uncached_suffix,
 )
@@ -278,9 +279,10 @@ class SkulkBatchGenerator:
         mx.random.seed(seed)
 
         sampler = make_sampler(
-            temp=task_params.temperature
-            if task_params.temperature is not None
-            else 0.7,
+            temp=resolve_mlx_temperature(
+                task_params,
+                has_vision=vision is not None,
+            ),
             top_p=task_params.top_p if task_params.top_p is not None else 1.0,
             min_p=task_params.min_p if task_params.min_p is not None else 0.05,
             top_k=task_params.top_k if task_params.top_k is not None else 0,

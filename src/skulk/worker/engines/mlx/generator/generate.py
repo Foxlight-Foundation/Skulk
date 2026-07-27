@@ -2216,6 +2216,22 @@ def eos_ids_from_tokenizer(tokenizer: TokenizerWrapper) -> list[int]:
     return eos
 
 
+def resolve_mlx_temperature(
+    task: TextGenerationTaskParams, *, has_vision: bool
+) -> float:
+    """Resolve the request temperature against the appropriate engine default.
+
+    Explicit client values always win. Multimodal requests otherwise follow
+    mlx-vlm's greedy default because small native VLMs can sample the requested
+    output schema instead of the image content at the generic text default.
+    Text-only MLX requests retain Skulk's established 0.7 default.
+    """
+
+    if task.temperature is not None:
+        return task.temperature
+    return 0.0 if has_vision else 0.7
+
+
 def extract_top_logprobs(
     logprobs: mx.array,
     tokenizer: TokenizerWrapper,
@@ -2788,8 +2804,12 @@ def mlx_generate(
         eos_ids = eos_ids_from_tokenizer(tokenizer)
         logits_processors = [ban_token_ids(eos_ids)] + logits_processors
 
+    effective_temperature = resolve_mlx_temperature(
+        task,
+        has_vision=vision is not None,
+    )
     sampler = make_sampler(
-        temp=task.temperature if task.temperature is not None else 0.7,
+        temp=effective_temperature,
         top_p=task.top_p if task.top_p is not None else 1.0,
         min_p=task.min_p if task.min_p is not None else 0.05,
         top_k=task.top_k if task.top_k is not None else 0,
@@ -2804,7 +2824,15 @@ def mlx_generate(
     max_stop_len = max((len(s) for s in stop_sequences), default=0)
 
     if vision is not None and vision.pixel_values is not None:
-        if group is None or _should_use_native_vision_reference_path():
+        # A one-rank placement still receives an MLX distributed group, but it
+        # has no pipeline peers to serve. Keep it on mlx-vlm's family-aware
+        # reference path; the generic pipeline path can produce valid-looking
+        # yet incorrect tokens for native Qwen vision models.
+        if (
+            group is None
+            or group.size() <= 1
+            or _should_use_native_vision_reference_path()
+        ):
             if kv_prefix_cache is not None:
                 logger.info(
                     "Disabling KV prefix cache for native vision generation to follow "
@@ -3089,7 +3117,7 @@ def mlx_generate(
     # arbitrary samplers, so the params below must stay in lockstep with
     # the make_sampler call above.
     _mtp_sampling = SamplingParams(
-        temperature=task.temperature if task.temperature is not None else 0.7,
+        temperature=effective_temperature,
         top_p=task.top_p if task.top_p is not None else 1.0,
         min_p=task.min_p if task.min_p is not None else 0.05,
         top_k=task.top_k if task.top_k is not None else 0,
