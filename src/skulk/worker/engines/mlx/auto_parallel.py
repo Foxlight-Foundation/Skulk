@@ -612,6 +612,216 @@ class _Gemma4ArgsLike(Protocol):
     num_kv_shared_layers: int
 
 
+class _Gemma3nConfigLike(Protocol):
+    """Configuration fields that must become rank-local after pipeline slicing."""
+
+    model_type: str
+    layer_types: list[str]
+    num_hidden_layers: int
+    num_kv_shared_layers: int
+    hidden_size_per_layer_input: int
+
+
+class _Gemma3nTrunkLike(Protocol):
+    """Gemma 3n trunk state coupled to full-model layer numbering."""
+
+    config: _Gemma3nConfigLike
+    layer_idx_to_cache_idx: list[int]
+    first_kv_shared_layer_idx: int
+    first_full_idx: int
+    first_sliding_idx: int
+    num_hidden_layers: int
+    embed_tokens_per_layer: nn.Module
+    per_layer_model_projection: nn.Module
+
+
+class _EmbeddingParameters(Protocol):
+    """Mutable feature-axis parameters shared by MLX embedding variants."""
+
+    weight: mx.array
+    dims: int
+
+
+class _QuantizedEmbeddingParameters(_EmbeddingParameters, Protocol):
+    """Mutable quantization metadata for an MLX quantized embedding."""
+
+    scales: mx.array
+    biases: mx.array | None
+
+
+class _LinearParameters(Protocol):
+    """Mutable output-axis parameters shared by MLX linear variants."""
+
+    weight: mx.array
+    bias: mx.array
+
+
+class _QuantizedLinearParameters(_LinearParameters, Protocol):
+    """Mutable quantization metadata for an MLX quantized linear layer."""
+
+    scales: mx.array
+    biases: mx.array | None
+
+
+def _slice_embedding_features(
+    module: nn.Module,
+    start_feature: int,
+    end_feature: int,
+    total_features: int,
+) -> None:
+    """Retain one contiguous output-feature range in an embedding module."""
+    if isinstance(module, nn.QuantizedEmbedding):
+        quantized = cast(_QuantizedEmbeddingParameters, cast(object, module))
+        packed_width = int(quantized.weight.shape[1])
+        scale_width = int(quantized.scales.shape[1])
+        packed_start = start_feature * packed_width // total_features
+        packed_end = end_feature * packed_width // total_features
+        scale_start = start_feature * scale_width // total_features
+        scale_end = end_feature * scale_width // total_features
+        quantized.weight = quantized.weight[:, packed_start:packed_end]
+        quantized.scales = quantized.scales[:, scale_start:scale_end]
+        if quantized.biases is not None:
+            quantized.biases = quantized.biases[:, scale_start:scale_end]
+        quantized.dims = end_feature - start_feature
+        return
+
+    if isinstance(module, nn.Embedding):
+        embedding = cast(_EmbeddingParameters, cast(object, module))
+        embedding.weight = embedding.weight[:, start_feature:end_feature]
+        embedding.dims = end_feature - start_feature
+        return
+
+    raise TypeError(
+        "Gemma 3n per-layer embedding must be an MLX Embedding or "
+        f"QuantizedEmbedding, got {type(module).__name__}"
+    )
+
+
+def _slice_linear_outputs(
+    module: nn.Module,
+    start_feature: int,
+    end_feature: int,
+) -> None:
+    """Retain one contiguous output-feature range in a linear module."""
+    if isinstance(module, nn.QuantizedLinear):
+        quantized = cast(_QuantizedLinearParameters, cast(object, module))
+        quantized.weight = quantized.weight[start_feature:end_feature]
+        quantized.scales = quantized.scales[start_feature:end_feature]
+        if quantized.biases is not None:
+            quantized.biases = quantized.biases[start_feature:end_feature]
+        if "bias" in module:
+            quantized.bias = quantized.bias[start_feature:end_feature]
+        return
+
+    if isinstance(module, nn.Linear):
+        linear = cast(_LinearParameters, cast(object, module))
+        linear.weight = linear.weight[start_feature:end_feature]
+        if "bias" in module:
+            linear.bias = linear.bias[start_feature:end_feature]
+        return
+
+    raise TypeError(
+        "Gemma 3n per-layer projection must be an MLX Linear or "
+        f"QuantizedLinear, got {type(module).__name__}"
+    )
+
+
+def _slice_gemma3n_pipeline_state(
+    inner_model_instance: nn.Module,
+    start_layer: int,
+    end_layer: int,
+) -> None:
+    """Convert Gemma 3n's full-model cache and per-layer inputs to rank-local state.
+
+    Gemma 3n's final layers reuse K/V produced by the last concrete sliding and
+    full-attention layers. Its two per-layer input projections also concatenate
+    one feature block per original layer. Pipeline ranks therefore cannot merely
+    replace ``layers``: every dependent index and projection must be sliced in
+    the same coordinate system or the first shared layer reads an empty cache.
+    """
+    config_source = getattr(inner_model_instance, "config", None)
+    if getattr(config_source, "model_type", None) != "gemma3n_text":
+        return
+    if not all(
+        hasattr(inner_model_instance, name)
+        for name in (
+            "layer_idx_to_cache_idx",
+            "first_kv_shared_layer_idx",
+            "embed_tokens_per_layer",
+            "per_layer_model_projection",
+        )
+    ):
+        raise ValueError(
+            "Gemma 3n pipeline trunk is missing cache or per-layer input metadata"
+        )
+
+    trunk = cast(_Gemma3nTrunkLike, cast(object, inner_model_instance))
+    config = trunk.config
+    full_layer_types = list(config.layer_types)
+    full_cache_indices = list(trunk.layer_idx_to_cache_idx)
+    if len(full_layer_types) != len(full_cache_indices):
+        raise ValueError(
+            "Gemma 3n layer type and cache dependency metadata have different lengths"
+        )
+
+    shard_cache_indices = full_cache_indices[start_layer:end_layer]
+    external_dependencies = sorted(
+        {
+            cache_index
+            for cache_index in shard_cache_indices
+            if cache_index < start_layer or cache_index >= end_layer
+        }
+    )
+    if external_dependencies:
+        raise ValueError(
+            "Gemma 3n pipeline slice crosses a shared-KV dependency: "
+            f"slice=[{start_layer}, {end_layer}), "
+            f"external_cache_layers={external_dependencies}"
+        )
+
+    local_layer_types = full_layer_types[start_layer:end_layer]
+    local_layer_count = end_layer - start_layer
+    local_concrete_count = max(
+        min(trunk.first_kv_shared_layer_idx, end_layer) - start_layer,
+        0,
+    )
+    feature_width = config.hidden_size_per_layer_input
+    feature_start = start_layer * feature_width
+    feature_end = end_layer * feature_width
+    total_features = len(full_layer_types) * feature_width
+
+    _slice_embedding_features(
+        trunk.embed_tokens_per_layer,
+        feature_start,
+        feature_end,
+        total_features,
+    )
+    _slice_linear_outputs(
+        trunk.per_layer_model_projection,
+        feature_start,
+        feature_end,
+    )
+
+    config.layer_types = local_layer_types
+    config.num_hidden_layers = local_layer_count
+    config.num_kv_shared_layers = local_layer_count - local_concrete_count
+    trunk.num_hidden_layers = local_layer_count
+    trunk.first_kv_shared_layer_idx = local_concrete_count
+    trunk.layer_idx_to_cache_idx = [
+        cache_index - start_layer for cache_index in shard_cache_indices
+    ]
+    trunk.first_full_idx = (
+        local_layer_types.index("full_attention")
+        if "full_attention" in local_layer_types
+        else 0
+    )
+    trunk.first_sliding_idx = (
+        local_layer_types.index("sliding_attention")
+        if "sliding_attention" in local_layer_types
+        else 0
+    )
+
+
 def pipeline_auto_parallel(
     model: nn.Module,
     group: mx.distributed.Group,
@@ -701,6 +911,12 @@ def pipeline_auto_parallel(
                 ssm_idx=inner_model_instance.ssm_idx,
                 has_linear=bool(linear_layers),
             )
+
+    _slice_gemma3n_pipeline_state(
+        inner_model_instance,
+        start_layer,
+        end_layer,
+    )
 
     if isinstance(inner_model_instance, NemotronHInnerModel):
         # NemotronH uses block_type: "M" (Mamba/SSM), "*" (Attention), "E" (MoE), "-" (MLP)
