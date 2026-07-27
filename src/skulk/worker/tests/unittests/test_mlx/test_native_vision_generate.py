@@ -238,6 +238,75 @@ def test_native_vision_generation_uses_mlx_vlm_generate_step(
     assert responses[-1].usage.completion_tokens == 2
 
 
+def test_native_vision_clears_position_state_left_by_text_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A text warmup must not contaminate the first multimodal request."""
+
+    class _StatefulLanguageModel:
+        def __init__(self) -> None:
+            self._position_ids: object | None = object()
+            self._rope_deltas: object | None = object()
+
+        @property
+        def position_state(self) -> object | None:
+            return self._position_ids
+
+        @property
+        def rope_state(self) -> object | None:
+            return self._rope_deltas
+
+    class _StatefulVisionModel:
+        def __init__(self) -> None:
+            self.language_model = _StatefulLanguageModel()
+
+    model = _StatefulVisionModel()
+
+    def _fake_generate_step(**_kwargs: object):
+        assert model.language_model.position_state is None
+        assert model.language_model.rope_state is None
+        yield mx.array(999), mx.zeros((8,))
+
+    monkeypatch.setattr(
+        import_module("mlx_vlm.generate"),
+        "generate_step",
+        _fake_generate_step,
+    )
+
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/Qwen3-VL-4B-Instruct-4bit"),
+        input=[InputMessage(role="user", content="what is this?")],
+        max_output_tokens=8,
+        temperature=0.0,
+    )
+    vision = VisionResult(
+        prompt="ignored",
+        prompt_tokens=mx.array([1, 2, 3]),
+        embeddings=mx.zeros((1, 0, 1)),
+        media_regions=[],
+        pixel_values=mx.array([1.0]),
+        image_grid_thw=mx.array([[1, 2, 3]]),
+    )
+
+    responses = list(
+        _mlx_generate_native_vision_fn()(
+            model=cast(Model, cast(object, model)),
+            tokenizer=_fake_tokenizer(),
+            task=task,
+            all_prompt_tokens=vision.prompt_tokens,
+            vision=vision,
+            sampler=_identity_sampler,
+            logits_processors=[],
+            on_prefill_progress=None,
+            on_generation_token=None,
+            group=None,
+            max_tokens=8,
+        )
+    )
+
+    assert responses[-1].finish_reason == "stop"
+
+
 @pytest.mark.parametrize(
     ("group", "reference_path_enabled"),
     [
