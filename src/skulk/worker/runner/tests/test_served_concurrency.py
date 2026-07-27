@@ -55,6 +55,9 @@ class _FakeHost(ServedConcurrentDispatch):
         self.peak_inflight = 0
         self.admission_samples: list[int] = []
         self._samples_lock = threading.Lock()
+        self.cancel_status_task_id: TaskId | None = None
+        self.cancel_status_started: threading.Event | None = None
+        self.cancel_status_release: threading.Event | None = None
         evt_s, self._evt_r = mp_channel[Event]()
         task_s, task_r = mp_channel[Task]()
         cancel_s, cancel_r = mp_channel[TaskId]()
@@ -107,6 +110,15 @@ class _FakeHost(ServedConcurrentDispatch):
             self.events.append(RunnerStatusUpdated(runner_id=self.runner_id, runner_status=status))
 
     def send_task_status(self, task: Task, status: TaskStatus) -> None:
+        if (
+            status is TaskStatus.Cancelled
+            and task.task_id == self.cancel_status_task_id
+            and self.cancel_status_started is not None
+            and self.cancel_status_release is not None
+        ):
+            assert self._has_dispatch_waiters()
+            self.cancel_status_started.set()
+            assert self.cancel_status_release.wait(10), "cancel status gate timed out"
         with self._events_lock:
             self.events.append(TaskStatusUpdated(task_id=task.task_id, task_status=status))
 
@@ -153,6 +165,15 @@ def _wait_inflight(host: _FakeHost, target: int, timeout: float = 5.0) -> None:
     """Poll the in-flight count to a target (robust to CPU contention under load)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline and host._inflight_count() != target:
+        time.sleep(0.02)
+
+
+def _wait_dispatch_waiters(
+    host: _FakeHost, target: int, timeout: float = 5.0
+) -> None:
+    """Poll accepted-but-not-dispatched generations to a target."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and host._dispatch_waiters != target:
         time.sleep(0.02)
 
 
@@ -297,6 +318,122 @@ def test_cancel_marks_cancelled() -> None:
         host.generate_gate.set()
         host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
         t.join(timeout=5)
+
+
+def test_cancel_all_marks_waiting_generation_cancelled_without_dispatch() -> None:
+    """A cancel-all during backpressure must not be cleared by the running task."""
+    host = _FakeHost(max_concurrency=1)
+    _load_ready(host)
+    host.generate_gate = threading.Event()
+    t = host.start()
+    first = _gen()
+    waiting = _gen()
+    try:
+        host.send(first)
+        assert host.started.acquire(timeout=10)
+        host.send(waiting)
+        _wait_dispatch_waiters(host, 1)
+        assert host._dispatch_waiters == 1
+
+        host._cancel_sender.send(CANCEL_ALL_TASKS)
+        host.generate_gate.set()
+        host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+        t.join(timeout=10)
+
+        assert not t.is_alive()
+        assert not host.started.acquire(timeout=0.5), (
+            "waiting generation entered the engine after cancel-all"
+        )
+        with host._events_lock:
+            events = list(host.events)
+        waiting_statuses = [
+            e.task_status
+            for e in events
+            if isinstance(e, TaskStatusUpdated) and e.task_id == waiting.task_id
+        ]
+        assert waiting_statuses[-1] is TaskStatus.Cancelled
+        waiter_cancelled_at = next(
+            index
+            for index, event in enumerate(events)
+            if isinstance(event, TaskStatusUpdated)
+            and event.task_id == waiting.task_id
+            and event.task_status is TaskStatus.Cancelled
+        )
+        ready_after_waiter_cancel = next(
+            (
+                index
+                for index, event in enumerate(events[waiter_cancelled_at + 1 :])
+                if isinstance(event, RunnerStatusUpdated)
+                and isinstance(event.runner_status, RunnerReady)
+            ),
+            None,
+        )
+        assert ready_after_waiter_cancel is not None
+    finally:
+        host.generate_gate.set()
+        if t.is_alive():
+            host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+            t.join(timeout=5)
+
+
+def test_cancelled_width_two_waiter_keeps_runner_active_until_terminal() -> None:
+    """A waiter remains active until its terminal status, even with peers running."""
+    host = _FakeHost(max_concurrency=2)
+    _load_ready(host)
+    first_release = threading.Event()
+    second_release = threading.Event()
+    cancel_status_release = threading.Event()
+    cancel_status_started = threading.Event()
+    t = host.start()
+    first = _gen()
+    second = _gen()
+    waiting = _gen()
+    host.cancel_status_task_id = waiting.task_id
+    host.cancel_status_started = cancel_status_started
+    host.cancel_status_release = cancel_status_release
+
+    def fake_generate(task: Task) -> None:
+        host.started.release()
+        if task.task_id == first.task_id:
+            assert first_release.wait(10), "first gate timed out"
+        elif task.task_id == second.task_id:
+            assert second_release.wait(10), "second gate timed out"
+        host._is_cancelled(task.task_id)
+
+    host._generate = fake_generate
+    try:
+        host.send(first)
+        host.send(second)
+        assert host.started.acquire(timeout=10)
+        assert host.started.acquire(timeout=10)
+        host.send(waiting)
+        _wait_dispatch_waiters(host, 1)
+        assert host._dispatch_waiters == 1
+
+        host._cancel_sender.send(CANCEL_ALL_TASKS)
+        first_release.set()
+        assert cancel_status_started.wait(10)
+        second_release.set()
+        _wait_inflight(host, 0, timeout=10)
+        with host._events_lock:
+            events_before_terminal = list(host.events)
+        assert not any(
+            isinstance(event, RunnerStatusUpdated)
+            and isinstance(event.runner_status, RunnerReady)
+            for event in events_before_terminal
+        )
+
+        cancel_status_release.set()
+        host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+        t.join(timeout=10)
+        assert not t.is_alive()
+    finally:
+        first_release.set()
+        second_release.set()
+        cancel_status_release.set()
+        if t.is_alive():
+            host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+            t.join(timeout=5)
 
 
 def test_stale_cancel_all_cleared_on_drain() -> None:

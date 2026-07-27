@@ -386,7 +386,7 @@ def test_finish_generation_cancel_all_marks_cancelled() -> None:
     assert (task.task_id, TaskStatus.Cancelled) in runner.task_statuses
 
 
-def test_dispatch_clears_stale_cancel_all_when_idle() -> None:
+def test_idle_admission_clears_stale_cancel_all_before_dispatch() -> None:
     # A lingering cluster-wide cancel must not kill a fresh request admitted when
     # nothing else is in flight.
     runner = _bare_runner()
@@ -400,6 +400,7 @@ def test_dispatch_clears_stale_cancel_all_when_idle() -> None:
     task = _fake_task()
 
     with ThreadPoolExecutor(max_workers=1) as pool:
+        runner._clear_stale_cancel_all_if_idle()
         runner._dispatch_generation(task, pool)
         assert CANCEL_ALL_TASKS not in runner.cancelled_tasks
         release.set()

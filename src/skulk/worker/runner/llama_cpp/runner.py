@@ -23,8 +23,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Final, Literal
 
-from anyio import WouldBlock
-
 from skulk.api.types import GenerationStats, ToolCallItem, TopLogprobItem
 from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.memory_estimate import (
@@ -42,9 +40,7 @@ from skulk.shared.types.events import (
     TaskStatusUpdated,
 )
 from skulk.shared.types.tasks import (
-    CANCEL_ALL_TASKS,
     LoadModel,
-    Shutdown,
     Task,
     TaskId,
     TaskStatus,
@@ -56,9 +52,6 @@ from skulk.shared.types.worker.runners import (
     RunnerIdle,
     RunnerLoading,
     RunnerReady,
-    RunnerRunning,
-    RunnerShutdown,
-    RunnerShuttingDown,
     RunnerStatus,
 )
 from skulk.utils.channels import MpReceiver, MpSender
@@ -74,6 +67,7 @@ from skulk.worker.runner.llm_inference.think_text_parser import ThinkTextParser
 from skulk.worker.runner.llm_inference.tool_text_parser import (
     parse_tool_calls_from_text,
 )
+from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 
 
 def select_gguf_file(model_dir: Path) -> Path:
@@ -640,12 +634,22 @@ def map_finish_reason(
     return "stop"
 
 
-class Runner:
+class Runner(ServedConcurrentDispatch):
     """Single-node llama.cpp text-generation runner.
 
     Lifecycle mirrors the embeddings runner: it skips ``ConnectToGroup`` and
     ``StartWarmup`` (no ring), loads on ``LoadModel``, and serves
     ``TextGeneration`` by streaming tokens.
+
+    Dispatch runs through ``ServedConcurrentDispatch`` at **width 1** (#692).
+    That is not for parallelism -- ``llama_cpp_python``'s ``Llama`` object is
+    not safe for concurrent generation, so generations stay strictly serial --
+    it is for the admission machinery the served engines already proved:
+    ack-on-accept before backpressure, a bounded number of admitted
+    generations, lock-guarded cancellation, stale-``CANCEL_ALL`` hygiene, and
+    the #596 admission stamp that lets the performance-envelope registry see
+    this path at all. Raising the width later is a knob-turn plus a memory
+    conversation, not a rewrite.
     """
 
     def __init__(
@@ -681,6 +685,11 @@ class Runner:
         self.seen: set[TaskId] = set()
         self.model: Any = None
         self.current_status: RunnerStatus = RunnerIdle()
+        # Width 1: the in-process Llama object cannot generate concurrently.
+        # The mixin still bounds admitted work and stamps admission concurrency.
+        self._init_concurrent_dispatch(
+            max_concurrency=1, thread_name_prefix="llama-cpp-gen"
+        )
         logger.info("llama.cpp runner created")
         self.update_status(RunnerIdle())
 
@@ -706,69 +715,35 @@ class Runner:
         )
         self.event_sender.send(TaskAcknowledged(task_id=task.task_id))
 
-    def _drain_cancellations(self) -> None:
-        """Move any pending cancellation task-ids into ``cancelled_tasks``."""
-        while True:
-            try:
-                cancelled = self.cancel_receiver.receive_nowait()
-            except WouldBlock:
-                break
-            self.cancelled_tasks.add(cancelled)
-
-    def _is_cancelled(self, task_id: TaskId) -> bool:
-        self._drain_cancellations()
-        return (
-            task_id in self.cancelled_tasks or CANCEL_ALL_TASKS in self.cancelled_tasks
-        )
-
     def main(self) -> None:
-        with self.task_receiver as tasks:
-            for task in tasks:
-                if task.task_id in self.seen:
-                    logger.warning("repeat task - potential error")
-                self.seen.add(task.task_id)
-                self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
-                self.send_task_status(task, TaskStatus.Running)
-                self.handle_task(task)
-                # Use only cancellations OBSERVED during execution (the streaming
-                # loop drains the cancel pipe via _is_cancelled as it runs). Do
-                # NOT re-drain here: a cancel that loses the race with completion
-                # must not retroactively flip an already-finished task (which has
-                # streamed its tokens + finish chunk) to Cancelled.
-                was_cancelled = (
-                    task.task_id in self.cancelled_tasks
-                    or CANCEL_ALL_TASKS in self.cancelled_tasks
-                )
-                self.send_task_status(
-                    task,
-                    TaskStatus.Cancelled if was_cancelled else TaskStatus.Complete,
-                )
-                self.update_status(self.current_status)
-                if isinstance(self.current_status, RunnerShutdown):
-                    break
+        # Width-1 concurrent dispatch (#692): the shared loop keeps generations
+        # strictly serial (the Llama object requires it) while bounding admitted
+        # work, guarding cancellation behind locks, and stamping each task's
+        # admission concurrency for the performance-envelope tap. LoadModel and
+        # Shutdown run inline on the dispatch thread.
+        self.run_dispatch_loop()
+
+    def _ensure_server_alive(self) -> None:
+        """No-op: there is no server subprocess to poll.
+
+        The served engines use this hook to detect an external server that died
+        between requests. This engine runs in-process, where a native llama.cpp
+        crash takes the whole runner process with it and the supervisor observes
+        the exit directly, so there is nothing separate to check.
+        """
+
+    def _teardown_server(self) -> None:
+        """Release the in-process model on shutdown or loop exit."""
+        self.model = None
+        record_runner_phase("shutdown_cleanup", event="model_released")
 
     def handle_task(self, task: Task) -> None:
+        # TextGeneration and Shutdown are handled directly by the concurrent
+        # dispatch loop (ServedConcurrentDispatch); this serves the inline
+        # lifecycle path (LoadModel).
         match task:
             case LoadModel() if isinstance(self.current_status, RunnerIdle):
                 self._load_model(task)
-            case TextGeneration() if isinstance(self.current_status, RunnerReady):
-                self._generate(task)
-            case Shutdown():
-                logger.info("llama.cpp runner shutting down")
-                record_runner_phase(
-                    "shutdown_cleanup",
-                    event="runner_shutdown_requested",
-                    task_id=task.task_id,
-                )
-                self.update_status(RunnerShuttingDown())
-                self.acknowledge_task(task)
-                self.model = None
-                record_runner_phase(
-                    "shutdown_cleanup",
-                    event="model_released",
-                    task_id=task.task_id,
-                )
-                self.current_status = RunnerShutdown()
             case _:
                 raise RuntimeError(
                     f"llama.cpp runner received unsupported task "
@@ -876,15 +851,19 @@ class Runner:
 
     def _generate(self, task: Task) -> None:
         assert isinstance(task, TextGeneration)
-        # Must be an ACTIVE status (not RunnerReady) for the whole task: the
-        # supervisor asserts the runner is RunnerRunning/Loading/etc. when the
-        # terminal TaskStatus arrives (runner_supervisor._forward_events). main()
-        # sends Complete after this returns, so we stay RunnerRunning until then
-        # and only flip current_status back to Ready (without an event) at the
-        # end, so the Ready event is ordered after Complete.
-        self.update_status(RunnerRunning())
-        self.acknowledge_task(task)
+        # Acknowledgement and the Ready<->Running transitions are owned by the
+        # dispatch loop (ServedConcurrentDispatch): it acks on admission and
+        # flips status around the in-flight count, ordering Ready after the
+        # terminal task status exactly as the supervisor asserts.
         assert self.model is not None
+        # In-flight captured at THIS task's admission on the dispatch loop, for
+        # the performance-envelope tap (#596). At width 1 this is always 1 --
+        # which is precisely the ground truth the envelopes need from a serial
+        # engine, along with the serving node/backend stamp (#692).
+        admission_in_flight = self._admission_concurrency(task.task_id)
+        if self._is_cancelled(task.task_id):
+            logger.info(f"llama.cpp generation skipped (cancelled): {task.task_id}")
+            return
 
         model_id = self.shard_metadata.model_card.model_id
         command_id = task.command_id
@@ -939,19 +918,15 @@ class Runner:
                 self._generate_with_tools(task, messages, kwargs, model_id, command_id)
                 # Same observed-cancellation rule as the streaming path: a task
                 # cancelled during the non-streamed tool call must not be
-                # recorded as a completion.
-                tools_cancelled = (
-                    task.task_id in self.cancelled_tasks
-                    or CANCEL_ALL_TASKS in self.cancelled_tasks
-                )
+                # recorded as a completion. _was_cancelled reads without
+                # draining, so a cancel that lost the race stays unobserved.
+                tools_cancelled = self._was_cancelled(task.task_id)
                 record_runner_phase(
                     "cancel_observed" if tools_cancelled else "completion",
                     event="generation_finished",
                     task_id=task.task_id,
                     command_id=str(command_id),
                 )
-                self.current_status = RunnerReady()
-                record_runner_phase("idle", event="runner_ready", task_id=task.task_id)
                 return
 
             # A reasoning model's markers arrive as literal text in the content
@@ -1004,9 +979,16 @@ class Runner:
                     position_at_first_piece=position_at_first_piece,
                     pieces=clock.pieces,
                 )
-                return clock.stats(
-                    prompt_tokens=prompt_tokens,
-                    generation_tokens=generation_tokens,
+                # Stamp runner ground truth (#596/#692) so the API's
+                # performance-envelope tap can attribute this generation; this
+                # path previously never stamped, leaving the registry blind to
+                # the in-process engine.
+                return self.stamp_runner_stats(
+                    clock.stats(
+                        prompt_tokens=prompt_tokens,
+                        generation_tokens=generation_tokens,
+                    ),
+                    admission_in_flight,
                 )
 
             emitted_finish = False
@@ -1107,21 +1089,18 @@ class Runner:
                 )
             )
         else:
-            # Only cancellations OBSERVED during execution: draining the cancel
-            # pipe here would retroactively flip a finished task (see main()).
-            was_cancelled = (
-                task.task_id in self.cancelled_tasks
-                or CANCEL_ALL_TASKS in self.cancelled_tasks
-            )
+            # Only cancellations OBSERVED during execution: _was_cancelled reads
+            # the shared set without draining the pipe, so a cancel that loses
+            # the race with completion cannot retroactively flip a finished
+            # task. The dispatch loop's done-callback applies the same rule to
+            # the terminal task status.
+            was_cancelled = self._was_cancelled(task.task_id)
             record_runner_phase(
                 "cancel_observed" if was_cancelled else "completion",
                 event="generation_finished",
                 task_id=task.task_id,
                 command_id=str(command_id),
             )
-
-        self.current_status = RunnerReady()
-        record_runner_phase("idle", event="runner_ready", task_id=task.task_id)
 
     def _is_harmony_model(self) -> bool:
         """Whether this runner serves a gpt-oss (harmony-format) model.
@@ -1247,7 +1226,18 @@ class Runner:
         if self._is_cancelled(task.task_id):
             logger.info(f"llama.cpp tool generation cancelled: {task.task_id}")
             return
-        stats = blocking_call_stats(result.get("usage"), request_seconds)
+        # Stamped like the streaming path (#596/#692): tool calls are
+        # generations too, and the envelope tap must see them. A missing usage
+        # block yields no stats at all, which stays None rather than stamping
+        # an empty shell.
+        base_stats = blocking_call_stats(result.get("usage"), request_seconds)
+        stats = (
+            self.stamp_runner_stats(
+                base_stats, self._admission_concurrency(task.task_id)
+            )
+            if base_stats is not None
+            else None
+        )
         choice = result["choices"][0]
         message = choice.get("message", {})
         content = message.get("content") or ""

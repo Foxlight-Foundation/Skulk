@@ -15,7 +15,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from anyio import WouldBlock
+from anyio import EndOfStream, WouldBlock
 
 from skulk.shared.models.model_cards import ModelCard, ModelTask
 from skulk.shared.types.common import CommandId, ModelId, NodeId
@@ -39,16 +39,26 @@ class _CaptureSender:
 
 
 class _OneShotReceiver:
-    """Stand-in MpReceiver that yields a fixed task list once, then stops."""
+    """Stand-in MpReceiver: serves a fixed task list, then ends the stream.
+
+    The dispatch loop (ServedConcurrentDispatch) consumes via
+    ``receive_timeout`` rather than iteration, and treats ``EndOfStream`` as
+    the signal to drain and exit -- so an exhausted list ends ``main()``.
+    """
 
     def __init__(self, items: list[object]) -> None:
         self._items = items
 
     def __enter__(self):
-        return iter(self._items)
+        return self
 
     def __exit__(self, *_: object) -> bool:
         return False
+
+    def receive_timeout(self, _timeout: float) -> object:
+        if self._items:
+            return self._items.pop(0)
+        raise EndOfStream
 
 
 class _CancelReceiver:
@@ -84,6 +94,7 @@ def _make_runner(cancel: _CancelReceiver) -> tuple[Runner, _CaptureSender]:
             world_size=1,
             model_card=card,
             device_rank=0,
+            resolved_backend="llama_cpp-vulkan",
         ),
         bound_node_id=NodeId("n1"),
     )
