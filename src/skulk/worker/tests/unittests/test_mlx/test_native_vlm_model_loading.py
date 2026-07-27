@@ -4,7 +4,7 @@
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable, cast
+from typing import Callable, Protocol, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -94,6 +94,100 @@ class _VlmWithPipelineLanguage(nn.Module):
     def __init__(self, layer_types: list[bool]) -> None:
         super().__init__()
         self.language_model = _NativeQwenPipelineLanguageModel(layer_types)
+
+
+class _Gemma3nPipelineTrunk(nn.Module):
+    """Gemma 3n-shaped trunk with shared caches and layer-specific inputs."""
+
+    def __init__(self, *, quantized: bool) -> None:
+        super().__init__()
+        feature_width = 32
+        layer_types = [
+            "full_attention" if layer_index % 5 == 4 else "sliding_attention"
+            for layer_index in range(30)
+        ]
+        self.config = _Gemma3nTestConfig(
+            layer_types=layer_types,
+            hidden_size_per_layer_input=feature_width,
+        )
+        self.layers = [SimpleNamespace() for _ in layer_types]
+        self.num_hidden_layers = 30
+        self.first_kv_shared_layer_idx = 20
+        self.first_full_idx = 4
+        self.first_sliding_idx = 0
+        self.layer_idx_to_cache_idx = list(range(20)) + [
+            18 if layer_type == "sliding_attention" else 19
+            for layer_type in layer_types[20:]
+        ]
+        embedding = nn.Embedding(8, 30 * feature_width)
+        projection = nn.Linear(32, 30 * feature_width, bias=False)
+        if quantized:
+            self.embed_tokens_per_layer = nn.QuantizedEmbedding.from_embedding(
+                embedding,
+                group_size=32,
+                bits=4,
+            )
+            self.per_layer_model_projection = nn.QuantizedLinear.from_linear(
+                projection,
+                group_size=32,
+                bits=4,
+            )
+        else:
+            self.embed_tokens_per_layer = embedding
+            self.per_layer_model_projection = projection
+
+
+class _Gemma3nTestConfig:
+    """Typed Gemma 3n configuration used by pipeline slicing tests."""
+
+    model_type = "gemma3n_text"
+
+    def __init__(
+        self,
+        *,
+        layer_types: list[str],
+        hidden_size_per_layer_input: int,
+    ) -> None:
+        self.layer_types = layer_types
+        self.num_hidden_layers = 30
+        self.num_kv_shared_layers = 10
+        self.hidden_size_per_layer_input = hidden_size_per_layer_input
+
+
+class _FeatureSizedModule(Protocol):
+    """Test-facing feature metadata exposed by an embedding module."""
+
+    dims: int
+
+
+class _WeightedModule(Protocol):
+    """Test-facing matrix exposed by a projection module."""
+
+    weight: mx.array
+
+
+class _Gemma3nPipelineLanguageModel(nn.Module):
+    """Language wrapper whose cache factory reads the rank-local config."""
+
+    def __init__(self, *, quantized: bool) -> None:
+        super().__init__()
+        self.model = _Gemma3nPipelineTrunk(quantized=quantized)
+        self.config = self.model.config
+
+    def make_cache(self) -> list[str]:
+        return list(
+            self.config.layer_types[
+                : self.model.first_kv_shared_layer_idx
+            ]
+        )
+
+
+class _VlmWithGemma3nPipelineLanguage(nn.Module):
+    """Native Gemma 3n wrapper used to exercise pipeline metadata slicing."""
+
+    def __init__(self, *, quantized: bool) -> None:
+        super().__init__()
+        self.language_model = _Gemma3nPipelineLanguageModel(quantized=quantized)
 
 
 class _VlmWithTensorLanguage(nn.Module):
@@ -421,6 +515,125 @@ def test_pipeline_reindexes_native_qwen_hybrid_cache(
     assert len(inner.layers) == 3
     assert inner.ssm_idx == 0
     assert inner.fa_idx == 1
+
+
+@pytest.mark.parametrize("quantized", [False, True])
+def test_pipeline_slices_gemma3n_shared_cache_and_per_layer_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+    quantized: bool,
+) -> None:
+    """A Gemma 3n rank must use local cache indices and input feature blocks."""
+    model = _VlmWithGemma3nPipelineLanguage(quantized=quantized)
+    shard = SimpleNamespace(
+        start_layer=12,
+        end_layer=30,
+        device_rank=1,
+        world_size=2,
+    )
+
+    def _ignore_eval(*_args: object) -> None:
+        return None
+
+    def _identity_layer(
+        layer: object, *_args: object, **_kwargs: object
+    ) -> object:
+        return layer
+
+    def _identity_pipeline(
+        patched_model: nn.Module, _group: object
+    ) -> nn.Module:
+        return patched_model
+
+    monkeypatch.setattr(auto_parallel.mx, "eval", _ignore_eval)
+    monkeypatch.setattr(auto_parallel, "PipelineFirstLayer", _identity_layer)
+    monkeypatch.setattr(auto_parallel, "PipelineLastLayer", _identity_layer)
+    monkeypatch.setattr(auto_parallel, "patch_pipeline_model", _identity_pipeline)
+
+    auto_parallel.pipeline_auto_parallel(
+        model,
+        cast(mx.distributed.Group, cast(object, SimpleNamespace())),
+        cast(PipelineShardMetadata, cast(object, shard)),
+        on_layer_loaded=None,
+    )
+
+    inner = model.language_model.model
+    assert len(inner.layers) == 18
+    assert inner.config.num_hidden_layers == 18
+    assert inner.config.num_kv_shared_layers == 10
+    assert inner.first_kv_shared_layer_idx == 8
+    assert inner.layer_idx_to_cache_idx == list(range(8)) + [
+        6,
+        6,
+        6,
+        6,
+        7,
+        6,
+        6,
+        6,
+        6,
+        7,
+    ]
+    assert model.language_model.make_cache() == [
+        "sliding_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "sliding_attention",
+        "full_attention",
+    ]
+    embedding = cast(
+        _FeatureSizedModule,
+        cast(object, inner.embed_tokens_per_layer),
+    )
+    projection = cast(
+        _WeightedModule,
+        cast(object, inner.per_layer_model_projection),
+    )
+    assert embedding.dims == 18 * 32
+    assert projection.weight.shape[0] == 18 * 32
+
+
+def test_pipeline_rejects_gemma3n_slice_without_shared_cache_producer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rank may not consume K/V owned by an earlier pipeline rank."""
+    model = _VlmWithGemma3nPipelineLanguage(quantized=False)
+    shard = SimpleNamespace(
+        start_layer=20,
+        end_layer=30,
+        device_rank=2,
+        world_size=3,
+    )
+
+    def _ignore_eval(*_args: object) -> None:
+        return None
+
+    def _identity_layer(
+        layer: object, *_args: object, **_kwargs: object
+    ) -> object:
+        return layer
+
+    monkeypatch.setattr(auto_parallel.mx, "eval", _ignore_eval)
+    monkeypatch.setattr(
+        auto_parallel,
+        "PipelineFirstLayer",
+        _identity_layer,
+    )
+    monkeypatch.setattr(
+        auto_parallel,
+        "PipelineLastLayer",
+        _identity_layer,
+    )
+
+    with pytest.raises(ValueError, match="crosses a shared-KV dependency"):
+        auto_parallel.pipeline_auto_parallel(
+            model,
+            cast(mx.distributed.Group, cast(object, SimpleNamespace())),
+            cast(PipelineShardMetadata, cast(object, shard)),
+            on_layer_loaded=None,
+        )
 
 
 def test_tensor_patch_finds_cache_in_variadic_generation_kwargs(
