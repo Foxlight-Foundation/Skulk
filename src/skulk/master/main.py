@@ -29,6 +29,7 @@ from skulk.master.placement_utils import (
 )
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_EVENT_LOG_DIR, SKULK_TRACING_ENABLED
+from skulk.shared.log_summaries import summarize_command_for_log
 from skulk.shared.models.memory_estimate import (
     estimate_shard_footprint,
     shard_fraction_of_model,
@@ -856,7 +857,10 @@ class Master:
         with self.command_receiver as commands:
             async for forwarder_command in commands:
                 try:
-                    logger.info(f"Executing command: {forwarder_command.command}")
+                    logger.info(
+                        "Executing command: "
+                        f"{summarize_command_for_log(forwarder_command.command)}"
+                    )
 
                     generated_events: list[Event] = []
                     command = forwarder_command.command

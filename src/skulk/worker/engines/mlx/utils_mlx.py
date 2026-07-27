@@ -1412,6 +1412,18 @@ def _patch_lossy_chat_template(template: str) -> str | None:
     return patched if n > 0 else None
 
 
+def _log_rendered_prompt_shape(
+    renderer: PromptRendererType,
+    prompt: str,
+    message_count: int,
+) -> None:
+    """Log prompt construction metadata without retaining user content."""
+    logger.info(
+        "Rendered model prompt "
+        f"(renderer={renderer.value}, messages={message_count}, chars={len(prompt)})"
+    )
+
+
 def apply_chat_template(
     tokenizer: TokenizerWrapper,
     task_params: TextGenerationTaskParams,
@@ -1476,7 +1488,11 @@ def apply_chat_template(
         )
         if partial_assistant_content:
             prompt += partial_assistant_content
-        logger.info(prompt)
+        _log_rendered_prompt_shape(
+            capability_profile.prompt_renderer,
+            prompt,
+            len(formatted_messages),
+        )
         return prompt
 
     if capability_profile.prompt_renderer == PromptRendererType.Gemma4:
@@ -1488,7 +1504,11 @@ def apply_chat_template(
         )
         if partial_assistant_content:
             prompt += partial_assistant_content
-        logger.info(prompt)
+        _log_rendered_prompt_shape(
+            capability_profile.prompt_renderer,
+            prompt,
+            len(formatted_messages),
+        )
         return prompt
 
     for msg in formatted_messages:
@@ -1528,7 +1548,11 @@ def apply_chat_template(
     if partial_assistant_content:
         prompt += partial_assistant_content
 
-    logger.info(prompt)
+    _log_rendered_prompt_shape(
+        capability_profile.prompt_renderer,
+        prompt,
+        len(formatted_messages),
+    )
 
     return prompt
 
@@ -1756,12 +1780,17 @@ def _parse_gemma4_tool_calls(text: str) -> list[dict[str, Any]]:
         try:
             args_dict = cast(dict[str, object], json.loads(args_json))
         except json.JSONDecodeError:
-            logger.warning(f"Failed to parse Gemma 4 tool call args: {args_json}")
+            logger.warning(
+                "Failed to parse Gemma 4 tool call arguments "
+                f"(argument_chars={len(args_json)})"
+            )
             args_dict = {}
         results.append(dict(name=func_name, arguments=args_dict))
 
     if not results:
-        raise ValueError(f"No Gemma 4 tool calls found in: {text}")
+        raise ValueError(
+            f"No Gemma 4 tool calls found in generated text ({len(text)} chars)"
+        )
     return results
 
 

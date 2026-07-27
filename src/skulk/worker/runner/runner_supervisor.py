@@ -16,6 +16,7 @@ from anyio import (
 from loguru import logger
 
 from skulk.routing.trace_data import TraceDataPacket
+from skulk.shared.log_summaries import summarize_task_for_log
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.chunks import (
@@ -125,21 +126,7 @@ def _now_utc_iso() -> str:
 
 def _summarize_task(task: Task) -> str:
     """Return a compact task summary for logs."""
-    if isinstance(task, TextGeneration):
-        params = task.task_params
-        return (
-            "TextGeneration("
-            f"task_id={task.task_id!r}, "
-            f"command_id={task.command_id!r}, "
-            f"model={params.model!r}, "
-            f"input_messages={len(params.input)}, "
-            f"chat_template_messages={len(params.chat_template_messages or [])}, "
-            f"images={len(params.images)}, "
-            f"cached_image_indices={sorted(params.image_hashes.keys())}, "
-            f"total_input_chunks={params.total_input_chunks}, "
-            f"image_count={params.image_count})"
-        )
-    return repr(task)
+    return summarize_task_for_log(task)
 
 
 @dataclass(eq=False)
@@ -523,12 +510,14 @@ class RunnerSupervisor:
     async def start_task(self, task: Task):
         if task.task_id in self.pending:
             logger.warning(
-                f"Skipping invalid task {task} as it has already been submitted"
+                "Skipping invalid task "
+                f"{_summarize_task(task)} as it has already been submitted"
             )
             return
         if task.task_id in self.completed:
             logger.warning(
-                f"Skipping invalid task {task} as it has already been completed"
+                "Skipping invalid task "
+                f"{_summarize_task(task)} as it has already been completed"
             )
             return
         logger.info(f"Starting task {_summarize_task(task)}")
@@ -594,7 +583,9 @@ class RunnerSupervisor:
             await self._task_sender.send_async(task)
         except ClosedResourceError:
             self.in_progress.pop(task.task_id, None)
-            logger.warning(f"Task {task} dropped, runner closed communication.")
+            logger.warning(
+                f"Task {_summarize_task(task)} dropped, runner closed communication."
+            )
             self._record_milestone(
                 "task_send_failed",
                 f"{task.__class__.__name__}:{task.task_id}",

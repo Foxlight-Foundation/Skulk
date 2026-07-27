@@ -324,11 +324,13 @@ def parse_gpt_oss(
         ch = stream.current_channel
         recipient = stream.current_recipient
 
-        # Debug: log every token with state
+        # Keep parser-state diagnostics useful without retaining generated text.
         logger.debug(
-            f"parse_gpt_oss token={response.token} text={response.text!r} "
-            f"recipient={recipient!r} ch={ch!r} delta={delta!r} "
-            f"state={stream.state} current_tool={current_tool_name!r}"
+            f"parse_gpt_oss token={response.token} "
+            f"text_chars={len(response.text)} "
+            f"has_recipient={recipient is not None} channel={ch!r} "
+            f"delta_chars={len(delta or '')} state={stream.state} "
+            f"has_current_tool={current_tool_name is not None}"
         )
 
         if recipient != current_tool_name:
@@ -337,7 +339,8 @@ def parse_gpt_oss(
                 if current_tool_name.startswith(prefix):
                     current_tool_name = current_tool_name[len(prefix) :]
                 logger.info(
-                    f"parse_gpt_oss yielding tool call: name={current_tool_name!r}"
+                    "parse_gpt_oss yielding tool call "
+                    f"(name_chars={len(current_tool_name)})"
                 )
                 yield ToolCallResponse(
                     tool_calls=[
@@ -406,7 +409,9 @@ def parse_deepseek_v32(
             return ToolCallResponse(
                 tool_calls=parsed, usage=response.usage, stats=response.stats
             )
-        logger.warning(f"DSML tool call parsing failed for: {text}")
+        logger.warning(
+            f"DSML tool call parsing failed (generated_chars={len(text)})"
+        )
         return response.model_copy(update={"text": text})
 
     for response in responses:
@@ -702,12 +707,20 @@ def parse_tool_calls(
             # parse the actual tool calls from the tool call text
             combined = "".join(tool_call_text_parts)
             parsed = tool_parser.parse(combined.strip(), tools=tools)
-            logger.info(f"parsed {tool_call_text_parts=} into {parsed=}")
+            logger.info(
+                "Parsed generated tool-call block "
+                f"(chunks={len(tool_call_text_parts)}, "
+                f"generated_chars={len(combined)}, "
+                f"parsed_calls={len(parsed) if parsed is not None else 0})"
+            )
             in_tool_call = False
             tool_call_text_parts = []
 
             if parsed is None:
-                logger.warning(f"tool call parsing failed for text {combined}")
+                logger.warning(
+                    "Tool-call parsing failed "
+                    f"(generated_chars={len(combined)})"
+                )
                 if trace_task_id is not None:
                     record_trace_marker(
                         "tool_call_parse_error",
