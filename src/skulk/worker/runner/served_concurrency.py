@@ -224,12 +224,16 @@ class ServedConcurrentDispatch:
                                 ):
                                     cancelled_while_waiting = True
                             finally:
-                                self._note_dispatch_waiter_finished()
+                                if not cancelled_while_waiting:
+                                    self._note_dispatch_waiter_finished()
                             if cancelled_while_waiting:
-                                if permit_acquired:
-                                    self._dispatch_permits.release()
-                                self.send_task_status(task, TaskStatus.Cancelled)
-                                self._mark_ready_if_idle_after_waiter_terminal()
+                                try:
+                                    if permit_acquired:
+                                        self._dispatch_permits.release()
+                                    self.send_task_status(task, TaskStatus.Cancelled)
+                                finally:
+                                    self._note_dispatch_waiter_finished()
+                                    self._mark_ready_if_idle_after_waiter_terminal()
                                 continue
                             self._dispatch_generation(task, pool)
                         case Shutdown():
