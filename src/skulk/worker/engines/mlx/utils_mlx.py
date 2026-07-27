@@ -1155,6 +1155,21 @@ def shard_and_load(
                 on_layer_loaded,
                 generation_model=generation_model,
             )
+        case PipelineShardMetadata(world_size=1):
+            if group.size() != 1:
+                raise ValueError(
+                    "Single-node pipeline metadata requires a one-rank MLX group"
+                )
+            logger.info(
+                f"loading full model from {model_path} without pipeline wrappers"
+            )
+            layers = get_layers(get_inner_model(model))
+            total = len(layers)
+            for index, layer in enumerate(layers):
+                mx.eval(layer)  # pyright: ignore[reportArgumentType]
+                if on_layer_loaded is not None:
+                    on_layer_loaded(index, total)
+            eval_with_timeout(model.parameters(), timeout_seconds, on_timeout)
         case PipelineShardMetadata():
             logger.info(f"loading model from {model_path} with pipeline parallelism")
             model = pipeline_auto_parallel(

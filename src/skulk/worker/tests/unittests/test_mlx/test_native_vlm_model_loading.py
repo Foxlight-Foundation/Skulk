@@ -361,6 +361,88 @@ def test_pipeline_shards_use_native_loader_for_primary_vision_weights(
     }
 
 
+def test_single_node_pipeline_load_keeps_native_model_unwrapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A one-rank placement must preserve the upstream native VLM model."""
+    model_id = ModelId("mlx-community/Qwen3-VL-4B-Instruct-4bit")
+    shard_metadata = PipelineShardMetadata(
+        model_card=ModelCard(
+            model_id=model_id,
+            storage_size=Memory.from_bytes(1),
+            n_layers=2,
+            hidden_size=4,
+            supports_tensor=False,
+            tasks=[ModelTask.TextGeneration],
+            vision=VisionCardConfig(
+                image_token_id=151655,
+                model_type="qwen3_vl",
+                weights_repo=str(model_id),
+            ),
+        ),
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=2,
+        n_layers=2,
+    )
+    loaded_model = _FakeVlmModel()
+    layers = [object(), object()]
+    layer_progress: list[tuple[int, int]] = []
+    evaluated: list[object] = []
+
+    def _model_path(*_args: object, **_kwargs: object) -> Path:
+        return Path("/model")
+
+    def _load_model(*_args: object, **_kwargs: object) -> tuple[nn.Module, None]:
+        return loaded_model, None
+
+    def _fail_pipeline(*_args: object, **_kwargs: object) -> nn.Module:
+        raise AssertionError("one-rank placement must not install pipeline wrappers")
+
+    def _eval_with_timeout(
+        value: object,
+        _timeout_seconds: float,
+        _on_timeout: object,
+    ) -> None:
+        evaluated.append(value)
+
+    def _ignore(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def _tokenizer(*_args: object, **_kwargs: object) -> str:
+        return "tokenizer"
+
+    def _inner_model(_model: nn.Module) -> nn.Module:
+        return loaded_model
+
+    def _layers(_model: nn.Module) -> list[object]:
+        return layers
+
+    monkeypatch.setattr(utils_mlx, "build_model_path", _model_path)
+    monkeypatch.setattr(utils_mlx, "load_model", _load_model)
+    monkeypatch.setattr(utils_mlx, "pipeline_auto_parallel", _fail_pipeline)
+    monkeypatch.setattr(utils_mlx, "get_inner_model", _inner_model)
+    monkeypatch.setattr(utils_mlx, "get_layers", _layers)
+    monkeypatch.setattr(utils_mlx, "eval_with_timeout", _eval_with_timeout)
+    monkeypatch.setattr(utils_mlx, "mx_barrier", _ignore)
+    monkeypatch.setattr(utils_mlx.mx, "eval", _ignore)
+    monkeypatch.setattr(utils_mlx, "get_tokenizer", _tokenizer)
+    group = SimpleNamespace(size=lambda: 1, rank=lambda: 0)
+
+    model, tokenizer = utils_mlx.shard_and_load(
+        shard_metadata,
+        cast(utils_mlx.Group, cast(object, group)),
+        on_timeout=None,
+        on_layer_loaded=lambda index, total: layer_progress.append((index, total)),
+    )
+
+    assert model is loaded_model
+    assert tokenizer == "tokenizer"
+    assert layer_progress == [(0, 2), (1, 2)]
+    assert evaluated == [loaded_model.parameters()]
+
+
 def test_tensor_shards_delegate_to_native_language_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
