@@ -403,7 +403,12 @@ they list both llama.cpp engines as compatible but rank the served
 runner serves one request at a time, so under concurrent load its aggregate
 throughput stays flat as clients are added; the served engine keeps several
 generations in flight against `llama-server`'s parallel slots, and aggregate
-tokens per second then scale with concurrency instead. On a node that
+tokens per second then scale with concurrency instead. Serial does not mean
+unmanaged: the in-process runner admits requests through the same dispatch
+loop the served engines use, at a width of one, so admitted work is bounded,
+cancellation is race-safe, and every generation reports its serving node and
+concurrency to the performance-envelope diagnostics rather than queueing
+invisibly. On a node that
 advertises a llama-server binary the model serves through the served proxy; on
 a node without one, the preference is a soft order intersected with the node's
 advertised backends, so the same card falls through to the in-process runner

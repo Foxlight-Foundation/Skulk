@@ -263,7 +263,11 @@ class RunnerSupervisor:
         """
         ev_send, ev_recv = mp_channel[Event]()
         diag_send, diag_recv = mp_channel[RunnerDiagnosticUpdate](max_buffer_size=256)
-        task_sender, task_recv = mp_channel[Task]()
+        # Bounded like the sibling channels (#692): cluster-level admission keeps
+        # this queue near-empty in health, so the bound only bites when something
+        # upstream has already gone wrong -- and then send_async parks in its
+        # worker thread (backpressure) instead of growing runner memory silently.
+        task_sender, task_recv = mp_channel[Task](max_buffer_size=256)
         cancel_sender, cancel_recv = mp_channel[TaskId]()
         realtime_audio_sender, realtime_audio_recv = mp_channel[
             RealtimeAudioInputFrame

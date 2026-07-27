@@ -206,7 +206,12 @@ A model card's `placement.compatible_backends` selects which engine serves it
   the worker assembles them in bounded process-local memory and the runner
   removes its request-scoped temporary file after generation.
 - **`llama_cpp`** (`worker/runner/llama_cpp/`): in-process `llama-cpp-python` for
-  GGUF on GPU/Linux nodes (Vulkan/ROCm/CUDA). Single-node.
+  GGUF on GPU/Linux nodes (Vulkan/ROCm/CUDA). Single-node. Dispatches through
+  `ServedConcurrentDispatch` at width 1 (#692): generations stay strictly
+  serial (the `Llama` object requires it) but admission is bounded, the
+  supervisor task channel is bounded at 256, and every generation stamps
+  serving node/backend and admission concurrency so the performance-envelope
+  registry can observe this path.
 - **`llama_server`** (`worker/runner/llama_server/`): served-backend engine; the
   worker launches an external `llama-server` subprocess and proxies its OpenAI
   HTTP API. The only path to llama.cpp's **native MTP** (`--spec-type draft-mtp`),
