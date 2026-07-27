@@ -101,6 +101,9 @@ uv run skulk
 
 On macOS, this path uses the official `mlx` and `mlx-metal` wheel stack that
 the project pins in [pyproject.toml](https://github.com/Foxlight-Foundation/Skulk/blob/main/pyproject.toml).
+On the first run from a local interactive terminal, Skulk opens the dashboard
+in the default browser. SSH, redirected, and service launches still print the
+dashboard URL but do not open a GUI browser.
 
 That means the runtime path is the one most users and nodes should follow.
 

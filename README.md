@@ -297,6 +297,9 @@ uv run skulk
 ```
 
 This starts the dashboard and API at `http://localhost:52415`.
+On the first run from a local interactive terminal, Skulk opens that URL in
+your default browser. SSH, redirected, and service launches print the URL
+without opening a browser.
 
 ### 3. Open the Dashboard
 
