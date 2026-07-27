@@ -10,7 +10,18 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
-from skulk.worker.engines.mlx import utils_mlx
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    VisionCardConfig,
+)
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.worker.shards import (
+    PipelineShardMetadata,
+    TensorShardMetadata,
+)
+from skulk.worker.engines.mlx import auto_parallel, utils_mlx
 
 
 class _FakeVlmModel(nn.Module):
@@ -43,6 +54,61 @@ class _VlmWithNativeLanguageCache(nn.Module):
         super().__init__()
         self.language_model = _NativeLanguageModel()
         self.layers = [object(), object()]
+
+
+class _NativeQwenLanguageModel(nn.Module):
+    """Minimal model carrying MLX-VLM's runtime identity and model type."""
+
+    __module__ = "mlx_vlm.models.qwen3_5.language"
+    model_type = "qwen3_5_text"
+
+
+class _NativeQwenPipelineTrunk(nn.Module):
+    """Minimal native Qwen inner trunk used by pipeline placement."""
+
+    __module__ = "mlx_vlm.models.qwen3_5.language"
+
+    def __init__(self, layer_types: list[bool]) -> None:
+        super().__init__()
+        self.layers = [
+            SimpleNamespace(is_linear=is_linear) for is_linear in layer_types
+        ]
+        self.fa_idx = 3
+        self.ssm_idx = 0
+
+
+_NativeQwenPipelineTrunk.__name__ = "Qwen3_5Model"
+
+
+class _NativeQwenPipelineLanguageModel(nn.Module):
+    """Minimal native language model that owns the pipeline inner trunk."""
+
+    def __init__(self, layer_types: list[bool]) -> None:
+        super().__init__()
+        self.model = _NativeQwenPipelineTrunk(layer_types)
+
+
+class _VlmWithPipelineLanguage(nn.Module):
+    """Native VLM stub whose hybrid language trunk is pipeline-sharded."""
+
+    def __init__(self, layer_types: list[bool]) -> None:
+        super().__init__()
+        self.language_model = _NativeQwenPipelineLanguageModel(layer_types)
+
+
+class _VlmWithTensorLanguage(nn.Module):
+    """Native VLM stub whose tensor-shardable trunk is nested."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.language_model = _NativeQwenLanguageModel()
+
+
+class _VariadicGenerationModel(nn.Module):
+    """Generation wrapper whose cache is carried through ``**kwargs``."""
+
+    def __call__(self, *_args: object, **_kwargs: object) -> mx.array:
+        return mx.zeros((1, 1, 4))
 
 
 def test_prefer_vlm_bypasses_text_only_mlx_lm_loader(
@@ -85,6 +151,302 @@ def test_prefer_vlm_bypasses_text_only_mlx_lm_loader(
         "model_path": model_path,
         "kwargs": {"lazy": True, "strict": False},
     }
+
+
+def test_pipeline_shards_use_native_loader_for_primary_vision_weights(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distributed vision must preserve the same native model as one-rank loads."""
+    model_id = ModelId("mlx-community/Qwen3-VL-4B-Instruct-4bit")
+    shard_metadata = PipelineShardMetadata(
+        model_card=ModelCard(
+            model_id=model_id,
+            storage_size=Memory.from_bytes(1),
+            n_layers=2,
+            hidden_size=4,
+            supports_tensor=False,
+            tasks=[ModelTask.TextGeneration],
+            vision=VisionCardConfig(
+                image_token_id=151655,
+                model_type="qwen3_vl",
+                weights_repo=str(model_id),
+            ),
+        ),
+        device_rank=0,
+        world_size=2,
+        start_layer=0,
+        end_layer=1,
+        n_layers=2,
+    )
+    loaded_model = _FakeVlmModel()
+    seen: dict[str, object] = {}
+
+    def _record_load_model(model_path: Path, **kwargs: object) -> tuple[nn.Module, None]:
+        seen["model_path"] = model_path
+        seen["kwargs"] = kwargs
+        return loaded_model, None
+
+    def _model_path(*_args: object, **_kwargs: object) -> Path:
+        return Path("/model")
+
+    def _identity_pipeline(
+        model: nn.Module, *_args: object, **_kwargs: object
+    ) -> nn.Module:
+        return model
+
+    def _ignore(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def _tokenizer(*_args: object, **_kwargs: object) -> str:
+        return "tokenizer"
+
+    monkeypatch.setattr(utils_mlx, "build_model_path", _model_path)
+    monkeypatch.setattr(utils_mlx, "load_model", _record_load_model)
+    monkeypatch.setattr(utils_mlx, "pipeline_auto_parallel", _identity_pipeline)
+    monkeypatch.setattr(utils_mlx, "eval_with_timeout", _ignore)
+    monkeypatch.setattr(utils_mlx, "mx_barrier", _ignore)
+    monkeypatch.setattr(utils_mlx.mx, "eval", _ignore)
+    monkeypatch.setattr(utils_mlx, "get_tokenizer", _tokenizer)
+    group = SimpleNamespace(size=lambda: 2, rank=lambda: 0)
+
+    model, tokenizer = utils_mlx.shard_and_load(
+        shard_metadata,
+        cast(utils_mlx.Group, cast(object, group)),
+        on_timeout=None,
+        on_layer_loaded=None,
+    )
+
+    assert model is loaded_model
+    assert tokenizer == "tokenizer"
+    assert seen == {
+        "model_path": Path("/model"),
+        "kwargs": {
+            "lazy": True,
+            "strict": False,
+            "prefer_vlm": True,
+        },
+    }
+
+
+def test_tensor_shards_delegate_to_native_language_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tensor sharding must retain the native VLM wrapper and vision tower."""
+    model_id = ModelId("mlx-community/Qwen3.5-2B-4bit")
+    shard_metadata = TensorShardMetadata(
+        model_card=ModelCard(
+            model_id=model_id,
+            storage_size=Memory.from_bytes(1),
+            n_layers=2,
+            hidden_size=4,
+            num_key_value_heads=2,
+            supports_tensor=True,
+            tasks=[ModelTask.TextGeneration],
+            vision=VisionCardConfig(
+                image_token_id=248056,
+                model_type="qwen3_5",
+                weights_repo=str(model_id),
+            ),
+        ),
+        device_rank=0,
+        world_size=2,
+        start_layer=0,
+        end_layer=2,
+        n_layers=2,
+    )
+    inner_model = _VlmWithTensorLanguage()
+    wrapper_class = cast(
+        Callable[[nn.Module], nn.Module],
+        vars(utils_mlx)["_VlmModelWrapper"],
+    )
+    wrapper = wrapper_class(inner_model)
+    seen: dict[str, object] = {}
+
+    def _model_path(*_args: object, **_kwargs: object) -> Path:
+        return Path("/model")
+
+    def _load_model(*_args: object, **_kwargs: object) -> tuple[nn.Module, None]:
+        return wrapper, None
+
+    def _tensor_parallel(
+        model: nn.Module,
+        _group: object,
+        _timeout_seconds: float,
+        _on_timeout: object,
+        _on_layer_loaded: object,
+        *,
+        generation_model: nn.Module | None = None,
+    ) -> nn.Module:
+        seen["sharding_model"] = model
+        seen["generation_model"] = generation_model
+        assert generation_model is not None
+        return generation_model
+
+    def _ignore(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def _tokenizer(*_args: object, **_kwargs: object) -> str:
+        return "tokenizer"
+
+    def _weight_size(_metadata: object) -> Memory:
+        return Memory.from_bytes(1)
+
+    monkeypatch.setattr(utils_mlx, "build_model_path", _model_path)
+    monkeypatch.setattr(utils_mlx, "load_model", _load_model)
+    monkeypatch.setattr(utils_mlx, "tensor_auto_parallel", _tensor_parallel)
+    monkeypatch.setattr(utils_mlx, "mx_barrier", _ignore)
+    monkeypatch.setattr(utils_mlx.mx, "eval", _ignore)
+    monkeypatch.setattr(utils_mlx, "get_tokenizer", _tokenizer)
+    monkeypatch.setattr(
+        utils_mlx,
+        "get_weights_size",
+        _weight_size,
+    )
+    group = SimpleNamespace(size=lambda: 2, rank=lambda: 0)
+
+    model, tokenizer = utils_mlx.shard_and_load(
+        shard_metadata,
+        cast(utils_mlx.Group, cast(object, group)),
+        on_timeout=None,
+        on_layer_loaded=None,
+    )
+
+    assert model is wrapper
+    assert tokenizer == "tokenizer"
+    assert seen == {
+        "sharding_model": inner_model.language_model,
+        "generation_model": wrapper,
+    }
+
+
+def test_tensor_parallel_selects_native_qwen_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nested MLX-VLM Qwen trunk must reach the Qwen sharding strategy."""
+    native_model = _NativeQwenLanguageModel()
+    generation_model = _FakeVlmModel()
+    seen: dict[str, object] = {}
+
+    class _RecordingStrategy:
+        def __init__(self, *_args: object) -> None:
+            return None
+
+        def shard_model(
+            self,
+            model: nn.Module,
+            _timeout_seconds: float,
+            _on_timeout: object,
+            _on_layer_loaded: object,
+        ) -> nn.Module:
+            seen["sharding_model"] = model
+            return model
+
+    def _record_patch(model: nn.Module) -> nn.Module:
+        seen["generation_model"] = model
+        return model
+
+    monkeypatch.setattr(auto_parallel, "QwenShardingStrategy", _RecordingStrategy)
+    monkeypatch.setattr(auto_parallel, "patch_tensor_model", _record_patch)
+    group = SimpleNamespace(size=lambda: 2, rank=lambda: 0)
+
+    result = auto_parallel.tensor_auto_parallel(
+        native_model,
+        cast(mx.distributed.Group, cast(object, group)),
+        timeout_seconds=1,
+        on_timeout=None,
+        on_layer_loaded=None,
+        generation_model=generation_model,
+    )
+
+    assert result is generation_model
+    assert seen == {
+        "sharding_model": native_model,
+        "generation_model": generation_model,
+    }
+
+
+def test_pipeline_reindexes_native_qwen_hybrid_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sliced native Qwen trunk must use cache indices local to its rank."""
+    model = _VlmWithPipelineLanguage(
+        [True, True, True, False, True, True, True, False]
+    )
+    shard = SimpleNamespace(
+        start_layer=2,
+        end_layer=5,
+        device_rank=1,
+        world_size=3,
+    )
+
+    def _ignore_eval(*_args: object) -> None:
+        return None
+
+    def _identity_layer(
+        layer: object, *_args: object, **_kwargs: object
+    ) -> object:
+        return layer
+
+    def _identity_pipeline(
+        patched_model: nn.Module, _group: object
+    ) -> nn.Module:
+        return patched_model
+
+    monkeypatch.setattr(auto_parallel.mx, "eval", _ignore_eval)
+    monkeypatch.setattr(
+        auto_parallel,
+        "PipelineFirstLayer",
+        _identity_layer,
+    )
+    monkeypatch.setattr(
+        auto_parallel,
+        "PipelineLastLayer",
+        _identity_layer,
+    )
+    monkeypatch.setattr(
+        auto_parallel,
+        "patch_pipeline_model",
+        _identity_pipeline,
+    )
+    group = SimpleNamespace()
+
+    auto_parallel.pipeline_auto_parallel(
+        model,
+        cast(mx.distributed.Group, cast(object, group)),
+        cast(PipelineShardMetadata, cast(object, shard)),
+        on_layer_loaded=None,
+    )
+
+    inner = model.language_model.model
+    assert len(inner.layers) == 3
+    assert inner.ssm_idx == 0
+    assert inner.fa_idx == 1
+
+
+def test_tensor_patch_finds_cache_in_variadic_generation_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wrapper patch must preserve the tensor collective dependency."""
+    cache_keys = mx.ones((1,))
+    seen: dict[str, object] = {}
+
+    class _CacheEntry:
+        def __init__(self) -> None:
+            self.keys = cache_keys
+
+    def _record_depends(keys: mx.array, logits: mx.array) -> mx.array:
+        seen["keys"] = keys
+        seen["logits"] = logits
+        return keys
+
+    monkeypatch.setattr(auto_parallel.mx, "depends", _record_depends)
+    model = _VariadicGenerationModel()
+    patched = auto_parallel.patch_tensor_model(model)
+
+    logits = patched(mx.array([[1]]), cache=[_CacheEntry()])
+
+    assert seen["keys"] is cache_keys
+    assert seen["logits"] is logits
 
 
 def test_converted_qwen_norm_guard_preserves_mlx_norm_weights() -> None:

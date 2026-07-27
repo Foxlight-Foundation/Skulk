@@ -631,6 +631,24 @@ class _VlmModelWrapper(nn.Module):
         layers = cast(Model, inner).layers
         return [KVCache() for _ in layers]
 
+    def tensor_parallel_target(self) -> nn.Module:
+        """Return the nested language model whose weights tensor sharding owns.
+
+        The wrapper itself owns generation compatibility and the native VLM
+        owns the vision tower, but tensor parallelism shards only the language
+        trunk. Keeping those roles separate also ensures the distributed
+        generation synchronization patch continues to observe plain logits
+        rather than an upstream ``LanguageModelOutput``.
+        """
+        inner = cast(object, self._inner)
+        language_model = getattr(inner, "language_model", None)
+        if not isinstance(language_model, nn.Module):
+            raise ValueError(
+                "Native vision model does not expose a tensor-shardable "
+                "language model"
+            )
+        return language_model
+
     def __call__(self, *args: object, **kwargs: object) -> mx.array:
         pixel_values = cast(
             mx.array | list[mx.array] | None,
@@ -711,8 +729,8 @@ def load_model(
         model_path: Local model bundle.
         prefer_vlm: Load through MLX-VLM even when MLX-LM recognizes the model
             type. MLX-LM intentionally strips vision towers from Qwen VLM
-            checkpoints, so a single-node vision placement must opt into the
-            native model to preserve its image-grid-aware embeddings and RoPE.
+            checkpoints, so vision placements must opt into the native model to
+            preserve their image-grid-aware embeddings and RoPE.
         **kwargs: Loader options forwarded to the selected upstream loader.
 
     Returns:
@@ -738,6 +756,20 @@ def load_model(
             raise ValueError(
                 f"{exc}. Install mlx-vlm for vision model support: pip install -U mlx-vlm"
             ) from exc
+
+
+def _prefers_native_vlm(model_card: ModelCard) -> bool:
+    """Return whether a card's primary weights require the native VLM loader.
+
+    MLX-LM recognizes some multimodal checkpoints as text models and strips
+    their vision towers. When the card points vision at the same checkpoint as
+    its language weights, every placement shape must load through MLX-VLM so
+    family-specific image-grid positions and embeddings remain available.
+    """
+    vision_config = model_card.vision
+    return vision_config is not None and vision_config.weights_repo == str(
+        model_card.model_id
+    )
 
 
 def sidecar_load_eligible(
@@ -892,15 +924,11 @@ def load_mlx_items(
         card = bound_instance.bound_shard.model_card
         model_path = build_model_path(card.model_id, card.source_revision)
         start_time = time.perf_counter()
-        vision_config = card.vision
-        prefer_vlm = vision_config is not None and vision_config.weights_repo == str(
-            card.model_id
-        )
         model, _ = load_model(
             model_path,
             lazy=True,
             strict=False,
-            prefer_vlm=prefer_vlm,
+            prefer_vlm=_prefers_native_vlm(card),
         )
         # Eval layers one by one for progress reporting
         try:
@@ -1071,7 +1099,12 @@ def shard_and_load(
         shard_metadata.model_card.source_revision,
     )
 
-    model, _ = load_model(model_path, lazy=True, strict=False)
+    model, _ = load_model(
+        model_path,
+        lazy=True,
+        strict=False,
+        prefer_vlm=_prefers_native_vlm(shard_metadata.model_card),
+    )
     logger.debug(model)
     if hasattr(model, "model") and isinstance(model.model, DeepseekV3Model):  # type: ignore
         pass
@@ -1108,8 +1141,19 @@ def shard_and_load(
     match shard_metadata:
         case TensorShardMetadata():
             logger.info(f"loading model from {model_path} with tensor parallelism")
+            generation_model = model
+            sharding_model = (
+                model.tensor_parallel_target()
+                if isinstance(model, _VlmModelWrapper)
+                else model
+            )
             model = tensor_auto_parallel(
-                model, group, timeout_seconds, on_timeout, on_layer_loaded
+                sharding_model,
+                group,
+                timeout_seconds,
+                on_timeout,
+                on_layer_loaded,
+                generation_model=generation_model,
             )
         case PipelineShardMetadata():
             logger.info(f"loading model from {model_path} with pipeline parallelism")
