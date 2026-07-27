@@ -361,10 +361,7 @@ class Runner:
                 self.acknowledge_task(task)
 
                 warmup_generator = self.generator
-                assert isinstance(warmup_generator, (SequentialGenerator, BatchGenerator))
-                group_size = (
-                    warmup_generator.group.size() if warmup_generator.group else 1
-                )
+                group_size = warmup_generator.group_size()
                 if _should_skip_llm_warmup(
                     group_size,
                     self.model_id,

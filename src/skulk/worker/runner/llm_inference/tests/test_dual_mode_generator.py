@@ -257,6 +257,7 @@ def test_dual_mode_forwards_cancel_all_and_drops_queued_work() -> None:
 def test_dual_mode_warms_shared_model_once_and_closes_both_engines() -> None:
     dual, text, vision, _, _, _ = _dual()
 
+    assert dual.group_size() == 1
     dual.warmup()
     assert vision.warmup_calls == 1
     assert text.warmup_calls == 0

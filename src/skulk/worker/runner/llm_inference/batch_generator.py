@@ -89,6 +89,7 @@ class _ActiveBatchTask:
 
 
 class InferenceGenerator(ABC):
+    group: mx.distributed.Group | None
     _cancelled_tasks: set[TaskId]
 
     def should_cancel(self, task_id: TaskId) -> bool:
@@ -116,6 +117,10 @@ class InferenceGenerator(ABC):
         rather than collapsing onto the peak.
         """
         return 1
+
+    def group_size(self) -> int:
+        """Return the number of ranks participating in generation."""
+        return self.group.size() if self.group is not None else 1
 
     def batches_for(self, task_id: TaskId) -> bool:
         """Return whether ``task_id`` used concurrent decode.
