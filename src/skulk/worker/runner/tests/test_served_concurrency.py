@@ -333,12 +333,30 @@ def test_cancel_all_marks_waiting_generation_cancelled_without_dispatch() -> Non
             "waiting generation entered the engine after cancel-all"
         )
         with host._events_lock:
-            waiting_statuses = [
-                e.task_status
-                for e in host.events
-                if isinstance(e, TaskStatusUpdated) and e.task_id == waiting.task_id
-            ]
+            events = list(host.events)
+        waiting_statuses = [
+            e.task_status
+            for e in events
+            if isinstance(e, TaskStatusUpdated) and e.task_id == waiting.task_id
+        ]
         assert waiting_statuses[-1] is TaskStatus.Cancelled
+        waiter_cancelled_at = next(
+            index
+            for index, event in enumerate(events)
+            if isinstance(event, TaskStatusUpdated)
+            and event.task_id == waiting.task_id
+            and event.task_status is TaskStatus.Cancelled
+        )
+        ready_after_waiter_cancel = next(
+            (
+                index
+                for index, event in enumerate(events[waiter_cancelled_at + 1 :])
+                if isinstance(event, RunnerStatusUpdated)
+                and isinstance(event.runner_status, RunnerReady)
+            ),
+            None,
+        )
+        assert ready_after_waiter_cancel is not None
     finally:
         host.generate_gate.set()
         if t.is_alive():

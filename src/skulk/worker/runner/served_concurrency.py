@@ -229,6 +229,7 @@ class ServedConcurrentDispatch:
                                 if permit_acquired:
                                     self._dispatch_permits.release()
                                 self.send_task_status(task, TaskStatus.Cancelled)
+                                self._mark_ready_if_idle_after_waiter_terminal()
                                 continue
                             self._dispatch_generation(task, pool)
                         case Shutdown():
@@ -366,7 +367,11 @@ class ServedConcurrentDispatch:
         """Drop the in-flight count; return True if this drained to idle (0)."""
         with self._status_lock:
             self._inflight = max(0, self._inflight - 1)
-            if self._inflight == 0 and isinstance(self.current_status, RunnerRunning):
+            if (
+                self._inflight == 0
+                and self._dispatch_waiters == 0
+                and isinstance(self.current_status, RunnerRunning)
+            ):
                 self.update_status(RunnerReady())
             return self._inflight == 0
 
@@ -398,6 +403,16 @@ class ServedConcurrentDispatch:
         if self._inflight_count() == 0 and not self._has_dispatch_waiters():
             with self._cancel_lock:
                 self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
+
+    def _mark_ready_if_idle_after_waiter_terminal(self) -> None:
+        """Return to Ready after a never-dispatched waiter emits its terminal status."""
+        with self._status_lock:
+            if (
+                self._inflight == 0
+                and self._dispatch_waiters == 0
+                and isinstance(self.current_status, RunnerRunning)
+            ):
+                self.update_status(RunnerReady())
 
     def _admission_concurrency(self, task_id: TaskId) -> int:
         """In-flight count captured when ``task_id`` was admitted (#596).
