@@ -1832,7 +1832,22 @@ def _parse_kimi_tool_calls(text: str):
 def mx_all_gather_tasks(
     tasks: list[TextGeneration],
     group: mx.distributed.Group | None,
+    *,
+    preserve_rank_zero_order: bool = False,
 ) -> tuple[list[TextGeneration], list[TextGeneration]]:
+    """Agree on tasks present on every rank.
+
+    Args:
+        tasks: Locally observed candidate tasks.
+        group: MLX distributed group, or ``None`` for one rank.
+        preserve_rank_zero_order: Use rank zero's arrival order as the canonical
+            order for agreed tasks. The default retains the historical
+            task-ID-sorted behavior.
+
+    Returns:
+        Agreed local task objects in canonical order and candidates not yet
+        observed on every rank.
+    """
     def encode_task_id(task_id: TaskId) -> list[int]:
         utf8_task_id = task_id.encode()
         return [
@@ -1877,6 +1892,11 @@ def mx_all_gather_tasks(
     agreed_ids = set[TaskId].intersection(*(set(tids) for tids in all_task_ids))
 
     local_tasks = {task.task_id: task for task in tasks}
-    agreed = [local_tasks[tid] for tid in sorted(agreed_ids)]
+    canonical_ids = (
+        [task_id for task_id in all_task_ids[0] if task_id in agreed_ids]
+        if preserve_rank_zero_order
+        else sorted(agreed_ids)
+    )
+    agreed = [local_tasks[tid] for tid in canonical_ids]
     different = [task for task in tasks if task.task_id not in agreed_ids]
     return agreed, different

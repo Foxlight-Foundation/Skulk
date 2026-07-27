@@ -65,7 +65,7 @@ from skulk.shared.types.worker.runners import (
     RunnerStatus,
     RunnerWarmingUp,
 )
-from skulk.utils.channels import MpReceiver, MpSender
+from skulk.utils.channels import MpReceiver, MpSender, mp_channel
 from skulk.worker.engines.mlx.cache import KVPrefixCache, get_kv_cache_backend
 from skulk.worker.engines.mlx.utils_mlx import (
     initialize_mlx,
@@ -82,6 +82,7 @@ from skulk.worker.runner.bootstrap import (
 from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
 from skulk.worker.runner.llm_inference.batch_generator import (
     BatchGenerator,
+    DualModeGenerator,
     InferenceGenerator,
     SequentialGenerator,
 )
@@ -360,10 +361,7 @@ class Runner:
                 self.acknowledge_task(task)
 
                 warmup_generator = self.generator
-                assert isinstance(warmup_generator, (SequentialGenerator, BatchGenerator))
-                group_size = (
-                    warmup_generator.group.size() if warmup_generator.group else 1
-                )
+                group_size = warmup_generator.group_size()
                 if _should_skip_llm_warmup(
                     group_size,
                     self.model_id,
@@ -660,19 +658,22 @@ class Runner:
     ) -> GenerationStats | None:
         """Stamp runner ground truth onto a generation's terminal stats (#596).
 
-        The in-process MLX runner batches concurrent requests on the batch
-        generator, so it must report its own serving node, backend, batching mode,
-        and in-flight-at-admission count exactly like the served runners do. Without
-        it the API's performance-envelope tap falls back to guessing and classifies
-        every MLX instance as serial (``batches=False``), which biases the
-        throughput-vs-concurrency knee for the batch path. ``None`` passes through
-        unchanged (only terminal chunks carry stats).
+        The in-process MLX runner reports its serving node, backend, task-local
+        batching mode, and in-flight-at-admission count exactly like served
+        runners do. Task-local truth matters for multimodal instances: text
+        requests batch while image-bearing requests use sequential reference
+        generation. Without provenance the API's performance-envelope tap must
+        guess, which can classify a serialized request as batched or hide a
+        batching regression. ``None`` passes through unchanged because only
+        terminal chunks carry stats.
         """
         if stats is None:
             return None
         generator = self.generator
         batches = (
-            generator.batches if isinstance(generator, InferenceGenerator) else False
+            generator.batches_for(task_id)
+            if isinstance(generator, InferenceGenerator)
+            else False
         )
         in_flight = (
             generator.admission_concurrency(task_id)
@@ -816,13 +817,12 @@ class Builder:
         force_sequential_for_gemma4 = is_gemma4_family(
             self.model_card, model_id=self.model_id
         )
-        # MLX-LM's BatchGenerator only accepts language-model caches and token
-        # ids after Skulk's generic prefill. Native VLM families also require
-        # mlx-vlm's family-specific multimodal positions during generation;
-        # using the batch engine can read the image yet terminate with a
-        # partial answer. Keep card-declared vision models on the reference
-        # sequential path until the batch engine has an equivalent VLM adapter.
-        force_sequential_for_vision = (
+        # MLX-LM's BatchGenerator cannot yet carry native VLM position/model
+        # state per sequence. Card-declared vision models therefore need the
+        # dual-mode coordinator: text batches normally, while image-bearing
+        # requests use mutually exclusive reference generation. Independent
+        # constraints below still force the whole instance sequential.
+        needs_reference_vision = (
             self.model_card is not None and self.model_card.vision is not None
         )
         # CARD-derived, never asset-derived: on multi-node placements only the
@@ -858,7 +858,6 @@ class Builder:
             no_batch_requested
             or force_sequential_for_kv_backend
             or force_sequential_for_gemma4
-            or force_sequential_for_vision
             or force_sequential_for_mtp
         ):
             if force_sequential_for_kv_backend and not no_batch_requested:
@@ -874,11 +873,6 @@ class Builder:
                     "mode yet; forcing SequentialGenerator"
                 )
                 logger.info("using SequentialGenerator (model_family=gemma4)")
-            elif force_sequential_for_vision and not no_batch_requested:
-                logger.info(
-                    "Native vision requires the mlx-vlm reference generation path; "
-                    "using SequentialGenerator"
-                )
             elif force_sequential_for_mtp and not no_batch_requested:
                 logger.info("MTP speculative decoding requires SequentialGenerator; forcing (mtp_heads=true)")
             else:
@@ -898,6 +892,47 @@ class Builder:
                 mtp_weights=self.mtp_weights,
                 assistant_model=self.assistant_model,
                 context_token_limit=self.context_token_limit,
+            )
+        if needs_reference_vision:
+            logger.info(
+                "using DualModeGenerator "
+                "(text=BatchGenerator, vision=SequentialGenerator)"
+            )
+            text_cancel_sender, text_cancel_receiver = mp_channel[TaskId]()
+            vision_cancel_sender, vision_cancel_receiver = mp_channel[TaskId]()
+            return DualModeGenerator(
+                text_generator=BatchGenerator(
+                    model=self.inference_model,
+                    tokenizer=self.tokenizer,
+                    group=self.group,
+                    tool_parser=tool_parser,
+                    kv_prefix_cache=kv_prefix_cache,
+                    model_card=self.model_card,
+                    model_id=self.model_id,
+                    device_rank=device_rank,
+                    cancel_receiver=text_cancel_receiver,
+                    event_sender=self.event_sender,
+                    vision_processor=vision_processor,
+                    context_token_limit=self.context_token_limit,
+                ),
+                vision_generator=SequentialGenerator(
+                    model=self.inference_model,
+                    tokenizer=self.tokenizer,
+                    group=self.group,
+                    tool_parser=tool_parser,
+                    kv_prefix_cache=kv_prefix_cache,
+                    model_card=self.model_card,
+                    model_id=self.model_id,
+                    device_rank=device_rank,
+                    cancel_receiver=vision_cancel_receiver,
+                    event_sender=self.event_sender,
+                    vision_processor=vision_processor,
+                    context_token_limit=self.context_token_limit,
+                ),
+                group=self.group,
+                cancel_receiver=self.cancel_receiver,
+                text_cancel_sender=text_cancel_sender,
+                vision_cancel_sender=vision_cancel_sender,
             )
         logger.info("using BatchGenerator")
         return BatchGenerator(
