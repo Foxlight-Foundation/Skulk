@@ -284,6 +284,20 @@ def _should_use_native_vision_reference_path() -> bool:
     )
 
 
+def _native_vision_model_requires_reference_path(model: Model) -> bool:
+    """Return whether a model needs family-aware native-vision prefill.
+
+    Qwen3-VL's distributed generic ``mlx_lm`` prefill produces different
+    logits from MLX-VLM's reference embedding path even on the fixed upstream
+    stack. Keep this family on the reference path for correctness while other
+    native VLMs retain Skulk's optimized distributed pipeline.
+    """
+
+    config = getattr(model, "config", None)
+    model_type = cast(str | None, getattr(config, "model_type", None))
+    return model_type == "qwen3_vl"
+
+
 def _native_pixel_values_debug_state(
     pixel_values: mx.array | list[mx.array] | None,
 ) -> str:
@@ -1046,7 +1060,7 @@ def prefill(
                     f"stream_generate prefill rank={rank} group_size={group_size}"
                 ),
             ):
-                for prefill_response in stream_generate(
+                for _ in stream_generate(
                     model=model,
                     tokenizer=tokenizer,
                     prompt=prompt_tokens,
@@ -1059,8 +1073,7 @@ def prefill(
                     prompt_progress_callback=progress_callback,
                 ):
                     logger.info(
-                        "Prefill stream_generate yielded first token "
-                        f"(rank={rank}, token={getattr(prefill_response, 'token', '<unknown>')})"
+                        f"Prefill stream_generate yielded first token (rank={rank})"
                     )
                     break  # Stop after first iteration - cache is now filled
     except PrefillCancelled:
@@ -1199,11 +1212,6 @@ def _stream_generate_without_lookahead(
         last_token = int(sampled.item())
         last_logprobs = logprobs.squeeze(0)
         generated_count = token_index + 1
-        if token_index == 0:
-            logger.info(
-                "Sequential decode selected first token "
-                f"(rank={0 if group is None else group.rank()}, token={last_token})"
-            )
 
         if last_token in eos_token_ids:
             finish_reason = "stop"
@@ -2855,6 +2863,7 @@ def mlx_generate(
             group is None
             or group.size() <= 1
             or _should_use_native_vision_reference_path()
+            or _native_vision_model_requires_reference_path(model)
         ):
             if kv_prefix_cache is not None:
                 logger.info(
