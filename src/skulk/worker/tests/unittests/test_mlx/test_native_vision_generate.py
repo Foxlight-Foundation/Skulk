@@ -126,6 +126,22 @@ class _FakeGroup:
         return self._size
 
 
+class _FakePositionState:
+    """Mutable upstream position state used to simulate a completed warmup."""
+
+    def __init__(self) -> None:
+        self._position_ids: object | None = object()
+        self._rope_deltas: object | None = object()
+
+    @property
+    def position_state(self) -> object | None:
+        return self._position_ids
+
+    @property
+    def rope_state(self) -> object | None:
+        return self._rope_deltas
+
+
 def _fake_group(*, size: int = 3) -> mx.distributed.Group:
     return cast(mx.distributed.Group, cast(object, _FakeGroup(size=size)))
 
@@ -243,22 +259,9 @@ def test_native_vision_clears_position_state_left_by_text_warmup(
 ) -> None:
     """A text warmup must not contaminate the first multimodal request."""
 
-    class _StatefulLanguageModel:
-        def __init__(self) -> None:
-            self._position_ids: object | None = object()
-            self._rope_deltas: object | None = object()
-
-        @property
-        def position_state(self) -> object | None:
-            return self._position_ids
-
-        @property
-        def rope_state(self) -> object | None:
-            return self._rope_deltas
-
     class _StatefulVisionModel:
         def __init__(self) -> None:
-            self.language_model = _StatefulLanguageModel()
+            self.language_model = _FakePositionState()
 
     model = _StatefulVisionModel()
 
@@ -1430,6 +1433,7 @@ def test_mlx_generate_full_prefills_distributed_single_native_image(
 
     class _FakeModel:
         def __init__(self) -> None:
+            self.language_model = _FakePositionState()
             self.pixel_values: mx.array | None = None
             self.saw_non_none_pixel_values = False
 
@@ -1450,6 +1454,8 @@ def test_mlx_generate_full_prefills_distributed_single_native_image(
         *_args: object,
         **_kwargs: object,
     ) -> tuple[float, int, list[CacheSnapshot]]:
+        assert model.language_model.position_state is None
+        assert model.language_model.rope_state is None
         assert model.pixel_values is not None
         assert model.pixel_values.tolist() == [[10.0]]
         assert prompt_tokens.tolist() == [1, 2, 3, 4, 5, 6, 7]

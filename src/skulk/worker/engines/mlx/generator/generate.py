@@ -2895,6 +2895,7 @@ def mlx_generate(
             "Using pipeline-aware native vision generation path on fixed "
             "mlx/mlx-vlm stack"
         )
+        _reset_native_vision_position_state(model)
         record_runner_phase(
             "vision_preprocess",
             event="pipeline_native_vision_path_selected",
