@@ -886,6 +886,26 @@ def pipeline_parallel_prefill(
     )
 
 
+def _requires_single_chunk_pipeline_prefill(
+    model: Model,
+    native_pixel_values: mx.array | list[mx.array] | None,
+) -> bool:
+    """Return whether a short multimodal prompt needs deterministic prefill.
+
+    Qwen3-VL carries multimodal position state outside its language trunk.
+    Upstream ``stream_generate`` samples a lookahead token before yielding,
+    which lets pipeline ranks advance that outer state using different
+    rank-local logits. The explicit scheduler instead finishes prefill from the
+    authoritative final prompt token without a sampled intermediate token.
+    """
+    if native_pixel_values is None:
+        return False
+
+    config = getattr(model, "config", None)
+    model_type = getattr(config, "model_type", None)
+    return isinstance(model_type, str) and model_type == "qwen3_vl"
+
+
 def prefill(
     model: Model,
     tokenizer: TokenizerWrapper,
@@ -958,14 +978,26 @@ def prefill(
         else []
     )
     pipeline_chunks = len(pipeline_chunk_sizes)
-    use_pipeline_prefill = is_pipeline and pipeline_chunks >= 2
+    force_single_chunk_pipeline_prefill = (
+        is_pipeline
+        and _requires_single_chunk_pipeline_prefill(model, native_pixel_values)
+    )
+    use_pipeline_prefill = is_pipeline and (
+        pipeline_chunks >= 2 or force_single_chunk_pipeline_prefill
+    )
+    selection_reason = (
+        "qwen3_vl_native_vision"
+        if force_single_chunk_pipeline_prefill and pipeline_chunks < 2
+        else "chunk_threshold"
+    )
     logger.info(
         "Prefill path selected: "
         f"{'pipeline_parallel_prefill' if use_pipeline_prefill else 'stream_generate'} "
         f"(rank={rank}, prompt_tokens={num_tokens}, is_pipeline={is_pipeline}, "
         f"prefill_step_size_input={prefill_step_size}, "
         f"prefill_step_size_effective={effective_prefill_step_size}, "
-        f"pipeline_chunks={pipeline_chunks}, pipeline_min_chunks=2)"
+        f"pipeline_chunks={pipeline_chunks}, pipeline_min_chunks=2, "
+        f"selection_reason={selection_reason})"
     )
     # Pipeline models must run in prefill mode during any prefill forward
     # pass. With is_prefill=False, pipeline wrappers can queue collectives

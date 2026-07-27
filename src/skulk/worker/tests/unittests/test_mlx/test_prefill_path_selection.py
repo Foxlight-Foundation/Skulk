@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 from typing import cast
 
 import mlx.core as mx
@@ -37,6 +38,12 @@ class _FakeGroup:
 class _FakeModel:
     def __init__(self) -> None:
         self.layers: list[object] = []
+
+
+class _FakeQwen3VlModel(_FakeModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.config = SimpleNamespace(model_type="qwen3_vl")
 
 
 class _FakeStateCache:
@@ -115,6 +122,10 @@ def _identity_sampler(logits: mx.array) -> mx.array:
 
 def _fake_model() -> Model:
     return cast(Model, cast(object, _FakeModel()))
+
+
+def _fake_qwen3_vl_model() -> Model:
+    return cast(Model, cast(object, _FakeQwen3VlModel()))
 
 
 def _fake_tokenizer() -> TokenizerWrapper:
@@ -297,6 +308,80 @@ def test_prefill_uses_stream_generate_path_for_short_pipeline_prompts(
     assert snapshots == []
     assert prefill_tps >= 0.0
     assert fake_cache.trim_calls == [2]
+    assert prefill_mode_calls == [True, False]
+
+
+def test_prefill_uses_pipeline_path_for_short_qwen3_vl_image_prompts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Qwen3-VL image prompts must avoid sampled rank-local prefill lookahead."""
+    calls: list[str] = []
+    fake_cache = _FakeCache()
+    prefill_mode_calls: list[bool] = []
+    queue_send_calls: list[bool] = []
+
+    monkeypatch.setattr(generate_module, "mx_barrier", _noop_barrier)
+    monkeypatch.setattr(
+        generate_module,
+        "set_pipeline_prefill",
+        _record_prefill_mode(prefill_mode_calls),
+    )
+    monkeypatch.setattr(
+        generate_module,
+        "set_pipeline_queue_sends",
+        _record_queue_sends(queue_send_calls),
+    )
+    monkeypatch.setattr(
+        generate_module,
+        "_has_pipeline_communication_layer",
+        _pipeline_enabled,
+    )
+
+    def _pipeline_parallel_prefill(**kwargs: object) -> None:
+        calls.append("pipeline_parallel_prefill")
+        assert kwargs["distributed_prompt_progress_callback"] is None
+        assert kwargs["native_pixel_values"] is not None
+        prompt_progress_callback = cast(
+            Callable[[int, int], None], kwargs["prompt_progress_callback"]
+        )
+        prompt = cast(mx.array, kwargs["prompt"])
+        prompt_progress_callback(len(prompt), len(prompt))
+
+    monkeypatch.setattr(
+        generate_module,
+        "pipeline_parallel_prefill",
+        _pipeline_parallel_prefill,
+    )
+
+    def _stream_generate(*_args: object, **_kwargs: object) -> Iterator[object]:
+        calls.append("stream_generate")
+        yield object()
+
+    monkeypatch.setattr(generate_module, "stream_generate", _stream_generate)
+
+    def _fail_distributed_callback() -> None:
+        raise AssertionError("single-chunk pipeline prefill should not poll tasks")
+
+    prefill_tps, prefill_tokens, snapshots = generate_module.prefill(
+        model=_fake_qwen3_vl_model(),
+        tokenizer=_fake_tokenizer(),
+        sampler=_identity_sampler,
+        prompt_tokens=mx.array(list(range(23))),
+        cache=_fake_cache_list(fake_cache),
+        group=_fake_group(),
+        on_prefill_progress=None,
+        distributed_prompt_progress_callback=_fail_distributed_callback,
+        native_pixel_values=mx.array([1.0]),
+        native_image_grid_thw=mx.array([[1, 1, 1]]),
+        native_media_regions=[MediaRegion("image", 2, 20)],
+    )
+
+    assert calls == ["pipeline_parallel_prefill"]
+    assert prefill_tokens == 23
+    assert snapshots == []
+    assert prefill_tps >= 0.0
+    assert fake_cache.trim_calls == [2]
+    assert queue_send_calls == [True, False]
     assert prefill_mode_calls == [True, False]
 
 
