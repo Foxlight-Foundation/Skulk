@@ -10,6 +10,14 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    VisionCardConfig,
+)
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.worker.engines.mlx import utils_mlx
 
 
@@ -84,6 +92,81 @@ def test_prefer_vlm_bypasses_text_only_mlx_lm_loader(
     assert seen == {
         "model_path": model_path,
         "kwargs": {"lazy": True, "strict": False},
+    }
+
+
+def test_pipeline_shards_use_native_loader_for_primary_vision_weights(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distributed vision must preserve the same native model as one-rank loads."""
+    model_id = ModelId("mlx-community/Qwen3-VL-4B-Instruct-4bit")
+    shard_metadata = PipelineShardMetadata(
+        model_card=ModelCard(
+            model_id=model_id,
+            storage_size=Memory.from_bytes(1),
+            n_layers=2,
+            hidden_size=4,
+            supports_tensor=False,
+            tasks=[ModelTask.TextGeneration],
+            vision=VisionCardConfig(
+                image_token_id=151655,
+                model_type="qwen3_vl",
+                weights_repo=str(model_id),
+            ),
+        ),
+        device_rank=0,
+        world_size=2,
+        start_layer=0,
+        end_layer=1,
+        n_layers=2,
+    )
+    loaded_model = _FakeVlmModel()
+    seen: dict[str, object] = {}
+
+    def _record_load_model(model_path: Path, **kwargs: object) -> tuple[nn.Module, None]:
+        seen["model_path"] = model_path
+        seen["kwargs"] = kwargs
+        return loaded_model, None
+
+    def _model_path(*_args: object, **_kwargs: object) -> Path:
+        return Path("/model")
+
+    def _identity_pipeline(
+        model: nn.Module, *_args: object, **_kwargs: object
+    ) -> nn.Module:
+        return model
+
+    def _ignore(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def _tokenizer(*_args: object, **_kwargs: object) -> str:
+        return "tokenizer"
+
+    monkeypatch.setattr(utils_mlx, "build_model_path", _model_path)
+    monkeypatch.setattr(utils_mlx, "load_model", _record_load_model)
+    monkeypatch.setattr(utils_mlx, "pipeline_auto_parallel", _identity_pipeline)
+    monkeypatch.setattr(utils_mlx, "eval_with_timeout", _ignore)
+    monkeypatch.setattr(utils_mlx, "mx_barrier", _ignore)
+    monkeypatch.setattr(utils_mlx.mx, "eval", _ignore)
+    monkeypatch.setattr(utils_mlx, "get_tokenizer", _tokenizer)
+    group = SimpleNamespace(size=lambda: 2, rank=lambda: 0)
+
+    model, tokenizer = utils_mlx.shard_and_load(
+        shard_metadata,
+        cast(utils_mlx.Group, cast(object, group)),
+        on_timeout=None,
+        on_layer_loaded=None,
+    )
+
+    assert model is loaded_model
+    assert tokenizer == "tokenizer"
+    assert seen == {
+        "model_path": Path("/model"),
+        "kwargs": {
+            "lazy": True,
+            "strict": False,
+            "prefer_vlm": True,
+        },
     }
 
 
