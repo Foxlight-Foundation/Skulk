@@ -96,6 +96,45 @@ class _VlmWithPipelineLanguage(nn.Module):
         self.language_model = _NativeQwenPipelineLanguageModel(layer_types)
 
 
+class _Qwen3VlPipelineTrunk(nn.Module):
+    """Qwen3-VL-shaped trunk that records rank-local deep-stack inputs."""
+
+    __module__ = "mlx_vlm.models.qwen3_vl.language"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.layers = [SimpleNamespace() for _ in range(8)]
+        self.received_deepstack: object | None = None
+
+    def __call__(
+        self,
+        _inputs: object,
+        *,
+        deepstack_visual_embeds: object | None = None,
+    ) -> mx.array:
+        self.received_deepstack = deepstack_visual_embeds
+        return mx.zeros((1, 1, 4))
+
+
+_Qwen3VlPipelineTrunk.__name__ = "Qwen3VLModel"
+
+
+class _Qwen3VlPipelineLanguageModel(nn.Module):
+    """Language wrapper owning a Qwen3-VL deep-stack trunk."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = _Qwen3VlPipelineTrunk()
+
+
+class _VlmWithQwen3VlPipelineLanguage(nn.Module):
+    """Native Qwen3-VL wrapper used to verify deep-stack layer alignment."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.language_model = _Qwen3VlPipelineLanguageModel()
+
+
 class _Gemma3nPipelineTrunk(nn.Module):
     """Gemma 3n-shaped trunk with shared caches and layer-specific inputs."""
 
@@ -515,6 +554,54 @@ def test_pipeline_reindexes_native_qwen_hybrid_cache(
     assert len(inner.layers) == 3
     assert inner.ssm_idx == 0
     assert inner.fa_idx == 1
+
+
+def test_pipeline_slices_qwen3_vl_deepstack_inputs_by_global_layer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Later Qwen3-VL ranks must not reinject early-layer image features."""
+    model = _VlmWithQwen3VlPipelineLanguage()
+    shard = SimpleNamespace(
+        start_layer=4,
+        end_layer=8,
+        device_rank=1,
+        world_size=2,
+    )
+
+    def _ignore_eval(*_args: object) -> None:
+        return None
+
+    def _identity_layer(
+        layer: object, *_args: object, **_kwargs: object
+    ) -> object:
+        return layer
+
+    def _identity_pipeline(
+        patched_model: nn.Module, _group: object
+    ) -> nn.Module:
+        return patched_model
+
+    monkeypatch.setattr(auto_parallel.mx, "eval", _ignore_eval)
+    monkeypatch.setattr(auto_parallel, "PipelineFirstLayer", _identity_layer)
+    monkeypatch.setattr(auto_parallel, "PipelineLastLayer", _identity_layer)
+    monkeypatch.setattr(
+        auto_parallel,
+        "patch_pipeline_model",
+        _identity_pipeline,
+    )
+
+    auto_parallel.pipeline_auto_parallel(
+        model,
+        cast(mx.distributed.Group, cast(object, SimpleNamespace())),
+        cast(PipelineShardMetadata, cast(object, shard)),
+        on_layer_loaded=None,
+    )
+
+    deepstack = ["layer-0", "layer-1", "layer-2", "layer-3", "layer-4"]
+    inner = model.language_model.model
+    inner(object(), deepstack_visual_embeds=deepstack)
+
+    assert inner.received_deepstack == ["layer-4"]
 
 
 @pytest.mark.parametrize("quantized", [False, True])
