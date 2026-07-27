@@ -344,7 +344,7 @@ async def test_never_started_generation_does_not_leak_inflight() -> None:
     assert api._performance_envelopes.snapshot().envelopes == []
 
 
-def test_generation_stats_redacted_for_client_strips_runner_attribution() -> None:
+def test_generation_stats_redacted_for_client_preserves_batching_truth() -> None:
     from skulk.api.types import GenerationStats
     from skulk.shared.types.memory import Memory
 
@@ -362,18 +362,19 @@ def test_generation_stats_redacted_for_client_strips_runner_attribution() -> Non
 
     client = stats.redacted_for_client()
 
-    # Internal runner attribution (#596) is cleared for client serialization.
+    # Identifying runner attribution (#596) is cleared for client serialization.
     assert client.serving_node is None
     assert client.serving_backend is None
-    assert client.in_flight_at_admission is None
-    assert client.serving_batches is None
-    # The client-facing measurements are preserved.
+    # Non-identifying serving truth remains available to black-box qualification.
+    assert client.in_flight_at_admission == 5
+    assert client.serving_batches is True
+    # The other client-facing measurements are preserved.
     assert client.generation_tps == 2.0
     assert client.prompt_tokens == 3
     assert client.peak_memory_usage.in_bytes == 123
     # The dumped JSON a client sees carries none of the internal VALUES (the
-    # node id, backend tag, and live in-flight count). The keys may remain as
-    # nulls; what must not leak is the data.
+    # node id and backend tag). The keys may remain as nulls; what must not leak
+    # is the identifying data.
     dumped = client.model_dump_json()
     assert "node-7" not in dumped
     assert "vllm-cuda" not in dumped

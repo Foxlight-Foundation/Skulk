@@ -724,24 +724,21 @@ class GenerationStats(BaseModel):
     concurrency. Distinguishes a parallel llama-server from a serial one."""
 
     def redacted_for_client(self) -> "GenerationStats":
-        """Return a copy with the internal runner-attribution fields cleared.
+        """Return a copy with identifying runner-attribution fields cleared.
 
-        The four ``serving_*`` / ``in_flight_at_admission`` fields exist only to
-        feed the API's performance-envelope tap over the DATA plane (#596); an
-        API client has no need for them and must not see internal cluster
-        topology (node id), the serving backend, or the instance's live in-flight
-        load. Both the DATA-plane transport and client responses serialize this
-        model with the same ``model_dump_json()``, so the fields cannot simply be
-        excluded (that would strip them from the worker-to-API payload too).
-        Client-facing serializers (the chat SSE ``generation_stats`` comment, the
-        bench response) call this to emit a client-safe view instead.
+        Node identity and backend selection are private cluster topology. The
+        task-local batching mode and admission width are non-identifying serving
+        measurements and remain visible so black-box clients can verify that
+        configured concurrency was actually exercised. Both the DATA-plane
+        transport and client responses serialize this model with the same
+        ``model_dump_json()``, so client-facing serializers call this method
+        after the API's internal performance-envelope tap has consumed the full
+        runner attribution.
         """
         return self.model_copy(
             update={
                 "serving_node": None,
                 "serving_backend": None,
-                "in_flight_at_admission": None,
-                "serving_batches": None,
             }
         )
 
