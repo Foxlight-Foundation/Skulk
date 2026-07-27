@@ -624,14 +624,10 @@ def _build_vision_prompt_with_debug(
     For models that use BOI/EOI framing (Gemma 3n/4), each expanded image
     sequence is wrapped as ``BOI + (IMAGE × N) + EOI`` matching the format
     the model was trained on."""
-    prompt_debug_messages = [
-        {
-            key: (value[:50] if isinstance(value, str) else value)
-            for key, value in message.items()
-        }
-        for message in chat_template_messages
-    ]
-    logger.info(f"Vision prompt messages: {prompt_debug_messages}")
+    logger.info(
+        "Building vision prompt "
+        f"(messages={len(chat_template_messages)}, images={len(n_tokens_per_image)})"
+    )
     uses_gemma4_reference_prompt = model_type == "gemma4"
     if uses_gemma4_reference_prompt:
         prompt = render_gemma4_prompt(

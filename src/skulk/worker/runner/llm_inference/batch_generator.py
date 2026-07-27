@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Generator, Iterable
 from dataclasses import dataclass, field
+from typing import Literal
 
 import mlx.core as mx
 from mlx_lm.tokenizer_utils import TokenizerWrapper
@@ -88,6 +89,7 @@ class _ActiveBatchTask:
 
 
 class InferenceGenerator(ABC):
+    group: mx.distributed.Group | None
     _cancelled_tasks: set[TaskId]
 
     def should_cancel(self, task_id: TaskId) -> bool:
@@ -115,6 +117,21 @@ class InferenceGenerator(ABC):
         rather than collapsing onto the peak.
         """
         return 1
+
+    def group_size(self) -> int:
+        """Return the number of ranks participating in generation."""
+        return self.group.size() if self.group is not None else 1
+
+    def batches_for(self, task_id: TaskId) -> bool:
+        """Return whether ``task_id`` used concurrent decode.
+
+        Most generators have one serving mode for their lifetime, so the
+        default delegates to :attr:`batches`. A modality-aware generator
+        overrides this with task-local truth because text requests batch while
+        image-bearing requests use the reference sequential path.
+        """
+        del task_id
+        return self.batches
 
     @abstractmethod
     def warmup(self) -> None: ...
@@ -1010,3 +1027,276 @@ class BatchGenerator(InferenceGenerator):
             rank=self.device_rank,
             category="decode",
         )
+
+
+GenerationMode = Literal["text_batch", "vision_sequential"]
+
+
+@dataclass(eq=False)
+class DualModeGenerator(InferenceGenerator):
+    """Schedule text through batching and image requests through reference decode.
+
+    Native VLM families need request-local multimodal position and model state
+    that MLX-LM's batch primitive cannot yet carry per sequence. Forcing the
+    whole model instance onto ``SequentialGenerator`` preserves image
+    correctness but also serializes ordinary text. This coordinator keeps the
+    two proven engines mutually exclusive over one shared model:
+
+    * consecutive text-only tasks form a batch cohort;
+    * one image-bearing task runs through reference generation;
+    * FIFO mode boundaries prevent either modality from starving the other.
+
+    Task and cancellation agreement happens before a cohort is delegated, so
+    every distributed rank changes mode in the same order. The child generators
+    retain their existing per-mode agreement and cancellation behavior.
+    """
+
+    text_generator: BatchGenerator
+    vision_generator: SequentialGenerator
+    group: mx.distributed.Group | None
+    cancel_receiver: MpReceiver[TaskId]
+    text_cancel_sender: MpSender[TaskId]
+    vision_cancel_sender: MpSender[TaskId]
+
+    _cancelled_tasks: set[TaskId] = field(default_factory=set, init=False)
+    _maybe_queue: list[TextGeneration] = field(default_factory=list, init=False)
+    _queue: deque[TextGeneration] = field(default_factory=deque, init=False)
+    _all_tasks: dict[TaskId, TextGeneration] = field(default_factory=dict, init=False)
+    _maybe_cancel: list[TextGeneration] = field(default_factory=list, init=False)
+    _active_mode: GenerationMode | None = field(default=None, init=False)
+    _active_task_ids: set[TaskId] = field(default_factory=set, init=False)
+    _task_modes: dict[TaskId, GenerationMode] = field(
+        default_factory=dict, init=False
+    )
+    _completed_task_ids: set[TaskId] = field(default_factory=set, init=False)
+    _step_count: int = field(default=0, init=False)
+
+    @property
+    def batches(self) -> bool:
+        """Return the instance capability; task-local truth uses ``batches_for``."""
+        return True
+
+    def batches_for(self, task_id: TaskId) -> bool:
+        """Return whether this task used the text batch path."""
+        return self._task_modes.get(task_id) == "text_batch"
+
+    def admission_concurrency(self, task_id: TaskId) -> int:
+        """Return task-local admission width from the selected child engine."""
+        if self._task_modes.get(task_id) == "text_batch":
+            return self.text_generator.admission_concurrency(task_id)
+        return 1
+
+    def warmup(self) -> None:
+        """Warm the shared model once through the reference-safe path."""
+        self.vision_generator.warmup()
+        self.text_generator.check_for_cancel_every = (
+            self.vision_generator.check_for_cancel_every
+        )
+
+    def submit(self, task: TextGeneration) -> None:
+        """Queue one task for distributed agreement and modality scheduling."""
+        self._cancelled_tasks.discard(CANCEL_ALL_TASKS)
+        self._all_tasks[task.task_id] = task
+        self._maybe_queue.append(task)
+
+    def step(
+        self,
+    ) -> Iterable[
+        tuple[TaskId, ToolCallResponse | GenerationResponse | Cancelled | Finished]
+    ]:
+        """Advance the active cohort without overlapping the two generators."""
+        self._step_count += 1
+        self._prune_completed_metadata()
+
+        outer_results: list[tuple[TaskId, Cancelled]] = []
+        if self._should_coordinate():
+            outer_results.extend(self._agree_on_cancellations())
+            self._agree_on_tasks()
+
+        self._dispatch_ready_tasks()
+        if self._active_mode is None:
+            return outer_results
+
+        delegate: InferenceGenerator = (
+            self.text_generator
+            if self._active_mode == "text_batch"
+            else self.vision_generator
+        )
+        delegated_results = list(delegate.step())
+        for task_id, result in delegated_results:
+            if not isinstance(result, (Cancelled, Finished)):
+                continue
+            self._active_task_ids.discard(task_id)
+            self._all_tasks.pop(task_id, None)
+            self._completed_task_ids.add(task_id)
+
+        if not self._active_task_ids:
+            record_runner_phase(
+                "idle",
+                event="dual_mode_cohort_complete",
+                attrs={"mode": self._active_mode},
+            )
+            self._active_mode = None
+
+        return itertools.chain(outer_results, delegated_results)
+
+    def close(self) -> None:
+        """Close both child engines after their shared model is idle."""
+        self.vision_generator.close()
+        self.text_generator.close()
+        self.text_cancel_sender.close()
+        self.vision_cancel_sender.close()
+
+    def _should_coordinate(self) -> bool:
+        """Coordinate promptly when idle and periodically while decoding.
+
+        Single-rank operation has no collective cost, so it accepts new work on
+        every step. Distributed reference generation already polls for new work
+        periodically; using the same cadence avoids adding a collective to every
+        vision token while keeping mode changes rank-symmetric.
+        """
+        if self.group is None or not self._active_task_ids:
+            return True
+        interval = max(
+            1,
+            min(
+                self.text_generator.check_for_cancel_every,
+                self.vision_generator.check_for_cancel_every,
+            ),
+        )
+        return self._step_count % interval == 0
+
+    def _agree_on_tasks(self) -> None:
+        agreed, different = mx_all_gather_tasks(
+            self._maybe_queue,
+            self.group,
+            preserve_rank_zero_order=True,
+        )
+        queued_ids = {task.task_id for task in self._queue}
+        for task in agreed:
+            if (
+                task.task_id not in queued_ids
+                and task.task_id not in self._cancelled_tasks
+            ):
+                self._queue.append(task)
+                queued_ids.add(task.task_id)
+        self._maybe_queue = [
+            task for task in different if task.task_id not in self._cancelled_tasks
+        ]
+        if agreed or different:
+            record_runner_phase(
+                "task_agreement",
+                event="dual_mode_tasks_agreed",
+                attrs={
+                    "agreed_count": len(agreed),
+                    "different_count": len(different),
+                    "queued_count": len(self._queue),
+                },
+            )
+
+    def _agree_on_cancellations(self) -> list[tuple[TaskId, Cancelled]]:
+        has_cancel_all = False
+        for task_id in self.cancel_receiver.collect():
+            if task_id == CANCEL_ALL_TASKS:
+                has_cancel_all = True
+                continue
+            task = self._all_tasks.get(task_id)
+            if task is not None:
+                self._maybe_cancel.append(task)
+
+        cancel_all = mx_any(has_cancel_all, self.group)
+        agreed, different = mx_all_gather_tasks(self._maybe_cancel, self.group)
+        self._maybe_cancel = list(different)
+        agreed_ids = {task.task_id for task in agreed}
+        if cancel_all:
+            agreed_ids.update(self._all_tasks)
+            self._cancelled_tasks.add(CANCEL_ALL_TASKS)
+        self._cancelled_tasks.update(agreed_ids)
+
+        if not agreed_ids:
+            return []
+
+        active_ids = agreed_ids & self._active_task_ids
+        if active_ids:
+            sender = (
+                self.text_cancel_sender
+                if self._active_mode == "text_batch"
+                else self.vision_cancel_sender
+            )
+            if cancel_all:
+                sender.send(CANCEL_ALL_TASKS)
+            else:
+                for task_id in active_ids:
+                    sender.send(task_id)
+
+        queued_ids = agreed_ids - self._active_task_ids
+        if not queued_ids:
+            return []
+
+        self._queue = deque(
+            task for task in self._queue if task.task_id not in queued_ids
+        )
+        self._maybe_queue = [
+            task for task in self._maybe_queue if task.task_id not in queued_ids
+        ]
+        for task_id in queued_ids:
+            self._all_tasks.pop(task_id, None)
+            self._task_modes.pop(task_id, None)
+        record_runner_phase(
+            "cancel_observed",
+            event="dual_mode_queued_cancellations",
+            attrs={"task_ids": [str(task_id) for task_id in sorted(queued_ids)]},
+        )
+        return [(task_id, Cancelled()) for task_id in sorted(queued_ids)]
+
+    def _dispatch_ready_tasks(self) -> None:
+        if self._active_mode is None:
+            if not self._queue:
+                return
+            self._active_mode = self._mode_for(self._queue[0])
+            record_runner_phase(
+                "task_submission",
+                event="dual_mode_cohort_started",
+                attrs={"mode": self._active_mode, "queued_count": len(self._queue)},
+            )
+
+        if self._active_mode == "vision_sequential":
+            if self._active_task_ids or not self._queue:
+                return
+            task = self._queue[0]
+            if self._mode_for(task) != "vision_sequential":
+                return
+            self._queue.popleft()
+            self._assign(task, "vision_sequential")
+            return
+
+        # Do not place overflow into BatchGenerator's private waiting queues.
+        # The coordinator owns not-yet-admitted work so it can cancel that work
+        # exactly once without a child later admitting an already-finalized task.
+        while (
+            self._queue
+            and self._mode_for(self._queue[0]) == "text_batch"
+            and len(self._active_task_ids) < SKULK_MAX_CONCURRENT_REQUESTS
+        ):
+            self._assign(self._queue.popleft(), "text_batch")
+
+    def _assign(self, task: TextGeneration, mode: GenerationMode) -> None:
+        self._active_task_ids.add(task.task_id)
+        self._task_modes[task.task_id] = mode
+        if mode == "text_batch":
+            self.text_generator.submit(task)
+        else:
+            self.vision_generator.submit(task)
+
+    @staticmethod
+    def _mode_for(task: TextGeneration) -> GenerationMode:
+        # Runner dispatch receives fully assembled new and cached images. The
+        # concrete payload list is therefore the authoritative modality signal;
+        # ``image_count`` alone excludes cached-image reuse.
+        return "vision_sequential" if task.task_params.images else "text_batch"
+
+    def _prune_completed_metadata(self) -> None:
+        for task_id in self._completed_task_ids:
+            self._task_modes.pop(task_id, None)
+            self._cancelled_tasks.discard(task_id)
+        self._completed_task_ids.clear()

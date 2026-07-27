@@ -47,6 +47,14 @@ def _should_use_native_vision_reference_path_fn() -> Callable[[], bool]:
     )
 
 
+def _native_vision_model_requires_reference_path_fn() -> Callable[[Model], bool]:
+    module_dict = cast(dict[str, object], generate_module.__dict__)
+    return cast(
+        Callable[[Model], bool],
+        module_dict["_native_vision_model_requires_reference_path"],
+    )
+
+
 def _slice_native_pixel_values_fn() -> Callable[
     [mx.array | list[mx.array], list[MediaRegion], int],
     mx.array | list[mx.array] | None,
@@ -124,6 +132,22 @@ class _FakeGroup:
 
     def size(self) -> int:
         return self._size
+
+
+class _FakePositionState:
+    """Mutable upstream position state used to simulate a completed warmup."""
+
+    def __init__(self) -> None:
+        self._position_ids: object | None = object()
+        self._rope_deltas: object | None = object()
+
+    @property
+    def position_state(self) -> object | None:
+        return self._position_ids
+
+    @property
+    def rope_state(self) -> object | None:
+        return self._rope_deltas
 
 
 def _fake_group(*, size: int = 3) -> mx.distributed.Group:
@@ -236,6 +260,62 @@ def test_native_vision_generation_uses_mlx_vlm_generate_step(
     assert responses[-1].usage is not None
     assert responses[-1].usage.prompt_tokens == 3
     assert responses[-1].usage.completion_tokens == 2
+
+
+def test_native_vision_clears_position_state_left_by_text_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A text warmup must not contaminate the first multimodal request."""
+
+    class _StatefulVisionModel:
+        def __init__(self) -> None:
+            self.language_model = _FakePositionState()
+
+    model = _StatefulVisionModel()
+
+    def _fake_generate_step(**_kwargs: object):
+        assert model.language_model.position_state is None
+        assert model.language_model.rope_state is None
+        yield mx.array(999), mx.zeros((8,))
+
+    monkeypatch.setattr(
+        import_module("mlx_vlm.generate"),
+        "generate_step",
+        _fake_generate_step,
+    )
+
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/Qwen3-VL-4B-Instruct-4bit"),
+        input=[InputMessage(role="user", content="what is this?")],
+        max_output_tokens=8,
+        temperature=0.0,
+    )
+    vision = VisionResult(
+        prompt="ignored",
+        prompt_tokens=mx.array([1, 2, 3]),
+        embeddings=mx.zeros((1, 0, 1)),
+        media_regions=[],
+        pixel_values=mx.array([1.0]),
+        image_grid_thw=mx.array([[1, 2, 3]]),
+    )
+
+    responses = list(
+        _mlx_generate_native_vision_fn()(
+            model=cast(Model, cast(object, model)),
+            tokenizer=_fake_tokenizer(),
+            task=task,
+            all_prompt_tokens=vision.prompt_tokens,
+            vision=vision,
+            sampler=_identity_sampler,
+            logits_processors=[],
+            on_prefill_progress=None,
+            on_generation_token=None,
+            group=None,
+            max_tokens=8,
+        )
+    )
+
+    assert responses[-1].finish_reason == "stop"
 
 
 @pytest.mark.parametrize(
@@ -872,6 +952,33 @@ def test_native_vision_reference_path_keeps_prereleases_on_safe_path(
     assert _should_use_native_vision_reference_path_fn()() is True
 
 
+@pytest.mark.parametrize(
+    ("model_type", "expected"),
+    [
+        ("qwen3_vl", True),
+        ("gemma4", False),
+        (None, False),
+    ],
+)
+def test_qwen3_vl_requires_family_aware_reference_path(
+    model_type: str | None,
+    expected: bool,
+) -> None:
+    """Only Qwen3-VL bypasses generic distributed native-vision prefill."""
+
+    class _Config:
+        def __init__(self, configured_model_type: str | None) -> None:
+            self.model_type = configured_model_type
+
+    class _Model:
+        def __init__(self, configured_model_type: str | None) -> None:
+            self.config = _Config(configured_model_type)
+
+    model = cast(Model, cast(object, _Model(model_type)))
+
+    assert _native_vision_model_requires_reference_path_fn()(model) is expected
+
+
 def test_slice_native_pixel_values_for_uncached_suffix_drops_cached_images() -> None:
     """Prefix hits should remove already-cached native images from pixel_values."""
 
@@ -1361,6 +1468,7 @@ def test_mlx_generate_full_prefills_distributed_single_native_image(
 
     class _FakeModel:
         def __init__(self) -> None:
+            self.language_model = _FakePositionState()
             self.pixel_values: mx.array | None = None
             self.saw_non_none_pixel_values = False
 
@@ -1381,6 +1489,8 @@ def test_mlx_generate_full_prefills_distributed_single_native_image(
         *_args: object,
         **_kwargs: object,
     ) -> tuple[float, int, list[CacheSnapshot]]:
+        assert model.language_model.position_state is None
+        assert model.language_model.rope_state is None
         assert model.pixel_values is not None
         assert model.pixel_values.tolist() == [[10.0]]
         assert prompt_tokens.tolist() == [1, 2, 3, 4, 5, 6, 7]

@@ -153,7 +153,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
   `torchvision`; macOS still installs pinned `torchvision` for supported families
   that require Transformers' `AutoImageProcessor` fallback. Vision
   processor/preprocessing failures are terminal rather than falling back to
-  text-only generation.
+  text-only generation. Vision-capable instances use request-aware dual-mode
+  scheduling: text-only cohorts use `BatchGenerator`, image-bearing requests
+  use `SequentialGenerator`, and the two paths are mutually exclusive with
+  FIFO mode boundaries. Terminal generation provenance is task-local.
 - **`mlx_audio`**: single-node speech backend vocabulary for upstream
   `mlx-audio` TTS/STT models. Skulk probes and advertises `mlx_audio` /
   `mlx_audio-metal` when `mlx_audio` imports on macOS. Mounted TTS models serve
@@ -354,7 +357,7 @@ Centralized logging uses a three-layer stack:
 - **Vector**: A local log shipper on each node reads Skulk's stdout and forwards to VictoriaLogs. Config at `deployment/logging/vector.yaml`.
 - **VictoriaLogs + Grafana**: Central log storage and dashboards on the R720. Stack definition at `deployment/logging/docker-compose.yml`.
 
-**Performance envelopes (adaptive concurrency, Phase 0):** the API node records one observation per completed generation into a bounded in-memory `PerformanceEnvelopeRegistry` (`src/skulk/api/performance_envelope.py`), keyed by `(hardware class x model x engine+backend x quant)` and bucketed by in-flight concurrency at admission, computing per-bucket p50/p90 TTFT, decode tok/s, aggregate throughput, and a knee estimate. A guarded stream tap (`API._tap_performance_envelope`) feeds it; it is exposed only via `GET /v1/diagnostics/performance-envelopes` (+ `/cluster` fan-out) and the dashboard Performance tab. Observe-only (no behavior change), off State/event-log/telemetry gossip plane. It records only when the serving node's hardware is fully known and exactly one instance serves the model (conservative skips keep the data trustworthy). Later phases (static caps -> online refinement -> closed-loop) are gated.
+**Performance envelopes (adaptive concurrency, Phase 0):** the API node records one observation per completed generation into a bounded in-memory `PerformanceEnvelopeRegistry` (`src/skulk/api/performance_envelope.py`), keyed by `(hardware class x model x engine+backend x quant)` and bucketed by in-flight concurrency at admission, computing per-bucket p50/p90 TTFT, decode tok/s, aggregate throughput, and a knee estimate. A guarded stream tap (`API._tap_performance_envelope`) feeds it; aggregate views are exposed via `GET /v1/diagnostics/performance-envelopes` (+ `/cluster` fan-out) and the dashboard Performance tab. The explicit benchmark API retains non-identifying `serving_batches` and `in_flight_at_admission` truth for black-box qualification while ordinary generation streams redact all runner-attribution fields. Node ids and backend tags are always redacted. Observe-only (no behavior change), off State/event-log/telemetry gossip plane. It records only when the serving node's hardware is fully known and exactly one instance serves the model (conservative skips keep the data trustworthy). Later phases (static caps -> online refinement -> closed-loop) are gated.
 
 ### Tracing
 Runtime tracing is a cluster-scoped debugging feature controlled by command and

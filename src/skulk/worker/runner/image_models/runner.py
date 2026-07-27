@@ -6,6 +6,7 @@ import mlx.core as mx
 
 from skulk.api.types import ImageGenerationStats
 from skulk.shared.constants import SKULK_MAX_CHUNK_SIZE
+from skulk.shared.log_summaries import summarize_task_for_log
 from skulk.shared.models.model_cards import ModelTask
 from skulk.shared.tracing import (
     begin_trace_session,
@@ -298,7 +299,10 @@ class Runner:
                 isinstance(self.current_status, RunnerReady)
             ):
                 assert self.image_model
-                logger.info(f"received image generation request: {str(task)[:500]}")
+                logger.info(
+                    "received image generation request: "
+                    f"{summarize_task_for_log(task)}"
+                )
                 logger.info("runner running")
                 self.update_status(RunnerRunning())
                 self.acknowledge_task(task)
@@ -392,7 +396,9 @@ class Runner:
                 isinstance(self.current_status, RunnerReady)
             ):
                 assert self.image_model
-                logger.info(f"received image edits request: {str(task)[:500]}")
+                logger.info(
+                    f"received image edits request: {summarize_task_for_log(task)}"
+                )
                 logger.info("runner running")
                 self.update_status(RunnerRunning())
                 self.acknowledge_task(task)

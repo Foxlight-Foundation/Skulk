@@ -28,6 +28,7 @@ from skulk.routing.vision_media import VisionMediaPacket
 from skulk.routing.zenoh_status import ZenohPeerSampler
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
+from skulk.shared.log_summaries import summarize_task_for_log
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
     KV_CONTEXT_BUDGET_TOKENS,
@@ -88,7 +89,6 @@ from skulk.shared.types.tasks import (
     RealtimeAudioTranscription,
     Shutdown,
     SpeechSynthesis,
-    StartWarmup,
     Task,
     TaskId,
     TaskStatus,
@@ -389,75 +389,7 @@ def _local_usable_vram() -> Memory | None:
 
 def _summarize_worker_task(task: Task) -> str:
     """Return a compact task summary for worker lifecycle logs."""
-    if isinstance(task, CreateRunner):
-        shard = task.bound_instance.bound_shard
-        return (
-            "CreateRunner("
-            f"instance_id={task.instance_id!r}, "
-            f"runner_id={task.bound_instance.bound_runner_id!r}, "
-            f"node_id={task.bound_instance.bound_node_id!r}, "
-            f"device_rank={shard.device_rank}, "
-            f"world_size={shard.world_size}, "
-            f"layers={shard.start_layer}:{shard.end_layer})"
-        )
-    if isinstance(task, DownloadModel):
-        shard = task.shard_metadata
-        return (
-            "DownloadModel("
-            f"instance_id={task.instance_id!r}, "
-            f"model={shard.model_card.model_id!r}, "
-            f"device_rank={shard.device_rank}, "
-            f"world_size={shard.world_size}, "
-            f"layers={shard.start_layer}:{shard.end_layer})"
-        )
-    if isinstance(task, Shutdown):
-        return (
-            f"Shutdown(instance_id={task.instance_id!r}, runner_id={task.runner_id!r})"
-        )
-    if isinstance(task, LoadModel):
-        return f"LoadModel(instance_id={task.instance_id!r})"
-    if isinstance(task, StartWarmup):
-        return f"StartWarmup(instance_id={task.instance_id!r})"
-    if isinstance(task, CancelTask):
-        return (
-            "CancelTask("
-            f"instance_id={task.instance_id!r}, "
-            f"runner_id={task.runner_id!r}, "
-            f"cancelled_task_id={task.cancelled_task_id!r})"
-        )
-    if isinstance(task, TextGeneration):
-        params = task.task_params
-        return (
-            "TextGeneration("
-            f"task_id={task.task_id!r}, "
-            f"command_id={task.command_id!r}, "
-            f"instance_id={task.instance_id!r}, "
-            f"model={params.model!r}, "
-            f"input_messages={len(params.input)}, "
-            f"chat_template_messages={len(params.chat_template_messages or [])}, "
-            f"images={len(params.images)}, "
-            f"cached_image_indices={sorted(params.image_hashes.keys())}, "
-            f"total_input_chunks={params.total_input_chunks}, "
-            f"image_count={params.image_count}, "
-            f"stream={params.stream}, "
-            f"reasoning_effort={params.reasoning_effort!r}, "
-            f"enable_thinking={params.enable_thinking!r})"
-        )
-    if isinstance(task, ImageEdits):
-        params = task.task_params
-        return (
-            "ImageEdits("
-            f"task_id={task.task_id!r}, "
-            f"command_id={task.command_id!r}, "
-            f"instance_id={task.instance_id!r}, "
-            f"model={params.model!r}, "
-            f"total_input_chunks={params.total_input_chunks}, "
-            f"has_inline_image_data={bool(params.image_data)}, "
-            f"n={params.n!r}, "
-            f"size={params.size!r}, "
-            f"stream={params.stream!r})"
-        )
-    return task.__class__.__name__
+    return summarize_task_for_log(task)
 
 
 def _staging_model_ids(card: ModelCard) -> frozenset[str]:

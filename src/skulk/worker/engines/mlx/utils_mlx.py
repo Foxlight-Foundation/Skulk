@@ -631,6 +631,24 @@ class _VlmModelWrapper(nn.Module):
         layers = cast(Model, inner).layers
         return [KVCache() for _ in layers]
 
+    def tensor_parallel_target(self) -> nn.Module:
+        """Return the nested language model whose weights tensor sharding owns.
+
+        The wrapper itself owns generation compatibility and the native VLM
+        owns the vision tower, but tensor parallelism shards only the language
+        trunk. Keeping those roles separate also ensures the distributed
+        generation synchronization patch continues to observe plain logits
+        rather than an upstream ``LanguageModelOutput``.
+        """
+        inner = cast(object, self._inner)
+        language_model = getattr(inner, "language_model", None)
+        if not isinstance(language_model, nn.Module):
+            raise ValueError(
+                "Native vision model does not expose a tensor-shardable "
+                "language model"
+            )
+        return language_model
+
     def __call__(self, *args: object, **kwargs: object) -> mx.array:
         pixel_values = cast(
             mx.array | list[mx.array] | None,
@@ -711,8 +729,8 @@ def load_model(
         model_path: Local model bundle.
         prefer_vlm: Load through MLX-VLM even when MLX-LM recognizes the model
             type. MLX-LM intentionally strips vision towers from Qwen VLM
-            checkpoints, so a single-node vision placement must opt into the
-            native model to preserve its image-grid-aware embeddings and RoPE.
+            checkpoints, so vision placements must opt into the native model to
+            preserve their image-grid-aware embeddings and RoPE.
         **kwargs: Loader options forwarded to the selected upstream loader.
 
     Returns:
@@ -738,6 +756,20 @@ def load_model(
             raise ValueError(
                 f"{exc}. Install mlx-vlm for vision model support: pip install -U mlx-vlm"
             ) from exc
+
+
+def _prefers_native_vlm(model_card: ModelCard) -> bool:
+    """Return whether a card's primary weights require the native VLM loader.
+
+    MLX-LM recognizes some multimodal checkpoints as text models and strips
+    their vision towers. When the card points vision at the same checkpoint as
+    its language weights, every placement shape must load through MLX-VLM so
+    family-specific image-grid positions and embeddings remain available.
+    """
+    vision_config = model_card.vision
+    return vision_config is not None and vision_config.weights_repo == str(
+        model_card.model_id
+    )
 
 
 def sidecar_load_eligible(
@@ -892,15 +924,11 @@ def load_mlx_items(
         card = bound_instance.bound_shard.model_card
         model_path = build_model_path(card.model_id, card.source_revision)
         start_time = time.perf_counter()
-        vision_config = card.vision
-        prefer_vlm = vision_config is not None and vision_config.weights_repo == str(
-            card.model_id
-        )
         model, _ = load_model(
             model_path,
             lazy=True,
             strict=False,
-            prefer_vlm=prefer_vlm,
+            prefer_vlm=_prefers_native_vlm(card),
         )
         # Eval layers one by one for progress reporting
         try:
@@ -1071,7 +1099,12 @@ def shard_and_load(
         shard_metadata.model_card.source_revision,
     )
 
-    model, _ = load_model(model_path, lazy=True, strict=False)
+    model, _ = load_model(
+        model_path,
+        lazy=True,
+        strict=False,
+        prefer_vlm=_prefers_native_vlm(shard_metadata.model_card),
+    )
     logger.debug(model)
     if hasattr(model, "model") and isinstance(model.model, DeepseekV3Model):  # type: ignore
         pass
@@ -1108,8 +1141,19 @@ def shard_and_load(
     match shard_metadata:
         case TensorShardMetadata():
             logger.info(f"loading model from {model_path} with tensor parallelism")
+            generation_model = model
+            sharding_model = (
+                model.tensor_parallel_target()
+                if isinstance(model, _VlmModelWrapper)
+                else model
+            )
             model = tensor_auto_parallel(
-                model, group, timeout_seconds, on_timeout, on_layer_loaded
+                sharding_model,
+                group,
+                timeout_seconds,
+                on_timeout,
+                on_layer_loaded,
+                generation_model=generation_model,
             )
         case PipelineShardMetadata():
             logger.info(f"loading model from {model_path} with pipeline parallelism")
@@ -1368,6 +1412,18 @@ def _patch_lossy_chat_template(template: str) -> str | None:
     return patched if n > 0 else None
 
 
+def _log_rendered_prompt_shape(
+    renderer: PromptRendererType,
+    prompt: str,
+    message_count: int,
+) -> None:
+    """Log prompt construction metadata without retaining user content."""
+    logger.info(
+        "Rendered model prompt "
+        f"(renderer={renderer.value}, messages={message_count}, chars={len(prompt)})"
+    )
+
+
 def apply_chat_template(
     tokenizer: TokenizerWrapper,
     task_params: TextGenerationTaskParams,
@@ -1432,7 +1488,11 @@ def apply_chat_template(
         )
         if partial_assistant_content:
             prompt += partial_assistant_content
-        logger.info(prompt)
+        _log_rendered_prompt_shape(
+            capability_profile.prompt_renderer,
+            prompt,
+            len(formatted_messages),
+        )
         return prompt
 
     if capability_profile.prompt_renderer == PromptRendererType.Gemma4:
@@ -1444,7 +1504,11 @@ def apply_chat_template(
         )
         if partial_assistant_content:
             prompt += partial_assistant_content
-        logger.info(prompt)
+        _log_rendered_prompt_shape(
+            capability_profile.prompt_renderer,
+            prompt,
+            len(formatted_messages),
+        )
         return prompt
 
     for msg in formatted_messages:
@@ -1484,7 +1548,11 @@ def apply_chat_template(
     if partial_assistant_content:
         prompt += partial_assistant_content
 
-    logger.info(prompt)
+    _log_rendered_prompt_shape(
+        capability_profile.prompt_renderer,
+        prompt,
+        len(formatted_messages),
+    )
 
     return prompt
 
@@ -1712,12 +1780,17 @@ def _parse_gemma4_tool_calls(text: str) -> list[dict[str, Any]]:
         try:
             args_dict = cast(dict[str, object], json.loads(args_json))
         except json.JSONDecodeError:
-            logger.warning(f"Failed to parse Gemma 4 tool call args: {args_json}")
+            logger.warning(
+                "Failed to parse Gemma 4 tool call arguments "
+                f"(argument_chars={len(args_json)})"
+            )
             args_dict = {}
         results.append(dict(name=func_name, arguments=args_dict))
 
     if not results:
-        raise ValueError(f"No Gemma 4 tool calls found in: {text}")
+        raise ValueError(
+            f"No Gemma 4 tool calls found in generated text ({len(text)} chars)"
+        )
     return results
 
 
@@ -1759,7 +1832,22 @@ def _parse_kimi_tool_calls(text: str):
 def mx_all_gather_tasks(
     tasks: list[TextGeneration],
     group: mx.distributed.Group | None,
+    *,
+    preserve_rank_zero_order: bool = False,
 ) -> tuple[list[TextGeneration], list[TextGeneration]]:
+    """Agree on tasks present on every rank.
+
+    Args:
+        tasks: Locally observed candidate tasks.
+        group: MLX distributed group, or ``None`` for one rank.
+        preserve_rank_zero_order: Use rank zero's arrival order as the canonical
+            order for agreed tasks. The default retains the historical
+            task-ID-sorted behavior.
+
+    Returns:
+        Agreed local task objects in canonical order and candidates not yet
+        observed on every rank.
+    """
     def encode_task_id(task_id: TaskId) -> list[int]:
         utf8_task_id = task_id.encode()
         return [
@@ -1804,6 +1892,11 @@ def mx_all_gather_tasks(
     agreed_ids = set[TaskId].intersection(*(set(tids) for tids in all_task_ids))
 
     local_tasks = {task.task_id: task for task in tasks}
-    agreed = [local_tasks[tid] for tid in sorted(agreed_ids)]
+    canonical_ids = (
+        [task_id for task_id in all_task_ids[0] if task_id in agreed_ids]
+        if preserve_rank_zero_order
+        else sorted(agreed_ids)
+    )
+    agreed = [local_tasks[tid] for tid in canonical_ids]
     different = [task for task in tasks if task.task_id not in agreed_ids]
     return agreed, different

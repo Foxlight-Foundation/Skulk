@@ -19,6 +19,7 @@ from skulk.shared.types.tasks import TaskId
 from skulk.utils.channels import mp_channel
 from skulk.worker.runner.llm_inference.batch_generator import (
     BatchGenerator,
+    DualModeGenerator,
     SequentialGenerator,
 )
 from skulk.worker.runner.llm_inference.runner import Builder
@@ -134,10 +135,10 @@ def test_builder_forces_sequential_for_gemma4_runtime(
     assert not isinstance(generator, BatchGenerator)
 
 
-def test_builder_forces_sequential_for_native_vision(
+def test_builder_uses_dual_mode_for_native_vision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Card-declared VLMs must use the family-specific reference generator."""
+    """VLM text batches while image requests retain reference generation."""
     _, cancel_recv = mp_channel[TaskId]()
     event_send, _ = mp_channel[Event]()
 
@@ -169,5 +170,7 @@ def test_builder_forces_sequential_for_native_vision(
 
     generator = builder.build()
 
-    assert isinstance(generator, SequentialGenerator)
+    assert isinstance(generator, DualModeGenerator)
+    assert isinstance(generator.text_generator, BatchGenerator)
+    assert isinstance(generator.vision_generator, SequentialGenerator)
     assert not isinstance(generator, BatchGenerator)
