@@ -185,6 +185,37 @@ def test_dual_mode_cancels_queued_other_modality_without_switching() -> None:
     assert [task.task_id for task in text.submitted] == [text_task.task_id]
 
 
+def test_dual_mode_keeps_text_overflow_owned_and_cancellable() -> None:
+    dual, text, vision, cancel_sender, text_cancel_receiver, _ = _dual()
+    tasks = [_task(f"text-{index}") for index in range(10)]
+    for task in tasks:
+        dual.submit(task)
+
+    assert list(dual.step()) == []
+    assert [task.task_id for task in text.submitted] == [
+        task.task_id for task in tasks[:8]
+    ]
+
+    cancel_sender.send(tasks[8].task_id)
+    results = list(dual.step())
+
+    assert [task_id for task_id, _ in results] == [tasks[8].task_id]
+    assert isinstance(results[0][1], Cancelled)
+    assert text_cancel_receiver.collect() == []
+    assert [task.task_id for task in text.submitted] == [
+        task.task_id for task in tasks[:8]
+    ]
+    assert vision.submitted == []
+
+    text.completed.extend(task.task_id for task in tasks[:8])
+    assert len(list(dual.step())) == 8
+    assert list(dual.step()) == []
+    assert [task.task_id for task in text.submitted] == [
+        *(task.task_id for task in tasks[:8]),
+        tasks[9].task_id,
+    ]
+
+
 def test_dual_mode_forwards_active_cancellation_to_selected_engine() -> None:
     dual, text, vision, cancel_sender, text_cancel_receiver, vision_cancel_receiver = (
         _dual()

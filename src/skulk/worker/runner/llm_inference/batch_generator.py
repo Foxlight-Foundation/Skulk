@@ -1265,7 +1265,14 @@ class DualModeGenerator(InferenceGenerator):
             self._assign(task, "vision_sequential")
             return
 
-        while self._queue and self._mode_for(self._queue[0]) == "text_batch":
+        # Do not place overflow into BatchGenerator's private waiting queues.
+        # The coordinator owns not-yet-admitted work so it can cancel that work
+        # exactly once without a child later admitting an already-finalized task.
+        while (
+            self._queue
+            and self._mode_for(self._queue[0]) == "text_batch"
+            and len(self._active_task_ids) < SKULK_MAX_CONCURRENT_REQUESTS
+        ):
             self._assign(self._queue.popleft(), "text_batch")
 
     def _assign(self, task: TextGeneration, mode: GenerationMode) -> None:
