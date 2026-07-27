@@ -682,7 +682,9 @@ def pipeline_auto_parallel(
         inner_model_instance._swa_idx = 0 if not sliding_layers else sliding_layers[0]
         inner_model_instance._full_idx = 0 if not full_layers else full_layers[0]
 
-    if isinstance(inner_model_instance, (Qwen3_5TextModelInner, Qwen3NextInnerModel)):
+    if isinstance(
+        inner_model_instance, (Qwen3_5TextModelInner, Qwen3NextInnerModel)
+    ) or _is_native_qwen_vlm_language_model(inner_model_instance):
         full_attn_layers = [
             i for i, layer in enumerate(layers) if not getattr(layer, "is_linear", True)
         ]
@@ -1026,17 +1028,25 @@ def tensor_auto_parallel(
 
 
 def _is_native_qwen_vlm_language_model(model: nn.Module) -> bool:
-    """Return whether ``model`` is a supported MLX-VLM Qwen language trunk."""
+    """Return whether ``model`` is a supported MLX-VLM Qwen language component.
+
+    Tensor placement receives MLX-VLM's outer ``LanguageModel`` while pipeline
+    placement slices its nested ``Qwen3_5Model`` or ``Qwen3_5MoeModel``. Both
+    own family-specific sharding state, but only the outer class exposes
+    ``model_type``.
+    """
     module_name = type(model).__module__
     if not module_name.startswith("mlx_vlm.models.qwen3_5"):
         return False
     model_type = getattr(model, "model_type", None)
-    return model_type in {
+    if model_type in {
         "qwen3_5",
         "qwen3_5_text",
         "qwen3_5_moe",
         "qwen3_5_moe_text",
-    }
+    }:
+        return True
+    return type(model).__name__ in {"Qwen3_5Model", "Qwen3_5MoeModel"}
 
 
 class TensorParallelShardingStrategy(ABC):

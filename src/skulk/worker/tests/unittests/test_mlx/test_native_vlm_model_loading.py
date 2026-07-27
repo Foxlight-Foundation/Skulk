@@ -63,6 +63,39 @@ class _NativeQwenLanguageModel(nn.Module):
     model_type = "qwen3_5_text"
 
 
+class _NativeQwenPipelineTrunk(nn.Module):
+    """Minimal native Qwen inner trunk used by pipeline placement."""
+
+    __module__ = "mlx_vlm.models.qwen3_5.language"
+
+    def __init__(self, layer_types: list[bool]) -> None:
+        super().__init__()
+        self.layers = [
+            SimpleNamespace(is_linear=is_linear) for is_linear in layer_types
+        ]
+        self.fa_idx = 3
+        self.ssm_idx = 0
+
+
+_NativeQwenPipelineTrunk.__name__ = "Qwen3_5Model"
+
+
+class _NativeQwenPipelineLanguageModel(nn.Module):
+    """Minimal native language model that owns the pipeline inner trunk."""
+
+    def __init__(self, layer_types: list[bool]) -> None:
+        super().__init__()
+        self.model = _NativeQwenPipelineTrunk(layer_types)
+
+
+class _VlmWithPipelineLanguage(nn.Module):
+    """Native VLM stub whose hybrid language trunk is pipeline-sharded."""
+
+    def __init__(self, layer_types: list[bool]) -> None:
+        super().__init__()
+        self.language_model = _NativeQwenPipelineLanguageModel(layer_types)
+
+
 class _VlmWithTensorLanguage(nn.Module):
     """Native VLM stub whose tensor-shardable trunk is nested."""
 
@@ -330,6 +363,64 @@ def test_tensor_parallel_selects_native_qwen_strategy(
         "sharding_model": native_model,
         "generation_model": generation_model,
     }
+
+
+def test_pipeline_reindexes_native_qwen_hybrid_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sliced native Qwen trunk must use cache indices local to its rank."""
+    model = _VlmWithPipelineLanguage(
+        [True, True, True, False, True, True, True, False]
+    )
+    shard = SimpleNamespace(
+        start_layer=2,
+        end_layer=5,
+        device_rank=1,
+        world_size=3,
+    )
+
+    def _ignore_eval(*_args: object) -> None:
+        return None
+
+    def _identity_layer(
+        layer: object, *_args: object, **_kwargs: object
+    ) -> object:
+        return layer
+
+    def _identity_pipeline(
+        patched_model: nn.Module, _group: object
+    ) -> nn.Module:
+        return patched_model
+
+    monkeypatch.setattr(auto_parallel.mx, "eval", _ignore_eval)
+    monkeypatch.setattr(
+        auto_parallel,
+        "PipelineFirstLayer",
+        _identity_layer,
+    )
+    monkeypatch.setattr(
+        auto_parallel,
+        "PipelineLastLayer",
+        _identity_layer,
+    )
+    monkeypatch.setattr(
+        auto_parallel,
+        "patch_pipeline_model",
+        _identity_pipeline,
+    )
+    group = SimpleNamespace()
+
+    auto_parallel.pipeline_auto_parallel(
+        model,
+        cast(mx.distributed.Group, cast(object, group)),
+        cast(PipelineShardMetadata, cast(object, shard)),
+        on_layer_loaded=None,
+    )
+
+    inner = model.language_model.model
+    assert len(inner.layers) == 3
+    assert inner.ssm_idx == 0
+    assert inner.fa_idx == 1
 
 
 def test_tensor_patch_finds_cache_in_variadic_generation_kwargs(
