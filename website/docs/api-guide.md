@@ -922,7 +922,10 @@ validation as their non-bench counterparts, force a non-streaming run
 serving runner collects generation statistics. The response extends the normal
 response shape with two extra fields:
 
-- `generation_stats`: runner-reported timing/throughput statistics for the run
+- `generation_stats`: runner-reported timing/throughput statistics for the run,
+  including the non-identifying `serving_batches` batching-mode flag and
+  `in_flight_at_admission` request count. Serving node ids and backend tags are
+  redacted from client responses.
 - `power_usage`: per-node and total system power sampled from live cluster
   telemetry while the request ran
 
