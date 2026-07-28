@@ -141,7 +141,7 @@ STEWARD_TOOL_NAMES: tuple[str, ...] = tuple(
 class StewardChatMessage(BaseModel):
     """One turn of steward conversation history."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, strict=True)
 
     role: Literal["user", "assistant"] = Field(
         description="Message author: the operator or the steward."
@@ -152,7 +152,7 @@ class StewardChatMessage(BaseModel):
 class StewardChatRequest(BaseModel):
     """Request body for the steward chat surface."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, strict=True)
 
     messages: list[StewardChatMessage] = Field(
         min_length=1,
@@ -167,7 +167,7 @@ class StewardChatRequest(BaseModel):
 class StewardToolStep(BaseModel):
     """One tool call the steward made while investigating."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, strict=True)
 
     tool: str = Field(description="Tool name invoked.")
     arguments: dict[str, object] = Field(
@@ -178,7 +178,7 @@ class StewardToolStep(BaseModel):
 class StewardStatusResponse(BaseModel):
     """Whether the steward exists and what serves it right now."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, strict=True)
 
     enabled: bool = Field(
         description="Whether intelligent-fabric mode is enabled in Settings."
@@ -199,7 +199,7 @@ class StewardStatusResponse(BaseModel):
 class StewardChatResponse(BaseModel):
     """The steward's reply plus its investigation trace."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, strict=True)
 
     reply: str = Field(description="The steward's answer to the operator.")
     steps: list[StewardToolStep] = Field(

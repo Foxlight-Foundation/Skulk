@@ -8223,10 +8223,13 @@ class API:
                     await queue.send(error_chunk)
                 except (BrokenResourceError, ClosedResourceError):
                     queue_map.pop(task.command_id, None)
-        if not delivered:
+        if not delivered and isinstance(task, task_types.TextGeneration):
             # No stream queue exists yet: buffer the terminal chunk for the
             # lazily-registered stream to consume at startup, instead of
-            # dropping it and hanging the request.
+            # dropping it and hanging the request. Scoped to text generation,
+            # the only stream that drains this buffer today; buffering for
+            # the other task families would accumulate entries no consumer
+            # takes (their adapters can adopt the same drain as follow-up).
             while len(self._pending_stream_failures) >= 256:
                 oldest = next(iter(self._pending_stream_failures))
                 del self._pending_stream_failures[oldest]

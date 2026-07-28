@@ -169,10 +169,18 @@ def test_intelligent_fabric_config_defaults() -> None:
     parsed = SkulkConfig.model_validate({"intelligent_fabric": {"enabled": True}})
     assert parsed.intelligent_fabric is not None
     assert parsed.intelligent_fabric.enabled
-    assert parsed.intelligent_fabric.steward_models == (
+    assert parsed.intelligent_fabric.steward_models == [
         "mlx-community/Qwen3.5-4B-MLX-4bit",
         "unsloth/Qwen3.5-4B-GGUF",
+    ]
+
+    # The documented YAML-sequence override must load (list, not tuple:
+    # strict validation rejects coercion).
+    override = SkulkConfig.model_validate(
+        {"intelligent_fabric": {"enabled": True, "steward_models": ["a/b"]}}
     )
+    assert override.intelligent_fabric is not None
+    assert override.intelligent_fabric.steward_models == ["a/b"]
 
     default_section = IntelligentFabricConfig()
     assert not default_section.enabled

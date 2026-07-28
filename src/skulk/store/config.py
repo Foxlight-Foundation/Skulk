@@ -403,9 +403,14 @@ class IntelligentFabricConfig(FrozenModel):
     """
 
     enabled: bool = False
-    steward_models: tuple[str, ...] = (
-        "mlx-community/Qwen3.5-4B-MLX-4bit",
-        "unsloth/Qwen3.5-4B-GGUF",
+    # list (not tuple): strict validation rejects YAML sequences for tuple
+    # fields, which would make the documented override unloadable; matches
+    # the convention of other config lists (e.g. bootstrap_peers).
+    steward_models: list[str] = Field(
+        default_factory=lambda: [
+            "mlx-community/Qwen3.5-4B-MLX-4bit",
+            "unsloth/Qwen3.5-4B-GGUF",
+        ]
     )
 
 
