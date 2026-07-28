@@ -597,7 +597,10 @@ def entrypoint(
                 runner.main()
 
     except ClosedResourceError:
-        logger.warning("Runner communication closed unexpectedly")
+        # The parent intentionally closes IPC during bounded teardown. Actual
+        # runner failures take the exception path below and retain warning-level
+        # diagnostics, while a closed parent channel is normal shutdown noise.
+        logger.info("Runner communication closed during shutdown")
     except Exception as e:
         record_runner_phase(
             "error",

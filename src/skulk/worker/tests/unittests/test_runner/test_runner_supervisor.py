@@ -35,6 +35,7 @@ from skulk.shared.types.tasks import (
     AudioTranscription,
     ImageGeneration,
     RealtimeAudioTranscription,
+    Shutdown,
     SpeechSynthesis,
     Task,
     TaskId,
@@ -51,6 +52,7 @@ from skulk.shared.types.worker.runners import (
     RunnerFailed,
     RunnerId,
     RunnerRunning,
+    RunnerShuttingDown,
     ShardAssignments,
 )
 from skulk.shared.types.worker.shards import RpcDonorShardMetadata
@@ -84,6 +86,81 @@ class _DeadProcess:
 
     def kill(self) -> None:
         return None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_terminal_status_after_acknowledgement() -> None:
+    """Shutdown completion must be forwarded before the supervisor can be cancelled."""
+
+    event_sender, _ = channel[Event](10)
+    task_sender, task_receiver = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    ev_send, ev_recv = mp_channel[Event]()
+    _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("shutdown-instance"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("shutdown-runner"),
+        node_id=NodeId("shutdown-node"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=ev_recv,
+        _diag_recv=diag_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+    )
+    supervisor.status = RunnerRunning()
+    task = Shutdown(
+        task_id=TaskId("shutdown-task"),
+        instance_id=bound_instance.instance.instance_id,
+        runner_id=bound_instance.bound_runner_id,
+    )
+    returned = anyio.Event()
+
+    async def submit_shutdown() -> None:
+        await supervisor.start_task(task, wait_for_terminal=True)
+        returned.set()
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                supervisor._forward_events  # pyright: ignore[reportPrivateUsage]
+            )
+            task_group.start_soon(submit_shutdown)
+            dispatched = await to_thread.run_sync(task_receiver.receive_timeout, 1)
+            assert dispatched == task
+
+            ev_send.send(
+                RunnerStatusUpdated(
+                    runner_id=bound_instance.bound_runner_id,
+                    runner_status=RunnerShuttingDown(),
+                )
+            )
+            ev_send.send(TaskAcknowledged(task_id=task.task_id))
+            with anyio.move_on_after(0.05) as acknowledgement_only:
+                await returned.wait()
+            assert acknowledgement_only.cancel_called
+
+            ev_send.send(
+                TaskStatusUpdated(
+                    task_id=task.task_id,
+                    task_status=TaskStatus.Complete,
+                )
+            )
+            await returned.wait()
+            assert (
+                task.task_id
+                not in supervisor._terminal_waiters  # pyright: ignore[reportPrivateUsage]
+            )
+            task_group.cancel_scope.cancel()
+
+    ev_send.close()
+    event_sender.close()
 
 
 def test_trace_expected_ranks_excludes_rpc_memory_donors() -> None:

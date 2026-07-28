@@ -491,8 +491,7 @@ def stale_lifecycle_task_failures(
                     error_type="executor_lost",
                     error_message=(
                         "Lifecycle task outlived its instance with no "
-                        "surviving executor (node died mid-task and "
-                        "returned with a new identity)"
+                        "surviving executor"
                     ),
                 )
             )

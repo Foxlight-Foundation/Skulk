@@ -310,6 +310,7 @@ def test_stale_lifecycle_task_fails_only_after_grace() -> None:
     events = stale_lifecycle_task_failures(state, tracking, now=161.0)
     assert [e.task_id for e in events] == [task_id]
     assert events[0].error_type == "executor_lost"
+    assert "node died" not in events[0].error_message
     assert task_id not in tracking
 
 
