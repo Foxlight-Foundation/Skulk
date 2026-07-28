@@ -2311,7 +2311,33 @@ def _reset_native_vision_position_state(model: Model) -> None:
             object.__setattr__(language_model, attribute_name, None)
 
 
-def _mlx_generate_native_vision(
+@contextlib.contextmanager
+def _isolated_native_vision_position_state(model: Model) -> Generator[None]:
+    """Isolate request-local multimodal RoPE state from later text requests.
+
+    Qwen VLM text generation relies on its retained zero RoPE delta when a
+    later request resumes from Skulk's text-only prefix cache. Native vision
+    must temporarily clear that state to calculate multimodal coordinates, but
+    leaving it cleared makes the next cached text suffix restart positions at
+    zero. Preserve the prior text state across the complete vision generator,
+    including cancellation and failure.
+    """
+
+    language_model = getattr(model, "language_model", model)
+    position_state = {
+        attribute_name: cast(object | None, getattr(language_model, attribute_name))
+        for attribute_name in ("_position_ids", "_rope_deltas")
+        if hasattr(language_model, attribute_name)
+    }
+    _reset_native_vision_position_state(model)
+    try:
+        yield
+    finally:
+        for attribute_name, attribute_value in position_state.items():
+            object.__setattr__(language_model, attribute_name, attribute_value)
+
+
+def _mlx_generate_native_vision_unisolated(
     model: Model,
     tokenizer: TokenizerWrapper,
     task: TextGenerationTaskParams,
@@ -2381,7 +2407,6 @@ def _mlx_generate_native_vision(
 
     logger.info(f"Native decode context: {decode_context}")
     logger.info("Starting native mlx-vlm multimodal decode")
-    _reset_native_vision_position_state(model)
     with (
         runner_phase(
             "decode_barrier",
@@ -2577,6 +2602,39 @@ def _mlx_generate_native_vision(
         _hang_debug_watch(f"native decode final barrier ({decode_context})"),
     ):
         mx_barrier(group)
+
+
+def _mlx_generate_native_vision(
+    model: Model,
+    tokenizer: TokenizerWrapper,
+    task: TextGenerationTaskParams,
+    all_prompt_tokens: mx.array,
+    vision: VisionResult,
+    max_tokens: int,
+    sampler: Callable[[mx.array], mx.array],
+    logits_processors: list[Callable[[mx.array, mx.array], mx.array]],
+    on_prefill_progress: Callable[[int, int], None] | None,
+    on_generation_token: Callable[[], None] | None,
+    group: mx.distributed.Group | None,
+    trace_task_id: str | None = None,
+) -> Generator[GenerationResponse]:
+    """Generate native vision without leaking multimodal position state."""
+
+    with _isolated_native_vision_position_state(model):
+        yield from _mlx_generate_native_vision_unisolated(
+            model=model,
+            tokenizer=tokenizer,
+            task=task,
+            all_prompt_tokens=all_prompt_tokens,
+            vision=vision,
+            max_tokens=max_tokens,
+            sampler=sampler,
+            logits_processors=logits_processors,
+            on_prefill_progress=on_prefill_progress,
+            on_generation_token=on_generation_token,
+            group=group,
+            trace_task_id=trace_task_id,
+        )
 
 
 def mlx_generate(

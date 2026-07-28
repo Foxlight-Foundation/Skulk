@@ -138,8 +138,8 @@ class _FakePositionState:
     """Mutable upstream position state used to simulate a completed warmup."""
 
     def __init__(self) -> None:
-        self._position_ids: object | None = object()
-        self._rope_deltas: object | None = object()
+        self._position_ids: object | None = mx.arange(64)[None]
+        self._rope_deltas: object | None = mx.zeros((1, 1))
 
     @property
     def position_state(self) -> object | None:
@@ -148,6 +148,13 @@ class _FakePositionState:
     @property
     def rope_state(self) -> object | None:
         return self._rope_deltas
+
+    def cached_suffix_start(self, cache_offset: int) -> int:
+        """Return the next position that Qwen assigns to a cached text suffix."""
+        if self._rope_deltas is None:
+            return 0
+        rope_deltas = cast(mx.array, self._rope_deltas)
+        return cache_offset + int(rope_deltas.item())
 
 
 def _fake_group(*, size: int = 3) -> mx.distributed.Group:
@@ -262,16 +269,19 @@ def test_native_vision_generation_uses_mlx_vlm_generate_step(
     assert responses[-1].usage.completion_tokens == 2
 
 
-def test_native_vision_clears_position_state_left_by_text_warmup(
+def test_text_vision_text_restores_cached_suffix_position_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A text warmup must not contaminate the first multimodal request."""
+    """Vision must not reset the cached suffix position of the next text request."""
 
     class _StatefulVisionModel:
         def __init__(self) -> None:
             self.language_model = _FakePositionState()
 
     model = _StatefulVisionModel()
+    original_position_state = model.language_model.position_state
+    original_rope_state = model.language_model.rope_state
+    assert model.language_model.cached_suffix_start(19) == 19
 
     def _fake_generate_step(**_kwargs: object):
         assert model.language_model.position_state is None
@@ -316,6 +326,70 @@ def test_native_vision_clears_position_state_left_by_text_warmup(
     )
 
     assert responses[-1].finish_reason == "stop"
+    assert model.language_model.position_state is original_position_state
+    assert model.language_model.rope_state is original_rope_state
+    assert model.language_model.cached_suffix_start(19) == 19
+
+
+def test_native_vision_restores_text_position_state_after_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed image request must not corrupt the next cached text request."""
+
+    class _StatefulVisionModel:
+        def __init__(self) -> None:
+            self.language_model = _FakePositionState()
+
+    model = _StatefulVisionModel()
+    original_position_state = model.language_model.position_state
+    original_rope_state = model.language_model.rope_state
+
+    def _failing_generate_step(**_kwargs: object):
+        assert model.language_model.position_state is None
+        assert model.language_model.rope_state is None
+        raise RuntimeError("native vision decode failed")
+        yield mx.array(999), mx.zeros((8,))
+
+    monkeypatch.setattr(
+        import_module("mlx_vlm.generate"),
+        "generate_step",
+        _failing_generate_step,
+    )
+
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/Qwen3-VL-4B-Instruct-4bit"),
+        input=[InputMessage(role="user", content="what is this?")],
+        max_output_tokens=8,
+        temperature=0.0,
+    )
+    vision = VisionResult(
+        prompt="ignored",
+        prompt_tokens=mx.array([1, 2, 3]),
+        embeddings=mx.zeros((1, 0, 1)),
+        media_regions=[],
+        pixel_values=mx.array([1.0]),
+        image_grid_thw=mx.array([[1, 2, 3]]),
+    )
+
+    with pytest.raises(RuntimeError, match="native vision decode failed"):
+        list(
+            _mlx_generate_native_vision_fn()(
+                model=cast(Model, cast(object, model)),
+                tokenizer=_fake_tokenizer(),
+                task=task,
+                all_prompt_tokens=vision.prompt_tokens,
+                vision=vision,
+                sampler=_identity_sampler,
+                logits_processors=[],
+                on_prefill_progress=None,
+                on_generation_token=None,
+                group=None,
+                max_tokens=8,
+            )
+        )
+
+    assert model.language_model.position_state is original_position_state
+    assert model.language_model.rope_state is original_rope_state
 
 
 @pytest.mark.parametrize(
