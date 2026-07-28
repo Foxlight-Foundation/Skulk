@@ -17,9 +17,9 @@ results transfer to production behavior.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, cast, final
+from typing import TYPE_CHECKING, Any, Literal, cast, final
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from skulk.api.types.api import (
     ChatCompletionMessage,
@@ -141,12 +141,18 @@ STEWARD_TOOL_NAMES: tuple[str, ...] = tuple(
 class StewardChatMessage(BaseModel):
     """One turn of steward conversation history."""
 
-    role: str = Field(description="'user' or 'assistant'.")
+    model_config = ConfigDict(frozen=True)
+
+    role: Literal["user", "assistant"] = Field(
+        description="Message author: the operator or the steward."
+    )
     content: str = Field(description="The message text.")
 
 
 class StewardChatRequest(BaseModel):
     """Request body for the steward chat surface."""
+
+    model_config = ConfigDict(frozen=True)
 
     messages: list[StewardChatMessage] = Field(
         min_length=1,
@@ -161,6 +167,8 @@ class StewardChatRequest(BaseModel):
 class StewardToolStep(BaseModel):
     """One tool call the steward made while investigating."""
 
+    model_config = ConfigDict(frozen=True)
+
     tool: str = Field(description="Tool name invoked.")
     arguments: dict[str, object] = Field(
         default_factory=dict, description="Arguments the steward passed."
@@ -169,6 +177,8 @@ class StewardToolStep(BaseModel):
 
 class StewardStatusResponse(BaseModel):
     """Whether the steward exists and what serves it right now."""
+
+    model_config = ConfigDict(frozen=True)
 
     enabled: bool = Field(
         description="Whether intelligent-fabric mode is enabled in Settings."
@@ -188,6 +198,8 @@ class StewardStatusResponse(BaseModel):
 
 class StewardChatResponse(BaseModel):
     """The steward's reply plus its investigation trace."""
+
+    model_config = ConfigDict(frozen=True)
 
     reply: str = Field(description="The steward's answer to the operator.")
     steps: list[StewardToolStep] = Field(
@@ -407,9 +419,8 @@ class StewardHarness:
             ChatCompletionMessage(role="system", content=STEWARD_SYSTEM_PROMPT)
         ]
         for message in history:
-            role = message.role if message.role in ("user", "assistant") else "user"
             messages.append(
-                ChatCompletionMessage(role=role, content=message.content)
+                ChatCompletionMessage(role=message.role, content=message.content)
             )
 
         steps: list[StewardToolStep] = []

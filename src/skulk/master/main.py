@@ -887,7 +887,17 @@ class Master:
                                         task_count
                                     )
 
-                            if not instance_task_counts:
+                            # A pinned request (steward/canary) must fail its
+                            # task cleanly even when NO instance serves the
+                            # model anymore (the pinned instance vanished
+                            # between caller lookup and processing); raising
+                            # here would leave the caller hanging with no
+                            # terminal event. Mirrors the SpeechSynthesis
+                            # guard.
+                            if (
+                                not instance_task_counts
+                                and command.target_instance_id is None
+                            ):
                                 raise ValueError(
                                     f"No instance found for model {command.task_params.model}"
                                 )
