@@ -30,9 +30,11 @@ NOW_EPOCH=$(date +%s)
 
 git -C "$REPO" fetch -q origin dev
 
-MAIN_WT=$(git -C "$REPO" worktree list --porcelain | awk '/^worktree /{print $2; exit}')
+# Porcelain lines are "worktree <path>"; strip the prefix with sed so paths
+# containing spaces survive intact.
+MAIN_WT=$(git -C "$REPO" worktree list --porcelain | sed -n 's/^worktree //p' | head -n 1)
 
-git -C "$REPO" worktree list --porcelain | awk '/^worktree /{print $2}' | while read -r wt_path; do
+git -C "$REPO" worktree list --porcelain | sed -n 's/^worktree //p' | while IFS= read -r wt_path; do
     [ "$wt_path" = "$MAIN_WT" ] && continue
     if ! wt_head=$(git -C "$wt_path" rev-parse HEAD 2>/dev/null); then
         # Directory or linkage already gone; `git worktree prune` handles it.
@@ -46,7 +48,21 @@ git -C "$REPO" worktree list --porcelain | awk '/^worktree /{print $2}' | while 
         echo "keep (unmerged): $wt_path"
         continue
     fi
-    wt_mtime=$(stat -f %m "$wt_path/.git" 2>/dev/null || stat -c %Y "$wt_path/.git" 2>/dev/null || echo 0)
+    # Activity signal: the linked worktree's admin dir (its real git-dir)
+    # has entries (HEAD, index, logs) whose mtimes move on checkouts,
+    # commits, and resets; the .git linkage file alone is written once at
+    # creation and never again, so it cannot distinguish an active checkout
+    # from an abandoned one. Take the newest of the linkage file and the
+    # admin dir's HEAD/index.
+    wt_gitdir=$(git -C "$wt_path" rev-parse --absolute-git-dir 2>/dev/null || echo "")
+    wt_mtime=0
+    for probe in "$wt_path/.git" "$wt_gitdir/HEAD" "$wt_gitdir/index"; do
+        [ -e "$probe" ] || continue
+        probe_mtime=$(stat -f %m "$probe" 2>/dev/null || stat -c %Y "$probe" 2>/dev/null || echo 0)
+        if [ "$probe_mtime" -gt "$wt_mtime" ]; then
+            wt_mtime=$probe_mtime
+        fi
+    done
     age_hours=$(( (NOW_EPOCH - wt_mtime) / 3600 ))
     if [ "$age_hours" -lt "$MIN_AGE_HOURS" ]; then
         echo "keep (recent, ${age_hours}h): $wt_path"
