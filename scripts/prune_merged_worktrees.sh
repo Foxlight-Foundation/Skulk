@@ -25,6 +25,7 @@ if [ -z "$REPO" ]; then
     echo "error: not inside a git repository and no repo path given" >&2
     exit 2
 fi
+REPO=$(cd "$REPO" && pwd)
 MIN_AGE_HOURS="${MIN_AGE_HOURS:-48}"
 NOW_EPOCH=$(date +%s)
 
@@ -36,6 +37,10 @@ MAIN_WT=$(git -C "$REPO" worktree list --porcelain | sed -n 's/^worktree //p' | 
 
 git -C "$REPO" worktree list --porcelain | sed -n 's/^worktree //p' | while IFS= read -r wt_path; do
     [ "$wt_path" = "$MAIN_WT" ] && continue
+    # Never remove the worktree this script is running from: when invoked
+    # inside a linked worktree, $REPO resolves to that worktree, and
+    # removing one's own working directory mid-run is never intended.
+    [ "$wt_path" = "$REPO" ] && continue
     if ! wt_head=$(git -C "$wt_path" rev-parse HEAD 2>/dev/null); then
         # Directory or linkage already gone; `git worktree prune` handles it.
         continue
@@ -58,7 +63,10 @@ git -C "$REPO" worktree list --porcelain | sed -n 's/^worktree //p' | while IFS=
     wt_mtime=0
     for probe in "$wt_path/.git" "$wt_gitdir/HEAD" "$wt_gitdir/index"; do
         [ -e "$probe" ] || continue
-        probe_mtime=$(stat -f %m "$probe" 2>/dev/null || stat -c %Y "$probe" 2>/dev/null || echo 0)
+        # GNU stat first (-c %Y); BSD stat second (-f %m). The reverse
+        # order is a trap: on GNU, -f is filesystem mode and %m is the
+        # mount point, which SUCCEEDS with a non-mtime string.
+        probe_mtime=$(stat -c %Y "$probe" 2>/dev/null || stat -f %m "$probe" 2>/dev/null || echo 0)
         if [ "$probe_mtime" -gt "$wt_mtime" ]; then
             wt_mtime=$probe_mtime
         fi
