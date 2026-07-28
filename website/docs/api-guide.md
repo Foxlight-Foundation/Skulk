@@ -1185,6 +1185,60 @@ Use this when you already have an `instance` object and want exact control.
 
 **DELETE** `/instance/{instance_id}`
 
+## Intelligent Fabric (Steward)
+
+When intelligent-fabric mode is enabled in the cluster configuration
+(`intelligent_fabric.enabled`), the fabric keeps a small resident model (the
+steward) placed as a hidden system instance and exposes it through these
+endpoints. The steward investigates the cluster through a bounded read-only
+tool surface and answers operator questions; it cannot change the cluster.
+
+### GET /v1/steward
+
+Returns steward availability.
+
+Response fields:
+
+- `enabled`: whether intelligent-fabric mode is enabled in Settings.
+- `present`: whether a steward placement currently exists.
+- `steward_model`: model id of the steward brain when present, else null.
+- `instance_id`: the steward instance id when present, else null.
+
+### POST /v1/steward/chat
+
+Ask the steward. The caller carries conversation history; the steward system
+prompt, tool definitions, and investigation loop are server-side.
+
+Request body:
+
+- `messages` (required): list of `{role, content}` objects, oldest first,
+  ending with the operator's latest message. Roles are `user` and
+  `assistant`.
+
+Behavior: the steward runs up to 8 read-only tool calls per turn (cluster
+state, node resources, telemetry / data-plane diagnostics, version status,
+performance envelopes, the local doctor registry, and the model catalog),
+then replies. Generation is pinned to the hidden steward instance and rides
+the normal text-generation path.
+
+Response fields:
+
+- `reply`: the steward's answer.
+- `steps`: ordered list of `{tool, arguments}` consulted this turn.
+- `steward_model`: the model id that produced the reply.
+- `instance_id`: the steward instance that served the turn.
+
+Errors:
+
+- `409`: intelligent-fabric mode is disabled, or the steward placement is
+  not currently available (for example, immediately after enabling the mode
+  or during re-placement after node loss).
+- `502`: steward generation failed.
+
+Note: deleting the steward instance through `DELETE /instance/{instance_id}`
+is refused with `409` while intelligent-fabric mode is enabled; disable the
+mode in Settings to remove the placement.
+
 ## Download Management
 
 ### Start a node download

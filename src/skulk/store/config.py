@@ -364,6 +364,8 @@ class SkulkConfig(FrozenModel):
             the node.
         telemetry: Field-telemetry consent and settings.  ``None`` means the
             operator has never been asked (nothing is queued or sent).
+        intelligent_fabric: Intelligent-fabric (resident steward) settings.
+            ``None`` means the mode is off.
         hf_token: HuggingFace API token.  Stripped from ``GET /config``
             responses for security.
     """
@@ -375,7 +377,36 @@ class SkulkConfig(FrozenModel):
     connectivity: ConnectivityConfig | None = None
     experiments: ExperimentsConfig | None = None
     telemetry: "TelemetryConfig | None" = None
+    intelligent_fabric: "IntelligentFabricConfig | None" = None
     hf_token: str | None = None
+
+
+@final
+class IntelligentFabricConfig(FrozenModel):
+    """Intelligent-fabric mode: the resident steward (cluster-synced).
+
+    When ``enabled`` is ``True``, the master maintains exactly one hidden
+    steward placement as a planner invariant: it places the steward model on
+    the best available nodes, re-places it after node loss or master
+    failover, and protects it from ordinary deletion. The steward answers
+    operator questions about the cluster through the steward chat surface.
+
+    Attributes:
+        enabled: Master switch for intelligent-fabric mode. Off by default
+            while the feature hardens; flipping it on makes the master
+            establish the steward placement within one planning cycle.
+        steward_models: Ordered model-card preference list for the steward
+            brain. The master places the first card the cluster can serve.
+            The defaults are the benched steward class (Qwen3.5-4B in MLX
+            and GGUF form); operators may override with any bundled or
+            custom text model that supports tool calling.
+    """
+
+    enabled: bool = False
+    steward_models: tuple[str, ...] = (
+        "mlx-community/Qwen3.5-4B-MLX-4bit",
+        "unsloth/Qwen3.5-4B-GGUF",
+    )
 
 
 @final

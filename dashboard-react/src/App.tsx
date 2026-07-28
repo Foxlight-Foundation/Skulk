@@ -449,6 +449,15 @@ export function App() {
   const instanceCards = useMemo<InstanceCardData[]>(() => {
     const cards: InstanceCardData[] = [];
     for (const [iid, inst] of Object.entries(instances)) {
+      // Fabric-maintained system placements (the intelligent-fabric steward)
+      // are not user instances: they are hidden here, which covers the
+      // Active Instances panel, the chat model picker, and instance counts
+      // in one place. The steward is reachable through its own chat surface.
+      const innerAny =
+        inst.MlxRingInstance ?? inst.MlxJacclInstance ?? inst.LlamaRpcInstance;
+      if (innerAny?.systemRole) {
+        continue;
+      }
       // Instance is a tagged union: MlxRing / MlxJaccl (in-process) and
       // LlamaRpc (pooled multi-node GGUF, #328). Handling only the first two
       // silently dropped every pooled instance from the Active Instances panel.

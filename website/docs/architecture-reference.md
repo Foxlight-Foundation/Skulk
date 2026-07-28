@@ -80,6 +80,33 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Mounts:** dashboard at `/` (skipped when the built assets are absent, e.g. a headless/non-Mac worker node with no `dashboard-react/dist`; `DASHBOARD_DIR` is then `None` and the API serves without the UI, #333); OpenAPI at `/api/openapi.json`
 - **Background tasks:** `_apply_state` (consumes `GLOBAL_EVENTS` and persists merged traces), `_pause_on_new_election`, `_cleanup_expired_images` (image-store TTL), `_prune_old_traces` (hourly trace janitor backed by `prune_old_trace_files`; retention via `tracing.retention_days`)
 
+### Steward (intelligent fabric)
+
+- Config: `intelligent_fabric` in `skulk.yaml` (`enabled`, default false;
+  `steward_models` preference list, default Qwen3.5-4B MLX then GGUF).
+- Identity: `BaseInstance.system_role = "steward" | None` (additive field;
+  None on replayed old logs). Stamped from `PlaceInstance.system_role` at
+  mint; all three repair builders re-stamp it from the instance.
+- Invariant: `Master._maintain_steward_placement` runs each planning tick
+  behind the topology-settle grace: places first servable card from the
+  preference list (min_nodes=1, MlxRing meta), tears down duplicate
+  stewards keeping the lowest instance id, paces attempts to one per
+  minute. Master failover re-establishes the steward via the invariant; no
+  dedicated failover code.
+- Pinning: `TextGeneration.target_instance_id` (mirrors SpeechSynthesis);
+  miss emits TaskFailed `instance_unavailable`.
+- Harness: `src/skulk/api/steward.py`. Read-only tools: cluster state
+  summary, node resources, telemetry diagnostics, data-plane diagnostics,
+  cluster versions, performance envelopes, local doctor registry, model
+  catalog. 6000-char tool-result bound, 8 steps/turn, observe/advise only.
+- Endpoints: `GET /v1/steward` (status), `POST /v1/steward/chat`
+  (409 when disabled/absent). Ordinary `DELETE /instance/{id}` of the
+  steward is refused 409 while the mode is enabled.
+- Dashboard: instances with `systemRole` set are hidden from all instance
+  surfaces (filter in App.tsx instanceCards).
+- Cards: `mlx-community/Qwen3.5-4B-MLX-4bit` (vision, MLX) and
+  `unsloth/Qwen3.5-4B-GGUF` (text-only so served lanes stay eligible).
+
 ### Dashboard
 
 - **Role:** operator UI for the same Skulk runtime

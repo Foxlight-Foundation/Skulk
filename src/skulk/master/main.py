@@ -34,6 +34,7 @@ from skulk.shared.models.memory_estimate import (
     estimate_shard_footprint,
     shard_fraction_of_model,
 )
+from skulk.shared.models.model_cards import ModelId, get_card, get_model_cards
 from skulk.shared.types.commands import (
     AddCustomModelCard,
     AudioTranscription,
@@ -121,10 +122,10 @@ from skulk.shared.types.worker.downloads import (
     DownloadPending,
     DownloadProgress,
 )
-from skulk.shared.types.worker.instances import Instance, InstanceId
+from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
-from skulk.shared.types.worker.shards import RpcDonorShardMetadata
-from skulk.store.config import resolve_config_path
+from skulk.shared.types.worker.shards import RpcDonorShardMetadata, Sharding
+from skulk.store.config import load_skulk_config, resolve_config_path
 from skulk.utils.channels import Receiver, Sender
 from skulk.utils.disk_event_log import DiskEventLog
 from skulk.utils.event_buffer import MultiSourceBuffer
@@ -658,6 +659,10 @@ class Master:
         # id makes recovery fire once per wedged instance. Grows only by wedged
         # ids (rare); never reused since InstanceIds are unique.
         self._download_failure_recovered: set[InstanceId] = set()
+        # Steward invariant pacing: at most one placement attempt per minute,
+        # so an unplaceable steward (no eligible node yet) logs and retries
+        # calmly instead of hammering the planner every 10s tick.
+        self._steward_last_attempt_monotonic: float = 0.0
         # Per-node memory (bytes) freed by a just-deleted instance. The grace
         # window is zero by default, so entries are normally pruned without being
         # applied; keeping the structure preserves one place to revisit this if
@@ -887,15 +892,27 @@ class Master:
                                     f"No instance found for model {command.task_params.model}"
                                 )
 
-                            available_instance_ids = sorted(
-                                instance_task_counts.keys(),
-                                key=lambda instance_id: instance_task_counts[
-                                    instance_id
-                                ],
-                            )
-
                             task_id = TaskId()
-                            selected_instance_id = available_instance_ids[0]
+                            target_unavailable = False
+                            if command.target_instance_id is not None:
+                                # Steward/canary path: pin to the requested
+                                # instance (mirrors SpeechSynthesis); a miss
+                                # fails the task instead of silently landing
+                                # on another placement.
+                                if (
+                                    command.target_instance_id
+                                    not in instance_task_counts
+                                ):
+                                    target_unavailable = True
+                                selected_instance_id = command.target_instance_id
+                            else:
+                                available_instance_ids = sorted(
+                                    instance_task_counts.keys(),
+                                    key=lambda instance_id: instance_task_counts[
+                                        instance_id
+                                    ],
+                                )
+                                selected_instance_id = available_instance_ids[0]
                             trace_enabled = self.state.tracing_enabled
                             generated_events.append(
                                 TaskCreated(
@@ -909,7 +926,11 @@ class Master:
                                         # Phase 2).
                                         owner_node=command.owner_node,
                                         instance_id=selected_instance_id,
-                                        task_status=TaskStatus.Pending,
+                                        task_status=(
+                                            TaskStatus.Failed
+                                            if target_unavailable
+                                            else TaskStatus.Pending
+                                        ),
                                         task_params=command.task_params,
                                         trace_enabled=trace_enabled,
                                     ),
@@ -917,6 +938,18 @@ class Master:
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
+                            if target_unavailable:
+                                generated_events.append(
+                                    TaskFailed(
+                                        task_id=task_id,
+                                        error_type="instance_unavailable",
+                                        error_message=(
+                                            "Requested text-generation instance "
+                                            "is unavailable or does not serve "
+                                            "the requested model"
+                                        ),
+                                    )
+                                )
                         case ImageGeneration():
                             for instance in self.state.instances.values():
                                 if (
@@ -1767,6 +1800,15 @@ class Master:
             if topology_settled:
                 await self._recover_download_failed_instances()
 
+            # Intelligent fabric (steward) invariant: while the mode is
+            # enabled, exactly one steward system placement exists. Behind
+            # the settle grace so a freshly failed-over master does not act
+            # on a stale seeded view; because this runs on every planning
+            # tick, a new master re-establishes the steward after election
+            # without any dedicated failover machinery.
+            if topology_settled:
+                await self._maintain_steward_placement()
+
             await anyio.sleep(10)
 
     async def _recover_download_failed_instances(self) -> None:
@@ -1887,6 +1929,119 @@ class Master:
                     "recovery)"
                 )
 
+
+    async def _maintain_steward_placement(self) -> None:
+        """Re-establish the intelligent-fabric steward placement invariant.
+
+        While ``intelligent_fabric.enabled`` is set in the cluster config,
+        exactly one instance carrying ``system_role="steward"`` must exist.
+        This pass places the first card from the configured preference list
+        the cluster can serve, tears down accidental duplicates (possible
+        across master handoffs), and does nothing while a steward exists.
+        Node loss needs no special handling here: the dead steward's
+        instance is torn down by the liveness pass and this invariant
+        re-places it on the next tick. Attempts are paced to one per minute
+        so an unplaceable steward logs calmly instead of spamming.
+        """
+        try:
+            config = load_skulk_config()
+        except Exception:
+            # An unreadable config never breaks the planning loop; the mode
+            # simply stays off until the config loads again.
+            return
+        fabric = config.intelligent_fabric if config is not None else None
+        if fabric is None or not fabric.enabled:
+            return
+
+        stewards = sorted(
+            (
+                instance_id
+                for instance_id, instance in self.state.instances.items()
+                if instance.system_role == "steward"
+            ),
+            key=str,
+        )
+        if len(stewards) > 1:
+            # Duplicate stewards can appear when two masters each placed one
+            # around a failover window. Keep the lowest id (stable across
+            # replicas), tear down the rest.
+            survivors = dict(self.state.instances)
+            for extra in stewards[1:]:
+                logger.warning(
+                    f"Removing duplicate steward placement {extra} "
+                    f"(keeping {stewards[0]})"
+                )
+                survivors = delete_instance(
+                    DeleteInstance(instance_id=extra), survivors
+                )
+            for event in get_transition_events(
+                self.state.instances, survivors, self.state.tasks
+            ):
+                await self.event_sender.send(event)
+            return
+        if stewards:
+            return
+
+        now = time.monotonic()
+        if now - self._steward_last_attempt_monotonic < 60:
+            return
+        self._steward_last_attempt_monotonic = now
+
+        # The card cache is lazily filled; a fresh master process may not
+        # have loaded it yet.
+        await get_model_cards()
+        for model_ref in fabric.steward_models:
+            card = get_card(ModelId(model_ref))
+            if card is None:
+                logger.warning(
+                    f"Steward model {model_ref} has no model card; skipping"
+                )
+                continue
+            command = PlaceInstance(
+                model_card=card,
+                sharding=Sharding.Pipeline,
+                instance_meta=InstanceMeta.MlxRing,
+                min_nodes=1,
+                system_role="steward",
+            )
+            try:
+                final_placement = place_instance(
+                    command,
+                    self.state.topology,
+                    self.state.instances,
+                    self._telemetry_view.node_memory,
+                    self.state.node_network,
+                    download_status=self._effective_downloads(),
+                    node_resources=self._telemetry_view.node_resources,
+                    node_vram=usable_vram_by_node(
+                        self._telemetry_view.node_system,
+                        self._telemetry_view.node_resources,
+                        node_memory=self._telemetry_view.node_memory,
+                    ),
+                    unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                        self._telemetry_view.node_system,
+                        self._telemetry_view.node_resources,
+                        node_memory=self._telemetry_view.node_memory,
+                    ),
+                )
+            except (PlacementError, PlacementInfoPendingError) as err:
+                logger.warning(
+                    f"Steward placement with {model_ref} not possible yet: {err}"
+                )
+                continue
+            logger.info(
+                f"Establishing steward placement with {model_ref} "
+                "(intelligent fabric)"
+            )
+            for event in get_transition_events(
+                self.state.instances, final_placement, self.state.tasks
+            ):
+                await self.event_sender.send(event)
+            return
+        logger.warning(
+            "Intelligent fabric is enabled but no configured steward model "
+            "can be placed on the current topology; will retry"
+        )
     async def _event_processor(self) -> None:
         with self.local_event_receiver as local_events:
             async for local_event in local_events:

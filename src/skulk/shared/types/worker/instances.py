@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import Literal
 
 from pydantic import Field, model_validator
 
@@ -47,6 +48,20 @@ class BaseInstance(TaggedModel):
             "honoring these instead of widening eligibility back to the "
             "full topology. Sorted for deterministic replicated events; "
             "empty for instances replayed from older event logs."
+        ),
+    )
+    system_role: Literal["steward"] | None = Field(
+        default=None,
+        description=(
+            "Marks a fabric-maintained system placement. ``\"steward\"`` is "
+            "the intelligent-fabric resident: the master re-establishes "
+            "exactly one such placement while intelligent-fabric mode is "
+            "enabled, the dashboard hides it from ordinary instance "
+            "surfaces, and the API refuses ordinary deletion while the mode "
+            "is on. ``None`` (the default, and the value on every instance "
+            "replayed from older event logs) means a normal user placement. "
+            "Repair re-placements re-stamp the role so it survives node "
+            "loss."
         ),
     )
 

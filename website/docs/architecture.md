@@ -620,7 +620,36 @@ input chunks into exact classifier windows, and emits typed
 minimum-speech, silence-hangover, preroll, and maximum-utterance state. Media
 is processed per call and never retained.
 
-### The dashboard voice loop
+### Intelligent fabric (the steward)
+
+Skulk can keep a small resident model, the steward, always available to
+answer operator questions about the cluster. The mode is configured by the
+`intelligent_fabric` section of the cluster configuration and is off by
+default.
+
+The steward is an ordinary model instance with one extra property: its
+placement record carries a system-role marker, and the master treats "exactly
+one steward placement exists" as an invariant of its planning loop. The
+master places the first servable model from the configured preference list,
+re-places the steward after node loss through the same repair machinery every
+instance gets, and, because the invariant is re-evaluated on every planning
+tick, a newly elected master re-establishes the steward automatically after
+failover. Duplicate stewards (possible across a failover window) are detected
+and reduced to one. The steward placement is hidden from user-facing instance
+surfaces and refuses ordinary deletion while the mode is enabled.
+
+Conversation happens through the steward chat endpoint. The server-side
+harness gives the model a bounded, strictly read-only tool surface: cluster
+state with health reasons, per-node resources and capability conflicts,
+telemetry and data-plane diagnostics, per-node version status, performance
+envelopes, the local doctor check registry, and the model catalog. Each
+operator turn runs a bounded investigation loop; generation itself rides the
+normal text-generation dispatch path, pinned to the steward instance. In this
+release the steward observes and advises only: no tool can change the
+cluster, and anything action-shaped is returned to the operator as a
+recommendation.
+
+## The dashboard voice loop
 
 The dashboard composes these surfaces in chat: mounted TTS models can speak
 draft text, replay assistant messages, or auto-speak final assistant responses

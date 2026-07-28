@@ -1229,7 +1229,7 @@ def test_missing_node_resources_is_treated_as_eligible() -> None:
     assert len(placements) == 1
 
 
-def _fully_connected_three_nodes(
+def fully_connected_three_nodes(
     available_memory: tuple[float, float, float],
 ) -> tuple[
     Topology,
@@ -1269,7 +1269,7 @@ def _fully_connected_three_nodes(
 
 def test_replacement_command_widens_refused_instance_by_one_node() -> None:
     """A refused instance re-places one node wider, preserving model + backend (#290)."""
-    topology, node_memory, node_network, _ = _fully_connected_three_nodes(
+    topology, node_memory, node_network, _ = fully_connected_three_nodes(
         (10.0, 10.0, 10.0)
     )
     card = ModelCard(
@@ -1302,7 +1302,7 @@ def test_refusal_fallback_excludes_refuser_at_any_width() -> None:
     anywhere but the refusing node at min_nodes=1 (#290 on a heterogeneous
     fleet: an MLX model refused at the full Mac width cannot go wider, but a
     remaining node can hold it alone)."""
-    topology, node_memory, node_network, node_ids = _fully_connected_three_nodes(
+    topology, node_memory, node_network, node_ids = fully_connected_three_nodes(
         (10.0, 10.0, 24.0)
     )
     card = ModelCard(
@@ -1355,7 +1355,7 @@ def test_refused_instance_replaces_onto_a_wider_split() -> None:
     Bumping ``min_nodes`` to 3 forces the wider floor, so the re-placement lands
     a 3-node split (smaller per-node share) instead of the doomed 2-node one.
     """
-    topology, node_memory, node_network, _ = _fully_connected_three_nodes(
+    topology, node_memory, node_network, _ = fully_connected_three_nodes(
         (10.0, 10.0, 10.0)
     )
     card = ModelCard(
@@ -1391,7 +1391,7 @@ def test_replacement_at_full_cluster_width_is_terminal() -> None:
     satisfied — place_instance raises, and the master treats that as the terminal
     "cannot fit anywhere" outcome that stops the refuse→re-place loop.
     """
-    topology, node_memory, node_network, _ = _fully_connected_three_nodes(
+    topology, node_memory, node_network, _ = fully_connected_three_nodes(
         (10.0, 10.0, 10.0)
     )
     card = ModelCard(
@@ -1554,7 +1554,7 @@ def test_repair_commands_preserve_original_exclusions() -> None:
     the caller excluded (observed live: a placement pinned off five nodes
     was repaired onto one of them).
     """
-    topology, node_memory, node_network, node_ids = _fully_connected_three_nodes(
+    topology, node_memory, node_network, node_ids = fully_connected_three_nodes(
         (10.0, 10.0, 10.0)
     )
     operator_excluded = node_ids[2]

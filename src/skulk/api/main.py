@@ -115,6 +115,11 @@ from skulk.api.realtime import (
     RealtimeResponseConfig,
     RealtimeTranscriptionBridge,
 )
+from skulk.api.steward import (
+    StewardChatRequest,
+    StewardChatResponse,
+    StewardStatusResponse,
+)
 from skulk.api.types import (
     AddCustomModelParams,
     AdvancedImageParams,
@@ -2206,6 +2211,32 @@ class API:
                 "explicit failures rather than vanishing."
             ),
         )(self.get_cluster_performance_envelopes)
+        self.app.get(
+            "/v1/steward",
+            tags=["Steward"],
+            summary="Get intelligent-fabric steward status",
+            description=(
+                "Report whether intelligent-fabric mode is enabled and whether "
+                "a steward placement currently exists, with its model and "
+                "instance id when present. The steward is the fabric-maintained "
+                "resident assistant; see the steward chat endpoint."
+            ),
+        )(self.get_steward_status)
+        self.app.post(
+            "/v1/steward/chat",
+            tags=["Steward"],
+            summary="Ask the cluster's resident steward",
+            description=(
+                "Send a conversation to the intelligent-fabric steward: a small "
+                "resident model the fabric keeps placed while the mode is "
+                "enabled. The steward investigates the cluster through a "
+                "bounded read-only tool surface (state, diagnostics, doctor, "
+                "catalog) and answers with its reasoning trace. Observe/advise "
+                "only: the steward cannot change the cluster. Returns 409 when "
+                "intelligent-fabric mode is disabled or the steward placement "
+                "is not currently available."
+            ),
+        )(self.steward_chat)
         self.app.post(
             "/v1/diagnostics/node/runners/{runner_id}/cancel",
             tags=["Diagnostics"],
@@ -2842,9 +2873,85 @@ class API:
             raise HTTPException(status_code=404, detail="Instance not found")
         return self.state.instances[instance_id]
 
+    async def get_steward_status(self) -> "StewardStatusResponse":
+        """Report intelligent-fabric mode and the current steward placement."""
+        from skulk.api.steward import StewardHarness, StewardStatusResponse
+
+        located = StewardHarness(self).steward_instance()
+        return StewardStatusResponse(
+            enabled=self._intelligent_fabric_enabled(),
+            present=located is not None,
+            steward_model=located[1] if located is not None else None,
+            instance_id=str(located[0]) if located is not None else None,
+        )
+
+    async def steward_chat(
+        self, payload: "StewardChatRequest"
+    ) -> "StewardChatResponse":
+        """Run one steward turn: investigate through read-only tools, reply."""
+        from skulk.api.steward import StewardHarness
+
+        if not self._intelligent_fabric_enabled():
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Intelligent-fabric mode is disabled. Enable it in "
+                    "Settings (intelligent_fabric.enabled) to talk to the "
+                    "steward."
+                ),
+            )
+        harness = StewardHarness(self)
+        try:
+            return await harness.run_turn(payload.messages)
+        except LookupError as error:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "The steward placement is not available yet. The fabric "
+                    "establishes it automatically; check /state for placement "
+                    "progress or node capacity."
+                ),
+            ) from error
+        except RuntimeError as error:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Steward generation failed: {error}",
+            ) from error
+
+    def _intelligent_fabric_enabled(self) -> bool:
+        """Whether intelligent-fabric mode is currently enabled.
+
+        Reads the on-disk cluster config (kept current on every node by
+        SyncConfig) so the answer tracks fleet-wide Settings changes made
+        from any node, falling back to the startup-parsed config when the
+        file is momentarily unreadable.
+        """
+        try:
+            config = load_skulk_config()
+        except Exception:
+            config = self._skulk_config
+        fabric = config.intelligent_fabric if config is not None else None
+        return fabric is not None and fabric.enabled
+
     async def delete_instance(self, instance_id: InstanceId) -> DeleteInstanceResponse:
         if instance_id not in self.state.instances:
             raise HTTPException(status_code=404, detail="Instance not found")
+        instance = self.state.instances[instance_id]
+        if instance.system_role == "steward" and self._intelligent_fabric_enabled():
+            # The steward is a fabric-maintained system placement: while the
+            # mode is on, the master would immediately re-place it anyway, so
+            # an ordinary delete is refused loudly instead of producing a
+            # confusing delete-then-reappear. Internal correctness paths
+            # (worker give-up on a crashed instance, repair teardown) send
+            # DeleteInstance directly on the command plane and are unaffected.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This is the intelligent-fabric steward placement, which "
+                    "the fabric maintains automatically. Disable intelligent "
+                    "fabric in Settings to remove it."
+                ),
+            )
 
         command = DeleteInstance(
             instance_id=instance_id,
@@ -3831,8 +3938,47 @@ class API:
                     "Vision media timed out waiting for worker verification",
                 )
 
+    async def dispatch_text_generation(
+        self,
+        task_params: TextGenerationTaskParams,
+        target_instance_id: InstanceId | None = None,
+    ) -> TextGeneration:
+        """Public dispatch seam for internal callers (the steward harness).
+
+        Sends a text-generation command through the same validated path as
+        the HTTP chat adapters, optionally pinned to one instance.
+        """
+        return await self._send_text_generation_with_images(
+            task_params, target_instance_id=target_instance_id
+        )
+
+    def text_generation_chunk_stream(
+        self,
+        command: TextGeneration,
+        task_params: TextGenerationTaskParams,
+    ) -> AsyncGenerator[
+        ErrorChunk | ToolCallChunk | TokenChunk | PrefillProgressChunk, None
+    ]:
+        """Public tapped chunk stream for one dispatched command.
+
+        Same observation taps as the HTTP adapters (envelopes, telemetry,
+        extensions), so internal consumers are indistinguishable from
+        external ones to the observability planes.
+        """
+        return self._tapped_text_stream(
+            command.command_id,
+            task_params.model,
+            task_params=task_params,
+        )
+
+    async def running_model_card(self, model_id: ModelId) -> ModelCard | None:
+        """Public card lookup preferring the card carried on a live instance."""
+        return await self._get_running_model_card(model_id)
+
     async def _send_text_generation_with_images(
-        self, task_params: TextGenerationTaskParams
+        self,
+        task_params: TextGenerationTaskParams,
+        target_instance_id: InstanceId | None = None,
     ) -> TextGeneration:
         # Single dispatch chokepoint for every text-generation wire format
         # (chat, claude, ollama, responses, bench) — reject un-renderable
@@ -3863,7 +4009,11 @@ class API:
             )
         images = task_params.images
         if not images:
-            command = TextGeneration(task_params=task_params, owner_node=self.node_id)
+            command = TextGeneration(
+            task_params=task_params,
+            owner_node=self.node_id,
+            target_instance_id=target_instance_id,
+        )
             await self._send(command)
             return command
 
@@ -3904,7 +4054,11 @@ class API:
             task_params = task_params.model_copy(
                 update={"images": [], "image_hashes": cached_hashes}
             )
-            command = TextGeneration(task_params=task_params, owner_node=self.node_id)
+            command = TextGeneration(
+            task_params=task_params,
+            owner_node=self.node_id,
+            target_instance_id=target_instance_id,
+        )
             await self._send(command)
             return command
 
@@ -3921,7 +4075,11 @@ class API:
                 "image_count": len(new_images),
             }
         )
-        command = TextGeneration(task_params=task_params, owner_node=self.node_id)
+        command = TextGeneration(
+            task_params=task_params,
+            owner_node=self.node_id,
+            target_instance_id=target_instance_id,
+        )
         self._stage_vision_media(
             command.command_id,
             task_params.model,
