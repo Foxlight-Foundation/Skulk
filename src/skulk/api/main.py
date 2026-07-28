@@ -1349,6 +1349,14 @@ class API:
         self.last_completed_election: int = 0
         self.port = port
         self._skulk_config = skulk_config
+        # Terminal failures that arrived before their command's stream queue
+        # was registered (#223 follow-up): the low-level chunk stream
+        # registers its queue lazily on first iteration, so a fast TaskFailed
+        # (e.g. a pinned steward request whose instance vanished, on a
+        # single-node cluster where the master round-trip is local) can beat
+        # registration and _terminate_command_stream would silently no-op,
+        # hanging the caller. Bounded FIFO; consumed at stream registration.
+        self._pending_stream_failures: dict[CommandId, ErrorChunk] = {}
         self._store_client = store_client
         self._config_path = resolve_config_path()
         # Field telemetry (opt-in, consent-gated in skulk.yaml). The config
@@ -2554,6 +2562,18 @@ class API:
         self, payload: CreateInstanceParams
     ) -> CreateInstanceResponse:
         instance = payload.instance
+        if instance.system_role is not None:
+            # System placements (the intelligent-fabric steward) are minted
+            # and maintained by the fabric's own invariant; accepting one
+            # from a caller would let an arbitrary instance impersonate the
+            # steward and suppress the configured placement.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "system_role placements are fabric-managed and cannot "
+                    "be created through this endpoint"
+                ),
+            )
         model_card = await ModelCard.load(instance.shard_assignments.model_id)
         required_memory = model_card.storage_size
         available_memory = self._calculate_total_available_memory()
@@ -3075,6 +3095,15 @@ class API:
 
             if pending_error := self._take_vision_media_failure(command_id):
                 yield pending_error
+                return
+
+            if pending_failure := self._pending_stream_failures.pop(
+                command_id, None
+            ):
+                # The task already failed before this stream registered
+                # (fast local TaskFailed, e.g. a pinned instance that
+                # vanished); deliver the buffered terminal chunk.
+                yield pending_failure
                 return
 
             with recv as token_chunks:
@@ -8180,6 +8209,7 @@ class API:
                 except (BrokenResourceError, ClosedResourceError):
                     self._audio_transcription_queues.pop(task.command_id, None)
             return
+        delivered = False
         for queue_map in (
             self._text_generation_queues,
             self._image_generation_queues,
@@ -8188,10 +8218,19 @@ class API:
             self._audio_transcription_queues,
         ):
             if queue := queue_map.get(task.command_id):
+                delivered = True
                 try:
                     await queue.send(error_chunk)
                 except (BrokenResourceError, ClosedResourceError):
                     queue_map.pop(task.command_id, None)
+        if not delivered:
+            # No stream queue exists yet: buffer the terminal chunk for the
+            # lazily-registered stream to consume at startup, instead of
+            # dropping it and hanging the request.
+            while len(self._pending_stream_failures) >= 256:
+                oldest = next(iter(self._pending_stream_failures))
+                del self._pending_stream_failures[oldest]
+            self._pending_stream_failures[task.command_id] = error_chunk
 
     def _save_trace(
         self, task_id: task_types.TaskId, trace_data: Sequence[TraceEventData]

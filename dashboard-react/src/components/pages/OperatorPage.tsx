@@ -459,7 +459,16 @@ export function OperatorPage() {
   }
 
   // Cluster-level summary stats
-  const instanceCount = data?.instances ? Object.keys(data.instances).length : 0;
+  // Fabric-maintained system placements (systemRole set, e.g. the
+  // intelligent-fabric steward) are hidden from operator instance counts,
+  // matching every other instance surface.
+  const instanceCount = data?.instances
+    ? Object.values(data.instances).filter((inst) => {
+        const inner =
+          inst.MlxRingInstance ?? inst.MlxJacclInstance ?? inst.LlamaRpcInstance;
+        return !inner?.systemRole;
+      }).length
+    : 0;
   const runnerCount = data?.runners ? Object.keys(data.runners).length : 0;
   const nodeCount = nodes.length;
 

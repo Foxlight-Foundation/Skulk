@@ -1,7 +1,7 @@
 import copy
 import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -1960,9 +1960,6 @@ class Master:
             # simply stays off until the config loads again.
             return
         fabric = config.intelligent_fabric if config is not None else None
-        if fabric is None or not fabric.enabled:
-            return
-
         stewards = sorted(
             (
                 instance_id
@@ -1971,23 +1968,28 @@ class Master:
             ),
             key=str,
         )
+        if fabric is None or not fabric.enabled:
+            # Disable is a lifecycle transition, not a shrug: a steward left
+            # behind would keep occupying memory while hidden from every
+            # ordinary instance surface. Symmetric with enable.
+            if stewards:
+                logger.info(
+                    "Intelligent fabric is disabled; removing the steward "
+                    f"placement(s) {[str(s) for s in stewards]}"
+                )
+                await self._teardown_steward_instances(stewards)
+            return
+
         if len(stewards) > 1:
             # Duplicate stewards can appear when two masters each placed one
             # around a failover window. Keep the lowest id (stable across
             # replicas), tear down the rest.
-            survivors = dict(self.state.instances)
-            for extra in stewards[1:]:
-                logger.warning(
-                    f"Removing duplicate steward placement {extra} "
-                    f"(keeping {stewards[0]})"
-                )
-                survivors = delete_instance(
-                    DeleteInstance(instance_id=extra), survivors
-                )
-            for event in get_transition_events(
-                self.state.instances, survivors, self.state.tasks
-            ):
-                await self.event_sender.send(event)
+            extras = stewards[1:]
+            logger.warning(
+                f"Removing duplicate steward placement(s) "
+                f"{[str(e) for e in extras]} (keeping {stewards[0]})"
+            )
+            await self._teardown_steward_instances(extras)
             return
         if stewards:
             return
@@ -2052,6 +2054,37 @@ class Master:
             "Intelligent fabric is enabled but no configured steward model "
             "can be placed on the current topology; will retry"
         )
+
+    async def _teardown_steward_instances(
+        self, instance_ids: Sequence[InstanceId]
+    ) -> None:
+        """Tear down steward placements with full lifecycle hygiene.
+
+        Fails any in-flight tasks first (the TaskFailed-before-removal
+        invariant), emits the deletion transition events, and forwards
+        download cancellations so an in-flight steward-model download does
+        not keep occupying disk and bandwidth after its instance is gone —
+        the same steps the ordinary DeleteInstance path performs.
+        """
+        for task_failed in orphaned_task_failure_events(
+            self.state, set(instance_ids)
+        ):
+            await self.event_sender.send(task_failed)
+        survivors = dict(self.state.instances)
+        for instance_id in instance_ids:
+            survivors = delete_instance(
+                DeleteInstance(instance_id=instance_id), survivors
+            )
+        for cmd in cancel_unnecessary_downloads(
+            survivors, self._effective_downloads()
+        ):
+            await self.download_command_sender.send(
+                ForwarderDownloadCommand(origin=self._system_id, command=cmd)
+            )
+        for event in get_transition_events(
+            self.state.instances, survivors, self.state.tasks
+        ):
+            await self.event_sender.send(event)
     async def _event_processor(self) -> None:
         with self.local_event_receiver as local_events:
             async for local_event in local_events:
