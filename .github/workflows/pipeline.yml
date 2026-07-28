@@ -11,6 +11,9 @@ on:
       - staging
       - main
       - dev
+      # Long-lived initiative (epic) integration branches: feature PRs
+      # target these during release freezes and get identical CI.
+      - "initiative/**"
 
 jobs:
   wire-compat-guard:
