@@ -1967,8 +1967,13 @@ class Worker:
                     # be retried), keep the files so the next runner can find them.
                     instance_deleted = task.instance_id not in self.state.instances
                     try:
-                        with fail_after(3):
-                            await runner.start_task(task)
+                        # Acknowledgement only means the subprocess received the
+                        # shutdown task. Wait for its terminal status before
+                        # cancelling the supervisor; otherwise cancellation can
+                        # close the event pipe between ACK and Complete, leaving
+                        # a permanently running lifecycle task in cluster state.
+                        with fail_after(15):
+                            await runner.start_task(task, wait_for_terminal=True)
                     except TimeoutError:
                         await self.event_sender.send(
                             TaskStatusUpdated(

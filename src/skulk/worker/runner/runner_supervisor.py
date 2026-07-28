@@ -150,6 +150,9 @@ class RunnerSupervisor:
     _tg: TaskGroup = field(default_factory=TaskGroup, init=False)
     status: RunnerStatus = field(default_factory=RunnerIdle, init=False)
     pending: dict[TaskId, anyio.Event] = field(default_factory=dict, init=False)
+    _terminal_waiters: dict[TaskId, anyio.Event] = field(
+        default_factory=dict, init=False
+    )
     in_progress: dict[TaskId, Task] = field(default_factory=dict, init=False)
     completed: set[TaskId] = field(default_factory=set, init=False)
     cancelled: set[TaskId] = field(default_factory=set, init=False)
@@ -511,7 +514,18 @@ class RunnerSupervisor:
         self._record_milestone("shutdown_requested")
         self._tg.cancel_tasks()
 
-    async def start_task(self, task: Task):
+    async def start_task(
+        self, task: Task, *, wait_for_terminal: bool = False
+    ) -> None:
+        """Submit a task and wait for its acknowledgement or terminal status.
+
+        Args:
+            task: Runner task to submit over the process boundary.
+            wait_for_terminal: When true, do not return after acknowledgement;
+                wait until the runner's terminal task status has been forwarded.
+                Shutdown uses this to prevent supervisor cancellation from racing
+                and dropping its completion event.
+        """
         if task.task_id in self.pending:
             logger.warning(
                 "Skipping invalid task "
@@ -527,6 +541,9 @@ class RunnerSupervisor:
         logger.info(f"Starting task {_summarize_task(task)}")
         event = anyio.Event()
         self.pending[task.task_id] = event
+        terminal_event = anyio.Event() if wait_for_terminal else None
+        if terminal_event is not None:
+            self._terminal_waiters[task.task_id] = terminal_event
         self.in_progress[task.task_id] = task
         # Record the owning API node so _emit can address this command's output
         # chunks to it over the Zenoh data plane (#279 Phase 2). Set before the
@@ -586,7 +603,9 @@ class RunnerSupervisor:
         try:
             await self._task_sender.send_async(task)
         except ClosedResourceError:
+            self.pending.pop(task.task_id, None)
             self.in_progress.pop(task.task_id, None)
+            self._terminal_waiters.pop(task.task_id, None)
             logger.warning(
                 f"Task {_summarize_task(task)} dropped, runner closed communication."
             )
@@ -595,7 +614,12 @@ class RunnerSupervisor:
                 f"{task.__class__.__name__}:{task.task_id}",
             )
             return
-        await event.wait()
+        try:
+            await event.wait()
+            if terminal_event is not None:
+                await terminal_event.wait()
+        finally:
+            self._terminal_waiters.pop(task.task_id, None)
 
     async def send_realtime_audio(self, frame: RealtimeAudioInputFrame) -> None:
         """Forward one bounded PCM frame to this runner process."""
@@ -722,6 +746,9 @@ class RunnerSupervisor:
                             await self._event_sender.send(
                                 TaskDeleted(task_id=event.task_id)
                             )
+                        terminal_waiter = self._terminal_waiters.get(event.task_id)
+                        if terminal_waiter is not None:
+                            terminal_waiter.set()
                         continue
                     # Catch-all: runner-produced events, including the per-token
                     # ChunkGenerated output, which _emit diverts to the data
