@@ -265,6 +265,16 @@ def _downloads_summary(state_payload: dict[str, object]) -> dict[str, object]:
             for kind, body_obj in _as_object_dict(envelope).items():
                 body = _as_object_dict(body_obj)
                 row: dict[str, object] = {"kind": kind}
+                # The model id lives on the shard's card; without it a node
+                # staging several models gives the steward ambiguous rows.
+                shard_envelope = _as_object_dict(body.get("shardMetadata"))
+                for shard_body in shard_envelope.values():
+                    card = _as_object_dict(
+                        _as_object_dict(shard_body).get("modelCard")
+                    )
+                    if card.get("modelId") is not None:
+                        row["modelId"] = card.get("modelId")
+                    break
                 if body.get("errorMessage"):
                     row["errorMessage"] = body["errorMessage"]
                 progress = _as_object_dict(body.get("downloadProgress"))
