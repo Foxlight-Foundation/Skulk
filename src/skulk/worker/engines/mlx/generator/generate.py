@@ -2371,13 +2371,13 @@ def _isolated_native_vision_position_state(
         for attribute_name in ("_position_ids", "_rope_deltas")
         if hasattr(language_model, attribute_name)
     }
-    _reset_native_vision_position_state(model)
-    _seed_native_vision_position_state(
-        model,
-        all_prompt_tokens,
-        image_grid_thw,
-    )
     try:
+        _reset_native_vision_position_state(model)
+        _seed_native_vision_position_state(
+            model,
+            all_prompt_tokens,
+            image_grid_thw,
+        )
         yield
     finally:
         for attribute_name, attribute_value in position_state.items():

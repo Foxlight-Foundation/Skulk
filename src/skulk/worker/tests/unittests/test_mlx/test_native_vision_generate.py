@@ -411,6 +411,63 @@ def test_native_vision_restores_text_position_state_after_failure(
     assert model.language_model.rope_state is original_rope_state
 
 
+def test_native_vision_restores_text_position_state_when_seeding_fails() -> None:
+    """A failed RoPE seed must not clear state retained for cached text."""
+
+    class _FailingPositionState(_FakePositionState):
+        def get_rope_index(
+            self,
+            input_ids: mx.array,
+            image_grid_thw: mx.array,
+            _video_grid_thw: object,
+            _attention_mask: object,
+        ) -> tuple[mx.array, mx.array]:
+            del input_ids, image_grid_thw
+            raise RuntimeError("native vision position seed failed")
+
+    class _StatefulVisionModel:
+        def __init__(self) -> None:
+            self.language_model = _FailingPositionState()
+
+    model = _StatefulVisionModel()
+    original_position_state = model.language_model.position_state
+    original_rope_state = model.language_model.rope_state
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/Qwen3-VL-4B-Instruct-4bit"),
+        input=[InputMessage(role="user", content="what is this?")],
+        max_output_tokens=8,
+        temperature=0.0,
+    )
+    vision = VisionResult(
+        prompt="ignored",
+        prompt_tokens=mx.array([1, 2, 3]),
+        embeddings=mx.zeros((1, 0, 1)),
+        media_regions=[],
+        pixel_values=mx.array([1.0]),
+        image_grid_thw=mx.array([[1, 2, 3]]),
+    )
+
+    with pytest.raises(RuntimeError, match="native vision position seed failed"):
+        list(
+            _mlx_generate_native_vision_fn()(
+                model=cast(Model, cast(object, model)),
+                tokenizer=_fake_tokenizer(),
+                task=task,
+                all_prompt_tokens=vision.prompt_tokens,
+                vision=vision,
+                sampler=_identity_sampler,
+                logits_processors=[],
+                on_prefill_progress=None,
+                on_generation_token=None,
+                group=None,
+                max_tokens=8,
+            )
+        )
+
+    assert model.language_model.position_state is original_position_state
+    assert model.language_model.rope_state is original_rope_state
+
+
 def test_back_to_back_native_vision_requests_seed_their_own_position_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
