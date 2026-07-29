@@ -2311,16 +2311,58 @@ def _reset_native_vision_position_state(model: Model) -> None:
             object.__setattr__(language_model, attribute_name, None)
 
 
+def _seed_native_vision_position_state(
+    model: Model,
+    all_prompt_tokens: mx.array,
+    image_grid_thw: mx.array | None,
+) -> None:
+    """Seed the current image prompt's multimodal position state.
+
+    MLX-VLM computes ``position_ids`` and ``rope_deltas`` while preparing
+    native Qwen embeddings, then passes them only to the prefill forward. Its
+    decode loop clears those keyword arguments after prefill and expects the
+    language model's retained state to carry the same coordinates forward.
+    Starting from ``None`` makes Qwen recompute them from the first one-token
+    decode suffix, which produces repeated or corrupted output. Compute the
+    current request's coordinates before generation so decode never depends
+    on warmup or a previous image request.
+    """
+
+    language_model = getattr(model, "language_model", model)
+    get_rope_index = getattr(language_model, "get_rope_index", None)
+    if not callable(get_rope_index) or image_grid_thw is None:
+        return
+
+    position_ids, rope_deltas = cast(
+        tuple[mx.array, mx.array],
+        get_rope_index(
+            all_prompt_tokens[None],
+            image_grid_thw,
+            None,
+            None,
+        ),
+    )
+    if hasattr(language_model, "_position_ids"):
+        object.__setattr__(language_model, "_position_ids", position_ids)
+    if hasattr(language_model, "_rope_deltas"):
+        object.__setattr__(language_model, "_rope_deltas", rope_deltas)
+
+
 @contextlib.contextmanager
-def _isolated_native_vision_position_state(model: Model) -> Generator[None]:
+def _isolated_native_vision_position_state(
+    model: Model,
+    all_prompt_tokens: mx.array,
+    image_grid_thw: mx.array | None,
+) -> Generator[None]:
     """Isolate request-local multimodal RoPE state from later text requests.
 
     Qwen VLM text generation relies on its retained zero RoPE delta when a
     later request resumes from Skulk's text-only prefix cache. Native vision
-    must temporarily clear that state to calculate multimodal coordinates, but
-    leaving it cleared makes the next cached text suffix restart positions at
-    zero. Preserve the prior text state across the complete vision generator,
-    including cancellation and failure.
+    must temporarily replace that state with coordinates for the current image
+    prompt, but leaving the image state behind corrupts the next cached text
+    suffix. Preserve the prior text state across the complete vision generator,
+    including cancellation and failure, while seeding each image request from
+    its own prompt rather than whichever request happened to run before it.
     """
 
     language_model = getattr(model, "language_model", model)
@@ -2330,6 +2372,11 @@ def _isolated_native_vision_position_state(model: Model) -> Generator[None]:
         if hasattr(language_model, attribute_name)
     }
     _reset_native_vision_position_state(model)
+    _seed_native_vision_position_state(
+        model,
+        all_prompt_tokens,
+        image_grid_thw,
+    )
     try:
         yield
     finally:
@@ -2620,7 +2667,11 @@ def _mlx_generate_native_vision(
 ) -> Generator[GenerationResponse]:
     """Generate native vision without leaking multimodal position state."""
 
-    with _isolated_native_vision_position_state(model):
+    with _isolated_native_vision_position_state(
+        model,
+        all_prompt_tokens,
+        vision.image_grid_thw,
+    ):
         yield from _mlx_generate_native_vision_unisolated(
             model=model,
             tokenizer=tokenizer,

@@ -140,6 +140,7 @@ class _FakePositionState:
     def __init__(self) -> None:
         self._position_ids: object | None = mx.arange(64)[None]
         self._rope_deltas: object | None = mx.zeros((1, 1))
+        self.seeded_grids: list[int] = []
 
     @property
     def position_state(self) -> object | None:
@@ -155,6 +156,23 @@ class _FakePositionState:
             return 0
         rope_deltas = cast(mx.array, self._rope_deltas)
         return cache_offset + int(rope_deltas.item())
+
+    def get_rope_index(
+        self,
+        input_ids: mx.array,
+        image_grid_thw: mx.array,
+        _video_grid_thw: object,
+        _attention_mask: object,
+    ) -> tuple[mx.array, mx.array]:
+        """Return request-specific multimodal coordinates like native Qwen."""
+
+        grid_marker = int(image_grid_thw[0, 0].item())
+        self.seeded_grids.append(grid_marker)
+        position_ids = mx.broadcast_to(
+            mx.arange(input_ids.shape[-1])[None, None, :],
+            (3, input_ids.shape[0], input_ids.shape[-1]),
+        )
+        return position_ids, mx.array([[grid_marker]])
 
 
 def _fake_group(*, size: int = 3) -> mx.distributed.Group:
@@ -284,8 +302,8 @@ def test_text_vision_text_restores_cached_suffix_position_state(
     assert model.language_model.cached_suffix_start(19) == 19
 
     def _fake_generate_step(**_kwargs: object):
-        assert model.language_model.position_state is None
-        assert model.language_model.rope_state is None
+        assert cast(mx.array, model.language_model.position_state).shape == (3, 1, 3)
+        assert cast(mx.array, model.language_model.rope_state).item() == 1
         yield mx.array(999), mx.zeros((8,))
 
     monkeypatch.setattr(
@@ -329,6 +347,7 @@ def test_text_vision_text_restores_cached_suffix_position_state(
     assert model.language_model.position_state is original_position_state
     assert model.language_model.rope_state is original_rope_state
     assert model.language_model.cached_suffix_start(19) == 19
+    assert model.language_model.seeded_grids == [1]
 
 
 def test_native_vision_restores_text_position_state_after_failure(
@@ -345,8 +364,8 @@ def test_native_vision_restores_text_position_state_after_failure(
     original_rope_state = model.language_model.rope_state
 
     def _failing_generate_step(**_kwargs: object):
-        assert model.language_model.position_state is None
-        assert model.language_model.rope_state is None
+        assert cast(mx.array, model.language_model.position_state).shape == (3, 1, 3)
+        assert cast(mx.array, model.language_model.rope_state).item() == 1
         raise RuntimeError("native vision decode failed")
         yield mx.array(999), mx.zeros((8,))
 
@@ -390,6 +409,78 @@ def test_native_vision_restores_text_position_state_after_failure(
 
     assert model.language_model.position_state is original_position_state
     assert model.language_model.rope_state is original_rope_state
+
+
+def test_back_to_back_native_vision_requests_seed_their_own_position_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each image decode must use its own grid rather than prior request state."""
+
+    class _StatefulVisionModel:
+        def __init__(self) -> None:
+            self.language_model = _FakePositionState()
+
+    model = _StatefulVisionModel()
+    original_position_state = model.language_model.position_state
+    original_rope_state = model.language_model.rope_state
+    observed_rope_deltas: list[int] = []
+
+    def _fake_generate_step(**_kwargs: object):
+        current_delta = int(
+            cast(mx.array, model.language_model.rope_state).item()
+        )
+        observed_rope_deltas.append(current_delta)
+        # Upstream decode mutates retained request state. The next request
+        # must replace it rather than inheriting this terminal value.
+        object.__setattr__(
+            model.language_model,
+            "_rope_deltas",
+            mx.array([[999]]),
+        )
+        yield mx.array(999), mx.zeros((8,))
+
+    monkeypatch.setattr(
+        import_module("mlx_vlm.generate"),
+        "generate_step",
+        _fake_generate_step,
+    )
+
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/Qwen3-VL-4B-Instruct-4bit"),
+        input=[InputMessage(role="user", content="what is this?")],
+        max_output_tokens=8,
+        temperature=0.0,
+    )
+    for grid_marker in (2, 7):
+        vision = VisionResult(
+            prompt="ignored",
+            prompt_tokens=mx.array([1, 2, 3]),
+            embeddings=mx.zeros((1, 0, 1)),
+            media_regions=[],
+            pixel_values=mx.array([1.0]),
+            image_grid_thw=mx.array([[grid_marker, 2, 3]]),
+        )
+        responses = list(
+            _mlx_generate_native_vision_fn()(
+                model=cast(Model, cast(object, model)),
+                tokenizer=_fake_tokenizer(),
+                task=task,
+                all_prompt_tokens=vision.prompt_tokens,
+                vision=vision,
+                sampler=_identity_sampler,
+                logits_processors=[],
+                on_prefill_progress=None,
+                on_generation_token=None,
+                group=None,
+                max_tokens=8,
+            )
+        )
+        assert responses[-1].finish_reason == "stop"
+        assert model.language_model.position_state is original_position_state
+        assert model.language_model.rope_state is original_rope_state
+
+    assert observed_rope_deltas == [2, 7]
+    assert model.language_model.seeded_grids == [2, 7]
 
 
 @pytest.mark.parametrize(
