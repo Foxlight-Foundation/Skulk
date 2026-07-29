@@ -80,6 +80,17 @@ def test_gemma4_12b_card_does_not_advertise_missing_vision_tower() -> None:
     assert card.modalities is None
 
 
+def test_qwen3_vl_4b_card_pins_the_measured_artifact() -> None:
+    """Keep disk admission aligned with the complete pinned upstream artifact."""
+    card = _load(
+        _CARD_DIRS["inference"]
+        / "mlx-community--Qwen3-VL-4B-Instruct-4bit.toml"
+    )
+
+    assert card.source_revision == "2fd8dacbdb8f1e54b8c005f081ec5bf79c56376b"
+    assert card.storage_size.in_bytes == 3_109_732_071
+
+
 @pytest.mark.parametrize(("kind", "path"), _CARD_FILES, ids=_CARD_IDS)
 def test_bundled_card_invariants(kind: str, path: Path) -> None:
     card = _load(path)  # validation itself is the first gate
