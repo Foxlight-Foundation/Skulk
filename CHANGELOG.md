@@ -9,6 +9,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Fresh multi-node installs now converge their per-node bootstrap model stores
+  on the elected master's routable store endpoint. Followers retry
+  authoritative config sync through the startup window, stop superseded local
+  store servers, and update dashboard and worker clients together, preventing
+  dashboard download followed by placement on another node from downloading
+  the same multi-gigabyte model from Hugging Face twice.
+
 - Routed text-only requests on native MLX-VLM models through their language
   model instead of the multimodal outer model. This prevents Qwen3-VL text
   chats from producing long corrupted repetition while preserving the native

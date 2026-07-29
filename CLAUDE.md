@@ -339,6 +339,12 @@ of truth; a store that cannot be reached at the transport level
 detection) falls back to DIRECT Hugging Face download on the node when
 `allow_hf_fallback` is on, preserving revision/GGUF pinning. The expected
 shape for store-unreachable remote members; a loud log cue elsewhere.
+Installer-generated configs begin as local bootstrap stores. On cluster
+formation, followers retry state-sync config bootstrap, receive the elected
+master's routable store address, stop superseded local store servers, and
+replace both API and worker store clients together. Do not let a fresh fleet
+retain one independent store per node: that makes dashboard download and
+placement perform repeated external downloads.
 
 Model cards may pin qualified Hugging Face artifacts with `source_revision`, a
 full commit hash. Metadata probes, direct downloads, model-store registry

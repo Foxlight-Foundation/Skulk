@@ -32,11 +32,12 @@ endpoint, so you can run models far larger than any single machine could hold.
    ```
 
    It installs prerequisites, builds the node, writes a `skulk.yaml` with
-   single-node [model store](./model-store.md) defaults (only when none
-   exists, so the store-first download flow works out of the box), and
-   finishes with `skulk doctor --fix`, which audits the machine (GPUs,
-   inference engines, storage) and fixes what it safely can. Then start
-   Skulk from the install directory:
+   bootstrap [model store](./model-store.md) defaults (only when none exists),
+   and finishes with `skulk doctor --fix`, which audits the machine (GPUs,
+   inference engines, storage) and fixes what it safely can. A single node
+   serves its own store immediately; several fresh nodes converge on the
+   elected master's store when their cluster forms. Then start Skulk from the
+   install directory:
 
    ```bash
    cd ~/skulk && uv run skulk

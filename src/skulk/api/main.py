@@ -4453,6 +4453,28 @@ class API:
 
         self._sync_builtin_speech_capability()
 
+    def set_model_store_runtime(
+        self,
+        skulk_config: "SkulkConfig | None",
+        store_client: "ModelStoreClient | None",
+    ) -> None:
+        """Replace config and store client after cluster-config convergence.
+
+        Args:
+            skulk_config: The authoritative cluster configuration, or ``None``
+                when the cluster has no configuration.
+            store_client: Client for the authoritative model store, or ``None``
+                when the model store is disabled.
+
+        Side effects:
+            Subsequent dashboard store requests use the replacement client and
+            config-dependent provider advertisements are refreshed.
+        """
+
+        self._skulk_config = skulk_config
+        self._store_client = store_client
+        self.refresh_config_dependent_capabilities()
+
     async def _validate_audio_transcription_model(
         self,
         model_id: ModelId,
