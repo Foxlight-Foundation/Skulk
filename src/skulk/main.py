@@ -92,6 +92,9 @@ def _derive_zenoh_namespace(raw: str) -> str:
 _LIBP2P_NETWORK_VERSION = "v0.0.2"
 _LIBP2P_NAMESPACE_ENV_VAR = "SKULK_LIBP2P_NAMESPACE"
 _NODE_RESOURCES_POLL_INTERVAL_SECONDS = 2.0
+_CLUSTER_CONFIG_SYNC_ATTEMPTS = 30
+_CLUSTER_CONFIG_SYNC_RESPONSE_TIMEOUT_SECONDS = 1.0
+_CLUSTER_CONFIG_SYNC_RETRY_INTERVAL_SECONDS = 0.2
 # Cadence of the local zenoh-isolation check, and the floor between repeated
 # operator warnings while the condition persists. The check is a cheap local
 # session introspection; the warning floor keeps a permanently isolated node
@@ -436,6 +439,32 @@ def _configure_model_store_runtime(
     return store_client, store_server
 
 
+def _state_sync_store_http_host(
+    node_id: NodeId,
+    skulk_config: SkulkConfig | None,
+) -> str | None:
+    """Return this store host's routable address for cluster bootstrap."""
+
+    if (
+        skulk_config is None
+        or skulk_config.model_store is None
+        or not skulk_config.model_store.enabled
+    ):
+        return None
+    model_store = skulk_config.model_store
+    local_hostname = socket.gethostname()
+    if not node_matches_store_host(
+        model_store.store_host,
+        str(node_id),
+        hostname=local_hostname,
+    ):
+        return None
+    return _routable_store_advertise_host(
+        model_store.store_http_host,
+        local_hostname,
+    )
+
+
 @dataclass
 class Node:
     router: Router
@@ -757,6 +786,10 @@ class Node:
             state_sync_sender=router.sender(topics.STATE_SYNC_MESSAGES),
             download_command_sender=router.sender(topics.DOWNLOAD_COMMANDS),
             telemetry_view=telemetry_view,
+            state_sync_store_http_host=_state_sync_store_http_host(
+                node_id,
+                skulk_config,
+            ),
         )
 
         er_send, er_recv = channel[ElectionResult]()
@@ -894,7 +927,7 @@ class Node:
             topics.STATE_SYNC_MESSAGES
         )
         with state_sync_receiver as messages:
-            for attempt in range(3):
+            for attempt in range(_CLUSTER_CONFIG_SYNC_ATTEMPTS):
                 await state_sync_sender.send(
                     StateSyncMessage(
                         kind="request",
@@ -902,7 +935,9 @@ class Node:
                         session_id=session_id,
                     )
                 )
-                with anyio.move_on_after(1.0):
+                with anyio.move_on_after(
+                    _CLUSTER_CONFIG_SYNC_RESPONSE_TIMEOUT_SECONDS
+                ):
                     async for origin, message in messages:
                         if message.kind != "response":
                             continue
@@ -913,8 +948,13 @@ class Node:
                         if origin != str(session_id.master_node_id):
                             continue
                         return message.config_yaml
-                if attempt < 2:
-                    await anyio.sleep(0.2)
+                if attempt < _CLUSTER_CONFIG_SYNC_ATTEMPTS - 1:
+                    await anyio.sleep(_CLUSTER_CONFIG_SYNC_RETRY_INTERVAL_SECONDS)
+        logger.warning(
+            "Authoritative cluster config was unavailable after "
+            f"{_CLUSTER_CONFIG_SYNC_ATTEMPTS} bootstrap attempts; retaining "
+            "the local config"
+        )
         return None
 
     def _apply_cluster_config_yaml(self, config_yaml: str) -> None:
@@ -923,6 +963,32 @@ class Node:
         config_path = resolve_config_path()
         config_path.write_text(config_yaml)
         self.skulk_config = load_skulk_config(config_path)
+
+    async def _apply_authoritative_cluster_config(self, config_yaml: str) -> None:
+        """Converge config plus every live model-store consumer atomically."""
+
+        previous_store_server = self.store_server
+        self._apply_cluster_config_yaml(config_yaml)
+        new_store_client, new_store_server = _configure_model_store_runtime(
+            self.node_id,
+            self.skulk_config,
+        )
+        self.store_client = new_store_client
+        if new_store_server is None:
+            if previous_store_server is not None:
+                await previous_store_server.stop()
+            self.store_server = None
+        else:
+            self.store_server = (
+                previous_store_server
+                if previous_store_server is not None
+                else new_store_server
+            )
+        if self.api is not None:
+            self.api.set_model_store_runtime(
+                self.skulk_config,
+                self.store_client,
+            )
 
     async def _broadcast_config_if_store_host(self) -> None:
         """If this node is the store host, broadcast a valid config to all nodes.
@@ -1071,6 +1137,10 @@ class Node:
                             topics.DOWNLOAD_COMMANDS
                         ),
                         telemetry_view=self.telemetry_view,
+                        state_sync_store_http_host=_state_sync_store_http_host(
+                            self.node_id,
+                            self.skulk_config,
+                        ),
                     )
                     self._tg.start_soon(self.master.run)
                 elif (
@@ -1094,17 +1164,8 @@ class Node:
                         result.session_id
                     )
                     if authoritative_config_yaml is not None:
-                        self._apply_cluster_config_yaml(authoritative_config_yaml)
-                        new_store_client, new_store_server = (
-                            _configure_model_store_runtime(
-                                self.node_id, self.skulk_config
-                            )
-                        )
-                        self.store_client = new_store_client
-                        self.store_server = (
-                            previous_store_server
-                            if previous_store_server is not None
-                            else new_store_server
+                        await self._apply_authoritative_cluster_config(
+                            authoritative_config_yaml
                         )
                 if result.is_new_master:
                     if self.download_coordinator:

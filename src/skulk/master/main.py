@@ -570,6 +570,7 @@ class Master:
         snapshot_event_cadence: int = SNAPSHOT_EVENT_CADENCE,
         initial_state: State | None = None,
         telemetry_view: TelemetryView | None = None,
+        state_sync_store_http_host: str | None = None,
     ):
         self.node_id = node_id
         self.session_id = session_id
@@ -609,6 +610,7 @@ class Master:
         self.state_sync_sender = state_sync_sender
         self.download_command_sender = download_command_sender
         self.event_sender = event_sender
+        self._state_sync_store_http_host = state_sync_store_http_host
         self._system_id = SystemId()
         self._multi_buffer = MultiSourceBuffer[SystemId, Event]()
         self._event_log = DiskEventLog(SKULK_EVENT_LOG_DIR / "master")
@@ -2159,6 +2161,12 @@ class Master:
             str(key): copy.deepcopy(value) for key, value in raw_config.items()
         }
         sanitized_config.pop("hf_token", None)
+        model_store = sanitized_config.get("model_store")
+        if (
+            self._state_sync_store_http_host is not None
+            and isinstance(model_store, dict)
+        ):
+            model_store["store_http_host"] = self._state_sync_store_http_host
         return yaml.safe_dump(
             sanitized_config,
             default_flow_style=False,
