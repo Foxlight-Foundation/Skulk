@@ -2921,6 +2921,8 @@ class API:
                     for part in content
                     if isinstance(part, ChatCompletionMessageText) and part.text
                 )
+            elif isinstance(content, ChatCompletionMessageText):
+                text = content.text
             elif isinstance(content, str):
                 text = content
             else:
@@ -2929,10 +2931,15 @@ class API:
                 history.append(
                     StewardChatMessage(role=message.role, content=text)
                 )
-        if not history:
+        if not history or history[-1].role != "user":
+            # A steward turn answers an operator; assistant-only history or
+            # a trailing assistant message has no question to investigate.
             raise HTTPException(
                 status_code=400,
-                detail="At least one user message is required",
+                detail=(
+                    "The conversation must end with a user message for the "
+                    "steward to answer"
+                ),
             )
         harness = StewardHarness(self)
         command_id = CommandId()
@@ -2959,9 +2966,24 @@ class API:
         from skulk.api.steward import StewardHarness, StewardStatusResponse
 
         located = StewardHarness(self).steward_instance()
+        ready = False
+        if located is not None:
+            instance = self.state.instances.get(located[0])
+            if instance is not None:
+                runner_ids = instance.shard_assignments.node_to_runner.values()
+                # Running counts as ready: a steward mid-generation is
+                # serving, not still loading.
+                ready = bool(runner_ids) and all(
+                    isinstance(
+                        self.state.runners.get(runner_id),
+                        (RunnerReady, RunnerRunning),
+                    )
+                    for runner_id in runner_ids
+                )
         return StewardStatusResponse(
             enabled=self._intelligent_fabric_enabled(),
             present=located is not None,
+            ready=ready,
             steward_model=located[1] if located is not None else None,
             instance_id=str(located[0]) if located is not None else None,
         )

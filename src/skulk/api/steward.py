@@ -178,6 +178,14 @@ class StewardStatusResponse(BaseModel):
     present: bool = Field(
         description="Whether a steward placement currently exists in state."
     )
+    ready: bool = Field(
+        default=False,
+        description=(
+            "Whether every runner of the steward placement reports Ready: "
+            "present-but-not-ready means the model is still downloading or "
+            "loading, and chat requests will queue or fail until ready."
+        ),
+    )
     steward_model: str | None = Field(
         default=None,
         description="Model id of the steward brain, when present.",
@@ -537,7 +545,7 @@ class StewardHarness:
             yield TokenChunk(
                 model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
                 text=trace_line + "\n",
-                token_id=0,
+                token_id=-1,
                 usage=None,
                 is_thinking=True,
             )
@@ -564,7 +572,7 @@ class StewardHarness:
         yield TokenChunk(
             model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
             text=reply,
-            token_id=0,
+            token_id=-1,
             usage=None,
             finish_reason="stop",
         )
