@@ -1189,55 +1189,60 @@ Use this when you already have an `instance` object and want exact control.
 
 When intelligent-fabric mode is enabled in the cluster configuration
 (`intelligent_fabric.enabled`), the fabric keeps a small resident model (the
-steward) placed as a hidden system instance and exposes it through these
-endpoints. The steward investigates the cluster through a bounded read-only
-tool surface and answers operator questions; it cannot change the cluster.
+steward) placed as a hidden system instance. The steward investigates the
+cluster through a bounded read-only tool surface and answers operator
+questions; it cannot change the cluster.
+
+### Talking to the steward: the virtual model
+
+Clients consume the steward through the standard OpenAI-compatible
+`POST /v1/chat/completions` endpoint using the reserved model id
+`skulk/steward`. Any OpenAI-compatible client works, streaming included; no
+steward-specific client code is required beyond the model id.
+
+Semantics of the reserved id:
+
+- The server runs the steward's investigation loop (up to 8 read-only tool
+  calls per turn: cluster state, node resources, telemetry and data-plane
+  diagnostics, version status, performance envelopes, the local doctor
+  registry, and the model catalog) and answers from the evidence.
+- The tool trace is returned as reasoning content: in streaming responses,
+  each tool step arrives as a `reasoning_content` delta while the
+  investigation runs, followed by the answer as `content`; non-streaming
+  responses carry the trace in the message's `reasoning_content` field.
+- Client-supplied `tools` are rejected with `400`: the steward's tool
+  surface belongs to the server.
+- Client `system` messages are ignored in favor of the steward's own system
+  prompt; `user` and `assistant` turns form the conversation history, which
+  the client owns and resends each turn (the server is stateless).
+- Requests to the id while intelligent-fabric mode is disabled return `404`
+  with an explanatory message. If the mode is enabled but the placement is
+  not currently available (first placement, repair in flight), the response
+  is an error chunk in the normal chat-completions error shape.
+- The underlying model card id (for example the bundled Qwen3.5-4B) remains
+  addressable as an ordinary model and answers WITHOUT tools or cluster
+  access: only the reserved id selects model-plus-harness.
+
+The steward appears in `GET /v1/models` as an entry flagged with
+`system_role: "steward"` while the mode is enabled, so model pickers can
+badge or separate it rather than listing it as an ordinary model.
 
 ### GET /v1/steward
 
-Returns steward availability.
+Returns steward availability. Clients use this to decide whether to show a
+steward surface at all.
 
 Response fields:
 
 - `enabled`: whether intelligent-fabric mode is enabled in Settings.
 - `present`: whether a steward placement currently exists.
-- `steward_model`: model id of the steward brain when present, else null.
+- `steward_model`: model card id of the steward brain when present, else null.
 - `instance_id`: the steward instance id when present, else null.
-
-### POST /v1/steward/chat
-
-Ask the steward. The caller carries conversation history; the steward system
-prompt, tool definitions, and investigation loop are server-side.
-
-Request body:
-
-- `messages` (required): list of `{role, content}` objects, oldest first,
-  ending with the operator's latest message. Roles are `user` and
-  `assistant`.
-
-Behavior: the steward runs up to 8 read-only tool calls per turn (cluster
-state, node resources, telemetry / data-plane diagnostics, version status,
-performance envelopes, the local doctor registry, and the model catalog),
-then replies. Generation is pinned to the hidden steward instance and rides
-the normal text-generation path.
-
-Response fields:
-
-- `reply`: the steward's answer.
-- `steps`: ordered list of `{tool, arguments}` consulted this turn.
-- `steward_model`: the model id that produced the reply.
-- `instance_id`: the steward instance that served the turn.
-
-Errors:
-
-- `409`: intelligent-fabric mode is disabled, or the steward placement is
-  not currently available (for example, immediately after enabling the mode
-  or during re-placement after node loss).
-- `502`: steward generation failed.
 
 Note: deleting the steward instance through `DELETE /instance/{instance_id}`
 is refused with `409` while intelligent-fabric mode is enabled; disable the
-mode in Settings to remove the placement.
+mode in Settings to remove the placement (the fabric then tears it down
+automatically).
 
 ## Download Management
 

@@ -116,8 +116,9 @@ from skulk.api.realtime import (
     RealtimeTranscriptionBridge,
 )
 from skulk.api.steward import (
-    StewardChatRequest,
-    StewardChatResponse,
+    STEWARD_VIRTUAL_MODEL_ID,
+    StewardChatMessage,
+    StewardHarness,
     StewardStatusResponse,
 )
 from skulk.api.types import (
@@ -140,6 +141,7 @@ from skulk.api.types import (
     CancelCommandResponse,
     ChatCompletionChoice,
     ChatCompletionMessage,
+    ChatCompletionMessageText,
     ChatCompletionRequest,
     ChatCompletionResponse,
     CreateInstanceParams,
@@ -2231,21 +2233,6 @@ class API:
             ),
         )(self.get_steward_status)
         self.app.post(
-            "/v1/steward/chat",
-            tags=["Steward"],
-            summary="Ask the cluster's resident steward",
-            description=(
-                "Send a conversation to the intelligent-fabric steward: a small "
-                "resident model the fabric keeps placed while the mode is "
-                "enabled. The steward investigates the cluster through a "
-                "bounded read-only tool surface (state, diagnostics, doctor, "
-                "catalog) and answers with its reasoning trace. Observe/advise "
-                "only: the steward cannot change the cluster. Returns 409 when "
-                "intelligent-fabric mode is disabled or the steward placement "
-                "is not currently available."
-            ),
-        )(self.steward_chat)
-        self.app.post(
             "/v1/diagnostics/node/runners/{runner_id}/cancel",
             tags=["Diagnostics"],
             summary="Request direct local runner cancellation",
@@ -2893,6 +2880,80 @@ class API:
             raise HTTPException(status_code=404, detail="Instance not found")
         return self.state.instances[instance_id]
 
+    async def _steward_chat_completions(
+        self, payload: ChatCompletionRequest
+    ) -> StreamingResponse:
+        """Serve the steward through the standard chat-completions surface.
+
+        The steward's tool surface belongs to the server, so client tool
+        definitions are rejected rather than silently ignored, and client
+        system messages are dropped in favor of the steward's own prompt
+        (documented in the API guide). History is the caller's user and
+        assistant turns; multimodal content parts are flattened to their
+        text. Both streaming and non-streaming ride the ordinary adapters
+        over the harness's chunk stream.
+        """
+        if payload.tools:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "The steward's tool surface is server-side; client tool "
+                    "definitions are not accepted for this model"
+                ),
+            )
+        if not self._intelligent_fabric_enabled():
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Model not available: intelligent-fabric mode is "
+                    "disabled. Enable intelligent_fabric in Settings to "
+                    "use the steward."
+                ),
+            )
+        history: list[StewardChatMessage] = []
+        for message in payload.messages:
+            if message.role not in ("user", "assistant"):
+                continue
+            content = message.content
+            if isinstance(content, list):
+                text = " ".join(
+                    part.text
+                    for part in content
+                    if isinstance(part, ChatCompletionMessageText) and part.text
+                )
+            elif isinstance(content, str):
+                text = content
+            else:
+                text = ""
+            if text:
+                history.append(
+                    StewardChatMessage(role=message.role, content=text)
+                )
+        if not history:
+            raise HTTPException(
+                status_code=400,
+                detail="At least one user message is required",
+            )
+        harness = StewardHarness(self)
+        command_id = CommandId()
+        chunk_stream = harness.run_turn_chunks(history)
+        if payload.stream:
+            return StreamingResponse(
+                with_sse_keepalive(
+                    generate_chat_stream(command_id, chunk_stream),
+                ),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "close",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+        return StreamingResponse(
+            collect_chat_response(command_id, chunk_stream),
+            media_type="application/json",
+        )
+
     async def get_steward_status(self) -> "StewardStatusResponse":
         """Report intelligent-fabric mode and the current steward placement."""
         from skulk.api.steward import StewardHarness, StewardStatusResponse
@@ -2904,39 +2965,6 @@ class API:
             steward_model=located[1] if located is not None else None,
             instance_id=str(located[0]) if located is not None else None,
         )
-
-    async def steward_chat(
-        self, payload: "StewardChatRequest"
-    ) -> "StewardChatResponse":
-        """Run one steward turn: investigate through read-only tools, reply."""
-        from skulk.api.steward import StewardHarness
-
-        if not self._intelligent_fabric_enabled():
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Intelligent-fabric mode is disabled. Enable it in "
-                    "Settings (intelligent_fabric.enabled) to talk to the "
-                    "steward."
-                ),
-            )
-        harness = StewardHarness(self)
-        try:
-            return await harness.run_turn(payload.messages)
-        except LookupError as error:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "The steward placement is not available yet. The fabric "
-                    "establishes it automatically; check /state for placement "
-                    "progress or node capacity."
-                ),
-            ) from error
-        except RuntimeError as error:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Steward generation failed: {error}",
-            ) from error
 
     def _intelligent_fabric_enabled(self) -> bool:
         """Whether intelligent-fabric mode is currently enabled.
@@ -4128,6 +4156,12 @@ class API:
         self, payload: ChatCompletionRequest
     ) -> ChatCompletionResponse | StreamingResponse:
         """OpenAI Chat Completions API - adapter."""
+        if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
+            # The reserved steward id selects model-plus-harness: the
+            # server-side investigation loop answers, with its tool trace
+            # streamed as reasoning content. Checked before card resolution
+            # so no repository of the same name can shadow it.
+            return await self._steward_chat_completions(payload)
         resolved_model = await self._resolve_and_validate_text_model(payload.model)
         model_card = await self._get_running_model_card(resolved_model)
         task_params = await chat_request_to_text_generation(
@@ -7268,7 +7302,26 @@ class API:
                         downloaded_model_ids.add(dl.shard_metadata.model_card.model_id)
             cards = [c for c in cards if c.model_id in downloaded_model_ids]
 
-        return ModelList(data=[self._model_list_entry(card) for card in cards])
+        entries = [self._model_list_entry(card) for card in cards]
+        if self._intelligent_fabric_enabled():
+            # The steward's virtual id is addressable like any chat model but
+            # is fabric-managed: flagged so pickers can badge or separate it.
+            entries.append(
+                ModelListModel(
+                    id=STEWARD_VIRTUAL_MODEL_ID,
+                    name="Steward",
+                    description=(
+                        "The cluster's resident assistant. Ask it about "
+                        "cluster health, models, and diagnostics; it "
+                        "investigates through read-only tools before "
+                        "answering and cannot change the cluster."
+                    ),
+                    tags=["system", "steward"],
+                    tasks=["TextGeneration"],
+                    system_role="steward",
+                )
+            )
+        return ModelList(data=entries)
 
     async def add_custom_model(self, payload: AddCustomModelParams) -> ModelListModel:
         """Fetch a Hugging Face model card, optionally pinning one GGUF file."""

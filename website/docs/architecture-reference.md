@@ -99,9 +99,17 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   summary, node resources, telemetry diagnostics, data-plane diagnostics,
   cluster versions, performance envelopes, local doctor registry, model
   catalog. 6000-char tool-result bound, 8 steps/turn, observe/advise only.
-- Endpoints: `GET /v1/steward` (status), `POST /v1/steward/chat`
-  (409 when disabled/absent). Ordinary `DELETE /instance/{id}` of the
-  steward is refused 409 while the mode is enabled.
+- Client surface: reserved virtual model id `skulk/steward` on
+  `POST /v1/chat/completions` (checked before card resolution; client
+  `tools` rejected 400; client system messages ignored; trace streams as
+  `reasoning_content` deltas then the answer as `content`; 404 when the
+  mode is disabled). Harness emits the adapters' native chunk vocabulary
+  (`run_turn_chunks`), so streaming and non-streaming ride the ordinary
+  adapters unchanged. `GET /v1/models` carries a flagged entry
+  (`system_role: "steward"`) while enabled. `GET /v1/steward` = presence.
+  The earlier bespoke `POST /v1/steward/chat` was removed before any
+  release. Ordinary `DELETE /instance/{id}` of the steward is refused 409
+  while the mode is enabled.
 - Dashboard: instances with `systemRole` set are hidden from all instance
   surfaces (filter in App.tsx instanceCards).
 - Cards: `mlx-community/Qwen3.5-4B-MLX-4bit` (vision, MLX) and

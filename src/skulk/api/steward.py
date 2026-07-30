@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import TYPE_CHECKING, Any, Literal, cast, final
+from collections.abc import AsyncGenerator
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -28,10 +29,25 @@ from skulk.api.types.api import (
     ToolCall,
     ToolCallItem,
 )
+from skulk.shared.models.model_cards import ModelId
+from skulk.shared.types.chunks import (
+    ErrorChunk,
+    PrefillProgressChunk,
+    TokenChunk,
+    ToolCallChunk,
+)
 from skulk.shared.types.worker.instances import InstanceId
 
 if TYPE_CHECKING:
     from skulk.api.main import API
+
+STEWARD_VIRTUAL_MODEL_ID = "skulk/steward"
+"""Reserved chat-completions model id selecting model-plus-harness.
+
+Checked before card resolution, so a Hugging Face repository of the same
+name can never shadow it. Requests to this id run the steward's server-side
+investigation loop; requests to the underlying card id reach the bare model.
+"""
 
 MAX_TOOL_RESULT_CHARS = 6000
 """Hard cap on one tool result rendered into the steward's context."""
@@ -151,32 +167,6 @@ class StewardChatMessage(BaseModel):
     content: str = Field(description="The message text.")
 
 
-class StewardChatRequest(BaseModel):
-    """Request body for the steward chat surface."""
-
-    model_config = ConfigDict(frozen=True, strict=True)
-
-    messages: list[StewardChatMessage] = Field(
-        min_length=1,
-        description=(
-            "Conversation history, oldest first, ending with the operator's "
-            "latest message. The steward system prompt and tool plumbing "
-            "are added server-side."
-        ),
-    )
-
-
-class StewardToolStep(BaseModel):
-    """One tool call the steward made while investigating."""
-
-    model_config = ConfigDict(frozen=True, strict=True)
-
-    tool: str = Field(description="Tool name invoked.")
-    arguments: dict[str, object] = Field(
-        default_factory=dict, description="Arguments the steward passed."
-    )
-
-
 class StewardStatusResponse(BaseModel):
     """Whether the steward exists and what serves it right now."""
 
@@ -195,24 +185,6 @@ class StewardStatusResponse(BaseModel):
     instance_id: str | None = Field(
         default=None,
         description="The steward instance id, when present.",
-    )
-
-
-class StewardChatResponse(BaseModel):
-    """The steward's reply plus its investigation trace."""
-
-    model_config = ConfigDict(frozen=True, strict=True)
-
-    reply: str = Field(description="The steward's answer to the operator.")
-    steps: list[StewardToolStep] = Field(
-        default_factory=list,
-        description="Tools consulted this turn, in order.",
-    )
-    steward_model: str = Field(
-        description="Model id of the steward brain that produced the reply."
-    )
-    instance_id: str = Field(
-        description="The hidden steward instance that served the turn."
     )
 
 
@@ -367,7 +339,6 @@ def strip_tool_markup(text: str) -> str:
     return text.strip()
 
 
-@final
 class StewardHarness:
     """Drives the steward brain through its tools for one API node.
 
@@ -491,17 +462,30 @@ class StewardHarness:
             {"error": f"unknown tool '{name}'", "available": STEWARD_TOOL_NAMES}
         )
 
-    async def run_turn(
+    async def run_turn_chunks(
         self, history: list[StewardChatMessage]
-    ) -> StewardChatResponse:
-        """Run one operator turn: investigate via tools, return the reply.
+    ) -> "AsyncGenerator[TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None]":
+        """Run one steward turn as a chat-completions chunk stream.
 
-        Raises ``LookupError`` when no steward instance exists (callers map
-        this to an HTTP 409 with remediation).
+        Tool steps stream live as thinking chunks (mapped to
+        ``reasoning_content`` by the adapters) while the investigation runs,
+        and the final answer follows as a content chunk with
+        ``finish_reason="stop"``. Emitting the adapters' native chunk
+        vocabulary is what lets the steward ride ``/v1/chat/completions``
+        (streaming and non-streaming) with no adapter changes: clients see
+        a normal model whose reasoning happens to be its tool trace.
         """
+
         located = self.steward_instance()
         if located is None:
-            raise LookupError("no steward placement exists")
+            yield ErrorChunk(
+                model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
+                error_message=(
+                    "The steward placement is not available yet; the fabric "
+                    "establishes it automatically"
+                ),
+            )
+            return
         instance_id, model_id = located
 
         messages: list[ChatCompletionMessage] = [
@@ -512,7 +496,6 @@ class StewardHarness:
                 ChatCompletionMessage(role=message.role, content=message.content)
             )
 
-        steps: list[StewardToolStep] = []
         reply = ""
         for step_index in range(MAX_STEPS_PER_TURN):
             if step_index == MAX_STEPS_PER_TURN - 1:
@@ -529,10 +512,11 @@ class StewardHarness:
                 messages, model_id, instance_id
             )
             if error is not None:
-                raise RuntimeError(error)
+                yield ErrorChunk(
+                    model=ModelId(STEWARD_VIRTUAL_MODEL_ID), error_message=error
+                )
+                return
             if not tool_calls:
-                # Engine-independent fallback: the in-process MLX path can
-                # leave the family's tool-call markup in the text stream.
                 tool_calls = parse_text_tool_calls(text)
                 if tool_calls:
                     text = strip_tool_markup(text)
@@ -547,12 +531,22 @@ class StewardHarness:
                 parsed = {}
             if isinstance(parsed, dict):
                 arguments = cast("dict[str, object]", parsed)
-            steps.append(StewardToolStep(tool=call.function.name, arguments=arguments))
+            trace_line = call.function.name + (
+                f" {json.dumps(arguments)}" if arguments else ""
+            )
+            yield TokenChunk(
+                model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
+                text=trace_line + "\n",
+                token_id=0,
+                usage=None,
+                is_thinking=True,
+            )
             result = await self.execute_tool(call.function.name, arguments)
+            content_text = strip_tool_markup(text)
             messages.append(
                 ChatCompletionMessage(
                     role="assistant",
-                    content=text or None,
+                    content=content_text or None,
                     tool_calls=[call],
                 )
             )
@@ -564,14 +558,15 @@ class StewardHarness:
         else:
             reply = (
                 "I ran out of investigation budget before reaching a "
-                "conclusion; the tools consulted so far are listed."
+                "conclusion this turn."
             )
 
-        return StewardChatResponse(
-            reply=reply,
-            steps=steps,
-            steward_model=model_id,
-            instance_id=str(instance_id),
+        yield TokenChunk(
+            model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
+            text=reply,
+            token_id=0,
+            usage=None,
+            finish_reason="stop",
         )
 
     async def _generate(
