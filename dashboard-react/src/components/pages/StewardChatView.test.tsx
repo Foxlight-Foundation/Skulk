@@ -14,6 +14,11 @@ import { StewardChatView } from './StewardChatView';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
+const addToastSpy = vi.fn();
+vi.mock('../../hooks/useToast', () => ({
+  addToast: (toast: unknown) => addToastSpy(toast),
+}));
+
 vi.mock('../../i18n/tolgee', () => {
   const translate = (
     _key: string,
@@ -113,6 +118,7 @@ async function waitFor(predicate: () => boolean, message: string): Promise<void>
 }
 
 afterEach(async () => {
+  addToastSpy.mockClear();
   await act(async () => root?.unmount());
   container?.remove();
   root = null;
@@ -181,5 +187,34 @@ describe('StewardChatView', () => {
     expect((body as { model?: string }).model).toBe('skulk/steward');
     expect((body as { stream?: boolean }).stream).toBe(true);
     expect(container?.textContent).toContain('Is the cluster healthy?');
+  });
+});
+
+describe('StewardChatView stream errors', () => {
+  it('surfaces a mid-stream error envelope instead of ending silently', async () => {
+    stubFetch({
+      status: READY,
+      sseEvents: [
+        delta({ reasoning_content: 'get_cluster_state\n' }),
+        JSON.stringify({ error: { message: 'steward generation failed' } }),
+      ],
+    });
+    await renderPage();
+    await waitFor(
+      () => container?.textContent?.includes('Ask the cluster') ?? false,
+      'empty chat state never rendered',
+    );
+    const textarea = container?.querySelector('textarea');
+    await userEvent.fill(textarea as HTMLTextAreaElement, 'hello?');
+    await userEvent.keyboard('{Enter}');
+    await waitFor(
+      () =>
+        addToastSpy.mock.calls.some((call) =>
+          String((call[0] as { message?: string }).message).includes(
+            'steward generation failed',
+          ),
+        ),
+      'stream error never surfaced as a toast',
+    );
   });
 });

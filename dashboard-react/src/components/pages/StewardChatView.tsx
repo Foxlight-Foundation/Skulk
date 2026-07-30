@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import styled from 'styled-components';
 import { MdAutoAwesome } from 'react-icons/md';
 import { ChatMessages } from '../chat/ChatMessages';
@@ -83,6 +83,23 @@ interface StreamDelta {
   reasoning_content?: string;
 }
 
+/** Extract a mid-stream error envelope's message, if this payload is one. */
+function parseStreamError(payload: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(payload);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const error = (parsed as { error?: unknown }).error;
+    if (typeof error === 'string') return error;
+    if (typeof error === 'object' && error !== null) {
+      const message = (error as { message?: unknown }).message;
+      if (typeof message === 'string') return message;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /** Parse one SSE `data:` payload into its delta, ignoring non-JSON lines. */
 function parseDelta(payload: string): StreamDelta | null {
   try {
@@ -112,6 +129,10 @@ export function StewardChatView() {
   const handleCancel = useCallback(() => {
     abortRef.current?.abort();
   }, []);
+
+  // Navigating away must not leave the steward generating for a stream
+  // nobody is reading; the server cancels the turn on disconnect.
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   const handleSend = useCallback(
     async (content: string) => {
@@ -167,6 +188,8 @@ export function StewardChatView() {
             if (!line.startsWith('data: ')) continue;
             const payload = line.slice(6).trim();
             if (payload === '[DONE]') continue;
+            const streamError = parseStreamError(payload);
+            if (streamError) throw new Error(streamError);
             const delta = parseDelta(payload);
             if (!delta) continue;
             if (delta.reasoning_content) {
