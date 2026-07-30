@@ -5,6 +5,7 @@ import {
   useConfig,
   type StoreConfig,
   type FullConfig,
+  type IntelligentFabricConfig,
   type LoggingConfig,
   type TelemetryConfig,
 } from '../../hooks/useConfig';
@@ -252,6 +253,9 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const [kvBackend, setKvBackend] = useState('default');
   const [hfToken, setHfToken] = useState('');
   const [telemetryDraft, setTelemetryDraft] = useState<TelemetryConfig | null>(null);
+  const [fabricDraft, setFabricDraft] = useState<IntelligentFabricConfig>({
+    enabled: false,
+  });
   const [loggingDraft, setLoggingDraft] = useState<LoggingConfig>({
     enabled: false, ingest_url: '',
   });
@@ -272,6 +276,10 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     );
     setKvBackend(effective?.kv_cache_backend ?? fullConfig?.inference?.kv_cache_backend ?? 'default');
     setHfToken(fullConfig?.hf_token ?? '');
+    setFabricDraft({
+      enabled: fullConfig?.intelligent_fabric?.enabled ?? false,
+      steward_models: fullConfig?.intelligent_fabric?.steward_models,
+    });
     setLoggingDraft({
       enabled: fullConfig?.logging?.enabled ?? false,
       ingest_url: fullConfig?.logging?.ingest_url ?? '',
@@ -315,6 +323,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     updated.inference = { kv_cache_backend: kvBackend };
     // Include logging config
     updated.logging = { ...loggingDraft };
+    updated.intelligent_fabric = { ...fabricDraft };
     // Persist only once the operator has interacted (an untouched unasked
     // draft must not overwrite the "never asked" state that gates the modal).
     if (telemetryDraft && (telemetryDraft.consent !== 'unasked' || telemetryDraft.diagnostics_consent !== 'unasked')) {
@@ -341,7 +350,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     } else {
       addToast({ type: 'error', message: t('settings.toasts.saveFailed', 'Failed to save settings') });
     }
-  }, [draft, fullConfig, hfToken, kvBackend, loggingDraft, telemetryDraft, onClose, saveFullConfig, t]);
+  }, [draft, fullConfig, hfToken, kvBackend, loggingDraft, fabricDraft, telemetryDraft, onClose, saveFullConfig, t]);
 
   // ESC to close
   useEffect(() => {
@@ -642,6 +651,34 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                   )}
                 </HintText>
               </>
+            )}
+          </Fieldset>
+
+          {/* Intelligent fabric: the resident steward. The toggle is the
+              whole surface; model preference stays config-file-only until
+              the cards-DB arc gives model pickers a proper home. */}
+          <Fieldset>
+            <Legend>{t('settings.intelligentFabric.legend', 'Intelligent Fabric')}</Legend>
+            <Row>
+              <FieldLabel>
+                {t('settings.common.enabled', 'Enabled')}
+                <InfoTooltip
+                  filled
+                  content={t(
+                    'settings.intelligentFabric.enabledTooltip',
+                    'Keeps a small resident assistant (the steward) placed on the cluster. Ask it about cluster health, models, and diagnostics from the Steward page. It observes and advises; it cannot change the cluster.',
+                  )}
+                />
+              </FieldLabel>
+              <Toggle $on={fabricDraft.enabled} onClick={() => setFabricDraft(prev => ({ ...prev, enabled: !prev.enabled }))} />
+            </Row>
+            {fabricDraft.enabled && (
+              <HintText>
+                {t(
+                  'settings.intelligentFabric.syncHint',
+                  'The fabric places the steward automatically after saving; the first start downloads its model. Turning it off removes the placement.',
+                )}
+              </HintText>
             )}
           </Fieldset>
 
