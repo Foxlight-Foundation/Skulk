@@ -34,29 +34,56 @@ vi.mock('../../i18n/tolgee', () => {
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
-type FetchStub = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+interface StewardStatusFixture {
+  enabled: boolean;
+  present: boolean;
+  ready: boolean;
+  steward_model: string | null;
+  instance_id: string | null;
+}
 
-function jsonResponse(payload: unknown, status = 200): Response {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
+function sseBody(events: string[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return new ReadableStream({
+    start(controller) {
+      for (const event of events) {
+        controller.enqueue(encoder.encode(`data: ${event}\n\n`));
+      }
+      controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+      controller.close();
+    },
   });
 }
 
-function stubStewardFetch(options: {
-  status: { enabled: boolean; present: boolean; steward_model: string | null; instance_id: string | null };
-  chatReply?: { reply: string; steps: { tool: string; arguments: Record<string, unknown> }[]; steward_model: string; instance_id: string };
+function delta(delta: Record<string, string>): string {
+  return JSON.stringify({ choices: [{ index: 0, delta }] });
+}
+
+function stubFetch(options: {
+  status: StewardStatusFixture;
+  sseEvents?: string[];
+  onChat?: (init: RequestInit | undefined) => void;
 }): void {
-  const fetchStub: FetchStub = async (input, init) => {
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-    if (url.includes('/v1/steward/chat')) {
-      expect(init?.method ?? 'POST').toBe('POST');
-      return jsonResponse(options.chatReply ?? { reply: '', steps: [], steward_model: '', instance_id: '' });
+  const fetchStub = async (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    const url =
+      typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    if (url.includes('/v1/chat/completions')) {
+      options.onChat?.(init);
+      return new Response(sseBody(options.sseEvents ?? []), {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
     }
     if (url.includes('/v1/steward')) {
-      return jsonResponse(options.status);
+      return new Response(JSON.stringify(options.status), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
     }
-    return jsonResponse({}, 404);
+    return new Response('{}', { status: 404 });
   };
   vi.stubGlobal('fetch', fetchStub);
 }
@@ -90,16 +117,21 @@ afterEach(async () => {
   container?.remove();
   root = null;
   container = null;
-  // Drop cached steward queries so each test's stubbed status is fetched fresh.
   store.dispatch(apiSlice.util.resetApiState());
   vi.unstubAllGlobals();
 });
 
+const READY: StewardStatusFixture = {
+  enabled: true,
+  present: true,
+  ready: true,
+  steward_model: 'org/steward-4b',
+  instance_id: 'inst-1',
+};
+
 describe('StewardChatView', () => {
   it('shows the disabled state when intelligent fabric is off', async () => {
-    stubStewardFetch({
-      status: { enabled: false, present: false, steward_model: null, instance_id: null },
-    });
+    stubFetch({ status: { ...READY, enabled: false, present: false, ready: false } });
     await renderPage();
     await waitFor(
       () => container?.textContent?.includes('Intelligent Fabric is off') ?? false,
@@ -107,25 +139,26 @@ describe('StewardChatView', () => {
     );
   });
 
-  it('shows the placing state while the steward is not yet present', async () => {
-    stubStewardFetch({
-      status: { enabled: true, present: false, steward_model: null, instance_id: null },
-    });
+  it('holds the placing state until the steward is ready, not merely present', async () => {
+    stubFetch({ status: { ...READY, ready: false } });
     await renderPage();
     await waitFor(
       () => container?.textContent?.includes('Steward is being placed') ?? false,
       'placing state never rendered',
     );
+    expect(container?.querySelector('textarea')).toBeNull();
   });
 
-  it('sends a message and renders the reply with its tool trace', async () => {
-    stubStewardFetch({
-      status: { enabled: true, present: true, steward_model: 'org/steward-4b', instance_id: 'inst-1' },
-      chatReply: {
-        reply: 'All three nodes are healthy.',
-        steps: [{ tool: 'get_cluster_state', arguments: {} }],
-        steward_model: 'org/steward-4b',
-        instance_id: 'inst-1',
+  it('streams a turn over chat-completions with the reserved model id', async () => {
+    let chatInit: RequestInit | undefined;
+    stubFetch({
+      status: READY,
+      sseEvents: [
+        delta({ reasoning_content: 'get_cluster_state\n' }),
+        delta({ content: 'All three nodes are healthy.' }),
+      ],
+      onChat: (init) => {
+        chatInit = init;
       },
     });
     await renderPage();
@@ -143,6 +176,10 @@ describe('StewardChatView', () => {
       () => container?.textContent?.includes('All three nodes are healthy.') ?? false,
       'steward reply never rendered',
     );
+    expect(chatInit?.method).toBe('POST');
+    const body: unknown = JSON.parse(String(chatInit?.body));
+    expect((body as { model?: string }).model).toBe('skulk/steward');
+    expect((body as { stream?: boolean }).stream).toBe(true);
     expect(container?.textContent).toContain('Is the cluster healthy?');
   });
 });

@@ -1,26 +1,26 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import styled from 'styled-components';
 import { MdAutoAwesome } from 'react-icons/md';
 import { ChatMessages } from '../chat/ChatMessages';
 import { ChatForm } from '../chat/ChatForm';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { addToast } from '../../hooks/useToast';
-import {
-  useGetStewardStatusQuery,
-  useStewardChatMutation,
-  type StewardToolStep,
-} from '../../store/endpoints/steward';
+import { useGetStewardStatusQuery } from '../../store/endpoints/steward';
 import type { ChatMessage } from '../../types/chat';
 
 /**
  * The steward chat surface: talk to the cluster's resident assistant.
  *
- * Unlike ChatView this page has no model picker, conversations, or
- * streaming: the steward is a single fabric-maintained placement, each turn
- * is a bounded server-side investigation, and the reply arrives whole. The
- * investigation trace (which tools the steward consulted) is rendered
- * through the existing collapsible thinking block on each reply.
+ * Conversation rides the standard streaming chat-completions endpoint with
+ * the reserved virtual model id: tool steps arrive live as
+ * `reasoning_content` deltas while the steward investigates (rendered
+ * through the shared thinking affordances), and the answer follows as
+ * `content`. The page holds its placing state until the steward is actually
+ * ready to serve, not merely placed.
  */
+
+/** Reserved chat-completions model id selecting model-plus-harness. */
+export const STEWARD_MODEL_ID = 'skulk/steward';
 
 const Container = styled.div`
   display: flex;
@@ -78,25 +78,40 @@ const ModelTag = styled.div`
   text-align: center;
 `;
 
-function traceToThinking(steps: StewardToolStep[]): string | undefined {
-  if (steps.length === 0) return undefined;
-  return steps
-    .map((step) => {
-      const args = Object.keys(step.arguments).length
-        ? ` ${JSON.stringify(step.arguments)}`
-        : '';
-      return `${step.tool}${args}`;
-    })
-    .join('\n');
+interface StreamDelta {
+  content?: string;
+  reasoning_content?: string;
+}
+
+/** Parse one SSE `data:` payload into its delta, ignoring non-JSON lines. */
+function parseDelta(payload: string): StreamDelta | null {
+  try {
+    const parsed: unknown = JSON.parse(payload);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const choices = (parsed as { choices?: unknown }).choices;
+    if (!Array.isArray(choices) || choices.length === 0) return null;
+    const delta = (choices[0] as { delta?: unknown }).delta;
+    if (typeof delta !== 'object' || delta === null) return null;
+    return delta as StreamDelta;
+  } catch {
+    return null;
+  }
 }
 
 export function StewardChatView() {
   const { t } = useSkulkTranslation();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [streamingContent, setStreamingContent] = useState<string | null>(null);
+  const [streamingThinking, setStreamingThinking] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const { data: status, refetch } = useGetStewardStatusQuery(undefined, {
     pollingInterval: 15000,
   });
-  const [sendChat, { isLoading }] = useStewardChatMutation();
+
+  const handleCancel = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
 
   const handleSend = useCallback(
     async (content: string) => {
@@ -110,38 +125,105 @@ export function StewardChatView() {
       };
       const history = [...messages, userMessage];
       setMessages(history);
+      setIsLoading(true);
+      setStreamingContent(null);
+      setStreamingThinking(null);
+      const controller = new AbortController();
+      abortRef.current = controller;
+      let reply = '';
+      let thinking = '';
       try {
-        const response = await sendChat(
-          history.map(({ role, content: text }) => ({ role, content: text })),
-        ).unwrap();
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `steward-a-${Date.now()}`,
-            role: 'assistant',
-            content: response.reply,
-            timestamp: Date.now(),
-            thinkingContent: traceToThinking(response.steps),
-          },
-        ]);
+        const res = await fetch('/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            model: STEWARD_MODEL_ID,
+            stream: true,
+            messages: history.map(({ role, content: text }) => ({ role, content: text })),
+          }),
+        });
+        if (!res.ok || !res.body) {
+          let detail = t('stewardChat.errors.requestFailed', 'The steward request failed');
+          try {
+            const body: unknown = await res.json();
+            const parsed = (body as { detail?: unknown }).detail;
+            if (typeof parsed === 'string') detail = parsed;
+          } catch {
+            /* keep fallback */
+          }
+          throw new Error(detail);
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const payload = line.slice(6).trim();
+            if (payload === '[DONE]') continue;
+            const delta = parseDelta(payload);
+            if (!delta) continue;
+            if (delta.reasoning_content) {
+              thinking += delta.reasoning_content;
+              setStreamingThinking(thinking);
+            }
+            if (delta.content) {
+              reply += delta.content;
+              setStreamingContent(reply);
+            }
+          }
+        }
+        if (reply) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `steward-a-${Date.now()}`,
+              role: 'assistant',
+              content: reply,
+              timestamp: Date.now(),
+              thinkingContent: thinking || undefined,
+            },
+          ]);
+        }
       } catch (error: unknown) {
-        // A 409 means the mode flipped off or the placement is mid-repair;
-        // refresh status so the page swaps to the matching empty state.
-        const detail =
-          typeof error === 'object' && error !== null && 'data' in error
-            ? String(
-                (error as { data?: { detail?: string } }).data?.detail ??
-                  t('stewardChat.errors.requestFailed', 'The steward request failed'),
-              )
-            : t('stewardChat.errors.requestFailed', 'The steward request failed');
-        addToast({ type: 'error', message: detail });
-        void refetch();
+        if (!(error instanceof DOMException && error.name === 'AbortError')) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : t('stewardChat.errors.requestFailed', 'The steward request failed');
+          addToast({ type: 'error', message });
+          void refetch();
+        }
+      } finally {
+        setIsLoading(false);
+        setStreamingContent(null);
+        setStreamingThinking(null);
+        abortRef.current = null;
       }
     },
-    [messages, isLoading, sendChat, refetch, t],
+    [messages, isLoading, refetch, t],
   );
 
-  if (status && !status.enabled) {
+  if (!status) {
+    // Gate on the first status response so the chat surface cannot render
+    // (or accept input) before the page knows the steward's state.
+    return (
+      <CenterState>
+        <CenterTitle>
+          <MdAutoAwesome size={16} />
+          {t('stewardChat.loading.title', 'Checking steward status')}
+        </CenterTitle>
+      </CenterState>
+    );
+  }
+
+  if (!status.enabled) {
     return (
       <CenterState>
         <CenterTitle>
@@ -158,7 +240,7 @@ export function StewardChatView() {
     );
   }
 
-  if (status && status.enabled && !status.present) {
+  if (!status.present || !status.ready) {
     return (
       <CenterState>
         <CenterTitle>
@@ -177,7 +259,7 @@ export function StewardChatView() {
 
   return (
     <Container>
-      {status?.steward_model && (
+      {status.steward_model && (
         <ModelTag>
           {t('stewardChat.servedBy', 'steward: {model}', {
             model: status.steward_model,
@@ -199,18 +281,21 @@ export function StewardChatView() {
             </CenterBody>
           </CenterState>
         ) : (
-          <ChatMessages messages={messages} isLoading={isLoading} />
+          <ChatMessages
+            messages={messages}
+            isLoading={isLoading && !streamingContent && !streamingThinking}
+            streamingContent={streamingContent}
+            streamingThinking={streamingThinking}
+          />
         )}
       </MessagesScroll>
       <InputArea>
         <ChatForm
           onSend={handleSend}
+          onCancel={handleCancel}
           isLoading={isLoading}
           canSendMessages
-          placeholder={t(
-            'stewardChat.placeholder',
-            'Ask about the cluster...',
-          )}
+          placeholder={t('stewardChat.placeholder', 'Ask about the cluster...')}
         />
       </InputArea>
     </Container>

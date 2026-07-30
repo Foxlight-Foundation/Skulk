@@ -663,6 +663,7 @@
   "stewardChat.empty.body": "The steward investigates before answering: cluster health, why a download failed, what a node is doing, whether things look slow. It observes and advises; it cannot change the cluster.",
   "stewardChat.empty.title": "Ask the cluster",
   "stewardChat.errors.requestFailed": "The steward request failed",
+  "stewardChat.loading.title": "Checking steward status",
   "stewardChat.placeholder": "Ask about the cluster...",
   "stewardChat.placing.body": "The fabric is placing the steward and preparing its model. This page will become available automatically; the first start may take a few minutes while the model downloads.",
   "stewardChat.placing.title": "Steward is being placed",
