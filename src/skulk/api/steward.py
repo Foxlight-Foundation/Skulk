@@ -16,6 +16,7 @@ results transfer to production behavior.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from collections.abc import AsyncGenerator
@@ -522,10 +523,9 @@ class StewardHarness:
                 # is not left generating for nobody.
                 abandoned = self._active_command_id
                 self._active_command_id = None
-                try:
+                # Cancellation is best-effort on teardown.
+                with contextlib.suppress(Exception):
                     await self._api.send_task_cancellation(abandoned)
-                except Exception:  # cancellation is best-effort on teardown
-                    pass
 
     async def _run_investigation(
         self,
