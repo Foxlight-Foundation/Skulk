@@ -301,6 +301,12 @@ export interface RawShardAssignments {
 export interface RawInstanceInner {
   instanceId?: string;
   shardAssignments?: RawShardAssignments;
+  /**
+   * Fabric-maintained system placement marker ("steward" = the
+   * intelligent-fabric resident). System placements are hidden from
+   * ordinary instance surfaces; the steward has its own chat surface.
+   */
+  systemRole?: string | null;
 }
 
 export type RawInstances = Record<

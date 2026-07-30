@@ -115,6 +115,11 @@ from skulk.api.realtime import (
     RealtimeResponseConfig,
     RealtimeTranscriptionBridge,
 )
+from skulk.api.steward import (
+    StewardChatRequest,
+    StewardChatResponse,
+    StewardStatusResponse,
+)
 from skulk.api.types import (
     AddCustomModelParams,
     AdvancedImageParams,
@@ -1344,6 +1349,14 @@ class API:
         self.last_completed_election: int = 0
         self.port = port
         self._skulk_config = skulk_config
+        # Terminal failures that arrived before their command's stream queue
+        # was registered (#223 follow-up): the low-level chunk stream
+        # registers its queue lazily on first iteration, so a fast TaskFailed
+        # (e.g. a pinned steward request whose instance vanished, on a
+        # single-node cluster where the master round-trip is local) can beat
+        # registration and _terminate_command_stream would silently no-op,
+        # hanging the caller. Bounded FIFO; consumed at stream registration.
+        self._pending_stream_failures: dict[CommandId, ErrorChunk] = {}
         self._store_client = store_client
         self._config_path = resolve_config_path()
         # Field telemetry (opt-in, consent-gated in skulk.yaml). The config
@@ -2206,6 +2219,32 @@ class API:
                 "explicit failures rather than vanishing."
             ),
         )(self.get_cluster_performance_envelopes)
+        self.app.get(
+            "/v1/steward",
+            tags=["Steward"],
+            summary="Get intelligent-fabric steward status",
+            description=(
+                "Report whether intelligent-fabric mode is enabled and whether "
+                "a steward placement currently exists, with its model and "
+                "instance id when present. The steward is the fabric-maintained "
+                "resident assistant; see the steward chat endpoint."
+            ),
+        )(self.get_steward_status)
+        self.app.post(
+            "/v1/steward/chat",
+            tags=["Steward"],
+            summary="Ask the cluster's resident steward",
+            description=(
+                "Send a conversation to the intelligent-fabric steward: a small "
+                "resident model the fabric keeps placed while the mode is "
+                "enabled. The steward investigates the cluster through a "
+                "bounded read-only tool surface (state, diagnostics, doctor, "
+                "catalog) and answers with its reasoning trace. Observe/advise "
+                "only: the steward cannot change the cluster. Returns 409 when "
+                "intelligent-fabric mode is disabled or the steward placement "
+                "is not currently available."
+            ),
+        )(self.steward_chat)
         self.app.post(
             "/v1/diagnostics/node/runners/{runner_id}/cancel",
             tags=["Diagnostics"],
@@ -2523,6 +2562,18 @@ class API:
         self, payload: CreateInstanceParams
     ) -> CreateInstanceResponse:
         instance = payload.instance
+        if instance.system_role is not None:
+            # System placements (the intelligent-fabric steward) are minted
+            # and maintained by the fabric's own invariant; accepting one
+            # from a caller would let an arbitrary instance impersonate the
+            # steward and suppress the configured placement.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "system_role placements are fabric-managed and cannot "
+                    "be created through this endpoint"
+                ),
+            )
         model_card = await ModelCard.load(instance.shard_assignments.model_id)
         required_memory = model_card.storage_size
         available_memory = self._calculate_total_available_memory()
@@ -2842,9 +2893,85 @@ class API:
             raise HTTPException(status_code=404, detail="Instance not found")
         return self.state.instances[instance_id]
 
+    async def get_steward_status(self) -> "StewardStatusResponse":
+        """Report intelligent-fabric mode and the current steward placement."""
+        from skulk.api.steward import StewardHarness, StewardStatusResponse
+
+        located = StewardHarness(self).steward_instance()
+        return StewardStatusResponse(
+            enabled=self._intelligent_fabric_enabled(),
+            present=located is not None,
+            steward_model=located[1] if located is not None else None,
+            instance_id=str(located[0]) if located is not None else None,
+        )
+
+    async def steward_chat(
+        self, payload: "StewardChatRequest"
+    ) -> "StewardChatResponse":
+        """Run one steward turn: investigate through read-only tools, reply."""
+        from skulk.api.steward import StewardHarness
+
+        if not self._intelligent_fabric_enabled():
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Intelligent-fabric mode is disabled. Enable it in "
+                    "Settings (intelligent_fabric.enabled) to talk to the "
+                    "steward."
+                ),
+            )
+        harness = StewardHarness(self)
+        try:
+            return await harness.run_turn(payload.messages)
+        except LookupError as error:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "The steward placement is not available yet. The fabric "
+                    "establishes it automatically; check /state for placement "
+                    "progress or node capacity."
+                ),
+            ) from error
+        except RuntimeError as error:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Steward generation failed: {error}",
+            ) from error
+
+    def _intelligent_fabric_enabled(self) -> bool:
+        """Whether intelligent-fabric mode is currently enabled.
+
+        Reads the on-disk cluster config (kept current on every node by
+        SyncConfig) so the answer tracks fleet-wide Settings changes made
+        from any node, falling back to the startup-parsed config when the
+        file is momentarily unreadable.
+        """
+        try:
+            config = load_skulk_config()
+        except Exception:
+            config = self._skulk_config
+        fabric = config.intelligent_fabric if config is not None else None
+        return fabric is not None and fabric.enabled
+
     async def delete_instance(self, instance_id: InstanceId) -> DeleteInstanceResponse:
         if instance_id not in self.state.instances:
             raise HTTPException(status_code=404, detail="Instance not found")
+        instance = self.state.instances[instance_id]
+        if instance.system_role == "steward" and self._intelligent_fabric_enabled():
+            # The steward is a fabric-maintained system placement: while the
+            # mode is on, the master would immediately re-place it anyway, so
+            # an ordinary delete is refused loudly instead of producing a
+            # confusing delete-then-reappear. Internal correctness paths
+            # (worker give-up on a crashed instance, repair teardown) send
+            # DeleteInstance directly on the command plane and are unaffected.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This is the intelligent-fabric steward placement, which "
+                    "the fabric maintains automatically. Disable intelligent "
+                    "fabric in Settings to remove it."
+                ),
+            )
 
         command = DeleteInstance(
             instance_id=instance_id,
@@ -2968,6 +3095,15 @@ class API:
 
             if pending_error := self._take_vision_media_failure(command_id):
                 yield pending_error
+                return
+
+            if pending_failure := self._pending_stream_failures.pop(
+                command_id, None
+            ):
+                # The task already failed before this stream registered
+                # (fast local TaskFailed, e.g. a pinned instance that
+                # vanished); deliver the buffered terminal chunk.
+                yield pending_failure
                 return
 
             with recv as token_chunks:
@@ -3831,8 +3967,47 @@ class API:
                     "Vision media timed out waiting for worker verification",
                 )
 
+    async def dispatch_text_generation(
+        self,
+        task_params: TextGenerationTaskParams,
+        target_instance_id: InstanceId | None = None,
+    ) -> TextGeneration:
+        """Public dispatch seam for internal callers (the steward harness).
+
+        Sends a text-generation command through the same validated path as
+        the HTTP chat adapters, optionally pinned to one instance.
+        """
+        return await self._send_text_generation_with_images(
+            task_params, target_instance_id=target_instance_id
+        )
+
+    def text_generation_chunk_stream(
+        self,
+        command: TextGeneration,
+        task_params: TextGenerationTaskParams,
+    ) -> AsyncGenerator[
+        ErrorChunk | ToolCallChunk | TokenChunk | PrefillProgressChunk, None
+    ]:
+        """Public tapped chunk stream for one dispatched command.
+
+        Same observation taps as the HTTP adapters (envelopes, telemetry,
+        extensions), so internal consumers are indistinguishable from
+        external ones to the observability planes.
+        """
+        return self._tapped_text_stream(
+            command.command_id,
+            task_params.model,
+            task_params=task_params,
+        )
+
+    async def running_model_card(self, model_id: ModelId) -> ModelCard | None:
+        """Public card lookup preferring the card carried on a live instance."""
+        return await self._get_running_model_card(model_id)
+
     async def _send_text_generation_with_images(
-        self, task_params: TextGenerationTaskParams
+        self,
+        task_params: TextGenerationTaskParams,
+        target_instance_id: InstanceId | None = None,
     ) -> TextGeneration:
         # Single dispatch chokepoint for every text-generation wire format
         # (chat, claude, ollama, responses, bench) — reject un-renderable
@@ -3863,7 +4038,11 @@ class API:
             )
         images = task_params.images
         if not images:
-            command = TextGeneration(task_params=task_params, owner_node=self.node_id)
+            command = TextGeneration(
+            task_params=task_params,
+            owner_node=self.node_id,
+            target_instance_id=target_instance_id,
+        )
             await self._send(command)
             return command
 
@@ -3904,7 +4083,11 @@ class API:
             task_params = task_params.model_copy(
                 update={"images": [], "image_hashes": cached_hashes}
             )
-            command = TextGeneration(task_params=task_params, owner_node=self.node_id)
+            command = TextGeneration(
+            task_params=task_params,
+            owner_node=self.node_id,
+            target_instance_id=target_instance_id,
+        )
             await self._send(command)
             return command
 
@@ -3921,7 +4104,11 @@ class API:
                 "image_count": len(new_images),
             }
         )
-        command = TextGeneration(task_params=task_params, owner_node=self.node_id)
+        command = TextGeneration(
+            task_params=task_params,
+            owner_node=self.node_id,
+            target_instance_id=target_instance_id,
+        )
         self._stage_vision_media(
             command.command_id,
             task_params.model,
@@ -8022,6 +8209,7 @@ class API:
                 except (BrokenResourceError, ClosedResourceError):
                     self._audio_transcription_queues.pop(task.command_id, None)
             return
+        delivered = False
         for queue_map in (
             self._text_generation_queues,
             self._image_generation_queues,
@@ -8030,10 +8218,22 @@ class API:
             self._audio_transcription_queues,
         ):
             if queue := queue_map.get(task.command_id):
+                delivered = True
                 try:
                     await queue.send(error_chunk)
                 except (BrokenResourceError, ClosedResourceError):
                     queue_map.pop(task.command_id, None)
+        if not delivered and isinstance(task, task_types.TextGeneration):
+            # No stream queue exists yet: buffer the terminal chunk for the
+            # lazily-registered stream to consume at startup, instead of
+            # dropping it and hanging the request. Scoped to text generation,
+            # the only stream that drains this buffer today; buffering for
+            # the other task families would accumulate entries no consumer
+            # takes (their adapters can adopt the same drain as follow-up).
+            while len(self._pending_stream_failures) >= 256:
+                oldest = next(iter(self._pending_stream_failures))
+                del self._pending_stream_failures[oldest]
+            self._pending_stream_failures[task.command_id] = error_chunk
 
     def _save_trace(
         self, task_id: task_types.TaskId, trace_data: Sequence[TraceEventData]

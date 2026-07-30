@@ -254,6 +254,22 @@ A model card's `placement.compatible_backends` selects which engine serves it
   `AcceleratorMetrics.compute_capability` (+ `native_fp4`/`native_fp8`, via NVML)
   is the capability signal for keying placement on GPU generation, not vendor.
 
+### Intelligent fabric (steward)
+Optional resident operator assistant, config-gated (`intelligent_fabric` in
+skulk.yaml, default off). Identity = `BaseInstance.system_role` flagged
+placement (additive schema field); the master's `_maintain_steward_placement`
+planning-tick invariant keeps exactly one steward placed from the
+`steward_models` preference list (Qwen3.5-4B MLX/GGUF cards), tears down
+duplicates, and inherits failover from election since the invariant re-runs
+on every tick. Repair builders re-stamp `system_role` (same pattern as #658
+exclusions). `TextGeneration.target_instance_id` pins generation to one
+instance (mirrors SpeechSynthesis). Harness = `src/skulk/api/steward.py`:
+bounded read-only tools (state/resources/telemetry/data-plane/versions/
+envelopes/doctor/catalog), 8 steps per turn, observe/advise only, rides the
+normal chat dispatch path. Endpoints `GET /v1/steward` + `POST
+/v1/steward/chat`; ordinary deletion of the steward is refused while the
+mode is on; the dashboard hides `systemRole` instances.
+
 ### Message Flow
 Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `GLOBAL_EVENTS`: Master broadcasts indexed events to all workers

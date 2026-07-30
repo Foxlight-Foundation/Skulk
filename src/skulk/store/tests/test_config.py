@@ -156,3 +156,31 @@ def test_load_skulk_config_parses_speech_streaming_experiments(
     assert config.experiments.tts_streaming is True
     assert config.experiments.stt_realtime is True
     assert config.experiments.speech_translation is True
+
+
+def test_intelligent_fabric_config_defaults() -> None:
+    """The intelligent-fabric section parses, defaults off, and carries the
+    benched steward model preference order."""
+    from skulk.store.config import IntelligentFabricConfig, SkulkConfig
+
+    config = SkulkConfig.model_validate({})
+    assert config.intelligent_fabric is None
+
+    parsed = SkulkConfig.model_validate({"intelligent_fabric": {"enabled": True}})
+    assert parsed.intelligent_fabric is not None
+    assert parsed.intelligent_fabric.enabled
+    assert parsed.intelligent_fabric.steward_models == [
+        "mlx-community/Qwen3.5-4B-MLX-4bit",
+        "unsloth/Qwen3.5-4B-GGUF",
+    ]
+
+    # The documented YAML-sequence override must load (list, not tuple:
+    # strict validation rejects coercion).
+    override = SkulkConfig.model_validate(
+        {"intelligent_fabric": {"enabled": True, "steward_models": ["a/b"]}}
+    )
+    assert override.intelligent_fabric is not None
+    assert override.intelligent_fabric.steward_models == ["a/b"]
+
+    default_section = IntelligentFabricConfig()
+    assert not default_section.enabled

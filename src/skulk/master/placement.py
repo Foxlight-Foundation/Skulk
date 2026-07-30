@@ -799,6 +799,7 @@ def place_instance(
             shard_assignments=shard_assignments,
             context_token_limit=context_token_limit,
             excluded_nodes=stamped_exclusions_list,
+            system_role=command.system_role,
             driver_node=driver_node,
             donor_endpoints=donor_endpoints,
         )
@@ -846,6 +847,7 @@ def place_instance(
                 shard_assignments=shard_assignments,
                 context_token_limit=context_token_limit,
                 excluded_nodes=stamped_exclusions_list,
+                system_role=command.system_role,
                 jaccl_devices=mlx_jaccl_devices,
                 jaccl_coordinators=mlx_jaccl_coordinators,
             )
@@ -864,6 +866,7 @@ def place_instance(
                 shard_assignments=shard_assignments,
                 context_token_limit=context_token_limit,
                 excluded_nodes=stamped_exclusions_list,
+                system_role=command.system_role,
                 hosts_by_node=hosts_by_node,
                 ephemeral_port=ephemeral_port,
             )
@@ -928,6 +931,9 @@ def fallback_command_for_refused_instance(
         # exclusions (#658): the anywhere-fallback still may not land on
         # nodes the caller excluded.
         excluded_nodes=sorted({*instance.excluded_nodes, refusing_node}),
+        # System-role marker (intelligent-fabric steward): repair
+        # re-placements re-stamp it so the flag survives node loss.
+        system_role=instance.system_role,
     )
 
 
@@ -960,6 +966,9 @@ def replacement_command_for_refused_instance(instance: Instance) -> PlaceInstanc
         # The instance's original per-placement exclusions (#658); the wider
         # re-placement keeps honoring the caller's intent.
         excluded_nodes=sorted(instance.excluded_nodes),
+        # System-role marker (intelligent-fabric steward): repair
+        # re-placements re-stamp it so the flag survives node loss.
+        system_role=instance.system_role,
     )
 
 
@@ -993,6 +1002,9 @@ def replacement_command_for_download_failed_instance(
         # (#658) and the newly failed node(s): repair must not land on
         # nodes the caller excluded, nor on the nodes that just failed.
         excluded_nodes=sorted({*instance.excluded_nodes, *excluded_nodes}),
+        # System-role marker (intelligent-fabric steward): repair
+        # re-placements re-stamp it so the flag survives node loss.
+        system_role=instance.system_role,
     )
 
 

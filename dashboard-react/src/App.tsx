@@ -13,7 +13,7 @@ const HeaderAnchor = styled.div`
 `;
 import { ThemeProvider } from 'styled-components';
 import { darkTheme, lightTheme, GlobalStyle } from './theme';
-import { useClusterState } from './hooks/useClusterState';
+import { useClusterState, type RawInstances } from './hooks/useClusterState';
 import { HeaderNav } from './components/layout/HeaderNav';
 import { MobileMenuSheet } from './components/layout/MobileMenuSheet';
 import { useIsMobile, MOBILE_BREAKPOINT_PX } from './hooks/useMediaQuery';
@@ -446,9 +446,26 @@ export function App() {
   }, [storeDownloads]);
 
   // Derive instance card data for the right panel
+  // Fabric-maintained system placements (the intelligent-fabric steward)
+  // are not user instances: filtering at the source hides them from every
+  // consumer at once (instance cards, chat picker, model-store page,
+  // placement views). The steward is reachable through its own chat surface.
+  const visibleInstances = useMemo<RawInstances>(() => {
+    const filtered: RawInstances = {};
+    for (const [iid, inst] of Object.entries(instances)) {
+      const inner =
+        inst.MlxRingInstance ?? inst.MlxJacclInstance ?? inst.LlamaRpcInstance;
+      if (inner?.systemRole) {
+        continue;
+      }
+      filtered[iid] = inst;
+    }
+    return filtered;
+  }, [instances]);
+
   const instanceCards = useMemo<InstanceCardData[]>(() => {
     const cards: InstanceCardData[] = [];
-    for (const [iid, inst] of Object.entries(instances)) {
+    for (const [iid, inst] of Object.entries(visibleInstances)) {
       // Instance is a tagged union: MlxRing / MlxJaccl (in-process) and
       // LlamaRpc (pooled multi-node GGUF, #328). Handling only the first two
       // silently dropped every pooled instance from the Active Instances panel.
@@ -574,7 +591,7 @@ export function App() {
       });
     }
     return cards;
-  }, [instances, runners, topology, t]);
+  }, [visibleInstances, runners, topology, t]);
 
   const hasInstances = instanceCards.length > 0;
 
@@ -671,7 +688,7 @@ export function App() {
                 topology={topology}
                 downloads={downloads}
                 nodeDisk={nodeDisk}
-                instances={instances}
+                instances={visibleInstances}
                 runners={runners}
                 onChat={(modelId) => { dispatch(chatActions.selectModel(modelId)); setActiveRoute('chat'); }}
               />
