@@ -36,6 +36,7 @@ from skulk.shared.types.chunks import (
     TokenChunk,
     ToolCallChunk,
 )
+from skulk.shared.types.common import CommandId
 from skulk.shared.types.worker.instances import InstanceId
 
 if TYPE_CHECKING:
@@ -358,6 +359,10 @@ class StewardHarness:
 
     def __init__(self, api: "API") -> None:
         self._api = api
+        # The inner TextGeneration currently in flight for this turn, so an
+        # abandoned stream (client disconnect, cancel button) can stop the
+        # runner instead of leaving it generating for nobody.
+        self._active_command_id: CommandId | None = None
 
     def steward_instance(self) -> tuple[InstanceId, str] | None:
         """The current steward placement, as (instance_id, model_id)."""
@@ -504,6 +509,32 @@ class StewardHarness:
                 ChatCompletionMessage(role=message.role, content=message.content)
             )
 
+        completed = False
+        try:
+            yield_target = self._run_investigation(messages, model_id, instance_id)
+            async for chunk in yield_target:
+                yield chunk
+            completed = True
+        finally:
+            if not completed and self._active_command_id is not None:
+                # The stream was abandoned (client disconnect or cancel)
+                # mid-generation: stop the inner task so the steward runner
+                # is not left generating for nobody.
+                abandoned = self._active_command_id
+                self._active_command_id = None
+                try:
+                    await self._api.send_task_cancellation(abandoned)
+                except Exception:  # cancellation is best-effort on teardown
+                    pass
+
+    async def _run_investigation(
+        self,
+        messages: list[ChatCompletionMessage],
+        model_id: str,
+        instance_id: InstanceId,
+    ) -> "AsyncGenerator[TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None]":
+        """The turn's investigation loop; separated so the public stream can
+        wrap it with abandonment cleanup."""
         reply = ""
         for step_index in range(MAX_STEPS_PER_TURN):
             if step_index == MAX_STEPS_PER_TURN - 1:
@@ -614,6 +645,7 @@ class StewardHarness:
         command = await api.dispatch_text_generation(
             task_params, target_instance_id=instance_id
         )
+        self._active_command_id = command.command_id
         chunk_stream = api.text_generation_chunk_stream(command, task_params)
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
@@ -633,4 +665,5 @@ class StewardHarness:
                     )
                 case _:
                     continue
+        self._active_command_id = None
         return "".join(text_parts), tool_calls, error_message

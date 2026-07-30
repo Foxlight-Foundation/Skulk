@@ -4017,6 +4017,16 @@ class API:
                     "Vision media timed out waiting for worker verification",
                 )
 
+    async def send_task_cancellation(self, command_id: CommandId) -> None:
+        """Public cancellation seam for internal callers (the steward harness).
+
+        Sends the same TaskCancelled command the HTTP cancel endpoint sends,
+        suppressing the final TaskFinished so the worker can observe the
+        cancelled task and stop the runner promptly.
+        """
+        await self._send(TaskCancelled(cancelled_command_id=command_id))
+        self._cancelled_command_ids.add(command_id)
+
     async def dispatch_text_generation(
         self,
         task_params: TextGenerationTaskParams,

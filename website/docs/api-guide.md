@@ -1236,6 +1236,9 @@ Response fields:
 
 - `enabled`: whether intelligent-fabric mode is enabled in Settings.
 - `present`: whether a steward placement currently exists.
+- `ready`: whether every steward runner reports Ready or Running. Present
+  but not ready means the model is still downloading or loading; clients
+  should keep showing a preparing state and hold chat until ready.
 - `steward_model`: model card id of the steward brain when present, else null.
 - `instance_id`: the steward instance id when present, else null.
 

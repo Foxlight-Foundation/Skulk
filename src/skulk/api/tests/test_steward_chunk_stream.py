@@ -106,3 +106,24 @@ async def test_text_markup_tool_calls_are_recovered() -> None:
     assert isinstance(last, TokenChunk)
     assert last.text == "Doctor says fine."
     assert last.model == ModelId("skulk/steward")
+
+
+async def test_abandoned_stream_cancels_active_generation() -> None:
+    """Closing the stream mid-turn cancels the in-flight inner generation."""
+    cancelled: list[object] = []
+
+    class _Api:
+        async def send_task_cancellation(self, command_id: object) -> None:
+            cancelled.append(command_id)
+
+    harness = _ScriptedHarness(turns=[("", [_call("get_cluster_state")])])
+    harness._api = cast("API", cast(object, _Api()))  # pyright: ignore[reportPrivateUsage]
+    harness._active_command_id = cast(Any, "cmd-inner-1")  # pyright: ignore[reportPrivateUsage]
+
+    stream = harness.run_turn_chunks(
+        [StewardChatMessage(role="user", content="hi")]
+    )
+    first = await stream.__anext__()
+    assert isinstance(first, TokenChunk)
+    await stream.aclose()
+    assert cancelled == ["cmd-inner-1"]
