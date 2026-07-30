@@ -17,6 +17,7 @@ results transfer to production behavior.
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any, Literal, cast, final
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -25,6 +26,7 @@ from skulk.api.types.api import (
     ChatCompletionMessage,
     ChatCompletionRequest,
     ToolCall,
+    ToolCallItem,
 )
 from skulk.shared.types.worker.instances import InstanceId
 
@@ -288,6 +290,83 @@ def _downloads_summary(state_payload: dict[str, object]) -> dict[str, object]:
     return summary
 
 
+_FUNCTION_BLOCK = re.compile(r"<function=([\w.-]+)>(.*?)</function>", re.DOTALL)
+_PARAMETER_BLOCK = re.compile(r"<parameter=([\w.-]+)>\n?(.*?)\n?</parameter>", re.DOTALL)
+_TOOL_CALL_BLOCK = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+
+
+def parse_text_tool_calls(text: str) -> list[ToolCall]:
+    """Fallback parser for tool calls left in raw assistant text.
+
+    Served engines parse tool calls server-side into structured chunks, but
+    the in-process MLX path can pass the family's markup through as plain
+    text (observed live with Qwen3.5's XML function format on the MLX lane).
+    This recognizes both that XML format and Hermes-style JSON blocks, so
+    steward turns behave identically on every engine. Ported from the
+    Phase 0 bench harness, where both formats are exercised.
+    """
+    calls: list[ToolCall] = []
+
+    def from_xml(block: str) -> ToolCall | None:
+        match = _FUNCTION_BLOCK.search(block)
+        if match is None:
+            return None
+        arguments: dict[str, object] = {}
+        for key, raw in cast(
+            "list[tuple[str, str]]", _PARAMETER_BLOCK.findall(match.group(2))
+        ):
+            try:
+                arguments[key] = cast("object", json.loads(raw))
+            except (json.JSONDecodeError, ValueError):
+                arguments[key] = raw
+        return ToolCall(
+            id=f"steward-text-{len(calls)}",
+            index=len(calls),
+            function=ToolCallItem(
+                name=match.group(1), arguments=json.dumps(arguments)
+            ),
+        )
+
+    spans: list[tuple[int, int]] = []
+    for match in _TOOL_CALL_BLOCK.finditer(text):
+        spans.append(match.span())
+        block = match.group(1).strip()
+        xml_call = from_xml(block)
+        if xml_call is not None:
+            calls.append(xml_call)
+            continue
+        try:
+            data = _as_object_dict(cast("object", json.loads(block)))
+            name = data.get("name")
+            arguments = data.get("arguments", {})
+            if isinstance(name, str) and isinstance(arguments, dict):
+                calls.append(
+                    ToolCall(
+                        id=f"steward-text-{len(calls)}",
+                        index=len(calls),
+                        function=ToolCallItem(
+                            name=name, arguments=json.dumps(arguments)
+                        ),
+                    )
+                )
+        except (json.JSONDecodeError, ValueError):
+            continue
+    for match in _FUNCTION_BLOCK.finditer(text):
+        if any(start <= match.start() < end for start, end in spans):
+            continue
+        bare = from_xml(match.group(0))
+        if bare is not None:
+            calls.append(bare)
+    return calls
+
+
+def strip_tool_markup(text: str) -> str:
+    """Remove tool-call markup from text kept as assistant content."""
+    text = _TOOL_CALL_BLOCK.sub("", text)
+    text = _FUNCTION_BLOCK.sub("", text)
+    return text.strip()
+
+
 @final
 class StewardHarness:
     """Drives the steward brain through its tools for one API node.
@@ -451,6 +530,12 @@ class StewardHarness:
             )
             if error is not None:
                 raise RuntimeError(error)
+            if not tool_calls:
+                # Engine-independent fallback: the in-process MLX path can
+                # leave the family's tool-call markup in the text stream.
+                tool_calls = parse_text_tool_calls(text)
+                if tool_calls:
+                    text = strip_tool_markup(text)
             if not tool_calls:
                 reply = text.strip()
                 break
