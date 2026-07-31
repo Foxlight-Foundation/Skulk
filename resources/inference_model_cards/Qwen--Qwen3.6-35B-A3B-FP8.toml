@@ -10,8 +10,8 @@
 #   ({mlx, llama_cpp} in shared/backends.py) would make a vision-declaring
 #   vllm-only card unplaceable, so this card claims text serving only.
 #   Restore the vision declaration when the vllm runner gains image input.
-# - Tool calling is declared off: the vllm runner does not implement tool
-#   dispatch yet (#638); flip to the family default when it lands.
+# - Tool calling is on: the vllm runner launches with vLLM's hermes
+#   parser (family default) and returns structured tool_calls.
 # Architecture facts from the repo's config.json; context_length is the
 # config max_position_embeddings. storage_size is the full staging set.
 # `supports_tensor = false`: vLLM runs single-node in Skulk.
@@ -39,7 +39,7 @@ vllm_spec_method = "mtp"
 vllm_spec_num_tokens = 2
 
 [tooling]
-supports_tool_calling = false
+supports_tool_calling = true
 
 [placement]
 compatible_backends = ["vllm-cuda", "vllm-rocm"]

@@ -103,6 +103,10 @@ class TextGenerationTaskParams(BaseModel, frozen=True):
     top_p: float | None = None
     stream: bool = False
     tools: list[dict[str, Any]] | None = None
+    tool_choice: str | dict[str, Any] | None = None
+    """OpenAI tool_choice passthrough ("auto"/"none"/"required" or a forced
+    function selector). Previously accepted at the API boundary but dropped
+    before dispatch, so served engines always saw None."""
     bench: bool = False
     top_k: int | None = None
     stop: str | list[str] | None = None
