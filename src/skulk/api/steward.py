@@ -478,6 +478,11 @@ class StewardHarness:
             temperature=0.0,
             max_tokens=8,
             stream=False,
+            # A thinking-default model would spend the whole bounded budget
+            # reasoning and emit no non-thinking text, failing every probe
+            # and tearing down a healthy steward. The probe is a liveness
+            # check, not a benchmark: thinking off.
+            enable_thinking=False,
         )
         model_card = await api.running_model_card(request.model)
         task_params = await chat_request_to_text_generation(
@@ -488,6 +493,7 @@ class StewardHarness:
         )
         chunk_stream = api.text_generation_chunk_stream(command, task_params)
         got_text = False
+        stream_done = False
         with anyio.move_on_after(CANARY_PROBE_TIMEOUT_SECONDS):
             async for chunk in chunk_stream:
                 if isinstance(chunk, ErrorChunk):
@@ -499,10 +505,13 @@ class StewardHarness:
                 ):
                     got_text = True
                 if isinstance(chunk, TokenChunk) and chunk.finish_reason is not None:
+                    stream_done = True
                     break
-        if not got_text:
-            # Deadline elapsed or the stream ended empty; stop the probe's
-            # task so a wedged runner is not left holding it.
+        if not got_text and not stream_done:
+            # Deadline elapsed mid-stream: stop the probe's task so a wedged
+            # runner is not left holding it. A stream that reached its
+            # terminal chunk already finalized; cancelling a finished
+            # command would only emit noise.
             with contextlib.suppress(Exception):
                 await api.send_task_cancellation(command.command_id)
         return got_text
