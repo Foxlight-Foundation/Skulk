@@ -154,7 +154,8 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
   // model_id. Derived from each parent card's runtime references so the store
   // can mark them as non-placeable instead of offering launch/placement/optiq.
   const [companionRoles, setCompanionRoles] = useState<Record<string, CompanionInfo>>({});
-  const pollRef = useRef<ReturnType<typeof setInterval>>(undefined);
+  const pollRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const storePollingDisposedRef = useRef(false);
   const optimizePollRef = useRef<ReturnType<typeof setInterval>>(undefined);
 
   // Fetch authoritative model card info from /models API
@@ -269,50 +270,65 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
     return cards;
   }, [downloads, apiModelCards]);
 
-  const fetchDownloads = useCallback(async () => {
+  const fetchDownloads = useCallback(async (): Promise<StoreDownloadProgress[] | null> => {
     try {
       const res = await fetch('/store/downloads');
-      if (!res.ok) return [];
+      if (!res.ok) return null;
       const data = await res.json();
       return (data.downloads ?? []) as StoreDownloadProgress[];
-    } catch { return []; }
+    } catch { return null; }
   }, []);
+
+  const fetchRegistry = useCallback(async (): Promise<StoreRegistryEntry[] | null> => {
+    try {
+      const response = await fetch('/store/registry');
+      if (!response.ok) return null;
+      const data = await response.json();
+      return (data.entries ?? []) as StoreRegistryEntry[];
+    } catch { return null; }
+  }, []);
+
+  const refreshStore = useCallback(async (): Promise<boolean> => {
+    const [registryEntries, downloadEntries] = await Promise.all([
+      fetchRegistry(),
+      fetchDownloads(),
+    ]);
+    if (storePollingDisposedRef.current) return true;
+    if (registryEntries !== null) setStoreEntries(registryEntries);
+    if (downloadEntries !== null) setStoreDownloads(downloadEntries);
+
+    // A transient failure must keep the convergence loop alive. In particular,
+    // the store can finish a download just as the dashboard reloads; stopping on
+    // an empty downloads response while the registry request failed leaves a new
+    // user permanently looking at "0 models in store" until a manual refresh.
+    return registryEntries !== null
+      && downloadEntries !== null
+      && downloadEntries.length === 0;
+  }, [fetchDownloads, fetchRegistry]);
+
+  const scheduleStoreRefresh = useCallback(() => {
+    if (storePollingDisposedRef.current || pollRef.current) return;
+
+    const poll = async () => {
+      const converged = await refreshStore();
+      if (storePollingDisposedRef.current || converged) {
+        pollRef.current = undefined;
+        return;
+      }
+      pollRef.current = setTimeout(poll, 2000);
+    };
+
+    pollRef.current = setTimeout(poll, 2000);
+  }, [refreshStore]);
 
   const loadRegistry = useCallback(async () => {
     setStoreLoading(true);
     try {
-      const [regRes, dls] = await Promise.all([
-        fetch('/store/registry'),
-        fetchDownloads(),
-      ]);
-      if (regRes.ok) {
-        const data = await regRes.json();
-        setStoreEntries(data.entries ?? []);
-      }
-      setStoreDownloads(dls);
-
-      // Start polling if active downloads
-      if (dls.length > 0 && !pollRef.current) {
-        pollRef.current = setInterval(async () => {
-          const [newDls, regRefresh] = await Promise.all([
-            fetchDownloads(),
-            fetch('/store/registry'),
-          ]);
-          setStoreDownloads(newDls);
-          if (regRefresh.ok) {
-            const d = await regRefresh.json();
-            setStoreEntries(d.entries ?? []);
-          }
-          // Stop polling when done
-          if (newDls.length === 0 && pollRef.current) {
-            clearInterval(pollRef.current);
-            pollRef.current = undefined;
-          }
-        }, 2000);
-      }
-    } catch { /* ignore */ }
-    finally { setStoreLoading(false); }
-  }, [fetchDownloads]);
+      if (!(await refreshStore())) scheduleStoreRefresh();
+    } finally {
+      if (!storePollingDisposedRef.current) setStoreLoading(false);
+    }
+  }, [refreshStore, scheduleStoreRefresh]);
 
   // Load store registry on mount
   useEffect(() => {
@@ -321,8 +337,10 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
 
   // Cleanup polling on unmount
   useEffect(() => {
+    storePollingDisposedRef.current = false;
     return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
+      storePollingDisposedRef.current = true;
+      if (pollRef.current) clearTimeout(pollRef.current);
       if (optimizePollRef.current) clearInterval(optimizePollRef.current);
     };
   }, []);
