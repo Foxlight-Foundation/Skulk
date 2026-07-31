@@ -343,6 +343,7 @@ def test_resolve_reasoning_params_uses_profile_defaults() -> None:
 
     assert resolve_reasoning_params(None, True, profile) == ("high", True)
     assert resolve_reasoning_params(None, False, profile) == ("none", False)
+    assert resolve_reasoning_params(None, None, profile) == ("none", False)
 
 
 def test_resolve_reasoning_params_treats_none_as_disabled_even_for_custom_profiles() -> None:
