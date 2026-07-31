@@ -237,18 +237,24 @@ def canary_probe_target(
         if instance.system_role != "steward":
             continue
         node_to_runner = instance.shard_assignments.node_to_runner
-        if node_id not in node_to_runner:
-            return None
+        # Prober election for a steward that spans nodes (possible after a
+        # memory-refusal repair widens the placement): only the
+        # lexicographically smallest hosting node probes, so exactly one
+        # canary runs per steward.
+        hosting_nodes = sorted(str(candidate) for candidate in node_to_runner)
+        if not hosting_nodes or str(node_id) != hosting_nodes[0]:
+            continue
         runner_ids = list(node_to_runner.values())
         if not runner_ids or not all(
             isinstance(runners.get(runner_id), RunnerReady)
             for runner_id in runner_ids
         ):
-            return None
-        for task in tasks.values():
-            task_instance = getattr(task, "instance_id", None)
-            if task_instance == instance_id:
-                return None
+            continue
+        if any(
+            getattr(task, "instance_id", None) == instance_id
+            for task in tasks.values()
+        ):
+            continue
         return instance_id
     return None
 
@@ -456,7 +462,7 @@ class StewardHarness:
 
         api = self._api
         request = ChatCompletionRequest(
-            model=model_id,  # type: ignore[arg-type]
+            model=ModelId(model_id),
             messages=[
                 ChatCompletionMessage(
                     role="user",

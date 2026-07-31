@@ -2993,7 +2993,16 @@ class API:
                     self.node_id,
                 )
                 if target is None:
-                    failures = 0
+                    # A skipped probe (busy, loading, not the elected
+                    # prober) is not evidence of health: keep the failure
+                    # count so "3 consecutive failures" means three failed
+                    # probes with no intervening success. Reset only when
+                    # the steward instance itself is gone.
+                    if last_instance is not None and last_instance not in (
+                        self.state.instances
+                    ):
+                        failures = 0
+                        last_instance = None
                     continue
                 if target != last_instance:
                     failures = 0
@@ -3001,7 +3010,6 @@ class API:
                 harness = StewardHarness(self)
                 located = harness.steward_instance()
                 if located is None or located[0] != target:
-                    failures = 0
                     continue
                 if await harness.canary_probe(target, located[1]):
                     failures = 0

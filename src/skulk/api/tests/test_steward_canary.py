@@ -119,3 +119,37 @@ def test_ordinary_instances_are_never_probed() -> None:
     runner_id = instance.shard_assignments.node_to_runner[host]
 
     assert canary_probe_target(placed, {runner_id: RunnerReady()}, {}, host) is None
+
+
+def test_multi_node_steward_elects_one_prober() -> None:
+    """Only the lexicographically smallest hosting node probes (election)."""
+    topology, node_memory, node_network, _node_ids = fully_connected_three_nodes(
+        (10.0, 10.0, 10.0)
+    )
+    command = PlaceInstance(
+        model_card=ModelCard(
+            model_id=ModelId("canary-brain"),
+            storage_size=Memory.from_gb(12),
+            n_layers=12,
+            hidden_size=30,
+            supports_tensor=True,
+            tasks=[ModelTask.TextGeneration],
+        ),
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=2,
+        system_role="steward",
+    )
+    placed = place_instance(command, topology, {}, node_memory, node_network)
+    instance = next(iter(placed.values()))
+    hosting = sorted(instance.shard_assignments.node_to_runner, key=str)
+    assert len(hosting) >= 2
+    runners = {
+        runner_id: RunnerReady()
+        for runner_id in instance.shard_assignments.node_to_runner.values()
+    }
+    assert (
+        canary_probe_target(placed, runners, {}, hosting[0])
+        == instance.instance_id
+    )
+    assert canary_probe_target(placed, runners, {}, hosting[1]) is None
