@@ -1764,7 +1764,10 @@ def _parse_generic_text_tool_calls(text: str) -> list[dict[str, Any]]:
 
     items = parse_tool_calls_from_text(f"<tool_call>{text}</tool_call>")
     if not items:
-        return []
+        # Raising routes the runner to its malformed-tool-call fallback
+        # (raw text with finish_reason="error"), matching the behavior of
+        # every other parser instead of fabricating an empty success.
+        raise ValueError("no recognized tool calls in block")
     return [{"name": item.name, "arguments": item.arguments} for item in items]
 
 
