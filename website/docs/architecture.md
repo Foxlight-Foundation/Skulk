@@ -638,16 +638,24 @@ failover. Duplicate stewards (possible across a failover window) are detected
 and reduced to one. The steward placement is hidden from user-facing instance
 surfaces and refuses ordinary deletion while the mode is enabled.
 
-Conversation happens through the steward chat endpoint. The server-side
-harness gives the model a bounded, strictly read-only tool surface: cluster
+Conversation happens through the standard OpenAI-compatible chat-completions
+endpoint using the reserved virtual model id `skulk/steward`, streaming
+included, so any OpenAI-compatible client can talk to the cluster with no
+steward-specific integration. The reserved id selects the model plus the
+server-side harness: a bounded, strictly read-only tool surface (cluster
 state with health reasons, per-node resources and capability conflicts,
 telemetry and data-plane diagnostics, per-node version status, performance
-envelopes, the local doctor check registry, and the model catalog. Each
-operator turn runs a bounded investigation loop; generation itself rides the
-normal text-generation dispatch path, pinned to the steward instance. In this
-release the steward observes and advises only: no tool can change the
-cluster, and anything action-shaped is returned to the operator as a
-recommendation.
+envelopes, the local doctor check registry, and the model catalog) and an
+investigation loop of up to eight tool calls per turn. Tool steps stream to
+the client as reasoning content while the investigation runs, followed by
+the answer; client-supplied tool definitions are rejected, and client system
+prompts are ignored in favor of the steward's own. Generation itself rides
+the normal text-generation dispatch path, pinned to the steward instance,
+and the underlying model card id remains addressable as an ordinary model
+without tools or cluster access. A small status endpoint reports presence
+and readiness so clients know whether to offer the surface. In this release
+the steward observes and advises only: no tool can change the cluster, and
+anything action-shaped is returned to the operator as a recommendation.
 
 ## The dashboard voice loop
 

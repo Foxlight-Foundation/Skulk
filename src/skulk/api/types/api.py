@@ -119,6 +119,15 @@ class ModelListModel(BaseModel):
     supports_tensor: bool = Field(default=False)
     tasks: list[str] = Field(default=[])
     is_custom: bool = Field(default=False)
+    system_role: Literal["steward"] | None = Field(
+        default=None,
+        description=(
+            "Set for fabric-managed system entries (\"steward\" = the "
+            "intelligent-fabric resident, addressable as a chat model but "
+            "not user-placeable). Model pickers should badge or separate "
+            "these rather than listing them as ordinary models."
+        ),
+    )
     family: str = Field(default="")
     quantization: str = Field(default="")
     base_model: str = Field(default="")

@@ -16,22 +16,44 @@ results transfer to production behavior.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
-from typing import TYPE_CHECKING, Any, Literal, cast, final
+from collections.abc import AsyncGenerator
+from typing import TYPE_CHECKING, Any, Literal, cast
 
+import anyio
 from pydantic import BaseModel, ConfigDict, Field
 
 from skulk.api.types.api import (
     ChatCompletionMessage,
     ChatCompletionRequest,
+    CompletionTokensDetails,
+    PromptTokensDetails,
     ToolCall,
     ToolCallItem,
+    Usage,
 )
+from skulk.shared.models.model_cards import ModelId
+from skulk.shared.types.chunks import (
+    ErrorChunk,
+    PrefillProgressChunk,
+    TokenChunk,
+    ToolCallChunk,
+)
+from skulk.shared.types.common import CommandId
 from skulk.shared.types.worker.instances import InstanceId
 
 if TYPE_CHECKING:
     from skulk.api.main import API
+
+STEWARD_VIRTUAL_MODEL_ID = "skulk/steward"
+"""Reserved chat-completions model id selecting model-plus-harness.
+
+Checked before card resolution, so a Hugging Face repository of the same
+name can never shadow it. Requests to this id run the steward's server-side
+investigation loop; requests to the underlying card id reach the bare model.
+"""
 
 MAX_TOOL_RESULT_CHARS = 6000
 """Hard cap on one tool result rendered into the steward's context."""
@@ -151,32 +173,6 @@ class StewardChatMessage(BaseModel):
     content: str = Field(description="The message text.")
 
 
-class StewardChatRequest(BaseModel):
-    """Request body for the steward chat surface."""
-
-    model_config = ConfigDict(frozen=True, strict=True)
-
-    messages: list[StewardChatMessage] = Field(
-        min_length=1,
-        description=(
-            "Conversation history, oldest first, ending with the operator's "
-            "latest message. The steward system prompt and tool plumbing "
-            "are added server-side."
-        ),
-    )
-
-
-class StewardToolStep(BaseModel):
-    """One tool call the steward made while investigating."""
-
-    model_config = ConfigDict(frozen=True, strict=True)
-
-    tool: str = Field(description="Tool name invoked.")
-    arguments: dict[str, object] = Field(
-        default_factory=dict, description="Arguments the steward passed."
-    )
-
-
 class StewardStatusResponse(BaseModel):
     """Whether the steward exists and what serves it right now."""
 
@@ -188,6 +184,14 @@ class StewardStatusResponse(BaseModel):
     present: bool = Field(
         description="Whether a steward placement currently exists in state."
     )
+    ready: bool = Field(
+        default=False,
+        description=(
+            "Whether every runner of the steward placement reports Ready: "
+            "present-but-not-ready means the model is still downloading or "
+            "loading, and chat requests will queue or fail until ready."
+        ),
+    )
     steward_model: str | None = Field(
         default=None,
         description="Model id of the steward brain, when present.",
@@ -195,24 +199,6 @@ class StewardStatusResponse(BaseModel):
     instance_id: str | None = Field(
         default=None,
         description="The steward instance id, when present.",
-    )
-
-
-class StewardChatResponse(BaseModel):
-    """The steward's reply plus its investigation trace."""
-
-    model_config = ConfigDict(frozen=True, strict=True)
-
-    reply: str = Field(description="The steward's answer to the operator.")
-    steps: list[StewardToolStep] = Field(
-        default_factory=list,
-        description="Tools consulted this turn, in order.",
-    )
-    steward_model: str = Field(
-        description="Model id of the steward brain that produced the reply."
-    )
-    instance_id: str = Field(
-        description="The hidden steward instance that served the turn."
     )
 
 
@@ -367,7 +353,6 @@ def strip_tool_markup(text: str) -> str:
     return text.strip()
 
 
-@final
 class StewardHarness:
     """Drives the steward brain through its tools for one API node.
 
@@ -379,6 +364,30 @@ class StewardHarness:
 
     def __init__(self, api: "API") -> None:
         self._api = api
+        # The inner TextGeneration currently in flight for this turn, so an
+        # abandoned stream (client disconnect, cancel button) can stop the
+        # runner instead of leaving it generating for nobody.
+        self._active_command_id: CommandId | None = None
+        # Aggregated across the turn's inner generations so the terminal
+        # chunk reports real usage instead of null, and the model's actual
+        # terminal reason (e.g. length) is preserved.
+        self._turn_usage: Usage | None = None
+        self._last_finish_reason: Literal["stop", "length", "content_filter"] = "stop"
+
+    def _accumulate_usage(self, usage: "Usage") -> None:
+        """Sum an inner generation's usage into the turn total."""
+        if self._turn_usage is None:
+            self._turn_usage = usage
+            return
+        self._turn_usage = Usage(
+            prompt_tokens=self._turn_usage.prompt_tokens + usage.prompt_tokens,
+            completion_tokens=(
+                self._turn_usage.completion_tokens + usage.completion_tokens
+            ),
+            total_tokens=self._turn_usage.total_tokens + usage.total_tokens,
+            prompt_tokens_details=PromptTokensDetails(),
+            completion_tokens_details=CompletionTokensDetails(),
+        )
 
     def steward_instance(self) -> tuple[InstanceId, str] | None:
         """The current steward placement, as (instance_id, model_id)."""
@@ -491,17 +500,30 @@ class StewardHarness:
             {"error": f"unknown tool '{name}'", "available": STEWARD_TOOL_NAMES}
         )
 
-    async def run_turn(
+    async def run_turn_chunks(
         self, history: list[StewardChatMessage]
-    ) -> StewardChatResponse:
-        """Run one operator turn: investigate via tools, return the reply.
+    ) -> "AsyncGenerator[TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None]":
+        """Run one steward turn as a chat-completions chunk stream.
 
-        Raises ``LookupError`` when no steward instance exists (callers map
-        this to an HTTP 409 with remediation).
+        Tool steps stream live as thinking chunks (mapped to
+        ``reasoning_content`` by the adapters) while the investigation runs,
+        and the final answer follows as a content chunk with
+        ``finish_reason="stop"``. Emitting the adapters' native chunk
+        vocabulary is what lets the steward ride ``/v1/chat/completions``
+        (streaming and non-streaming) with no adapter changes: clients see
+        a normal model whose reasoning happens to be its tool trace.
         """
+
         located = self.steward_instance()
         if located is None:
-            raise LookupError("no steward placement exists")
+            yield ErrorChunk(
+                model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
+                error_message=(
+                    "The steward placement is not available yet; the fabric "
+                    "establishes it automatically"
+                ),
+            )
+            return
         instance_id, model_id = located
 
         messages: list[ChatCompletionMessage] = [
@@ -512,7 +534,37 @@ class StewardHarness:
                 ChatCompletionMessage(role=message.role, content=message.content)
             )
 
-        steps: list[StewardToolStep] = []
+        self._turn_usage = None
+        self._last_finish_reason = "stop"
+        completed = False
+        try:
+            yield_target = self._run_investigation(messages, model_id, instance_id)
+            async for chunk in yield_target:
+                yield chunk
+            completed = True
+        finally:
+            if not completed and self._active_command_id is not None:
+                # The stream was abandoned (client disconnect or cancel)
+                # mid-generation: stop the inner task so the steward runner
+                # is not left generating for nobody.
+                abandoned = self._active_command_id
+                self._active_command_id = None
+                # Teardown usually runs inside an already-cancelled scope
+                # (client disconnect cancels the response task), where an
+                # unshielded await re-raises before the cancel can send.
+                # Shield it, bounded so teardown can never hang.
+                with contextlib.suppress(Exception):
+                    with anyio.move_on_after(2, shield=True):
+                        await self._api.send_task_cancellation(abandoned)
+
+    async def _run_investigation(
+        self,
+        messages: list[ChatCompletionMessage],
+        model_id: str,
+        instance_id: InstanceId,
+    ) -> "AsyncGenerator[TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None]":
+        """The turn's investigation loop; separated so the public stream can
+        wrap it with abandonment cleanup."""
         reply = ""
         for step_index in range(MAX_STEPS_PER_TURN):
             if step_index == MAX_STEPS_PER_TURN - 1:
@@ -529,10 +581,11 @@ class StewardHarness:
                 messages, model_id, instance_id
             )
             if error is not None:
-                raise RuntimeError(error)
+                yield ErrorChunk(
+                    model=ModelId(STEWARD_VIRTUAL_MODEL_ID), error_message=error
+                )
+                return
             if not tool_calls:
-                # Engine-independent fallback: the in-process MLX path can
-                # leave the family's tool-call markup in the text stream.
                 tool_calls = parse_text_tool_calls(text)
                 if tool_calls:
                     text = strip_tool_markup(text)
@@ -547,12 +600,22 @@ class StewardHarness:
                 parsed = {}
             if isinstance(parsed, dict):
                 arguments = cast("dict[str, object]", parsed)
-            steps.append(StewardToolStep(tool=call.function.name, arguments=arguments))
+            trace_line = call.function.name + (
+                f" {json.dumps(arguments)}" if arguments else ""
+            )
+            yield TokenChunk(
+                model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
+                text=trace_line + "\n",
+                token_id=-1,
+                usage=None,
+                is_thinking=True,
+            )
             result = await self.execute_tool(call.function.name, arguments)
+            content_text = strip_tool_markup(text)
             messages.append(
                 ChatCompletionMessage(
                     role="assistant",
-                    content=text or None,
+                    content=content_text or None,
                     tool_calls=[call],
                 )
             )
@@ -564,14 +627,15 @@ class StewardHarness:
         else:
             reply = (
                 "I ran out of investigation budget before reaching a "
-                "conclusion; the tools consulted so far are listed."
+                "conclusion this turn."
             )
 
-        return StewardChatResponse(
-            reply=reply,
-            steps=steps,
-            steward_model=model_id,
-            instance_id=str(instance_id),
+        yield TokenChunk(
+            model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
+            text=reply,
+            token_id=-1,
+            usage=self._turn_usage,
+            finish_reason=self._last_finish_reason,
         )
 
     async def _generate(
@@ -588,6 +652,7 @@ class StewardHarness:
         """
         from skulk.api.adapters.chat_completions import (
             chat_request_to_text_generation,
+            usage_from_stats,
         )
         from skulk.shared.types.chunks import (
             ErrorChunk,
@@ -611,6 +676,7 @@ class StewardHarness:
         command = await api.dispatch_text_generation(
             task_params, target_instance_id=instance_id
         )
+        self._active_command_id = command.command_id
         chunk_stream = api.text_generation_chunk_stream(command, task_params)
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
@@ -623,11 +689,18 @@ class StewardHarness:
                 case TokenChunk():
                     if not chunk.is_thinking:
                         text_parts.append(chunk.text)
+                    if chunk.finish_reason is not None:
+                        self._last_finish_reason = chunk.finish_reason
+                    if step_usage := chunk.usage or usage_from_stats(chunk.stats):
+                        self._accumulate_usage(step_usage)
                 case ToolCallChunk():
+                    if step_usage := chunk.usage or usage_from_stats(chunk.stats):
+                        self._accumulate_usage(step_usage)
                     tool_calls.extend(
                         ToolCall(id=item.id, index=i, function=item)
                         for i, item in enumerate(chunk.tool_calls)
                     )
                 case _:
                     continue
+        self._active_command_id = None
         return "".join(text_parts), tool_calls, error_message
