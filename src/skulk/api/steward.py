@@ -499,7 +499,10 @@ class StewardHarness:
                 {"results": [result.model_dump(mode="json") for result in results]}
             )
         if name == "search_docs":
-            from skulk.api.steward_docs import search_docs
+            from skulk.api.steward_docs import (
+                MAX_RESULT_TEXT_CHARS,
+                search_docs,
+            )
 
             query = arguments.get("query")
             if not isinstance(query, str) or not query.strip():
@@ -526,7 +529,7 @@ class StewardHarness:
                         {
                             "source": section.source,
                             "heading": section.heading,
-                            "text": section.text,
+                            "text": section.text[:MAX_RESULT_TEXT_CHARS],
                         }
                         for section in sections
                     ]

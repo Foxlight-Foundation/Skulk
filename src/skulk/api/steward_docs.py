@@ -28,6 +28,12 @@ MAX_SECTION_CHARS = 2400
 MAX_RESULTS = 4
 """Result budget per query."""
 
+MAX_RESULT_TEXT_CHARS = 1200
+"""Per-result text budget in tool output: four results plus JSON overhead
+must fit the harness's 6000-char tool-result cap without mid-JSON
+truncation. Indexing keeps the full section; only returned context is
+sliced."""
+
 _WORD_RE = re.compile(r"[a-z0-9_./-]+")
 
 _QUERY_STOPWORDS = frozenset(
@@ -65,7 +71,18 @@ def _tokenize(text: str) -> list[str]:
 
 
 def split_sections(source: str, text: str) -> list[DocSection]:
-    """Split a markdown document on headings into bounded sections."""
+    """Split a markdown document on headings into bounded sections.
+
+    Args:
+        source: Repo-relative path of the document, recorded on every
+            resulting section and used as the fallback heading.
+        text: The document's full markdown text.
+
+    Returns:
+        Sections in document order. A heading whose body exceeds
+        ``MAX_SECTION_CHARS`` yields multiple sections, the continuations
+        titled ``"<heading> (cont.)"``, so nothing becomes unsearchable.
+    """
     sections: list[DocSection] = []
     current_heading = source
     current_lines: list[str] = []
@@ -136,7 +153,13 @@ class DocsIndex:
                 continue
             self._sections.extend(split_sections(relative, text))
         for section in self._sections:
-            tokens = _tokenize(section.heading + " " + section.text)
+            # Continuation chunks skip their (repeated) heading terms so a
+            # heading-matching query cannot make tiny tail chunks outrank
+            # the substantive first chunk via length normalization.
+            if section.heading.endswith("(cont.)"):
+                tokens = _tokenize(section.text)
+            else:
+                tokens = _tokenize(section.heading + " " + section.text)
             frequencies: dict[str, float] = {}
             for token in tokens:
                 frequencies[token] = frequencies.get(token, 0.0) + 1.0
