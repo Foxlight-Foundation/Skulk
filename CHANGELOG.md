@@ -9,6 +9,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- The dashboard model-store page now retries transient registry and download
+  request failures until it has both a successful registry snapshot and no
+  active downloads. A brief API connection reset during a fresh-install model
+  download can no longer leave the page stuck at "0 models in store" after the
+  model was registered successfully.
+
 - Disabled the Qwen3.5 2B MLX card's MTP sidecar after clean-install text and
   vision journeys showed repetitive generation until the output limit. The
   same shipped model now uses vanilla decoding, which completes both journeys
