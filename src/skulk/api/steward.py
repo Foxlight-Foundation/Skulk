@@ -22,13 +22,17 @@ import re
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import anyio
 from pydantic import BaseModel, ConfigDict, Field
 
 from skulk.api.types.api import (
     ChatCompletionMessage,
     ChatCompletionRequest,
+    CompletionTokensDetails,
+    PromptTokensDetails,
     ToolCall,
     ToolCallItem,
+    Usage,
 )
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.chunks import (
@@ -364,6 +368,26 @@ class StewardHarness:
         # abandoned stream (client disconnect, cancel button) can stop the
         # runner instead of leaving it generating for nobody.
         self._active_command_id: CommandId | None = None
+        # Aggregated across the turn's inner generations so the terminal
+        # chunk reports real usage instead of null, and the model's actual
+        # terminal reason (e.g. length) is preserved.
+        self._turn_usage: Usage | None = None
+        self._last_finish_reason: Literal["stop", "length", "content_filter"] = "stop"
+
+    def _accumulate_usage(self, usage: "Usage") -> None:
+        """Sum an inner generation's usage into the turn total."""
+        if self._turn_usage is None:
+            self._turn_usage = usage
+            return
+        self._turn_usage = Usage(
+            prompt_tokens=self._turn_usage.prompt_tokens + usage.prompt_tokens,
+            completion_tokens=(
+                self._turn_usage.completion_tokens + usage.completion_tokens
+            ),
+            total_tokens=self._turn_usage.total_tokens + usage.total_tokens,
+            prompt_tokens_details=PromptTokensDetails(),
+            completion_tokens_details=CompletionTokensDetails(),
+        )
 
     def steward_instance(self) -> tuple[InstanceId, str] | None:
         """The current steward placement, as (instance_id, model_id)."""
@@ -510,6 +534,8 @@ class StewardHarness:
                 ChatCompletionMessage(role=message.role, content=message.content)
             )
 
+        self._turn_usage = None
+        self._last_finish_reason = "stop"
         completed = False
         try:
             yield_target = self._run_investigation(messages, model_id, instance_id)
@@ -523,9 +549,13 @@ class StewardHarness:
                 # is not left generating for nobody.
                 abandoned = self._active_command_id
                 self._active_command_id = None
-                # Cancellation is best-effort on teardown.
+                # Teardown usually runs inside an already-cancelled scope
+                # (client disconnect cancels the response task), where an
+                # unshielded await re-raises before the cancel can send.
+                # Shield it, bounded so teardown can never hang.
                 with contextlib.suppress(Exception):
-                    await self._api.send_task_cancellation(abandoned)
+                    with anyio.move_on_after(2, shield=True):
+                        await self._api.send_task_cancellation(abandoned)
 
     async def _run_investigation(
         self,
@@ -604,8 +634,8 @@ class StewardHarness:
             model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
             text=reply,
             token_id=-1,
-            usage=None,
-            finish_reason="stop",
+            usage=self._turn_usage,
+            finish_reason=self._last_finish_reason,
         )
 
     async def _generate(
@@ -622,6 +652,7 @@ class StewardHarness:
         """
         from skulk.api.adapters.chat_completions import (
             chat_request_to_text_generation,
+            usage_from_stats,
         )
         from skulk.shared.types.chunks import (
             ErrorChunk,
@@ -658,7 +689,13 @@ class StewardHarness:
                 case TokenChunk():
                     if not chunk.is_thinking:
                         text_parts.append(chunk.text)
+                    if chunk.finish_reason is not None:
+                        self._last_finish_reason = chunk.finish_reason
+                    if step_usage := chunk.usage or usage_from_stats(chunk.stats):
+                        self._accumulate_usage(step_usage)
                 case ToolCallChunk():
+                    if step_usage := chunk.usage or usage_from_stats(chunk.stats):
+                        self._accumulate_usage(step_usage)
                     tool_calls.extend(
                         ToolCall(id=item.id, index=i, function=item)
                         for i, item in enumerate(chunk.tool_calls)

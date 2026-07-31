@@ -119,7 +119,7 @@ class ModelListModel(BaseModel):
     supports_tensor: bool = Field(default=False)
     tasks: list[str] = Field(default=[])
     is_custom: bool = Field(default=False)
-    system_role: str | None = Field(
+    system_role: Literal["steward"] | None = Field(
         default=None,
         description=(
             "Set for fabric-managed system entries (\"steward\" = the "
