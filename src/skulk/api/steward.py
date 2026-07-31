@@ -281,6 +281,32 @@ _PARAMETER_BLOCK = re.compile(r"<parameter=([\w.-]+)>\n?(.*?)\n?</parameter>", r
 _TOOL_CALL_BLOCK = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
 
 
+_HOLDBACK_MARKERS = ("<tool_call>", "<function=")
+_MAX_MARKER_LEN = max(len(marker) for marker in _HOLDBACK_MARKERS)
+
+
+def splittable_prefix(pending: str) -> int:
+    """How much of ``pending`` is safe to emit as live answer text.
+
+    Returns the index up to which the buffer cannot be part of tool-call
+    markup: everything before the earliest position whose tail is a prefix
+    of (or begins) a marker. Streaming the final answer live requires never
+    emitting half a marker, so the gate holds the smallest suspicious tail
+    and no more.
+    """
+    length = len(pending)
+    for index in range(max(0, length - _MAX_MARKER_LEN), length):
+        tail = pending[index:]
+        for marker in _HOLDBACK_MARKERS:
+            if marker.startswith(tail) or tail.startswith(marker):
+                return index
+    for marker in _HOLDBACK_MARKERS:
+        found = pending.find(marker)
+        if found != -1:
+            return found
+    return length
+
+
 def parse_text_tool_calls(text: str) -> list[ToolCall]:
     """Fallback parser for tool calls left in raw assistant text.
 
@@ -577,9 +603,42 @@ class StewardHarness:
                         ),
                     )
                 )
-            text, tool_calls, error = await self._generate(
+            pending = ""
+            suppressing = False
+            text = ""
+            tool_calls: list[ToolCall] = []
+            error: str | None = None
+            async for kind, payload in self._generate_events(
                 messages, model_id, instance_id
-            )
+            ):
+                if kind == "text" and isinstance(payload, str):
+                    # Live answer streaming with a markup hold-back gate:
+                    # emit only the prefix that cannot be part of tool-call
+                    # markup, and stop emitting for the rest of the step
+                    # the moment a marker begins. Prose emitted before a
+                    # marker (the model narrating its next step) stays
+                    # visible, which reads as progress, not duplication.
+                    if suppressing:
+                        continue
+                    pending += payload
+                    cut = splittable_prefix(pending)
+                    piece, pending = pending[:cut], pending[cut:]
+                    if any(
+                        pending.startswith(marker)
+                        for marker in _HOLDBACK_MARKERS
+                    ):
+                        suppressing = True
+                    if piece:
+                        yield TokenChunk(
+                            model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
+                            text=piece,
+                            token_id=-1,
+                            usage=None,
+                        )
+                elif kind == "result":
+                    text, tool_calls, error = cast(
+                        "tuple[str, list[ToolCall], str | None]", payload
+                    )
             if error is not None:
                 yield ErrorChunk(
                     model=ModelId(STEWARD_VIRTUAL_MODEL_ID), error_message=error
@@ -587,10 +646,11 @@ class StewardHarness:
                 return
             if not tool_calls:
                 tool_calls = parse_text_tool_calls(text)
-                if tool_calls:
-                    text = strip_tool_markup(text)
             if not tool_calls:
-                reply = text.strip()
+                # Final answer: everything safe was streamed live; flush the
+                # held tail (an innocent suspicious suffix like "a<b") and
+                # let the terminal chunk carry usage and the finish reason.
+                reply = pending
                 break
             call = tool_calls[0]
             arguments: dict[str, object] = {}
@@ -638,17 +698,19 @@ class StewardHarness:
             finish_reason=self._last_finish_reason,
         )
 
-    async def _generate(
+    async def _generate_events(
         self,
         messages: list[ChatCompletionMessage],
         model_id: str,
         instance_id: InstanceId,
-    ) -> tuple[str, list[ToolCall], str | None]:
-        """One completion against the steward instance.
+    ) -> "AsyncGenerator[tuple[str, object], None]":
+        """One completion against the steward instance, as live events.
 
-        Returns (text, tool_calls, error_message). Rides the exact
-        chat-completions dispatch path so the capability spine handles the
-        family's prompt rendering and tool-call parsing.
+        Yields ``("text", piece)`` for each non-thinking text piece as it
+        arrives (enabling live answer streaming upstream), then exactly one
+        ``("result", (full_text, tool_calls, error_message))`` terminal.
+        Rides the exact chat-completions dispatch path so the capability
+        spine handles the family's prompt rendering and tool-call parsing.
         """
         from skulk.api.adapters.chat_completions import (
             chat_request_to_text_generation,
@@ -689,6 +751,8 @@ class StewardHarness:
                 case TokenChunk():
                     if not chunk.is_thinking:
                         text_parts.append(chunk.text)
+                        if chunk.text:
+                            yield ("text", chunk.text)
                     if chunk.finish_reason is not None:
                         self._last_finish_reason = chunk.finish_reason
                     if step_usage := chunk.usage or usage_from_stats(chunk.stats):
@@ -703,4 +767,4 @@ class StewardHarness:
                 case _:
                     continue
         self._active_command_id = None
-        return "".join(text_parts), tool_calls, error_message
+        yield ("result", ("".join(text_parts), tool_calls, error_message))

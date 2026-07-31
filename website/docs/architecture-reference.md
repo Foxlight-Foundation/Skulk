@@ -105,7 +105,10 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   `reasoning_content` deltas then the answer as `content`; 404 when the
   mode is disabled). Harness emits the adapters' native chunk vocabulary
   (`run_turn_chunks`), so streaming and non-streaming ride the ordinary
-  adapters unchanged. `GET /v1/models` carries a flagged entry
+  adapters unchanged. The final answer streams token-live behind a markup
+  hold-back gate (`splittable_prefix`): prose emits as it arrives, a
+  suspicious tail holds until disambiguated, and tool markup is never
+  emitted as content. `GET /v1/models` carries a flagged entry
   (`system_role: "steward"`) while enabled. `GET /v1/steward` = presence.
   The earlier bespoke `POST /v1/steward/chat` was removed before any
   release. Ordinary `DELETE /instance/{id}` of the steward is refused 409

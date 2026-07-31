@@ -6290,6 +6290,13 @@ class API:
         self._embedding_queues[command_id], recv = channel[
             EmbeddingChunk | ErrorChunk
         ]()
+        if pending_failure := self._pending_stream_failures.pop(
+            command_id, None
+        ):
+            # A terminal failure beat this stream's registration:
+            # deliver it through the fresh queue so the adapter's
+            # normal error handling engages.
+            self._embedding_queues[command_id].send_nowait(pending_failure)
         try:
             with anyio.fail_after(timeout_seconds):
                 await self._send(command)
@@ -6448,6 +6455,13 @@ class API:
             self._image_generation_queues[command_id], recv = channel[
                 ImageChunk | ErrorChunk
             ]()
+            if pending_failure := self._pending_stream_failures.pop(
+                command_id, None
+            ):
+                # A terminal failure beat this stream's registration:
+                # deliver it through the fresh queue so the adapter's
+                # normal error handling engages.
+                self._image_generation_queues[command_id].send_nowait(pending_failure)
 
             if pending_error := self._take_vision_media_failure(command_id):
                 error_response = ErrorResponse(
@@ -6583,6 +6597,13 @@ class API:
             self._image_generation_queues[command_id], recv = channel[
                 ImageChunk | ErrorChunk
             ]()
+            if pending_failure := self._pending_stream_failures.pop(
+                command_id, None
+            ):
+                # A terminal failure beat this stream's registration:
+                # deliver it through the fresh queue so the adapter's
+                # normal error handling engages.
+                self._image_generation_queues[command_id].send_nowait(pending_failure)
 
             if pending_error := self._take_vision_media_failure(command_id):
                 raise HTTPException(
@@ -8308,13 +8329,14 @@ class API:
                     await queue.send(error_chunk)
                 except (BrokenResourceError, ClosedResourceError):
                     queue_map.pop(task.command_id, None)
-        if not delivered and isinstance(task, task_types.TextGeneration):
+        if not delivered:
+            # Every task family that reaches this point streams through one
+            # of the queue maps above (Realtime returned earlier), so all of
+            # them buffer.
             # No stream queue exists yet: buffer the terminal chunk for the
             # lazily-registered stream to consume at startup, instead of
-            # dropping it and hanging the request. Scoped to text generation,
-            # the only stream that drains this buffer today; buffering for
-            # the other task families would accumulate entries no consumer
-            # takes (their adapters can adopt the same drain as follow-up).
+            # dropping it and hanging the request. Every stream family
+            # drains this buffer at its queue-registration site.
             while len(self._pending_stream_failures) >= 256:
                 oldest = next(iter(self._pending_stream_failures))
                 del self._pending_stream_failures[oldest]
@@ -10860,6 +10882,13 @@ class API:
             self._embedding_queues[command_id], recv = channel[
                 EmbeddingChunk | ErrorChunk
             ]()
+            if pending_failure := self._pending_stream_failures.pop(
+                command_id, None
+            ):
+                # A terminal failure beat this stream's registration:
+                # deliver it through the fresh queue so the adapter's
+                # normal error handling engages.
+                self._embedding_queues[command_id].send_nowait(pending_failure)
 
             await self._send(command)
 
@@ -11011,6 +11040,13 @@ class API:
         )
         command_id = command.command_id
         self._audio_speech_queues[command_id], recv = channel[AudioChunk | ErrorChunk]()
+        if pending_failure := self._pending_stream_failures.pop(
+            command_id, None
+        ):
+            # A terminal failure beat this stream's registration:
+            # deliver it through the fresh queue so the adapter's
+            # normal error handling engages.
+            self._audio_speech_queues[command_id].send_nowait(pending_failure)
         if reference_audio is not None:
             self._speech_media_commands.add(command_id)
             assert target_node is not None
@@ -12872,6 +12908,13 @@ class API:
             self._audio_transcription_queues[command_id], recv = channel[
                 TranscriptionChunk | ErrorChunk
             ]()
+            if pending_failure := self._pending_stream_failures.pop(
+                command_id, None
+            ):
+                # A terminal failure beat this stream's registration:
+                # deliver it through the fresh queue so the adapter's
+                # normal error handling engages.
+                self._audio_transcription_queues[command_id].send_nowait(pending_failure)
             self._stage_audio_transcription_media(command_id, params, audio_bytes)
             await self._send(command)
         except BaseException:
