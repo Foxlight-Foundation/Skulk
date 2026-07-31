@@ -172,12 +172,23 @@ def test_earliest_complete_marker_wins_over_tail_prefix() -> None:
     assert splittable_prefix(text) == text.index("<tool_call>")
 
 
-async def test_malformed_complete_block_never_flushes_as_reply() -> None:
-    """Suppressed markup that parses to nothing is stripped, not leaked."""
-    malformed = "<tool_call>\n<function=broken\n</tool_call> Sorry, done."
+async def test_pure_malformed_block_never_flushes_as_reply() -> None:
+    """A withheld tail that is nothing but markup is a malformed tool
+    attempt and must not leak as content."""
+    malformed = "<tool_call>\n<function=broken\n</tool_call>"
     harness = _ScriptedHarness(turns=[(malformed, [])])
     chunks = await _collect(harness, "status?")
     token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
     content = "".join(c.text for c in token_chunks if not c.is_thinking)
     assert "<tool_call>" not in content
-    assert "Sorry, done." in content
+
+
+async def test_complete_literal_example_survives_in_final_answer() -> None:
+    """Markup embedded in prose is a literal example inside a real answer
+    and must flush intact, complete block included."""
+    answer = "The syntax is <tool_call>example</tool_call>, wrapped exactly so."
+    harness = _ScriptedHarness(turns=[(answer, [])])
+    chunks = await _collect(harness, "how do tools work?")
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert content == answer

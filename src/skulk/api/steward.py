@@ -658,11 +658,15 @@ class StewardHarness:
                 tool_calls = parse_text_tool_calls(text)
             if not tool_calls:
                 # Final answer: everything safe was streamed live. When
-                # suppression fired but nothing parsed, strip any complete
-                # markup blocks from the withheld text before flushing:
-                # prose that MENTIONS a lone marker survives, while a
-                # malformed complete-looking block never leaks as content.
-                reply = strip_tool_markup(pending) if suppressing else pending
+                # suppression fired but nothing parsed, the withheld text is
+                # ambiguous: markup embedded in prose is a literal example
+                # inside a real answer and must survive intact, while text
+                # that is nothing but markup is a malformed tool attempt
+                # that must not leak as content.
+                if suppressing and not strip_tool_markup(pending).strip():
+                    reply = ""
+                else:
+                    reply = pending
                 break
             call = tool_calls[0]
             arguments: dict[str, object] = {}
