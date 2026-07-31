@@ -284,3 +284,93 @@ async def test_token_stream_registration_drains_buffered_failure() -> None:
 
     assert chunks == [buffered]
     assert command_id not in api._pending_stream_failures
+
+
+async def test_every_stream_family_buffers_and_drains_at_registration() -> None:
+    """Each non-text family's failed task buffers its terminal chunk in
+    _terminate_command_stream, and the family's real registration path
+    (_open_stream_queue, shared by every non-text handler) drains it into
+    the fresh queue so the request terminates instead of hanging."""
+    from skulk.api.types.api import ImageGenerationTaskParams
+    from skulk.shared.types.audio import (
+        AudioTranscriptionTaskParams,
+        SpeechSynthesisTaskParams,
+    )
+    from skulk.shared.types.embedding import TextEmbeddingTaskParams
+    from skulk.shared.types.tasks import (
+        AudioTranscription,
+        ImageGeneration,
+        SpeechSynthesis,
+        TextEmbedding,
+    )
+
+    owner = NodeId("api-node")
+    cases: list[tuple[Any, str]] = [
+        (
+            ImageGeneration(
+                task_id=TaskId(),
+                instance_id=InstanceId(),
+                task_status=TaskStatus.Failed,
+                command_id=CommandId(),
+                owner_node=owner,
+                task_params=ImageGenerationTaskParams(
+                    prompt="a fox", model="image-model"
+                ),
+            ),
+            "_image_generation_queues",
+        ),
+        (
+            TextEmbedding(
+                task_id=TaskId(),
+                instance_id=InstanceId(),
+                task_status=TaskStatus.Failed,
+                command_id=CommandId(),
+                owner_node=owner,
+                task_params=TextEmbeddingTaskParams(
+                    model=ModelId("embedding-model"), input_texts=["hello"]
+                ),
+            ),
+            "_embedding_queues",
+        ),
+        (
+            SpeechSynthesis(
+                task_id=TaskId(),
+                instance_id=InstanceId(),
+                task_status=TaskStatus.Failed,
+                command_id=CommandId(),
+                owner_node=owner,
+                task_params=SpeechSynthesisTaskParams(
+                    model=ModelId("tts-model"), input_text="hello"
+                ),
+            ),
+            "_audio_speech_queues",
+        ),
+        (
+            AudioTranscription(
+                task_id=TaskId(),
+                instance_id=InstanceId(),
+                task_status=TaskStatus.Failed,
+                command_id=CommandId(),
+                owner_node=owner,
+                task_params=AudioTranscriptionTaskParams(
+                    model=ModelId("stt-model"), audio_sha256="0" * 64
+                ),
+            ),
+            "_audio_transcription_queues",
+        ),
+    ]
+    for task, queue_map_name in cases:
+        api = _make_api()
+        api.state = State().model_copy(update={"tasks": {task.task_id: task}})
+
+        await api._terminate_command_stream(task.task_id, "instance gone")
+
+        buffered = api._pending_stream_failures[task.command_id]
+        assert isinstance(buffered, ErrorChunk), queue_map_name
+        assert buffered.model == ModelId(task.task_params.model), queue_map_name
+
+        queue_map = getattr(api, queue_map_name)
+        receiver = api._open_stream_queue(queue_map, task.command_id)
+        assert receiver.receive_nowait() is buffered, queue_map_name
+        assert task.command_id not in api._pending_stream_failures, queue_map_name
+        assert task.command_id in queue_map, queue_map_name

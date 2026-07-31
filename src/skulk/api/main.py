@@ -6287,16 +6287,7 @@ class API:
             ),
         )
         command_id = command.command_id
-        self._embedding_queues[command_id], recv = channel[
-            EmbeddingChunk | ErrorChunk
-        ]()
-        if pending_failure := self._pending_stream_failures.pop(
-            command_id, None
-        ):
-            # A terminal failure beat this stream's registration:
-            # deliver it through the fresh queue so the adapter's
-            # normal error handling engages.
-            self._embedding_queues[command_id].send_nowait(pending_failure)
+        recv = self._open_stream_queue(self._embedding_queues, command_id)
         try:
             with anyio.fail_after(timeout_seconds):
                 await self._send(command)
@@ -6452,16 +6443,9 @@ class API:
         images_complete = 0
 
         try:
-            self._image_generation_queues[command_id], recv = channel[
-                ImageChunk | ErrorChunk
-            ]()
-            if pending_failure := self._pending_stream_failures.pop(
-                command_id, None
-            ):
-                # A terminal failure beat this stream's registration:
-                # deliver it through the fresh queue so the adapter's
-                # normal error handling engages.
-                self._image_generation_queues[command_id].send_nowait(pending_failure)
+            recv = self._open_stream_queue(
+                self._image_generation_queues, command_id
+            )
 
             if pending_error := self._take_vision_media_failure(command_id):
                 error_response = ErrorResponse(
@@ -6594,16 +6578,9 @@ class API:
         stats: ImageGenerationStats | None = None
 
         try:
-            self._image_generation_queues[command_id], recv = channel[
-                ImageChunk | ErrorChunk
-            ]()
-            if pending_failure := self._pending_stream_failures.pop(
-                command_id, None
-            ):
-                # A terminal failure beat this stream's registration:
-                # deliver it through the fresh queue so the adapter's
-                # normal error handling engages.
-                self._image_generation_queues[command_id].send_nowait(pending_failure)
+            recv = self._open_stream_queue(
+                self._image_generation_queues, command_id
+            )
 
             if pending_error := self._take_vision_media_failure(command_id):
                 raise HTTPException(
@@ -8270,6 +8247,26 @@ class API:
                 await queue.send(chunk)
             except (BrokenResourceError, ClosedResourceError):
                 self._audio_transcription_queues.pop(command_id, None)
+
+    def _open_stream_queue[ChunkT](
+        self,
+        queue_map: dict[CommandId, Sender[ChunkT | ErrorChunk]],
+        command_id: CommandId,
+    ) -> Receiver[ChunkT | ErrorChunk]:
+        """Register a fresh per-command stream queue, draining any buffered
+        terminal failure.
+
+        A fast local TaskFailed can beat the lazily-registered stream queue,
+        leaving its terminal chunk in the pending-failure buffer; every
+        non-text stream family opens its queue through here so that chunk is
+        delivered through the fresh queue instead of the request hanging
+        (the text stream drains the same buffer inside its generator).
+        """
+        sender, receiver = channel[ChunkT | ErrorChunk]()
+        queue_map[command_id] = sender
+        if pending_failure := self._pending_stream_failures.pop(command_id, None):
+            sender.send_nowait(pending_failure)
+        return receiver
 
     async def _terminate_command_stream(
         self, task_id: task_types.TaskId, error_message: str
@@ -10882,16 +10879,7 @@ class API:
         command_id = command.command_id
 
         try:
-            self._embedding_queues[command_id], recv = channel[
-                EmbeddingChunk | ErrorChunk
-            ]()
-            if pending_failure := self._pending_stream_failures.pop(
-                command_id, None
-            ):
-                # A terminal failure beat this stream's registration:
-                # deliver it through the fresh queue so the adapter's
-                # normal error handling engages.
-                self._embedding_queues[command_id].send_nowait(pending_failure)
+            recv = self._open_stream_queue(self._embedding_queues, command_id)
 
             await self._send(command)
 
@@ -11042,14 +11030,7 @@ class API:
             target_instance_id=target_instance_id,
         )
         command_id = command.command_id
-        self._audio_speech_queues[command_id], recv = channel[AudioChunk | ErrorChunk]()
-        if pending_failure := self._pending_stream_failures.pop(
-            command_id, None
-        ):
-            # A terminal failure beat this stream's registration:
-            # deliver it through the fresh queue so the adapter's
-            # normal error handling engages.
-            self._audio_speech_queues[command_id].send_nowait(pending_failure)
+        recv = self._open_stream_queue(self._audio_speech_queues, command_id)
         if reference_audio is not None:
             self._speech_media_commands.add(command_id)
             assert target_node is not None
@@ -12908,16 +12889,9 @@ class API:
         command = AudioTranscription(owner_node=self.node_id, task_params=params)
         command_id = command.command_id
         try:
-            self._audio_transcription_queues[command_id], recv = channel[
-                TranscriptionChunk | ErrorChunk
-            ]()
-            if pending_failure := self._pending_stream_failures.pop(
-                command_id, None
-            ):
-                # A terminal failure beat this stream's registration:
-                # deliver it through the fresh queue so the adapter's
-                # normal error handling engages.
-                self._audio_transcription_queues[command_id].send_nowait(pending_failure)
+            recv = self._open_stream_queue(
+                self._audio_transcription_queues, command_id
+            )
             self._stage_audio_transcription_media(command_id, params, audio_bytes)
             await self._send(command)
         except BaseException:
