@@ -409,6 +409,7 @@ Notes:
 - Treat `resolved_capabilities` as the default tool-free request path; request-specific options such as tools can change prompt rendering and related resolved values for mixed-mode model families.
 - Thinking-control semantics are model-aware:
   - if `supports_thinking_toggle` is `true`, send `enable_thinking=true` or `false` explicitly
+  - if both `enable_thinking` and `reasoning_effort` are omitted for a model with a known toggleable capability profile, Skulk disables thinking using the profile's disabled effort
   - `reasoning_effort="none"` disables thinking for toggleable models
   - if a model does not support toggleable thinking, Skulk ignores explicit toggle overrides but still preserves explicit non-disabled reasoning-effort hints when the model family supports them
 
