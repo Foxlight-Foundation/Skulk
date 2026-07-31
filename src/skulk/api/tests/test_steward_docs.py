@@ -72,3 +72,14 @@ def test_how_to_guides_are_indexed() -> None:
     assert results is not None and results
     sources = {s.source for s in results}
     assert any("docs/" in src for src in sources)
+
+
+def test_shell_comments_in_fences_are_not_headings() -> None:
+    text = (
+        "# Guide\nIntro line.\n```bash\n# install it\nmake install\n```\n"
+        "Outro line.\n## Next\nmore"
+    )
+    sections = split_sections("doc.md", text)
+    assert [s.heading for s in sections] == ["Guide", "Next"]
+    assert "# install it" in sections[0].text
+    assert "Outro line." in sections[0].text

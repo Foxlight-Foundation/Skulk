@@ -135,8 +135,12 @@ def split_sections(source: str, text: str) -> list[DocSection]:
             first = False
             offset = end + (1 if end < len(body) else 0)
 
+    in_fence = False
     for line in text.splitlines():
-        if line.startswith("#"):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            current_lines.append(line)
+        elif line.startswith("#") and not in_fence:
             flush()
             current_heading = line.lstrip("# ").strip() or source
             current_lines = []
@@ -203,7 +207,20 @@ class DocsIndex:
                 )
 
     def search(self, query: str) -> list[DocSection] | None:
-        """Top sections for the query, or None when no corpus exists."""
+        """Rank documentation sections against a query.
+
+        Args:
+            query: Free-text search terms; common filler words are ignored.
+
+        Returns:
+            Up to ``MAX_RESULTS`` sections by descending relevance. An
+            empty list means the corpus exists but nothing matched;
+            ``None`` means this installation ships no documentation
+            directory at all.
+
+        Side effects:
+            The first call builds the process-cached index.
+        """
         with self._lock:
             if not self._built:
                 self._build()
