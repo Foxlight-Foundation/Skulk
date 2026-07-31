@@ -92,7 +92,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   task; busy-wedge belongs to the worker wedge detector). Probe = minimal
   pinned no-tools generation, code-checked non-empty text within 120s; 3
   consecutive failures send DeleteInstance and the invariant re-places.
-  Pure target selection = `canary_probe_target` (steward.py).
+  Pure target selection = `canary_probe_target` (steward.py). Limitation:
+  requires the hosting node to run an API; split API/worker shapes = #734.
 - Invariant: `Master._maintain_steward_placement` runs each planning tick
   behind the topology-settle grace: places first servable card from the
   preference list (min_nodes=1, MlxRing meta), tears down duplicate

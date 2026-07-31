@@ -2971,6 +2971,11 @@ class API:
         model judges another model's health. Skips whenever the mode is
         off, this node is not the host, the runner is not idle-Ready, or a
         task is in flight (the worker's wedge detector owns the busy case).
+
+        Known limitation (#734): the elected prober is the steward's
+        hosting node, so a split deployment whose hosting worker runs
+        --no-api has no canary; probing from any API node needs API
+        presence advertised in node resources first.
         """
         from skulk.api.steward import (
             CANARY_FAILURE_THRESHOLD,
