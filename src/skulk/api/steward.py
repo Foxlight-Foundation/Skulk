@@ -660,10 +660,13 @@ class StewardHarness:
                 # Final answer: everything safe was streamed live. When
                 # suppression fired but nothing parsed, the withheld text is
                 # ambiguous: markup embedded in prose is a literal example
-                # inside a real answer and must survive intact, while text
+                # inside a real answer and must survive intact, while a turn
                 # that is nothing but markup is a malformed tool attempt
-                # that must not leak as content.
-                if suppressing and not strip_tool_markup(pending).strip():
+                # that must not leak as content. Judge on the FULL turn
+                # text: prose before the block has already streamed, so the
+                # withheld suffix alone can be markup-only even when the
+                # answer has surrounding prose.
+                if suppressing and not strip_tool_markup(text).strip():
                     reply = ""
                 else:
                     reply = pending

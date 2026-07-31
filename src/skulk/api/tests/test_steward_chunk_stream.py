@@ -183,6 +183,18 @@ async def test_pure_malformed_block_never_flushes_as_reply() -> None:
     assert "<tool_call>" not in content
 
 
+async def test_prefix_only_literal_example_survives_in_final_answer() -> None:
+    """An answer whose prose all precedes the example block must not be
+    truncated: the prose streams live, and the withheld block (markup-only
+    on its own) still flushes because the FULL turn contains prose."""
+    answer = "The syntax is <tool_call>example</tool_call>"
+    harness = _ScriptedHarness(turns=[(answer, [])])
+    chunks = await _collect(harness, "how do tools work?")
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert content == answer
+
+
 async def test_complete_literal_example_survives_in_final_answer() -> None:
     """Markup embedded in prose is a literal example inside a real answer
     and must flush intact, complete block included."""
