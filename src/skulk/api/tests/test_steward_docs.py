@@ -9,8 +9,14 @@ from skulk.api.steward_docs import search_docs, split_sections
 def test_sections_split_on_headings_and_bound_length() -> None:
     text = "# Alpha\nbody one\n## Beta\n" + ("x" * 5000)
     sections = split_sections("doc.md", text)
-    assert [s.heading for s in sections] == ["Alpha", "Beta"]
-    assert len(sections[1].text) <= 2400
+    # The oversized Beta section chunks into bounded continuations.
+    assert [s.heading for s in sections] == [
+        "Alpha",
+        "Beta",
+        "Beta (cont.)",
+        "Beta (cont.)",
+    ]
+    assert all(len(s.text) <= 2400 for s in sections)
 
 
 def test_search_finds_relevant_repo_docs() -> None:

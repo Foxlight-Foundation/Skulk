@@ -31,9 +31,7 @@ MAX_RESULTS = 4
 _WORD_RE = re.compile(r"[a-z0-9_./-]+")
 
 _QUERY_STOPWORDS = frozenset(
-    """a an and are can d do does doing for from how i in is it its of on or
-    s t that the this to was we what when where which who why will with you
-    your""".split()
+    ["a", "an", "and", "are", "can", "d", "do", "does", "doing", "for", "from", "how", "i", "in", "is", "it", "its", "of", "on", "or", "s", "t", "that", "the", "this", "to", "was", "we", "what", "when", "where", "which", "who", "why", "will", "with", "you", "your"]
 )
 """Filler terms dropped from queries so 'what does zenoh do' ranks on
 'zenoh' rather than on sections dense in common words. Applied to queries
