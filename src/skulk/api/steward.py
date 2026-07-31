@@ -523,18 +523,26 @@ class StewardHarness:
                 return json.dumps(
                     {"results": [], "note": "no documentation section matched"}
                 )
-            return _bounded(
-                {
-                    "results": [
-                        {
-                            "source": section.source,
-                            "heading": section.heading,
-                            "text": section.text[:MAX_RESULT_TEXT_CHARS],
-                        }
-                        for section in sections
-                    ]
-                }
-            )
+            # Serialized size governs, not raw text length: escaping and
+            # metadata overhead can push a payload past the tool cap even
+            # with sliced text, and a truncated-mid-JSON result is worse
+            # than fewer results.
+            doc_results: list[dict[str, str]] = []
+            for section in sections:
+                candidate = doc_results + [
+                    {
+                        "source": section.source,
+                        "heading": section.heading,
+                        "text": section.text[:MAX_RESULT_TEXT_CHARS],
+                    }
+                ]
+                if (
+                    len(json.dumps({"results": candidate}, indent=1))
+                    > MAX_TOOL_RESULT_CHARS
+                ):
+                    break
+                doc_results = candidate
+            return json.dumps({"results": doc_results}, indent=1)
         if name == "get_model_catalog":
             models = await api.get_models(status=None)
             return _bounded(

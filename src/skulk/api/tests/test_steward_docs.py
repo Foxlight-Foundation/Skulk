@@ -57,3 +57,18 @@ def test_filler_terms_do_not_dominate_ranking() -> None:
     assert results is not None and results
     joined = " ".join((s.heading + " " + s.text).lower() for s in results)
     assert "zenoh" in joined
+
+
+def test_chunk_boundaries_never_split_terms() -> None:
+    body = ("word " * 700).strip()  # far past one chunk
+    sections = split_sections("doc.md", "# Big\n" + body)
+    for section in sections:
+        # every chunk is whole words: reassembling with spaces loses nothing
+        assert all(token == "word" for token in section.text.split())
+
+
+def test_how_to_guides_are_indexed() -> None:
+    results = search_docs("run skulk as a service")
+    assert results is not None and results
+    sources = {s.source for s in results}
+    assert any("docs/" in src for src in sources)

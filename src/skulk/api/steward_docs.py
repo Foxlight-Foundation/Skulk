@@ -43,23 +43,43 @@ _QUERY_STOPWORDS = frozenset(
 'zenoh' rather than on sections dense in common words. Applied to queries
 only; section indexing keeps every term."""
 
-_DOC_SOURCES: tuple[str, ...] = (
+_ANCHOR_SOURCES: tuple[str, ...] = (
     "website/docs/architecture-reference.md",
     "website/docs/api-guide.md",
-    "website/docs/architecture.md",
-    "website/docs/node-doctor.md",
-    "README.md",
 )
-"""Repo-relative documentation files indexed, most fact-dense first.
+"""Indexed first: architecture-reference.md exists specifically as the
+LLM-readable fact sheet, making it the corpus anchor."""
 
-architecture-reference.md exists specifically as the LLM-readable fact
-sheet, which makes it the corpus anchor.
-"""
+
+def _doc_sources(root: Path) -> list[str]:
+    """Every top-level docs page plus the README, anchors first.
+
+    Globbing instead of an allowlist keeps dedicated how-to guides (service
+    setup, logging, and future pages) searchable without maintenance;
+    generated content lives in gitignored subdirectories and is untouched
+    by the top-level glob.
+    """
+    sources = [s for s in _ANCHOR_SOURCES if (root / s).is_file()]
+    docs_dir = root / "website" / "docs"
+    for path in sorted(docs_dir.glob("*.md")):
+        relative = str(path.relative_to(root))
+        if relative not in sources:
+            sources.append(relative)
+    if (root / "README.md").is_file():
+        sources.append("README.md")
+    return sources
 
 
 @dataclass(frozen=True)
 class DocSection:
-    """One heading-delimited slice of a documentation file."""
+    """One heading-delimited slice of a documentation file.
+
+    Attributes:
+        source: Repo-relative path of the document the slice came from.
+        heading: The section's heading text; continuation chunks of an
+            oversized section carry a ``"(cont.)"`` suffix.
+        text: The section body, bounded to ``MAX_SECTION_CHARS``.
+    """
 
     source: str
     heading: str
@@ -94,16 +114,26 @@ def split_sections(source: str, text: str) -> list[DocSection]:
         # Long sections are chunked, not truncated: truncating before the
         # index is built would make every fact after the cutoff
         # unsearchable rather than merely bounding returned context.
-        for offset in range(0, len(body), MAX_SECTION_CHARS):
-            chunk = body[offset : offset + MAX_SECTION_CHARS]
-            heading = (
-                current_heading
-                if offset == 0
-                else f"{current_heading} (cont.)"
-            )
-            sections.append(
-                DocSection(source=source, heading=heading, text=chunk)
-            )
+        offset = 0
+        first = True
+        while offset < len(body):
+            end = min(offset + MAX_SECTION_CHARS, len(body))
+            if end < len(body):
+                # Cut at the last whitespace inside the window so a term
+                # spanning the boundary never becomes unsearchable.
+                boundary = body.rfind(" ", offset, end)
+                newline_boundary = body.rfind("\n", offset, end)
+                boundary = max(boundary, newline_boundary)
+                if boundary > offset:
+                    end = boundary
+            chunk = body[offset:end].strip()
+            if chunk:
+                heading = current_heading if first else f"{current_heading} (cont.)"
+                sections.append(
+                    DocSection(source=source, heading=heading, text=chunk)
+                )
+            first = False
+            offset = end + (1 if end < len(body) else 0)
 
     for line in text.splitlines():
         if line.startswith("#"):
@@ -143,7 +173,7 @@ class DocsIndex:
         root = _repo_root()
         if root is None:
             return
-        for relative in _DOC_SOURCES:
+        for relative in _doc_sources(root):
             path = root / relative
             if not path.is_file():
                 continue
