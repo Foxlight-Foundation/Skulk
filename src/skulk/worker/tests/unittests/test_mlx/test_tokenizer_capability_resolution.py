@@ -196,3 +196,96 @@ def test_get_tokenizer_passes_shard_model_card_to_tokenizer_loader(
     assert captured["model_path"] == tmp_path
     assert captured["model_card"] == card
     assert captured["trust_remote_code"] == card.trust_remote_code
+
+
+class _QwenTemplateBackend(_TokenizerBackend):
+    """Backend whose chat template speaks the <tool_call> dialect but that
+    arrives without an inferred tool parser (the mlx-vlm vision-path shape,
+    #728)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.chat_template = (
+            "{% if tools %}<tool_call>\n<function=example>\n</function>\n"
+            "</tool_call>{% endif %}"
+        )
+
+
+def test_generic_format_wires_text_parser_when_template_speaks_tool_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#728: a Generic-format card whose tokenizer lacks an inferred parser
+    but whose template uses <tool_call> gets the shared text parser wired, so
+    the MLX lane (including vision loaders) emits structured tool calls."""
+    card = ModelCard(
+        model_id=ModelId("mlx-community/Qwen3.5-4B-MLX-4bit"),
+        storage_size=Memory.from_mb(100),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        capabilities=["text"],
+        family="qwen",
+        tooling=ToolingCardConfig(tool_call_format=ToolCallFormat.Generic),
+    )
+
+    def _fake_load_tokenizer(*_args: object, **_kwargs: object) -> TokenizerWrapper:
+        return TokenizerWrapper(_QwenTemplateBackend())
+
+    monkeypatch.setattr(
+        "skulk.worker.engines.mlx.utils_mlx.load_tokenizer",
+        _fake_load_tokenizer,
+    )
+
+    tokenizer = load_tokenizer_for_model_id(
+        card.model_id,
+        tmp_path,
+        model_card=card,
+    )
+    assert tokenizer.tool_call_start == "<tool_call>"
+    assert tokenizer.tool_call_end == "</tool_call>"
+    parser = cast(
+        Callable[[str], list[dict[str, object]]] | None,
+        tokenizer.tool_parser,
+    )
+    assert parser is not None
+    parsed = parser(
+        "\n<function=get_node_resources>\n<parameter=node_id>\nmac-den\n"
+        "</parameter>\n</function>\n"
+    )
+    assert parsed == [
+        {"name": "get_node_resources", "arguments": '{"node_id": "mac-den"}'}
+    ]
+
+
+def test_generic_format_leaves_other_template_dialects_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    card = ModelCard(
+        model_id=ModelId("mlx-community/some-other-model"),
+        storage_size=Memory.from_mb(100),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        capabilities=["text"],
+        family="other",
+        tooling=ToolingCardConfig(tool_call_format=ToolCallFormat.Generic),
+    )
+
+    def _fake_load_tokenizer(*_args: object, **_kwargs: object) -> TokenizerWrapper:
+        return TokenizerWrapper(_TokenizerBackend())
+
+    monkeypatch.setattr(
+        "skulk.worker.engines.mlx.utils_mlx.load_tokenizer",
+        _fake_load_tokenizer,
+    )
+
+    tokenizer = load_tokenizer_for_model_id(
+        card.model_id,
+        tmp_path,
+        model_card=card,
+    )
+    assert cast(object, tokenizer.tool_parser) is None

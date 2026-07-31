@@ -28,6 +28,7 @@ import { TelemetryConsentModal } from './components/layout/TelemetryConsentModal
 import { ModelStorePage } from './components/pages/DownloadsPage';
 import { ChatView } from './components/pages/ChatView';
 import { OperatorPage } from './components/pages/OperatorPage';
+import { StewardChatView } from './components/pages/StewardChatView';
 import { InstancePanel, type InstanceCardData } from './components/layout/InstancePanel';
 import { ConversationPanel } from './components/layout/ConversationPanel';
 import { addToast } from './hooks/useToast';
@@ -265,7 +266,7 @@ export function App() {
   // On load, honour the URL path so /operator (and future deep-links) work.
   useEffect(() => {
     const path = window.location.pathname.replace(/^\//, '') || 'cluster';
-    const valid: typeof activeRoute[] = ['cluster', 'model-store', 'chat', 'operator'];
+    const valid: typeof activeRoute[] = ['cluster', 'model-store', 'chat', 'steward', 'operator'];
     if (valid.includes(path as typeof activeRoute)) {
       dispatch(uiActions.setActiveRoute(path as typeof activeRoute));
     }
@@ -697,6 +698,8 @@ export function App() {
                 readyInstances={instanceCards}
                 realtimeTranscriptionAvailable={realtimeTranscriptionAvailable}
               />
+            ) : activeRoute === 'steward' ? (
+              <StewardChatView />
             ) : activeRoute === 'operator' ? (
               <OperatorPage />
             ) : topology ? (
