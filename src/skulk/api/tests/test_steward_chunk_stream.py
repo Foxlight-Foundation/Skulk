@@ -33,15 +33,17 @@ class _ScriptedHarness(StewardHarness):
         self.executed.append(name)
         return '{"ok": true}'
 
-    async def _generate(
+    async def _generate_events(
         self,
         messages: list[Any],
         model_id: str,
         instance_id: InstanceId,
-    ) -> tuple[str, list[ToolCall], str | None]:
+    ):
         text, calls = self._turns[min(self._cursor, len(self._turns) - 1)]
         self._cursor += 1
-        return text, calls, None
+        if text:
+            yield ("text", text)
+        yield ("result", (text, calls, None))
 
 
 def _call(name: str) -> ToolCall:
@@ -66,12 +68,12 @@ async def test_tool_steps_stream_as_thinking_then_reply_stops() -> None:
         ]
     )
     chunks = await _collect(harness, "Is the cluster healthy?")
-    assert [type(c) for c in chunks] == [TokenChunk, TokenChunk]
-    first, last = cast(TokenChunk, chunks[0]), cast(TokenChunk, chunks[1])
-    assert first.is_thinking and "get_cluster_state" in first.text
-    assert not last.is_thinking
-    assert last.text == "All healthy."
-    assert last.finish_reason == "stop"
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    assert token_chunks[0].is_thinking
+    assert "get_cluster_state" in token_chunks[0].text
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert content == "All healthy."
+    assert token_chunks[-1].finish_reason == "stop"
     assert harness.executed == ["get_cluster_state"]
 
 
@@ -102,10 +104,12 @@ async def test_text_markup_tool_calls_are_recovered() -> None:
     )
     chunks = await _collect(harness, "run a checkup")
     assert harness.executed == ["run_doctor"]
-    last = chunks[-1]
-    assert isinstance(last, TokenChunk)
-    assert last.text == "Doctor says fine."
-    assert last.model == ModelId("skulk/steward")
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert content == "Doctor says fine."
+    assert token_chunks[-1].model == ModelId("skulk/steward")
+    # The markup step's text was held back, never streamed as content.
+    assert "<function=" not in content
 
 
 async def test_abandoned_stream_cancels_active_generation() -> None:
@@ -127,3 +131,76 @@ async def test_abandoned_stream_cancels_active_generation() -> None:
     assert isinstance(first, TokenChunk)
     await stream.aclose()
     assert cancelled == ["cmd-inner-1"]
+
+
+async def test_final_answer_streams_live_with_holdback() -> None:
+    """Answer pieces stream as they arrive; markup-suspicious tails hold."""
+    harness = _ScriptedHarness(turns=[("The cluster looks a<b fine.", [])])
+    chunks = await _collect(harness, "status?")
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert content == "The cluster looks a<b fine."
+    # more than one content chunk proves live emission plus flushed tail
+    assert len([c for c in token_chunks if not c.is_thinking]) >= 2
+
+
+def test_splittable_prefix_gates_only_marker_prefixes() -> None:
+    from skulk.api.steward import splittable_prefix
+
+    assert splittable_prefix("plain words") == len("plain words")
+    held = splittable_prefix("answer <tool")
+    assert "answer <tool"[held:] == "<tool"
+    assert splittable_prefix("a<b compare") == len("a<b compare")
+    assert splittable_prefix("ends with <") == len("ends with ")
+
+
+async def test_false_marker_mention_is_not_lost() -> None:
+    """An answer that MENTIONS markup syntax keeps its full text."""
+    answer = "Tools are invoked with <tool_call> blocks, like this example."
+    harness = _ScriptedHarness(turns=[(answer, [])])
+    chunks = await _collect(harness, "how do tools work?")
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert content == answer
+
+
+def test_earliest_complete_marker_wins_over_tail_prefix() -> None:
+    from skulk.api.steward import splittable_prefix
+
+    assert splittable_prefix("<tool_call>\n<function=") == 0
+    text = "answer first <tool_call>\n<function="
+    assert splittable_prefix(text) == text.index("<tool_call>")
+
+
+async def test_pure_malformed_block_never_flushes_as_reply() -> None:
+    """A withheld tail that is nothing but markup is a malformed tool
+    attempt and must not leak as content."""
+    malformed = "<tool_call>\n<function=broken\n</tool_call>"
+    harness = _ScriptedHarness(turns=[(malformed, [])])
+    chunks = await _collect(harness, "status?")
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert "<tool_call>" not in content
+
+
+async def test_prefix_only_literal_example_survives_in_final_answer() -> None:
+    """An answer whose prose all precedes the example block must not be
+    truncated: the prose streams live, and the withheld block (markup-only
+    on its own) still flushes because the FULL turn contains prose."""
+    answer = "The syntax is <tool_call>example</tool_call>"
+    harness = _ScriptedHarness(turns=[(answer, [])])
+    chunks = await _collect(harness, "how do tools work?")
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert content == answer
+
+
+async def test_complete_literal_example_survives_in_final_answer() -> None:
+    """Markup embedded in prose is a literal example inside a real answer
+    and must flush intact, complete block included."""
+    answer = "The syntax is <tool_call>example</tool_call>, wrapped exactly so."
+    harness = _ScriptedHarness(turns=[(answer, [])])
+    chunks = await _collect(harness, "how do tools work?")
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert content == answer
