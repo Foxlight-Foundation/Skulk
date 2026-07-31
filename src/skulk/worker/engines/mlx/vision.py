@@ -712,7 +712,26 @@ def build_vision_prompt(
     enable_thinking: bool | None = None,
     reasoning_effort: ReasoningEffort | None = None,
 ) -> str:
-    """Build a full prompt string with image placeholders expanded to features."""
+    """Build a full prompt string with image placeholders expanded to features.
+
+    Args:
+        tokenizer: Tokenizer whose chat template renders the textual turns.
+        chat_template_messages: OpenAI-style chat messages that may include
+            image parts.
+        n_tokens_per_image: Number of placeholder tokens each image expands to.
+        image_token: Placeholder token text used by the model's vision template.
+        model_type: Optional model family override for custom prompt renderers.
+        boi_token_id: Optional beginning-of-image token for framed templates.
+        eoi_token_id: Optional end-of-image token for framed templates.
+        enable_thinking: Explicit thinking toggle forwarded to templates that
+            support it.
+        reasoning_effort: Optional reasoning effort forwarded to templates that
+            support it.
+
+    Returns:
+        The rendered prompt with each image placeholder expanded to match the
+        encoded vision feature count.
+    """
     return _build_vision_prompt_with_debug(
         tokenizer,
         chat_template_messages,
@@ -1621,6 +1640,23 @@ class VisionProcessor:
         enable_thinking: bool | None = None,
         reasoning_effort: ReasoningEffort | None = None,
     ) -> VisionResult:
+        """Convert images and chat messages into model-ready vision inputs.
+
+        Args:
+            images: Base64-encoded image payloads from the request.
+            chat_template_messages: Chat messages containing the image parts.
+            tokenizer: Tokenizer used to render and encode the multimodal prompt.
+            model: Loaded MLX model receiving the resulting prompt inputs.
+            task_id: Optional task identifier for diagnostics.
+            enable_thinking: Explicit thinking toggle forwarded to the prompt
+                renderer.
+            reasoning_effort: Optional reasoning effort forwarded to the prompt
+                renderer.
+
+        Returns:
+            Vision preprocessing output containing prompt tokens, media regions,
+            and either fused embeddings or native image tensors.
+        """
         logger.info(f"Vision pipeline: {len(images)} image(s)")
         record_runner_phase(
             "vision_preprocess",
@@ -1993,6 +2029,27 @@ def prepare_vision(
     reasoning_effort: ReasoningEffort | None = None,
 ) -> VisionResult | None:
     """Encode images and build the vision-augmented prompt.
+
+    Args:
+        images: Base64-encoded image payloads, or ``None`` for text-only tasks.
+        chat_template_messages: Chat messages preserving the request's image
+            placement.
+        vision_processor: Processor configured for the selected vision model.
+        tokenizer: Tokenizer used by the model's chat template.
+        model: Loaded MLX model receiving the vision-preprocessed inputs.
+        task_id: Optional task identifier for diagnostics.
+        enable_thinking: Explicit thinking toggle forwarded to vision prompt
+            rendering.
+        reasoning_effort: Optional reasoning effort forwarded to vision prompt
+            rendering.
+
+    Returns:
+        ``None`` for requests without images, otherwise a ``VisionResult`` ready
+        for generation.
+
+    Raises:
+        VisionPreprocessingError: Raised when a request contains images but the
+            prompt cannot be built without dropping or hallucinating them.
 
     Returns ``None`` only when the request carried no images. A request that
     does carry images either gets them spliced into the prompt or raises
