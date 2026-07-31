@@ -493,7 +493,10 @@ class StewardHarness:
         )
         chunk_stream = api.text_generation_chunk_stream(command, task_params)
         got_text = False
-        stream_done = False
+        # No manual cancellation on timeout: move_on_after cancels the
+        # stream iteration, and the chunk stream's own cancellation handling
+        # already sends TaskCancelled and finalizes; a second cancel here
+        # would just duplicate it for an already-finalized command.
         with anyio.move_on_after(CANARY_PROBE_TIMEOUT_SECONDS):
             async for chunk in chunk_stream:
                 if isinstance(chunk, ErrorChunk):
@@ -505,15 +508,7 @@ class StewardHarness:
                 ):
                     got_text = True
                 if isinstance(chunk, TokenChunk) and chunk.finish_reason is not None:
-                    stream_done = True
                     break
-        if not got_text and not stream_done:
-            # Deadline elapsed mid-stream: stop the probe's task so a wedged
-            # runner is not left holding it. A stream that reached its
-            # terminal chunk already finalized; cancelling a finished
-            # command would only emit noise.
-            with contextlib.suppress(Exception):
-                await api.send_task_cancellation(command.command_id)
         return got_text
 
     def steward_instance(self) -> tuple[InstanceId, str] | None:
