@@ -295,16 +295,20 @@ def splittable_prefix(pending: str) -> int:
     and no more.
     """
     length = len(pending)
-    for index in range(max(0, length - _MAX_MARKER_LEN), length):
-        tail = pending[index:]
-        for marker in _HOLDBACK_MARKERS:
-            if marker.startswith(tail) or tail.startswith(marker):
-                return index
+    candidates = [length]
+    # Earliest complete marker anywhere wins first: a chunk like
+    # "<tool_call>\n<function=" must hold from index 0, not from the later
+    # marker-prefix tail.
     for marker in _HOLDBACK_MARKERS:
         found = pending.find(marker)
         if found != -1:
-            return found
-    return length
+            candidates.append(found)
+    for index in range(max(0, length - _MAX_MARKER_LEN), length):
+        tail = pending[index:]
+        if any(marker.startswith(tail) for marker in _HOLDBACK_MARKERS):
+            candidates.append(index)
+            break
+    return min(candidates)
 
 
 def parse_text_tool_calls(text: str) -> list[ToolCall]:
@@ -653,10 +657,12 @@ class StewardHarness:
             if not tool_calls:
                 tool_calls = parse_text_tool_calls(text)
             if not tool_calls:
-                # Final answer: everything safe was streamed live; flush the
-                # held tail (an innocent suspicious suffix like "a<b") and
-                # let the terminal chunk carry usage and the finish reason.
-                reply = pending
+                # Final answer: everything safe was streamed live. When
+                # suppression fired but nothing parsed, strip any complete
+                # markup blocks from the withheld text before flushing:
+                # prose that MENTIONS a lone marker survives, while a
+                # malformed complete-looking block never leaks as content.
+                reply = strip_tool_markup(pending) if suppressing else pending
                 break
             call = tool_calls[0]
             arguments: dict[str, object] = {}

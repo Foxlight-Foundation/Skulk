@@ -162,3 +162,22 @@ async def test_false_marker_mention_is_not_lost() -> None:
     token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
     content = "".join(c.text for c in token_chunks if not c.is_thinking)
     assert content == answer
+
+
+def test_earliest_complete_marker_wins_over_tail_prefix() -> None:
+    from skulk.api.steward import splittable_prefix
+
+    assert splittable_prefix("<tool_call>\n<function=") == 0
+    text = "answer first <tool_call>\n<function="
+    assert splittable_prefix(text) == text.index("<tool_call>")
+
+
+async def test_malformed_complete_block_never_flushes_as_reply() -> None:
+    """Suppressed markup that parses to nothing is stripped, not leaked."""
+    malformed = "<tool_call>\n<function=broken\n</tool_call> Sorry, done."
+    harness = _ScriptedHarness(turns=[(malformed, [])])
+    chunks = await _collect(harness, "status?")
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert "<tool_call>" not in content
+    assert "Sorry, done." in content
