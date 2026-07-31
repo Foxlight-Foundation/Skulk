@@ -153,3 +153,29 @@ def test_multi_node_steward_elects_one_prober() -> None:
         == instance.instance_id
     )
     assert canary_probe_target(placed, runners, {}, hosting[1]) is None
+
+
+def test_terminal_lifecycle_tasks_do_not_mute_the_canary() -> None:
+    """Completed startup tasks linger in state; only live work defers."""
+    placed = _steward_placement()
+    instance = next(iter(placed.values()))
+    host = next(iter(instance.shard_assignments.node_to_runner))
+    runner_id = instance.shard_assignments.node_to_runner[host]
+    runners = {runner_id: RunnerReady()}
+    task_id = TaskId()
+    tasks = {
+        task_id: TextGeneration(
+            task_id=task_id,
+            command_id=CommandId(),
+            instance_id=instance.instance_id,
+            task_status=TaskStatus.Complete,
+            task_params=TextGenerationTaskParams(
+                model=ModelId("canary-brain"),
+                input=[InputMessage(role="user", content="done earlier")],
+            ),
+        )
+    }
+
+    assert (
+        canary_probe_target(placed, runners, tasks, host) == instance.instance_id
+    )

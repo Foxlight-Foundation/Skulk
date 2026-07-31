@@ -231,6 +231,7 @@ def canary_probe_target(
     belongs to the worker's wedge detector, not the canary), and no task is
     currently bound to the instance.
     """
+    from skulk.shared.types.tasks import TaskStatus
     from skulk.shared.types.worker.runners import RunnerReady
 
     for instance_id, instance in instances.items():
@@ -250,8 +251,13 @@ def canary_probe_target(
             for runner_id in runner_ids
         ):
             continue
+        # Only live work defers the probe: terminal lifecycle tasks
+        # (CreateRunner, LoadModel, ... with Complete/Failed status) linger
+        # in state after startup and must not permanently mute the canary.
         if any(
             getattr(task, "instance_id", None) == instance_id
+            and getattr(task, "task_status", None)
+            in (TaskStatus.Pending, TaskStatus.Running)
             for task in tasks.values()
         ):
             continue
