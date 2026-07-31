@@ -1,7 +1,6 @@
 """Docs grounding: section index and steward tool behavior."""
 
 import json
-
 from typing import cast
 
 from skulk.api.steward_docs import search_docs, split_sections

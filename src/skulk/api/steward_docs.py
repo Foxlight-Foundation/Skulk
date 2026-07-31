@@ -120,7 +120,7 @@ class DocsIndex:
                 text = path.read_text(errors="replace")
             except OSError:
                 continue
-            self._sections.extend(_split_sections(relative, text))
+            self._sections.extend(split_sections(relative, text))
         for section in self._sections:
             tokens = _tokenize(section.heading + " " + section.text)
             frequencies: dict[str, float] = {}
