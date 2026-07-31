@@ -597,10 +597,10 @@ export function ChatMessages({
 
               {/* Content */}
               {msg.role === 'assistant' ? (
-                <>
+                <div data-testid="assistant-response-content">
                   {msg.content && <MarkdownContent content={msg.content} />}
                   {isLoading && isLastAssistant(i) && <Cursor />}
-                </>
+                </div>
               ) : (
                 <UserContent>{msg.content}</UserContent>
               )}
@@ -705,10 +705,10 @@ export function ChatMessages({
             </ThinkingBlock>
           )}
           {streamingContent ? (
-            <>
+            <div data-testid="streaming-assistant-response-content">
               <MarkdownContent content={streamingContent} />
               <Cursor />
-            </>
+            </div>
           ) : (
             <Cursor />
           )}
