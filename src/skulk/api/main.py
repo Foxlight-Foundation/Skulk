@@ -2961,6 +2961,69 @@ class API:
             media_type="application/json",
         )
 
+    async def _steward_canary_loop(self) -> None:
+        """Deterministic degraded-but-alive detection for the steward.
+
+        The node hosting the steward instance probes its generation path on
+        a slow cadence; three consecutive failures tear the instance down
+        (the master's invariant re-places it within a tick). Detection is
+        code-checked, repair is the fabric's deterministic machinery: no
+        model judges another model's health. Skips whenever the mode is
+        off, this node is not the host, the runner is not idle-Ready, or a
+        task is in flight (the worker's wedge detector owns the busy case).
+        """
+        from skulk.api.steward import (
+            CANARY_FAILURE_THRESHOLD,
+            CANARY_INTERVAL_SECONDS,
+            canary_probe_target,
+        )
+
+        failures = 0
+        last_instance: InstanceId | None = None
+        while True:
+            await anyio.sleep(CANARY_INTERVAL_SECONDS)
+            try:
+                if not self._intelligent_fabric_enabled():
+                    failures = 0
+                    continue
+                target = canary_probe_target(
+                    self.state.instances,
+                    self.state.runners,
+                    self.state.tasks,
+                    self.node_id,
+                )
+                if target is None:
+                    failures = 0
+                    continue
+                if target != last_instance:
+                    failures = 0
+                    last_instance = target
+                harness = StewardHarness(self)
+                located = harness.steward_instance()
+                if located is None or located[0] != target:
+                    failures = 0
+                    continue
+                if await harness.canary_probe(target, located[1]):
+                    failures = 0
+                    continue
+                failures += 1
+                logger.warning(
+                    f"Steward canary probe failed ({failures}/"
+                    f"{CANARY_FAILURE_THRESHOLD}) for instance {target}"
+                )
+                if failures >= CANARY_FAILURE_THRESHOLD:
+                    logger.error(
+                        f"Steward instance {target} failed "
+                        f"{CANARY_FAILURE_THRESHOLD} consecutive canary "
+                        "probes; tearing it down for re-placement"
+                    )
+                    await self._send(DeleteInstance(instance_id=target))
+                    failures = 0
+            except Exception:
+                # The canary must never take the API down; a broken probe
+                # pass just waits for the next interval.
+                logger.warning("Steward canary pass failed", exc_info=True)
+
     async def get_steward_status(self) -> "StewardStatusResponse":
         """Report intelligent-fabric mode and the current steward placement."""
         from skulk.api.steward import StewardHarness, StewardStatusResponse
@@ -7426,6 +7489,9 @@ class API:
                 tg.start_soon(self._sweep_pending_trace_data)
                 tg.start_soon(self._sweep_pending_vision_media)
                 tg.start_soon(self._sweep_provider_stream_receivers)
+                # Steward canary (intelligent fabric): degraded-but-alive
+                # detection on the hosting node; inert while the mode is off.
+                tg.start_soon(self._steward_canary_loop)
                 # Releases reorder gaps stuck on a chunk dropped by the
                 # best-effort DATA topic (#279 Phase 2b); lifetime-scoped like
                 # _apply_data. Only meaningful while the reorder buffer is on;

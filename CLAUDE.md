@@ -271,7 +271,11 @@ model `skulk/steward` on chat-completions (client tools 400; trace as
 reasoning_content; streaming via the ordinary adapters over
 `run_turn_chunks`); `GET /v1/steward` = presence; flagged entry in
 /v1/models (`system_role`). Ordinary deletion of the steward is refused
-while the mode is on; the dashboard hides `systemRole` instances.
+while the mode is on; the dashboard hides `systemRole` instances. Canary:
+the hosting node's API probes the steward every 300s when idle-Ready
+(minimal pinned generation, code-checked); 3 consecutive failures tear it
+down and the invariant re-places (degraded-but-alive coverage; busy-wedge
+stays with the worker wedge detector).
 
 ### Message Flow
 Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
