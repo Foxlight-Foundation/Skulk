@@ -1337,6 +1337,23 @@ def load_tokenizer_for_model_id(
         object.__setattr__(tokenizer, "_tool_call_end", "<tool_call|>")
         object.__setattr__(tokenizer, "_tool_parser", _parse_gemma4_tool_calls)
 
+    if (
+        capability_profile.tool_call_format == ToolCallFormat.Generic
+        and not getattr(tokenizer, "tool_parser", None)
+        and "<tool_call>" in (getattr(tokenizer, "chat_template", None) or "")
+    ):
+        # #728: tokenizers that reach this path without mlx-lm's inferred
+        # tool parser (notably the mlx-vlm native-vision loaders, which is
+        # every natively-multimodal family) silently pass tool-call markup
+        # through as text. When the chat template speaks the <tool_call>
+        # dialect, wire the repo's shared text parser (Qwen3 XML plus
+        # Hermes JSON, the same one the llama_cpp engine uses) through the
+        # standard marker mechanism. Template truth decides, so models
+        # whose templates use other dialects are untouched.
+        object.__setattr__(tokenizer, "_tool_call_start", "<tool_call>")
+        object.__setattr__(tokenizer, "_tool_call_end", "</tool_call>")
+        object.__setattr__(tokenizer, "_tool_parser", _parse_generic_text_tool_calls)
+
     return tokenizer
 
 
@@ -1730,6 +1747,28 @@ def mx_barrier(group: Group | None):
             "mx_barrier", {"group_size": group.size()}, is_prefill=False
         ),
     )
+
+
+def _parse_generic_text_tool_calls(text: str) -> list[dict[str, Any]]:
+    """Parse generic-format tool calls (Qwen3 XML or Hermes JSON) from text.
+
+    Receives the inner text between the ``<tool_call>`` markers (the runner's
+    marker mechanism strips them) and delegates to the shared text parser so
+    the MLX lane recognizes exactly the formats the llama_cpp engine does.
+    Argument values arrive as JSON strings, the shape ``ToolCallItem``
+    validation expects.
+    """
+    from skulk.worker.runner.llm_inference.tool_text_parser import (
+        parse_tool_calls_from_text,
+    )
+
+    items = parse_tool_calls_from_text(f"<tool_call>{text}</tool_call>")
+    if not items:
+        # Raising routes the runner to its malformed-tool-call fallback
+        # (raw text with finish_reason="error"), matching the behavior of
+        # every other parser instead of fabricating an empty success.
+        raise ValueError("no recognized tool calls in block")
+    return [{"name": item.name, "arguments": item.arguments} for item in items]
 
 
 def _parse_gemma4_tool_calls(text: str) -> list[dict[str, Any]]:
