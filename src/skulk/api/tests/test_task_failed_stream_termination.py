@@ -30,6 +30,8 @@ def _make_api() -> Any:
     api._embedding_queues = {}
     api._audio_speech_queues = {}
     api._audio_transcription_queues = {}
+    api._pending_stream_failures = {}
+    api.node_id = NodeId("api-node")
     return api
 
 
@@ -179,3 +181,106 @@ async def test_session_reset_with_already_closed_queue_is_silent() -> None:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+async def test_owned_task_without_queue_buffers_terminal_chunk() -> None:
+    """A fast local TaskFailed that beats queue registration must be buffered
+    on the owning API so the late-registering stream still terminates."""
+    api = _make_api()
+    command_id = CommandId()
+    task = _failed_task(command_id).model_copy(
+        update={"owner_node": NodeId("api-node")}
+    )
+    api.state = State().model_copy(update={"tasks": {task.task_id: task}})
+
+    await api._terminate_command_stream(task.task_id, "instance gone")
+
+    buffered = api._pending_stream_failures[command_id]
+    assert isinstance(buffered, ErrorChunk)
+    assert buffered.error_message == "instance gone"
+    assert buffered.model == ModelId("test-model")
+
+
+async def test_remote_owned_task_failure_is_not_buffered() -> None:
+    """Only the owning API can ever register the command's queue; other nodes
+    must not accumulate entries no consumer will drain."""
+    api = _make_api()
+    command_id = CommandId()
+    task = _failed_task(command_id).model_copy(
+        update={"owner_node": NodeId("some-other-node")}
+    )
+    api.state = State().model_copy(update={"tasks": {task.task_id: task}})
+
+    await api._terminate_command_stream(task.task_id, "instance gone")
+
+    assert api._pending_stream_failures == {}
+
+
+async def test_ownerless_task_failure_buffers_on_any_api() -> None:
+    """owner_node None (legacy gossip fan-out) means any API may serve the
+    stream, so every API buffers."""
+    api = _make_api()
+    command_id = CommandId()
+    task = _failed_task(command_id)
+    api.state = State().model_copy(update={"tasks": {task.task_id: task}})
+
+    await api._terminate_command_stream(task.task_id, "instance gone")
+
+    assert command_id in api._pending_stream_failures
+
+
+async def test_delivered_failure_is_not_also_buffered() -> None:
+    api = _make_api()
+    command_id = CommandId()
+    task = _failed_task(command_id).model_copy(
+        update={"owner_node": NodeId("api-node")}
+    )
+    api.state = State().model_copy(update={"tasks": {task.task_id: task}})
+    sender, receiver = channel[Any]()
+    api._text_generation_queues[command_id] = sender
+
+    await api._terminate_command_stream(task.task_id, "instance gone")
+
+    assert isinstance(receiver.receive_nowait(), ErrorChunk)
+    assert api._pending_stream_failures == {}
+
+
+async def test_pending_failure_buffer_evicts_oldest_at_capacity() -> None:
+    api = _make_api()
+    stale = ErrorChunk(model=ModelId("m"), error_message="stale")
+    for index in range(256):
+        api._pending_stream_failures[CommandId(f"old-{index}")] = stale
+    command_id = CommandId()
+    task = _failed_task(command_id).model_copy(
+        update={"owner_node": NodeId("api-node")}
+    )
+    api.state = State().model_copy(update={"tasks": {task.task_id: task}})
+
+    await api._terminate_command_stream(task.task_id, "instance gone")
+
+    assert len(api._pending_stream_failures) == 256
+    assert CommandId("old-0") not in api._pending_stream_failures
+    assert command_id in api._pending_stream_failures
+
+
+async def test_token_stream_registration_drains_buffered_failure() -> None:
+    """The real text-stream drain: a stream registering after its buffered
+    failure yields exactly the terminal ErrorChunk and consumes the entry."""
+    api = _make_api()
+    command_id = CommandId()
+    buffered = ErrorChunk(model=ModelId("test-model"), error_message="instance gone")
+    api._pending_stream_failures[command_id] = buffered
+    def no_vision_failure(_command_id: CommandId) -> None:
+        return None
+
+    api._take_vision_media_failure = no_vision_failure
+
+    async def finalize(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    api._finalize_command_stream = finalize
+
+    chunks = [chunk async for chunk in api._token_chunk_stream(command_id)]
+
+    assert chunks == [buffered]
+    assert command_id not in api._pending_stream_failures
