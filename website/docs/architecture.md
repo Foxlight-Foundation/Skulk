@@ -645,8 +645,10 @@ steward-specific integration. The reserved id selects the model plus the
 server-side harness: a bounded, strictly read-only tool surface (cluster
 state with health reasons, per-node resources and capability conflicts,
 telemetry and data-plane diagnostics, per-node version status, performance
-envelopes, the local doctor check registry, and the model catalog) and an
-investigation loop of up to eight tool calls per turn. Tool steps stream to
+envelopes, the local doctor check registry, the model catalog, and a
+search over Skulk's own bundled documentation so what-is and how-to
+questions are answered from the shipped docs rather than model priors)
+and an investigation loop of up to eight tool calls per turn. Tool steps stream to
 the client as reasoning content while the investigation runs, followed by
 the answer; client-supplied tool definitions are rejected, and client system
 prompts are ignored in favor of the steward's own. Generation itself rides
