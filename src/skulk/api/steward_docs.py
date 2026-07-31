@@ -30,6 +30,15 @@ MAX_RESULTS = 4
 
 _WORD_RE = re.compile(r"[a-z0-9_./-]+")
 
+_QUERY_STOPWORDS = frozenset(
+    """a an and are can d do does doing for from how i in is it its of on or
+    s t that the this to was we what when where which who why will with you
+    your""".split()
+)
+"""Filler terms dropped from queries so 'what does zenoh do' ranks on
+'zenoh' rather than on sections dense in common words. Applied to queries
+only; section indexing keeps every term."""
+
 _DOC_SOURCES: tuple[str, ...] = (
     "website/docs/architecture-reference.md",
     "website/docs/api-guide.md",
@@ -65,13 +74,20 @@ def split_sections(source: str, text: str) -> list[DocSection]:
 
     def flush() -> None:
         body = "\n".join(current_lines).strip()
-        if body:
+        if not body:
+            return
+        # Long sections are chunked, not truncated: truncating before the
+        # index is built would make every fact after the cutoff
+        # unsearchable rather than merely bounding returned context.
+        for offset in range(0, len(body), MAX_SECTION_CHARS):
+            chunk = body[offset : offset + MAX_SECTION_CHARS]
+            heading = (
+                current_heading
+                if offset == 0
+                else f"{current_heading} (cont.)"
+            )
             sections.append(
-                DocSection(
-                    source=source,
-                    heading=current_heading,
-                    text=body[:MAX_SECTION_CHARS],
-                )
+                DocSection(source=source, heading=heading, text=chunk)
             )
 
     for line in text.splitlines():
@@ -88,9 +104,9 @@ def split_sections(source: str, text: str) -> list[DocSection]:
 def _repo_root() -> Path | None:
     """The repository root containing the docs, if this install has one.
 
-    Walks up from this module: a checkout places it under
-    ``<root>/src/skulk/api``, so the docs live three levels up. A wheel
-    install has no ``website/`` and returns None.
+    Walks up from this module: a checkout places it at
+    ``<root>/src/skulk/api/steward_docs.py``, so the root is four parents
+    up. A wheel install has no ``website/`` and returns None.
     """
     candidate = Path(__file__).resolve().parent.parent.parent.parent
     if (candidate / "website" / "docs").is_dir():
@@ -143,7 +159,9 @@ class DocsIndex:
                 self._built = True
         if not self._sections:
             return None
-        query_terms = _tokenize(query)
+        query_terms = [
+            term for term in _tokenize(query) if term not in _QUERY_STOPWORDS
+        ]
         if not query_terms:
             return []
         total = len(self._sections)

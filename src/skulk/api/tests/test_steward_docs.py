@@ -36,3 +36,18 @@ async def test_steward_tool_returns_bounded_results() -> None:
     )
     if parsed:
         assert "results" in parsed or "error" in parsed
+
+
+def test_long_sections_chunk_instead_of_truncating() -> None:
+    text = "# Big\n" + ("alpha " * 300) + "UNIQUEMARKER-TAIL " + ("beta " * 300)
+    sections = split_sections("doc.md", text)
+    assert len(sections) >= 2
+    assert any("UNIQUEMARKER-TAIL".lower() in s.text.lower() or "UNIQUEMARKER-TAIL" in s.text for s in sections)
+    assert all(len(s.text) <= 2400 for s in sections)
+
+
+def test_filler_terms_do_not_dominate_ranking() -> None:
+    results = search_docs("what does zenoh do")
+    assert results is not None and results
+    joined = " ".join((s.heading + " " + s.text).lower() for s in results)
+    assert "zenoh" in joined
