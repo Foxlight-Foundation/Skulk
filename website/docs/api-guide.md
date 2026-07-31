@@ -1205,7 +1205,8 @@ Semantics of the reserved id:
 - The server runs the steward's investigation loop (up to 8 read-only tool
   calls per turn: cluster state, node resources, telemetry and data-plane
   diagnostics, version status, performance envelopes, the local doctor
-  registry, and the model catalog) and answers from the evidence.
+  registry, the model catalog, and a search over Skulk's own bundled
+  documentation) and answers from the evidence.
 - The tool trace is returned as reasoning content: in streaming responses,
   each tool step arrives as a `reasoning_content` delta while the
   investigation runs, followed by the answer as `content`; non-streaming

@@ -84,7 +84,8 @@ cluster through your tools, then reporting clearly.
 
 Rules:
 - Investigate before concluding. Start from get_cluster_state unless the
-  question clearly points elsewhere.
+  question clearly points elsewhere; for what-is and how-to questions,
+  search_docs is the primary source.
 - Call ONE tool at a time and read its result before deciding the next step.
 - Evidence means concrete observed values from tool results, not guesses.
 - If everything is healthy, say so; do not invent problems.
@@ -154,6 +155,24 @@ def steward_tool_definitions() -> list[dict[str, Any]]:
             "return check results. Use for environment problems: missing "
             "engines, GPU detection, storage.",
             no_args,
+        ),
+        (
+            "search_docs",
+            "Search Skulk's own documentation (architecture, API guide, "
+            "doctor checks) for concepts, features, and how-to guidance. "
+            "Use for questions about what something IS or HOW to do "
+            "something, before or instead of guessing from general "
+            "knowledge.",
+            {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search terms, e.g. 'zenoh transport' or 'model store staging'.",
+                    }
+                },
+                "required": ["query"],
+            },
         ),
         (
             "get_model_catalog",
@@ -601,6 +620,51 @@ class StewardHarness:
             return _bounded(
                 {"results": [result.model_dump(mode="json") for result in results]}
             )
+        if name == "search_docs":
+            from skulk.api.steward_docs import (
+                MAX_RESULT_TEXT_CHARS,
+                search_docs,
+            )
+
+            query = arguments.get("query")
+            if not isinstance(query, str) or not query.strip():
+                return json.dumps({"error": "search_docs requires a query string"})
+            sections = search_docs(query)
+            if sections is None:
+                return json.dumps(
+                    {
+                        "error": (
+                            "documentation is not available on this "
+                            "installation (no docs directory); answer from "
+                            "tool evidence only and say docs were "
+                            "unavailable"
+                        )
+                    }
+                )
+            if not sections:
+                return json.dumps(
+                    {"results": [], "note": "no documentation section matched"}
+                )
+            # Serialized size governs, not raw text length: escaping and
+            # metadata overhead can push a payload past the tool cap even
+            # with sliced text, and a truncated-mid-JSON result is worse
+            # than fewer results.
+            doc_results: list[dict[str, str]] = []
+            for section in sections:
+                candidate = doc_results + [
+                    {
+                        "source": section.source,
+                        "heading": section.heading,
+                        "text": section.text[:MAX_RESULT_TEXT_CHARS],
+                    }
+                ]
+                if (
+                    len(json.dumps({"results": candidate}, indent=1))
+                    > MAX_TOOL_RESULT_CHARS
+                ):
+                    break
+                doc_results = candidate
+            return json.dumps({"results": doc_results}, indent=1)
         if name == "get_model_catalog":
             models = await api.get_models(status=None)
             return _bounded(

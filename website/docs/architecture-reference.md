@@ -105,7 +105,11 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - Harness: `src/skulk/api/steward.py`. Read-only tools: cluster state
   summary, node resources, telemetry diagnostics, data-plane diagnostics,
   cluster versions, performance envelopes, local doctor registry, model
-  catalog. 6000-char tool-result bound, 8 steps/turn, observe/advise only.
+  catalog, and `search_docs` (steward_docs.py: dependency-free tf-idf
+  section index over the checkout's own docs, anchored on
+  architecture-reference.md; honest absence report on doc-less installs;
+  version-correct by construction, per the no-knowledge-in-weights
+  doctrine). 6000-char tool-result bound, 8 steps/turn, observe/advise only.
 - Client surface: reserved virtual model id `skulk/steward` on
   `POST /v1/chat/completions` (checked before card resolution; client
   `tools` rejected 400; client system messages ignored; trace streams as
