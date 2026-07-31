@@ -163,4 +163,36 @@ describe('ModelStorePage registry convergence', () => {
     expect(container?.textContent).toContain('org/new-model');
     expect(registryRequests).toBe(3);
   });
+
+  it('does not restart polling when an in-flight refresh finishes after unmount', async () => {
+    vi.useFakeTimers();
+    let registryRequests = 0;
+    let resolveRegistry: ((response: Response) => void) | undefined;
+    const pendingRegistry = new Promise<Response>((resolve) => {
+      resolveRegistry = resolve;
+    });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/models') return jsonResponse({ data: [] });
+      if (path === '/store/downloads') return jsonResponse({ downloads: [] });
+      if (path === '/store/registry') {
+        registryRequests += 1;
+        return pendingRegistry;
+      }
+      throw new Error(`unexpected fetch: ${path}`);
+    }));
+
+    await renderModelStore();
+    expect(registryRequests).toBe(1);
+
+    await act(async () => root?.unmount());
+    root = null;
+    resolveRegistry?.(new Response(null, { status: 503 }));
+    await flushEffects();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    expect(registryRequests).toBe(1);
+  });
 });

@@ -155,6 +155,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
   // can mark them as non-placeable instead of offering launch/placement/optiq.
   const [companionRoles, setCompanionRoles] = useState<Record<string, CompanionInfo>>({});
   const pollRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const storePollingDisposedRef = useRef(false);
   const optimizePollRef = useRef<ReturnType<typeof setInterval>>(undefined);
 
   // Fetch authoritative model card info from /models API
@@ -292,6 +293,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
       fetchRegistry(),
       fetchDownloads(),
     ]);
+    if (storePollingDisposedRef.current) return true;
     if (registryEntries !== null) setStoreEntries(registryEntries);
     if (downloadEntries !== null) setStoreDownloads(downloadEntries);
 
@@ -305,11 +307,11 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
   }, [fetchDownloads, fetchRegistry]);
 
   const scheduleStoreRefresh = useCallback(() => {
-    if (pollRef.current) return;
+    if (storePollingDisposedRef.current || pollRef.current) return;
 
     const poll = async () => {
       const converged = await refreshStore();
-      if (converged) {
+      if (storePollingDisposedRef.current || converged) {
         pollRef.current = undefined;
         return;
       }
@@ -324,7 +326,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
     try {
       if (!(await refreshStore())) scheduleStoreRefresh();
     } finally {
-      setStoreLoading(false);
+      if (!storePollingDisposedRef.current) setStoreLoading(false);
     }
   }, [refreshStore, scheduleStoreRefresh]);
 
@@ -335,7 +337,9 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
 
   // Cleanup polling on unmount
   useEffect(() => {
+    storePollingDisposedRef.current = false;
     return () => {
+      storePollingDisposedRef.current = true;
       if (pollRef.current) clearTimeout(pollRef.current);
       if (optimizePollRef.current) clearInterval(optimizePollRef.current);
     };
