@@ -8329,10 +8329,13 @@ class API:
                     await queue.send(error_chunk)
                 except (BrokenResourceError, ClosedResourceError):
                     queue_map.pop(task.command_id, None)
-        if not delivered:
+        owner = getattr(task, "owner_node", None)
+        if not delivered and (owner is None or owner == self.node_id):
             # Every task family that reaches this point streams through one
-            # of the queue maps above (Realtime returned earlier), so all of
-            # them buffer.
+            # of the queue maps above (Realtime returned earlier). Only the
+            # task's owning API can ever register the command's queue, so
+            # other nodes skip buffering entries no consumer will drain
+            # (owner None = legacy gossip fan-out, where any API may serve).
             # No stream queue exists yet: buffer the terminal chunk for the
             # lazily-registered stream to consume at startup, instead of
             # dropping it and hanging the request. Every stream family

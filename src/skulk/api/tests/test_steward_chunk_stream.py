@@ -152,3 +152,13 @@ def test_splittable_prefix_gates_only_marker_prefixes() -> None:
     assert "answer <tool"[held:] == "<tool"
     assert splittable_prefix("a<b compare") == len("a<b compare")
     assert splittable_prefix("ends with <") == len("ends with ")
+
+
+async def test_false_marker_mention_is_not_lost() -> None:
+    """An answer that MENTIONS markup syntax keeps its full text."""
+    answer = "Tools are invoked with <tool_call> blocks, like this example."
+    harness = _ScriptedHarness(turns=[(answer, [])])
+    chunks = await _collect(harness, "how do tools work?")
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert content == answer

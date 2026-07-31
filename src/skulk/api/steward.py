@@ -619,6 +619,12 @@ class StewardHarness:
                     # marker (the model narrating its next step) stays
                     # visible, which reads as progress, not duplication.
                     if suppressing:
+                        # Withhold from the live stream but keep
+                        # accumulating: if this step ends with no parseable
+                        # tool call, the text was a legitimate answer that
+                        # merely mentions the markup, and the terminal
+                        # flush must include it rather than lose it.
+                        pending += payload
                         continue
                     pending += payload
                     cut = splittable_prefix(pending)
