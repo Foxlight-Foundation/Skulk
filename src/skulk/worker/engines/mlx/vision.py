@@ -65,6 +65,7 @@ from skulk.shared.tracing import TraceAttrValue
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.mlx import Model
 from skulk.shared.types.tasks import TaskId
+from skulk.shared.types.text_generation import ReasoningEffort
 from skulk.worker.engines.mlx.cache import encode_prompt
 from skulk.worker.engines.mlx.gemma4_prompt import render_gemma4_prompt
 from skulk.worker.engines.mlx.utils_mlx import fix_unmatched_think_end_tokens
@@ -618,6 +619,8 @@ def _build_vision_prompt_with_debug(
     model_type: str | None = None,
     boi_token_id: int | None = None,
     eoi_token_id: int | None = None,
+    enable_thinking: bool | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
 ) -> _VisionPromptBuild:
     """Build the expanded prompt and retain the raw placeholder layout.
 
@@ -633,12 +636,22 @@ def _build_vision_prompt_with_debug(
         prompt = render_gemma4_prompt(
             chat_template_messages,
             add_generation_prompt=True,
+            enable_thinking=enable_thinking,
         )
     else:
+        extra_kwargs: dict[str, Any] = {}
+        if enable_thinking is not None:
+            # Qwen3 and GLM use "enable_thinking"; DeepSeek uses "thinking".
+            # Unknown Jinja variables are ignored by templates that do not need them.
+            extra_kwargs["enable_thinking"] = enable_thinking
+            extra_kwargs["thinking"] = enable_thinking
+        if reasoning_effort is not None:
+            extra_kwargs["reasoning_effort"] = reasoning_effort
         prompt = tokenizer.apply_chat_template(
             chat_template_messages,
             tokenize=False,
             add_generation_prompt=True,
+            **extra_kwargs,
         )
     raw_prompt = prompt
     raw_placeholder_positions = _prompt_placeholder_positions(raw_prompt, image_token)
@@ -696,6 +709,8 @@ def build_vision_prompt(
     model_type: str | None = None,
     boi_token_id: int | None = None,
     eoi_token_id: int | None = None,
+    enable_thinking: bool | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
 ) -> str:
     """Build a full prompt string with image placeholders expanded to features."""
     return _build_vision_prompt_with_debug(
@@ -706,6 +721,8 @@ def build_vision_prompt(
         model_type=model_type,
         boi_token_id=boi_token_id,
         eoi_token_id=eoi_token_id,
+        enable_thinking=enable_thinking,
+        reasoning_effort=reasoning_effort,
     ).prompt
 
 
@@ -1601,6 +1618,8 @@ class VisionProcessor:
         model: Model,
         *,
         task_id: TaskId | str | None = None,
+        enable_thinking: bool | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
     ) -> VisionResult:
         logger.info(f"Vision pipeline: {len(images)} image(s)")
         record_runner_phase(
@@ -1619,6 +1638,8 @@ class VisionProcessor:
                 tokenizer,
                 model,
                 task_id=task_id,
+                enable_thinking=enable_thinking,
+                reasoning_effort=reasoning_effort,
             )
 
         cache_key = self._image_cache_key(images)
@@ -1652,6 +1673,8 @@ class VisionProcessor:
             model_type=self.vision_config.model_type,
             boi_token_id=self.vision_config.boi_token_id,
             eoi_token_id=self.vision_config.eoi_token_id,
+            enable_thinking=enable_thinking,
+            reasoning_effort=reasoning_effort,
         )
         prompt = prompt_build.prompt
         record_runner_phase(
@@ -1747,6 +1770,8 @@ class VisionProcessor:
         model: Model,
         *,
         task_id: TaskId | str | None = None,
+        enable_thinking: bool | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
     ) -> VisionResult:
         """Process images for models with native vision support (e.g. Gemma 4).
 
@@ -1850,6 +1875,8 @@ class VisionProcessor:
             model_type=self.vision_config.model_type,
             boi_token_id=self.vision_config.boi_token_id,
             eoi_token_id=self.vision_config.eoi_token_id,
+            enable_thinking=enable_thinking,
+            reasoning_effort=reasoning_effort,
         )
         prompt = prompt_build.prompt
         record_runner_phase(
@@ -1962,6 +1989,8 @@ def prepare_vision(
     model: Model,
     *,
     task_id: TaskId | str | None = None,
+    enable_thinking: bool | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
 ) -> VisionResult | None:
     """Encode images and build the vision-augmented prompt.
 
@@ -1984,4 +2013,6 @@ def prepare_vision(
         tokenizer=tokenizer,
         model=model,
         task_id=task_id,
+        enable_thinking=enable_thinking,
+        reasoning_effort=reasoning_effort,
     )

@@ -2781,6 +2781,8 @@ def mlx_generate(
                     tokenizer=tokenizer,
                     model=model,
                     task_id=trace_task_id,
+                    enable_thinking=task.enable_thinking,
+                    reasoning_effort=task.reasoning_effort,
                 )
         except VisionPreprocessingError:
             record_runner_phase(
