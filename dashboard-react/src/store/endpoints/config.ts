@@ -118,7 +118,9 @@ export const configApi = apiSlice.injectEndpoints({
         method: 'PUT',
         body: { config },
       }),
-      invalidatesTags: ['Config'],
+      // Saving may flip intelligent_fabric: refresh steward status so the
+      // nav link and steward page react immediately, not on the next poll.
+      invalidatesTags: ['Config', 'StewardStatus'],
     }),
   }),
 });
