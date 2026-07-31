@@ -266,9 +266,12 @@ exclusions). `TextGeneration.target_instance_id` pins generation to one
 instance (mirrors SpeechSynthesis). Harness = `src/skulk/api/steward.py`:
 bounded read-only tools (state/resources/telemetry/data-plane/versions/
 envelopes/doctor/catalog), 8 steps per turn, observe/advise only, rides the
-normal chat dispatch path. Endpoints `GET /v1/steward` + `POST
-/v1/steward/chat`; ordinary deletion of the steward is refused while the
-mode is on; the dashboard hides `systemRole` instances.
+normal chat dispatch path. Client surface = reserved virtual
+model `skulk/steward` on chat-completions (client tools 400; trace as
+reasoning_content; streaming via the ordinary adapters over
+`run_turn_chunks`); `GET /v1/steward` = presence; flagged entry in
+/v1/models (`system_role`). Ordinary deletion of the steward is refused
+while the mode is on; the dashboard hides `systemRole` instances.
 
 ### Message Flow
 Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
