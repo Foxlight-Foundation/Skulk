@@ -19,7 +19,7 @@ from __future__ import annotations
 import contextlib
 import json
 import re
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import anyio
@@ -46,6 +46,10 @@ from skulk.shared.types.worker.instances import InstanceId
 
 if TYPE_CHECKING:
     from skulk.api.main import API
+    from skulk.shared.types.common import NodeId
+    from skulk.shared.types.tasks import Task, TaskId
+    from skulk.shared.types.worker.instances import Instance
+    from skulk.shared.types.worker.runners import RunnerId, RunnerStatus
 
 STEWARD_VIRTUAL_MODEL_ID = "skulk/steward"
 """Reserved chat-completions model id selecting model-plus-harness.
@@ -60,6 +64,17 @@ MAX_TOOL_RESULT_CHARS = 6000
 
 MAX_STEPS_PER_TURN = 8
 """Investigation budget: tool calls per operator message."""
+
+CANARY_INTERVAL_SECONDS = 300
+"""How often the steward's hosting node probes it for liveness."""
+
+CANARY_PROBE_TIMEOUT_SECONDS = 120
+"""Per-probe deadline; generous because a cold small model may be slow."""
+
+CANARY_FAILURE_THRESHOLD = 3
+"""Consecutive probe failures before the steward is torn down for
+re-placement. One failure is a blip; three spaced five minutes apart is a
+wedge."""
 
 STEWARD_SYSTEM_PROMPT = """\
 You are the steward: the resident operator intelligence of this Skulk
@@ -200,6 +215,54 @@ class StewardStatusResponse(BaseModel):
         default=None,
         description="The steward instance id, when present.",
     )
+
+
+def canary_probe_target(
+    instances: "Mapping[InstanceId, Instance]",
+    runners: "Mapping[RunnerId, RunnerStatus]",
+    tasks: "Mapping[TaskId, Task]",
+    node_id: "NodeId",
+) -> InstanceId | None:
+    """The steward instance this node should probe, or None.
+
+    Pure decision logic: probe only when a steward placement exists, it is
+    hosted on THIS node (one prober per steward, with locality), every
+    runner reports Ready (Running means busy, and a busy-but-wedged runner
+    belongs to the worker's wedge detector, not the canary), and no task is
+    currently bound to the instance.
+    """
+    from skulk.shared.types.tasks import TaskStatus
+    from skulk.shared.types.worker.runners import RunnerReady
+
+    for instance_id, instance in instances.items():
+        if instance.system_role != "steward":
+            continue
+        node_to_runner = instance.shard_assignments.node_to_runner
+        # Prober election for a steward that spans nodes (possible after a
+        # memory-refusal repair widens the placement): only the
+        # lexicographically smallest hosting node probes, so exactly one
+        # canary runs per steward.
+        hosting_nodes = sorted(str(candidate) for candidate in node_to_runner)
+        if not hosting_nodes or str(node_id) != hosting_nodes[0]:
+            continue
+        runner_ids = list(node_to_runner.values())
+        if not runner_ids or not all(
+            isinstance(runners.get(runner_id), RunnerReady)
+            for runner_id in runner_ids
+        ):
+            continue
+        # Only live work defers the probe: terminal lifecycle tasks
+        # (CreateRunner, LoadModel, ... with Complete/Failed status) linger
+        # in state after startup and must not permanently mute the canary.
+        if any(
+            getattr(task, "instance_id", None) == instance_id
+            and getattr(task, "task_status", None)
+            in (TaskStatus.Pending, TaskStatus.Running)
+            for task in tasks.values()
+        ):
+            continue
+        return instance_id
+    return None
 
 
 def _as_object_dict(value: object) -> dict[str, object]:
@@ -388,6 +451,65 @@ class StewardHarness:
             prompt_tokens_details=PromptTokensDetails(),
             completion_tokens_details=CompletionTokensDetails(),
         )
+
+    async def canary_probe(
+        self, instance_id: InstanceId, model_id: str
+    ) -> bool:
+        """One deterministic liveness probe of the steward's generation path.
+
+        A minimal no-tools request pinned to the instance; success is any
+        non-thinking text within the deadline, checked by code, never judged
+        by a model. Used by the hosting node's canary loop to catch a
+        steward that is alive in state but wedged in generation.
+        """
+        from skulk.api.adapters.chat_completions import (
+            chat_request_to_text_generation,
+        )
+
+        api = self._api
+        request = ChatCompletionRequest(
+            model=ModelId(model_id),
+            messages=[
+                ChatCompletionMessage(
+                    role="user",
+                    content="Reply with the single word OK.",
+                )
+            ],
+            temperature=0.0,
+            max_tokens=8,
+            stream=False,
+            # A thinking-default model would spend the whole bounded budget
+            # reasoning and emit no non-thinking text, failing every probe
+            # and tearing down a healthy steward. The probe is a liveness
+            # check, not a benchmark: thinking off.
+            enable_thinking=False,
+        )
+        model_card = await api.running_model_card(request.model)
+        task_params = await chat_request_to_text_generation(
+            request, model_card=model_card
+        )
+        command = await api.dispatch_text_generation(
+            task_params, target_instance_id=instance_id
+        )
+        chunk_stream = api.text_generation_chunk_stream(command, task_params)
+        got_text = False
+        # No manual cancellation on timeout: move_on_after cancels the
+        # stream iteration, and the chunk stream's own cancellation handling
+        # already sends TaskCancelled and finalizes; a second cancel here
+        # would just duplicate it for an already-finalized command.
+        with anyio.move_on_after(CANARY_PROBE_TIMEOUT_SECONDS):
+            async for chunk in chunk_stream:
+                if isinstance(chunk, ErrorChunk):
+                    return False
+                if (
+                    isinstance(chunk, TokenChunk)
+                    and not chunk.is_thinking
+                    and chunk.text.strip()
+                ):
+                    got_text = True
+                if isinstance(chunk, TokenChunk) and chunk.finish_reason is not None:
+                    break
+        return got_text
 
     def steward_instance(self) -> tuple[InstanceId, str] | None:
         """The current steward placement, as (instance_id, model_id)."""

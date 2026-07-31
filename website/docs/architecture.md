@@ -653,7 +653,11 @@ prompts are ignored in favor of the steward's own. Generation itself rides
 the normal text-generation dispatch path, pinned to the steward instance,
 and the underlying model card id remains addressable as an ordinary model
 without tools or cluster access. A small status endpoint reports presence
-and readiness so clients know whether to offer the surface. In this release
+and readiness so clients know whether to offer the surface. The node
+hosting the steward also runs a slow deterministic canary: a minimal
+pinned generation whose answer is shape-checked by code, so a steward
+that is alive in state but wedged in generation is torn down and
+re-placed by the same invariant that handles node loss. In this release
 the steward observes and advises only: no tool can change the cluster, and
 anything action-shaped is returned to the operator as a recommendation.
 
