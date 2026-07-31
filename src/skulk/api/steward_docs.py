@@ -207,5 +207,19 @@ _INDEX = DocsIndex()
 
 
 def search_docs(query: str) -> list[DocSection] | None:
-    """Module-level search over the process-cached index."""
+    """Search the documentation corpus for sections relevant to a query.
+
+    Args:
+        query: Free-text search terms; common filler words are ignored.
+
+    Returns:
+        Up to ``MAX_RESULTS`` sections ranked by relevance. An empty list
+        means the corpus exists but nothing matched; ``None`` means this
+        installation has no documentation directory at all, which callers
+        must report honestly rather than treating as a silent no-match.
+
+    Side effects:
+        The first call builds a process-cached index from the checkout's
+        documentation files; later calls reuse it.
+    """
     return _INDEX.search(query)
