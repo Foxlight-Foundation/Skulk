@@ -9,6 +9,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Disabled the Qwen3.5 2B MLX card's MTP sidecar after clean-install text and
+  vision journeys showed repetitive generation until the output limit. The
+  same shipped model now uses vanilla decoding, which completes both journeys
+  normally while retaining its text, thinking-toggle, and vision capabilities.
+
 - Fresh multi-node installs now converge their per-node bootstrap model stores
   on the elected master's routable store endpoint. Followers retry
   authoritative config sync through the startup window, stop superseded local

@@ -91,6 +91,17 @@ def test_qwen3_vl_4b_card_pins_the_measured_artifact() -> None:
     assert card.storage_size.in_bytes == 3_109_732_071
 
 
+def test_qwen35_2b_card_keeps_unstable_mtp_disabled() -> None:
+    """Do not re-enable the sidecar that loops in clean user journeys."""
+    card = _load(
+        _CARD_DIRS["inference"] / "mlx-community--Qwen3.5-2B-4bit.toml"
+    )
+
+    assert card.runtime is not None
+    assert card.runtime.mtp_heads is False
+    assert card.runtime.mtp_sidecar_repo is None
+
+
 @pytest.mark.parametrize(("kind", "path"), _CARD_FILES, ids=_CARD_IDS)
 def test_bundled_card_invariants(kind: str, path: Path) -> None:
     card = _load(path)  # validation itself is the first gate
