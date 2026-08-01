@@ -265,7 +265,8 @@ Optional resident operator assistant, config-gated (`intelligent_fabric` in
 skulk.yaml, default off). Identity = `BaseInstance.system_role` flagged
 placement (additive schema field); the master's `_maintain_steward_placement`
 planning-tick invariant keeps exactly one steward placed from the
-`steward_models` preference list (Qwen3.5-4B MLX/GGUF cards), tears down
+`steward_models` preference list (Qwen3.5-4B MLX/GGUF cards, then the
+Qwen3.5-0.8B GGUF universal floor so CPU-only fleets place one), tears down
 duplicates, and inherits failover from election since the invariant re-runs
 on every tick. Repair builders re-stamp `system_role` (same pattern as #658
 exclusions). `TextGeneration.target_instance_id` pins generation to one
