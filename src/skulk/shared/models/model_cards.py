@@ -833,6 +833,19 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     stages through the Skulk model store; staging the draft through the
     store as a pinned companion is a follow-up)."""
 
+    vllm_tool_call_parser: str | None = None
+    """vLLM server-side tool-call parser name for this model
+    (``--tool-call-parser``, paired with ``--enable-auto-tool-choice``).
+
+    Engine-specific platform knob, so it lives in runtime beside the
+    ``vllm_spec_*`` fields rather than in ``tooling`` (which stays model
+    truth). This explicit field is the ONLY source: one family string can
+    span tool-call generations with different wire formats, so there is no
+    family fallback, and an unset field launches the server without tool
+    support (tool requests are rejected loudly). Names follow vLLM's
+    parser registry (hermes, llama3_json, mistral, pythonic, deepseek_v3,
+    openai, ...); pin only pod-validated names."""
+
     @model_validator(mode="after")
     def _validate_vllm_spec_pairing(self) -> "RuntimeCapabilityCardConfig":
         """Reject inconsistent vllm speculative fields so custom cards fail

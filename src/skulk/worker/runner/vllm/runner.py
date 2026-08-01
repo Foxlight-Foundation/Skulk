@@ -58,7 +58,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Final, Literal, NamedTuple
+from typing import Any, Final, Literal, NamedTuple, cast
 
 import httpx
 
@@ -66,7 +66,8 @@ from skulk.api.types import GenerationStats
 from skulk.download.download_utils import build_model_path
 from skulk.shared.backends import VLLM_BIN_ENV
 from skulk.shared.models.memory_estimate import VLLM_MAX_MODEL_LEN
-from skulk.shared.types.chunks import ErrorChunk, TokenChunk
+from skulk.shared.models.model_cards import ModelCard
+from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
     ChunkGenerated,
@@ -97,12 +98,14 @@ from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
 from skulk.worker.runner.generation_stats import (
     StreamStatsClock,
+    blocking_call_stats,
     subprocess_peak_memory,
 )
 from skulk.worker.runner.llama_cpp.runner import (
     map_finish_reason,
     messages_for_llama,
     serving_n_ctx,
+    tool_calls_from_message,
     wants_logprobs,
 )
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
@@ -215,6 +218,7 @@ def build_vllm_serve_args(
     spec_method: str | None = None,
     spec_num_tokens: int | None = None,
     spec_draft_repo: str | None = None,
+    tool_call_parser: str | None = None,
 ) -> list[str]:
     """Build the ``vllm serve`` command line. Pure, so it is unit-testable.
 
@@ -249,6 +253,14 @@ def build_vllm_serve_args(
     ]
     if trust_remote_code:
         args.append("--trust-remote-code")
+    if tool_call_parser is not None:
+        # vLLM refuses --tool-call-parser without --enable-auto-tool-choice;
+        # the pair enables server-side parsing of the model's native
+        # tool-call format into structured OpenAI tool_calls, mirroring the
+        # llama_server runner's --jinja role.
+        args.extend(
+            ["--enable-auto-tool-choice", "--tool-call-parser", tool_call_parser]
+        )
     if spec_method is not None:
         # Card-declared speculative decoding (runtime.vllm_spec_method /
         # vllm_spec_num_tokens / vllm_spec_draft_repo): method "mtp" engages
@@ -286,6 +298,24 @@ def build_vllm_serve_args(
             )
             args.extend(["--max-num-batched-tokens", str(batched)])
     return args
+
+
+def resolve_vllm_tool_call_parser(card: ModelCard) -> str | None:
+    """The vLLM tool parser this card should launch with, or None.
+
+    Explicit ``runtime.vllm_tool_call_parser`` only: there is deliberately
+    no family fallback, because one Skulk family string can span tool-call
+    generations with different wire formats (Qwen2.5 emits Hermes JSON
+    while Qwen3.6 emits the XML function format), and a wrong parser fails
+    at request time with opaque server errors rather than at card review.
+    A card without the field launches without the parser pair and tool
+    requests are rejected loudly at request time (the #385 no-silent-empty
+    contract).
+    """
+    runtime = card.runtime
+    if runtime is not None and runtime.vllm_tool_call_parser is not None:
+        return runtime.vllm_tool_call_parser
+    return None
 
 
 def vllm_generation_kwargs(task_params: Any) -> dict[str, Any]:
@@ -475,6 +505,9 @@ class Runner(ServedConcurrentDispatch):
         self.server_log: Any = None
         self.server_log_path: Path | None = None
         self.base_url: str | None = None
+        # Resolved at spawn; None means the server was launched without the
+        # tool-parser pair and tool requests must be rejected loudly.
+        self._tool_call_parser: str | None = None
         self.current_status: RunnerStatus = RunnerIdle()
         logger.info("vllm runner created")
         self.update_status(RunnerIdle())
@@ -601,6 +634,9 @@ class Runner(ServedConcurrentDispatch):
         port = self._pick_port()
         self.base_url = f"http://{host}:{port}"
         card_runtime = self.shard_metadata.model_card.runtime
+        self._tool_call_parser = resolve_vllm_tool_call_parser(
+            self.shard_metadata.model_card
+        )
         args = build_vllm_serve_args(
             binary,
             model_dir,
@@ -623,6 +659,7 @@ class Runner(ServedConcurrentDispatch):
                 if card_runtime is not None
                 else None
             ),
+            tool_call_parser=self._tool_call_parser,
         )
         # Deterministic log path keyed by runner_id (matching llama_server), so
         # postmortem debugging is easy and restarts truncate rather than pile up
@@ -783,14 +820,15 @@ class Runner(ServedConcurrentDispatch):
             attrs={"tools": bool(task.task_params.tools)},
         )
         try:
-            # Tool calling and per-token logprobs are out of scope for this slice:
-            # the tool-call round trip and logprob surfacing over the SSE proxy are
-            # follow-ups. Fail loud rather than silently drop them (matching the
-            # llama_server runner's #385 no-silent-empty contract).
-            if task.task_params.tools:
+            # Per-token logprobs remain out of scope for this slice: the SSE
+            # proxy does not surface them. Fail loud rather than silently
+            # drop them (the #385 no-silent-empty contract).
+            if task.task_params.tools and self._tool_call_parser is None:
                 raise RuntimeError(
-                    "Tool calling is not yet supported on the vllm engine; retry "
-                    "without tools or use a llama_cpp/llama_server card."
+                    "This model's card declares no vLLM tool-call parser "
+                    "(runtime.vllm_tool_call_parser or a family default), so "
+                    "the server was launched without tool support. Retry "
+                    "without tools or serve a tool-capable card."
                 )
             if wants_logprobs(
                 task.task_params.logprobs, task.task_params.top_logprobs
@@ -808,7 +846,10 @@ class Runner(ServedConcurrentDispatch):
                 task_id=task.task_id,
                 command_id=str(command_id),
             )
-            self._generate_streaming(task, body, model_id, command_id)
+            if task.task_params.tools:
+                self._generate_with_tools(task, body, model_id, command_id)
+            else:
+                self._generate_streaming(task, body, model_id, command_id)
         except Exception as exc:  # noqa: BLE001 - surface as an ErrorChunk
             record_runner_phase(
                 "error",
@@ -839,6 +880,90 @@ class Runner(ServedConcurrentDispatch):
         # Ready only when the LAST in-flight generation drains (see
         # _note_generation_finished), so a peer generation still streaming keeps
         # the runner Running.
+
+    def _generate_with_tools(
+        self,
+        task: TextGeneration,
+        body: dict[str, Any],
+        model_id: ModelId,
+        command_id: CommandId,
+    ) -> None:
+        """Non-streamed tool round trip, mirroring the llama_server runner.
+
+        vLLM parses the model's native tool-call format server-side
+        (--enable-auto-tool-choice + --tool-call-parser at launch) and
+        returns assembled ``tool_calls``; the caller wants the whole call,
+        and the API's streaming adapter emits tool calls as one delta
+        anyway, so nothing is lost by skipping SSE here.
+        """
+        body["stream"] = False
+        body["tools"] = task.task_params.tools
+        if task.task_params.tool_choice is not None:
+            body["tool_choice"] = task.task_params.tool_choice
+        assert self.base_url is not None
+        if self._is_cancelled(task.task_id):
+            return
+        admission_in_flight = self._admission_concurrency(task.task_id)
+        timeout = httpx.Timeout(connect=15.0, read=None, write=30.0, pool=None)
+        request_started = time.perf_counter()
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(f"{self.base_url}/v1/chat/completions", json=body)
+            resp.raise_for_status()
+            result = cast("dict[str, Any]", resp.json())
+        request_seconds = time.perf_counter() - request_started
+        # A cancel that landed while the blocking POST was in flight: drain it
+        # (the streaming path checks per chunk; this path has no mid-flight
+        # checkpoint) so the task ends Cancelled and no tool call surfaces.
+        if self._is_cancelled(task.task_id):
+            logger.info(f"vllm tool generation cancelled: {task.task_id}")
+            return
+        choice = cast("dict[str, Any]", (result.get("choices") or [{}])[0])
+        message = cast("dict[str, Any]", choice.get("message") or {})
+        # vLLM responses carry OpenAI usage but no llama-server-style engine
+        # timings, so usage-derived whole-request wall rates are the honest
+        # stats here; cached-prefix subtraction does not apply to the
+        # blocking path (no prompt_tokens_details outside include_usage).
+        stats = blocking_call_stats(result.get("usage"), request_seconds, None)
+        if stats is not None:
+            stats = stats.model_copy(
+                update={"peak_memory_usage": self._server_peak_memory()}
+            )
+            # Runner attribution (#596): tool-call generations feed the
+            # performance envelope exactly like the streaming path.
+            stats = self.stamp_runner_stats(stats, admission_in_flight)
+        raw_finish = choice.get("finish_reason")
+        tool_calls = tool_calls_from_message(message)
+        if tool_calls and raw_finish in (None, "tool_calls"):
+            self.event_sender.send(
+                ChunkGenerated(
+                    command_id=command_id,
+                    chunk=ToolCallChunk(
+                        model=model_id,
+                        tool_calls=tool_calls,
+                        usage=None,
+                        stats=stats,
+                    ),
+                )
+            )
+            return
+        # Prose answer, or a tool attempt cut short by length/content_filter:
+        # a truncated tool call has incomplete arguments and must NOT surface
+        # as an executable call, so those fall through here and the terminal
+        # chunk carries the server's real finish reason. content_filter is
+        # preserved exactly like the streaming parser does; everything else
+        # maps through the shared finish mapping.
+        reasoning = str(message.get("reasoning_content") or "")
+        content = str(message.get("content") or "")
+        if reasoning:
+            self._send_token(command_id, model_id, reasoning, is_thinking=True)
+        if content:
+            self._send_token(command_id, model_id, content)
+        finish = (
+            "content_filter"
+            if raw_finish == "content_filter"
+            else map_finish_reason(raw_finish)
+        ) or "stop"
+        self._send_token(command_id, model_id, "", finish_reason=finish, stats=stats)
 
     def _generate_streaming(
         self,
