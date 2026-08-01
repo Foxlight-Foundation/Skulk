@@ -1105,7 +1105,11 @@ class AudioSpeechRequest(BaseModel):
     max_tokens: int | None = Field(
         default=None,
         gt=0,
-        description="Optional model-specific maximum generation token budget.",
+        description=(
+            "Optional model-specific maximum generation token budget. When omitted, "
+            "the speech runner supplies 4096 only to generators that explicitly "
+            "declare this control."
+        ),
     )
     reference_audio: str | None = Field(
         default=None,

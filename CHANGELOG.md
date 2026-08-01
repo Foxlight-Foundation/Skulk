@@ -9,6 +9,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Omitted TTS `max_tokens` no longer inherits undersized upstream model
+  defaults that hard-cut ordinary speech mid-word. Speech runners now apply a
+  4096-token serving budget only to models that explicitly declare the control,
+  while preserving caller-supplied limits and leaving unsupported models alone.
+
 - The dashboard model-store page now retries transient registry and download
   request failures until it has both a successful registry snapshot and no
   active downloads. A brief API connection reset during a fresh-install model
