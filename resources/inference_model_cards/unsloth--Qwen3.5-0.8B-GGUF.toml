@@ -32,8 +32,13 @@ supports_tool_calling = true
 tool_call_format = "generic"
 
 [placement]
-compatible_backends = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu", "llama_cpp-vulkan", "llama_cpp-cpu"]
-backend_preference = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_cpp-vulkan", "llama_server-cpu", "llama_cpp-cpu"]
+# The floor card lists every GGUF lane, including the in-process CUDA and
+# ROCm tags the 4B card omits: a node with llama-cpp-python but no
+# llama-server binary advertises only llama_cpp-<compute>, and the whole
+# point of this card is that no node class is left without a steward
+# candidate.
+compatible_backends = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu", "llama_cpp-vulkan", "llama_cpp-cuda", "llama_cpp-rocm", "llama_cpp-cpu"]
+backend_preference = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_cpp-vulkan", "llama_cpp-cuda", "llama_cpp-rocm", "llama_server-cpu", "llama_cpp-cpu"]
 
 [storage_size]
 in_bytes = 532517120
