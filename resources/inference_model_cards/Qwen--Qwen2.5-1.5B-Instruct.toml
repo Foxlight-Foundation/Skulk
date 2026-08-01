@@ -2,7 +2,7 @@
 # vllm served engine (#630): the small smoke-test card of the vLLM starter
 # set, sized so any vLLM-capable GPU can place it. Qwen2.5 is an INSTRUCT
 # model, NOT a thinking model (no <think> mode before Qwen3); text-only, no
-# [reasoning] section. Tool calling is declared off: see the [tooling] note below.
+# [reasoning] section. Tool calling is on: see the [tooling] note below.
 # context_length is the config.json max_position_embeddings (32768).
 # `supports_tensor = false`: vLLM runs single-node in Skulk. Architecture from
 # config.json (qwen2: 28 layers, hidden 1536, 2 KV heads, bf16). storage_size
@@ -20,9 +20,12 @@ capabilities = ["text"]
 context_length = 32768
 trust_remote_code = false
 
-# Tool calling is on: the vllm runner launches with vLLM's hermes parser
-# (family default) and returns structured tool_calls, so the model's
-# native tool support is honored on this engine.
+# Tool calling is on: Qwen2.5 emits Hermes-style JSON tool calls, so the
+# card pins vLLM's hermes parser in [runtime] and the server returns
+# structured tool_calls.
+[runtime]
+vllm_tool_call_parser = "hermes"
+
 [tooling]
 supports_tool_calling = true
 

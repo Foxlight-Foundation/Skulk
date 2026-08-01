@@ -91,16 +91,15 @@ def test_parser_resolution_explicit_runtime_wins() -> None:
     assert resolve_vllm_tool_call_parser(card) == "mistral"
 
 
-def test_parser_resolution_family_default_needs_tooling() -> None:
-    declared = _card(tooling=ToolingCardConfig(supports_tool_calling=True))
-    assert resolve_vllm_tool_call_parser(declared) == "hermes"
-    undeclared = _card(tooling=ToolingCardConfig(supports_tool_calling=False))
-    assert resolve_vllm_tool_call_parser(undeclared) is None
-    unknown_family = _card(
-        family="mysteryfamily",
-        tooling=ToolingCardConfig(supports_tool_calling=True),
+def test_parser_resolution_is_explicit_only() -> None:
+    """No family fallback: one family string spans tool-call generations
+    with different wire formats (Qwen2.5 Hermes JSON vs Qwen3.6 XML), so
+    only the explicit runtime pin resolves a parser."""
+    declared_without_pin = _card(
+        tooling=ToolingCardConfig(supports_tool_calling=True)
     )
-    assert resolve_vllm_tool_call_parser(unknown_family) is None
+    assert resolve_vllm_tool_call_parser(declared_without_pin) is None
+    assert resolve_vllm_tool_call_parser(_card()) is None
 
 
 class _FakeResponse:

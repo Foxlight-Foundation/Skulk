@@ -245,10 +245,11 @@ A model card's `placement.compatible_backends` selects which engine serves it
   `--speculative-config` (method `mtp` = native prediction heads,
   Qwen3.6-27B-FP8 measured 2.01x; method `dflash` = separate block-parallel
   speculator repo, the Laguna cards). Single-node
-  text with tool calling: card-declared tooling launches the server with
-  vLLM's parser pair (`runtime.vllm_tool_call_parser` or the qwen->hermes
-  family default), tool requests run non-streamed to `ToolCallChunk`
-  (llama_server shape), parserless cards reject tools loudly, and
+  text with tool calling: a card pinning `runtime.vllm_tool_call_parser`
+  (explicit only, no family fallback; Qwen2.5 pins hermes) launches the
+  server with vLLM's parser pair, tool requests run non-streamed to
+  `ToolCallChunk` (llama_server shape), parserless cards reject tools
+  loudly, and
   `TextGenerationTaskParams.tool_choice` now reaches every served engine.
   Logprobs / multi-node / vLLM-aware admission
   are follow-ups. Lifecycle (#653): teardown signals the server's whole

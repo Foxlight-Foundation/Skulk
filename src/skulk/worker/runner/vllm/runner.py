@@ -300,31 +300,21 @@ def build_vllm_serve_args(
     return args
 
 
-# Family-default vLLM tool parsers, consulted when a tool-capable card does
-# not pin runtime.vllm_tool_call_parser explicitly. Deliberately narrow: only
-# families with a pod-validated parser belong here; everything else must pin
-# the parser on the card, because a wrong parser fails at request time with
-# opaque server errors rather than at card review.
-_VLLM_TOOL_PARSER_BY_FAMILY: Final[dict[str, str]] = {
-    "qwen": "hermes",
-}
-
-
 def resolve_vllm_tool_call_parser(card: ModelCard) -> str | None:
     """The vLLM tool parser this card should launch with, or None.
 
-    Explicit ``runtime.vllm_tool_call_parser`` wins. Otherwise a card that
-    declares tool calling (``tooling.supports_tool_calling``) falls back to
-    the family-default map. A card that declares no tool support launches
-    without the parser pair and tool requests are rejected loudly at
-    request time (the #385 no-silent-empty contract).
+    Explicit ``runtime.vllm_tool_call_parser`` only: there is deliberately
+    no family fallback, because one Skulk family string can span tool-call
+    generations with different wire formats (Qwen2.5 emits Hermes JSON
+    while Qwen3.6 emits the XML function format), and a wrong parser fails
+    at request time with opaque server errors rather than at card review.
+    A card without the field launches without the parser pair and tool
+    requests are rejected loudly at request time (the #385 no-silent-empty
+    contract).
     """
     runtime = card.runtime
     if runtime is not None and runtime.vllm_tool_call_parser is not None:
         return runtime.vllm_tool_call_parser
-    tooling = card.tooling
-    if tooling is not None and tooling.supports_tool_calling:
-        return _VLLM_TOOL_PARSER_BY_FAMILY.get(card.family or "")
     return None
 
 

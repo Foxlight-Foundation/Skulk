@@ -341,10 +341,11 @@ ship native multi-token-prediction heads (Qwen3.6 among them) can declare
 vLLM speculative decoding on their card, engaging the model's own prediction
 heads with no separate draft model; measured on an A100, this roughly
 doubles single-stream decode on the dense Qwen3.6. This slice is
-single-node text generation with tool calling: when a card declares tool
-support, the runner launches the server with vLLM's native tool-call
-parser (an explicit card runtime field, or a small family-default map:
-qwen resolves to the hermes parser) and a tool-enabled request runs
+single-node text generation with tool calling: when a card pins vLLM's
+native tool-call parser (the explicit runtime field
+`vllm_tool_call_parser`; there is no family fallback, because one model
+family can span tool-call generations with different wire formats), the
+runner launches the server with it and a tool-enabled request runs
 unstreamed so the caller receives the assembled call, the same shape as
 the llama.cpp engines; a card with no resolvable parser rejects tool
 requests loudly instead of silently dropping them. Logprobs, vLLM's own

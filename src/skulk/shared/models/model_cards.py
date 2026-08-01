@@ -839,11 +839,12 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
 
     Engine-specific platform knob, so it lives in runtime beside the
     ``vllm_spec_*`` fields rather than in ``tooling`` (which stays model
-    truth). Explicit value wins; when unset, the vllm runner falls back to
-    a small family-default map (qwen family -> "hermes") and otherwise
-    launches without tool support, rejecting tool requests loudly. Names
-    follow vLLM's parser registry (hermes, llama3_json, mistral, pythonic,
-    deepseek_v3, openai, ...)."""
+    truth). This explicit field is the ONLY source: one family string can
+    span tool-call generations with different wire formats, so there is no
+    family fallback, and an unset field launches the server without tool
+    support (tool requests are rejected loudly). Names follow vLLM's
+    parser registry (hermes, llama3_json, mistral, pythonic, deepseek_v3,
+    openai, ...); pin only pod-validated names."""
 
     @model_validator(mode="after")
     def _validate_vllm_spec_pairing(self) -> "RuntimeCapabilityCardConfig":
