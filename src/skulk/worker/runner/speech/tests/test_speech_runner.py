@@ -958,6 +958,44 @@ def test_speech_synthesis_handles_single_numpy_result(
     assert encoded_calls == [([0.7, 0.8], 24000)]
 
 
+def test_tts_generation_uses_safe_default_and_preserves_explicit_budget() -> None:
+    """Omitted TTS limits must not inherit a model default that truncates speech."""
+
+    class _BudgetSpeechModel:
+        def __init__(self) -> None:
+            self.max_token_calls: list[int] = []
+
+        def generate(
+            self,
+            text: str,
+            *,
+            max_tokens: int = 1024,
+        ) -> list[_FakeSpeechResult]:
+            assert text == "hello budget"
+            self.max_token_calls.append(max_tokens)
+            return [_FakeSpeechResult()]
+
+    runner, _sender = _make_runner()
+    model = _BudgetSpeechModel()
+    runner.model = model
+
+    def task(max_tokens: int | None) -> SpeechSynthesis:
+        return SpeechSynthesis(
+            instance_id=InstanceId("speech-instance-1"),
+            command_id=CommandId(f"speech-budget-{max_tokens}"),
+            task_params=SpeechSynthesisTaskParams(
+                model=ModelId("mlx-community/fish-test"),
+                input_text="hello budget",
+                response_format=AudioResponseFormat.Wav,
+                max_tokens=max_tokens,
+            ),
+        )
+
+    assert list(runner._iter_tts_results(task(None), stream=False))
+    assert list(runner._iter_tts_results(task(2048), stream=False))
+    assert model.max_token_calls == [4096, 2048]
+
+
 def test_speech_synthesis_uses_staged_voice_assets(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

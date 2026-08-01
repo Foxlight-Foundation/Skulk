@@ -605,7 +605,8 @@ Request fields:
 | `stream` | boolean | Optional. When `true`, Skulk returns a chunked HTTP response and yields MP3 or raw PCM bytes as the speech runner emits them; accepted only when the mounted TTS card explicitly declares `audio.supports_streaming = true` and every routable instance of the requested model has a ready runner |
 | `streaming_interval` | number or null | Optional positive model-specific streaming cadence hint, accepted only with `stream=true` |
 | `instruct`, `lang_code` | string or null | Optional model-specific generation hints |
-| `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number or integer | Optional model-specific sampling controls |
+| `temperature`, `top_p`, `top_k`, `repetition_penalty` | number | Optional model-specific sampling controls |
+| `max_tokens` | integer or null | Optional model-specific generation ceiling. An explicit value is preserved. When omitted and the mounted model explicitly declares this control, Skulk uses a 4096-token serving default instead of inheriting a potentially truncating upstream library default. Models that do not declare the control receive no injected keyword. |
 | `reference_audio` | multipart file or null | Optional request-scoped voice-conditioning audio. Accepted only as a multipart upload for a mounted card declaring `audio.supports_reference_audio = true`; server-local paths are rejected |
 | `reference_text` | string or null | Optional transcript of `reference_audio`; accepted only when the multipart upload is present |
 
