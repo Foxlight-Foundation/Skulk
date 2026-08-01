@@ -272,3 +272,67 @@ def test_tools_without_parser_surface_error_chunk(monkeypatch: Any) -> None:
     ]
     assert len(errors) == 1
     assert "tool" in errors[0].error_message.lower()
+
+
+def test_truncated_tool_call_surfaces_length_not_a_call(monkeypatch: Any) -> None:
+    """finish_reason length with parsed tool_calls means the arguments were
+    cut mid-generation; surfacing them as an executable call would hand the
+    caller incomplete JSON as a success."""
+    task = _tool_task()
+    events: list[object] = []
+    runner = _runner(events, monkeypatch, task)
+    payload: dict[str, Any] = {
+        "choices": [
+            {
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"ci'},
+                        }
+                    ],
+                },
+                "finish_reason": "length",
+            }
+        ],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 7},
+    }
+    monkeypatch.setattr(httpx, "Client", lambda **_kw: _FakeClient(payload, {}))
+
+    runner._generate_with_tools(task, {}, ModelId("m"), task.command_id)
+
+    kinds = [type(e.chunk).__name__ for e in events if isinstance(e, ChunkGenerated)]
+    assert "ToolCallChunk" not in kinds
+    terminal = [
+        e.chunk
+        for e in events
+        if isinstance(e, ChunkGenerated) and isinstance(e.chunk, TokenChunk)
+    ][-1]
+    assert terminal.finish_reason == "length"
+
+
+def test_content_filter_finish_is_preserved_in_fallback(monkeypatch: Any) -> None:
+    task = _tool_task()
+    events: list[object] = []
+    runner = _runner(events, monkeypatch, task)
+    payload: dict[str, Any] = {
+        "choices": [
+            {
+                "message": {"content": "I cannot help with that."},
+                "finish_reason": "content_filter",
+            }
+        ],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 4},
+    }
+    monkeypatch.setattr(httpx, "Client", lambda **_kw: _FakeClient(payload, {}))
+
+    runner._generate_with_tools(task, {}, ModelId("m"), task.command_id)
+
+    terminal = [
+        e.chunk
+        for e in events
+        if isinstance(e, ChunkGenerated) and isinstance(e.chunk, TokenChunk)
+    ][-1]
+    assert terminal.finish_reason == "content_filter"

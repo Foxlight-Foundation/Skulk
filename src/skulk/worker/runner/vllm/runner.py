@@ -931,8 +931,9 @@ class Runner(ServedConcurrentDispatch):
             # Runner attribution (#596): tool-call generations feed the
             # performance envelope exactly like the streaming path.
             stats = self.stamp_runner_stats(stats, admission_in_flight)
+        raw_finish = choice.get("finish_reason")
         tool_calls = tool_calls_from_message(message)
-        if tool_calls:
+        if tool_calls and raw_finish in (None, "tool_calls"):
             self.event_sender.send(
                 ChunkGenerated(
                     command_id=command_id,
@@ -945,16 +946,23 @@ class Runner(ServedConcurrentDispatch):
                 )
             )
             return
-        # The model answered in prose: emit reasoning + content, then a
-        # terminal chunk preserving the server's finish_reason so a
-        # truncated answer still signals truncation.
+        # Prose answer, or a tool attempt cut short by length/content_filter:
+        # a truncated tool call has incomplete arguments and must NOT surface
+        # as an executable call, so those fall through here and the terminal
+        # chunk carries the server's real finish reason. content_filter is
+        # preserved exactly like the streaming parser does; everything else
+        # maps through the shared finish mapping.
         reasoning = str(message.get("reasoning_content") or "")
         content = str(message.get("content") or "")
         if reasoning:
             self._send_token(command_id, model_id, reasoning, is_thinking=True)
         if content:
             self._send_token(command_id, model_id, content)
-        finish = map_finish_reason(choice.get("finish_reason")) or "stop"
+        finish = (
+            "content_filter"
+            if raw_finish == "content_filter"
+            else map_finish_reason(raw_finish)
+        ) or "stop"
         self._send_token(command_id, model_id, "", finish_reason=finish, stats=stats)
 
     def _generate_streaming(
