@@ -172,6 +172,7 @@ def test_intelligent_fabric_config_defaults() -> None:
     assert parsed.intelligent_fabric.steward_models == [
         "mlx-community/Qwen3.5-4B-MLX-4bit",
         "unsloth/Qwen3.5-4B-GGUF",
+        "unsloth/Qwen3.5-0.8B-GGUF",
     ]
 
     # The documented YAML-sequence override must load (list, not tuple:

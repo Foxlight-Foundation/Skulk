@@ -83,7 +83,9 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 ### Steward (intelligent fabric)
 
 - Config: `intelligent_fabric` in `skulk.yaml` (`enabled`, default false;
-  `steward_models` preference list, default Qwen3.5-4B MLX then GGUF).
+  `steward_models` preference list, default Qwen3.5-4B MLX, then the 4B
+  GGUF, then the Qwen3.5-0.8B GGUF universal floor so CPU-only fleets
+  still place a steward).
 - Identity: `BaseInstance.system_role = "steward" | None` (additive field;
   None on replayed old logs). Stamped from `PlaceInstance.system_role` at
   mint; all three repair builders re-stamp it from the instance.

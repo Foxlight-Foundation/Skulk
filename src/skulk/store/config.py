@@ -397,9 +397,11 @@ class IntelligentFabricConfig(FrozenModel):
             establish the steward placement within one planning cycle.
         steward_models: Ordered model-card preference list for the steward
             brain. The master places the first card the cluster can serve.
-            The defaults are the benched steward class (Qwen3.5-4B in MLX
-            and GGUF form); operators may override with any bundled or
-            custom text model that supports tool calling.
+            The defaults are the benched steward class: Qwen3.5-4B in MLX
+            and GGUF form, then the Qwen3.5-0.8B GGUF as the universal
+            floor so every fleet, including CPU-only nodes, can place a
+            steward. Operators may override with any bundled or custom
+            text model that supports tool calling.
     """
 
     enabled: bool = False
@@ -410,6 +412,7 @@ class IntelligentFabricConfig(FrozenModel):
         default_factory=lambda: [
             "mlx-community/Qwen3.5-4B-MLX-4bit",
             "unsloth/Qwen3.5-4B-GGUF",
+            "unsloth/Qwen3.5-0.8B-GGUF",
         ]
     )
 
