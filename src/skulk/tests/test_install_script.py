@@ -43,3 +43,11 @@ def test_generated_config_pins_safe_model_store_port() -> None:
     """The installer must materialize the same safe port as runtime defaults."""
 
     assert f"store_port: {DEFAULT_MODEL_STORE_PORT}" in _installer()
+
+
+def test_bundled_node_probe_keeps_retry_diagnostics_visible() -> None:
+    """Fresh-install Node probe failures must remain visible to operators."""
+
+    installer = _installer()
+    assert "elif run_bundled_npm --version; then" in installer
+    assert "run_bundled_npm --version >/dev/null" not in installer
