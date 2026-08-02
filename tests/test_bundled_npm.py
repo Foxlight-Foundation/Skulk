@@ -73,6 +73,38 @@ def test_bundled_npm_probe_retries_a_transient_launch_failure(
     assert "attempt 1/3 failed with exit 75; retrying" in capsys.readouterr().err
 
 
+def test_bundled_npm_probe_retries_a_transient_launch_exception(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A transient inability to create the Node process must be retried."""
+
+    attempts = 0
+    sleeps: list[float] = []
+
+    def npm_runner(arguments: list[str]) -> int:
+        nonlocal attempts
+        assert arguments == ["--version"]
+        attempts += 1
+        if attempts == 1:
+            raise OSError(11, "resource temporarily unavailable")
+        return 0
+
+    status = run_npm_probe(
+        ["--version"],
+        npm_runner=npm_runner,
+        sleep=sleeps.append,
+    )
+
+    assert status == 0
+    assert attempts == 2
+    assert sleeps == [1.0]
+    assert (
+        "attempt 1/3 failed with launch error [Errno 11] resource temporarily "
+        "unavailable; retrying"
+        in capsys.readouterr().err
+    )
+
+
 def test_bundled_npm_probe_preserves_a_persistent_failure(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -97,3 +129,31 @@ def test_bundled_npm_probe_preserves_a_persistent_failure(
     error = capsys.readouterr().err
     assert "attempt 1/3 failed with exit 126; retrying" in error
     assert "attempt 3/3 failed with exit 126" in error
+
+
+def test_bundled_npm_probe_preserves_a_persistent_launch_exception(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A persistent launch exception is reported for every attempt and reraised."""
+
+    attempts = 0
+    sleeps: list[float] = []
+
+    def npm_runner(arguments: list[str]) -> int:
+        nonlocal attempts
+        assert arguments == ["--version"]
+        attempts += 1
+        raise OSError(11, "resource temporarily unavailable")
+
+    with pytest.raises(OSError, match="resource temporarily unavailable"):
+        run_npm_probe(
+            ["--version"],
+            npm_runner=npm_runner,
+            sleep=sleeps.append,
+        )
+
+    assert attempts == 3
+    assert sleeps == [1.0, 1.0]
+    error = capsys.readouterr().err
+    assert "attempt 1/3 failed with launch error" in error
+    assert "attempt 3/3 failed with launch error" in error

@@ -36,6 +36,9 @@ def run_npm_probe(
     Returns:
         Zero after a successful attempt, otherwise the final failure status.
 
+    Raises:
+        OSError: The final probe attempt could not launch the bundled process.
+
     Side effects:
         Writes failed-attempt diagnostics to stderr and invokes ``sleep``
         between attempts.
@@ -43,19 +46,30 @@ def run_npm_probe(
 
     final_status = 1
     for attempt in range(1, _NPM_PROBE_ATTEMPTS + 1):
-        final_status = int(npm_runner(arguments))
-        if final_status == 0:
-            return 0
+        launch_error: OSError | None = None
+        try:
+            final_status = int(npm_runner(arguments))
+        except OSError as error:
+            launch_error = error
+        else:
+            if final_status == 0:
+                return 0
         retrying = attempt < _NPM_PROBE_ATTEMPTS
         suffix = "; retrying" if retrying else ""
+        failure = (
+            f"launch error {launch_error!s}"
+            if launch_error is not None
+            else f"exit {final_status}"
+        )
         print(
             "bundled Node.js probe attempt "
-            f"{attempt}/{_NPM_PROBE_ATTEMPTS} failed with exit "
-            f"{final_status}{suffix}",
+            f"{attempt}/{_NPM_PROBE_ATTEMPTS} failed with {failure}{suffix}",
             file=sys.stderr,
         )
         if retrying:
             sleep(1.0)
+        elif launch_error is not None:
+            raise launch_error
     return final_status
 
 
