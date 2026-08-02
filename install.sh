@@ -249,7 +249,7 @@ run_bundled_npm() {
 
 if [[ "$HEADLESS" == "1" ]]; then
     log "skipping dashboard build (--headless); the API serves without the web UI"
-elif run_bundled_npm --version >/dev/null 2>&1; then
+elif run_bundled_npm --version; then
     log "building the dashboard with Skulk's bundled Node.js runtime"
     (
         cd dashboard-react
