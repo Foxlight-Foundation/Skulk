@@ -357,6 +357,13 @@ TTS cards with fixed speakers may declare `audio.voices`, optional ordered
 
 **Model truth vs platform truth:** a card's `compatible_backends` declares which engines the model's artifacts run on (MODEL truth) and must never encode a gap in Skulk's own runners (PLATFORM truth). Platform limitations live in code: `platform_compatible_backends` in `src/skulk/shared/backends.py` (currently: the served `llama_server` runner cannot load a vision card's mmproj projector, so vision cards are gated off served engines there; TTS/STT cards are gated to `mlx_audio`). Placement (`_card_platform_backends`) and the worker's fallback probe both apply the filter. When a runner gains a capability, flip the code table; do NOT sweep cards.
 
+Model-specific sharding truth also lives on the card:
+`placement.max_pipeline_split_layer` caps pipeline boundaries for architectures
+whose tail layers reuse KV from earlier concrete layers. The planner adjusts
+its proportional split before the ordinary per-node memory validation; the
+worker rejection remains a final invariant guard rather than the first place
+an invalid shard is discovered.
+
 ### Logging & Observability
 Centralized logging uses a three-layer stack:
 - **Structured JSON stdout**: When `logging.enabled` is `true` and `logging.ingest_url` is set in `skulk.yaml` (or dashboard Settings), skulk emits one JSON object per line on stdout (alongside human-readable stderr). Settings sync to all nodes via gossipsub. Configured in `src/skulk/shared/logging.py`.

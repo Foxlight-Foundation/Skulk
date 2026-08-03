@@ -387,6 +387,10 @@ memory/topology axes above:
 - `backend_preference` is a **soft score**: when several compatible nodes
   qualify, the planner prefers the node whose backend ranks earliest in the
   card's preference list (for example preferring a GPU backend over CPU).
+- `max_pipeline_split_layer` is a **hard sharding constraint** for architectures
+  whose tail layers reuse KV from earlier concrete layers. Proportional layer
+  allocation may move boundaries left, but never beyond this limit; the usual
+  per-node memory check then validates the adjusted shards before launch.
 
 The engine axis (which runtime) is orthogonal to the node axis (which machine):
 the same card mechanism that routes a GGUF model to a Vulkan llama.cpp node would

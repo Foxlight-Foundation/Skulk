@@ -296,8 +296,8 @@ def _per_node_required_memory(
         pipeline_total_usable = sum(pipeline_usable.values(), start=Memory())
         if pipeline_total_usable.in_bytes == 0:
             return {node_id: required_memory for node_id in cycle.node_ids}
-        layer_allocations = allocate_layers_proportionally(
-            total_layers=model_card.n_layers,
+        layer_allocations = allocate_pipeline_layers(
+            model_card=model_card,
             memory_fractions=[
                 pipeline_usable[node_id] / pipeline_total_usable
                 for node_id in pipeline_node_ids
@@ -311,8 +311,8 @@ def _per_node_required_memory(
             // model_card.n_layers
             for index, node_id in enumerate(cycle.node_ids)
         }
-    layer_allocations = allocate_layers_proportionally(
-        total_layers=model_card.n_layers,
+    layer_allocations = allocate_pipeline_layers(
+        model_card=model_card,
         memory_fractions=[
             node_usable[node_id] / total_usable for node_id in cycle.node_ids
         ],
@@ -435,6 +435,19 @@ def filter_cycles_by_memory(
                 f"{model_card.n_layers} model layers"
             )
             continue
+        split_limit = model_card.placement.max_pipeline_split_layer
+        if (
+            exact_pipeline_layers
+            and sharding == Sharding.Pipeline
+            and split_limit is not None
+            and pipeline_stage_count - 1 > split_limit
+        ):
+            diagnostics.rejection_reasons.append(
+                f"cycle [{', '.join(str(n) for n in cycle.node_ids)}] "
+                f"({sharding.value} sharding): {pipeline_stage_count} pipeline "
+                f"stages cannot fit before safe split boundary {split_limit}"
+            )
+            continue
 
         node_shares = _per_node_required_memory(
             cycle,
@@ -515,6 +528,69 @@ def allocate_layers_proportionally(
     return result
 
 
+def allocate_pipeline_layers(
+    model_card: ModelCard,
+    memory_fractions: list[float],
+) -> list[int]:
+    """Allocate pipeline layers while honoring model-specific safe boundaries.
+
+    The ordinary proportional allocation remains the target. When the model's
+    tail reuses KV from earlier concrete layers, its card caps the final split
+    boundary so the last rank also owns every producer. Earlier boundaries are
+    shifted left only when necessary, preserving at least one layer per rank.
+
+    Args:
+        model_card: Model whose layer and placement constraints are applied.
+        memory_fractions: Per-rank shares of usable memory in pipeline order.
+
+    Returns:
+        Positive contiguous layer counts whose sum is ``model_card.n_layers``.
+
+    Raises:
+        ValueError: The safe boundary cannot accommodate the requested ranks.
+    """
+    allocations = allocate_layers_proportionally(
+        total_layers=model_card.n_layers,
+        memory_fractions=memory_fractions,
+    )
+    split_limit = model_card.placement.max_pipeline_split_layer
+    stage_count = len(allocations)
+    if split_limit is None or stage_count == 1:
+        return allocations
+    if stage_count - 1 > split_limit:
+        raise ValueError(
+            f"Cannot distribute {model_card.n_layers} layers across {stage_count} "
+            f"pipeline ranks before safe split boundary {split_limit}"
+        )
+
+    desired_boundaries: list[int] = []
+    layers_before = 0
+    for layer_count in allocations[:-1]:
+        layers_before += layer_count
+        desired_boundaries.append(layers_before)
+
+    safe_boundaries = [0] * len(desired_boundaries)
+    next_boundary = split_limit + 1
+    for index in reversed(range(len(desired_boundaries))):
+        boundary = min(desired_boundaries[index], next_boundary - 1)
+        minimum_boundary = index + 1
+        if boundary < minimum_boundary:
+            raise ValueError(
+                f"Cannot assign positive pipeline shards before safe split "
+                f"boundary {split_limit}"
+            )
+        safe_boundaries[index] = boundary
+        next_boundary = boundary
+
+    constrained: list[int] = []
+    previous_boundary = 0
+    for boundary in safe_boundaries:
+        constrained.append(boundary - previous_boundary)
+        previous_boundary = boundary
+    constrained.append(model_card.n_layers - previous_boundary)
+    return constrained
+
+
 def _validate_cycle(cycle: Cycle) -> None:
     if not cycle.node_ids:
         raise ValueError("Cannot create shard assignments for empty node cycle")
@@ -550,8 +626,8 @@ def _allocate_and_validate_layers(
     node_vram: Mapping[NodeId, Memory] | None = None,
 ) -> list[int]:
     node_vram = node_vram or {}
-    layer_allocations = allocate_layers_proportionally(
-        total_layers=model_card.n_layers,
+    layer_allocations = allocate_pipeline_layers(
+        model_card=model_card,
         memory_fractions=[
             _node_usable_memory(node_memory[node_id], node_vram.get(node_id))
             / total_memory

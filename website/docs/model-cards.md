@@ -142,6 +142,8 @@ card written against the original `{"mlx"}` set keeps matching.
   - optional minimum accelerator memory a node must have to be eligible.
 - `max_context_tokens`
   - optional cap on the admission context for this model, independent of the model's trained context length.
+- `max_pipeline_split_layer`
+  - optional largest layer boundary where a later pipeline rank may begin. Use it when a model's tail reuses KV from earlier concrete layers; the planner shifts proportional boundaries left as needed and reruns normal per-node memory checks so the final rank owns every producer it consumes.
 
 ## Extended Capability Sections
 
