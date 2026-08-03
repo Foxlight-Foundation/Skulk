@@ -1030,6 +1030,10 @@ generated GGUF card is compatible with both llama.cpp engines and prefers
 the served `llama_server` tags, so on a node running llama-server it gets
 that engine's concurrency slots and is eligible for multi-node pooling via
 RPC; nodes without a served binary fall through to the in-process engine.
+When the repository exactly matches a bundled card, generated metadata retains
+the bundled card's hard pipeline-split constraint; adding a curated model through
+the dashboard therefore cannot erase an architecture safety boundary. A
+hand-authored card remains an explicit operator override.
 The
 `model_id` field is required. `gguf_file` is optional; when supplied it must be
 an exact repo-relative GGUF weight path and the card pins that quant instead of

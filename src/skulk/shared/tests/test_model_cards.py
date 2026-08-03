@@ -10,7 +10,9 @@ from skulk.shared.constants import RESOURCES_DIR
 from skulk.shared.models import model_cards as model_cards_module
 from skulk.shared.models.model_cards import (
     ModelCard,
+    PlacementCardConfig,
     RuntimeCapabilityCardConfig,
+    preserve_generated_card_constraints,
 )
 from skulk.shared.types.common import ModelId
 
@@ -190,6 +192,82 @@ async def test_current_generated_card_keeps_override(
 
     assert card.is_custom
     assert card.quantization == "int4"
+
+
+@pytest.mark.anyio
+async def test_current_generated_card_preserves_bundled_split_constraint(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Generated overrides must retain curated architecture invariants."""
+    builtin_dir = tmp_path / "builtin"
+    custom_dir = tmp_path / "custom"
+    builtin_dir.mkdir()
+    custom_dir.mkdir()
+    bundled = ModelCard(
+        model_id=ModelId("testorg/override-model"),
+        storage_size=model_cards_module.Memory(in_bytes=1024),
+        n_layers=4,
+        hidden_size=64,
+        supports_tensor=False,
+        tasks=[model_cards_module.ModelTask.TextGeneration],
+        placement=PlacementCardConfig(max_pipeline_split_layer=2),
+    )
+    await bundled.save(Path(str(builtin_dir / "override-model.toml")))
+    (custom_dir / "testorg--override-model.toml").write_text(
+        _STAMPED_CARD.format(
+            quantization="int4",
+            generator_revision=model_cards_module.CARD_GENERATOR_REVISION,
+        )
+    )
+
+    card = await _load_both(builtin_dir, custom_dir, monkeypatch)
+
+    assert card.is_custom
+    assert card.placement.max_pipeline_split_layer == 2
+
+
+def test_generated_card_preserves_constraint_before_catalog_event() -> None:
+    """The API event payload must be safe before workers persist the card."""
+    bundled = ModelCard(
+        model_id=ModelId("testorg/override-model"),
+        storage_size=model_cards_module.Memory(in_bytes=1024),
+        n_layers=4,
+        hidden_size=64,
+        supports_tensor=False,
+        tasks=[model_cards_module.ModelTask.TextGeneration],
+        placement=PlacementCardConfig(max_pipeline_split_layer=2),
+    )
+    generated = bundled.model_copy(
+        update={
+            "placement": PlacementCardConfig(),
+            "is_custom": True,
+            "generator_revision": model_cards_module.CARD_GENERATOR_REVISION,
+        }
+    )
+
+    preserved = preserve_generated_card_constraints(generated, bundled)
+
+    assert preserved.placement.max_pipeline_split_layer == 2
+
+
+def test_hand_authored_card_keeps_explicit_placement_override() -> None:
+    """Unstamped operator policy must continue to override bundled truth."""
+    bundled = ModelCard(
+        model_id=ModelId("testorg/override-model"),
+        storage_size=model_cards_module.Memory(in_bytes=1024),
+        n_layers=4,
+        hidden_size=64,
+        supports_tensor=False,
+        tasks=[model_cards_module.ModelTask.TextGeneration],
+        placement=PlacementCardConfig(max_pipeline_split_layer=2),
+    )
+    authored = bundled.model_copy(
+        update={"placement": PlacementCardConfig(), "is_custom": True}
+    )
+
+    preserved = preserve_generated_card_constraints(authored, bundled)
+
+    assert preserved.placement.max_pipeline_split_layer is None
 
 
 @pytest.mark.anyio

@@ -45,7 +45,7 @@ from skulk.utils.pydantic_ext import CamelCaseModel, FrozenModel
 # whatever that generator got wrong (the fresh-fleet audit found exactly that:
 # pre-#652-fix cards forcing serial in-process llama_cpp over the served
 # engine).
-CARD_GENERATOR_REVISION: Final[int] = 1
+CARD_GENERATOR_REVISION: Final[int] = 2
 
 # kinda ugly...
 # TODO: load search path from config.toml
@@ -105,6 +105,8 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
                 if vision is not None:
                     card = card.model_copy(update={"vision": vision})
             existing = _card_cache.get(card.model_id)
+            if is_custom and existing is not None and not existing.is_custom:
+                card = preserve_generated_card_constraints(card, existing)
             stale_generated = (
                 card.generator_revision is not None
                 and card.generator_revision < CARD_GENERATOR_REVISION
@@ -1284,6 +1286,39 @@ class ModelCard(CamelCaseModel):
                 ),
             ),
         )
+
+
+def preserve_generated_card_constraints(
+    generated: ModelCard,
+    bundled: ModelCard | None,
+) -> ModelCard:
+    """Carry curated hard placement constraints into a generated override.
+
+    Args:
+        generated: Machine-generated Hugging Face metadata card.
+        bundled: Existing curated card for the same model, when one exists.
+
+    Returns:
+        The generated card with any curated pipeline split boundary retained.
+
+    Operator-authored cards have no generator stamp and remain authoritative.
+    Generated cards are metadata caches, so they must not erase a bundled
+    architecture invariant merely because the user added the same repository
+    through the dashboard.
+    """
+    if (
+        generated.generator_revision is None
+        or bundled is None
+        or bundled.is_custom
+        or bundled.placement.max_pipeline_split_layer is None
+    ):
+        return generated
+    placement = generated.placement.model_copy(
+        update={
+            "max_pipeline_split_layer": bundled.placement.max_pipeline_split_layer
+        }
+    )
+    return generated.model_copy(update={"placement": placement})
 
 
 def add_to_card_cache(card: "ModelCard") -> None:

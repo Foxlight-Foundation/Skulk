@@ -289,6 +289,7 @@ from skulk.shared.models.model_cards import (
     ModelTask,
     get_card,
     get_model_cards,
+    preserve_generated_card_constraints,
 )
 from skulk.shared.tracing import (
     TraceEvent,
@@ -7107,12 +7108,18 @@ class API:
 
     async def add_custom_model(self, payload: AddCustomModelParams) -> ModelListModel:
         """Fetch a Hugging Face model card, optionally pinning one GGUF file."""
+        # Load curated truth before generating the override. A generated card
+        # is a metadata cache, not operator-authored placement policy, and must
+        # retain architecture safety constraints from an exact bundled match.
+        await get_model_cards()
+        bundled_card = get_card(payload.model_id)
         try:
             card = await ModelCard.fetch_from_hf(
                 payload.model_id,
                 gguf_file=payload.gguf_file,
                 source_revision=payload.source_revision,
             )
+            card = preserve_generated_card_constraints(card, bundled_card)
         except Exception as exc:
             raise HTTPException(
                 status_code=400, detail=f"Failed to fetch model: {exc}"
