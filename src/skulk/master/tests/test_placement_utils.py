@@ -2,6 +2,7 @@ import pytest
 
 from skulk.master.placement_utils import (
     allocate_layers_proportionally,
+    allocate_pipeline_layers,
     filter_cycles_by_memory,
     get_mlx_jaccl_coordinators,
     get_shard_assignments,
@@ -14,7 +15,12 @@ from skulk.master.tests.conftest import (
     create_node_memory,
     create_socket_connection,
 )
-from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    PlacementCardConfig,
+)
 from skulk.shared.topology import Topology
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
@@ -62,6 +68,44 @@ def _card(
         uses_cfg=uses_cfg,
         tasks=[ModelTask.TextToImage if uses_cfg else ModelTask.TextGeneration],
     )
+
+
+def test_pipeline_allocation_moves_tail_behind_safe_split_boundary() -> None:
+    """A shared-KV tail must remain with both of its concrete producers."""
+    card = _card(storage_gb=2, n_layers=30).model_copy(
+        update={
+            "placement": PlacementCardConfig(max_pipeline_split_layer=18),
+        }
+    )
+
+    allocations = allocate_pipeline_layers(card, [0.63, 0.37])
+
+    assert allocations == [18, 12]
+
+
+def test_pipeline_allocation_preserves_earlier_safe_boundaries() -> None:
+    """Only boundaries beyond the shared-tail limit should move."""
+    card = _card(storage_gb=2, n_layers=30).model_copy(
+        update={
+            "placement": PlacementCardConfig(max_pipeline_split_layer=18),
+        }
+    )
+
+    allocations = allocate_pipeline_layers(card, [0.34, 0.33, 0.33])
+
+    assert allocations == [10, 8, 12]
+
+
+def test_pipeline_allocation_rejects_too_many_constrained_ranks() -> None:
+    """Every pipeline rank still requires at least one owned layer."""
+    card = _card(storage_gb=2, n_layers=30).model_copy(
+        update={
+            "placement": PlacementCardConfig(max_pipeline_split_layer=1),
+        }
+    )
+
+    with pytest.raises(ValueError, match="before safe split boundary 1"):
+        allocate_pipeline_layers(card, [0.34, 0.33, 0.33])
 
 
 def test_filter_cycles_by_memory():

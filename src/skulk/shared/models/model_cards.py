@@ -612,6 +612,15 @@ class PlacementCardConfig(CamelCaseModel):
     max_context_tokens: int | None = None
     """Soft: caps the placement-time KV budget check (see #145) when set."""
 
+    max_pipeline_split_layer: int | None = Field(default=None, ge=1)
+    """Largest layer boundary at which a pipeline rank may begin.
+
+    Some architectures end with layers that reuse KV produced by earlier
+    concrete layers. Keeping every split at or before this boundary ensures the
+    final rank owns those producers as well as their dependent tail. ``None``
+    allows the planner to split at any ordinary layer boundary.
+    """
+
     backend_preference: tuple[str, ...] = ()
     """Soft, ordered preference among the node's backend tags (e.g.
     ``("llama_cpp-vulkan", "llama_cpp-rocm")``).
@@ -1003,6 +1012,16 @@ class ModelCard(CamelCaseModel):
                 self,
                 "vision",
                 self.vision.model_copy(update={"weights_repo": str(self.model_id)}),
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_pipeline_split_limit(self) -> "ModelCard":
+        """Require a constrained split boundary to lie inside the model."""
+        split_limit = self.placement.max_pipeline_split_layer
+        if split_limit is not None and split_limit >= self.n_layers:
+            raise ValueError(
+                "placement.max_pipeline_split_layer must be smaller than n_layers"
             )
         return self
 

@@ -8,7 +8,10 @@ from anyio import Path
 
 from skulk.shared.constants import RESOURCES_DIR
 from skulk.shared.models import model_cards as model_cards_module
-from skulk.shared.models.model_cards import ModelCard, RuntimeCapabilityCardConfig
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    RuntimeCapabilityCardConfig,
+)
 from skulk.shared.types.common import ModelId
 
 _MINIMAL_CARD = """\
@@ -22,6 +25,25 @@ quantization = "{quantization}"
 [storage_size]
 in_bytes = 1024
 """
+
+
+def test_pipeline_split_limit_must_be_inside_model() -> None:
+    """A split at or beyond the final layer cannot constrain a pipeline."""
+    with pytest.raises(
+        ValueError,
+        match="max_pipeline_split_layer must be smaller than n_layers",
+    ):
+        ModelCard.model_validate(
+            {
+                "model_id": "testorg/invalid-split",
+                "storage_size": {"in_bytes": 1024},
+                "n_layers": 4,
+                "hidden_size": 64,
+                "supports_tensor": False,
+                "tasks": ["TextGeneration"],
+                "placement": {"max_pipeline_split_layer": 4},
+            }
+        )
 
 
 @pytest.mark.anyio
