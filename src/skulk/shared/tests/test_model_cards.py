@@ -12,6 +12,7 @@ from skulk.shared.models.model_cards import (
     ModelCard,
     PlacementCardConfig,
     RuntimeCapabilityCardConfig,
+    get_bundled_card,
     preserve_generated_card_constraints,
 )
 from skulk.shared.types.common import ModelId
@@ -268,6 +269,44 @@ def test_hand_authored_card_keeps_explicit_placement_override() -> None:
     preserved = preserve_generated_card_constraints(authored, bundled)
 
     assert preserved.placement.max_pipeline_split_layer is None
+
+
+@pytest.mark.anyio
+async def test_bundled_lookup_ignores_cached_custom_winner(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repeated add must still find curated constraints beneath the cache."""
+    builtin_dir = tmp_path / "builtin"
+    builtin_dir.mkdir()
+    bundled = ModelCard(
+        model_id=ModelId("testorg/override-model"),
+        storage_size=model_cards_module.Memory(in_bytes=1024),
+        n_layers=4,
+        hidden_size=64,
+        supports_tensor=False,
+        tasks=[model_cards_module.ModelTask.TextGeneration],
+        placement=PlacementCardConfig(max_pipeline_split_layer=2),
+    )
+    await bundled.save(Path(str(builtin_dir / "testorg--override-model.toml")))
+    cached_custom = bundled.model_copy(
+        update={
+            "placement": PlacementCardConfig(),
+            "is_custom": True,
+            "generator_revision": model_cards_module.CARD_GENERATOR_REVISION,
+        }
+    )
+    monkeypatch.setattr(model_cards_module, "_BUILTIN_CARD_DIRS", [Path(str(builtin_dir))])
+    monkeypatch.setattr(
+        model_cards_module,
+        "_card_cache",
+        {ModelId("testorg/override-model"): cached_custom},
+    )
+
+    resolved = await get_bundled_card(ModelId("testorg/override-model"))
+
+    assert resolved is not None
+    assert not resolved.is_custom
+    assert resolved.placement.max_pipeline_split_layer == 2
 
 
 @pytest.mark.anyio

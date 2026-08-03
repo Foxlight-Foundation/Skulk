@@ -287,6 +287,7 @@ from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
     ModelTask,
+    get_bundled_card,
     get_card,
     get_model_cards,
     preserve_generated_card_constraints,
@@ -7111,8 +7112,7 @@ class API:
         # Load curated truth before generating the override. A generated card
         # is a metadata cache, not operator-authored placement policy, and must
         # retain architecture safety constraints from an exact bundled match.
-        await get_model_cards()
-        bundled_card = get_card(payload.model_id)
+        bundled_card = await get_bundled_card(payload.model_id)
         try:
             card = await ModelCard.fetch_from_hf(
                 payload.model_id,

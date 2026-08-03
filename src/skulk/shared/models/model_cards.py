@@ -172,6 +172,29 @@ async def get_model_cards() -> list["ModelCard"]:
     return [c for c in _card_cache.values() if not _is_image_card(c)]
 
 
+async def get_bundled_card(model_id: ModelId) -> "ModelCard | None":
+    """Load the curated card for a model independently of custom overrides.
+
+    Args:
+        model_id: Exact repository identifier to resolve.
+
+    Returns:
+        The matching bundled card, or ``None`` when the repository is not in
+        the curated catalog.
+
+    The live cache intentionally lets custom cards win. Callers that need the
+    curated safety baseline must therefore resolve it from bundled storage,
+    especially when a repeated add request has already replaced the cache
+    entry with a generated custom card.
+    """
+    card_path = model_id.normalize() + ".toml"
+    for directory in _BUILTIN_CARD_DIRS:
+        path = directory / card_path
+        if await path.exists():
+            return await ModelCard.load_from_path(path)
+    return None
+
+
 class ModelTask(str, Enum):
     """Task families a model card can declare as servable."""
 
