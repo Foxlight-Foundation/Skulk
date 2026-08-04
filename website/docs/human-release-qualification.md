@@ -22,9 +22,16 @@ the human test must begin from an empty Skulk home and use the public installer
 with that exact commit:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh \
-  | bash -s -- --ref <40-character-dev-commit>
+CANDIDATE_COMMIT=<40-character-dev-commit>
+curl -fsSL \
+  "https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/${CANDIDATE_COMMIT}/install.sh" \
+  | bash -s -- --ref "${CANDIDATE_COMMIT}"
 ```
+
+Both the installer script and the checkout therefore come from the same exact
+candidate. Fetching the script from `main` would leave candidate installer
+changes untested; the literal `main/install.sh | bash` command belongs only to
+the post-promotion shipping qualification.
 
 Do not add `SKULK_*` overrides, edit the generated `skulk.yaml`, substitute an
 engine, reuse an existing Skulk home, or use a private setup wrapper. Those
