@@ -111,7 +111,7 @@
   "chat.view.errors.generic": "Error: {message}",
   "chat.view.errors.noDiscoveredVoice": "No discovered voice is available for this speech model.",
   "chat.view.errors.noTranscriptionModel": "No transcription model is ready.",
-  "chat.view.errors.pcmStreamingRequired": "This speech model requires secure streaming audio playback in this browser.",
+  "chat.view.errors.pcmStreamingRequired": "This speech model requires Web Audio streaming playback in this browser.",
   "chat.view.errors.speechPlaybackFailed": "Speech playback failed.",
   "chat.view.errors.speechSynthesisFailed": "Speech synthesis failed.",
   "chat.view.errors.toolExecutionFailed": "Tool execution failed.",

@@ -182,9 +182,12 @@ model and local node advertise the required capabilities.
   response playback.
 - Batch-only models retain the `MediaRecorder` upload flow.
 - Transcription results populate the chat draft for review or submission.
-- Streaming-capable TTS models use sentence-sized raw PCM requests and a bounded
-  AudioWorklet playback queue. The dashboard pauses HTTP reads under pressure,
-  preserves sentence order, and propagates stop to queued and active requests.
+- Streaming-capable TTS models use sentence-sized raw PCM requests. The
+  dashboard prefers a bounded `AudioWorklet` queue on HTTPS and localhost, and
+  otherwise schedules bounded 100 ms `AudioBufferSourceNode` frames so ordinary
+  LAN HTTP dashboards retain streaming playback. Both paths pause HTTP reads
+  under pressure, preserve sentence order, and propagate stop to queued and
+  active requests.
 - For cards with voice discovery, the dashboard lists the mounted catalog and
   defaults to automatic language matching. It chooses the first catalog voice
   whose preferred language matches the response text, then pins that voice for

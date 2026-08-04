@@ -629,8 +629,10 @@ is processed per call and never retained.
 The dashboard composes these surfaces in chat: mounted TTS models can speak
 draft text, replay assistant messages, or auto-speak final assistant responses
 (the dashboard requests PCM, segments visible assistant output into ordered
-sentences, and pauses HTTP reads against a bounded AudioWorklet queue; stop
-aborts queued and active synthesis), and mounted STT models transcribe a
+sentences, and pauses HTTP reads against a bounded playback queue; HTTPS and
+localhost use an `AudioWorklet`, while ordinary LAN HTTP uses scheduled 100 ms
+`AudioBufferSourceNode` frames; stop aborts queued and active synthesis), and
+mounted STT models transcribe a
 browser recording into the draft box. Realtime cards get the live microphone
 path only when the card's declaration and the local API's live `stt.realtime`
 advertisement agree; an AudioWorklet then captures microphone audio and

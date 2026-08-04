@@ -2,21 +2,38 @@ import { StreamingLinearResampler } from './realtimeTranscription';
 
 const DEFAULT_MAX_BUFFERED_SECONDS = 8;
 const DEFAULT_RESUME_BUFFERED_SECONDS = 4;
+const DEFAULT_SCHEDULED_FRAME_SECONDS = 0.1;
+const DEFAULT_SCHEDULED_START_LEAD_SECONDS = 0.05;
 
-/** Return whether the current origin exposes the secure AudioWorklet surface. */
-export function canUseStreamingSpeechPlayback(
-  environment: {
-    isSecureContext: boolean;
-    AudioContext?: unknown;
-    AudioWorkletNode?: unknown;
-  } = window,
-): boolean {
-  return Boolean(
+/** Browser audio sink selected for one streaming speech response. */
+export type StreamingSpeechPlaybackMode = 'audio-worklet' | 'scheduled-buffer' | 'unavailable';
+
+type StreamingSpeechEnvironment = {
+  isSecureContext: boolean;
+  AudioContext?: unknown;
+  AudioWorkletNode?: unknown;
+};
+
+/** Select the best raw-PCM playback implementation available in this browser. */
+export function streamingSpeechPlaybackMode(
+  environment: StreamingSpeechEnvironment = window,
+): StreamingSpeechPlaybackMode {
+  if (typeof environment.AudioContext !== 'function') return 'unavailable';
+  if (
     environment.isSecureContext
-    && typeof environment.AudioContext === 'function'
     && 'audioWorklet' in (environment.AudioContext as { prototype: object }).prototype
-    && environment.AudioWorkletNode
-  );
+    && typeof environment.AudioWorkletNode === 'function'
+  ) {
+    return 'audio-worklet';
+  }
+  return 'scheduled-buffer';
+}
+
+/** Return whether the browser can play streaming raw PCM on this origin. */
+export function canUseStreamingSpeechPlayback(
+  environment: StreamingSpeechEnvironment = window,
+): boolean {
+  return streamingSpeechPlaybackMode(environment) !== 'unavailable';
 }
 
 /** Validate raw PCM response framing and return its sample rate. */
@@ -127,6 +144,54 @@ export function splitPlaybackSamples(
   return frames;
 }
 
+class PlaybackFrameAccumulator {
+  private readonly chunks: Float32Array[] = [];
+  private sampleCount = 0;
+
+  constructor(private readonly frameSamples: number) {
+    if (!Number.isInteger(frameSamples) || frameSamples <= 0) {
+      throw new Error('Scheduled playback frame size must be a positive integer.');
+    }
+  }
+
+  /** Add decoded samples and return every complete fixed-size playback frame. */
+  push(samples: Float32Array): Float32Array[] {
+    if (samples.length > 0) {
+      this.chunks.push(samples);
+      this.sampleCount += samples.length;
+    }
+    const frames: Float32Array[] = [];
+    while (this.sampleCount >= this.frameSamples) {
+      frames.push(this.take(this.frameSamples));
+    }
+    return frames;
+  }
+
+  /** Return the final partial frame after the network stream ends. */
+  flush(): Float32Array | null {
+    return this.sampleCount > 0 ? this.take(this.sampleCount) : null;
+  }
+
+  private take(length: number): Float32Array {
+    const frame = new Float32Array(length);
+    let written = 0;
+    while (written < length) {
+      const chunk = this.chunks[0];
+      if (!chunk) throw new Error('Scheduled playback accumulator underflow.');
+      const count = Math.min(length - written, chunk.length);
+      frame.set(chunk.subarray(0, count), written);
+      written += count;
+      if (count === chunk.length) {
+        this.chunks.shift();
+      } else {
+        this.chunks[0] = chunk.slice(count);
+      }
+    }
+    this.sampleCount -= length;
+    return frame;
+  }
+}
+
 /** Split visible text into complete synthesis sentences and one retained tail. */
 export function splitCompleteSpeechSentences(text: string): {
   sentences: string[];
@@ -162,6 +227,9 @@ export function resyncVisibleSpeech(
 export class StreamingSpeechPlayback {
   private context: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
+  private readonly scheduledNodes = new Map<AudioBufferSourceNode, number>();
+  private readonly drainWaiters = new Set<() => void>();
+  private scheduledThroughSeconds = 0;
   private stopped = false;
   private bufferedSamples = 0;
   private readonly waiters = new Set<() => void>();
@@ -169,53 +237,43 @@ export class StreamingSpeechPlayback {
   constructor(
     private readonly maximumBufferedSeconds = DEFAULT_MAX_BUFFERED_SECONDS,
     private readonly resumeBufferedSeconds = DEFAULT_RESUME_BUFFERED_SECONDS,
+    private readonly playbackMode = streamingSpeechPlaybackMode(),
   ) {}
 
-  /** Stream a validated `audio/pcm` response through a bounded AudioWorklet queue. */
+  /** Stream a validated `audio/pcm` response through the best available audio sink. */
   async play(response: Response, signal?: AbortSignal): Promise<void> {
     const sampleRate = validatePcmResponseHeaders(response.headers);
     if (!response.body) throw new Error('Streaming speech response has no body.');
+    if (this.playbackMode === 'unavailable') {
+      throw new Error('This browser does not expose Web Audio playback.');
+    }
 
     this.stopped = false;
     const context = new AudioContext();
     this.context = context;
-    const playbackSampleRate = context.sampleRate;
-    const resampler = playbackSampleRate === sampleRate
-      ? null
-      : new StreamingLinearResampler(sampleRate, playbackSampleRate);
-    const moduleUrl = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'text/javascript' }));
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+    let stopOnAbort: (() => void) | null = null;
     try {
-      await context.audioWorklet.addModule(moduleUrl);
-    } finally {
-      URL.revokeObjectURL(moduleUrl);
-    }
-    if (this.stopped) return;
-    const node = new AudioWorkletNode(context, 'skulk-pcm-queue', {
-      numberOfInputs: 0,
-      numberOfOutputs: 1,
-      outputChannelCount: [1],
-    });
-    this.node = node;
-    node.connect(context.destination);
-    await context.resume();
+      const playbackSampleRate = context.sampleRate;
+      const resampler = playbackSampleRate === sampleRate
+        ? null
+        : new StreamingLinearResampler(sampleRate, playbackSampleRate);
+      const preparedWorklet = this.playbackMode === 'audio-worklet'
+        ? await this.prepareAudioWorklet(context, playbackSampleRate)
+        : null;
+      if (this.stopped) return;
+      await context.resume();
 
-    const drained = new Promise<void>((resolve) => {
-      node.port.onmessage = (event: MessageEvent<{ type: string; samples?: number }>) => {
-        if (event.data.type === 'consumed') {
-          this.bufferedSamples = Math.max(0, this.bufferedSamples - (event.data.samples ?? 0));
-          if (this.bufferedSamples <= playbackSampleRate * this.resumeBufferedSeconds) {
-            this.releaseWaiters();
-          }
-        } else if (event.data.type === 'drained') {
-          resolve();
-        }
-      };
-    });
-    const stopOnAbort = () => this.stop();
-    signal?.addEventListener('abort', stopOnAbort, { once: true });
-    const reader = response.body.getReader();
-    let pendingPcmByte: number | null = null;
-    try {
+      stopOnAbort = () => this.stop();
+      signal?.addEventListener('abort', stopOnAbort, { once: true });
+      reader = response.body.getReader();
+      const scheduledAccumulator = this.playbackMode === 'scheduled-buffer'
+        ? new PlaybackFrameAccumulator(Math.max(
+            1,
+            Math.floor(playbackSampleRate * DEFAULT_SCHEDULED_FRAME_SECONDS),
+          ))
+        : null;
+      let pendingPcmByte: number | null = null;
       while (!this.stopped) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -228,22 +286,43 @@ export class StreamingSpeechPlayback {
           playbackSampleRate * this.maximumBufferedSeconds,
         );
         for (const frame of splitPlaybackSamples(samples, maximumFrameSamples)) {
-          await this.waitForCapacity(playbackSampleRate, frame.length, signal);
-          if (this.stopped || signal?.aborted) return;
-          this.bufferedSamples += frame.length;
-          node.port.postMessage({ type: 'audio', samples: frame.buffer }, [frame.buffer]);
+          if (scheduledAccumulator) {
+            for (const scheduledFrame of scheduledAccumulator.push(frame)) {
+              await this.enqueueScheduledFrame(
+                context,
+                scheduledFrame,
+                playbackSampleRate,
+                signal,
+              );
+            }
+          } else {
+            await this.enqueueWorkletFrame(frame, playbackSampleRate, signal);
+          }
         }
       }
       if (!this.stopped) {
         if (pendingPcmByte !== null) {
           throw new Error('Streaming PCM response ended on an incomplete sample.');
         }
-        node.port.postMessage({ type: 'end' });
-        await drained;
+        const finalScheduledFrame = scheduledAccumulator?.flush();
+        if (finalScheduledFrame) {
+          await this.enqueueScheduledFrame(
+            context,
+            finalScheduledFrame,
+            playbackSampleRate,
+            signal,
+          );
+        }
+        if (preparedWorklet) {
+          this.node?.port.postMessage({ type: 'end' });
+          await preparedWorklet.drained;
+        } else {
+          await this.waitForScheduledDrain();
+        }
       }
     } finally {
-      signal?.removeEventListener('abort', stopOnAbort);
-      await reader.cancel().catch(() => undefined);
+      if (stopOnAbort) signal?.removeEventListener('abort', stopOnAbort);
+      await reader?.cancel().catch(() => undefined);
       await this.closeAudio();
     }
   }
@@ -252,8 +331,101 @@ export class StreamingSpeechPlayback {
   stop(): void {
     this.stopped = true;
     this.node?.port.postMessage({ type: 'clear' });
+    this.clearScheduledNodes();
     this.releaseWaiters();
+    this.releaseDrainWaiters();
     void this.closeAudio();
+  }
+
+  private async prepareAudioWorklet(
+    context: AudioContext,
+    playbackSampleRate: number,
+  ): Promise<{ drained: Promise<void> }> {
+    const moduleUrl = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'text/javascript' }));
+    try {
+      await context.audioWorklet.addModule(moduleUrl);
+    } finally {
+      URL.revokeObjectURL(moduleUrl);
+    }
+    const node = new AudioWorkletNode(context, 'skulk-pcm-queue', {
+      numberOfInputs: 0,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+    });
+    this.node = node;
+    node.connect(context.destination);
+    const drained = new Promise<void>((resolve) => {
+      node.port.onmessage = (event: MessageEvent<{ type: string; samples?: number }>) => {
+        if (event.data.type === 'consumed') {
+          this.bufferedSamples = Math.max(0, this.bufferedSamples - (event.data.samples ?? 0));
+          if (this.bufferedSamples <= playbackSampleRate * this.resumeBufferedSeconds) {
+            this.releaseWaiters();
+          }
+        } else if (event.data.type === 'drained') {
+          resolve();
+        }
+      };
+    });
+    return { drained };
+  }
+
+  private async enqueueWorkletFrame(
+    frame: Float32Array,
+    playbackSampleRate: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.waitForCapacity(playbackSampleRate, frame.length, signal);
+    if (this.stopped || signal?.aborted) return;
+    this.bufferedSamples += frame.length;
+    this.node?.port.postMessage({ type: 'audio', samples: frame.buffer }, [frame.buffer]);
+  }
+
+  private async enqueueScheduledFrame(
+    context: AudioContext,
+    frame: Float32Array,
+    playbackSampleRate: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.waitForCapacity(playbackSampleRate, frame.length, signal);
+    if (this.stopped || signal?.aborted) return;
+
+    const audioBuffer = context.createBuffer(1, frame.length, playbackSampleRate);
+    audioBuffer.copyToChannel(frame, 0);
+    const source = context.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(context.destination);
+    const startAt = Math.max(
+      this.scheduledThroughSeconds,
+      context.currentTime + DEFAULT_SCHEDULED_START_LEAD_SECONDS,
+    );
+    this.scheduledThroughSeconds = startAt + frame.length / playbackSampleRate;
+    this.bufferedSamples += frame.length;
+    this.scheduledNodes.set(source, frame.length);
+    source.onended = () => {
+      const scheduledSamples = this.scheduledNodes.get(source);
+      if (scheduledSamples === undefined) return;
+      this.scheduledNodes.delete(source);
+      source.disconnect();
+      this.bufferedSamples = Math.max(0, this.bufferedSamples - scheduledSamples);
+      if (this.bufferedSamples <= playbackSampleRate * this.resumeBufferedSeconds) {
+        this.releaseWaiters();
+      }
+      if (this.scheduledNodes.size === 0) this.releaseDrainWaiters();
+    };
+    try {
+      source.start(startAt);
+    } catch (error) {
+      source.onended = null;
+      this.scheduledNodes.delete(source);
+      source.disconnect();
+      this.bufferedSamples = Math.max(0, this.bufferedSamples - frame.length);
+      throw error;
+    }
+  }
+
+  private async waitForScheduledDrain(): Promise<void> {
+    if (this.scheduledNodes.size === 0) return;
+    await new Promise<void>((resolve) => this.drainWaiters.add(resolve));
   }
 
   private async waitForCapacity(
@@ -286,9 +458,30 @@ export class StreamingSpeechPlayback {
     this.waiters.clear();
   }
 
+  private releaseDrainWaiters(): void {
+    for (const resolve of this.drainWaiters) resolve();
+    this.drainWaiters.clear();
+  }
+
+  private clearScheduledNodes(): void {
+    for (const source of this.scheduledNodes.keys()) {
+      source.onended = null;
+      try {
+        source.stop();
+      } catch {
+        // A node that has already ended does not need another stop signal.
+      }
+      source.disconnect();
+    }
+    this.scheduledNodes.clear();
+    this.scheduledThroughSeconds = 0;
+  }
+
   private async closeAudio(): Promise<void> {
     this.node?.disconnect();
     this.node = null;
+    this.clearScheduledNodes();
+    this.releaseDrainWaiters();
     const context = this.context;
     this.context = null;
     this.bufferedSamples = 0;
