@@ -21,6 +21,7 @@ from skulk.shared.types.events import (
     Event,
     IndexedEvent,
     NodeGatheredInfo,
+    NodeTimedOut,
     StateSnapshotHydrated,
     TaskCreated,
     TaskFailed,
@@ -618,5 +619,103 @@ async def test_forward_info_gates_connectivity_on_confirmed_echo() -> None:
     )
 
     indexed_event_sender.close()
+    command_sender.close()
+    download_sender.close()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_hydration_invalidates_connectivity_confirmation() -> None:
+    """A winning master's snapshot must make a transient echo retryable."""
+
+    node_id = NodeId("node-a")
+    reading = NodeNetworkInterfaces(
+        ifaces=[NetworkInterfaceInfo(name="eth0", ip_address="10.0.0.1")]
+    )
+    indexed_event_sender, indexed_event_receiver = channel[IndexedEvent]()
+    event_sender, event_receiver = channel[Event]()
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    worker = Worker(
+        node_id=node_id,
+        event_receiver=indexed_event_receiver,
+        event_sender=event_sender,
+        command_sender=command_sender,
+        download_command_sender=download_sender,
+    )
+    worker._confirmed_forwarded_info[NodeNetworkInterfaces] = reading  # pyright: ignore[reportPrivateUsage]
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(worker._event_applier)  # pyright: ignore[reportPrivateUsage]
+        await indexed_event_sender.send(
+            IndexedEvent(
+                idx=0,
+                event=StateSnapshotHydrated(
+                    state=State(last_event_applied_idx=0)
+                ),
+            )
+        )
+        with anyio.fail_after(2):
+            while worker._confirmed_forwarded_info:  # pyright: ignore[reportPrivateUsage]
+                await anyio.sleep(0)
+        task_group.cancel_scope.cancel()
+
+    info_sender, info_receiver = channel[GatheredInfo]()
+    await info_sender.send(reading)
+    info_sender.close()
+    await worker._forward_info(info_receiver)  # pyright: ignore[reportPrivateUsage]
+
+    retried = await event_receiver.receive()
+    assert isinstance(retried, NodeGatheredInfo)
+    assert retried.node_id == node_id
+    assert retried.info == reading
+    indexed_event_sender.close()
+    event_sender.close()
+    command_sender.close()
+    download_sender.close()
+
+
+@pytest.mark.asyncio
+async def test_self_timeout_invalidates_connectivity_confirmation() -> None:
+    """A live process timed out by the master must be able to re-enroll."""
+
+    node_id = NodeId("node-a")
+    reading = NodeNetworkInterfaces(
+        ifaces=[NetworkInterfaceInfo(name="eth0", ip_address="10.0.0.1")]
+    )
+    indexed_event_sender, indexed_event_receiver = channel[IndexedEvent]()
+    event_sender, _ = channel[Event]()
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    worker = Worker(
+        node_id=node_id,
+        event_receiver=indexed_event_receiver,
+        event_sender=event_sender,
+        command_sender=command_sender,
+        download_command_sender=download_sender,
+    )
+    worker._confirmed_forwarded_info[NodeNetworkInterfaces] = reading  # pyright: ignore[reportPrivateUsage]
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(worker._event_applier)  # pyright: ignore[reportPrivateUsage]
+        await indexed_event_sender.send(
+            IndexedEvent(idx=0, event=NodeTimedOut(node_id=NodeId("node-b")))
+        )
+        with anyio.fail_after(2):
+            while worker.state.last_event_applied_idx != 0:
+                await anyio.sleep(0)
+        assert worker._confirmed_forwarded_info == {  # pyright: ignore[reportPrivateUsage]
+            NodeNetworkInterfaces: reading
+        }
+
+        await indexed_event_sender.send(
+            IndexedEvent(idx=1, event=NodeTimedOut(node_id=node_id))
+        )
+        with anyio.fail_after(2):
+            while worker._confirmed_forwarded_info:  # pyright: ignore[reportPrivateUsage]
+                await anyio.sleep(0)
+        task_group.cancel_scope.cancel()
+
+    indexed_event_sender.close()
+    event_sender.close()
     command_sender.close()
     download_sender.close()

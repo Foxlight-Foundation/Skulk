@@ -66,6 +66,7 @@ from skulk.shared.types.events import (
     IndexedEvent,
     NodeDownloadProgress,
     NodeGatheredInfo,
+    NodeTimedOut,
     StagedModelEvicted,
     StateSnapshotHydrated,
     TaskCreated,
@@ -1753,6 +1754,19 @@ class Worker:
                 previous_tasks = self.state.tasks
                 self.state = apply(self.state, event=event)
                 event = event.event
+
+                # A confirmation is scoped to the event-log state that echoed
+                # it. Election bootstrap can briefly let this worker confirm a
+                # connectivity reading against a transient master, then replace
+                # that state with the winning master's snapshot. Keeping the
+                # old confirmation suppresses every unchanged re-publication,
+                # leaving this live node absent from last_seen and topology
+                # indefinitely. A self-timeout has the same recovery problem:
+                # the live process must be allowed to enroll itself again.
+                if isinstance(event, StateSnapshotHydrated) or (
+                    isinstance(event, NodeTimedOut) and event.node_id == self.node_id
+                ):
+                    self._confirmed_forwarded_info.clear()
 
                 # Confirm our own connectivity readings once the master echoes
                 # them back indexed; _forward_info gates on this so an
