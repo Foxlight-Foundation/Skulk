@@ -254,7 +254,7 @@ This project records release notes here and mirrors public-facing notes in
   static voice catalogs via `GET /v1/audio/voices`, and bounded multipart
   reference audio for supporting cards); mounted STT models serve
   `POST /v1/audio/transcriptions` (with typed SSE or progressive NDJSON
-  streaming where a card proves it) and experimental
+  streaming where a card proves it) and standard
   `POST /v1/audio/translations`. A realtime transcription provider pins a
   session to a mounted speech worker and feeds a true upstream streaming
   session over bounded ingress; `WS /v1/realtime` is the OpenAI-compatible
@@ -428,8 +428,7 @@ This project records release notes here and mirrors public-facing notes in
   context), and `withdraw_capability(tag)` reverses an advertisement, with the
   telemetry publisher emitting one final empty reading when a node's last tag is
   withdrawn so peers clear their entry instead of holding a stale value. A
-  reference provider lives at `examples/extensions/echo-provider/`. Invoking a
-  capability (the generic call envelope) is the next slice of this surface.
+  reference provider lives at `examples/extensions/echo-provider/`.
 
 - **Extensions get telemetry-plane access (read + advertise).** First-class
   fabric citizenship expressed as plane access: a plugin can now both discover
@@ -445,16 +444,6 @@ This project records release notes here and mirrors public-facing notes in
     every peer's `read_cluster()` snapshot under `ClusterNodeView.capabilities`.
     Advertising is additive and idempotent; the tag keeps being gossiped
     (last-write-wins) until the node leaves the cluster.
-
-- **A gated "Experiments" area for staging in-development features.** A node
-  started with `SKULK_ENABLE_EXPERIMENTAL_MODE` set reveals an Experiments
-  section in the dashboard Settings; without it, the section is hidden and any
-  feature that opts into the gate stays inert, so a released build can carry
-  work-in-progress UX without exposing it. The switch is deliberately
-  feature-agnostic (it knows about no particular experiment); a feature that
-  wants to be gated reads it and adds its own toggle to the section, so its
-  operator UX is built alongside it. No experimental features ship in this
-  release, so with the flag on, the section shows a placeholder.
 
 ### Fixed
 

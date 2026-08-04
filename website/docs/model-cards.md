@@ -206,7 +206,7 @@ Declares speech serving metadata for TTS and STT models:
   - whether managed reference audio can condition the voice
 - `supports_translation`
   - whether speech-to-English translation is supported through the
-    experimental `/v1/audio/translations` route
+    standard `/v1/audio/translations` route
 - `sample_rates`
   - supported input or output sample rates in hertz
 
