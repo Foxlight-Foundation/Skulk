@@ -340,13 +340,14 @@ export class StreamingSpeechPlayback {
   private async prepareAudioWorklet(
     context: AudioContext,
     playbackSampleRate: number,
-  ): Promise<{ drained: Promise<void> }> {
+  ): Promise<{ drained: Promise<void> } | null> {
     const moduleUrl = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'text/javascript' }));
     try {
       await context.audioWorklet.addModule(moduleUrl);
     } finally {
       URL.revokeObjectURL(moduleUrl);
     }
+    if (this.stopped || context.state === 'closed') return null;
     const node = new AudioWorkletNode(context, 'skulk-pcm-queue', {
       numberOfInputs: 0,
       numberOfOutputs: 1,

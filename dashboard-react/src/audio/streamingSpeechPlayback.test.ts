@@ -112,6 +112,68 @@ describe('StreamingSpeechPlayback scheduled-buffer fallback', () => {
   });
 });
 
+describe('StreamingSpeechPlayback AudioWorklet cancellation', () => {
+  it('does not construct a worklet node after stop closes the context', async () => {
+    let releaseModule: (() => void) | undefined;
+    let workletNodeConstructions = 0;
+    const closeContext = vi.fn();
+
+    class FakeAudioContext {
+      readonly sampleRate = 24000;
+      readonly destination = {};
+      state: AudioContextState = 'suspended';
+      readonly audioWorklet = {
+        addModule: vi.fn(() => new Promise<void>((resolve) => { releaseModule = resolve; })),
+      };
+
+      async resume(): Promise<void> {
+        this.state = 'running';
+      }
+      async close(): Promise<void> {
+        this.state = 'closed';
+        closeContext();
+      }
+    }
+
+    class FakeAudioWorkletNode {
+      constructor() {
+        workletNodeConstructions += 1;
+      }
+    }
+
+    const previousAudioContext = window.AudioContext;
+    const previousAudioWorkletNode = window.AudioWorkletNode;
+    Object.defineProperties(window, {
+      AudioContext: { configurable: true, value: FakeAudioContext },
+      AudioWorkletNode: { configurable: true, value: FakeAudioWorkletNode },
+    });
+    try {
+      const response = new Response(new Int16Array([0]).buffer, {
+        headers: {
+          'X-Audio-Sample-Rate': '24000',
+          'X-Audio-Channels': '1',
+          'X-Audio-Sample-Format': 's16le',
+        },
+      });
+      const playback = new StreamingSpeechPlayback(8, 4, 'audio-worklet');
+      const playing = playback.play(response);
+      await vi.waitFor(() => expect(releaseModule).toBeTypeOf('function'));
+
+      playback.stop();
+      releaseModule?.();
+      await playing;
+
+      expect(workletNodeConstructions).toBe(0);
+      expect(closeContext).toHaveBeenCalledOnce();
+    } finally {
+      Object.defineProperties(window, {
+        AudioContext: { configurable: true, value: previousAudioContext },
+        AudioWorkletNode: { configurable: true, value: previousAudioWorkletNode },
+      });
+    }
+  });
+});
+
 describe('validatePcmResponseHeaders', () => {
   it('requires sample rate, mono channels, and signed little-endian PCM16', () => {
     const headers = new Headers({
