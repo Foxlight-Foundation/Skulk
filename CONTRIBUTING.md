@@ -374,6 +374,14 @@ uv run skulk-harness fresh-install qualify \
 The green reports must cover Apple Silicon, AMD Linux, and a clean RunPod
 NVIDIA pod. A configured-fleet battery is not an acceptable substitute.
 
+After the automated candidate matrix passes, a human tester exercises the same
+exact commit through the first-install dashboard journeys in the
+[human release qualification guide](website/docs/human-release-qualification.md).
+Human acceptance supplements the automated gate; it cannot replace a failed or
+incomplete harness matrix. Any product, shipped-default, installer, dashboard,
+or model-card change made in response to human testing creates a new candidate
+that must repeat the automated qualification before promotion.
+
 ## Submitting Changes
 
 1. Fork the repository
