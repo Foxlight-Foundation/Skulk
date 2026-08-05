@@ -268,7 +268,10 @@ export class StreamingSpeechPlayback {
     }
 
     const context = await this.ensureAudioContext();
-    if (!context || this.stopped) return;
+    if (!context || this.stopped) {
+      await response.body.cancel().catch(() => undefined);
+      return;
+    }
     let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
     let stopOnAbort: (() => void) | null = null;
     try {
@@ -550,6 +553,7 @@ export class SpeechSentenceQueue {
     private readonly onError: (error: unknown) => void,
     private readonly onIdle: () => void = () => undefined,
     private readonly finishPlayback: () => Promise<void> = async () => undefined,
+    private readonly stopPlayback: () => void = () => undefined,
   ) {}
 
   /** Add complete visible sentences without starting overlapping synthesis calls. */
@@ -568,9 +572,11 @@ export class SpeechSentenceQueue {
 
   /** Cancel the active HTTP/audio call and discard sentences not yet synthesized. */
   stop(): void {
+    if (this.stopped) return;
     this.stopped = true;
     this.pending.length = 0;
     this.activeController?.abort();
+    this.stopPlayback();
   }
 
   private async drain(): Promise<void> {

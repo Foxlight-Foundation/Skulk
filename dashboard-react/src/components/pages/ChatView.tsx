@@ -1187,6 +1187,7 @@ export function ChatView({
               setIsAutoSpeaking(false);
             },
             () => responseSession.playback.finish(),
+            () => responseSession.playback.stop(),
           );
         })()
       : null;
@@ -1591,6 +1592,7 @@ export function ChatView({
               setIsAutoSpeaking(false);
             },
             () => responseSession.playback.finish(),
+            () => responseSession.playback.stop(),
           );
         }
         if (visibleText.startsWith(realtimeSpeechTextRef.current)) {

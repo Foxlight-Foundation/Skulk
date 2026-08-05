@@ -204,6 +204,7 @@ describe('StreamingSpeechPlayback AudioWorklet cancellation', () => {
     let releaseModule: (() => void) | undefined;
     let workletNodeConstructions = 0;
     const closeContext = vi.fn();
+    const cancelResponseBody = vi.fn();
 
     class FakeAudioContext {
       readonly sampleRate = 24000;
@@ -235,7 +236,9 @@ describe('StreamingSpeechPlayback AudioWorklet cancellation', () => {
       AudioWorkletNode: { configurable: true, value: FakeAudioWorkletNode },
     });
     try {
-      const response = new Response(new Int16Array([0]).buffer, {
+      const response = new Response(new ReadableStream<Uint8Array>({
+        cancel: cancelResponseBody,
+      }), {
         headers: {
           'X-Audio-Sample-Rate': '24000',
           'X-Audio-Channels': '1',
@@ -252,6 +255,7 @@ describe('StreamingSpeechPlayback AudioWorklet cancellation', () => {
 
       expect(workletNodeConstructions).toBe(0);
       expect(closeContext).toHaveBeenCalledOnce();
+      expect(cancelResponseBody).toHaveBeenCalledOnce();
     } finally {
       Object.defineProperties(window, {
         AudioContext: { configurable: true, value: previousAudioContext },
@@ -385,6 +389,7 @@ describe('SpeechSentenceQueue', () => {
   it('aborts active playback and drops pending sentences', async () => {
     const calls: string[] = [];
     let aborted = false;
+    const stopPlayback = vi.fn();
     const queue = new SpeechSentenceQueue(async (text, signal) => {
       calls.push(text);
       await new Promise<void>((_resolve, reject) => {
@@ -393,13 +398,14 @@ describe('SpeechSentenceQueue', () => {
           reject(new DOMException('cancelled', 'AbortError'));
         }, { once: true });
       });
-    }, () => undefined);
+    }, () => undefined, () => undefined, async () => undefined, stopPlayback);
 
     queue.enqueue(['First.', 'Second.']);
     await vi.waitFor(() => expect(calls).toEqual(['First.']));
     queue.stop();
     await vi.waitFor(() => expect(aborted).toBe(true));
     expect(calls).toEqual(['First.']);
+    expect(stopPlayback).toHaveBeenCalledOnce();
   });
 
   it('returns to idle after a playback error', async () => {
