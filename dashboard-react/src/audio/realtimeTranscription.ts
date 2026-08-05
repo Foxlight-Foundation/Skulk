@@ -342,7 +342,7 @@ export class RealtimeConversationSocket {
   private readonly responses = new Map<string, string>();
   private connected = false;
   private acceptingAudio = true;
-  private turnHasSpeech = false;
+  private turnHasAudio = false;
   private inputPaused = false;
   private responseActive = false;
   private terminal = false;
@@ -400,6 +400,7 @@ export class RealtimeConversationSocket {
       throw new Error('microphone sample rate changed during realtime conversation');
     }
     const resampled = this.resampler?.process(samples) ?? new Float32Array(0);
+    if (resampled.length > 0) this.turnHasAudio = true;
     for (const sample of resampled) this.pendingSamples.push(sample);
     while (this.pendingSamples.length >= TARGET_FRAME_SAMPLES) {
       this.sendSamples(Float32Array.from(
@@ -411,7 +412,7 @@ export class RealtimeConversationSocket {
   /** Flush microphone tail and ask the server to close the current turn. */
   commitTurn(): boolean {
     const socket = this.socket;
-    if (!this.connected || !socket || socket.readyState !== 1 || !this.turnHasSpeech) {
+    if (!this.connected || !socket || socket.readyState !== 1 || !this.turnHasAudio) {
       return false;
     }
     if (!this.acceptingAudio) return true;
@@ -504,7 +505,6 @@ export class RealtimeConversationSocket {
     }
     const itemId = typeof payload.item_id === 'string' ? payload.item_id : null;
     if (payload.type === 'input_audio_buffer.speech_started') {
-      this.turnHasSpeech = true;
       this.options.onSpeechStarted?.();
       return;
     }
@@ -532,7 +532,7 @@ export class RealtimeConversationSocket {
     ) {
       this.transcripts.delete(itemId ?? 'current');
       this.acceptingAudio = true;
-      this.turnHasSpeech = false;
+      this.turnHasAudio = false;
       this.options.onTranscript?.(payload.transcript, true, itemId);
       return;
     }

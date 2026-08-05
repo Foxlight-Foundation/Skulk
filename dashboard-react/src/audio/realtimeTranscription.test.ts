@@ -236,7 +236,6 @@ describe('RealtimeConversationSocket', () => {
     });
 
     client.append(Float32Array.from([0, 0.25, 0.5, 0.75, 1]), 48_000);
-    socket.serverEvent({ type: 'input_audio_buffer.speech_started' });
     client.commitTurn();
     expect(JSON.parse(socket.sent.at(-1)!)).toEqual({ type: 'input_audio_buffer.commit' });
     socket.serverEvent({
@@ -453,7 +452,7 @@ describe('RealtimeConversationSocket', () => {
     );
   });
 
-  it('does not commit post-transcription silence when a completed session is stopped', async () => {
+  it('does not recommit an already completed turn without new microphone frames', async () => {
     const socket = new FakeWebSocket();
     const client = new RealtimeConversationSocket({
       transcriptionModelId: 'org/stt',
@@ -464,13 +463,13 @@ describe('RealtimeConversationSocket', () => {
     const connected = client.connect();
     socket.serverEvent({ type: 'session.created' });
     await connected;
+    client.append(new Float32Array(2_401), 24_000);
     socket.serverEvent({ type: 'input_audio_buffer.speech_started' });
     socket.serverEvent({ type: 'input_audio_buffer.speech_stopped' });
     socket.serverEvent({
       type: 'conversation.item.input_audio_transcription.completed',
       transcript: 'preserve this draft',
     });
-    client.append(new Float32Array(2_401), 24_000);
 
     expect(client.commitTurn()).toBe(false);
     expect(socket.sent.map((message) => JSON.parse(message)).filter(
@@ -489,6 +488,7 @@ describe('RealtimeConversationSocket', () => {
     const connected = client.connect();
     socket.serverEvent({ type: 'session.created' });
     await connected;
+    client.append(new Float32Array(2_401), 24_000);
     socket.serverEvent({ type: 'input_audio_buffer.speech_started' });
     socket.serverEvent({ type: 'input_audio_buffer.speech_stopped' });
 
