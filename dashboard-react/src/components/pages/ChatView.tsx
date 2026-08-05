@@ -1166,7 +1166,7 @@ export function ChatView({
             useEncodedFallback: false,
           };
           streamingPlaybackRef.current = responseSession.playback;
-          return new SpeechSentenceQueue(
+          const responseQueue = new SpeechSentenceQueue(
             (sentence, signal) => playSpeechSegment(
               sentence,
               null,
@@ -1181,6 +1181,9 @@ export function ChatView({
               setSpeechError(message);
             },
             () => {
+              if (speechSentenceQueueRef.current === responseQueue) {
+                speechSentenceQueueRef.current = null;
+              }
               if (streamingPlaybackRef.current === responseSession.playback) {
                 streamingPlaybackRef.current = null;
               }
@@ -1189,6 +1192,7 @@ export function ChatView({
             () => responseSession.playback.finish(),
             () => responseSession.playback.stop(),
           );
+          return responseQueue;
         })()
       : null;
     speechSentenceQueueRef.current = sentenceQueue;
@@ -1572,7 +1576,7 @@ export function ChatView({
             useEncodedFallback: false,
           };
           streamingPlaybackRef.current = responseSession.playback;
-          speechSentenceQueueRef.current = new SpeechSentenceQueue(
+          const responseQueue = new SpeechSentenceQueue(
             (sentence, signal) => playSpeechSegment(
               sentence,
               null,
@@ -1586,6 +1590,9 @@ export function ChatView({
                 : t('chat.view.errors.speechSynthesisFailed', 'Speech synthesis failed.'));
             },
             () => {
+              if (speechSentenceQueueRef.current === responseQueue) {
+                speechSentenceQueueRef.current = null;
+              }
               if (streamingPlaybackRef.current === responseSession.playback) {
                 streamingPlaybackRef.current = null;
               }
@@ -1594,6 +1601,7 @@ export function ChatView({
             () => responseSession.playback.finish(),
             () => responseSession.playback.stop(),
           );
+          speechSentenceQueueRef.current = responseQueue;
         }
         if (visibleText.startsWith(realtimeSpeechTextRef.current)) {
           const delta = visibleText.slice(realtimeSpeechTextRef.current.length);
