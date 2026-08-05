@@ -902,7 +902,7 @@ export function ChatView({
     if (!useStreamingPcm && !encodedFallbackFormat) {
       throw new Error(t(
         'chat.view.errors.pcmStreamingRequired',
-        'This speech model requires secure streaming audio playback in this browser.',
+        'This speech model requires Web Audio streaming playback in this browser.',
       ));
     }
     const speechRequest = (format: AudioResponseFormat, stream: boolean) => fetch(

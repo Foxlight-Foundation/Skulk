@@ -8,22 +8,169 @@ import {
   resyncVisibleSpeech,
   splitPlaybackSamples,
   splitCompleteSpeechSentences,
+  streamingSpeechPlaybackMode,
+  StreamingSpeechPlayback,
   validatePcmResponseHeaders,
 } from './streamingSpeechPlayback';
 
 describe('canUseStreamingSpeechPlayback', () => {
-  it('requires a secure origin and both Web Audio worklet constructors', () => {
+  it('uses AudioWorklet on secure origins and scheduled buffers otherwise', () => {
     class SupportedAudioContext {}
     Object.defineProperty(SupportedAudioContext.prototype, 'audioWorklet', { value: {} });
     const constructors = { AudioContext: SupportedAudioContext, AudioWorkletNode: class {} };
     expect(canUseStreamingSpeechPlayback({ isSecureContext: true, ...constructors })).toBe(true);
-    expect(canUseStreamingSpeechPlayback({ isSecureContext: false, ...constructors })).toBe(false);
+    expect(canUseStreamingSpeechPlayback({ isSecureContext: false, ...constructors })).toBe(true);
     expect(canUseStreamingSpeechPlayback({ isSecureContext: true })).toBe(false);
-    expect(canUseStreamingSpeechPlayback({
+    expect(streamingSpeechPlaybackMode({ isSecureContext: true, ...constructors }))
+      .toBe('audio-worklet');
+    expect(streamingSpeechPlaybackMode({ isSecureContext: false, ...constructors }))
+      .toBe('scheduled-buffer');
+    expect(streamingSpeechPlaybackMode({
       isSecureContext: true,
       AudioContext: class {},
       AudioWorkletNode: class {},
-    })).toBe(false);
+    })).toBe('scheduled-buffer');
+    expect(streamingSpeechPlaybackMode({ isSecureContext: false }))
+      .toBe('unavailable');
+  });
+});
+
+describe('StreamingSpeechPlayback scheduled-buffer fallback', () => {
+  it('plays contiguous PCM frames without a secure AudioWorklet context', async () => {
+    const scheduledStarts: number[] = [];
+    const copiedFrames: number[][] = [];
+
+    class FakeAudioBuffer {
+      copyToChannel(samples: Float32Array): void {
+        copiedFrames.push(Array.from(samples));
+      }
+    }
+
+    class FakeAudioBufferSourceNode {
+      buffer: FakeAudioBuffer | null = null;
+      onended: (() => void) | null = null;
+
+      connect(): void {}
+      disconnect(): void {}
+      stop(): void {}
+      start(when: number): void {
+        scheduledStarts.push(when);
+        window.setTimeout(() => this.onended?.(), 0);
+      }
+    }
+
+    class FakeAudioContext {
+      readonly sampleRate = 1000;
+      readonly currentTime = 1;
+      readonly destination = {};
+      state: AudioContextState = 'suspended';
+
+      createBuffer(): FakeAudioBuffer {
+        return new FakeAudioBuffer();
+      }
+      createBufferSource(): FakeAudioBufferSourceNode {
+        return new FakeAudioBufferSourceNode();
+      }
+      async resume(): Promise<void> {
+        this.state = 'running';
+      }
+      async close(): Promise<void> {
+        this.state = 'closed';
+      }
+    }
+
+    const previousAudioContext = window.AudioContext;
+    Object.defineProperty(window, 'AudioContext', {
+      configurable: true,
+      value: FakeAudioContext,
+    });
+    try {
+      const samples = new Int16Array(250);
+      samples.fill(16384);
+      const response = new Response(samples.buffer, {
+        headers: {
+          'X-Audio-Sample-Rate': '1000',
+          'X-Audio-Channels': '1',
+          'X-Audio-Sample-Format': 's16le',
+        },
+      });
+      const playback = new StreamingSpeechPlayback(8, 4, 'scheduled-buffer');
+      await playback.play(response);
+
+      expect(copiedFrames.map((frame) => frame.length)).toEqual([100, 100, 50]);
+      expect(copiedFrames[0]?.[0]).toBeCloseTo(0.5);
+      expect(scheduledStarts).toHaveLength(3);
+      expect(scheduledStarts[0]).toBeCloseTo(1.05);
+      expect(scheduledStarts[1]).toBeCloseTo(1.15);
+      expect(scheduledStarts[2]).toBeCloseTo(1.25);
+    } finally {
+      Object.defineProperty(window, 'AudioContext', {
+        configurable: true,
+        value: previousAudioContext,
+      });
+    }
+  });
+});
+
+describe('StreamingSpeechPlayback AudioWorklet cancellation', () => {
+  it('does not construct a worklet node after stop closes the context', async () => {
+    let releaseModule: (() => void) | undefined;
+    let workletNodeConstructions = 0;
+    const closeContext = vi.fn();
+
+    class FakeAudioContext {
+      readonly sampleRate = 24000;
+      readonly destination = {};
+      state: AudioContextState = 'suspended';
+      readonly audioWorklet = {
+        addModule: vi.fn(() => new Promise<void>((resolve) => { releaseModule = resolve; })),
+      };
+
+      async resume(): Promise<void> {
+        this.state = 'running';
+      }
+      async close(): Promise<void> {
+        this.state = 'closed';
+        closeContext();
+      }
+    }
+
+    class FakeAudioWorkletNode {
+      constructor() {
+        workletNodeConstructions += 1;
+      }
+    }
+
+    const previousAudioContext = window.AudioContext;
+    const previousAudioWorkletNode = window.AudioWorkletNode;
+    Object.defineProperties(window, {
+      AudioContext: { configurable: true, value: FakeAudioContext },
+      AudioWorkletNode: { configurable: true, value: FakeAudioWorkletNode },
+    });
+    try {
+      const response = new Response(new Int16Array([0]).buffer, {
+        headers: {
+          'X-Audio-Sample-Rate': '24000',
+          'X-Audio-Channels': '1',
+          'X-Audio-Sample-Format': 's16le',
+        },
+      });
+      const playback = new StreamingSpeechPlayback(8, 4, 'audio-worklet');
+      const playing = playback.play(response);
+      await vi.waitFor(() => expect(releaseModule).toBeTypeOf('function'));
+
+      playback.stop();
+      releaseModule?.();
+      await playing;
+
+      expect(workletNodeConstructions).toBe(0);
+      expect(closeContext).toHaveBeenCalledOnce();
+    } finally {
+      Object.defineProperties(window, {
+        AudioContext: { configurable: true, value: previousAudioContext },
+        AudioWorkletNode: { configurable: true, value: previousAudioWorkletNode },
+      });
+    }
   });
 });
 
