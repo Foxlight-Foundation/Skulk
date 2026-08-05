@@ -635,8 +635,11 @@ is processed per call and never retained.
 The dashboard composes these surfaces in chat: mounted TTS models can speak
 draft text, replay assistant messages, or auto-speak final assistant responses
 (the dashboard requests PCM, segments visible assistant output into ordered
-sentences, and pauses HTTP reads against a bounded playback queue; HTTPS and
-localhost use an `AudioWorklet`, while ordinary LAN HTTP uses scheduled 100 ms
+sentences, serially starts the next synthesis as soon as the preceding HTTP
+response is ingested, and appends every response to one bounded continuous
+playback timeline; playback begins with the first PCM instead of waiting for
+lookahead, so an underrun remains a natural pause; HTTPS and localhost use an
+`AudioWorklet`, while ordinary LAN HTTP uses scheduled 100 ms
 `AudioBufferSourceNode` frames; stop aborts queued and active synthesis), and
 mounted STT models transcribe a
 browser recording into the draft box. Realtime cards get the live microphone
