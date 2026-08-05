@@ -234,10 +234,11 @@ def test_qwen_custom_voice_card_exposes_upstream_speaker_inventory() -> None:
     path = (
         Path(RESOURCES_DIR)
         / "speech_model_cards"
-        / "mlx-community--Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit.toml"
+        / "mlx-community--Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit.toml"
     )
     card = _load(path)
 
+    assert card.quantization == "6bit"
     assert card.audio is not None
     assert card.audio.supports_voice_listing is True
     assert card.audio.default_voice == "ryan"

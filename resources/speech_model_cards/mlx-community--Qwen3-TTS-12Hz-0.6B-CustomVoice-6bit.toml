@@ -1,10 +1,12 @@
-model_id = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit"
+# The 4-bit conversion does not reliably emit EOS and can generate unrelated
+# non-speech audio. Six-bit is the smallest validated CustomVoice conversion.
+model_id = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit"
 n_layers = 5
 hidden_size = 1024
 supports_tensor = false
 tasks = ["TextToSpeech"]
 family = "qwen3_tts"
-quantization = "4bit"
+quantization = "6bit"
 base_model = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 capabilities = ["tts"]
 context_length = 65536
@@ -71,4 +73,4 @@ compatible_backends = ["mlx_audio", "mlx_audio-metal"]
 backend_preference = ["mlx_audio-metal", "mlx_audio"]
 
 [storage_size]
-in_bytes = 1711328624
+in_bytes = 1833587721

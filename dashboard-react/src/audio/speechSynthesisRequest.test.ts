@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildSpeechSynthesisRequest,
   MAX_REFERENCE_AUDIO_BYTES,
+  speechLanguageForDashboardLocale,
 } from './speechSynthesisRequest';
 
 describe('buildSpeechSynthesisRequest', () => {
@@ -11,6 +12,7 @@ describe('buildSpeechSynthesisRequest', () => {
     const request = buildSpeechSynthesisRequest({
       model: 'org/tts',
       input: 'Hello',
+      language: 'English',
       responseFormat: 'mp3',
       stream: false,
       voice: 'ryan',
@@ -23,6 +25,7 @@ describe('buildSpeechSynthesisRequest', () => {
     expect(JSON.parse(request.body as string)).toEqual({
       model: 'org/tts',
       input: 'Hello',
+      lang_code: 'English',
       response_format: 'mp3',
       voice: 'ryan',
     });
@@ -36,6 +39,7 @@ describe('buildSpeechSynthesisRequest', () => {
     const request = buildSpeechSynthesisRequest({
       model: 'org/voice-clone',
       input: 'First sentence.',
+      language: 'English',
       responseFormat: 'pcm',
       stream: true,
       voice: null,
@@ -49,6 +53,7 @@ describe('buildSpeechSynthesisRequest', () => {
     const body = request.body as FormData;
     expect(body.get('model')).toBe('org/voice-clone');
     expect(body.get('input')).toBe('First sentence.');
+    expect(body.get('lang_code')).toBe('English');
     expect(body.get('response_format')).toBe('pcm');
     expect(body.get('stream')).toBe('true');
     const uploadedReference = body.get('reference_audio');
@@ -61,5 +66,11 @@ describe('buildSpeechSynthesisRequest', () => {
 
   it('mirrors the server upload bound', () => {
     expect(MAX_REFERENCE_AUDIO_BYTES).toBe(26_214_400);
+  });
+
+  it('maps the dashboard locale to the TTS model language vocabulary', () => {
+    expect(speechLanguageForDashboardLocale('en-US')).toBe('English');
+    expect(speechLanguageForDashboardLocale('pt_BR')).toBe('Portuguese');
+    expect(speechLanguageForDashboardLocale(undefined)).toBe('English');
   });
 });

@@ -17,6 +17,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 vi.mock('../../i18n/tolgee', () => {
   const translate = (_key: string, fallback: string) => fallback;
   return {
+    tolgee: { getLanguage: () => 'en' },
     useSkulkTranslation: () => ({ t: translate }),
   };
 });

@@ -16,7 +16,7 @@ import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import { chatActions } from '../../store/slices/chatSlice';
 import { store } from '../../store';
-import { useSkulkTranslation } from '../../i18n/tolgee';
+import { tolgee, useSkulkTranslation } from '../../i18n/tolgee';
 import {
   canUseStreamingSpeechPlayback,
   resyncVisibleSpeech,
@@ -28,7 +28,10 @@ import {
   createPinnedSpeechVoiceSelector,
   fetchSpeechVoiceCatalog,
 } from '../../audio/speechVoiceSelection';
-import { buildSpeechSynthesisRequest } from '../../audio/speechSynthesisRequest';
+import {
+  buildSpeechSynthesisRequest,
+  speechLanguageForDashboardLocale,
+} from '../../audio/speechSynthesisRequest';
 import { buildApiMessages, type ApiMessagePayload } from './chatApiPayload';
 
 /* ── Types ────────────────────────────────────────────── */
@@ -556,6 +559,7 @@ export function ChatView({
   className,
 }: ChatViewProps) {
   const { t } = useSkulkTranslation();
+  const speechLanguage = speechLanguageForDashboardLocale(tolgee.getLanguage());
   // Store state
   const selectedModelId = useAppSelector((s) => s.chat.selectedModelId);
   const selectedTranscriptionModelId = useAppSelector((s) => s.chat.selectedTranscriptionModelId);
@@ -909,6 +913,7 @@ export function ChatView({
       buildSpeechSynthesisRequest({
         model: selectedSpeechModelId,
         input,
+        language: speechLanguage,
         responseFormat: format,
         stream,
         voice,
@@ -975,7 +980,14 @@ export function ChatView({
       if (audioObjectUrlRef.current === objectUrl) audioObjectUrlRef.current = null;
       URL.revokeObjectURL(objectUrl);
     }
-  }, [referenceAudioFile, referenceAudioText, selectedSpeechModelId, selectedSpeechOption, t]);
+  }, [
+    referenceAudioFile,
+    referenceAudioText,
+    selectedSpeechModelId,
+    selectedSpeechOption,
+    speechLanguage,
+    t,
+  ]);
 
   const speakText = useCallback(async (text: string, messageId: string | null = 'draft') => {
     const input = text.trim();
