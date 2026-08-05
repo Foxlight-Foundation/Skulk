@@ -342,7 +342,8 @@ export class RealtimeConversationSocket {
   private readonly responses = new Map<string, string>();
   private connected = false;
   private acceptingAudio = true;
-  private turnHasAudio = false;
+  private turnHasSpeech = false;
+  private inputPaused = false;
   private responseActive = false;
   private terminal = false;
   private connectResolve: (() => void) | null = null;
@@ -386,7 +387,7 @@ export class RealtimeConversationSocket {
     if (!this.connected || !socket || socket.readyState !== 1) {
       throw new Error('realtime conversation socket is not connected');
     }
-    if (!this.acceptingAudio) return;
+    if (!this.acceptingAudio || this.inputPaused || this.responseActive) return;
     if (socket.bufferedAmount > MAX_SOCKET_BUFFERED_BYTES) {
       const error = new Error('Realtime conversation cannot keep up with microphone audio.');
       this.fail(error);
@@ -399,7 +400,6 @@ export class RealtimeConversationSocket {
       throw new Error('microphone sample rate changed during realtime conversation');
     }
     const resampled = this.resampler?.process(samples) ?? new Float32Array(0);
-    if (resampled.length > 0) this.turnHasAudio = true;
     for (const sample of resampled) this.pendingSamples.push(sample);
     while (this.pendingSamples.length >= TARGET_FRAME_SAMPLES) {
       this.sendSamples(Float32Array.from(
@@ -411,15 +411,24 @@ export class RealtimeConversationSocket {
   /** Flush microphone tail and ask the server to close the current turn. */
   commitTurn(): boolean {
     const socket = this.socket;
-    if (!this.connected || !socket || socket.readyState !== 1 || !this.turnHasAudio) {
+    if (!this.connected || !socket || socket.readyState !== 1 || !this.turnHasSpeech) {
       return false;
     }
+    if (!this.acceptingAudio) return true;
     if (this.pendingSamples.length > 0) {
       this.sendSamples(Float32Array.from(this.pendingSamples.splice(0)));
     }
     socket.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
     this.acceptingAudio = false;
     return true;
+  }
+
+  /** Pause microphone admission without closing the persistent conversation. */
+  setInputPaused(paused: boolean): void {
+    this.inputPaused = paused;
+    this.pendingSamples.length = 0;
+    this.resampler = null;
+    this.inputSampleRate = null;
   }
 
   /** Return whether assistant model or speech output is still draining. */
@@ -495,6 +504,7 @@ export class RealtimeConversationSocket {
     }
     const itemId = typeof payload.item_id === 'string' ? payload.item_id : null;
     if (payload.type === 'input_audio_buffer.speech_started') {
+      this.turnHasSpeech = true;
       this.options.onSpeechStarted?.();
       return;
     }
@@ -522,7 +532,7 @@ export class RealtimeConversationSocket {
     ) {
       this.transcripts.delete(itemId ?? 'current');
       this.acceptingAudio = true;
-      this.turnHasAudio = false;
+      this.turnHasSpeech = false;
       this.options.onTranscript?.(payload.transcript, true, itemId);
       return;
     }
@@ -627,6 +637,13 @@ export class RealtimePcmCapture {
       await context.close().catch(() => undefined);
       throw error;
     }
+  }
+
+  /** Enable or disable microphone tracks while preserving the capture graph. */
+  setEnabled(enabled: boolean): void {
+    this.stream.getAudioTracks().forEach((track) => {
+      track.enabled = enabled;
+    });
   }
 
   /** Stop microphone tracks and close the browser audio graph. */

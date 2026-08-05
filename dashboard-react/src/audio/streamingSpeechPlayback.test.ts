@@ -6,6 +6,7 @@ import {
   canUseStreamingSpeechPlayback,
   SpeechSentenceQueue,
   resyncVisibleSpeech,
+  speechTextFromMarkdown,
   splitPlaybackSamples,
   splitCompleteSpeechSentences,
   streamingSpeechPlaybackMode,
@@ -325,6 +326,30 @@ describe('splitCompleteSpeechSentences', () => {
       remainder: 'Version 1.2 is ready',
     });
   });
+
+  it('does not pronounce an ordered-list marker as its own sentence', () => {
+    expect(splitCompleteSpeechSentences('1. **First item.**\n2. Second item.')).toEqual({
+      sentences: ['1. **First item.**'],
+      remainder: '2. Second item.',
+    });
+  });
+});
+
+describe('speechTextFromMarkdown', () => {
+  it('removes presentation markup while preserving readable prose and pauses', () => {
+    expect(speechTextFromMarkdown([
+      '## **Summary**',
+      '1. Visit [the dashboard](https://example.test).',
+      '2. Run `skulk` and ~~ignore~~ inspect the result',
+    ].join('\n'))).toBe(
+      'Summary. Visit the dashboard. Run skulk and ignore inspect the result.',
+    );
+  });
+
+  it('drops fenced code rather than reading implementation punctuation aloud', () => {
+    expect(speechTextFromMarkdown('Before.\n```ts\nconst value = 1;\n```\nAfter.'))
+      .toBe('Before. After.');
+  });
 });
 
 describe('resyncVisibleSpeech', () => {
@@ -359,6 +384,19 @@ describe('SpeechSentenceQueue', () => {
     releaseFirst?.();
     await vi.waitFor(() => expect(calls).toEqual(['First.', 'Second.']));
     await vi.waitFor(() => expect(idle).toBe(true));
+  });
+
+  it('normalizes Markdown before selecting and synthesizing queued speech', async () => {
+    const calls: string[] = [];
+    const queue = new SpeechSentenceQueue(
+      async (text) => { calls.push(text); },
+      () => undefined,
+    );
+
+    queue.enqueue(['1. **First item.**', '- [Second item](https://example.test)']);
+    queue.finish();
+
+    await vi.waitFor(() => expect(calls).toEqual(['First item.', 'Second item.']));
   });
 
   it('starts the next synthesis before the shared playback session drains', async () => {

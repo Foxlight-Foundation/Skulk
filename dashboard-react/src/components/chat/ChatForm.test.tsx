@@ -32,6 +32,81 @@ async function renderChatForm(props: React.ComponentProps<typeof ChatForm>): Pro
   });
 }
 
+function installRealtimeBrowserFakes(): {
+  audioTrack: { enabled: boolean; stop: ReturnType<typeof vi.fn> };
+  sockets: Array<EventTarget & { sent: string[]; serverEvent: (payload: object) => void }>;
+} {
+  const sockets: Array<EventTarget & {
+    sent: string[];
+    serverEvent: (payload: object) => void;
+  }> = [];
+  class FakeWebSocket extends EventTarget {
+    readyState = 1;
+    bufferedAmount = 0;
+    readonly sent: string[] = [];
+
+    constructor(url: string) {
+      super();
+      void url;
+      sockets.push(this);
+    }
+
+    send(data: string): void {
+      this.sent.push(data);
+    }
+
+    close(code = 1000): void {
+      this.readyState = 3;
+      this.dispatchEvent(new CloseEvent('close', { code }));
+    }
+
+    serverEvent(payload: object): void {
+      this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(payload) }));
+    }
+  }
+
+  class FakeAudioContext {
+    readonly sampleRate = 48_000;
+    readonly audioWorklet = { addModule: vi.fn().mockResolvedValue(undefined) };
+    readonly destination = {};
+
+    createMediaStreamSource(): MediaStreamAudioSourceNode {
+      return { connect: vi.fn(), disconnect: vi.fn() } as unknown as MediaStreamAudioSourceNode;
+    }
+
+    createGain(): GainNode {
+      return {
+        gain: { value: 1 },
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+      } as unknown as GainNode;
+    }
+
+    resume = vi.fn().mockResolvedValue(undefined);
+    close = vi.fn().mockResolvedValue(undefined);
+  }
+
+  class FakeAudioWorkletNode {
+    readonly port = { onmessage: null as ((event: MessageEvent<unknown>) => void) | null };
+    connect = vi.fn();
+    disconnect = vi.fn();
+  }
+
+  const audioTrack = { enabled: true, stop: vi.fn() };
+  const stream = {
+    getTracks: () => [audioTrack],
+    getAudioTracks: () => [audioTrack],
+  } as unknown as MediaStream;
+  vi.stubGlobal('WebSocket', FakeWebSocket);
+  vi.stubGlobal('AudioContext', FakeAudioContext);
+  vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode);
+  Object.defineProperty(navigator, 'mediaDevices', {
+    configurable: true,
+    value: { getUserMedia: vi.fn().mockResolvedValue(stream) },
+  });
+  return { audioTrack, sockets };
+}
+
 afterEach(async () => {
   await act(async () => root?.unmount());
   container?.remove();
@@ -118,6 +193,107 @@ describe('ChatForm speech controls', () => {
       await userEvent.click(speakDraft!);
     });
     expect(onSpeakText).toHaveBeenCalledWith('Speak this response');
+  });
+
+  it('preserves a completed realtime draft and disables capture before manual send', async () => {
+    const { audioTrack, sockets } = installRealtimeBrowserFakes();
+    const onSend = vi.fn();
+    const transcriptionModel: ChatSpeechModelOption = {
+      modelId: 'org/realtime-stt',
+      label: 'Realtime STT',
+      supportsRealtime: true,
+    };
+    await renderChatForm({
+      onSend,
+      transcriptionModels: [transcriptionModel],
+      selectedTranscriptionModelId: transcriptionModel.modelId,
+      realtimeTranscriptionAvailable: true,
+      realtimeVoiceEnabled: true,
+      autoSubmitVoice: false,
+      realtimeResponseModelId: 'org/chat',
+    });
+
+    const microphone = container?.querySelector<HTMLButtonElement>(
+      '[aria-label="Start realtime transcription"]',
+    );
+    expect(microphone).not.toBeNull();
+    await act(async () => { microphone?.click(); });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    await act(async () => {
+      await Promise.resolve();
+      sockets[0].serverEvent({ type: 'session.created' });
+    });
+    await vi.waitFor(() => expect(
+      container?.querySelector('[aria-label="Stop recording"]'),
+    ).not.toBeNull());
+
+    await act(async () => {
+      sockets[0].serverEvent({ type: 'input_audio_buffer.speech_started' });
+      sockets[0].serverEvent({ type: 'input_audio_buffer.speech_stopped' });
+      sockets[0].serverEvent({
+        type: 'conversation.item.input_audio_transcription.completed',
+        transcript: 'Keep this transcript',
+      });
+      sockets[0].serverEvent({
+        type: 'conversation.item.input_audio_transcription.completed',
+        transcript: '',
+      });
+    });
+
+    const textarea = container?.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]');
+    expect(textarea?.value).toBe('Keep this transcript');
+    const send = container?.querySelector<HTMLButtonElement>('[aria-label="Send message"]');
+    await act(async () => { send?.click(); });
+
+    expect(onSend).toHaveBeenCalledWith('Keep this transcript', []);
+    expect(audioTrack.enabled).toBe(false);
+  });
+
+  it('disables capture as soon as Auto-send submits a completed utterance', async () => {
+    const { audioTrack, sockets } = installRealtimeBrowserFakes();
+    const onRealtimeTranscript = vi.fn();
+    const transcriptionModel: ChatSpeechModelOption = {
+      modelId: 'org/realtime-stt',
+      label: 'Realtime STT',
+      supportsRealtime: true,
+    };
+    await renderChatForm({
+      onSend: vi.fn(),
+      transcriptionModels: [transcriptionModel],
+      selectedTranscriptionModelId: transcriptionModel.modelId,
+      realtimeTranscriptionAvailable: true,
+      realtimeVoiceEnabled: true,
+      autoSubmitVoice: true,
+      realtimeResponseModelId: 'org/chat',
+      onRealtimeTranscript,
+    });
+
+    const microphone = container?.querySelector<HTMLButtonElement>(
+      '[aria-label="Start realtime transcription"]',
+    );
+    await act(async () => { microphone?.click(); });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    await act(async () => {
+      await Promise.resolve();
+      sockets[0].serverEvent({ type: 'session.created' });
+    });
+    await vi.waitFor(() => expect(
+      container?.querySelector('[aria-label="Stop recording"]'),
+    ).not.toBeNull());
+
+    await act(async () => {
+      sockets[0].serverEvent({ type: 'input_audio_buffer.speech_started' });
+      sockets[0].serverEvent({ type: 'input_audio_buffer.speech_stopped' });
+      sockets[0].serverEvent({
+        type: 'conversation.item.input_audio_transcription.completed',
+        transcript: 'Send this now',
+      });
+    });
+
+    expect(onRealtimeTranscript).toHaveBeenCalledWith('Send this now', true);
+    expect(audioTrack.enabled).toBe(false);
+    expect(container?.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]')?.value)
+      .toBe('');
   });
 
   it('renders discovered voices and preserves automatic language matching', async () => {
