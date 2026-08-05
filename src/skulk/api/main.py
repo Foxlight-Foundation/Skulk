@@ -1847,8 +1847,9 @@ class API:
             tags=["Audio"],
             summary="List voices for a mounted speech model",
             description=(
-                "Skulk extension that returns stable built-in voice identifiers "
-                "declared by a mounted text-to-speech model."
+                "Skulk extension that returns stable model-native and bundled-"
+                "reference voice identifiers declared by a mounted text-to-speech "
+                "model."
             ),
         )(self.audio_voices)
         self.app.websocket("/v1/realtime")(self.realtime_transcription)
@@ -10667,6 +10668,7 @@ class API:
         model_id: ModelId,
         response_format: AudioResponseFormat,
         *,
+        reference_voice_profile: str | None = None,
         reference_audio_filename: str | None = None,
         reference_audio_content_type: str | None = None,
         reference_audio_sha256: str | None = None,
@@ -10689,6 +10691,7 @@ class API:
             stream=request.stream,
             streaming_interval=request.streaming_interval,
             reference_text=request.reference_text,
+            reference_voice_profile=reference_voice_profile,
             reference_audio_present=reference_audio_sha256 is not None,
             reference_audio_filename=reference_audio_filename,
             reference_audio_content_type=reference_audio_content_type,
@@ -10734,7 +10737,7 @@ class API:
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        f"Model {model_id} does not expose built-in voices"
+                        f"Model {model_id} does not expose a voice catalog"
                         f"{reference_guidance}"
                     ),
                 )
@@ -10750,6 +10753,49 @@ class API:
         if card.audio.default_voice is None:
             return request
         return request.model_copy(update={"voice": card.audio.default_voice})
+
+    async def _bundled_reference_profile_for_voice(
+        self,
+        model_id: ModelId,
+        voice: str | None,
+    ) -> str | None:
+        """Return the bundled profile backing a validated voice selection.
+
+        Args:
+            model_id: Mounted TTS model selected for synthesis.
+            voice: Explicit or card-default voice identifier.
+
+        Returns:
+            The bundled profile identifier, or ``None`` for model-native voices.
+        """
+
+        if voice is None:
+            return None
+        matching_instances = tuple(
+            instance
+            for instance in self.state.instances.values()
+            if instance.shard_assignments.model_id == model_id
+        )
+        # Request validation normally guarantees mounted state. Keep this
+        # lookup inert for isolated adapters/tests that replace validation.
+        if not matching_instances:
+            return None
+        card = next(
+            (
+                candidate
+                for instance in matching_instances
+                if (candidate := self._model_card_for_instance(instance)) is not None
+            ),
+            None,
+        )
+        if card is None:
+            card = await self._get_running_model_card(model_id)
+        if card.audio is None:
+            return None
+        for catalog_voice in card.audio.voice_catalog:
+            if catalog_voice.id == voice:
+                return catalog_voice.reference_profile
+        return None
 
     async def _start_speech_synthesis(
         self,
@@ -10861,6 +10907,10 @@ class API:
             stream=True,
         )
         request = await self._apply_default_speech_voice(request, model_id)
+        reference_voice_profile = await self._bundled_reference_profile_for_voice(
+            model_id,
+            request.voice,
+        )
         if response_format != AudioResponseFormat.Mp3:
             raise HTTPException(
                 status_code=400,
@@ -10873,6 +10923,7 @@ class API:
             request,
             model_id,
             response_format,
+            reference_voice_profile=reference_voice_profile,
         )
 
     async def _admit_builtin_tts_stream(
@@ -11892,7 +11943,23 @@ class API:
         model_id, response_format = await self._validate_speech_synthesis_model(
             ModelId(request.model), requested_response_format, stream=request.stream
         )
-        request = await self._apply_default_speech_voice(request, model_id)
+        if reference_audio_file is not None and request.voice is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "`voice` cannot be combined with an uploaded `reference_audio`; "
+                    "omit `voice` to use the request-scoped reference"
+                ),
+            )
+        reference_voice_profile: str | None = None
+        if reference_audio_file is None:
+            request = await self._apply_default_speech_voice(request, model_id)
+            reference_voice_profile = (
+                await self._bundled_reference_profile_for_voice(
+                    model_id,
+                    request.voice,
+                )
+            )
         if request.stream and response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
             supported = ", ".join(
                 audio_format.value
@@ -11939,6 +12006,7 @@ class API:
                 request,
                 model_id,
                 response_format,
+                reference_voice_profile=reference_voice_profile,
                 reference_audio_filename=reference_filename,
                 reference_audio_content_type=reference_content_type,
                 reference_audio_sha256=reference_sha256,
@@ -12523,7 +12591,7 @@ class API:
             Query(description="Mounted text-to-speech model id."),
         ],
     ) -> AudioVoiceList:
-        """Return built-in voices declared by one mounted TTS model."""
+        """Return stable built-in and bundled-reference voices for a TTS model."""
 
         if not model.strip():
             raise HTTPException(status_code=400, detail="`model` must not be empty")
@@ -12565,6 +12633,12 @@ class API:
                         catalog_by_id[voice].preferred_languages
                         if voice in catalog_by_id
                         else ()
+                    ),
+                    kind=(
+                        "reference"
+                        if voice in catalog_by_id
+                        and catalog_by_id[voice].reference_profile is not None
+                        else "builtin"
                     ),
                 )
                 for voice in model_card.audio.voices

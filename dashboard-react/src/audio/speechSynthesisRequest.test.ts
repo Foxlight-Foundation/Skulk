@@ -56,12 +56,35 @@ describe('buildSpeechSynthesisRequest', () => {
     expect(body.get('lang_code')).toBe('English');
     expect(body.get('response_format')).toBe('pcm');
     expect(body.get('stream')).toBe('true');
+    expect(body.has('voice')).toBe(false);
     const uploadedReference = body.get('reference_audio');
     expect(uploadedReference).toBeInstanceOf(File);
     expect((uploadedReference as File).name).toBe(referenceAudio.name);
     expect((uploadedReference as File).type).toBe(referenceAudio.type);
     expect((uploadedReference as File).size).toBe(referenceAudio.size);
     expect(body.get('reference_text')).toBe('Reference transcript.');
+  });
+
+  it('uses uploaded reference audio instead of a catalog voice when both UI states exist', () => {
+    const controller = new AbortController();
+    const referenceAudio = new File(['RIFF-reference'], 'reference.wav', {
+      type: 'audio/wav',
+    });
+    const request = buildSpeechSynthesisRequest({
+      model: 'org/voice-clone',
+      input: 'First sentence.',
+      language: 'English',
+      responseFormat: 'wav',
+      stream: false,
+      voice: 'angus',
+      referenceAudio,
+      referenceText: 'Reference transcript.',
+      signal: controller.signal,
+    });
+
+    const body = request.body as FormData;
+    expect(body.has('voice')).toBe(false);
+    expect(body.get('reference_audio')).toBeInstanceOf(File);
   });
 
   it('mirrors the server upload bound', () => {

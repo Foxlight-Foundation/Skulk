@@ -195,9 +195,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
   serve `/v1/audio/translations` as a standard capability (card
   `audio.supports_translation` is the only gate; the whole `experiments`
   config section is now deprecated compatibility surface, accepted but
-  ignored); TTS cards may expose static voices
-  plus preferred-language metadata through the Skulk `/v1/audio/voices`
-  extension. Dashboard Auto selection pins the first language match across all
+  ignored); TTS cards may expose model-native voices or checksummed bundled
+  reference profiles plus preferred-language metadata through the Skulk
+  `/v1/audio/voices` extension. Bundled profile IDs resolve to local audio and
+  exact transcripts only inside the worker. Dashboard Auto selection pins the first language match across all
   sentence-sized requests in one response. The realtime transcription
   WebSocket accepts bounded server VAD and serializes utterances as distinct
   provider calls. Optional response configuration routes final transcripts
@@ -351,9 +352,10 @@ full commit hash. Metadata probes, direct downloads, model-store registry
 entries, and worker staging must preserve that revision. Never collapse a
 pinned artifact back onto mutable `main`, and never treat a staged directory
 from another revision as a cache hit.
-TTS cards with fixed speakers may declare `audio.voices`, optional ordered
-`audio.voice_catalog` display/preferred-language metadata, and a validated
-`audio.default_voice`, which the API applies only when callers omit `voice`.
+TTS cards may declare `audio.voices`, optional ordered `audio.voice_catalog`
+display/preferred-language metadata, optional checksummed bundled
+`reference_profile` identifiers, and a validated `audio.default_voice`, which
+the API applies only when callers omit `voice`.
 
 **Model truth vs platform truth:** a card's `compatible_backends` declares which engines the model's artifacts run on (MODEL truth) and must never encode a gap in Skulk's own runners (PLATFORM truth). Platform limitations live in code: `platform_compatible_backends` in `src/skulk/shared/backends.py` (currently: the served `llama_server` runner cannot load a vision card's mmproj projector, so vision cards are gated off served engines there; TTS/STT cards are gated to `mlx_audio`). Placement (`_card_platform_backends`) and the worker's fallback probe both apply the filter. When a runner gains a capability, flip the code table; do NOT sweep cards.
 

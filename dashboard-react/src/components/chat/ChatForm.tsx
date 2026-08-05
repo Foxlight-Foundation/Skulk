@@ -52,7 +52,7 @@ export interface ChatFormProps {
   selectedSpeechModelId?: string | null;
   /** Optional model-specific TTS voice or preset. */
   selectedVoice?: string | null;
-  /** Discovered built-in voices for the selected mounted TTS model. */
+  /** Discovered model-native or bundled-reference voices for the TTS model. */
   voiceOptions?: ChatVoiceOption[];
   /** Whether the selected model's voice catalog is still loading. */
   isVoiceCatalogLoading?: boolean;

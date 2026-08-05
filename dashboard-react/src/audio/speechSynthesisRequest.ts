@@ -63,7 +63,8 @@ export function buildSpeechSynthesisRequest(
     formData.set('lang_code', language);
     formData.set('response_format', responseFormat);
     if (stream) formData.set('stream', 'true');
-    if (voice) formData.set('voice', voice);
+    // The uploaded clip is the voice condition for this request. Sending the
+    // catalog selection as well would make the conditioning source ambiguous.
     formData.set('reference_audio', referenceAudio, referenceAudio.name);
     const normalizedReferenceText = referenceText.trim();
     if (normalizedReferenceText) formData.set('reference_text', normalizedReferenceText);

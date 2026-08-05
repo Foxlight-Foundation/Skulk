@@ -7,6 +7,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- Bundled ten checksummed English reference voices (Angus, Ember, Hannah, Ian,
+  Jake, Kite, Rufus, Samson, Sydney, and Sylvie) for the validated Qwen Base,
+  LongCat, and Fish voice-cloning cards. They appear through the ordinary voice
+  catalog and resolve to local conditioning audio plus its exact transcript only
+  inside the selected worker. Qwen Base now ships the stable six-bit conversion;
+  the unstable 0.6B CustomVoice and four-bit Base cards are no longer offered.
+
 ### Fixed
 
 - Omitted TTS `max_tokens` no longer inherits undersized upstream model

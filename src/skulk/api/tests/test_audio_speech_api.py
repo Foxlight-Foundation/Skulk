@@ -611,7 +611,7 @@ async def test_audio_voices_returns_static_mounted_catalog(
     """Voice listing should return only identifiers declared by the card."""
 
     api = _build_api()
-    card = _tts_card()
+    card = _tts_card(supports_reference_audio=True)
     assert card.audio is not None
     card = card.model_copy(
         update={
@@ -629,6 +629,7 @@ async def test_audio_voices_returns_static_mounted_catalog(
                             id="coral",
                             name="Coral",
                             preferred_languages=("es",),
+                            reference_profile="coral",
                         ),
                     ),
                 }
@@ -653,6 +654,84 @@ async def test_audio_voices_returns_static_mounted_catalog(
         ("es",),
     ]
     assert all(voice.model == str(card.model_id) for voice in response.data)
+    assert [voice.kind for voice in response.data] == ["builtin", "reference"]
+
+
+@pytest.mark.anyio
+async def test_selected_voice_resolves_bundled_reference_profile() -> None:
+    """A catalog voice should become a worker-local profile identifier."""
+
+    api = _build_api()
+    card = _tts_card(supports_reference_audio=True)
+    assert card.audio is not None
+    card = card.model_copy(
+        update={
+            "audio": card.audio.model_copy(
+                update={
+                    "supports_voice_listing": True,
+                    "voices": ("angus",),
+                    "default_voice": "angus",
+                    "voice_catalog": (
+                        AudioVoiceConfig(
+                            id="angus",
+                            name="Angus",
+                            preferred_languages=("en",),
+                            reference_profile="angus",
+                        ),
+                    ),
+                }
+            )
+        }
+    )
+    api.state = _state_with_running_card(card)
+
+    resolved = await api._bundled_reference_profile_for_voice(
+        card.model_id,
+        "angus",
+    )
+
+    assert resolved == "angus"
+
+
+@pytest.mark.anyio
+async def test_uploaded_reference_audio_rejects_catalog_voice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request cannot ambiguously select two independent voice conditions."""
+
+    api = _build_api()
+    card = _tts_card(supports_reference_audio=True)
+
+    async def _validate_model(
+        self: API,
+        requested_model: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        del self, requested_model, response_format, stream
+        return card.model_id, AudioResponseFormat.Wav
+
+    monkeypatch.setattr(API, "_validate_speech_synthesis_model", _validate_model)
+    upload = UploadFile(
+        filename="sample.wav",
+        file=io.BytesIO(b"RIFF-reference"),
+        headers=Headers({"content-type": "audio/wav"}),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.audio_speech(
+            AudioSpeechRequest(
+                model=str(card.model_id),
+                input="hello",
+                response_format=AudioResponseFormat.Wav,
+                voice="angus",
+            ),
+            reference_audio_file=upload,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "cannot be combined" in str(exc_info.value.detail)
 
 
 @pytest.mark.anyio
@@ -776,7 +855,7 @@ async def test_audio_speech_rejects_voice_for_reference_only_model() -> None:
         )
 
     assert exc_info.value.status_code == 400
-    assert "does not expose built-in voices" in str(exc_info.value.detail)
+    assert "does not expose a voice catalog" in str(exc_info.value.detail)
     assert "provide `reference_audio` instead" in str(exc_info.value.detail)
 
 
