@@ -177,9 +177,10 @@ model and local node advertise the required capabilities.
 - Capture callbacks are aggregated into bounded 100 ms transport frames.
 - Realtime mode keeps one multi-turn socket open, uses server VAD for automatic
   turn boundaries, and shows partial transcripts in the editable chat draft.
-- Auto-send optionally routes final transcripts to the selected chat model;
-  assistant text remains visible while it streams and barge-in cancels active
-  response playback.
+- Auto-send submits final transcripts through the dashboard's ordinary chat
+  request path. Voice and typed turns therefore share one persisted
+  conversation, the same generation limits, streaming, cancellation, and
+  sentence-paced TTS behavior. The microphone pauses while that turn drains.
 - Batch-only models retain the `MediaRecorder` upload flow.
 - Transcription results populate the chat draft for review or submission.
 - Streaming-capable TTS models use sentence-sized raw PCM requests. The
@@ -189,10 +190,11 @@ model and local node advertise the required capabilities.
   under pressure, preserve sentence order, and propagate stop to queued and
   active requests.
 - For cards with voice discovery, the dashboard lists the mounted catalog and
-  defaults to automatic language matching. It chooses the first catalog voice
-  whose preferred language matches the response text, then pins that voice for
-  every sentence request in the response. An explicit user selection overrides
-  automatic matching but remains pinned for the same response.
+  defaults to automatic language matching. It prefers the card's default voice
+  when that voice matches the response language, otherwise chooses the first
+  matching catalog voice, then pins that voice for every sentence request in
+  the response. An explicit user selection overrides automatic matching but
+  remains pinned for the same response.
 - Batch-only TTS models retain complete-response encoded playback.
 
 The dashboard falls back to batch transcription when realtime model or node

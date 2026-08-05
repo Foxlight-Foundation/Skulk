@@ -17,7 +17,7 @@ supports_streaming = false
 supports_realtime = false
 supports_voice_listing = true
 voices = ["angus", "ember", "hannah", "ian", "jake", "kite", "rufus", "samson", "sydney", "sylvie"]
-default_voice = "angus"
+default_voice = "kite"
 supports_reference_audio = true
 sample_rates = [24000]
 

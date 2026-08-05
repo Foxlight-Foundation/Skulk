@@ -13,10 +13,17 @@ This project records release notes here and mirrors public-facing notes in
   Jake, Kite, Rufus, Samson, Sydney, and Sylvie) for the validated Qwen Base,
   LongCat, and Fish voice-cloning cards. They appear through the ordinary voice
   catalog and resolve to local conditioning audio plus its exact transcript only
-  inside the selected worker. Qwen Base now ships the stable six-bit conversion;
-  the unstable 0.6B CustomVoice and four-bit Base cards are no longer offered.
+  inside the selected worker, with Kite as the shipped default. Qwen Base now
+  ships the stable six-bit conversion; the unstable 0.6B CustomVoice and
+  four-bit Base cards are no longer offered.
 
 ### Fixed
+
+- Dashboard realtime STT Auto-send now submits final transcripts through the
+  same chat-completions path as typed prompts. Voice turns retain the complete
+  dashboard conversation, use normal generation limits, and share the same
+  streaming, cancellation, and sentence-paced TTS behavior instead of creating
+  a separate socket-local conversation capped at 256 output tokens.
 
 - Omitted TTS `max_tokens` no longer inherits undersized upstream model
   defaults that hard-cut ordinary speech mid-word. Speech runners now apply a

@@ -2055,8 +2055,12 @@ samples, the dashboard continuously resamples them to 24 kHz PCM16, and the
 client aggregates worklet callbacks into 100 ms transport frames before the
 mic control commits the socket when recording stops. Realtime mode can retain
 the socket across server-VAD turns, show partial transcripts in the editable
-draft, and optionally auto-send final transcripts through the selected mounted
-chat model. If either capability truth is absent, chat retains the batch `MediaRecorder` plus
+draft, and optionally auto-send final transcripts through the same dashboard
+`POST /v1/chat/completions` flow used by typed prompts. This preserves the full
+dashboard conversation and its ordinary generation, cancellation, and TTS
+semantics; the WebSocket's optional `response` participant remains available to
+API clients but is not a second dashboard conversation. If either capability
+truth is absent, chat retains the batch `MediaRecorder` plus
 `POST /v1/audio/transcriptions` path.
 
 When `response` is configured, the API node that owns the WebSocket retains the
