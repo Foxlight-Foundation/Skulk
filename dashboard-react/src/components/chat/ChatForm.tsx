@@ -638,7 +638,12 @@ export function ChatForm({
           onSpeechStarted: onStopSpeaking,
           onTranscript: (text, final) => {
             if (realtimeConversationRef.current !== socket) return;
-            if (!text.trim()) return;
+            if (!text.trim()) {
+              if (final && conversationStoppingRef.current && !submitRealtimeTranscript) {
+                finishConversation();
+              }
+              return;
+            }
             if (final && submitRealtimeTranscript) {
               setIsRealtimeResponseActive(true);
               socket.setInputPaused(true);

@@ -249,6 +249,53 @@ describe('ChatForm speech controls', () => {
     expect(audioTrack.enabled).toBe(false);
   });
 
+  it('finishes a stopped realtime turn when its final transcript is empty', async () => {
+    const { sockets } = installRealtimeBrowserFakes();
+    const transcriptionModel: ChatSpeechModelOption = {
+      modelId: 'org/realtime-stt',
+      label: 'Realtime STT',
+      supportsRealtime: true,
+    };
+    await renderChatForm({
+      onSend: vi.fn(),
+      transcriptionModels: [transcriptionModel],
+      selectedTranscriptionModelId: transcriptionModel.modelId,
+      realtimeTranscriptionAvailable: true,
+      realtimeVoiceEnabled: true,
+      autoSubmitVoice: false,
+      realtimeResponseModelId: 'org/chat',
+    });
+
+    const microphone = container?.querySelector<HTMLButtonElement>(
+      '[aria-label="Start realtime transcription"]',
+    );
+    await act(async () => { microphone?.click(); });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    await act(async () => {
+      await Promise.resolve();
+      sockets[0].serverEvent({ type: 'session.created' });
+    });
+    await vi.waitFor(() => expect(
+      container?.querySelector('[aria-label="Stop recording"]'),
+    ).not.toBeNull());
+    await act(async () => {
+      sockets[0].serverEvent({ type: 'input_audio_buffer.speech_started' });
+      sockets[0].serverEvent({ type: 'input_audio_buffer.speech_stopped' });
+    });
+
+    const stop = container?.querySelector<HTMLButtonElement>('[aria-label="Stop recording"]');
+    await act(async () => { stop?.click(); });
+    await act(async () => {
+      sockets[0].serverEvent({
+        type: 'conversation.item.input_audio_transcription.completed',
+        transcript: '   ',
+      });
+    });
+
+    expect(container?.querySelector('[aria-label="Start realtime transcription"]')).not.toBeNull();
+    expect(container?.textContent).not.toContain('Transcribing');
+  });
+
   it('disables capture as soon as Auto-send submits a completed utterance', async () => {
     const { audioTrack, sockets } = installRealtimeBrowserFakes();
     const onRealtimeTranscript = vi.fn();
