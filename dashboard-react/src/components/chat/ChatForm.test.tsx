@@ -364,6 +364,7 @@ describe('ChatForm speech controls', () => {
   it('retains a buffered final transcript that arrives after chat starts loading', async () => {
     const { audioTrack, sockets } = installRealtimeBrowserFakes();
     const onRealtimeTranscript = vi.fn();
+    const onLateRealtimeTranscript = vi.fn();
     const transcriptionModel: ChatSpeechModelOption = {
       modelId: 'org/realtime-stt',
       label: 'Realtime STT',
@@ -393,7 +394,11 @@ describe('ChatForm speech controls', () => {
       container?.querySelector('[aria-label="Stop recording"]'),
     ).not.toBeNull());
 
-    await rerenderChatForm({ ...props, isLoading: true });
+    await rerenderChatForm({
+      ...props,
+      isLoading: true,
+      onRealtimeTranscript: onLateRealtimeTranscript,
+    });
     await act(async () => {
       sockets[0].serverEvent({
         type: 'conversation.item.input_audio_transcription.completed',
@@ -401,7 +406,8 @@ describe('ChatForm speech controls', () => {
       });
     });
 
-    expect(onRealtimeTranscript).toHaveBeenCalledWith('Keep this draft', true);
+    expect(onRealtimeTranscript).not.toHaveBeenCalled();
+    expect(onLateRealtimeTranscript).toHaveBeenCalledWith('Keep this draft', true);
     expect(audioTrack.enabled).toBe(false);
     expect(container?.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]')?.value)
       .toBe('Keep this draft');

@@ -473,6 +473,7 @@ export function ChatForm({
   const recordingStartingRef = useRef(false);
   const conversationStoppingRef = useRef(false);
   const componentMountedRef = useRef(true);
+  const onRealtimeTranscriptRef = useRef(onRealtimeTranscript);
   const submitRealtimeTranscriptRef = useRef(false);
   const recordingStartedAtRef = useRef(0);
   const recordingTimerRef = useRef<number | null>(null);
@@ -514,6 +515,9 @@ export function ChatForm({
   useEffect(() => {
     submitRealtimeTranscriptRef.current = submitRealtimeTranscript;
   }, [submitRealtimeTranscript]);
+  useEffect(() => {
+    onRealtimeTranscriptRef.current = onRealtimeTranscript;
+  }, [onRealtimeTranscript]);
   const recordingUnavailableReason = !secureRecordingContext
     ? t('chat.form.voiceErrors.secureContextRequired', 'Microphone requires HTTPS or localhost.')
     : !browserRecordingAvailable
@@ -643,7 +647,7 @@ export function ChatForm({
               capture?.setEnabled(false);
             }
             setMessage(final && shouldSubmit ? '' : text);
-            onRealtimeTranscript?.(text, final);
+            onRealtimeTranscriptRef.current?.(text, final);
             if (final && conversationStoppingRef.current) {
               finishConversation();
             }
@@ -857,7 +861,6 @@ export function ChatForm({
     t,
     transcriptionReady,
     captureMode,
-    onRealtimeTranscript,
     onStopSpeaking,
     useRealtimeConversation,
     useRealtimeCapture,
