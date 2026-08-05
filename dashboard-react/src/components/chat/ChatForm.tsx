@@ -463,6 +463,7 @@ export function ChatForm({
   const [isStartingRecording, setIsStartingRecording] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
+  const [isRealtimeResponseActive, setIsRealtimeResponseActive] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -637,6 +638,17 @@ export function ChatForm({
           onSpeechStarted: onStopSpeaking,
           onTranscript: (text, final) => {
             if (realtimeConversationRef.current !== socket) return;
+            if (!text.trim()) {
+              if (final && conversationStoppingRef.current && !submitRealtimeTranscript) {
+                finishConversation();
+              }
+              return;
+            }
+            if (final && submitRealtimeTranscript) {
+              setIsRealtimeResponseActive(true);
+              socket.setInputPaused(true);
+              capture?.setEnabled(false);
+            }
             setMessage(final && submitRealtimeTranscript ? '' : text);
             onRealtimeTranscript?.(text, final);
             if (final && conversationStoppingRef.current && !submitRealtimeTranscript) {
@@ -650,12 +662,14 @@ export function ChatForm({
           },
           onResponseDone: (status) => {
             if (realtimeConversationRef.current !== socket) return;
+            setIsRealtimeResponseActive(false);
             onRealtimeResponseDone?.(status);
             if (conversationStoppingRef.current) finishConversation();
           },
           onError: (error) => {
             if (realtimeConversationRef.current !== socket) return;
             setMediaError(error.message);
+            setIsRealtimeResponseActive(false);
             finishConversation();
             stream.getTracks().forEach((track) => track.stop());
             void capture?.stop();
@@ -666,6 +680,7 @@ export function ChatForm({
           realtimeConversationRef.current = null;
           mediaStreamRef.current = null;
           conversationStoppingRef.current = false;
+          setIsRealtimeResponseActive(false);
           socket.close();
           stopRecordingTimer();
           setIsRecording(false);
@@ -1016,6 +1031,8 @@ export function ChatForm({
     (e?: React.FormEvent) => {
       e?.preventDefault();
       if (isLoading || !canSend) return;
+      realtimeConversationRef.current?.setInputPaused(true);
+      realtimeCaptureRef.current?.setEnabled(false);
       onSend(message.trim(), files);
       setMessage('');
       clearFiles();
@@ -1025,6 +1042,12 @@ export function ChatForm({
     },
     [isLoading, canSend, message, files, onSend, clearFiles],
   );
+
+  useEffect(() => {
+    const microphonePaused = isLoading || isSpeaking || isRealtimeResponseActive;
+    realtimeConversationRef.current?.setInputPaused(microphonePaused);
+    realtimeCaptureRef.current?.setEnabled(!microphonePaused);
+  }, [isLoading, isRealtimeResponseActive, isSpeaking]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {

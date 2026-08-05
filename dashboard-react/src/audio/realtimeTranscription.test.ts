@@ -451,6 +451,84 @@ describe('RealtimeConversationSocket', () => {
       new Array(4_800).fill(0),
     );
   });
+
+  it('does not recommit an already completed turn without new microphone frames', async () => {
+    const socket = new FakeWebSocket();
+    const client = new RealtimeConversationSocket({
+      transcriptionModelId: 'org/stt',
+      location: { protocol: 'https:', host: 'skulk.example' },
+      socketFactory: () => socket as unknown as WebSocket,
+    });
+
+    const connected = client.connect();
+    socket.serverEvent({ type: 'session.created' });
+    await connected;
+    client.append(new Float32Array(2_401), 24_000);
+    socket.serverEvent({ type: 'input_audio_buffer.speech_started' });
+    socket.serverEvent({ type: 'input_audio_buffer.speech_stopped' });
+    socket.serverEvent({
+      type: 'conversation.item.input_audio_transcription.completed',
+      transcript: 'preserve this draft',
+    });
+
+    expect(client.commitTurn()).toBe(false);
+    expect(socket.sent.map((message) => JSON.parse(message)).filter(
+      (message) => message.type === 'input_audio_buffer.commit',
+    )).toHaveLength(0);
+  });
+
+  it('waits for an already VAD-committed transcript without sending a duplicate commit', async () => {
+    const socket = new FakeWebSocket();
+    const client = new RealtimeConversationSocket({
+      transcriptionModelId: 'org/stt',
+      location: { protocol: 'https:', host: 'skulk.example' },
+      socketFactory: () => socket as unknown as WebSocket,
+    });
+
+    const connected = client.connect();
+    socket.serverEvent({ type: 'session.created' });
+    await connected;
+    client.append(new Float32Array(2_401), 24_000);
+    socket.serverEvent({ type: 'input_audio_buffer.speech_started' });
+    socket.serverEvent({ type: 'input_audio_buffer.speech_stopped' });
+
+    expect(client.commitTurn()).toBe(true);
+    expect(socket.sent.map((message) => JSON.parse(message)).filter(
+      (message) => message.type === 'input_audio_buffer.commit',
+    )).toHaveLength(0);
+  });
+
+  it('suppresses microphone frames during submitted responses and explicit pauses', async () => {
+    const socket = new FakeWebSocket();
+    const client = new RealtimeConversationSocket({
+      transcriptionModelId: 'org/stt',
+      responseModelId: 'org/chat',
+      location: { protocol: 'https:', host: 'skulk.example' },
+      socketFactory: () => socket as unknown as WebSocket,
+    });
+
+    const connected = client.connect();
+    socket.serverEvent({ type: 'session.created' });
+    await connected;
+    const appendCount = () => socket.sent.map((message) => JSON.parse(message)).filter(
+      (message) => message.type === 'input_audio_buffer.append',
+    ).length;
+
+    client.append(new Float32Array(2_401), 24_000);
+    expect(appendCount()).toBe(1);
+    socket.serverEvent({ type: 'response.created', response: { status: 'in_progress' } });
+    client.append(new Float32Array(2_401), 24_000);
+    expect(appendCount()).toBe(1);
+    socket.serverEvent({ type: 'response.done', response: { status: 'completed' } });
+    client.append(new Float32Array(2_401), 24_000);
+    expect(appendCount()).toBe(2);
+    client.setInputPaused(true);
+    client.append(new Float32Array(2_401), 24_000);
+    expect(appendCount()).toBe(2);
+    client.setInputPaused(false);
+    client.append(new Float32Array(2_401), 24_000);
+    expect(appendCount()).toBe(3);
+  });
 });
 
 describe('RealtimePcmCapture', () => {
@@ -465,6 +543,7 @@ describe('RealtimePcmCapture', () => {
     const muteConnect = vi.fn();
     const muteDisconnect = vi.fn();
     const stopTrack = vi.fn();
+    const audioTrack = { enabled: true, stop: stopTrack };
     const source = { connect: sourceConnect, disconnect: sourceDisconnect };
     const mute = {
       gain: { value: 1 },
@@ -507,7 +586,8 @@ describe('RealtimePcmCapture', () => {
     vi.stubGlobal('AudioContext', FakeAudioContext);
     vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode);
     const stream = {
-      getTracks: () => [{ stop: stopTrack }],
+      getTracks: () => [audioTrack],
+      getAudioTracks: () => [audioTrack],
     } as unknown as MediaStream;
     const received: Array<[Float32Array, number]> = [];
 
@@ -526,6 +606,11 @@ describe('RealtimePcmCapture', () => {
     expect(muteConnect).toHaveBeenCalledWith(destination);
     expect(mute.gain.value).toBe(0);
     expect(received).toEqual([[samples, 48_000]]);
+
+    capture.setEnabled(false);
+    expect(audioTrack.enabled).toBe(false);
+    capture.setEnabled(true);
+    expect(audioTrack.enabled).toBe(true);
 
     await capture.stop();
 

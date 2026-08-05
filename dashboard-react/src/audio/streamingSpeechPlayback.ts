@@ -192,6 +192,34 @@ class PlaybackFrameAccumulator {
   }
 }
 
+/** Convert rendered Markdown prose into stable text suitable for speech synthesis. */
+export function speechTextFromMarkdown(text: string): string {
+  const normalizedLines = text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .split(/\r?\n/)
+    .map((line) => {
+      const structuralLine = /^\s*(?:#{1,6}\s+|>\s*|[-+*]\s+|\d+[.)]\s+)/.test(line);
+      let spoken = line
+        .replace(/^\s{0,3}(?:#{1,6}\s+|>\s*)/, '')
+        .replace(/^\s*(?:[-+*]|\d+[.)])\s+/, '')
+        .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+        .replace(/\[([^\]]+)]\([^)]*\)/g, '$1')
+        .replace(/<https?:\/\/[^>]+>/g, '')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/(\*\*|__)(.*?)\1/g, '$2')
+        .replace(/(\*|_)(.*?)\1/g, '$2')
+        .replace(/~~(.*?)~~/g, '$1')
+        .replace(/<[^>]+>/g, '')
+        .replace(/[\\*_~]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (structuralLine && spoken && !/[.!?]["')\]]*$/.test(spoken)) spoken += '.';
+      return spoken;
+    })
+    .filter(Boolean);
+  return normalizedLines.join(' ').replace(/\s+/g, ' ').trim();
+}
+
 /** Split visible text into complete synthesis sentences and one retained tail. */
 export function splitCompleteSpeechSentences(text: string): {
   sentences: string[];
@@ -199,8 +227,12 @@ export function splitCompleteSpeechSentences(text: string): {
 } {
   const sentences: string[] = [];
   let boundary = 0;
-  const matcher = /[.!?](?:["')\]]*)\s+/g;
+  const matcher = /[.!?](?:["')\]*_~]*)\s+/g;
   for (const match of text.matchAll(matcher)) {
+    const punctuation = match.index ?? 0;
+    const lineStart = text.lastIndexOf('\n', punctuation) + 1;
+    const linePrefix = text.slice(lineStart, punctuation + 1).trim();
+    if (/^(?:\d+|[A-Za-z])[.)]$/.test(linePrefix)) continue;
     const end = (match.index ?? 0) + match[0].length;
     const sentence = text.slice(boundary, end).trim();
     if (sentence) sentences.push(sentence);
@@ -559,7 +591,9 @@ export class SpeechSentenceQueue {
   /** Add complete visible sentences without starting overlapping synthesis calls. */
   enqueue(sentences: readonly string[]): void {
     if (this.stopped || this.inputFinished) return;
-    this.pending.push(...sentences.filter((sentence) => sentence.trim().length > 0));
+    this.pending.push(...sentences
+      .map(speechTextFromMarkdown)
+      .filter((sentence) => sentence.length > 0));
     void this.drain();
   }
 
