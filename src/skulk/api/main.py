@@ -10725,7 +10725,20 @@ class API:
         if card.audio is None:
             return request
         if request.voice is not None:
-            if card.audio.voices and request.voice not in card.audio.voices:
+            if card.audio.supports_voice_listing is not True:
+                reference_guidance = (
+                    "; omit `voice` and provide `reference_audio` instead"
+                    if card.audio.supports_reference_audio is True
+                    else "; omit `voice`"
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Model {model_id} does not expose built-in voices"
+                        f"{reference_guidance}"
+                    ),
+                )
+            if request.voice not in card.audio.voices:
                 raise HTTPException(
                     status_code=400,
                     detail=(

@@ -599,7 +599,7 @@ Request fields:
 |-------|------|-------|
 | `model` | string | Required mounted TTS model id |
 | `input` | string | Required text to synthesize |
-| `voice` | string or null | Optional model-specific voice name. When omitted, Skulk applies the mounted model card's `audio.default_voice` when declared. |
+| `voice` | string or null | Optional built-in voice identifier. Accepted only when the mounted card declares a static `audio.voices` catalog; unknown names are rejected. When omitted, Skulk applies the card's `audio.default_voice` when declared. Reference-only voice-cloning models reject this field instead of silently ignoring it. |
 | `speed` | number or null | Optional positive speaking speed multiplier |
 | `response_format` | string or null | Optional output format: `mp3`, `wav`, `flac`, `ogg`, `opus`, or raw `pcm`. When omitted or set to `null`, Skulk uses `mp3` for `stream=true`; otherwise it uses the mounted model card default when declared and falls back to `mp3`; supported values are constrained by the model card when declared |
 | `stream` | boolean | Optional. When `true`, Skulk returns a chunked HTTP response and yields MP3 or raw PCM bytes as the speech runner emits them; accepted only when the mounted TTS card explicitly declares `audio.supports_streaming = true` and every routable instance of the requested model has a ready runner |

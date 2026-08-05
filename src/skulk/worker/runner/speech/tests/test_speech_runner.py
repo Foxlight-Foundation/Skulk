@@ -812,20 +812,18 @@ def test_tts_reference_audio_temp_file_is_request_scoped(
         sample_rate = 24000
 
         def __init__(self) -> None:
-            self.reference_path: Path | None = None
+            self.reference_audio: object | None = None
 
         def generate(
             self,
             text: str,
             *,
-            ref_audio: str | None = None,
+            ref_audio: object | None = None,
             ref_text: str | None = None,
         ) -> list[_FakeSpeechResult]:
             assert text == "hello"
             assert ref_text == "reference transcript"
-            assert ref_audio is not None
-            self.reference_path = Path(ref_audio)
-            assert self.reference_path.read_bytes() == b"RIFF-reference"
+            self.reference_audio = ref_audio
             return [_FakeSpeechResult()]
 
     runner, _ = _make_runner()
@@ -843,6 +841,21 @@ def test_tts_reference_audio_temp_file_is_request_scoped(
         return b"WAV"
 
     monkeypatch.setattr(speech_runner, "_encode_audio", _fake_encode)
+    loaded_waveform = object()
+    observed_reference_path: Path | None = None
+
+    def _fake_load_reference_audio(audio_path: str, sample_rate: int) -> object:
+        nonlocal observed_reference_path
+        observed_reference_path = Path(audio_path)
+        assert observed_reference_path.read_bytes() == b"RIFF-reference"
+        assert sample_rate == 24000
+        return loaded_waveform
+
+    monkeypatch.setattr(
+        speech_runner,
+        "_load_tts_reference_audio",
+        _fake_load_reference_audio,
+    )
 
     encoded, sample_rate = runner._run_tts(
         SpeechSynthesis(
@@ -866,8 +879,9 @@ def test_tts_reference_audio_temp_file_is_request_scoped(
 
     assert encoded == b"WAV"
     assert sample_rate == 24000
-    assert model.reference_path is not None
-    assert not model.reference_path.exists()
+    assert model.reference_audio is loaded_waveform
+    assert observed_reference_path is not None
+    assert not observed_reference_path.exists()
 
 
 def test_speech_synthesis_handles_single_tuple_result(

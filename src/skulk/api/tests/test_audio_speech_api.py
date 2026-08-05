@@ -732,7 +732,14 @@ async def test_audio_speech_rejects_unknown_explicit_catalog_voice() -> None:
     card = _tts_card()
     assert card.audio is not None
     card = card.model_copy(
-        update={"audio": card.audio.model_copy(update={"voices": ("ryan",)})}
+        update={
+            "audio": card.audio.model_copy(
+                update={
+                    "supports_voice_listing": True,
+                    "voices": ("ryan",),
+                }
+            )
+        }
     )
     api.state = _state_with_running_card(card)
 
@@ -748,6 +755,29 @@ async def test_audio_speech_rejects_unknown_explicit_catalog_voice() -> None:
 
     assert exc_info.value.status_code == 400
     assert "GET /v1/audio/voices" in str(exc_info.value.detail)
+
+
+@pytest.mark.anyio
+async def test_audio_speech_rejects_voice_for_reference_only_model() -> None:
+    """A reference-only model must not silently ignore a named speaker."""
+
+    api = _build_api()
+    card = _tts_card(supports_reference_audio=True)
+    api.state = _state_with_running_card(card)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api._apply_default_speech_voice(
+            AudioSpeechRequest(
+                model=str(card.model_id),
+                input="hello",
+                voice="ryan",
+            ),
+            card.model_id,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "does not expose built-in voices" in str(exc_info.value.detail)
+    assert "provide `reference_audio` instead" in str(exc_info.value.detail)
 
 
 @pytest.mark.anyio

@@ -1236,8 +1236,7 @@ export function ChatForm({
                 ))
               )}
             </VoiceSelect>
-            {speechModels.length > 0 && (
-              selectedSpeechModel?.supportsVoiceListing ? (
+            {speechModels.length > 0 && selectedSpeechModel?.supportsVoiceListing && (
                 <VoiceSelect
                   value={voiceOptions.some((voice) => voice.id === selectedVoice) ? selectedVoice ?? '' : ''}
                   disabled={isVoiceCatalogLoading}
@@ -1257,14 +1256,6 @@ export function ChatForm({
                     </option>
                   ))}
                 </VoiceSelect>
-              ) : (
-                <VoiceInput
-                  value={selectedVoice ?? ''}
-                  onChange={(event) => onSelectedVoiceChange?.(event.target.value || null)}
-                  placeholder={t('chat.form.voicePlaceholder', 'voice')}
-                  aria-label={t('chat.form.voiceName', 'Voice')}
-                />
-              )
             )}
             <VoiceToggle
               type="button"

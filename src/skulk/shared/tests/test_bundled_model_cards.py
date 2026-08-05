@@ -255,3 +255,19 @@ def test_qwen_custom_voice_card_exposes_upstream_speaker_inventory() -> None:
     assert tuple(voice.id for voice in card.audio.voice_catalog) == card.audio.voices
     assert card.audio.voice_catalog[3].name == "Ryan"
     assert card.audio.voice_catalog[3].preferred_languages == ("en",)
+
+
+@pytest.mark.parametrize(
+    "card_name",
+    (
+        "mlx-community--LongCat-AudioDiT-1B-4bit.toml",
+        "mlx-community--fish-audio-s2-pro-8bit.toml",
+    ),
+)
+def test_voice_cloning_cards_expose_managed_reference_audio(card_name: str) -> None:
+    """Bundled cloning models must expose the conditioning path Skulk serves."""
+
+    card = _load(Path(RESOURCES_DIR) / "speech_model_cards" / card_name)
+
+    assert card.audio is not None
+    assert card.audio.supports_reference_audio is True

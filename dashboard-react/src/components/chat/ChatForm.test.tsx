@@ -155,6 +155,26 @@ describe('ChatForm speech controls', () => {
     expect(onSelectedVoiceChange).toHaveBeenCalledWith('ryan');
   });
 
+  it('does not offer a free-form voice for a model without built-in voices', async () => {
+    const speechModel: ChatSpeechModelOption = {
+      modelId: 'org/reference-only-tts',
+      label: 'Reference-only TTS',
+      responseFormats: ['wav'],
+      supportsVoiceListing: false,
+      supportsReferenceAudio: true,
+    };
+
+    await renderChatForm({
+      onSend: vi.fn(),
+      speechModels: [speechModel],
+      selectedSpeechModelId: speechModel.modelId,
+      selectedVoice: 'ryan',
+    });
+
+    expect(container?.querySelector('[aria-label="Voice"]')).toBeNull();
+    expect(container?.querySelector('[aria-label="Reference audio file"]')).not.toBeNull();
+  });
+
   it('exposes request-scoped reference audio only for a supporting TTS model', async () => {
     const onReferenceAudioChange = vi.fn();
     const onReferenceAudioTextChange = vi.fn();

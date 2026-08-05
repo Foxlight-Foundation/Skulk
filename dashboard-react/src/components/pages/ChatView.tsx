@@ -838,10 +838,9 @@ export function ChatView({
     return () => controller.abort();
   }, [selectedSpeechModelId, selectedSpeechOption?.supportsVoiceListing, t]);
 
-  const effectiveSelectedVoice = selectedVoice && (
-    !selectedSpeechOption?.supportsVoiceListing
-    || voiceOptions.some((voice) => voice.id === selectedVoice)
-  )
+  const effectiveSelectedVoice = selectedSpeechOption?.supportsVoiceListing
+    && selectedVoice
+    && voiceOptions.some((voice) => voice.id === selectedVoice)
     ? selectedVoice
     : null;
   const voiceCatalogReady = !selectedSpeechOption?.supportsVoiceListing
