@@ -624,7 +624,6 @@ export function ChatView({
   const audioPlaybackRef = useRef<HTMLAudioElement | null>(null);
   const audioObjectUrlRef = useRef<string | null>(null);
   const streamingPlaybackRef = useRef<StreamingSpeechPlayback | null>(null);
-  const speechAbortRef = useRef<AbortController | null>(null);
   const speechSentenceQueueRef = useRef<SpeechSentenceQueue | null>(null);
   const realtimeSpeechTextRef = useRef('');
   const realtimeSpeechTailRef = useRef('');
@@ -862,8 +861,6 @@ export function ChatView({
   const stopSpeechPlayback = useCallback(() => {
     speechSentenceQueueRef.current?.stop();
     speechSentenceQueueRef.current = null;
-    speechAbortRef.current?.abort();
-    speechAbortRef.current = null;
     streamingPlaybackRef.current?.stop();
     streamingPlaybackRef.current = null;
     audioPlaybackRef.current?.pause();
@@ -1008,36 +1005,82 @@ export function ChatView({
     t,
   ]);
 
-  const speakText = useCallback(async (text: string, messageId: string | null = 'draft') => {
+  const createSpeechSentenceQueue = useCallback((
+    messageId: string | null,
+    selectVoice: (text: string) => string | null,
+  ): SpeechSentenceQueue => {
+    const useContinuousStreaming = Boolean(
+      selectedSpeechOption?.supportsStreaming
+      && selectedSpeechOption.responseFormats.includes('pcm')
+      && canUseStreamingSpeechPlayback()
+    );
+    const responseSession: StreamingSpeechResponseSession | null = useContinuousStreaming
+      ? {
+          playback: new StreamingSpeechPlayback(),
+          useEncodedFallback: false,
+        }
+      : null;
+    if (responseSession) streamingPlaybackRef.current = responseSession.playback;
+
+    const queue = new SpeechSentenceQueue(
+      (sentence, signal) => playSpeechSegment(
+        sentence,
+        messageId,
+        signal,
+        selectVoice(sentence),
+        responseSession,
+      ),
+      (error) => {
+        const message = error instanceof Error
+          ? error.message
+          : t('chat.view.errors.speechSynthesisFailed', 'Speech synthesis failed.');
+        setSpeechError(message);
+      },
+      () => {
+        const isCurrentQueue = speechSentenceQueueRef.current === queue;
+        if (isCurrentQueue) {
+          speechSentenceQueueRef.current = null;
+          setSpeakingMessageId(null);
+          setIsAutoSpeaking(false);
+        }
+        if (
+          responseSession
+          && streamingPlaybackRef.current === responseSession.playback
+        ) {
+          streamingPlaybackRef.current = null;
+        }
+      },
+      responseSession ? () => responseSession.playback.finish() : undefined,
+      responseSession ? () => responseSession.playback.stop() : undefined,
+    );
+    speechSentenceQueueRef.current = queue;
+    setSpeakingMessageId(messageId);
+    setIsAutoSpeaking(messageId === null);
+    return queue;
+  }, [playSpeechSegment, selectedSpeechOption, t]);
+
+  const speakText = useCallback((text: string, messageId: string | null = 'draft') => {
     const input = text.trim();
     if (!input || !selectedSpeechModelId) return;
     setSpeechError(null);
     stopSpeechPlayback();
-    const abortController = new AbortController();
-    speechAbortRef.current = abortController;
     const selectVoice = createPinnedSpeechVoiceSelector(
       voiceOptions,
       effectiveSelectedVoice,
       selectedSpeechOption?.defaultVoice ?? null,
     );
-    try {
-      await playSpeechSegment(input, messageId, abortController.signal, selectVoice(input));
-      if (speechAbortRef.current === abortController) stopSpeechPlayback();
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return;
-      const messageText = error instanceof Error
-        ? error.message
-        : t('chat.view.errors.speechSynthesisFailed', 'Speech synthesis failed.');
-      setSpeechError(messageText);
-      stopSpeechPlayback();
-    }
+    const split = splitCompleteSpeechSentences(input);
+    const sentences = [...split.sentences];
+    if (split.remainder.trim()) sentences.push(split.remainder.trim());
+    const queue = createSpeechSentenceQueue(messageId, selectVoice);
+    queue.enqueue(sentences);
+    queue.finish();
   }, [
-    playSpeechSegment,
+    createSpeechSentenceQueue,
     effectiveSelectedVoice,
     selectedSpeechModelId,
     selectedSpeechOption?.defaultVoice,
     stopSpeechPlayback,
-    t,
     voiceOptions,
   ]);
 
@@ -1161,38 +1204,7 @@ export function ChatView({
       && canUseStreamingSpeechPlayback()
     )
       ? (() => {
-          const responseSession: StreamingSpeechResponseSession = {
-            playback: new StreamingSpeechPlayback(),
-            useEncodedFallback: false,
-          };
-          streamingPlaybackRef.current = responseSession.playback;
-          const responseQueue = new SpeechSentenceQueue(
-            (sentence, signal) => playSpeechSegment(
-              sentence,
-              null,
-              signal,
-              selectResponseVoice(sentence),
-              responseSession,
-            ),
-            (error) => {
-              const message = error instanceof Error
-                ? error.message
-                : t('chat.view.errors.speechSynthesisFailed', 'Speech synthesis failed.');
-              setSpeechError(message);
-            },
-            () => {
-              if (speechSentenceQueueRef.current === responseQueue) {
-                speechSentenceQueueRef.current = null;
-              }
-              if (streamingPlaybackRef.current === responseSession.playback) {
-                streamingPlaybackRef.current = null;
-              }
-              setIsAutoSpeaking(false);
-            },
-            () => responseSession.playback.finish(),
-            () => responseSession.playback.stop(),
-          );
-          return responseQueue;
+          return createSpeechSentenceQueue(null, selectResponseVoice);
         })()
       : null;
     speechSentenceQueueRef.current = sentenceQueue;
@@ -1468,13 +1480,13 @@ export function ChatView({
     addMessage,
     autoSpeakAssistant,
     canSendMessages,
+    createSpeechSentenceQueue,
     effectiveSelectedVoice,
     isLoading,
     selectedBuiltinTools,
     selectedModelId,
     selectedSpeechModelId,
     selectedSpeechOption,
-    playSpeechSegment,
     speakText,
     stopSpeechPlayback,
     supportsThinking,
