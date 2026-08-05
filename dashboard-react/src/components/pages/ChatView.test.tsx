@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { store } from '../../store';
 import { chatActions } from '../../store/slices/chatSlice';
+import { StreamingSpeechPlayback } from '../../audio/streamingSpeechPlayback';
 import { darkTheme } from '../../theme/theme';
 import { ChatView } from './ChatView';
 
@@ -57,6 +58,20 @@ async function waitFor(
   while (performance.now() < deadline) {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
+
+async function waitForReact(
+  predicate: () => boolean,
+  message: string,
+): Promise<void> {
+  const deadline = performance.now() + 5000;
+  while (performance.now() < deadline) {
+    if (predicate()) return;
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
   }
   throw new Error(message);
 }
@@ -157,5 +172,104 @@ describe('ChatView multimodal requests', () => {
     expect(
       container?.querySelector('[aria-label="User message"] img[alt="qualification.png"]'),
     ).not.toBeNull();
+  });
+});
+
+describe('ChatView completed-message speech', () => {
+  it('replays a completed assistant turn as serial sentence requests', async () => {
+    const requestedInputs: string[] = [];
+    vi.stubGlobal('AudioContext', class FakeAudioContext {});
+    vi.spyOn(StreamingSpeechPlayback.prototype, 'append').mockResolvedValue();
+    const finishPlayback = vi
+      .spyOn(StreamingSpeechPlayback.prototype, 'finish')
+      .mockResolvedValue();
+    vi.spyOn(StreamingSpeechPlayback.prototype, 'stop').mockImplementation(() => undefined);
+    vi.stubGlobal('fetch', vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = String(input);
+      if (url === '/models') {
+        return new Response(JSON.stringify({
+          data: [{
+            id: 'org/speech-model',
+            tasks: ['TextGeneration'],
+            audio: {
+              default_response_format: 'pcm',
+              response_formats: ['pcm'],
+              supports_streaming: true,
+            },
+            resolved_capabilities: {
+              supports_speech_synthesis: true,
+              default_audio_response_format: 'pcm',
+              audio_response_formats: ['pcm'],
+            },
+          }],
+        }), { status: 200 });
+      }
+      if (url === '/v1/audio/speech') {
+        const body = JSON.parse(String(init?.body)) as { input: string };
+        requestedInputs.push(body.input);
+        return new Response(new Uint8Array([0, 0]), { status: 200 });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+
+    store.dispatch(chatActions.selectModel('org/speech-model'));
+    store.dispatch(chatActions.selectSpeechModel('org/speech-model'));
+    store.dispatch(chatActions.addMessage({
+      id: 'assistant-message',
+      role: 'assistant',
+      content: 'First sentence. Second sentence! Final tail',
+      timestamp: Date.now(),
+    }));
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        <Provider store={store}>
+          <ThemeProvider theme={darkTheme}>
+            <ChatView readyInstances={[{
+              instanceId: 'speech-instance',
+              modelId: 'org/speech-model',
+              sharding: 'Pipeline',
+              instanceType: 'MlxRing',
+              engine: 'mlx',
+              nodeStatuses: [],
+              status: 'ready',
+            }]} />
+          </ThemeProvider>
+        </Provider>,
+      );
+    });
+
+    await waitForReact(
+      () => container?.querySelector<HTMLButtonElement>(
+        '[aria-label="Speak message"]',
+      ) !== null,
+      'assistant replay button did not become ready',
+    );
+    const replay = container?.querySelector<HTMLButtonElement>(
+      '[aria-label="Speak message"]',
+    );
+    if (!replay) throw new Error('assistant replay button was not rendered');
+    await act(async () => {
+      await userEvent.click(replay);
+    });
+
+    await waitForReact(
+      () => requestedInputs.length === 3,
+      'completed message was not synthesized sentence by sentence',
+    );
+    await waitForReact(
+      () => finishPlayback.mock.calls.length === 1,
+      'completed message playback did not drain its shared timeline',
+    );
+    expect(requestedInputs).toEqual([
+      'First sentence.',
+      'Second sentence!',
+      'Final tail',
+    ]);
   });
 });
