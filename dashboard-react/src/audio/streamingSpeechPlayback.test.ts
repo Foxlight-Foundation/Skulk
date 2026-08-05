@@ -110,6 +110,93 @@ describe('StreamingSpeechPlayback scheduled-buffer fallback', () => {
       });
     }
   });
+
+  it('appends sentence responses to one timeline before playback drains', async () => {
+    const scheduledStarts: number[] = [];
+    const scheduledNodes: FakeAudioBufferSourceNode[] = [];
+    let contextConstructions = 0;
+    let contextCloses = 0;
+
+    class FakeAudioBuffer {
+      copyToChannel(): void {}
+    }
+
+    class FakeAudioBufferSourceNode {
+      buffer: FakeAudioBuffer | null = null;
+      onended: (() => void) | null = null;
+
+      connect(): void {}
+      disconnect(): void {}
+      stop(): void {}
+      start(when: number): void {
+        scheduledStarts.push(when);
+        scheduledNodes.push(this);
+      }
+    }
+
+    class FakeAudioContext {
+      readonly sampleRate = 1000;
+      readonly currentTime = 1;
+      readonly destination = {};
+      state: AudioContextState = 'suspended';
+
+      constructor() {
+        contextConstructions += 1;
+      }
+
+      createBuffer(): FakeAudioBuffer {
+        return new FakeAudioBuffer();
+      }
+      createBufferSource(): FakeAudioBufferSourceNode {
+        return new FakeAudioBufferSourceNode();
+      }
+      async resume(): Promise<void> {
+        this.state = 'running';
+      }
+      async close(): Promise<void> {
+        contextCloses += 1;
+        this.state = 'closed';
+      }
+    }
+
+    const response = () => new Response(new Int16Array(100).buffer, {
+      headers: {
+        'X-Audio-Sample-Rate': '1000',
+        'X-Audio-Channels': '1',
+        'X-Audio-Sample-Format': 's16le',
+      },
+    });
+    const previousAudioContext = window.AudioContext;
+    Object.defineProperty(window, 'AudioContext', {
+      configurable: true,
+      value: FakeAudioContext,
+    });
+    try {
+      const playback = new StreamingSpeechPlayback(8, 4, 'scheduled-buffer');
+      await playback.append(response());
+      await playback.append(response());
+
+      expect(contextConstructions).toBe(1);
+      expect(scheduledStarts).toHaveLength(2);
+      expect(scheduledStarts[0]).toBeCloseTo(1.05);
+      expect(scheduledStarts[1]).toBeCloseTo(1.15);
+
+      let finished = false;
+      const finishing = playback.finish().then(() => { finished = true; });
+      await Promise.resolve();
+      expect(finished).toBe(false);
+
+      for (const node of scheduledNodes) node.onended?.();
+      await finishing;
+      expect(finished).toBe(true);
+      expect(contextCloses).toBe(1);
+    } finally {
+      Object.defineProperty(window, 'AudioContext', {
+        configurable: true,
+        value: previousAudioContext,
+      });
+    }
+  });
 });
 
 describe('StreamingSpeechPlayback AudioWorklet cancellation', () => {
@@ -263,9 +350,35 @@ describe('SpeechSentenceQueue', () => {
     }, () => undefined, () => { idle = true; });
 
     queue.enqueue(['First.', 'Second.']);
+    queue.finish();
     await vi.waitFor(() => expect(calls).toEqual(['First.']));
     releaseFirst?.();
     await vi.waitFor(() => expect(calls).toEqual(['First.', 'Second.']));
+    await vi.waitFor(() => expect(idle).toBe(true));
+  });
+
+  it('starts the next synthesis before the shared playback session drains', async () => {
+    const calls: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    let releasePlayback: (() => void) | undefined;
+    let idle = false;
+    const finishPlayback = vi.fn(() => new Promise<void>((resolve) => {
+      releasePlayback = resolve;
+    }));
+    const queue = new SpeechSentenceQueue(async (text) => {
+      calls.push(text);
+      if (text === 'First.') await new Promise<void>((resolve) => { releaseFirst = resolve; });
+    }, () => undefined, () => { idle = true; }, finishPlayback);
+
+    queue.enqueue(['First.', 'Second.']);
+    queue.finish();
+    await vi.waitFor(() => expect(calls).toEqual(['First.']));
+    releaseFirst?.();
+    await vi.waitFor(() => expect(calls).toEqual(['First.', 'Second.']));
+    await vi.waitFor(() => expect(finishPlayback).toHaveBeenCalledOnce());
+    expect(idle).toBe(false);
+
+    releasePlayback?.();
     await vi.waitFor(() => expect(idle).toBe(true));
   });
 

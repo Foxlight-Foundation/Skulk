@@ -223,14 +223,17 @@ export function resyncVisibleSpeech(
   return splitCompleteSpeechSentences(unprocessed);
 }
 
-/** One bounded browser playback session for a raw mono PCM HTTP response. */
+/** One bounded browser playback session spanning one or more raw mono PCM responses. */
 export class StreamingSpeechPlayback {
   private context: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
+  private workletDrain: Promise<void> | null = null;
+  private workletDrainResolver: (() => void) | null = null;
   private readonly scheduledNodes = new Map<AudioBufferSourceNode, number>();
   private readonly drainWaiters = new Set<() => void>();
   private scheduledThroughSeconds = 0;
   private stopped = false;
+  private finished = false;
   private bufferedSamples = 0;
   private readonly waiters = new Set<() => void>();
 
@@ -240,17 +243,32 @@ export class StreamingSpeechPlayback {
     private readonly playbackMode = streamingSpeechPlaybackMode(),
   ) {}
 
-  /** Stream a validated `audio/pcm` response through the best available audio sink. */
+  /** Play one response and close its browser audio session after playback drains. */
   async play(response: Response, signal?: AbortSignal): Promise<void> {
+    try {
+      await this.append(response, signal);
+      await this.finish();
+    } catch (error) {
+      this.stop();
+      throw error;
+    }
+  }
+
+  /** Append one complete synthesis response without waiting for queued audio to play. */
+  async append(response: Response, signal?: AbortSignal): Promise<void> {
     const sampleRate = validatePcmResponseHeaders(response.headers);
     if (!response.body) throw new Error('Streaming speech response has no body.');
     if (this.playbackMode === 'unavailable') {
       throw new Error('This browser does not expose Web Audio playback.');
     }
+    if (this.finished) throw new Error('Speech playback has already finished.');
+    if (this.stopped) {
+      await response.body.cancel().catch(() => undefined);
+      return;
+    }
 
-    this.stopped = false;
-    const context = new AudioContext();
-    this.context = context;
+    const context = await this.ensureAudioContext();
+    if (!context || this.stopped) return;
     let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
     let stopOnAbort: (() => void) | null = null;
     try {
@@ -258,11 +276,6 @@ export class StreamingSpeechPlayback {
       const resampler = playbackSampleRate === sampleRate
         ? null
         : new StreamingLinearResampler(sampleRate, playbackSampleRate);
-      const preparedWorklet = this.playbackMode === 'audio-worklet'
-        ? await this.prepareAudioWorklet(context, playbackSampleRate)
-        : null;
-      if (this.stopped) return;
-      await context.resume();
 
       stopOnAbort = () => this.stop();
       signal?.addEventListener('abort', stopOnAbort, { once: true });
@@ -313,16 +326,28 @@ export class StreamingSpeechPlayback {
             signal,
           );
         }
-        if (preparedWorklet) {
-          this.node?.port.postMessage({ type: 'end' });
-          await preparedWorklet.drained;
-        } else {
-          await this.waitForScheduledDrain();
-        }
       }
+    } catch (error) {
+      this.stop();
+      throw error;
     } finally {
       if (stopOnAbort) signal?.removeEventListener('abort', stopOnAbort);
       await reader?.cancel().catch(() => undefined);
+    }
+  }
+
+  /** Mark the session complete, wait for queued audio, and close the audio context. */
+  async finish(): Promise<void> {
+    if (this.finished || this.stopped) return;
+    this.finished = true;
+    try {
+      if (this.node) {
+        this.node.port.postMessage({ type: 'end' });
+        await this.workletDrain;
+      } else {
+        await this.waitForScheduledDrain();
+      }
+    } finally {
       await this.closeAudio();
     }
   }
@@ -334,7 +359,21 @@ export class StreamingSpeechPlayback {
     this.clearScheduledNodes();
     this.releaseWaiters();
     this.releaseDrainWaiters();
+    this.releaseWorkletDrain();
     void this.closeAudio();
+  }
+
+  private async ensureAudioContext(): Promise<AudioContext | null> {
+    if (this.context) return this.context;
+    const context = new AudioContext();
+    this.context = context;
+    if (this.playbackMode === 'audio-worklet') {
+      const preparedWorklet = await this.prepareAudioWorklet(context, context.sampleRate);
+      this.workletDrain = preparedWorklet?.drained ?? null;
+    }
+    if (this.stopped || context.state === 'closed') return null;
+    await context.resume();
+    return context;
   }
 
   private async prepareAudioWorklet(
@@ -356,6 +395,7 @@ export class StreamingSpeechPlayback {
     this.node = node;
     node.connect(context.destination);
     const drained = new Promise<void>((resolve) => {
+      this.workletDrainResolver = resolve;
       node.port.onmessage = (event: MessageEvent<{ type: string; samples?: number }>) => {
         if (event.data.type === 'consumed') {
           this.bufferedSamples = Math.max(0, this.bufferedSamples - (event.data.samples ?? 0));
@@ -363,7 +403,7 @@ export class StreamingSpeechPlayback {
             this.releaseWaiters();
           }
         } else if (event.data.type === 'drained') {
-          resolve();
+          this.releaseWorkletDrain();
         }
       };
     });
@@ -464,6 +504,11 @@ export class StreamingSpeechPlayback {
     this.drainWaiters.clear();
   }
 
+  private releaseWorkletDrain(): void {
+    this.workletDrainResolver?.();
+    this.workletDrainResolver = null;
+  }
+
   private clearScheduledNodes(): void {
     for (const source of this.scheduledNodes.keys()) {
       source.onended = null;
@@ -483,30 +528,41 @@ export class StreamingSpeechPlayback {
     this.node = null;
     this.clearScheduledNodes();
     this.releaseDrainWaiters();
+    this.releaseWorkletDrain();
     const context = this.context;
     this.context = null;
+    this.workletDrain = null;
     this.bufferedSamples = 0;
     if (context && context.state !== 'closed') await context.close();
   }
 }
 
-/** Serialize sentence-sized synthesis calls and cancel the active call as one unit. */
+/** Serialize sentence synthesis, then drain its shared browser playback session. */
 export class SpeechSentenceQueue {
   private readonly pending: string[] = [];
   private activeController: AbortController | null = null;
   private running = false;
   private stopped = false;
+  private inputFinished = false;
 
   constructor(
     private readonly playSentence: (text: string, signal: AbortSignal) => Promise<void>,
     private readonly onError: (error: unknown) => void,
     private readonly onIdle: () => void = () => undefined,
+    private readonly finishPlayback: () => Promise<void> = async () => undefined,
   ) {}
 
   /** Add complete visible sentences without starting overlapping synthesis calls. */
   enqueue(sentences: readonly string[]): void {
-    if (this.stopped) return;
+    if (this.stopped || this.inputFinished) return;
     this.pending.push(...sentences.filter((sentence) => sentence.trim().length > 0));
+    void this.drain();
+  }
+
+  /** Declare that no more sentences will arrive and drain queued browser audio. */
+  finish(): void {
+    if (this.stopped || this.inputFinished) return;
+    this.inputFinished = true;
     void this.drain();
   }
 
@@ -532,7 +588,6 @@ export class SpeechSentenceQueue {
           if (!(error instanceof DOMException && error.name === 'AbortError')) {
             this.onError(error);
             this.stop();
-            this.onIdle();
             return;
           }
           this.stop();
@@ -540,9 +595,17 @@ export class SpeechSentenceQueue {
           if (this.activeController === controller) this.activeController = null;
         }
       }
+      if (!this.stopped && this.inputFinished) await this.finishPlayback();
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) {
+        this.onError(error);
+      }
+      this.stop();
     } finally {
       this.running = false;
-      if (!this.stopped && this.pending.length === 0) this.onIdle();
+      if (this.stopped || (this.inputFinished && this.pending.length === 0)) {
+        this.onIdle();
+      }
     }
   }
 }
