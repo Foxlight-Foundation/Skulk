@@ -190,10 +190,11 @@ model and local node advertise the required capabilities.
   under pressure, preserve sentence order, and propagate stop to queued and
   active requests.
 - For cards with voice discovery, the dashboard lists the mounted catalog and
-  defaults to automatic language matching. It chooses the first catalog voice
-  whose preferred language matches the response text, then pins that voice for
-  every sentence request in the response. An explicit user selection overrides
-  automatic matching but remains pinned for the same response.
+  defaults to automatic language matching. It prefers the card's default voice
+  when that voice matches the response language, otherwise chooses the first
+  matching catalog voice, then pins that voice for every sentence request in
+  the response. An explicit user selection overrides automatic matching but
+  remains pinned for the same response.
 - Batch-only TTS models retain complete-response encoded playback.
 
 The dashboard falls back to batch transcription when realtime model or node
