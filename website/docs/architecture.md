@@ -517,14 +517,19 @@ runner emits independently encoded MP3 segments or headerless mono
 signed-16-bit PCM, and the API describes the PCM framing through response
 headers before it commits the body. (The bundled Qwen3 TTS card declares MP3
 and PCM streaming after live validation; the remaining bundled speech cards
-stay batch-only.) Cards with fixed speakers can declare `audio.voices`, a
-validated default voice, and ordered `audio.voice_catalog` display/language
-metadata. The Skulk `GET /v1/audio/voices` extension exposes that model truth;
+stay batch-only.) Cards can declare `audio.voices`, a validated default voice,
+and ordered `audio.voice_catalog` display/language metadata. Entries may be
+model-native speakers or bundled reference profiles. The Skulk
+`GET /v1/audio/voices` extension exposes that model truth;
 the dashboard can choose the first preferred-language match and pins it across
 all sentence-sized requests in one response. The API applies the card default
-only when callers omit `voice`.
+only when callers omit `voice`. For a bundled profile, the API sends only its
+stable identifier and the selected worker resolves a checksummed local MP3 plus
+exact transcript before calling the upstream model. The bytes and private file
+path never enter commands, State, or the event log, and no cluster media
+transfer is needed.
 
-Cards declaring reference-audio support accept a bounded multipart upload on
+Cards declaring reference-audio support also accept a bounded multipart upload on
 the same route. The API pins the command to one ready instance and sends the
 raw file to that worker over the node-addressed `SPEECH_MEDIA` data plane; only
 metadata rides the command path, and the audio bytes never enter `State` or the
@@ -536,7 +541,8 @@ The dashboard exposes this upload only for a selected TTS card declaring the
 capability, keeps the clip browser-local until synthesis, and reuses the same
 request-scoped `File` for all sentence segments in one response. Selecting a
 different TTS model clears the clip; persistent custom voices remain a separate
-resource and lifecycle.
+resource and lifecycle. An upload overrides catalog selection for that request,
+so the API rejects requests that combine `voice` and `reference_audio`.
 
 The same core path also backs the first-party `tts@1.0.0` capability provider
 (see [Extensions](#extensions-plugins)): a generic provider call becomes the

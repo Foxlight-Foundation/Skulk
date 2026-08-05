@@ -1,25 +1,28 @@
-model_id = "mlx-community/fish-audio-s2-pro-8bit"
-n_layers = 36
-hidden_size = 2560
+# Six-bit is the smallest Base conversion validated to terminate normally while
+# preserving stable bundled reference voices across independent streamed calls.
+model_id = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit"
+source_revision = "4e44ed4bcee28a0f89a493e07bde16e6dccd43eb"
+n_layers = 5
+hidden_size = 1024
 supports_tensor = false
 tasks = ["TextToSpeech"]
-family = "fish_qwen3_omni"
-quantization = "8bit"
-base_model = "fishaudio/s2-pro"
+family = "qwen3_tts"
+quantization = "6bit"
+base_model = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 capabilities = ["tts"]
-context_length = 32768
+context_length = 65536
 
 [audio]
 kind = "tts"
 default_response_format = "wav"
-response_formats = ["wav"]
-supports_streaming = false
+response_formats = ["wav", "mp3", "pcm"]
+supports_streaming = true
 supports_realtime = false
 supports_voice_listing = true
 voices = ["angus", "ember", "hannah", "ian", "jake", "kite", "rufus", "samson", "sydney", "sylvie"]
 default_voice = "angus"
 supports_reference_audio = true
-sample_rates = [44100]
+sample_rates = [24000]
 
 [[audio.voice_catalog]]
 id = "angus"
@@ -86,4 +89,4 @@ compatible_backends = ["mlx_audio", "mlx_audio-metal"]
 backend_preference = ["mlx_audio-metal", "mlx_audio"]
 
 [storage_size]
-in_bytes = 6731423034
+in_bytes = 1851314126

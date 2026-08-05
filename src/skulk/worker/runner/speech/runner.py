@@ -21,6 +21,7 @@ from anyio import ClosedResourceError, EndOfStream, WouldBlock
 
 from skulk.shared.constants import SKULK_CACHE_HOME, SKULK_MAX_CHUNK_SIZE
 from skulk.shared.models.model_cards import AudioCardKind, AudioResponseFormat
+from skulk.shared.models.reference_voices import bundled_reference_voice_profile
 from skulk.shared.tracing import (
     begin_trace_session,
     bind_trace_session,
@@ -130,6 +131,31 @@ def _tts_max_tokens(fn: Callable[..., Any], requested: int | None) -> int | None
     if accepted is None or "max_tokens" not in accepted.params:
         return None
     return _DEFAULT_TTS_MAX_TOKENS
+
+
+def _load_tts_reference_audio(audio_path: str, sample_rate: int) -> Any:
+    """Decode reference audio as the waveform expected by MLX TTS models.
+
+    Skulk calls ``model.generate`` directly rather than the upstream
+    ``generate_audio`` convenience layer. That layer normally performs this
+    decode and resample step before dispatching to model-family adapters; doing
+    the same here keeps adapters that accept only MLX arrays compatible with
+    the managed reference-audio path.
+
+    Args:
+        audio_path: Request-scoped local file containing the uploaded audio.
+        sample_rate: Model input sample rate in hertz.
+
+    Returns:
+        The decoded mono MLX waveform returned by ``mlx_audio``.
+
+    Side effects:
+        Reads the request-scoped file and may allocate a resampled waveform.
+    """
+
+    from mlx_audio.utils import load_audio
+
+    return load_audio(audio_path, sample_rate=sample_rate)
 
 
 def _install_attention_mask_dtype_compat(attention_type: type[Any]) -> None:
@@ -1330,6 +1356,11 @@ class Runner:
         """Call the TTS model and normalize its result into an iterable."""
         assert self.model is not None
         params = task.task_params
+        bundled_profile = (
+            bundled_reference_voice_profile(params.reference_voice_profile)
+            if params.reference_voice_profile is not None
+            else None
+        )
         reference_path: str | None = None
         try:
             if params.reference_audio_data is not None:
@@ -1344,15 +1375,48 @@ class Runner:
                     reference_file.write(params.reference_audio_data)
                     reference_path = reference_file.name
             generate = self.model.generate
+            reference_source = (
+                reference_path
+                or params.reference_audio
+                or (
+                    str(bundled_profile.audio_path)
+                    if bundled_profile is not None
+                    else None
+                )
+            )
+            reference_audio = (
+                _load_tts_reference_audio(
+                    reference_source,
+                    int(getattr(self.model, "sample_rate", 24000)),
+                )
+                if reference_source is not None
+                else None
+            )
+            reference_text = (
+                bundled_profile.transcript
+                if bundled_profile is not None
+                else params.reference_text
+            )
             generate_kwargs = {
-                "voice": _resolve_staged_voice_path(
-                    self.local_model_path, params.voice
+                "voice": (
+                    None
+                    if bundled_profile is not None
+                    else _resolve_staged_voice_path(
+                        self.local_model_path, params.voice
+                    )
                 ),
                 "speed": params.speed,
                 "instruct": params.instruct,
                 "lang_code": params.lang_code,
-                "ref_audio": reference_path or params.reference_audio,
-                "ref_text": params.reference_text,
+                "ref_audio": reference_audio,
+                "ref_text": reference_text,
+                "guidance_method": (
+                    "apg"
+                    if reference_audio is not None
+                    and getattr(self.shard_metadata.model_card, "family", None)
+                    == "longcat_audiodit"
+                    else None
+                ),
                 "temperature": params.temperature,
                 "top_p": params.top_p,
                 "top_k": params.top_k,

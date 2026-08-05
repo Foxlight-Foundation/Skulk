@@ -26,7 +26,7 @@ const ttsModel: ChatSpeechModelOption = {
 };
 
 const referenceTtsModel: ChatSpeechModelOption = {
-  modelId: 'mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit',
+  modelId: 'mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit',
   label: 'Qwen3-TTS-Base-4bit',
   defaultResponseFormat: 'mp3',
   responseFormats: ['mp3', 'pcm'],

@@ -193,14 +193,17 @@ Declares speech serving metadata for TTS and STT models:
 - `supports_voice_listing`
   - whether voices can be enumerated by the serving API
 - `voices`
-  - stable built-in voice identifiers returned by `GET /v1/audio/voices`; this
+  - stable model-native or bundled-reference identifiers returned by
+    `GET /v1/audio/voices`; this
     requires `kind = "tts"` and `supports_voice_listing = true`
 - `voice_catalog`
   - optional ordered metadata for every identifier in `voices`; each entry
     carries the same `id`, a display `name`, and ordered BCP 47
-    `preferred_languages` used by clients for deterministic language matching
+    `preferred_languages` used by clients for deterministic language matching;
+    `reference_profile` names a checksummed profile under
+    `resources/speech_reference_voices/` when the voice is reference-conditioned
 - `default_voice`
-  - built-in voice used when a TTS request omits `voice`; it must appear in
+  - stable voice used when a TTS request omits `voice`; it must appear in
     `voices`
 - `supports_reference_audio`
   - whether managed reference audio can condition the voice
@@ -409,6 +412,22 @@ id = "ryan"
 name = "Ryan"
 preferred_languages = ["en"]
 ```
+
+For a reference-conditioned voice, the catalog ID and `reference_profile` must
+match and the card must declare `supports_reference_audio = true`:
+
+```toml
+[[audio.voice_catalog]]
+id = "angus"
+name = "Angus"
+preferred_languages = ["en"]
+reference_profile = "angus"
+```
+
+The central profile manifest pins the local MP3 digest and exact transcript.
+Model cards intentionally repeat the public voice order so API and dashboard
+behavior remain explicit model truth; CI verifies every bundled cloning card
+against the central manifest.
 
 ## When to Extend a Card
 

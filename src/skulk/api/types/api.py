@@ -362,11 +362,11 @@ class AudioCapabilitySection(BaseModel):
     )
     default_voice: str | None = Field(
         default=None,
-        description="Built-in voice used when a request omits an explicit voice.",
+        description="Stable voice used when a request omits an explicit voice.",
     )
     voices: list[str] = Field(
         default_factory=list,
-        description="Stable built-in voice identifiers declared by the model card.",
+        description="Stable built-in or bundled-reference voice identifiers.",
     )
     supports_reference_audio: bool | None = Field(
         default=None,
@@ -1047,7 +1047,10 @@ class AudioSpeechRequest(BaseModel):
     )
     voice: str | None = Field(
         default=None,
-        description="Model-specific voice name or preset when supported.",
+        description=(
+            "Model-specific native voice or bundled-reference profile when "
+            "declared by the mounted card."
+        ),
     )
     speed: float | None = Field(
         default=None,
@@ -1148,9 +1151,11 @@ class AudioVoice(BaseModel, frozen=True):
             "this voice."
         ),
     )
-    kind: Literal["builtin"] = Field(
+    kind: Literal["builtin", "reference"] = Field(
         default="builtin",
-        description="Voice source. Version 1 exposes built-in voices only.",
+        description=(
+            "Voice source: a model-native preset or a bundled reference profile."
+        ),
     )
 
 

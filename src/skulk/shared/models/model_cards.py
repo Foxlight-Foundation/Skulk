@@ -225,7 +225,7 @@ class AudioCardKind(str, Enum):
 
 
 class AudioVoiceConfig(FrozenModel):
-    """Declarative metadata for one stable built-in TTS voice."""
+    """Declarative metadata for one stable TTS voice."""
 
     id: str
     """Model-specific voice identifier accepted by speech synthesis."""
@@ -233,10 +233,14 @@ class AudioVoiceConfig(FrozenModel):
     """Human-readable voice name shown by clients."""
     preferred_languages: tuple[str, ...] = ()
     """Ordered BCP 47 language tags for which this voice is a preferred match."""
+    reference_profile: str | None = None
+    """Bundled reference profile used to condition models without built-in voices."""
 
-    @field_validator("id", "name", mode="before")
+    @field_validator("id", "name", "reference_profile", mode="before")
     @classmethod
-    def _normalize_voice_text(cls, value: object) -> str:
+    def _normalize_voice_text(cls, value: object) -> str | None:
+        if value is None:
+            return None
         normalized = str(value).strip()
         if not normalized:
             raise ValueError("voice id and name must not be empty")
@@ -577,6 +581,19 @@ class AudioCardConfig(CamelCaseModel):
             if catalog_ids != self.voices:
                 raise ValueError(
                     "voice_catalog ids must match voices exactly and preserve order"
+                )
+            reference_voices = tuple(
+                voice
+                for voice in self.voice_catalog
+                if voice.reference_profile is not None
+            )
+            if reference_voices and self.supports_reference_audio is not True:
+                raise ValueError(
+                    "reference voice profiles require supports_reference_audio=true"
+                )
+            if any(voice.id != voice.reference_profile for voice in reference_voices):
+                raise ValueError(
+                    "reference voice ids must match their bundled profile ids"
                 )
         if self.default_voice is not None and self.default_voice not in self.voices:
             raise ValueError("default_voice must be included in voices")

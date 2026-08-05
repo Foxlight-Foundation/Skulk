@@ -1,0 +1,79 @@
+[[voices]]
+id = "angus"
+name = "Angus"
+preferred_languages = ["en"]
+audio_file = "angus/reference.mp3"
+transcript_file = "angus/reference.txt"
+sha256 = "fb607aca975b194e9a9c07c78bee3ef009cab8ba7f17bedd833e4c50d68d4ba0"
+
+[[voices]]
+id = "ember"
+name = "Ember"
+preferred_languages = ["en"]
+audio_file = "ember/reference.mp3"
+transcript_file = "ember/reference.txt"
+sha256 = "33dfc36a0a3cfe2dc2e2df9473b9649ec501398360672a490ea57a6fcc19a303"
+
+[[voices]]
+id = "hannah"
+name = "Hannah"
+preferred_languages = ["en"]
+audio_file = "hannah/reference.mp3"
+transcript_file = "hannah/reference.txt"
+sha256 = "48b74c00ff97663717cd2b23759f8ac78e0e56efa68f1cacde4ad99aab2a5b80"
+
+[[voices]]
+id = "ian"
+name = "Ian"
+preferred_languages = ["en"]
+audio_file = "ian/reference.mp3"
+transcript_file = "ian/reference.txt"
+sha256 = "8fd834fcbc9b8993336d99a97982f1968162f542fe685ef838a27595353a1608"
+
+[[voices]]
+id = "jake"
+name = "Jake"
+preferred_languages = ["en"]
+audio_file = "jake/reference.mp3"
+transcript_file = "jake/reference.txt"
+sha256 = "706d9e0fd8971b145a3d30e311d7b6b84fba534203b4b17e7c412cf0e295d4f2"
+
+[[voices]]
+id = "kite"
+name = "Kite"
+preferred_languages = ["en"]
+audio_file = "kite/reference.mp3"
+transcript_file = "kite/reference.txt"
+sha256 = "65f4311c1305cd03624bc3677be3f146a7a7ff9688c04355d43f2a8834b7c6c6"
+
+[[voices]]
+id = "rufus"
+name = "Rufus"
+preferred_languages = ["en"]
+audio_file = "rufus/reference.mp3"
+transcript_file = "rufus/reference.txt"
+sha256 = "ee0e5924aff3fbee4a2ec28f9da9b173a824a685759d88aec10d0bdf12db0e66"
+
+[[voices]]
+id = "samson"
+name = "Samson"
+preferred_languages = ["en"]
+audio_file = "samson/reference.mp3"
+transcript_file = "samson/reference.txt"
+sha256 = "dbe0b3f4c436cf361766d354aaf0a79ef80d09eb448cae48d58abc783ad158ad"
+
+[[voices]]
+id = "sydney"
+name = "Sydney"
+preferred_languages = ["en"]
+audio_file = "sydney/reference.mp3"
+transcript_file = "sydney/reference.txt"
+sha256 = "2cbf895b4f03439c21ababfa48ace16feedb27e6666cbd197e1032dac8354857"
+
+[[voices]]
+id = "sylvie"
+name = "Sylvie"
+preferred_languages = ["en"]
+audio_file = "sylvie/reference.mp3"
+transcript_file = "sylvie/reference.txt"
+sha256 = "31b9dc53dc5f2bbcd014bff0b69236e8567f2be38eea57f5e6d576cb52afacca"

@@ -51,6 +51,7 @@ Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard),
 - `resources/image_model_cards/` — Image model metadata TOML files
 - `resources/embedding_model_cards/` — Embedding model metadata TOML files
 - `resources/speech_model_cards/` — Speech model metadata TOML files
+- `resources/speech_reference_voices/` — Checksummed bundled TTS conditioning audio and exact transcripts
 - `deployment/logging/` — VictoriaLogs + Grafana stack and Vector config
 - `docs/` — Technical documentation
 - `docs/model-runtime-notes/` — Internal per-model clustered runtime notes

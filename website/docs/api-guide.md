@@ -599,7 +599,7 @@ Request fields:
 |-------|------|-------|
 | `model` | string | Required mounted TTS model id |
 | `input` | string | Required text to synthesize |
-| `voice` | string or null | Optional model-specific voice name. When omitted, Skulk applies the mounted model card's `audio.default_voice` when declared. |
+| `voice` | string or null | Optional stable voice identifier. Accepted only when the mounted card declares a static `audio.voices` catalog; unknown names are rejected. Entries may be model-native speakers or checksummed reference profiles bundled with Skulk. When omitted, Skulk applies the card's `audio.default_voice` when declared. |
 | `speed` | number or null | Optional positive speaking speed multiplier |
 | `response_format` | string or null | Optional output format: `mp3`, `wav`, `flac`, `ogg`, `opus`, or raw `pcm`. When omitted or set to `null`, Skulk uses `mp3` for `stream=true`; otherwise it uses the mounted model card default when declared and falls back to `mp3`; supported values are constrained by the model card when declared |
 | `stream` | boolean | Optional. When `true`, Skulk returns a chunked HTTP response and yields MP3 or raw PCM bytes as the speech runner emits them; accepted only when the mounted TTS card explicitly declares `audio.supports_streaming = true` and every routable instance of the requested model has a ready runner |
@@ -639,15 +639,23 @@ file when generation ends or fails. Reference-audio requests return **503
 Service Unavailable** when the Zenoh data plane is unavailable; Skulk never
 broadcasts private reference media through the gossipsub fallback.
 
+Reference-capable bundled cards may also expose Skulk's packaged voice profiles
+through the ordinary `voice` field. The worker resolves the selected identifier
+to its checksummed local MP3 and exact transcript; those asset paths and bytes
+never enter the command, State, or event log. This path does not require an
+upload or Zenoh media transfer. A multipart `reference_audio` upload is an
+explicit request-scoped override and cannot be combined with `voice`.
+
 `streaming_interval` without `stream=true`, `reference_text` without a
-multipart reference upload, and JSON `reference_audio` path strings return
-**400 Bad Request**.
+multipart reference upload, a multipart upload combined with `voice`, and JSON
+`reference_audio` path strings return **400 Bad Request**.
 
 ## Skulk Audio Voices API
 
 **GET** `/v1/audio/voices?model=<model-id>`
 
-Returns stable built-in voice identifiers declared by one mounted TTS model.
+Returns stable model-native and bundled-reference voice identifiers declared by
+one mounted TTS model.
 This is a Skulk extension, not an OpenAI compatibility route. The model must
 declare `audio.supports_voice_listing = true`; otherwise Skulk returns **400 Bad
 Request**.
@@ -657,9 +665,11 @@ curl 'http://localhost:52415/v1/audio/voices?model=org/tts-model'
 ```
 
 The response is `{ "object": "list", "data": [...] }`. Each item contains the
-voice `id`, display `name`, mounted `model`, `kind = "builtin"`, and an ordered
-`preferred_languages` array of BCP 47 tags when the model card declares
-language preferences. Version 1 does not create or persist voice profiles.
+voice `id`, display `name`, mounted `model`, a `kind` of `"builtin"` for a
+model-native speaker or `"reference"` for a checksummed profile shipped with
+Skulk, and an ordered `preferred_languages` array of BCP 47 tags when the model
+card declares language preferences. This endpoint does not create or persist
+user voice profiles.
 
 ## OpenAI Audio Transcriptions API
 
