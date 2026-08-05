@@ -32,6 +32,16 @@ async function renderChatForm(props: React.ComponentProps<typeof ChatForm>): Pro
   });
 }
 
+async function rerenderChatForm(props: React.ComponentProps<typeof ChatForm>): Promise<void> {
+  await act(async () => {
+    root?.render(
+      <ThemeProvider theme={darkTheme}>
+        <ChatForm {...props} />
+      </ThemeProvider>,
+    );
+  });
+}
+
 function installRealtimeBrowserFakes(): {
   audioTrack: { enabled: boolean; stop: ReturnType<typeof vi.fn> };
   sockets: Array<EventTarget & { sent: string[]; serverEvent: (payload: object) => void }>;
@@ -349,6 +359,52 @@ describe('ChatForm speech controls', () => {
     expect(audioTrack.enabled).toBe(false);
     expect(container?.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]')?.value)
       .toBe('');
+  });
+
+  it('retains a buffered final transcript that arrives after chat starts loading', async () => {
+    const { audioTrack, sockets } = installRealtimeBrowserFakes();
+    const onRealtimeTranscript = vi.fn();
+    const transcriptionModel: ChatSpeechModelOption = {
+      modelId: 'org/realtime-stt',
+      label: 'Realtime STT',
+      supportsRealtime: true,
+    };
+    const props: React.ComponentProps<typeof ChatForm> = {
+      onSend: vi.fn(),
+      transcriptionModels: [transcriptionModel],
+      selectedTranscriptionModelId: transcriptionModel.modelId,
+      realtimeTranscriptionAvailable: true,
+      realtimeVoiceEnabled: true,
+      autoSubmitVoice: true,
+      onRealtimeTranscript,
+    };
+    await renderChatForm(props);
+
+    const microphone = container?.querySelector<HTMLButtonElement>(
+      '[aria-label="Start realtime transcription"]',
+    );
+    await act(async () => { microphone?.click(); });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    await act(async () => {
+      await Promise.resolve();
+      sockets[0].serverEvent({ type: 'session.created' });
+    });
+    await vi.waitFor(() => expect(
+      container?.querySelector('[aria-label="Stop recording"]'),
+    ).not.toBeNull());
+
+    await rerenderChatForm({ ...props, isLoading: true });
+    await act(async () => {
+      sockets[0].serverEvent({
+        type: 'conversation.item.input_audio_transcription.completed',
+        transcript: 'Keep this draft',
+      });
+    });
+
+    expect(onRealtimeTranscript).toHaveBeenCalledWith('Keep this draft', true);
+    expect(audioTrack.enabled).toBe(false);
+    expect(container?.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]')?.value)
+      .toBe('Keep this draft');
   });
 
   it('renders discovered voices and preserves automatic language matching', async () => {

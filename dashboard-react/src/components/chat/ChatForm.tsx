@@ -473,6 +473,7 @@ export function ChatForm({
   const recordingStartingRef = useRef(false);
   const conversationStoppingRef = useRef(false);
   const componentMountedRef = useRef(true);
+  const submitRealtimeTranscriptRef = useRef(false);
   const recordingStartedAtRef = useRef(0);
   const recordingTimerRef = useRef<number | null>(null);
 
@@ -509,7 +510,10 @@ export function ChatForm({
   const browserRecordingAvailable = captureMode !== null;
   const useRealtimeCapture = captureMode === 'realtime';
   const useRealtimeConversation = useRealtimeCapture && realtimeVoiceEnabled;
-  const submitRealtimeTranscript = autoSubmitVoice && canSendMessages;
+  const submitRealtimeTranscript = autoSubmitVoice && canSendMessages && !isLoading;
+  useEffect(() => {
+    submitRealtimeTranscriptRef.current = submitRealtimeTranscript;
+  }, [submitRealtimeTranscript]);
   const recordingUnavailableReason = !secureRecordingContext
     ? t('chat.form.voiceErrors.secureContextRequired', 'Microphone requires HTTPS or localhost.')
     : !browserRecordingAvailable
@@ -627,17 +631,18 @@ export function ChatForm({
           onSpeechStarted: onStopSpeaking,
           onTranscript: (text, final) => {
             if (realtimeConversationRef.current !== socket) return;
+            const shouldSubmit = submitRealtimeTranscriptRef.current;
             if (!text.trim()) {
               if (final && conversationStoppingRef.current) {
                 finishConversation();
               }
               return;
             }
-            if (final && submitRealtimeTranscript) {
+            if (final && shouldSubmit) {
               socket.setInputPaused(true);
               capture?.setEnabled(false);
             }
-            setMessage(final && submitRealtimeTranscript ? '' : text);
+            setMessage(final && shouldSubmit ? '' : text);
             onRealtimeTranscript?.(text, final);
             if (final && conversationStoppingRef.current) {
               finishConversation();
@@ -852,7 +857,6 @@ export function ChatForm({
     t,
     transcriptionReady,
     captureMode,
-    submitRealtimeTranscript,
     onRealtimeTranscript,
     onStopSpeaking,
     useRealtimeConversation,
