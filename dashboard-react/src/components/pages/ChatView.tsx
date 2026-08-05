@@ -625,8 +625,6 @@ export function ChatView({
   const audioObjectUrlRef = useRef<string | null>(null);
   const streamingPlaybackRef = useRef<StreamingSpeechPlayback | null>(null);
   const speechSentenceQueueRef = useRef<SpeechSentenceQueue | null>(null);
-  const realtimeSpeechTextRef = useRef('');
-  const realtimeSpeechTailRef = useRef('');
 
   // Restore scroll position after store hydration + DOM render
   const dispatch = useAppDispatch();
@@ -1557,121 +1555,8 @@ export function ChatView({
 
   const handleRealtimeTranscript = useCallback((text: string, final: boolean) => {
     if (!final || !autoSubmitVoice || !canSendMessages || !text.trim()) return;
-    addMessage({
-      id: uuidv4(),
-      role: 'user',
-      content: text.trim(),
-      timestamp: Date.now(),
-    });
-  }, [addMessage, autoSubmitVoice, canSendMessages]);
-
-  const handleRealtimeAssistantText = useCallback((text: string, final: boolean) => {
-    const visibleText = text.trimStart();
-    if (!final) {
-      setStreamingContent(visibleText);
-      if (
-        autoSpeakAssistant
-        && selectedSpeechModelId
-        && voiceCatalogReady
-        && selectedSpeechOption?.supportsStreaming
-        && selectedSpeechOption.responseFormats.includes('pcm')
-        && canUseStreamingSpeechPlayback()
-      ) {
-        if (!speechSentenceQueueRef.current) {
-          const selectResponseVoice = createPinnedSpeechVoiceSelector(
-            voiceOptions,
-            effectiveSelectedVoice,
-            selectedSpeechOption.defaultVoice ?? null,
-          );
-          const responseSession: StreamingSpeechResponseSession = {
-            playback: new StreamingSpeechPlayback(),
-            useEncodedFallback: false,
-          };
-          streamingPlaybackRef.current = responseSession.playback;
-          const responseQueue = new SpeechSentenceQueue(
-            (sentence, signal) => playSpeechSegment(
-              sentence,
-              null,
-              signal,
-              selectResponseVoice(sentence),
-              responseSession,
-            ),
-            (error) => {
-              setSpeechError(error instanceof Error
-                ? error.message
-                : t('chat.view.errors.speechSynthesisFailed', 'Speech synthesis failed.'));
-            },
-            () => {
-              if (speechSentenceQueueRef.current === responseQueue) {
-                speechSentenceQueueRef.current = null;
-              }
-              if (streamingPlaybackRef.current === responseSession.playback) {
-                streamingPlaybackRef.current = null;
-              }
-              setIsAutoSpeaking(false);
-            },
-            () => responseSession.playback.finish(),
-            () => responseSession.playback.stop(),
-          );
-          speechSentenceQueueRef.current = responseQueue;
-        }
-        if (visibleText.startsWith(realtimeSpeechTextRef.current)) {
-          const delta = visibleText.slice(realtimeSpeechTextRef.current.length);
-          const split = splitCompleteSpeechSentences(realtimeSpeechTailRef.current + delta);
-          realtimeSpeechTailRef.current = split.remainder;
-          if (split.sentences.length > 0) {
-            setIsAutoSpeaking(true);
-            speechSentenceQueueRef.current.enqueue(split.sentences);
-          }
-        }
-        realtimeSpeechTextRef.current = visibleText;
-      }
-      return;
-    }
-
-    const finalText = text.trim();
-    setStreamingContent(null);
-    if (!finalText) {
-      speechSentenceQueueRef.current?.finish();
-      return;
-    }
-    const assistantMessage: ChatMessage = {
-      id: uuidv4(),
-      role: 'assistant',
-      content: finalText,
-      timestamp: Date.now(),
-    };
-    addMessage(assistantMessage);
-    const queue = speechSentenceQueueRef.current;
-    if (autoSpeakAssistant && queue && realtimeSpeechTailRef.current.trim()) {
-      setIsAutoSpeaking(true);
-      queue.enqueue([realtimeSpeechTailRef.current.trim()]);
-    } else if (autoSpeakAssistant && selectedSpeechModelId && !queue) {
-      void speakText(finalText, assistantMessage.id);
-    }
-    queue?.finish();
-    realtimeSpeechTextRef.current = '';
-    realtimeSpeechTailRef.current = '';
-  }, [
-    addMessage,
-    autoSpeakAssistant,
-    effectiveSelectedVoice,
-    playSpeechSegment,
-    selectedSpeechModelId,
-    selectedSpeechOption,
-    speakText,
-    t,
-    voiceCatalogReady,
-    voiceOptions,
-  ]);
-
-  const handleRealtimeResponseDone = useCallback((status: string) => {
-    if (status === 'completed') return;
-    setStreamingContent(null);
-    realtimeSpeechTextRef.current = '';
-    realtimeSpeechTailRef.current = '';
-    stopSpeechPlayback();
-  }, [stopSpeechPlayback]);
+    void handleSend(text.trim(), []);
+  }, [autoSubmitVoice, canSendMessages, handleSend]);
 
   if (readyModels.length === 0 && readyTranscriptionModels.length === 0 && readySpeechModels.length === 0) {
     return (
@@ -1745,7 +1630,6 @@ export function ChatView({
           autoSpeakAssistant={autoSpeakAssistant}
           realtimeVoiceEnabled={realtimeVoiceEnabled}
           autoSubmitVoice={autoSubmitVoice}
-          realtimeResponseModelId={selectedModelId}
           isSpeaking={speakingMessageId !== null || isAutoSpeaking}
           voiceError={voiceCatalogError ?? speechError}
           onSelectTranscriptionModel={selectTranscriptionModel}
@@ -1757,8 +1641,6 @@ export function ChatView({
           onRealtimeVoiceEnabledChange={setRealtimeVoiceEnabled}
           onAutoSubmitVoiceChange={setAutoSubmitVoice}
           onRealtimeTranscript={handleRealtimeTranscript}
-          onRealtimeAssistantText={handleRealtimeAssistantText}
-          onRealtimeResponseDone={handleRealtimeResponseDone}
           onTranscribeAudio={transcribeAudio}
           onSpeakText={(text) => { void speakText(text, 'draft'); }}
           onStopSpeaking={stopSpeechPlayback}

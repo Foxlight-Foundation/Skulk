@@ -261,7 +261,7 @@ def test_reference_capable_cards_expose_shared_voice_catalog(card_name: str) -> 
     assert card.audio is not None
     assert card.audio.supports_reference_audio is True
     assert card.audio.supports_voice_listing is True
-    assert card.audio.default_voice == "angus"
+    assert card.audio.default_voice == "kite"
     assert card.audio.voices == tuple(profile.id for profile in profiles)
     assert tuple(voice.id for voice in card.audio.voice_catalog) == card.audio.voices
     assert tuple(voice.name for voice in card.audio.voice_catalog) == tuple(

@@ -155,7 +155,6 @@ describe('ChatForm speech controls', () => {
       realtimeTranscriptionAvailable: true,
       realtimeVoiceEnabled: true,
       autoSubmitVoice: false,
-      realtimeResponseModelId: 'org/chat',
       speechModels: [speechModel],
       selectedSpeechModelId: speechModel.modelId,
       onRealtimeVoiceEnabledChange,
@@ -210,7 +209,6 @@ describe('ChatForm speech controls', () => {
       realtimeTranscriptionAvailable: true,
       realtimeVoiceEnabled: true,
       autoSubmitVoice: false,
-      realtimeResponseModelId: 'org/chat',
     });
 
     const microphone = container?.querySelector<HTMLButtonElement>(
@@ -223,6 +221,10 @@ describe('ChatForm speech controls', () => {
       await Promise.resolve();
       sockets[0].serverEvent({ type: 'session.created' });
     });
+    const sessionUpdate = JSON.parse(sockets[0].sent[0]) as {
+      session: { response?: unknown };
+    };
+    expect(sessionUpdate.session.response).toBeUndefined();
     await vi.waitFor(() => expect(
       container?.querySelector('[aria-label="Stop recording"]'),
     ).not.toBeNull());
@@ -263,7 +265,6 @@ describe('ChatForm speech controls', () => {
       realtimeTranscriptionAvailable: true,
       realtimeVoiceEnabled: true,
       autoSubmitVoice: false,
-      realtimeResponseModelId: 'org/chat',
     });
 
     const microphone = container?.querySelector<HTMLButtonElement>(
@@ -275,6 +276,10 @@ describe('ChatForm speech controls', () => {
       await Promise.resolve();
       sockets[0].serverEvent({ type: 'session.created' });
     });
+    const sessionUpdate = JSON.parse(sockets[0].sent[0]) as {
+      session: { response?: unknown };
+    };
+    expect(sessionUpdate.session.response).toBeUndefined();
     await vi.waitFor(() => expect(
       container?.querySelector('[aria-label="Stop recording"]'),
     ).not.toBeNull());
@@ -311,7 +316,6 @@ describe('ChatForm speech controls', () => {
       realtimeTranscriptionAvailable: true,
       realtimeVoiceEnabled: true,
       autoSubmitVoice: true,
-      realtimeResponseModelId: 'org/chat',
       onRealtimeTranscript,
     });
 
@@ -324,6 +328,10 @@ describe('ChatForm speech controls', () => {
       await Promise.resolve();
       sockets[0].serverEvent({ type: 'session.created' });
     });
+    const sessionUpdate = JSON.parse(sockets[0].sent[0]) as {
+      session: { response?: unknown };
+    };
+    expect(sessionUpdate.session.response).toBeUndefined();
     await vi.waitFor(() => expect(
       container?.querySelector('[aria-label="Stop recording"]'),
     ).not.toBeNull());

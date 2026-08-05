@@ -177,9 +177,10 @@ model and local node advertise the required capabilities.
 - Capture callbacks are aggregated into bounded 100 ms transport frames.
 - Realtime mode keeps one multi-turn socket open, uses server VAD for automatic
   turn boundaries, and shows partial transcripts in the editable chat draft.
-- Auto-send optionally routes final transcripts to the selected chat model;
-  assistant text remains visible while it streams and barge-in cancels active
-  response playback.
+- Auto-send submits final transcripts through the dashboard's ordinary chat
+  request path. Voice and typed turns therefore share one persisted
+  conversation, the same generation limits, streaming, cancellation, and
+  sentence-paced TTS behavior. The microphone pauses while that turn drains.
 - Batch-only models retain the `MediaRecorder` upload flow.
 - Transcription results populate the chat draft for review or submission.
 - Streaming-capable TTS models use sentence-sized raw PCM requests. The

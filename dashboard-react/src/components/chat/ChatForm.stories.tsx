@@ -96,7 +96,6 @@ export const RealtimeStt: Story = {
     realtimeTranscriptionAvailable: true,
     realtimeVoiceEnabled: true,
     autoSubmitVoice: true,
-    realtimeResponseModelId: 'mlx-community/Qwen3-30B-A3B-4bit',
     onTranscribeAudio: async () => 'batch fallback transcript',
     onRealtimeVoiceEnabledChange: () => {},
     onAutoSubmitVoiceChange: () => {},
