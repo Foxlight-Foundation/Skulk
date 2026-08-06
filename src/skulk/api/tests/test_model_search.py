@@ -58,6 +58,7 @@ def test_repository_search_uses_the_standard_hub_query(
         {
             "search": "qwen",
             "author": None,
+            "pipeline_tag": None,
             "sort": "downloads",
             "limit": 5,
             "expand": list(model_search._EXPAND_FIELDS),

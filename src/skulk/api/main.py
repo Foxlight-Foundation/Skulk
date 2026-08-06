@@ -7184,12 +7184,18 @@ class API:
         return HuggingFaceCardSummary(model_id=model_id, summary=summary)
 
     async def search_models(
-        self, query: str = "", limit: int = 20, mlx_only: bool = False, offset: int = 0
+        self,
+        query: str = "",
+        limit: int = 20,
+        mlx_only: bool = False,
+        offset: int = 0,
+        pipeline_tag: str | None = None,
     ) -> list[HuggingFaceSearchResult]:
         """Search Hugging Face repositories and exact GGUF filenames.
 
         An empty query returns trending repositories; ``offset`` skips leading
-        results for "show more" paging.
+        results for "show more" paging, and ``pipeline_tag`` restricts results
+        to one Hugging Face task.
         """
         return await to_thread.run_sync(
             search_hugging_face_models,
@@ -7197,6 +7203,7 @@ class API:
             limit,
             mlx_only,
             offset,
+            pipeline_tag,
         )
 
     async def run(self):

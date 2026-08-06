@@ -1021,6 +1021,8 @@ Behavior note:
 - An empty `query` returns repositories sorted by Hugging Face's trending
   score; text queries sort by downloads.
 - `offset` skips that many leading results, for "show more" paging.
+- `pipeline_tag` restricts results to one Hugging Face task (for example
+  `text-generation` or `automatic-speech-recognition`).
 - Ordinary text queries use Hugging Face repository search.
 - A query ending in `.gguf` also performs a bounded filename-aware fallback:
   Skulk broadens the model-name prefix, inspects those candidate repositories'

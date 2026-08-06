@@ -103,6 +103,8 @@ export function ModelSearchModal({
   // response filled the request (more may exist upstream).
   const [hfLimit, setHfLimit] = useState(50);
   const [hfHasMore, setHfHasMore] = useState(false);
+  // Hugging Face task filter (pipeline tag); null browses every task.
+  const [hfTask, setHfTask] = useState<string | null>(null);
   const lastQueryRef = useRef('');
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
@@ -148,6 +150,7 @@ export function ModelSearchModal({
     (async () => {
       try {
         const params = new URLSearchParams({ query: '', limit: String(hfLimit), mlx_only: String(mlxOnly) });
+        if (hfTask) params.set('pipeline_tag', hfTask);
         const res = await fetch(`/models/search?${params}`);
         if (!res.ok) return;
         const results = (await res.json()) as HuggingFaceModel[];
@@ -155,9 +158,9 @@ export function ModelSearchModal({
         setHfHasMore(results.length >= hfLimit);
       } catch { /* ignore */ }
     })();
-  }, [open, mlxOnly, hfLimit]);
+  }, [open, mlxOnly, hfLimit, hfTask]);
 
-  const handleHfSearch = useCallback((query: string, mlxOnlyOverride?: boolean, limitOverride?: number) => {
+  const handleHfSearch = useCallback((query: string, mlxOnlyOverride?: boolean, limitOverride?: number, taskOverride?: string | null) => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     // A changed query restarts paging at one page.
     let limit = limitOverride ?? hfLimit;
@@ -176,6 +179,8 @@ export function ModelSearchModal({
     debounceRef.current = setTimeout(async () => {
       try {
         const params = new URLSearchParams({ query, limit: String(limit), mlx_only: String(useMlxOnly) });
+        const task = taskOverride === undefined ? hfTask : taskOverride;
+        if (task) params.set('pipeline_tag', task);
         const res = await fetch(`/models/search?${params}`);
         if (res.ok) {
           const results = (await res.json()) as HuggingFaceModel[];
@@ -185,7 +190,16 @@ export function ModelSearchModal({
       } catch { /* ignore */ }
       finally { setHfSearching(false); }
     }, 500);
-  }, [mlxOnly, hfLimit]);
+  }, [mlxOnly, hfLimit, hfTask]);
+
+  const handleHfTaskChange = useCallback((task: string | null) => {
+    setHfTask(task);
+    setHfLimit(50);
+    // Trending refetches via its effect; an active search refetches here.
+    if (lastQueryRef.current.trim()) {
+      handleHfSearch(lastQueryRef.current, undefined, 50, task);
+    }
+  }, [handleHfSearch]);
 
   const handleHfLoadMore = useCallback(() => {
     const next = Math.min(hfLimit + 50, 200);
@@ -332,6 +346,8 @@ export function ModelSearchModal({
             getHfBurstInfo={getHfBurstInfo}
             fleetMemoryBytes={fleet?.totalMemoryBytes}
             onHfLoadMore={hfHasMore && hfLimit < 200 ? handleHfLoadMore : undefined}
+            hfTask={hfTask}
+            onHfTaskChange={handleHfTaskChange}
           />
         </ModalBody>
       </ModalContainer>

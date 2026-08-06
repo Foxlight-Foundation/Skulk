@@ -53,6 +53,10 @@ export interface ModelBrowserProps {
   fleetMemoryBytes?: number;
   /** Fetch another page of Hugging Face results; absent when exhausted. */
   onHfLoadMore?: () => void;
+  /** Active Hugging Face task filter (pipeline tag); null browses all. */
+  hfTask?: string | null;
+  /** Change the Hugging Face task filter. */
+  onHfTaskChange?: (task: string | null) => void;
 }
 
 /* ---------- layout ---------- */
@@ -276,6 +280,8 @@ export function ModelBrowser({
   getHfBurstInfo,
   fleetMemoryBytes,
   onHfLoadMore,
+  hfTask = null,
+  onHfTaskChange,
 }: ModelBrowserProps) {
   const { t } = useSkulkTranslation();
   const [source, setSource] = useState<'catalog' | 'huggingface'>('catalog');
@@ -296,6 +302,17 @@ export function ModelBrowser({
     picker.filters.sizeRange !== null ||
     picker.filters.downloadedOnly ||
     picker.filters.readyOnly;
+
+  // Hugging Face task filters offered on the search tab: the slice of the
+  // Hub typology Skulk users act on, labeled in the catalog's vocabulary.
+  const hfTaskOptions = [
+    { tag: 'text-generation', label: t('modelBrowser.taskText', 'Text') },
+    { tag: 'image-text-to-text', label: t('modelBrowser.taskVision', 'Vision') },
+    { tag: 'automatic-speech-recognition', label: t('modelBrowser.taskStt', 'STT') },
+    { tag: 'text-to-speech', label: t('modelBrowser.taskTts', 'TTS') },
+    { tag: 'sentence-similarity', label: t('modelBrowser.taskEmbedding', 'Embedding') },
+    { tag: 'text-to-image', label: t('modelBrowser.taskImageGen', 'Image gen') },
+  ];
 
   const hfModelsRaw = (hfSearchResults && hfSearchResults.length > 0)
     ? hfSearchResults
@@ -462,6 +479,31 @@ export function ModelBrowser({
             />
           )}
         </Toolbar>
+
+        {/* Hugging Face task scope */}
+        {isHf && onHfTaskChange && (
+          <FamilyRail role="group" aria-label={t('modelBrowser.taskScope', 'Filter Hugging Face results by task')}>
+            <FamilyChip
+              type="button"
+              $active={hfTask === null}
+              aria-pressed={hfTask === null}
+              onClick={() => onHfTaskChange(null)}
+            >
+              {t('modelBrowser.allFamilies', 'All')}
+            </FamilyChip>
+            {hfTaskOptions.map(({ tag, label }) => (
+              <FamilyChip
+                key={tag}
+                type="button"
+                $active={hfTask === tag}
+                aria-pressed={hfTask === tag}
+                onClick={() => onHfTaskChange(tag)}
+              >
+                {label}
+              </FamilyChip>
+            ))}
+          </FamilyRail>
+        )}
 
         {/* Catalog family scope */}
         {!isHf && (

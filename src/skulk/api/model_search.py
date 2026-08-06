@@ -200,7 +200,11 @@ def _matching_file(model: ModelInfo, requested_filename: str) -> str | None:
 
 
 def search_hugging_face_models(
-    query: str, limit: int, mlx_only: bool, offset: int = 0
+    query: str,
+    limit: int,
+    mlx_only: bool,
+    offset: int = 0,
+    pipeline_tag: str | None = None,
 ) -> list[HuggingFaceSearchResult]:
     """Search repositories and resolve exact GGUF filenames when requested.
 
@@ -221,6 +225,8 @@ def search_hugging_face_models(
         limit: Maximum number of repositories to return.
         mlx_only: Restrict both search paths to the ``mlx-community`` author.
         offset: Number of leading results to skip, for "show more" paging.
+        pipeline_tag: Restrict results to one Hugging Face task, for example
+            ``text-generation`` or ``automatic-speech-recognition``.
 
     Returns:
         Search results, with ``matched_file`` set for exact GGUF filename matches.
@@ -235,6 +241,7 @@ def search_hugging_face_models(
         list_models(
             search=query or None,
             author=author,
+            pipeline_tag=pipeline_tag,
             sort="downloads" if query else "trending_score",
             limit=limit + max(offset, 0),
             expand=list(_EXPAND_FIELDS),

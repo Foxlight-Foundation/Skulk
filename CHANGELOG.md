@@ -159,7 +159,10 @@ This project records release notes here and mirrors public-facing notes in
   popover became a real dossier: it lazily fetches the model card's own
   description through the new `GET /models/card-summary` endpoint and shows
   lineage with a link to the parent repository, architecture, languages,
-  license, and arXiv papers.
+  license, and arXiv papers. A task chip rail on the search tab filters
+  trending and search results by Hugging Face task (text, vision, STT,
+  TTS, embedding, image generation) via the endpoint's `pipeline_tag`
+  parameter.
 
 - **Concurrent slots on the served llama.cpp engine no longer shrink each
   request's context window.** `SKULK_LLAMA_SERVER_PARALLEL` asks a node to serve
