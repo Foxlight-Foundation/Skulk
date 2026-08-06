@@ -4,24 +4,14 @@ import styled from 'styled-components';
  * Rounded tile identifying a model family (or Hugging Face author) in
  * discovery lists. Renders the family's brand mark when we bundle one
  * (resurrected from the retired FamilyLogos set), and falls back to a
- * legible monogram over a deterministic hue for everything else, so every
- * row keeps a stable visual anchor whether or not iconography exists.
+ * legible monogram for everything else, so every row keeps a stable visual
+ * anchor whether or not iconography exists. Tiles are intentionally neutral;
+ * in this dashboard color carries semantics, and family identity is shape.
  */
 export interface FamilyAvatarProps {
   /** Family or author name the tile represents. */
   name: string;
 }
-
-/** Well-known families keep stable, deliberately chosen hues. */
-const PINNED_HUES: Readonly<Record<string, number>> = {
-  qwen: 262,
-  gemma: 214,
-  llama: 24,
-  'gpt-oss': 152,
-  glm: 330,
-  mistral: 12,
-  deepseek: 200,
-};
 
 /**
  * Brand glyph paths (24x24 viewBox, fill=currentColor) keyed by canonical
@@ -113,15 +103,6 @@ function brandGlyph(name: string): { paths: readonly string[]; evenodd: boolean 
   return { paths: GLYPH_PATHS[brand], evenodd: EVENODD_GLYPHS.has(brand) };
 }
 
-/** Well-known families keep stable hues; the rest hash deterministically. */
-function familyHue(name: string): number {
-  const pinned = PINNED_HUES[name.toLowerCase()];
-  if (pinned !== undefined) return pinned;
-  let h = 0;
-  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360;
-  return h;
-}
-
 function monogram(name: string): string {
   const tokens = name.split(/[\s_-]+/).filter(Boolean);
   if (tokens.length === 0) return '?';
@@ -129,7 +110,10 @@ function monogram(name: string): string {
   return (tokens[0].slice(0, 1) + tokens[1].slice(0, 1)).toUpperCase();
 }
 
-const Tile = styled.span<{ $hue: number }>`
+/* Deliberately neutral: everywhere else in the dashboard color carries
+ * semantics (status, capability, brand accent), so the tile stays greyscale
+ * and lets the mark's shape or the monogram's letterform carry identity. */
+const Tile = styled.span`
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -137,9 +121,9 @@ const Tile = styled.span<{ $hue: number }>`
   height: 36px;
   flex-shrink: 0;
   border-radius: ${({ theme }) => theme.radii.md};
-  background: hsl(${({ $hue }) => $hue} 70% 50% / 0.13);
-  border: 1px solid hsl(${({ $hue }) => $hue} 70% 50% / 0.22);
-  color: hsl(${({ $hue }) => $hue} 60% 52%);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
+  border: 1px solid ${({ theme }) => theme.colors.borderLight};
+  color: ${({ theme }) => theme.colors.textSecondary};
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-weight: 700;
@@ -150,7 +134,7 @@ const Tile = styled.span<{ $hue: number }>`
 export function FamilyAvatar({ name }: FamilyAvatarProps) {
   const glyph = brandGlyph(name);
   return (
-    <Tile aria-hidden $hue={familyHue(name)} title={name}>
+    <Tile aria-hidden title={name}>
       {glyph ? (
         <svg
           width={20}
