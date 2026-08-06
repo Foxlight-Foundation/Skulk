@@ -4,6 +4,7 @@ import type { HuggingFaceModel } from '../../types/models';
 import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
 import { FamilyAvatar } from './FamilyAvatar';
+import { HuggingFaceLink } from './HuggingFaceLink';
 import { deriveFormatLabel, deriveQuantLabel, QuantBadge } from './quantBadge';
 import { BurstChip } from './BurstChip';
 import type { BurstInfo } from './burst';
@@ -305,6 +306,8 @@ export function HuggingFaceResultItem({
       </Info>
 
       {burst && <BurstChip info={burst} fleetMemoryBytes={fleetMemoryBytes} />}
+
+      <HuggingFaceLink repoId={model.id} />
 
       {/* Info tooltip */}
       <InfoTooltip filled size={16} placement="left" delay={100} content={tooltipContent} />

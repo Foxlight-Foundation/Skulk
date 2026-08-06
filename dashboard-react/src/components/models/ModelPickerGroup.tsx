@@ -14,6 +14,7 @@ import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
 import { buildTagColors, CapabilityTagBadge } from '../common/capabilityTags';
 import { FamilyAvatar } from './FamilyAvatar';
+import { HuggingFaceLink } from './HuggingFaceLink';
 import { deriveFormatLabel, QuantBadge } from './quantBadge';
 import { BurstChip } from './BurstChip';
 import type { BurstInfo } from './burst';
@@ -274,8 +275,9 @@ function ModelGroupInfo({ group, title }: { group: ModelGroup; title: string }) 
   const resolved = v.resolved_capabilities;
   return (
     <div style={{ minWidth: 220 }}>
-      <div style={{ color: theme.colors.gold, fontWeight: 600, marginBottom: 6 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, color: theme.colors.gold, fontWeight: 600, marginBottom: 6 }}>
         {title}
+        <HuggingFaceLink repoId={v.hugging_face_id ?? v.id} size={12} />
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
         {v.family && (
@@ -478,6 +480,10 @@ export function ModelPickerGroup({
           <FiStar size={15} />
         </FavStar>
 
+        {singleVariant && (
+          <HuggingFaceLink repoId={singleVariant.hugging_face_id ?? singleVariant.id} />
+        )}
+
         {/* Info */}
         <span onClick={(e) => e.stopPropagation()} style={{ display: 'flex' }}>
           <InfoTooltip
@@ -542,6 +548,7 @@ export function ModelPickerGroup({
                   const b = getBurstInfo?.(v.id) ?? null;
                   return b ? <BurstChip info={b} fleetMemoryBytes={fleetMemoryBytes} /> : null;
                 })()}
+                <HuggingFaceLink repoId={v.hugging_face_id ?? v.id} />
                 <span style={{ color: fitColor(vFit, theme), fontWeight: 500, flex: 1 }}>
                   {sizeText(v.storage_size_megabytes)}
                 </span>
