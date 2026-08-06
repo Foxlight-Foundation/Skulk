@@ -242,9 +242,9 @@ export function ModelSearchModal({
   return (
     <>
       <Backdrop onClick={onClose} />
-      <ModalContainer>
+      <ModalContainer role="dialog" aria-modal="true" aria-labelledby="model-search-title">
         <ModalHeader>
-          <ModalTitle>{t('modelSearch.title', 'Find Models')}</ModalTitle>
+          <ModalTitle id="model-search-title">{t('modelSearch.title', 'Find Models')}</ModalTitle>
           <CloseButton onClick={onClose} aria-label={t('common.close', 'Close')}>
             <FiX size={20} />
           </CloseButton>
@@ -291,13 +291,18 @@ const ModalContainer = styled.div`
   z-index: 51;
   display: flex;
   flex-direction: column;
-  width: min(90vw, 600px);
-  height: min(80vh, 700px);
+  width: min(94vw, 900px);
+  height: min(86vh, 760px);
   background: ${({ theme }) => theme.colors.surface};
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.lg};
   overflow: hidden;
   box-shadow: 0 0 43px ${({ theme }) => theme.colors.shadowStrong}, 0 0 88px ${({ theme }) => theme.colors.shadow};
+
+  @media (max-width: 640px) {
+    width: calc(100vw - 16px);
+    height: calc(100vh - 16px);
+  }
 `;
 
 const ModalHeader = styled.div`

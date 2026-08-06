@@ -1,4 +1,5 @@
-import styled from 'styled-components';
+import { useState } from 'react';
+import styled, { css } from 'styled-components';
 import { Button } from '../common/Button';
 import type {
   ModelInfo,
@@ -11,12 +12,12 @@ import type {
 } from '../../types/models';
 import { useModelPicker } from '../../hooks/useModelPicker';
 import { SearchBar } from '../common/SearchBar';
-import { FamilySidebar } from './FamilySidebar';
 import { ModelFilterPopover } from './ModelFilterPopover';
 import { ModelPickerGroup } from './ModelPickerGroup';
 import { HuggingFaceResultItem } from './HuggingFaceResultItem';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 
+/** Data and actions used to browse Skulk-supported models or search Hugging Face. */
 export interface ModelBrowserProps {
   models: ModelInfo[];
   selectedModelId: string | null;
@@ -46,10 +47,49 @@ export interface ModelBrowserProps {
 
 const Container = styled.div`
   display: flex;
+  flex-direction: column;
   height: 100%;
   background: ${({ theme }) => theme.colors.bg};
   color: ${({ theme }) => theme.colors.text};
   overflow: hidden;
+`;
+
+const SourceSwitcher = styled.div`
+  display: flex;
+  gap: 4px;
+  padding: 12px 16px 0;
+  flex-shrink: 0;
+
+  @media (max-width: 640px) {
+    & > button {
+      flex: 1;
+    }
+  }
+`;
+
+const SourceButton = styled.button<{ $active: boolean }>`
+  appearance: none;
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.md};
+  background: transparent;
+  color: ${({ theme }) => theme.colors.textSecondary};
+  cursor: pointer;
+  font-family: ${({ theme }) => theme.fonts.body};
+  font-size: ${({ theme }) => theme.fontSizes.tableBody};
+  font-weight: 600;
+  padding: 8px 12px;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+
+  &:hover {
+    background: ${({ theme }) => theme.colors.surfaceHover};
+    color: ${({ theme }) => theme.colors.text};
+  }
+
+  ${({ $active }) => $active && css`
+    background: ${({ theme }) => theme.colors.goldBg};
+    border-color: ${({ theme }) => theme.colors.goldDim};
+    color: ${({ theme }) => theme.colors.gold};
+  `}
 `;
 
 const Main = styled.div`
@@ -72,6 +112,14 @@ const Toolbar = styled.div`
     flex: 1;
     min-width: 0;
   }
+
+  @media (max-width: 640px) {
+    flex-wrap: wrap;
+
+    & > *:first-child {
+      flex-basis: 100%;
+    }
+  }
 `;
 
 const FilterBtn = styled(Button)<{ $active: boolean }>`
@@ -81,6 +129,19 @@ const FilterBtn = styled(Button)<{ $active: boolean }>`
       color: ${theme.colors.gold};
       border-color: ${theme.colors.goldDim};
     `}
+`;
+
+const CatalogScopeSelect = styled.select`
+  min-width: 150px;
+  max-width: 210px;
+  height: 34px;
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.md};
+  background: ${({ theme }) => theme.colors.surface};
+  color: ${({ theme }) => theme.colors.text};
+  font-family: ${({ theme }) => theme.fonts.body};
+  font-size: ${({ theme }) => theme.fontSizes.tableBody};
+  padding: 0 28px 0 10px;
 `;
 
 const ListArea = styled.div`
@@ -109,8 +170,32 @@ const FilterIcon = () => (
   </svg>
 );
 
+const FAMILY_TOKEN_LABELS: Readonly<Record<string, string>> = {
+  audiodit: 'AudioDiT',
+  bert: 'BERT',
+  glm: 'GLM',
+  gpt: 'GPT',
+  longcat: 'LongCat',
+  oss: 'OSS',
+  qwen: 'Qwen',
+  qwen3: 'Qwen3',
+  stt: 'STT',
+  tts: 'TTS',
+  vl: 'VL',
+};
+
+function familyLabel(family: string): string {
+  return family
+    .split(/[_-]/)
+    .filter(Boolean)
+    .map((token) => FAMILY_TOKEN_LABELS[token.toLowerCase()]
+      ?? `${token.charAt(0).toUpperCase()}${token.slice(1)}`)
+    .join(' ');
+}
+
 /* ---------- component ---------- */
 
+/** Render model discovery with separate source selection and catalog filtering. */
 export function ModelBrowser({
   models,
   selectedModelId,
@@ -134,6 +219,7 @@ export function ModelBrowser({
   onToggleMlxOnly,
 }: ModelBrowserProps) {
   const { t } = useSkulkTranslation();
+  const [source, setSource] = useState<'catalog' | 'huggingface'>('catalog');
   const picker = useModelPicker({
     models,
     favorites,
@@ -144,7 +230,7 @@ export function ModelBrowser({
     instanceStatuses,
   });
 
-  const isHf = picker.selectedFamily === 'huggingface';
+  const isHf = source === 'huggingface';
 
   const hasActiveFilters =
     picker.filters.capabilities.length > 0 ||
@@ -158,14 +244,32 @@ export function ModelBrowser({
 
   return (
     <Container>
-      {/* Sidebar */}
-      <FamilySidebar
-        families={picker.uniqueFamilies}
-        selectedFamily={picker.selectedFamily}
-        hasFavorites={picker.hasFavorites}
-        hasRecents={picker.hasRecents}
-        onSelect={picker.setSelectedFamily}
-      />
+      <SourceSwitcher role="group" aria-label={t('modelBrowser.source', 'Model source')}>
+        <SourceButton
+          type="button"
+          aria-pressed={!isHf}
+          $active={!isHf}
+          onClick={() => {
+            setSource('catalog');
+            picker.setSelectedFamily(null);
+          }}
+        >
+          {t('modelBrowser.supportedCatalog', 'Supported models')}
+        </SourceButton>
+        <SourceButton
+          type="button"
+          aria-pressed={isHf}
+          $active={isHf}
+          onClick={() => {
+            setSource('huggingface');
+            if (picker.searchQuery.trim() && onHfSearch) {
+              onHfSearch(picker.searchQuery);
+            }
+          }}
+        >
+          {t('modelBrowser.huggingFaceSearch', 'Search Hugging Face')}
+        </SourceButton>
+      </SourceSwitcher>
 
       {/* Main content */}
       <Main>
@@ -180,7 +284,7 @@ export function ModelBrowser({
             placeholder={isHf
               ? (mlxOnly
                   ? t('modelBrowser.searchMlxCommunity', 'Search mlx-community...')
-                  : t('modelBrowser.searchHuggingFace', 'Search all of HuggingFace...'))
+                  : t('modelBrowser.searchHuggingFace', 'Search all of Hugging Face...'))
               : t('modelBrowser.searchModels', 'Search models...')}
             autoFocus
             ariaLabel={t('modelBrowser.searchAriaLabel', 'Search models')}
@@ -202,15 +306,38 @@ export function ModelBrowser({
             </FilterBtn>
           )}
           {!isHf && (
-            <FilterBtn
-              variant="outline"
-              size="sm"
-              $active={hasActiveFilters}
-              onClick={() => picker.setShowFilters(!picker.showFilters)}
-            >
-              <FilterIcon />
-              {t('modelBrowser.filters', 'Filters')}
-            </FilterBtn>
+            <>
+              <CatalogScopeSelect
+                value={picker.selectedFamily ?? 'all'}
+                aria-label={t('modelBrowser.catalogScope', 'Filter supported models by family')}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  picker.setSelectedFamily(value === 'all' ? null : value);
+                }}
+              >
+                <option value="all">{t('modelBrowser.allSupported', 'All supported models')}</option>
+                {picker.hasFavorites && (
+                  <option value="favorites">{t('familySidebar.favorites', 'Favorites')}</option>
+                )}
+                {picker.hasRecents && (
+                  <option value="recents">{t('familySidebar.recent', 'Recent')}</option>
+                )}
+                <optgroup label={t('modelInfo.family', 'Family')}>
+                  {picker.uniqueFamilies.map((family) => (
+                    <option key={family} value={family}>{familyLabel(family)}</option>
+                  ))}
+                </optgroup>
+              </CatalogScopeSelect>
+              <FilterBtn
+                variant="outline"
+                size="sm"
+                $active={hasActiveFilters}
+                onClick={() => picker.setShowFilters(!picker.showFilters)}
+              >
+                <FilterIcon />
+                {t('modelBrowser.filters', 'Filters')}
+              </FilterBtn>
+            </>
           )}
           {picker.showFilters && !isHf && (
             <ModelFilterPopover
@@ -258,7 +385,30 @@ export function ModelBrowser({
           ) : (
             /* Local model groups */
             <>
-              {picker.recommendedGroups.length > 0 && (
+              {mode === 'store-download' && picker.filteredGroups.length > 0 && (
+                <>
+                  <SectionHeader>{t('modelBrowser.supportedCatalog', 'Supported models')}</SectionHeader>
+                  {picker.filteredGroups.map((g) => (
+                    <ModelPickerGroup
+                      key={g.id}
+                      group={g}
+                      isExpanded={picker.expandedGroups.has(g.id)}
+                      isFavorite={favorites.has(g.id)}
+                      selectedModelId={selectedModelId}
+                      canModelFit={canModelFit}
+                      getModelFitStatus={getModelFitStatus}
+                      onToggleExpand={() => picker.toggleExpanded(g.id)}
+                      onSelectModel={onSelect}
+                      onToggleFavorite={onToggleFavorite}
+                      onShowInfo={onShowInfo}
+                      downloadStatusMap={downloadStatusMap}
+                      instanceStatuses={instanceStatuses}
+                      mode={mode}
+                    />
+                  ))}
+                </>
+              )}
+              {mode !== 'store-download' && picker.recommendedGroups.length > 0 && (
                 <>
                   <SectionHeader>{t('modelBrowser.recommended', 'Recommended')}</SectionHeader>
                   {picker.recommendedGroups.map((g) => (
@@ -281,7 +431,7 @@ export function ModelBrowser({
                   ))}
                 </>
               )}
-              {picker.otherGroups.length > 0 && (
+              {mode !== 'store-download' && picker.otherGroups.length > 0 && (
                 <>
                   {picker.recommendedGroups.length > 0 && (
                     <SectionHeader>{t('modelBrowser.other', 'Other')}</SectionHeader>
