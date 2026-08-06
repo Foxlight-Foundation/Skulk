@@ -5,21 +5,21 @@ import { formatBytes } from '../../utils/format';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import type { BurstInfo } from './burst';
 
+/* Icon-only, inked in the brand accent like the row's other quiet
+ * affordances; the name and reason live in the tooltip. */
 const Chip = styled.span`
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
   flex-shrink: 0;
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.warningOnSurface};
-  background: ${({ theme }) => theme.colors.warningBg};
-  border: 1px solid ${({ theme }) => theme.colors.warningBg};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  padding: 2px 8px;
+  border-radius: 50%;
+  color: ${({ theme }) => theme.colors.gold};
+  background: ${({ theme }) => theme.colors.goldBg};
 `;
 
-/** Amber chip naming the burst requirement, with the reason in a tooltip. */
+/** Brand-accent burst marker; the name and reason live in its tooltip. */
 export function BurstChip({ info, fleetMemoryBytes }: {
   info: BurstInfo;
   fleetMemoryBytes?: number;
@@ -43,11 +43,21 @@ export function BurstChip({ info, fleetMemoryBytes }: {
         },
       );
   return (
-    <InfoTooltip placement="left" delay={100} content={<div style={{ maxWidth: 260 }}>{reason}</div>}>
-      <Chip>
-        <FiZap size={11} />
-        {t('burst.chip', 'Burst')}
-        {info.estimated ? ' ~' : ''}
+    <InfoTooltip
+      placement="left"
+      delay={100}
+      content={
+        <div style={{ maxWidth: 260 }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>
+            {t('burst.chip', 'Burst')}
+            {info.estimated ? ` (${t('burst.estimated', 'estimated')})` : ''}
+          </div>
+          {reason}
+        </div>
+      }
+    >
+      <Chip aria-label={t('burst.chip', 'Burst')} role="img">
+        <FiZap size={12} />
       </Chip>
     </InfoTooltip>
   );

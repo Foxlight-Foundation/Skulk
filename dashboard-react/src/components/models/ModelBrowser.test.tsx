@@ -181,7 +181,7 @@ describe('ModelBrowser store discovery taxonomy', () => {
         : null);
 
     expect(container?.textContent).toContain('Needs burst capacity');
-    expect(container?.textContent).toContain('Burst');
+    expect(container?.querySelector('[aria-label="Burst"]')).not.toBeNull();
 
     // The burst section renders after the placeable card.
     const text = container?.textContent ?? '';

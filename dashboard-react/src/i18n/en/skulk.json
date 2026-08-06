@@ -16,6 +16,7 @@
   "app.warnings.versionMismatch": "Version mismatch: {details}. Update all nodes with git pull && uv sync.",
   "burst.chip": "Burst",
   "burst.engineReason": "No node in your fleet runs {format} artifacts. Serve it with burst capacity or an added node.",
+  "burst.estimated": "estimated",
   "burst.sizeReason": "Larger than your fleet’s total memory ({needed} of weights vs {available} fleet-wide). Serve it with burst capacity or added nodes.",
   "burst.thisFormat": "this format",
   "burst.unknownSize": "unknown size",
