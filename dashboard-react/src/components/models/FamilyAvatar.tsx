@@ -110,9 +110,10 @@ function monogram(name: string): string {
   return (tokens[0].slice(0, 1) + tokens[1].slice(0, 1)).toUpperCase();
 }
 
-/* Deliberately neutral: everywhere else in the dashboard color carries
- * semantics (status, capability, brand accent), so the tile stays greyscale
- * and lets the mark's shape or the monogram's letterform carry identity. */
+/* The tile background stays neutral (in this dashboard color carries
+ * semantics, and family identity is shape), while the mark itself is inked
+ * in the theme's brand accent - blue in the light palette, gold in the
+ * dark one - so the tiles read as part of the brand rather than greyed out. */
 const Tile = styled.span`
   display: inline-flex;
   align-items: center;
@@ -123,7 +124,7 @@ const Tile = styled.span`
   border-radius: ${({ theme }) => theme.radii.md};
   background: ${({ theme }) => theme.colors.surfaceSunken};
   border: 1px solid ${({ theme }) => theme.colors.borderLight};
-  color: ${({ theme }) => theme.colors.textSecondary};
+  color: ${({ theme }) => theme.colors.gold};
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-weight: 700;
