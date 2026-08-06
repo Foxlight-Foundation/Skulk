@@ -607,6 +607,7 @@ Request fields:
 | `instruct`, `lang_code` | string or null | Optional model-specific generation hints |
 | `temperature`, `top_p`, `top_k`, `repetition_penalty` | number | Optional model-specific sampling controls |
 | `max_tokens` | integer or null | Optional model-specific generation ceiling. An explicit value is preserved. When omitted and the mounted model explicitly declares this control, Skulk uses a 4096-token serving default instead of inheriting a potentially truncating upstream library default. Models that do not declare the control receive no injected keyword. |
+| `seed` | integer or null | Optional unsigned 32-bit sampling seed. When supplied, the speech runner resets MLX sampling immediately before generation so identical model, voice, text, and sampling controls are reproducible. Omission preserves the upstream advancing random stream. |
 | `reference_audio` | multipart file or null | Optional request-scoped voice-conditioning audio. Accepted only as a multipart upload for a mounted card declaring `audio.supports_reference_audio = true`; server-local paths are rejected |
 | `reference_text` | string or null | Optional transcript of `reference_audio`; accepted only when the multipart upload is present |
 
@@ -1902,7 +1903,8 @@ Its payload accepts:
 | `voice` | string | Optional model-specific voice |
 | `streaming_interval` | number | Optional positive generation cadence hint |
 | `speed`, `instruct`, `lang_code` | model-specific | Optional speech controls |
-| `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number | Optional model-specific sampling controls |
+| `temperature`, `top_p`, `repetition_penalty` | number | Optional model-specific sampling controls |
+| `top_k`, `max_tokens`, `seed` | integer | Optional model-specific sampling controls; `seed` must be unsigned 32-bit |
 
 Each `chunk` payload reports `model`, `format: "mp3"`, `chunk_index`,
 `is_partial`, and optional `sample_rate`; the MP3 bytes are carried beside it

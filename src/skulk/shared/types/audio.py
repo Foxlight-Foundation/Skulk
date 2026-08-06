@@ -28,6 +28,12 @@ class SpeechSynthesisTaskParams(BaseModel, frozen=True):
     top_k: int | None = None
     repetition_penalty: float | None = None
     max_tokens: int | None = None
+    seed: int | None = Field(
+        default=None,
+        ge=0,
+        le=2**32 - 1,
+        description="Optional deterministic MLX sampling seed for this request.",
+    )
     reference_audio: str | None = None
     reference_text: str | None = None
     reference_voice_profile: str | None = None

@@ -42,6 +42,7 @@ def test_serving_log_summaries_exclude_user_payloads() -> None:
         reference_audio_present=True,
         reference_audio_sha256="a" * 64,
         reference_audio_data=b"REFERENCE_AUDIO_SENTINEL",
+        seed=42,
     )
     transcription_params = AudioTranscriptionTaskParams(
         model=ModelId("stt-model"),
@@ -155,5 +156,6 @@ def test_serving_log_summaries_exclude_user_payloads() -> None:
     assert "prompt_chars=21" in joined
     assert "input_texts=1" in joined
     assert "reference_audio_bytes=24" in joined
+    assert joined.count("seed=42") == 2
     assert "audio_payload_chars=28" in joined
     assert "SendInputChunk(command_id='chunk-command')" in joined

@@ -3,6 +3,9 @@ import type { AudioResponseFormat } from '../types/chat';
 /** Dashboard-side mirror of the API's bounded reference-audio upload limit. */
 export const MAX_REFERENCE_AUDIO_BYTES = 25 * 1024 * 1024;
 
+/** Stable seed used for every dashboard sentence and replay generation. */
+export const DASHBOARD_SPEECH_SEED = 42;
+
 /** Inputs required to construct one dashboard speech-synthesis request. */
 export interface SpeechSynthesisRequestOptions {
   model: string;
@@ -10,6 +13,7 @@ export interface SpeechSynthesisRequestOptions {
   language: string;
   responseFormat: AudioResponseFormat;
   stream: boolean;
+  seed: number;
   voice: string | null;
   referenceAudio: File | null;
   referenceText: string;
@@ -51,6 +55,7 @@ export function buildSpeechSynthesisRequest(
     language,
     responseFormat,
     stream,
+    seed,
     voice,
     referenceAudio,
     referenceText,
@@ -62,6 +67,7 @@ export function buildSpeechSynthesisRequest(
     formData.set('input', input);
     formData.set('lang_code', language);
     formData.set('response_format', responseFormat);
+    formData.set('seed', String(seed));
     if (stream) formData.set('stream', 'true');
     // The uploaded clip is the voice condition for this request. Sending the
     // catalog selection as well would make the conditioning source ambiguous.
@@ -84,6 +90,7 @@ export function buildSpeechSynthesisRequest(
       input,
       lang_code: language,
       response_format: responseFormat,
+      seed,
       ...(stream ? { stream: true } : {}),
       ...(voice ? { voice } : {}),
     }),

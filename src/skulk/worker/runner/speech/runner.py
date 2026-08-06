@@ -133,6 +133,24 @@ def _tts_max_tokens(fn: Callable[..., Any], requested: int | None) -> int | None
     return _DEFAULT_TTS_MAX_TOKENS
 
 
+def _seed_tts_sampling(seed: int | None) -> None:
+    """Reset MLX sampling for one speech request when the caller supplies a seed.
+
+    Speech runners execute synthesis tasks serially, so resetting the process-global
+    MLX generator immediately before ``model.generate`` cannot race another TTS task.
+    Omitted seeds deliberately preserve the upstream generator's advancing state.
+
+    Args:
+        seed: Unsigned 32-bit sampling seed, or ``None`` to retain upstream behavior.
+    """
+
+    if seed is None:
+        return
+    import mlx.core as mx
+
+    mx.random.seed(seed)
+
+
 def _load_tts_reference_audio(audio_path: str, sample_rate: int) -> Any:
     """Decode reference audio as the waveform expected by MLX TTS models.
 
@@ -1427,6 +1445,7 @@ class Runner:
             }
             filtered_kwargs = _filter_kwargs(generate, generate_kwargs)
 
+            _seed_tts_sampling(params.seed)
             generated = generate(params.input_text, **filtered_kwargs)
             if (
                 isinstance(generated, (str, bytes, dict, tuple, np.ndarray))

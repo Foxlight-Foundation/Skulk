@@ -10688,6 +10688,7 @@ class API:
             top_k=request.top_k,
             repetition_penalty=request.repetition_penalty,
             max_tokens=request.max_tokens,
+            seed=request.seed,
             stream=request.stream,
             streaming_interval=request.streaming_interval,
             reference_text=request.reference_text,
@@ -11878,7 +11879,7 @@ class API:
             ):
                 if key in payload:
                     payload[key] = float(cast(str, payload[key]))
-            for key in ("top_k", "max_tokens"):
+            for key in ("top_k", "max_tokens", "seed"):
                 if key in payload:
                     payload[key] = int(cast(str, payload[key]))
         except ValueError as exc:

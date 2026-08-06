@@ -275,6 +275,34 @@ def test_audio_speech_request_allows_model_default_response_format() -> None:
     assert request.response_format is None
 
 
+def test_audio_speech_request_accepts_bounded_sampling_seed() -> None:
+    """Speech callers may request reproducible MLX sampling."""
+
+    request = AudioSpeechRequest.model_validate(
+        {
+            "model": "mlx-community/qwen3-tts-test",
+            "input": "hello",
+            "seed": 42,
+        }
+    )
+
+    assert request.seed == 42
+
+
+@pytest.mark.parametrize("seed", (-1, 2**32))
+def test_audio_speech_request_rejects_out_of_range_seed(seed: int) -> None:
+    """The wire contract is limited to MLX's unsigned 32-bit seed range."""
+
+    with pytest.raises(ValidationError):
+        AudioSpeechRequest.model_validate(
+            {
+                "model": "mlx-community/qwen3-tts-test",
+                "input": "hello",
+                "seed": seed,
+            }
+        )
+
+
 def test_audio_speech_request_rejects_unknown_audio_format() -> None:
     """Unsupported audio container names should fail request validation."""
 
@@ -303,6 +331,20 @@ def test_audio_speech_route_is_documented_in_openapi() -> None:
     content = cast(dict[str, object], request_body["content"])
     assert "application/json" in content
     assert "multipart/form-data" in content
+
+
+def test_builtin_tts_descriptor_exposes_bounded_sampling_seed() -> None:
+    """Provider clients receive the same deterministic-seed contract as REST."""
+
+    properties = cast(
+        dict[str, object], TTS_CAPABILITY_DESCRIPTOR.input_schema["properties"]
+    )
+
+    assert properties["seed"] == {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 2**32 - 1,
+    }
 
 
 def test_audio_speech_http_parses_multipart_reference_audio(
@@ -338,6 +380,7 @@ def test_audio_speech_http_parses_multipart_reference_audio(
             "input": "hello",
             "response_format": "wav",
             "speed": "1.25",
+            "seed": "42",
             "stream": "false",
             "reference_text": "sample transcript",
         },
@@ -348,6 +391,7 @@ def test_audio_speech_http_parses_multipart_reference_audio(
     assert len(captured) == 1
     request, filename = captured[0]
     assert request.speed == 1.25
+    assert request.seed == 42
     assert request.stream is False
     assert request.reference_text == "sample transcript"
     assert filename == "sample.wav"
@@ -355,7 +399,12 @@ def test_audio_speech_http_parses_multipart_reference_audio(
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    (("speed", "fast"), ("max_tokens", "many"), ("stream", "sometimes")),
+    (
+        ("speed", "fast"),
+        ("max_tokens", "many"),
+        ("seed", "random"),
+        ("stream", "sometimes"),
+    ),
 )
 def test_audio_speech_http_rejects_invalid_multipart_scalars(
     field: str,
@@ -1270,6 +1319,7 @@ async def test_audio_speech_streams_audio_chunks_and_sends_command(
             input="hello",
             stream=True,
             streaming_interval=0.25,
+            seed=42,
         )
     )
 
@@ -1282,6 +1332,7 @@ async def test_audio_speech_streams_audio_chunks_and_sends_command(
     command = sent_commands[0]
     assert command.task_params.stream is True
     assert command.task_params.streaming_interval == 0.25
+    assert command.task_params.seed == 42
     assert command.command_id not in api._audio_speech_queues
 
 

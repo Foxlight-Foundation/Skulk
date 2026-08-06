@@ -38,6 +38,11 @@ TTS_CAPABILITY_DESCRIPTOR = CapabilityDescriptor(
                 "exclusiveMinimum": 0,
             },
             "max_tokens": {"type": "integer", "minimum": 1},
+            "seed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2**32 - 1,
+            },
         },
         "required": ["model", "text"],
         "additionalProperties": False,

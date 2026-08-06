@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildSpeechSynthesisRequest,
+  DASHBOARD_SPEECH_SEED,
   MAX_REFERENCE_AUDIO_BYTES,
   speechLanguageForDashboardLocale,
 } from './speechSynthesisRequest';
@@ -15,6 +16,7 @@ describe('buildSpeechSynthesisRequest', () => {
       language: 'English',
       responseFormat: 'mp3',
       stream: false,
+      seed: DASHBOARD_SPEECH_SEED,
       voice: 'ryan',
       referenceAudio: null,
       referenceText: '',
@@ -27,6 +29,7 @@ describe('buildSpeechSynthesisRequest', () => {
       input: 'Hello',
       lang_code: 'English',
       response_format: 'mp3',
+      seed: DASHBOARD_SPEECH_SEED,
       voice: 'ryan',
     });
   });
@@ -42,6 +45,7 @@ describe('buildSpeechSynthesisRequest', () => {
       language: 'English',
       responseFormat: 'pcm',
       stream: true,
+      seed: DASHBOARD_SPEECH_SEED,
       voice: null,
       referenceAudio,
       referenceText: '  Reference transcript.  ',
@@ -55,6 +59,7 @@ describe('buildSpeechSynthesisRequest', () => {
     expect(body.get('input')).toBe('First sentence.');
     expect(body.get('lang_code')).toBe('English');
     expect(body.get('response_format')).toBe('pcm');
+    expect(body.get('seed')).toBe(String(DASHBOARD_SPEECH_SEED));
     expect(body.get('stream')).toBe('true');
     expect(body.has('voice')).toBe(false);
     const uploadedReference = body.get('reference_audio');
@@ -76,6 +81,7 @@ describe('buildSpeechSynthesisRequest', () => {
       language: 'English',
       responseFormat: 'wav',
       stream: false,
+      seed: DASHBOARD_SPEECH_SEED,
       voice: 'angus',
       referenceAudio,
       referenceText: 'Reference transcript.',

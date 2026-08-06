@@ -668,6 +668,12 @@ def test_speech_synthesis_emits_audio_chunk_and_active_status(
         return b"WAVDATA"
 
     monkeypatch.setattr(speech_runner, "_encode_audio", _fake_encode)
+    seeded_requests: list[int | None] = []
+    monkeypatch.setattr(
+        speech_runner,
+        "_seed_tts_sampling",
+        lambda seed: seeded_requests.append(seed),
+    )
 
     command_id = CommandId("speech-command-1")
     task = SpeechSynthesis(
@@ -679,6 +685,7 @@ def test_speech_synthesis_emits_audio_chunk_and_active_status(
             response_format=AudioResponseFormat.Wav,
             voice="af_heart",
             speed=1.1,
+            seed=42,
         ),
     )
     runner.task_receiver = cast("object", _OneShotReceiver([task]))  # pyright: ignore[reportAttributeAccessIssue]
@@ -686,6 +693,7 @@ def test_speech_synthesis_emits_audio_chunk_and_active_status(
     runner.main()
 
     assert model.calls == [("hello world", "af_heart", 1.1, False)]
+    assert seeded_requests == [42]
     assert any(
         isinstance(event, TaskAcknowledged) and event.task_id == task.task_id
         for event in sender.events

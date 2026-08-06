@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { store } from '../../store';
 import { chatActions } from '../../store/slices/chatSlice';
+import { DASHBOARD_SPEECH_SEED } from '../../audio/speechSynthesisRequest';
 import { StreamingSpeechPlayback } from '../../audio/streamingSpeechPlayback';
 import { darkTheme } from '../../theme/theme';
 import { ChatView } from './ChatView';
@@ -178,6 +179,7 @@ describe('ChatView multimodal requests', () => {
 describe('ChatView completed-message speech', () => {
   it('replays a completed assistant turn as serial sentence requests', async () => {
     const requestedInputs: string[] = [];
+    const requestedSeeds: number[] = [];
     vi.stubGlobal('AudioContext', class FakeAudioContext {});
     vi.spyOn(StreamingSpeechPlayback.prototype, 'append').mockResolvedValue();
     const finishPlayback = vi
@@ -208,8 +210,9 @@ describe('ChatView completed-message speech', () => {
         }), { status: 200 });
       }
       if (url === '/v1/audio/speech') {
-        const body = JSON.parse(String(init?.body)) as { input: string };
+        const body = JSON.parse(String(init?.body)) as { input: string; seed: number };
         requestedInputs.push(body.input);
+        requestedSeeds.push(body.seed);
         return new Response(new Uint8Array([0, 0]), { status: 200 });
       }
       throw new Error(`unexpected request: ${url}`);
@@ -270,6 +273,11 @@ describe('ChatView completed-message speech', () => {
       'First sentence.',
       'Second sentence!',
       'Final tail',
+    ]);
+    expect(requestedSeeds).toEqual([
+      DASHBOARD_SPEECH_SEED,
+      DASHBOARD_SPEECH_SEED,
+      DASHBOARD_SPEECH_SEED,
     ]);
   });
 });
