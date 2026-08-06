@@ -133,6 +133,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- Redesigned the dashboard's Find Models dialog. Catalog rows now lead with the
+  card's human-readable model name over a family monogram tile, show capability
+  chips shared with the store table plus size and context metadata, and label
+  store state with an explicit "In store" chip instead of bare check and arrow
+  glyphs. Downloads start only from a labeled Download button (per quantization
+  in the expanded size list), so clicking a row can no longer silently kick off
+  a multi-hundred-gigabyte transfer. The family sidebar dropdown became a chip
+  rail, and Hugging Face results gained author and popularity metadata lines.
+
 - **Concurrent slots on the served llama.cpp engine no longer shrink each
   request's context window.** `SKULK_LLAMA_SERVER_PARALLEL` asks a node to serve
   N generations at once. Until now that came with a hidden cost: llama.cpp gave

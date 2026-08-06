@@ -1,8 +1,9 @@
 import styled, { useTheme } from 'styled-components';
-import { FiCheck, FiDownload, FiExternalLink } from 'react-icons/fi';
+import { FiCheck, FiDownload, FiExternalLink, FiHeart } from 'react-icons/fi';
 import type { HuggingFaceModel } from '../../types/models';
 import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
+import { FamilyAvatar } from './FamilyAvatar';
 import type { Theme } from '../../theme';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 
@@ -25,10 +26,14 @@ function formatCount(n: number): string {
 const Row = styled.div`
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  border-radius: ${({ theme }) => theme.radii.md};
+  gap: 12px;
+  padding: 10px 14px;
+  border-top: 1px solid ${({ theme }) => theme.colors.borderLight};
   transition: background 0.15s;
+
+  &:first-child {
+    border-top: none;
+  }
 
   &:hover {
     background: ${({ theme }) => theme.colors.surfaceHover};
@@ -38,51 +43,68 @@ const Row = styled.div`
 const Info = styled.div`
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 `;
 
 const ModelName = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
-  font-weight: 500;
+  font-weight: 600;
   color: ${({ theme }) => theme.colors.text};
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 `;
 
-const Author = styled.div`
-  font-size: ${({ theme }) => theme.fontSizes.label};
+const MetaLine = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
   color: ${({ theme }) => theme.colors.textMuted};
   white-space: nowrap;
+`;
+
+const MetaItem = styled.span`
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+`;
+
+const Author = styled.span`
   overflow: hidden;
   text-overflow: ellipsis;
 `;
 
-const StatBadge = styled.span`
-  font-size: ${({ theme }) => theme.fontSizes.label};
+const MatchedFileChip = styled.span`
+  font-family: ${({ theme }) => theme.fonts.mono};
+  font-size: 10px;
   color: ${({ theme }) => theme.colors.textSecondary};
-  display: flex;
-  align-items: center;
-  gap: 3px;
+  background: ${({ theme }) => theme.colors.surfaceSunken};
+  border: 1px solid ${({ theme }) => theme.colors.borderLight};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  padding: 0 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
 `;
 
-const AddedBadge = styled.span`
-  display: flex;
+const InStoreChip = styled.span`
+  display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: ${({ theme }) => theme.fontSizes.label};
-  padding: 2px 8px;
+  flex-shrink: 0;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-family: ${({ theme }) => theme.fonts.body};
+  color: ${({ theme }) => theme.colors.healthy};
+  background: ${({ theme }) => theme.colors.accentBg};
+  border: 1px solid ${({ theme }) => theme.colors.accentBg};
   border-radius: ${({ theme }) => theme.radii.sm};
-  background: rgba(34, 197, 94, 0.15);
-  color: ${({ theme }) => theme.colors.accent};
+  padding: 2px 8px;
 `;
-
-const SelectBtn = styled(Button)`
-  background: ${({ theme }) => theme.colors.goldBg};
-  color: ${({ theme }) => theme.colors.gold};
-  &:hover:not(:disabled) { background: ${({ theme }) => theme.colors.goldDim}; }
-`;
-
-const StoreDownloadIcon = () => <FiDownload size={14} />;
 
 export function HuggingFaceResultItem({
   model,
@@ -94,9 +116,11 @@ export function HuggingFaceResultItem({
 }: HuggingFaceResultItemProps) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
-  const shortName = model.id.startsWith('mlx-community/')
-    ? model.id.replace('mlx-community/', '')
+  const shortName = model.id.includes('/')
+    ? model.id.slice(model.id.indexOf('/') + 1)
     : model.id;
+  // The search API often returns an empty author; the repo org is the author.
+  const author = model.author || (model.id.includes('/') ? model.id.split('/')[0] : '');
 
   const hfUrl = `https://huggingface.co/${model.id}`;
   const sizeTags = model.tags.filter((t) =>
@@ -121,13 +145,17 @@ export function HuggingFaceResultItem({
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
         <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.author', 'Author')}</span>
-        <span>{model.author}</span>
+        <span>{author}</span>
         <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.downloads', 'Downloads')}</span>
         <span>{formatCount(model.downloads)}</span>
         <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.likes', 'Likes')}</span>
         <span>{formatCount(model.likes)}</span>
-        <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.updated', 'Updated')}</span>
-        <span>{new Date(model.last_modified).toLocaleDateString()}</span>
+        {model.last_modified && (
+          <>
+            <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.updated', 'Updated')}</span>
+            <span>{new Date(model.last_modified).toLocaleDateString()}</span>
+          </>
+        )}
         {model.matched_file && (
           <>
             <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.matchedFile', 'Matched file')}</span>
@@ -152,25 +180,36 @@ export function HuggingFaceResultItem({
 
   return (
     <Row>
+      <FamilyAvatar name={author || shortName} />
+
       <Info>
-        <ModelName>{shortName}</ModelName>
-        <Author title={model.matched_file ?? model.author}>
-          {model.matched_file ?? model.author}
-        </Author>
+        <ModelName title={model.id}>{shortName}</ModelName>
+        <MetaLine>
+          <Author title={author}>{author}</Author>
+          <MetaItem title={t('huggingFaceResult.downloads', 'Downloads')}>
+            <FiDownload size={11} /> {formatCount(model.downloads)}
+          </MetaItem>
+          <MetaItem title={t('huggingFaceResult.likes', 'Likes')}>
+            <FiHeart size={11} /> {formatCount(model.likes)}
+          </MetaItem>
+          {model.matched_file && (
+            <MatchedFileChip title={model.matched_file}>
+              {model.matched_file.split('/').pop()}
+            </MatchedFileChip>
+          )}
+        </MetaLine>
       </Info>
 
       {/* Info tooltip */}
       <InfoTooltip filled size={16} placement="left" delay={100} content={tooltipContent} />
 
-      {/* Stats */}
-      <StatBadge title={t('huggingFaceResult.downloads', 'Downloads')}>↓ {formatCount(model.downloads)}</StatBadge>
-      <StatBadge title={t('huggingFaceResult.likes', 'Likes')}>♥ {formatCount(model.likes)}</StatBadge>
-
       {/* Action */}
       {isInStore ? (
-        <AddedBadge><FiCheck size={16} color={theme.colors.accent} strokeWidth={2.5} /> {t('huggingFaceResult.inStore', 'In Store')}</AddedBadge>
+        <InStoreChip>
+          <FiCheck size={12} strokeWidth={2.5} /> {t('huggingFaceResult.inStore', 'In Store')}
+        </InStoreChip>
       ) : isAdded ? (
-        <SelectBtn
+        <Button
           variant="primary"
           size="sm"
           onClick={onSelect}
@@ -178,8 +217,8 @@ export function HuggingFaceResultItem({
             modelId: model.id,
           })}
         >
-          <StoreDownloadIcon /> {t('huggingFaceResult.download', 'Download')}
-        </SelectBtn>
+          <FiDownload size={13} /> {t('huggingFaceResult.download', 'Download')}
+        </Button>
       ) : (
         <Button
           variant="outline"
@@ -192,7 +231,7 @@ export function HuggingFaceResultItem({
             { modelId: model.id },
           )}
         >
-          {isAdding ? '…' : <><StoreDownloadIcon /> {t('huggingFaceResult.addAndDownload', 'Add & Download')}</>}
+          {isAdding ? '…' : <><FiDownload size={13} /> {t('huggingFaceResult.addAndDownload', 'Add & Download')}</>}
         </Button>
       )}
     </Row>

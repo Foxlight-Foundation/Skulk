@@ -1,5 +1,5 @@
 import styled, { css, keyframes, useTheme } from 'styled-components';
-import { FiDownload, FiCheck } from 'react-icons/fi';
+import { FiCheck, FiChevronDown, FiDownload, FiStar } from 'react-icons/fi';
 import type { Theme } from '../../theme';
 import type {
   ModelGroup,
@@ -10,7 +10,10 @@ import type {
   PickerMode,
 } from '../../types/models';
 import { formatBytes } from '../../utils/format';
+import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
+import { buildTagColors, CapabilityTagBadge } from '../common/capabilityTags';
+import { FamilyAvatar } from './FamilyAvatar';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 export interface ModelPickerGroupProps {
@@ -54,13 +57,10 @@ function timeAgo(ts: number, t: SkulkTranslate): string {
   return t('storeRegistry.time.daysAgo', '{count}d ago', { count: Math.floor(hrs / 24) });
 }
 
-const CAPABILITY_ICONS: Record<string, string> = {
-  thinking: '🧠',
-  code: '💻',
-  vision: '👁',
-  image_gen: '🎨',
-  image_edit: '✏️',
-};
+/** Capabilities surfaced as chips on the row. `text` is implied and omitted. */
+const CHIP_CAPABILITIES = new Set([
+  'thinking', 'vision', 'code', 'image_gen', 'image_edit', 'embedding', 'tts', 'stt',
+]);
 
 function bestInstanceStatus(
   variants: ModelInfo[],
@@ -89,13 +89,20 @@ const glowAnim = keyframes`
   50%      { box-shadow: 0 0 12px rgba(34,197,94,0.7); }
 `;
 
-const Row = styled.div<{ $disabled: boolean; $highlighted: boolean }>`
+const GroupContainer = styled.div`
+  border-top: 1px solid ${({ theme }) => theme.colors.borderLight};
+
+  &:first-child {
+    border-top: none;
+  }
+`;
+
+const Row = styled.div<{ $disabled: boolean; $highlighted: boolean; $expandable: boolean }>`
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border-radius: ${({ theme }) => theme.radii.md};
-  cursor: pointer;
+  gap: 12px;
+  padding: 10px 14px;
+  cursor: ${({ $expandable }) => ($expandable ? 'pointer' : 'default')};
   transition: background 0.15s;
   user-select: none;
 
@@ -117,36 +124,51 @@ const Row = styled.div<{ $disabled: boolean; $highlighted: boolean }>`
     `}
 `;
 
-const Chevron = styled.span<{ $open: boolean }>`
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
-  transition: transform 0.15s;
-  width: 14px;
-  text-align: center;
-  ${({ $open }) => $open && css`transform: rotate(90deg);`}
+const Identity = styled.div`
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 `;
 
 const Name = styled.span`
-  flex: 1;
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
-  font-weight: 500;
+  font-weight: 600;
   color: ${({ theme }) => theme.colors.text};
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 `;
 
-const Caps = styled.span`
-  font-size: ${({ theme }) => theme.fontSizes.sm};
-  margin-left: 4px;
+const MetaLine = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textMuted};
+  white-space: nowrap;
 `;
 
-const Badge = styled.span<{ $color?: string }>`
-  font-size: ${({ theme }) => theme.fontSizes.label};
-  padding: 2px 6px;
+const MetaText = styled.span`
+  overflow: hidden;
+  text-overflow: ellipsis;
+`;
+
+const InStoreChip = styled.span`
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-family: ${({ theme }) => theme.fonts.body};
+  color: ${({ theme }) => theme.colors.healthy};
+  background: ${({ theme }) => theme.colors.accentBg};
+  border: 1px solid ${({ theme }) => theme.colors.accentBg};
   border-radius: ${({ theme }) => theme.radii.sm};
-  background: ${({ theme }) => theme.colors.surfaceHover};
-  color: ${({ $color, theme }) => $color ?? theme.colors.textSecondary};
+  padding: 2px 8px;
 `;
 
 const StatusDot = styled.span<{ $class: string }>`
@@ -165,45 +187,76 @@ const StatusDot = styled.span<{ $class: string }>`
 const FavStar = styled.button<{ $active: boolean }>`
   all: unset;
   cursor: pointer;
-  font-size: ${({ theme }) => theme.fontSizes.md};
-  color: ${({ $active }) => ($active ? '#fbbf24' : '#555')};
-  transition: color 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: ${({ theme }) => theme.radii.sm};
+  color: ${({ $active, theme }) => ($active ? theme.colors.gold : theme.colors.textMuted)};
+  transition: color 0.15s, background 0.15s;
+
   &:hover {
-    color: #fbbf24;
+    color: ${({ theme }) => theme.colors.gold};
+    background: ${({ theme }) => theme.colors.goldBg};
+  }
+
+  svg {
+    ${({ $active }) => $active && css`fill: currentColor;`}
   }
 `;
 
-
-const VariantList = styled.div`
-  padding: 4px 0 4px 32px;
+const Chevron = styled.span<{ $open: boolean }>`
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  color: ${({ theme }) => theme.colors.textMuted};
+  transition: transform 0.15s;
+  flex-shrink: 0;
+  ${({ $open }) => $open && css`transform: rotate(180deg);`}
+`;
+
+const VariantPanel = styled.div`
+  margin: 0 14px 10px 62px;
+  border: 1px solid ${({ theme }) => theme.colors.borderLight};
+  border-radius: ${({ theme }) => theme.radii.md};
+  background: ${({ theme }) => theme.colors.surfaceSunken};
+  overflow: hidden;
 `;
 
 const VariantRow = styled.div`
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  border-radius: ${({ theme }) => theme.radii.sm};
-  cursor: pointer;
+  gap: 10px;
+  padding: 7px 12px;
   font-size: ${({ theme }) => theme.fontSizes.sm};
   color: ${({ theme }) => theme.colors.textSecondary};
-  transition: background 0.15s;
 
-  &:hover {
-    background: ${({ theme }) => theme.colors.surfaceHover};
+  & + & {
+    border-top: 1px solid ${({ theme }) => theme.colors.borderLight};
   }
 `;
 
-const InfoIconWrapper = styled.span`
-  transform: translateY(2px);
+const QuantChip = styled.span`
+  font-family: ${({ theme }) => theme.fonts.mono};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  background: ${({ theme }) => theme.colors.surfaceHover};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  padding: 1px 7px;
+  min-width: 42px;
+  text-align: center;
+`;
+
+const ActionArea = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 `;
 
 /* ---------- component ---------- */
 
-function ModelGroupInfo({ group }: { group: ModelGroup }) {
+function ModelGroupInfo({ group, title }: { group: ModelGroup; title: string }) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
   const v = group.smallestVariant;
@@ -211,7 +264,7 @@ function ModelGroupInfo({ group }: { group: ModelGroup }) {
   return (
     <div style={{ minWidth: 220 }}>
       <div style={{ color: theme.colors.gold, fontWeight: 600, marginBottom: 6 }}>
-        {group.name}
+        {title}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
         {v.family && (
@@ -274,121 +327,109 @@ export function ModelPickerGroup({
   isExpanded,
   isFavorite,
   isHighlighted = false,
-  selectedModelId,
   canModelFit,
   getModelFitStatus,
   onToggleExpand,
   onSelectModel,
   onToggleFavorite,
-  onShowInfo: _onShowInfo,
   downloadStatusMap,
   launchedAt,
   instanceStatuses,
-  mode: _mode = 'launch',
 }: ModelPickerGroupProps) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
-  const DownloadIcon = () => <FiDownload size={14} color={theme.colors.accent} />;
-  const CheckMark = () => <FiCheck size={16} color={theme.colors.accent} strokeWidth={2.5} />;
+  const TAG_COLORS = buildTagColors(theme);
   const { variants, hasMultipleVariants } = group;
   const singleVariant = !hasMultipleVariants ? variants[0] : null;
+
+  // The group key is the card's human-readable base model ("GPT-OSS 20B")
+  // when one exists; the fallback group.name is a raw repo tail. Prefer the
+  // readable one as the row title.
+  const title = group.smallestVariant.base_model ?? group.name;
 
   const anyFits = variants.some((v) => canModelFit(v.id));
   const anyHasInstance = variants.some((v) => instanceStatuses?.[v.id]);
   const disabled = !anyFits && !anyHasInstance;
 
-  const groupFit = variants.reduce<ModelFitStatus>((best, v) => {
-    const s = getModelFitStatus(v.id);
-    if (s === 'fits_now') return 'fits_now';
-    if (s === 'fits_cluster_capacity' && best !== 'fits_now') return 'fits_cluster_capacity';
-    return best;
-  }, 'too_large');
-
   const groupDownload = variants.find((v) => downloadStatusMap?.get(v.id)?.available);
   const instanceStatus = bestInstanceStatus(variants, instanceStatuses);
 
-  const isSelected = singleVariant ? selectedModelId === singleVariant.id : false;
+  const chips = group.capabilities.filter((c) => CHIP_CAPABILITIES.has(c));
+  const contextLength = group.smallestVariant.context_length;
 
-  const caps = group.capabilities.filter((c) => c in CAPABILITY_ICONS);
+  // Size summary for the meta line
+  const smallest = sizeText(variants[0].storage_size_megabytes);
+  const largest = sizeText(variants[variants.length - 1].storage_size_megabytes);
+  const sizeSummary = hasMultipleVariants
+    ? (smallest && largest ? `${smallest} – ${largest}` : '')
+    : smallest;
 
-  const handleRowClick = () => {
-    if (singleVariant) {
-      onSelectModel(singleVariant.id);
-    } else {
-      onToggleExpand();
-    }
-  };
-
-  // Size display
-  let sizeDisplay: React.ReactNode;
-  if (hasMultipleVariants) {
-    const smallest = sizeText(variants[0].storage_size_megabytes);
-    const largest = sizeText(variants[variants.length - 1].storage_size_megabytes);
-    sizeDisplay = (
-      <Badge>
-        {t('modelPickerGroup.variantCount', '{count} variants', { count: variants.length })}
-        {smallest && largest ? ` (${smallest}–${largest})` : ''}
-      </Badge>
-    );
-  } else if (singleVariant?.storage_size_megabytes) {
-    sizeDisplay = (
-      <Badge $color={fitColor(groupFit, theme)}>
-        {sizeText(singleVariant.storage_size_megabytes)}
-      </Badge>
-    );
-  }
+  const inStoreChip = (
+    <InStoreChip>
+      <FiCheck size={12} strokeWidth={2.5} />
+      {t('modelPickerGroup.inStore', 'In store')}
+    </InStoreChip>
+  );
 
   return (
-    <div>
+    <GroupContainer>
       <Row
         $disabled={disabled}
         $highlighted={isHighlighted}
-        onClick={handleRowClick}
-        role="button"
-        tabIndex={disabled ? -1 : 0}
-        aria-label={singleVariant
-          ? t('modelPickerGroup.selectModel', 'Download {modelId}', {
-              modelId: singleVariant.id,
-            })
-          : t('modelPickerGroup.expandGroup', 'Expand {groupName}', {
-              groupName: group.name,
-            })}
+        $expandable={hasMultipleVariants}
+        onClick={hasMultipleVariants ? onToggleExpand : undefined}
+        role={hasMultipleVariants ? 'button' : undefined}
+        tabIndex={hasMultipleVariants && !disabled ? 0 : undefined}
+        aria-expanded={hasMultipleVariants ? isExpanded : undefined}
+        aria-label={hasMultipleVariants
+          ? t('modelPickerGroup.expandGroup', 'Expand {groupName}', { groupName: title })
+          : undefined}
         onKeyDown={(event) => {
-          if (!disabled && (event.key === 'Enter' || event.key === ' ')) {
+          if (hasMultipleVariants && !disabled && (event.key === 'Enter' || event.key === ' ')) {
             event.preventDefault();
-            handleRowClick();
+            onToggleExpand();
           }
         }}
       >
-        {/* Chevron */}
-        {hasMultipleVariants ? (
-          <Chevron $open={isExpanded}>▶</Chevron>
-        ) : (
-          <span style={{ width: 14 }} />
-        )}
+        <FamilyAvatar name={group.family || title} />
 
-        {/* Name + caps */}
-        <Name>
-          {group.name}
-          {caps.length > 0 && <Caps>{caps.map((c) => CAPABILITY_ICONS[c]).join('')}</Caps>}
-        </Name>
-
-        {/* Size */}
-        {sizeDisplay}
-
-        {/* Time ago */}
-        {launchedAt != null && (
-          <Badge>{timeAgo(launchedAt, t)}</Badge>
-        )}
-
-        {/* Download / in-store indicator */}
-        {groupDownload ? <CheckMark /> : <DownloadIcon />}
+        {/* Identity: title + meta line */}
+        <Identity>
+          <Name title={singleVariant?.id ?? group.name}>{title}</Name>
+          <MetaLine>
+            {chips.map((c) => {
+              const colors = TAG_COLORS[c];
+              if (!colors) return null;
+              return (
+                <CapabilityTagBadge key={c} $color={colors.color} $bg={colors.bg} $border={colors.border}>
+                  {c.replace('_', ' ')}
+                </CapabilityTagBadge>
+              );
+            })}
+            <MetaText>
+              {[
+                hasMultipleVariants
+                  ? t('modelPickerGroup.sizeCount', '{count} sizes', { count: variants.length })
+                  : null,
+                sizeSummary,
+                contextLength
+                  ? t('modelPickerGroup.contextMeta', '{count}k context', {
+                      count: Math.round(contextLength / 1024),
+                    })
+                  : null,
+                launchedAt != null ? timeAgo(launchedAt, t) : null,
+              ].filter(Boolean).join(' · ')}
+            </MetaText>
+          </MetaLine>
+        </Identity>
 
         {/* Instance status dot */}
-        {instanceStatus && <StatusDot $class={instanceStatus.statusClass} />}
-
-        {/* Selected check */}
-        {isSelected && !groupDownload && <CheckMark />}
+        {instanceStatus && (
+          <StatusDot
+            $class={instanceStatus.statusClass}
+            title={instanceStatus.statusClass}
+          />
+        )}
 
         {/* Favorite */}
         <FavStar
@@ -401,57 +442,82 @@ export function ModelPickerGroup({
             ? t('modelPickerGroup.removeFromFavorites', 'Remove from favorites')
             : t('modelPickerGroup.addToFavorites', 'Add to favorites')}
         >
-          {isFavorite ? '★' : '☆'}
+          <FiStar size={15} />
         </FavStar>
 
         {/* Info */}
-        <InfoIconWrapper onClick={(e) => e.stopPropagation()}>
+        <span onClick={(e) => e.stopPropagation()} style={{ display: 'flex' }}>
           <InfoTooltip
             filled
             size={16}
             placement="right"
             delay={100}
-            content={<ModelGroupInfo group={group} />}
+            content={<ModelGroupInfo group={group} title={title} />}
           />
-        </InfoIconWrapper>
+        </span>
+
+        {/* Primary action */}
+        <ActionArea onClick={(e) => e.stopPropagation()}>
+          {hasMultipleVariants ? (
+            <>
+              {groupDownload && inStoreChip}
+              <Chevron $open={isExpanded}>
+                <FiChevronDown size={16} />
+              </Chevron>
+            </>
+          ) : groupDownload ? (
+            inStoreChip
+          ) : (
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => singleVariant && onSelectModel(singleVariant.id)}
+              aria-label={t('modelPickerGroup.selectModel', 'Download {modelId}', {
+                modelId: singleVariant?.id ?? title,
+              })}
+            >
+              <FiDownload size={13} />
+              {t('modelPickerGroup.download', 'Download')}
+            </Button>
+          )}
+        </ActionArea>
       </Row>
 
       {/* Expanded variants */}
       {isExpanded && hasMultipleVariants && (
-        <VariantList>
+        <VariantPanel>
           {variants.map((v) => {
             const vFit = getModelFitStatus(v.id);
             const vDownload = downloadStatusMap?.get(v.id);
             const vInstance = instanceStatuses?.[v.id];
-            const vSelected = selectedModelId === v.id;
 
             return (
-              <VariantRow
-                key={v.id}
-                onClick={() => onSelectModel(v.id)}
-                role="button"
-                tabIndex={0}
-                aria-label={t('modelPickerGroup.selectModel', 'Download {modelId}', {
-                  modelId: v.id,
-                })}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    onSelectModel(v.id);
-                  }
-                }}
-              >
-                {v.quantization && <Badge>{v.quantization}</Badge>}
-                <span style={{ color: fitColor(vFit, theme), flex: 1 }}>
+              <VariantRow key={v.id}>
+                <QuantChip>{v.quantization ?? '—'}</QuantChip>
+                <span style={{ color: fitColor(vFit, theme), fontWeight: 500, flex: 1 }}>
                   {sizeText(v.storage_size_megabytes)}
                 </span>
-                {vDownload?.available ? <CheckMark /> : <DownloadIcon />}
-                {vInstance && <StatusDot $class={vInstance.statusClass} />}
+                {vInstance && <StatusDot $class={vInstance.statusClass} title={vInstance.statusClass} />}
+                {vDownload?.available ? (
+                  inStoreChip
+                ) : (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={() => onSelectModel(v.id)}
+                    aria-label={t('modelPickerGroup.selectModel', 'Download {modelId}', {
+                      modelId: v.id,
+                    })}
+                  >
+                    <FiDownload size={13} />
+                    {t('modelPickerGroup.download', 'Download')}
+                  </Button>
+                )}
               </VariantRow>
             );
           })}
-        </VariantList>
+        </VariantPanel>
       )}
-    </div>
+    </GroupContainer>
   );
 }
