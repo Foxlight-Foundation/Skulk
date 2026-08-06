@@ -316,7 +316,7 @@ and no extension installed = Skulk unchanged. Kill switch:
 `SKULK_EXTENSIONS_DISABLE=1`.
 
 ### Dashboard
-React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API when present. A node without the built assets (a headless/non-Mac worker, or with no `SKULK_DASHBOARD_DIR`) sets `DASHBOARD_DIR=None`, skips the mount, and serves the API without the UI.
+React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API when present. The installer and supervised launchd/systemd startup wrapper build these assets with Skulk's pinned bundled Node.js runtime, retaining compatible system Node/npm only as a recovery fallback. Only an explicitly headless node (or one with no `SKULK_DASHBOARD_DIR`) sets `DASHBOARD_DIR=None`, skips the mount, and serves the API without the UI.
 
 Dashboard localization uses Tolgee in `dashboard-react/src/i18n/tolgee.ts`.
 All dashboard strings must use the `skulk` namespace through Tolgee's `t()`

@@ -774,7 +774,10 @@ environment intelligence described above. On an NVIDIA Linux node,
 Skulk's validated dependency matrix and records `SKULK_VLLM_BIN` (vLLM lives
 in its own venv because Skulk pins a newer transformers than vLLM can use).
 Re-running the installer is safe; every step is idempotent. `--headless` is
-the explicit opt-out for an intentionally API-only node.
+the explicit opt-out for an intentionally API-only node. The supervised
+launchd/systemd entrypoint uses that same bundled Node.js runtime for dashboard
+rebuilds after updates, so Linux nodes do not require a separate host npm
+installation to keep their UI current.
 
 ## The inference engine
 
