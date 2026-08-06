@@ -8,12 +8,13 @@ import styled from 'styled-components';
  */
 export const QuantBadge = styled.span`
   font-family: ${({ theme }) => theme.fonts.mono};
-  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-size: 11px;
   color: ${({ theme }) => theme.colors.textSecondary};
-  background: ${({ theme }) => theme.colors.surfaceHover};
+  background: ${({ theme }) => theme.colors.surfaceSunken};
+  border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.sm};
-  padding: 1px 7px;
-  min-width: 42px;
+  padding: 0 6px;
+  min-width: 38px;
   text-align: center;
   flex-shrink: 0;
 `;
