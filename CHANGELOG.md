@@ -152,7 +152,14 @@ This project records release notes here and mirrors public-facing notes in
   sorts by Hugging Face's trending score instead of all-time downloads, gains
   a "Show more" pager, and rows surface task chips, gated-license markers,
   parameter counts, artifact sizes, and context lengths from the enriched
-  `/models/search` response.
+  `/models/search` response. Results also carry derivation lineage
+  (finetune, quantized, merge, adapter, shown as a small classification
+  tile on the row), tagged papers, languages, and architecture, and every
+  discovery row links its exact Hugging Face repository. The row's info
+  popover became a real dossier: it lazily fetches the model card's own
+  description through the new `GET /models/card-summary` endpoint and shows
+  lineage with a link to the parent repository, architecture, languages,
+  license, and arXiv papers.
 
 - **Concurrent slots on the served llama.cpp engine no longer shrink each
   request's context window.** `SKULK_LLAMA_SERVER_PARALLEL` asks a node to serve

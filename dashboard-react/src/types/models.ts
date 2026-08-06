@@ -201,6 +201,16 @@ export interface HuggingFaceModel {
   total_file_size?: number | null;
   /** Context window from GGUF metadata. */
   context_length?: number | null;
+  /** Parent repository this model derives from, when tagged. */
+  base_model_repo?: string | null;
+  /** Derivation kind: finetune, quantized, merge, or adapter. */
+  base_model_relation?: string | null;
+  /** arXiv paper identifiers tagged on the repository. */
+  arxiv_ids?: string[];
+  /** ISO 639-1 language tags declared on the repository. */
+  languages?: string[];
+  /** Model architecture from repository config or GGUF metadata. */
+  architecture?: string | null;
 }
 
 /** Progress snapshot for a download shown in the dashboard. */

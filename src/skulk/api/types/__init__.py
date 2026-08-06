@@ -41,6 +41,7 @@ from .api import ExtractPageToolRequest as ExtractPageToolRequest
 from .api import ExtractPageToolResponse as ExtractPageToolResponse
 from .api import FinishReason as FinishReason
 from .api import GenerationStats as GenerationStats
+from .api import HuggingFaceCardSummary as HuggingFaceCardSummary
 from .api import HuggingFaceSearchResult as HuggingFaceSearchResult
 from .api import ImageData as ImageData
 from .api import ImageEditsTaskParams as ImageEditsTaskParams

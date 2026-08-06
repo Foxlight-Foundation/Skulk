@@ -1,9 +1,10 @@
 import styled, { useTheme } from 'styled-components';
-import { FiCheck, FiDownload, FiExternalLink, FiHeart, FiLock } from 'react-icons/fi';
+import { FiCheck, FiDownload, FiHeart, FiLock } from 'react-icons/fi';
 import type { HuggingFaceModel } from '../../types/models';
 import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
 import { FamilyAvatar } from './FamilyAvatar';
+import { HfModelDossier } from './HfModelDossier';
 import { HuggingFaceLink } from './HuggingFaceLink';
 import { deriveFormatLabel, deriveQuantLabel, QuantBadge } from './quantBadge';
 import { BurstChip } from './BurstChip';
@@ -38,6 +39,14 @@ function formatParams(n: number): string {
   if (n >= 1e9) return `${(n / 1e9).toFixed(n < 1e10 ? 1 : 0)}B`;
   return `${Math.round(n / 1e6)}M`;
 }
+
+/** Derivation-kind labels for the top-layer classification micro-chip. */
+const RELATION_CHIP: Readonly<Record<string, string>> = {
+  quantized: 'quant',
+  finetune: 'tune',
+  merge: 'merge',
+  adapter: 'adapter',
+};
 
 /** Hugging Face pipeline tags mapped onto the catalog's capability chips. */
 const PIPELINE_CAPABILITY: Readonly<Record<string, string>> = {
@@ -179,68 +188,12 @@ export function HuggingFaceResultItem({
     && !capability
     ? model.pipeline_tag
     : null;
+  const relationChip = model.base_model_relation
+    ? RELATION_CHIP[model.base_model_relation]
+    : undefined;
 
-  const hfUrl = `https://huggingface.co/${model.id}`;
-  const sizeTags = model.tags.filter((t) =>
-    /^\d+[BMK]$|param|safetensor|gguf|mlx|fp16|bf16|\dbit|int[48]/i.test(t),
-  );
 
-  const tooltipContent = (
-    <div style={{ minWidth: 220 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-        <span style={{ color: theme.colors.gold, fontWeight: 600 }}>{model.id}</span>
-        <a
-          href={hfUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{ color: theme.colors.textMuted, display: 'flex', transition: 'color 0.15s' }}
-          onMouseEnter={(e) => { e.currentTarget.style.color = theme.colors.gold; }}
-          onMouseLeave={(e) => { e.currentTarget.style.color = theme.colors.textMuted; }}
-          title={t('common.openOnHuggingFace', 'Open on HuggingFace')}
-        >
-          <FiExternalLink size={14} />
-        </a>
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
-        <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.author', 'Author')}</span>
-        <span>{author}</span>
-        <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.downloads', 'Downloads')}</span>
-        <span>{formatCount(model.downloads)}</span>
-        <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.likes', 'Likes')}</span>
-        <span>{formatCount(model.likes)}</span>
-        {model.license && (
-          <>
-            <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.license', 'License')}</span>
-            <span>{model.license}</span>
-          </>
-        )}
-        {model.last_modified && (
-          <>
-            <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.updated', 'Updated')}</span>
-            <span>{new Date(model.last_modified).toLocaleDateString()}</span>
-          </>
-        )}
-        {model.matched_file && (
-          <>
-            <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.matchedFile', 'Matched file')}</span>
-            <span style={{ overflowWrap: 'anywhere' }}>{model.matched_file}</span>
-          </>
-        )}
-      </div>
-      {sizeTags.length > 0 && (
-        <div style={{ marginTop: 8, borderTop: `1px solid ${theme.colors.borderLight}`, paddingTop: 6 }}>
-          <div style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
-            {t('huggingFaceResult.tags', 'Tags')}
-          </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-            {sizeTags.map((t) => (
-              <span key={t} style={{ padding: '1px 6px', borderRadius: 3, background: theme.colors.borderLight, color: theme.colors.textSecondary }}>{t}</span>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
+  const tooltipContent = <HfModelDossier model={model} author={author} />;
 
   return (
     <Row>
@@ -261,6 +214,9 @@ export function HuggingFaceResultItem({
           {unfamiliarPipeline && <QuantBadge>{unfamiliarPipeline}</QuantBadge>}
           {formatLabel && <QuantBadge>{formatLabel}</QuantBadge>}
           {quantLabel && <QuantBadge>{quantLabel}</QuantBadge>}
+          {relationChip && (
+            <QuantBadge title={model.base_model_repo ?? undefined}>{relationChip}</QuantBadge>
+          )}
           {model.gated && (
             <InfoTooltip
               placement="bottom"

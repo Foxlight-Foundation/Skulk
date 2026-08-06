@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import random
+import re
 import shutil
 import socket
 import time
@@ -95,7 +96,7 @@ from skulk.api.field_telemetry import (
     tap_generation_stream,
 )
 from skulk.api.keepalive import with_sse_keepalive
-from skulk.api.model_search import search_hugging_face_models
+from skulk.api.model_search import fetch_card_summary, search_hugging_face_models
 from skulk.api.node_health import (
     compute_node_health,
     live_data_transports,
@@ -153,6 +154,7 @@ from skulk.api.types import (
     ExtractPageToolResponse,
     FinishReason,
     GenerationStats,
+    HuggingFaceCardSummary,
     HuggingFaceSearchResult,
     ImageData,
     ImageEditsTaskParams,
@@ -1788,6 +1790,17 @@ class API:
                 "manifests and return the matched repo-relative file path."
             ),
         )(self.search_models)
+        self.app.get(
+            "/models/card-summary",
+            tags=["Models"],
+            summary="Fetch a Hugging Face model card summary",
+            description=(
+                "Download a repository's model card README and return its first "
+                "prose paragraphs with markup stripped, for the dashboard's "
+                "model discovery popovers. The summary is empty when the card "
+                "has no usable prose."
+            ),
+        )(self.get_model_card_summary)
         self.app.post(
             "/v1/chat/completions",
             response_model=None,
@@ -7151,6 +7164,24 @@ class API:
         return JSONResponse(
             {"message": "Model card deleted", "model_id": str(model_id)}
         )
+
+    async def get_model_card_summary(self, model_id: str) -> HuggingFaceCardSummary:
+        """Return the prose summary of one Hugging Face repository's model card.
+
+        Args:
+            model_id: Repository id in ``owner/name`` form.
+
+        Returns:
+            The extracted summary; the ``summary`` field is empty when the
+            README is missing or carries no usable prose.
+        """
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", model_id):
+            raise HTTPException(status_code=422, detail="Invalid model id")
+        try:
+            summary = await to_thread.run_sync(fetch_card_summary, model_id)
+        except Exception:
+            summary = ""
+        return HuggingFaceCardSummary(model_id=model_id, summary=summary)
 
     async def search_models(
         self, query: str = "", limit: int = 20, mlx_only: bool = False, offset: int = 0

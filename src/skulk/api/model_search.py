@@ -1,10 +1,15 @@
 """Hugging Face repository and GGUF filename search helpers."""
 
 import re
+from functools import lru_cache
 from pathlib import PurePosixPath
 from typing import cast
 
-from huggingface_hub import ModelInfo, list_models
+from huggingface_hub import (
+    ModelInfo,
+    hf_hub_download,  # pyright: ignore[reportUnknownVariableType]
+    list_models,
+)
 
 from skulk.api.types import HuggingFaceSearchResult
 
@@ -28,7 +33,56 @@ _EXPAND_FIELDS = (
     "cardData",
     "safetensors",
     "gguf",
+    "config",
 )
+
+
+_BASE_MODEL_TAG = re.compile(r"^base_model:(finetune|quantized|merge|adapter):(.+)$")
+_ARXIV_TAG = re.compile(r"^arxiv:(\d{4}\.\d{4,5})$")
+_LANGUAGE_TAG = re.compile(r"^[a-z]{2}$")
+_MAX_LANGUAGES = 6
+
+_FRONTMATTER = re.compile(r"^---\n.*?\n---\n", re.S)
+_HTML_TAG = re.compile(r"<[^>]+>")
+_MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_CARD_SUMMARY_MAX_CHARS = 700
+
+
+def extract_card_summary(markdown: str) -> str:
+    """First prose paragraphs of a model card, stripped of markup.
+
+    The model card README is the only place Hugging Face describes what a
+    model actually is, so this powers the dashboard's "what is this thing"
+    popover text. Headings, tables, images, HTML, and code fences are
+    dropped; short fragments are skipped so badges and one-liners don't win.
+    """
+    body = _FRONTMATTER.sub("", markdown)
+    body = _MARKDOWN_IMAGE.sub("", body)
+    body = _HTML_TAG.sub("", body)
+    summary_parts: list[str] = []
+    for paragraph in body.split("\n\n"):
+        text = " ".join(paragraph.split())
+        if len(text) < 80 or text.startswith(("#", "|", "```", "[", "-", "*")):
+            continue
+        summary_parts.append(text)
+        if sum(len(part) for part in summary_parts) >= 300:
+            break
+    summary = "\n\n".join(summary_parts)
+    if len(summary) > _CARD_SUMMARY_MAX_CHARS:
+        summary = summary[:_CARD_SUMMARY_MAX_CHARS].rsplit(" ", 1)[0] + "…"
+    return summary
+
+
+@lru_cache(maxsize=256)
+def fetch_card_summary(model_id: str) -> str:
+    """Download one repository's README and extract its prose summary.
+
+    Cached per process; exceptions propagate uncached so a transient network
+    failure does not pin an empty summary.
+    """
+    readme_path = hf_hub_download(model_id, "README.md")
+    with open(readme_path, encoding="utf-8", errors="replace") as handle:
+        return extract_card_summary(handle.read())
 
 
 def _to_search_result(
@@ -59,6 +113,36 @@ def _to_search_result(
     if not author and "/" in model.id:
         author = model.id.split("/", 1)[0]
 
+    base_model_repo: str | None = None
+    base_model_relation: str | None = None
+    arxiv_ids: list[str] = []
+    languages: list[str] = []
+    for tag in model.tags or ():
+        base_match = _BASE_MODEL_TAG.match(tag)
+        if base_match and base_model_repo is None:
+            base_model_relation = base_match.group(1)
+            base_model_repo = base_match.group(2)
+            continue
+        arxiv_match = _ARXIV_TAG.match(tag)
+        if arxiv_match:
+            arxiv_ids.append(arxiv_match.group(1))
+            continue
+        if _LANGUAGE_TAG.match(tag) and len(languages) < _MAX_LANGUAGES:
+            languages.append(tag)
+
+    architecture: str | None = None
+    config_raw = cast(object, getattr(model, "config", None))
+    if isinstance(config_raw, dict):
+        architectures = cast("dict[str, object]", config_raw).get("architectures")
+        if isinstance(architectures, list) and architectures:
+            first = cast("list[object]", architectures)[0]
+            if isinstance(first, str):
+                architecture = first
+    if architecture is None:
+        gguf_architecture = gguf.get("architecture")
+        if isinstance(gguf_architecture, str):
+            architecture = gguf_architecture
+
     return HuggingFaceSearchResult(
         id=model.id,
         author=author,
@@ -76,6 +160,11 @@ def _to_search_result(
         param_count=param_count,
         total_file_size=total_file_size if isinstance(total_file_size, int) else None,
         context_length=context_length if isinstance(context_length, int) else None,
+        base_model_repo=base_model_repo,
+        base_model_relation=base_model_relation,
+        arxiv_ids=arxiv_ids,
+        languages=languages,
+        architecture=architecture,
     )
 
 

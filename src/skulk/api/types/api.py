@@ -914,6 +914,35 @@ class HuggingFaceSearchResult(BaseModel):
         default=None,
         description="Model context window reported by GGUF metadata, when available.",
     )
+    base_model_repo: str | None = Field(
+        default=None,
+        description="Parent repository this model derives from, when tagged.",
+    )
+    base_model_relation: str | None = Field(
+        default=None,
+        description="How this model derives from its parent: finetune, quantized, merge, or adapter.",
+    )
+    arxiv_ids: list[str] = Field(
+        default_factory=list,
+        description="arXiv paper identifiers tagged on the repository.",
+    )
+    languages: list[str] = Field(
+        default_factory=list,
+        description="ISO 639-1 language tags declared on the repository.",
+    )
+    architecture: str | None = Field(
+        default=None,
+        description="Model architecture from repository config or GGUF metadata.",
+    )
+
+
+class HuggingFaceCardSummary(BaseModel):
+    """Prose summary extracted from a Hugging Face model card README."""
+
+    model_id: str
+    summary: str = Field(
+        description="First prose paragraphs of the model card, markup stripped; empty when the card has no usable prose.",
+    )
 
 
 class StoreDownloadRequest(BaseModel):

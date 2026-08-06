@@ -1030,7 +1030,25 @@ Behavior note:
   reports it: `pipeline_tag` (task), `library_name`, `gated` (license
   acceptance plus an HF token are required to download), `license`,
   `param_count` (total parameters from safetensors or GGUF metadata),
-  `total_file_size` (exact GGUF artifact bytes), and `context_length`.
+  `total_file_size` (exact GGUF artifact bytes), `context_length`,
+  `base_model_repo` and `base_model_relation` (derivation lineage:
+  finetune, quantized, merge, or adapter), `arxiv_ids`, `languages`, and
+  `architecture`.
+
+### Fetch a model card summary
+
+**GET** `/models/card-summary?model_id=owner/name`
+
+```bash
+curl "http://localhost:52415/models/card-summary?model_id=LiquidAI/LFM2.5-2.6B"
+```
+
+Downloads the repository's model card README and returns
+`{ "model_id": ..., "summary": ... }`, where `summary` is the card's first
+prose paragraphs with markup stripped (bounded length). The summary is empty
+when the README is missing or has no usable prose. Summaries are cached per
+API process; the dashboard's discovery popovers fetch this lazily when
+opened.
 
 ### Add a Hugging Face model
 
