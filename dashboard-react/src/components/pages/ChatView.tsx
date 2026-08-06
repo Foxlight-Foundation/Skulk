@@ -30,6 +30,7 @@ import {
 } from '../../audio/speechVoiceSelection';
 import {
   buildSpeechSynthesisRequest,
+  DASHBOARD_SPEECH_SEED,
   speechLanguageForDashboardLocale,
 } from '../../audio/speechSynthesisRequest';
 import { buildApiMessages, type ApiMessagePayload } from './chatApiPayload';
@@ -918,6 +919,7 @@ export function ChatView({
         language: speechLanguage,
         responseFormat: format,
         stream,
+        seed: DASHBOARD_SPEECH_SEED,
         voice,
         referenceAudio: referenceAudioFile,
         referenceText: referenceAudioText,

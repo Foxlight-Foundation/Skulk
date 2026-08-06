@@ -1114,6 +1114,15 @@ class AudioSpeechRequest(BaseModel):
             "declare this control."
         ),
     )
+    seed: int | None = Field(
+        default=None,
+        ge=0,
+        le=2**32 - 1,
+        description=(
+            "Optional deterministic sampling seed applied immediately before "
+            "this speech generation."
+        ),
+    )
     reference_audio: str | None = Field(
         default=None,
         description=(

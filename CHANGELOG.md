@@ -19,6 +19,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Dashboard speech now sends the same deterministic seed for every generated
+  sentence and replay segment. The public speech API and built-in TTS provider
+  also accept an optional unsigned 32-bit seed, which the speech runner applies
+  immediately before model generation; callers that omit it retain upstream
+  advancing-random-stream behavior.
+
 - Dashboard realtime STT Auto-send now submits final transcripts through the
   same chat-completions path as typed prompts. Voice turns retain the complete
   dashboard conversation, use normal generation limits, and share the same
