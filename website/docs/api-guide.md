@@ -1903,7 +1903,8 @@ Its payload accepts:
 | `voice` | string | Optional model-specific voice |
 | `streaming_interval` | number | Optional positive generation cadence hint |
 | `speed`, `instruct`, `lang_code` | model-specific | Optional speech controls |
-| `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens`, `seed` | number | Optional model-specific sampling controls; `seed` is an unsigned 32-bit integer |
+| `temperature`, `top_p`, `repetition_penalty` | number | Optional model-specific sampling controls |
+| `top_k`, `max_tokens`, `seed` | integer | Optional model-specific sampling controls; `seed` must be unsigned 32-bit |
 
 Each `chunk` payload reports `model`, `format: "mp3"`, `chunk_index`,
 `is_partial`, and optional `sample_rate`; the MP3 bytes are carried beside it
