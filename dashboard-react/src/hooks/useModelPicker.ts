@@ -114,8 +114,6 @@ export function useModelPicker({
       groups = groups.filter((g) => favorites.has(g.id));
     } else if (selectedFamily === 'recents') {
       return recentGroups;
-    } else if (selectedFamily === 'huggingface') {
-      return []; // HF results are handled separately
     } else if (selectedFamily) {
       groups = groups.filter((g) => g.family === selectedFamily);
     }
