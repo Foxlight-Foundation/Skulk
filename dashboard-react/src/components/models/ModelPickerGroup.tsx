@@ -14,7 +14,7 @@ import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
 import { buildTagColors, CapabilityTagBadge } from '../common/capabilityTags';
 import { FamilyAvatar } from './FamilyAvatar';
-import { QuantBadge } from './quantBadge';
+import { deriveFormatLabel, QuantBadge } from './quantBadge';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 export interface ModelPickerGroupProps {
@@ -362,6 +362,14 @@ export function ModelPickerGroup({
   const chips = group.capabilities.filter((c) => CHIP_CAPABILITIES.has(c));
   const contextLength = group.smallestVariant.context_length;
 
+  // Artifact format (GGUF, MLX) is placement-relevant truth. Show it on the
+  // group row when every variant shares one format; otherwise it appears per
+  // variant in the expanded size panel.
+  const variantFormats = variants.map((v) => deriveFormatLabel(v.id));
+  const uniformFormat = variantFormats.every((f) => f === variantFormats[0])
+    ? variantFormats[0]
+    : null;
+
   // Size summary for the meta line
   const smallest = sizeText(variants[0].storage_size_megabytes);
   const largest = sizeText(variants[variants.length - 1].storage_size_megabytes);
@@ -411,6 +419,7 @@ export function ModelPickerGroup({
                 </CapabilityTagBadge>
               );
             })}
+            {uniformFormat && <QuantBadge>{uniformFormat}</QuantBadge>}
             {singleVariant?.quantization && (
               <QuantBadge>{singleVariant.quantization}</QuantBadge>
             )}
@@ -508,6 +517,9 @@ export function ModelPickerGroup({
 
             return (
               <VariantRow key={v.id}>
+                {uniformFormat === null && deriveFormatLabel(v.id) && (
+                  <QuantBadge>{deriveFormatLabel(v.id)}</QuantBadge>
+                )}
                 <QuantBadge>{v.quantization ?? '—'}</QuantBadge>
                 <span style={{ color: fitColor(vFit, theme), fontWeight: 500, flex: 1 }}>
                   {sizeText(v.storage_size_megabytes)}

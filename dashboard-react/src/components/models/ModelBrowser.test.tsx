@@ -44,7 +44,7 @@ const MODELS: ModelInfo[] = [
 ];
 
 const HUB_MODELS: HuggingFaceModel[] = [{
-  id: 'org/hub-model-8bit',
+  id: 'org/hub-model-8bit-GGUF',
   author: 'org',
   downloads: 100,
   likes: 10,
@@ -134,8 +134,10 @@ describe('ModelBrowser store discovery taxonomy', () => {
     expect(container?.querySelector<HTMLInputElement>('input')?.placeholder)
       .toBe('Search all of Hugging Face...');
     expect(container?.textContent).toContain('hub-model');
-    // Quantization derived from the repo name is surfaced on the row.
+    // Quantization and artifact format derived from the repo name are
+    // surfaced on the row.
     expect(container?.textContent).toContain('8bit');
+    expect(container?.textContent).toContain('GGUF');
     expect(container?.textContent).not.toContain('Canary 1B');
   });
 
@@ -144,8 +146,10 @@ describe('ModelBrowser store discovery taxonomy', () => {
 
     // Titles come from the card's human-readable base model, not the repo tail.
     expect(container?.textContent).toContain('Qwen3 4B');
-    // A row that represents exactly one artifact surfaces its quantization.
+    // A row that represents exactly one artifact surfaces its quantization
+    // and artifact format (the fixture id is an mlx-community repo).
     expect(container?.textContent).toContain('4bit');
+    expect(container?.textContent).toContain('MLX');
 
     // Clicking the row body of a single-variant group must NOT start a download.
     const rowTitle = Array.from(container?.querySelectorAll('span') ?? [])

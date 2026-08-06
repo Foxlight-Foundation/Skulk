@@ -4,7 +4,7 @@ import type { HuggingFaceModel } from '../../types/models';
 import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
 import { FamilyAvatar } from './FamilyAvatar';
-import { deriveQuantLabel, QuantBadge } from './quantBadge';
+import { deriveFormatLabel, deriveQuantLabel, QuantBadge } from './quantBadge';
 import type { Theme } from '../../theme';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 
@@ -123,6 +123,7 @@ export function HuggingFaceResultItem({
   // The search API often returns an empty author; the repo org is the author.
   const author = model.author || (model.id.includes('/') ? model.id.split('/')[0] : '');
   const quantLabel = deriveQuantLabel(model.id, model.matched_file, model.tags);
+  const formatLabel = deriveFormatLabel(model.id, model.matched_file, model.tags);
 
   const hfUrl = `https://huggingface.co/${model.id}`;
   const sizeTags = model.tags.filter((t) =>
@@ -187,6 +188,7 @@ export function HuggingFaceResultItem({
       <Info>
         <ModelName title={model.id}>{shortName}</ModelName>
         <MetaLine>
+          {formatLabel && <QuantBadge>{formatLabel}</QuantBadge>}
           {quantLabel && <QuantBadge>{quantLabel}</QuantBadge>}
           <Author title={author}>{author}</Author>
           <MetaItem title={t('huggingFaceResult.downloads', 'Downloads')}>

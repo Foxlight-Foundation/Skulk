@@ -136,7 +136,7 @@ export function ModelSearchModal({
     if (!open) return;
     (async () => {
       try {
-        const params = new URLSearchParams({ query: '', limit: '20', mlx_only: String(mlxOnly) });
+        const params = new URLSearchParams({ query: '', limit: '50', mlx_only: String(mlxOnly) });
         const res = await fetch(`/models/search?${params}`);
         if (!res.ok) return;
         setHfTrending(await res.json());
@@ -155,7 +155,7 @@ export function ModelSearchModal({
     const useMlxOnly = mlxOnlyOverride ?? mlxOnly;
     debounceRef.current = setTimeout(async () => {
       try {
-        const params = new URLSearchParams({ query, limit: '20', mlx_only: String(useMlxOnly) });
+        const params = new URLSearchParams({ query, limit: '50', mlx_only: String(useMlxOnly) });
         const res = await fetch(`/models/search?${params}`);
         if (res.ok) setHfResults(await res.json());
       } catch { /* ignore */ }

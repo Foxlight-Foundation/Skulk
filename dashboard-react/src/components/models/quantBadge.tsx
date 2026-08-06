@@ -33,6 +33,25 @@ function normalize(raw: string): string {
 }
 
 /**
+ * Artifact-format label (GGUF, MLX) telling the user which runtime family
+ * the artifact targets, derived from the matched file, repo id, or tags.
+ * Returns null when the format cannot be determined.
+ */
+export function deriveFormatLabel(
+  repoId: string,
+  matchedFile?: string | null,
+  tags?: readonly string[],
+): string | null {
+  if (matchedFile && matchedFile.toLowerCase().endsWith('.gguf')) return 'GGUF';
+  if (/gguf/i.test(repoId)) return 'GGUF';
+  if (/^mlx-community\//i.test(repoId) || /(^|[-_./])mlx([-_./]|$)/i.test(repoId)) return 'MLX';
+  const lowered = (tags ?? []).map((tag) => tag.toLowerCase());
+  if (lowered.includes('gguf')) return 'GGUF';
+  if (lowered.includes('mlx')) return 'MLX';
+  return null;
+}
+
+/**
  * Best-effort quantization label for a Hugging Face result, from the matched
  * GGUF filename first (exact artifact), then the repo name, then tags.
  * Returns null when nothing trustworthy is found.
