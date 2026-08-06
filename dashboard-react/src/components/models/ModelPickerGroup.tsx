@@ -480,9 +480,13 @@ export function ModelPickerGroup({
           <FiStar size={15} />
         </FavStar>
 
-        {singleVariant && (
-          <HuggingFaceLink repoId={singleVariant.hugging_face_id ?? singleVariant.id} />
-        )}
+        {/* A multi-size group anchors on its smallest variant's repo, the
+          * same convention as the group tooltip; each size row links its
+          * exact repo in the expanded panel. */}
+        <HuggingFaceLink
+          repoId={(singleVariant ?? group.smallestVariant).hugging_face_id
+            ?? (singleVariant ?? group.smallestVariant).id}
+        />
 
         {/* Info */}
         <span onClick={(e) => e.stopPropagation()} style={{ display: 'flex' }}>
