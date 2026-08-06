@@ -29,6 +29,11 @@ def _model(
                 last_modified=None,
                 tags=["gguf"],
                 siblings=[SimpleNamespace(rfilename=path) for path in files],
+                safetensors=None,
+                card_data=None,
+                pipeline_tag=None,
+                library_name=None,
+                gated=False,
             ),
         ),
     )
@@ -50,7 +55,13 @@ def test_repository_search_uses_the_standard_hub_query(
     assert [result.id for result in results] == ["org/Qwen-GGUF"]
     assert results[0].matched_file is None
     assert calls == [
-        {"search": "qwen", "author": None, "sort": "downloads", "limit": 5}
+        {
+            "search": "qwen",
+            "author": None,
+            "sort": "downloads",
+            "limit": 5,
+            "expand": list(model_search._EXPAND_FIELDS),
+        }
     ]
 
 
@@ -158,3 +169,55 @@ def test_filename_fallback_caps_unique_manifest_candidates(
 
     assert results == []
     assert len(inspected) == model_search._MAX_FILENAME_SEARCH_CANDIDATES
+
+
+def test_trending_sort_offset_and_metadata_enrichment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty query sorts by trending, offset slices, and GGUF/card metadata maps."""
+    calls: list[dict[str, object]] = []
+    enriched = cast(
+        ModelInfo,
+        cast(
+            object,
+            SimpleNamespace(
+                id="org/Big-GGUF",
+                author="",
+                downloads=7,
+                likes=1,
+                last_modified=None,
+                tags=["gguf"],
+                siblings=None,
+                safetensors=None,
+                card_data=SimpleNamespace(license="apache-2.0"),
+                pipeline_tag="text-generation",
+                library_name=None,
+                gated="manual",
+                gguf={
+                    "total": 8_000_000_000,
+                    "totalFileSize": 5_000_000_000,
+                    "context_length": 131072,
+                },
+            ),
+        ),
+    )
+
+    def fake_list_models(**kwargs: object) -> Iterable[ModelInfo]:
+        calls.append(kwargs)
+        return [_model("org/skipped", downloads=1), enriched]
+
+    monkeypatch.setattr(model_search, "list_models", fake_list_models)
+
+    results = model_search.search_hugging_face_models("", 1, mlx_only=False, offset=1)
+
+    assert calls[0]["sort"] == "trending_score"
+    assert calls[0]["limit"] == 2  # requested page plus the skipped offset
+    assert [result.id for result in results] == ["org/Big-GGUF"]
+    result = results[0]
+    assert result.author == "org"  # backfilled from the repo id
+    assert result.gated is True
+    assert result.license == "apache-2.0"
+    assert result.pipeline_tag == "text-generation"
+    assert result.param_count == 8_000_000_000
+    assert result.total_file_size == 5_000_000_000
+    assert result.context_length == 131072

@@ -7153,14 +7153,19 @@ class API:
         )
 
     async def search_models(
-        self, query: str = "", limit: int = 20, mlx_only: bool = False
+        self, query: str = "", limit: int = 20, mlx_only: bool = False, offset: int = 0
     ) -> list[HuggingFaceSearchResult]:
-        """Search Hugging Face repositories and exact GGUF filenames."""
+        """Search Hugging Face repositories and exact GGUF filenames.
+
+        An empty query returns trending repositories; ``offset`` skips leading
+        results for "show more" paging.
+        """
         return await to_thread.run_sync(
             search_hugging_face_models,
             query,
             limit,
             mlx_only,
+            offset,
         )
 
     async def run(self):

@@ -187,6 +187,20 @@ export interface HuggingFaceModel {
   tags: string[];
   /** Exact repo-relative GGUF path matched by a filename search. */
   matched_file?: string | null;
+  /** Hugging Face task tag (text-generation, image-text-to-text, ...). */
+  pipeline_tag?: string | null;
+  /** Framework the repository targets (transformers, diffusers, mlx, gguf). */
+  library_name?: string | null;
+  /** True when the license must be accepted and a token presented to download. */
+  gated?: boolean;
+  /** License identifier from the model card. */
+  license?: string | null;
+  /** Total parameter count from safetensors/GGUF metadata. */
+  param_count?: number | null;
+  /** Exact total artifact bytes from GGUF metadata. */
+  total_file_size?: number | null;
+  /** Context window from GGUF metadata. */
+  context_length?: number | null;
 }
 
 /** Progress snapshot for a download shown in the dashboard. */

@@ -51,6 +51,8 @@ export interface ModelBrowserProps {
   getHfBurstInfo?: (model: HuggingFaceModel) => BurstInfo | null;
   /** Fleet total memory, shown in burst tooltips. */
   fleetMemoryBytes?: number;
+  /** Fetch another page of Hugging Face results; absent when exhausted. */
+  onHfLoadMore?: () => void;
 }
 
 /* ---------- layout ---------- */
@@ -200,6 +202,12 @@ const SectionHeader = styled.div`
   padding: 4px 2px 8px;
 `;
 
+const MoreRow = styled.div`
+  display: flex;
+  justify-content: center;
+  padding: 12px 0 4px;
+`;
+
 const EmptyMsg = styled.div`
   display: flex;
   flex-direction: column;
@@ -267,6 +275,7 @@ export function ModelBrowser({
   getBurstInfo,
   getHfBurstInfo,
   fleetMemoryBytes,
+  onHfLoadMore,
 }: ModelBrowserProps) {
   const { t } = useSkulkTranslation();
   const [source, setSource] = useState<'catalog' | 'huggingface'>('catalog');
@@ -528,6 +537,13 @@ export function ModelBrowser({
                         {hfBurst.map((m) => renderHfItem(m))}
                       </ListCard>
                     </>
+                  )}
+                  {onHfLoadMore && (
+                    <MoreRow>
+                      <Button variant="outline" size="sm" onClick={onHfLoadMore}>
+                        {t('modelBrowser.showMore', 'Show more')}
+                      </Button>
+                    </MoreRow>
                   )}
                 </>
               )}

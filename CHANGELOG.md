@@ -146,8 +146,13 @@ This project records release notes here and mirrors public-facing notes in
   fleet-first ordering: models the local fleet can serve list first, and
   models needing more capacity move to a "Needs burst capacity" section with
   an amber Burst chip explaining whether size or artifact format exceeds the
-  fleet. Burst rows stay fully downloadable; Hugging Face size verdicts are
-  name-derived estimates and marked as such.
+  fleet. Burst rows stay fully downloadable; Hugging Face size verdicts prefer
+  exact GGUF artifact sizes and metadata parameter counts, falling back to
+  name-derived estimates marked as such. The Hugging Face trending list now
+  sorts by Hugging Face's trending score instead of all-time downloads, gains
+  a "Show more" pager, and rows surface task chips, gated-license markers,
+  parameter counts, artifact sizes, and context lengths from the enriched
+  `/models/search` response.
 
 - **Concurrent slots on the served llama.cpp engine no longer shrink each
   request's context window.** `SKULK_LLAMA_SERVER_PARALLEL` asks a node to serve

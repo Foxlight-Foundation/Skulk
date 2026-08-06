@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styled from 'styled-components';
 import { FiX } from 'react-icons/fi';
 import { ModelBrowser } from '../models/ModelBrowser';
-import { burstVerdict, estimateArtifactBytes, type BurstInfo, type FleetServingSummary } from '../models/burst';
+import { burstVerdict, hfWeightBytes, type BurstInfo, type FleetServingSummary } from '../models/burst';
 import { deriveFormatLabel, deriveQuantLabel } from '../models/quantBadge';
 import type { ModelInfo, HuggingFaceModel, DownloadAvailability } from '../../types/models';
 import { addToast } from '../../hooks/useToast';
@@ -99,6 +99,11 @@ export function ModelSearchModal({
   const [hfTrending, setHfTrending] = useState<HuggingFaceModel[]>([]);
   const [hfSearching, setHfSearching] = useState(false);
   const [mlxOnly, setMlxOnly] = useState(false);
+  // "Show more" paging: how many results to request, and whether the last
+  // response filled the request (more may exist upstream).
+  const [hfLimit, setHfLimit] = useState(50);
+  const [hfHasMore, setHfHasMore] = useState(false);
+  const lastQueryRef = useRef('');
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   useEffect(() => {
@@ -136,21 +141,31 @@ export function ModelSearchModal({
     })();
   }, [open]);
 
-  // Fetch trending whenever the modal opens or mlxOnly changes
+  // Fetch trending whenever the modal opens, mlxOnly changes, or More is
+  // requested while browsing trending.
   useEffect(() => {
     if (!open) return;
     (async () => {
       try {
-        const params = new URLSearchParams({ query: '', limit: '50', mlx_only: String(mlxOnly) });
+        const params = new URLSearchParams({ query: '', limit: String(hfLimit), mlx_only: String(mlxOnly) });
         const res = await fetch(`/models/search?${params}`);
         if (!res.ok) return;
-        setHfTrending(await res.json());
+        const results = (await res.json()) as HuggingFaceModel[];
+        setHfTrending(results);
+        setHfHasMore(results.length >= hfLimit);
       } catch { /* ignore */ }
     })();
-  }, [open, mlxOnly]);
+  }, [open, mlxOnly, hfLimit]);
 
-  const handleHfSearch = useCallback((query: string, mlxOnlyOverride?: boolean) => {
+  const handleHfSearch = useCallback((query: string, mlxOnlyOverride?: boolean, limitOverride?: number) => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
+    // A changed query restarts paging at one page.
+    let limit = limitOverride ?? hfLimit;
+    if (query !== lastQueryRef.current && limitOverride === undefined) {
+      limit = 50;
+      setHfLimit(50);
+    }
+    lastQueryRef.current = query;
     if (!query.trim()) {
       setHfResults([]);
       setHfSearching(false);
@@ -160,13 +175,27 @@ export function ModelSearchModal({
     const useMlxOnly = mlxOnlyOverride ?? mlxOnly;
     debounceRef.current = setTimeout(async () => {
       try {
-        const params = new URLSearchParams({ query, limit: '50', mlx_only: String(useMlxOnly) });
+        const params = new URLSearchParams({ query, limit: String(limit), mlx_only: String(useMlxOnly) });
         const res = await fetch(`/models/search?${params}`);
-        if (res.ok) setHfResults(await res.json());
+        if (res.ok) {
+          const results = (await res.json()) as HuggingFaceModel[];
+          setHfResults(results);
+          setHfHasMore(results.length >= limit);
+        }
       } catch { /* ignore */ }
       finally { setHfSearching(false); }
     }, 500);
-  }, [mlxOnly]);
+  }, [mlxOnly, hfLimit]);
+
+  const handleHfLoadMore = useCallback(() => {
+    const next = Math.min(hfLimit + 50, 200);
+    if (next === hfLimit) { setHfHasMore(false); return; }
+    setHfLimit(next);
+    // Trending refetches via its effect; an active search refetches here.
+    if (lastQueryRef.current.trim()) {
+      handleHfSearch(lastQueryRef.current, undefined, next);
+    }
+  }, [hfLimit, handleHfSearch]);
 
   const handleSelect = useCallback(async (modelId: string, ggufFile?: string | null) => {
     try {
@@ -254,8 +283,8 @@ export function ModelSearchModal({
     if (!fleet) return null;
     const quant = deriveQuantLabel(model.id, model.matched_file, model.tags);
     const format = deriveFormatLabel(model.id, model.matched_file, model.tags);
-    const estimate = estimateArtifactBytes(model.id, quant);
-    return burstVerdict(fleet, estimate, true, format);
+    const weight = hfWeightBytes(model, quant);
+    return burstVerdict(fleet, weight?.bytes ?? null, weight?.estimated ?? true, format);
   }, [fleet]);
 
   // Build a download status map so models already in store show a checkmark
@@ -302,6 +331,7 @@ export function ModelSearchModal({
             getBurstInfo={getBurstInfo}
             getHfBurstInfo={getHfBurstInfo}
             fleetMemoryBytes={fleet?.totalMemoryBytes}
+            onHfLoadMore={hfHasMore && hfLimit < 200 ? handleHfLoadMore : undefined}
           />
         </ModalBody>
       </ModalContainer>

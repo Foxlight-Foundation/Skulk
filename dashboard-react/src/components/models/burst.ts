@@ -81,6 +81,26 @@ export function estimateArtifactBytes(name: string, quant: string | null): numbe
 }
 
 /**
+ * Best available weight bytes for a Hugging Face result, most-trusted first:
+ * exact GGUF artifact size (measured), then metadata parameter count times
+ * the derived quant width (semi-estimated), then a name-derived estimate.
+ */
+export function hfWeightBytes(
+  model: { id: string; param_count?: number | null; total_file_size?: number | null },
+  quant: string | null,
+): { bytes: number; estimated: boolean } | null {
+  if (model.total_file_size) return { bytes: model.total_file_size, estimated: false };
+  if (model.param_count) {
+    return {
+      bytes: Math.round(model.param_count * (bitsForQuantLabel(quant) / 8)),
+      estimated: true,
+    };
+  }
+  const named = estimateArtifactBytes(model.id, quant);
+  return named === null ? null : { bytes: named, estimated: true };
+}
+
+/**
  * Burst verdict for one concrete artifact: known weight bytes (card truth)
  * or a name-derived estimate, plus its format, against the fleet summary.
  * Size wins over engine when both apply so the tooltip leads with the

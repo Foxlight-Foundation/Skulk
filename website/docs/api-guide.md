@@ -1008,7 +1008,7 @@ for OpenAI-compatible clients.
 
 ### Search Hugging Face
 
-**GET** `/models/search?query=...&limit=...&mlx_only=...`
+**GET** `/models/search?query=...&limit=...&mlx_only=...&offset=...`
 
 ```bash
 curl "http://localhost:52415/models/search?query=qwen3&limit=5"
@@ -1018,11 +1018,19 @@ Behavior note:
 
 - `mlx_only=true` restricts results to the `mlx-community` author; the default
   searches all Hugging Face model repositories.
+- An empty `query` returns repositories sorted by Hugging Face's trending
+  score; text queries sort by downloads.
+- `offset` skips that many leading results, for "show more" paging.
 - Ordinary text queries use Hugging Face repository search.
 - A query ending in `.gguf` also performs a bounded filename-aware fallback:
   Skulk broadens the model-name prefix, inspects those candidate repositories'
   manifests, and returns only exact filename matches. Exact matches carry a
   `matched_file` repo-relative path so the dashboard can preserve that quant.
+- Each result additionally carries discovery metadata when Hugging Face
+  reports it: `pipeline_tag` (task), `library_name`, `gated` (license
+  acceptance plus an HF token are required to download), `license`,
+  `param_count` (total parameters from safetensors or GGUF metadata),
+  `total_file_size` (exact GGUF artifact bytes), and `context_length`.
 
 ### Add a Hugging Face model
 

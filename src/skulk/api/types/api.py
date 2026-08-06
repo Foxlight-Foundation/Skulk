@@ -880,6 +880,40 @@ class HuggingFaceSearchResult(BaseModel):
             "for ordinary repository search results."
         ),
     )
+    pipeline_tag: str | None = Field(
+        default=None,
+        description="Hugging Face task tag (for example text-generation), when declared.",
+    )
+    library_name: str | None = Field(
+        default=None,
+        description="Framework the repository targets (transformers, diffusers, mlx, gguf).",
+    )
+    gated: bool = Field(
+        default=False,
+        description=(
+            "True when downloading requires accepting the repository's license "
+            "on Hugging Face and presenting an access token."
+        ),
+    )
+    license: str | None = Field(
+        default=None,
+        description="License identifier from the model card, when declared.",
+    )
+    param_count: int | None = Field(
+        default=None,
+        description=(
+            "Total parameter count reported by the repository's safetensors or "
+            "GGUF metadata, when available."
+        ),
+    )
+    total_file_size: int | None = Field(
+        default=None,
+        description="Exact total artifact bytes reported by GGUF metadata, when available.",
+    )
+    context_length: int | None = Field(
+        default=None,
+        description="Model context window reported by GGUF metadata, when available.",
+    )
 
 
 class StoreDownloadRequest(BaseModel):

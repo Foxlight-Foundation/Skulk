@@ -1,5 +1,5 @@
 import styled, { useTheme } from 'styled-components';
-import { FiCheck, FiDownload, FiExternalLink, FiHeart } from 'react-icons/fi';
+import { FiCheck, FiDownload, FiExternalLink, FiHeart, FiLock } from 'react-icons/fi';
 import type { HuggingFaceModel } from '../../types/models';
 import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
@@ -9,6 +9,8 @@ import { BurstChip } from './BurstChip';
 import type { BurstInfo } from './burst';
 import type { Theme } from '../../theme';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import { buildTagColors, CapabilityTagBadge } from '../common/capabilityTags';
+import { formatBytes } from '../../utils/format';
 
 export interface HuggingFaceResultItemProps {
   model: HuggingFaceModel;
@@ -29,6 +31,24 @@ function formatCount(n: number): string {
   if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`;
   return String(n);
 }
+
+function formatParams(n: number): string {
+  if (n >= 1e12) return `${(n / 1e12).toFixed(1)}T`;
+  if (n >= 1e9) return `${(n / 1e9).toFixed(n < 1e10 ? 1 : 0)}B`;
+  return `${Math.round(n / 1e6)}M`;
+}
+
+/** Hugging Face pipeline tags mapped onto the catalog's capability chips. */
+const PIPELINE_CAPABILITY: Readonly<Record<string, string>> = {
+  'image-text-to-text': 'vision',
+  'automatic-speech-recognition': 'stt',
+  'text-to-speech': 'tts',
+  'text-to-audio': 'tts',
+  'feature-extraction': 'embedding',
+  'sentence-similarity': 'embedding',
+  'text-to-image': 'image_gen',
+  'image-to-image': 'image_edit',
+};
 
 const Row = styled.div`
   display: flex;
@@ -99,6 +119,22 @@ const MatchedFileChip = styled.span`
   max-width: 220px;
 `;
 
+const GatedChip = styled.span`
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-family: ${({ theme }) => theme.fonts.body};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  background: ${({ theme }) => theme.colors.surfaceSunken};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  padding: 0 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+`;
+
 const InStoreChip = styled.span`
   display: inline-flex;
   align-items: center;
@@ -132,6 +168,16 @@ export function HuggingFaceResultItem({
   const author = model.author || (model.id.includes('/') ? model.id.split('/')[0] : '');
   const quantLabel = deriveQuantLabel(model.id, model.matched_file, model.tags);
   const formatLabel = deriveFormatLabel(model.id, model.matched_file, model.tags);
+  const TAG_COLORS = buildTagColors(theme);
+  const capability = model.pipeline_tag ? PIPELINE_CAPABILITY[model.pipeline_tag] : undefined;
+  const capabilityColors = capability ? TAG_COLORS[capability] : undefined;
+  // A pipeline outside the chat/audio/vision families Skulk serves is worth
+  // naming so nobody downloads a video-diffusion repo into an LLM cluster.
+  const unfamiliarPipeline = model.pipeline_tag
+    && model.pipeline_tag !== 'text-generation'
+    && !capability
+    ? model.pipeline_tag
+    : null;
 
   const hfUrl = `https://huggingface.co/${model.id}`;
   const sizeTags = model.tags.filter((t) =>
@@ -161,6 +207,12 @@ export function HuggingFaceResultItem({
         <span>{formatCount(model.downloads)}</span>
         <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.likes', 'Likes')}</span>
         <span>{formatCount(model.likes)}</span>
+        {model.license && (
+          <>
+            <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.license', 'License')}</span>
+            <span>{model.license}</span>
+          </>
+        )}
         {model.last_modified && (
           <>
             <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.updated', 'Updated')}</span>
@@ -196,8 +248,34 @@ export function HuggingFaceResultItem({
       <Info>
         <ModelName title={model.id}>{shortName}</ModelName>
         <MetaLine>
+          {capabilityColors && capability && (
+            <CapabilityTagBadge
+              $color={capabilityColors.color}
+              $bg={capabilityColors.bg}
+              $border={capabilityColors.border}
+            >
+              {capability.replace('_', ' ')}
+            </CapabilityTagBadge>
+          )}
+          {unfamiliarPipeline && <QuantBadge>{unfamiliarPipeline}</QuantBadge>}
           {formatLabel && <QuantBadge>{formatLabel}</QuantBadge>}
           {quantLabel && <QuantBadge>{quantLabel}</QuantBadge>}
+          {model.gated && (
+            <InfoTooltip
+              placement="bottom"
+              delay={100}
+              content={
+                <div style={{ maxWidth: 240 }}>
+                  {t(
+                    'huggingFaceResult.gatedTooltip',
+                    'Downloading requires accepting the license on Hugging Face and setting an HF token on the store host.',
+                  )}
+                </div>
+              }
+            >
+              <GatedChip><FiLock size={9} /> {t('huggingFaceResult.gated', 'Gated')}</GatedChip>
+            </InfoTooltip>
+          )}
           <Author title={author}>{author}</Author>
           <MetaItem title={t('huggingFaceResult.downloads', 'Downloads')}>
             <FiDownload size={11} /> {formatCount(model.downloads)}
@@ -205,6 +283,19 @@ export function HuggingFaceResultItem({
           <MetaItem title={t('huggingFaceResult.likes', 'Likes')}>
             <FiHeart size={11} /> {formatCount(model.likes)}
           </MetaItem>
+          {(model.param_count || model.total_file_size || model.context_length) && (
+            <MetaItem>
+              {[
+                model.param_count ? formatParams(model.param_count) : null,
+                model.total_file_size ? formatBytes(model.total_file_size) : null,
+                model.context_length
+                  ? t('modelPickerGroup.contextMeta', '{count}k context', {
+                      count: Math.round(model.context_length / 1024),
+                    })
+                  : null,
+              ].filter(Boolean).join(' · ')}
+            </MetaItem>
+          )}
           {model.matched_file && (
             <MatchedFileChip title={model.matched_file}>
               {model.matched_file.split('/').pop()}
