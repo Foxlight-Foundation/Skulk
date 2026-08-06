@@ -1,0 +1,45 @@
+# DeepSeek V4 Flash 0731 (unsloth dynamic GGUF): DeepSeek's 2026-07 flash-tier
+# MoE (~284B total parameters, MLA attention) for the llama.cpp engines on
+# GPU/Linux nodes. The quant is pinned to unsloth's UD-Q2_K_XL dynamic 2.0
+# shard group (~90 GiB, three shards; gguf_file names the first shard and the
+# store fetches the whole group), sized so a 128GB-class UMA node can serve it
+# single-node. source_revision pins the exact upstream commit: the repo is
+# young and actively re-uploaded, and a silent re-quant must not change what
+# the store stages. Requires an engine at least as new as pin b10092, which
+# carries upstream deepseek4 architecture support and its July 2026 template
+# fixes. supports_tensor = false: the llama.cpp engines are single-node (RPC
+# pooling is engine-level, not tensor sharding). TEXT-ONLY: the repo ships no
+# mmproj projector. DeepSeek V4 reasons between token-delimited <think> tags
+# with a toggle, matching the DeepSeek V3.x cards; tooling and runtime stay on
+# the conservative deepseek family defaults. The repo also ships a DSpark
+# drafter GGUF (~10 GiB) for speculative decoding; wiring it as a served draft
+# companion is a follow-up, not part of this card. Architecture from the base
+# repo config (deepseek_v4: 43 layers, hidden 4096, MLA single KV head,
+# 1048576 ctx).
+model_id = "unsloth/DeepSeek-V4-Flash-0731-GGUF"
+n_layers = 43
+hidden_size = 4096
+num_key_value_heads = 1
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "deepseek"
+quantization = "UD-Q2_K_XL"
+base_model = "DeepSeek V4 Flash"
+capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 1048576
+gguf_file = "UD-Q2_K_XL/DeepSeek-V4-Flash-0731-UD-Q2_K_XL-00001-of-00003.gguf"
+source_revision = "fbbb5b93fb787c21338159b0af3318bb3f4d9768"
+trust_remote_code = false
+
+[reasoning]
+supports_toggle = true
+format = "token_delimited"
+default_effort = "medium"
+disabled_effort = "none"
+
+[placement]
+compatible_backends = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu", "llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu"]
+backend_preference = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"]
+
+[storage_size]
+in_bytes = 96832508352
