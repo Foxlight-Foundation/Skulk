@@ -4,6 +4,7 @@ import type { HuggingFaceModel } from '../../types/models';
 import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
 import { FamilyAvatar } from './FamilyAvatar';
+import { familyTokensFromName } from './familyTokens';
 import { HfModelDossier } from './HfModelDossier';
 import { HuggingFaceLink } from './HuggingFaceLink';
 import { deriveFormatLabel, deriveQuantLabel, QuantBadge } from './quantBadge';
@@ -191,13 +192,24 @@ export function HuggingFaceResultItem({
   const relationChip = model.base_model_relation
     ? RELATION_CHIP[model.base_model_relation]
     : undefined;
+  // Mark ladder: the author when it is itself a brand, then the base
+  // model's org (lineage), then family tokens from either repo name.
+  const baseOrg = model.base_model_repo?.includes('/')
+    ? model.base_model_repo.split('/', 1)[0]
+    : undefined;
+  const markCandidates = [
+    ...(author ? [author] : []),
+    ...(baseOrg ? [baseOrg] : []),
+    ...familyTokensFromName(model.id),
+    ...(model.base_model_repo ? familyTokensFromName(model.base_model_repo) : []),
+  ];
 
 
   const tooltipContent = <HfModelDossier model={model} author={author} />;
 
   return (
     <Row>
-      <FamilyAvatar name={author || shortName} />
+      <FamilyAvatar name={author || shortName} markCandidates={markCandidates} />
 
       <Info>
         <ModelName title={model.id}>{shortName}</ModelName>

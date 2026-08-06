@@ -10,8 +10,15 @@ import unslothMark from '../../assets/marks/unsloth.png';
  * in this dashboard color carries semantics, and family identity is shape.
  */
 export interface FamilyAvatarProps {
-  /** Family or author name the tile represents. */
+  /** Family or author name the tile represents; the monogram source. */
   name: string;
+  /**
+   * Ordered mark candidates tried before `name` itself: e.g. the repo
+   * author, then the base model's org (lineage), then family tokens parsed
+   * from the repo name. The first candidate with a bundled mark wins, so a
+   * markless tuner's derivative still wears its root family's mark.
+   */
+  markCandidates?: readonly string[];
 }
 
 /**
@@ -57,6 +64,8 @@ const GLYPH_PATHS: Readonly<Record<string, readonly string[]>> = {
   bytedance: ['M14.944 18.587l-1.704-.445V10.01l1.824-.462c1-.254 1.84-.461 1.88-.453.032 0 .056 2.235.056 4.972v4.973l-.176-.008c-.104 0-.952-.207-1.88-.446z', 'M7 16.542c0-2.736.024-4.98.064-4.98.032-.008.872.2 1.88.454l1.816.461-.016 4.05-.024 4.049-1.632.422c-.896.23-1.736.445-1.856.469L7 21.523v-4.98z', 'M19.24 12.477c0-9.03.008-9.515.144-9.475.072.024.784.207 1.576.406.792.207 1.576.405 1.744.445l.296.08-.016 8.56-.024 8.568-1.624.414c-.888.23-1.728.437-1.856.47l-.24.055v-9.523z', 'M1 12.509c0-4.678.024-8.505.064-8.505.032 0 .872.207 1.872.454l1.824.461v7.582c0 4.16-.016 7.574-.032 7.574-.024 0-.872.215-1.88.47L1 21.013v-8.505z'],
   lmstudio: ['M2.84 2a1.273 1.273 0 100 2.547h14.107a1.273 1.273 0 100-2.547H2.84zM7.935 5.33a1.273 1.273 0 000 2.548H22.04a1.274 1.274 0 000-2.547H7.935zM3.624 9.935c0-.704.57-1.274 1.274-1.274h14.106a1.274 1.274 0 010 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM1.273 12.188a1.273 1.273 0 100 2.547H15.38a1.274 1.274 0 000-2.547H1.273zM3.624 16.792c0-.704.57-1.274 1.274-1.274h14.106a1.273 1.273 0 110 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM13.029 18.849a1.273 1.273 0 100 2.547h9.698a1.273 1.273 0 100-2.547h-9.698z', 'M2.84 2a1.273 1.273 0 100 2.547h10.287a1.274 1.274 0 000-2.547H2.84zM7.935 5.33a1.273 1.273 0 000 2.548H18.22a1.274 1.274 0 000-2.547H7.935zM3.624 9.935c0-.704.57-1.274 1.274-1.274h10.286a1.273 1.273 0 010 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM1.273 12.188a1.273 1.273 0 100 2.547H11.56a1.274 1.274 0 000-2.547H1.273zM3.624 16.792c0-.704.57-1.274 1.274-1.274h10.286a1.273 1.273 0 110 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM13.029 18.849a1.273 1.273 0 100 2.547h5.78a1.273 1.273 0 100-2.547h-5.78z'],
   poolside: ['M24 0H0v24h24V0z', 'M24 0H0v24h24V0z', 'M24 0H0v24h24V0z', 'M6.742 22.786a11.93 11.93 0 01-5.232-4.963 11.98 11.98 0 01-1.463-6.886.975.975 0 011.943.173c-.178 2.005.246 4 1.226 5.769a9.968 9.968 0 003.526 3.685l4.586-9.405c-1.795-.598-3.29-.338-3.425-.312l-.058.012a.972.972 0 01-1.054-.576c-.24-.448-.96-1.544-1.834-1.97-.873-.426-2.218-.289-2.651-.195a.977.977 0 01-1.087-1.38C4.117.792 11.315-1.686 17.262 1.215c5.946 2.9 8.422 10.093 5.529 16.038l-.01.02c-2.903 5.94-10.095 8.414-16.039 5.514zm6.338-10.773l-4.586 9.405c4.629 1.73 9.896-.192 12.304-4.558-.338-.524-.932-1.275-1.62-1.61-.888-.434-2.19-.292-2.637-.198a.989.989 0 01-.616-.055.984.984 0 01-.49-.473c-.028-.058-.739-1.438-2.355-2.51zM5.81 6.56c.747.365 1.356.944 1.81 1.49 1.406-2.15 3.314-3.774 4.787-4.82a20.81 20.81 0 011.66-1.067A10.078 10.078 0 003.882 6.077c.617.042 1.297.174 1.929.482zm12.671-2.243c.09.624.152 1.294.182 1.965.083 1.801-.021 4.296-.844 6.722.686.018 1.484.14 2.214.495.652.318 1.198.8 1.628 1.28a10.082 10.082 0 00-3.18-10.462zm-5.394 5.46a9.522 9.522 0 012.984 2.287c1.075-3.493.606-7.402.215-8.85-1.381.584-4.75 2.62-6.84 5.618a9.515 9.515 0 013.64.944z', 'M0 0h24v24H0z'],
+  comfyui: ['M5.485 23.76c-.568 0-1.026-.207-1.325-.598-.307-.402-.387-.964-.22-1.54l.672-2.315a.605.605 0 00-.1-.536.622.622 0 00-.494-.243H2.085c-.568 0-1.026-.207-1.325-.598-.307-.403-.387-.964-.22-1.54l2.31-7.917.255-.87c.343-1.18 1.592-2.14 2.786-2.14h2.313c.276 0 .519-.18.595-.442l.764-2.633C9.906 1.208 11.155.249 12.35.249l4.945-.008h3.62c.568 0 1.027.206 1.325.597.307.402.387.964.22 1.54l-1.035 3.566c-.343 1.178-1.593 2.137-2.787 2.137l-4.956.01H11.37a.618.618 0 00-.594.441l-1.928 6.604a.605.605 0 00.1.537c.118.153.3.243.495.243l3.275-.006h3.61c.568 0 1.026.206 1.325.598.307.402.387.964.22 1.54l-1.036 3.565c-.342 1.179-1.592 2.138-2.786 2.138l-4.957.01h-3.61z'],
+  liquid: ['M12.028 8.546l-.008.005 3.03 5.25a3.94 3.94 0 01.643 2.162c0 .754-.212 1.46-.58 2.062l6.173-1.991L11.63 0 9.304 3.872l2.724 4.674zM6.837 24l4.85-4.053h-.013c-2.219 0-4.017-1.784-4.017-3.984 0-.794.235-1.534.64-2.156l2.865-4.976-2.381-4.087L2 16.034 6.83 24h.007zM13.737 19.382h-.001L8.222 24h8.182l4.148-6.769-6.815 2.151z'],
 };
 
 
@@ -65,7 +74,7 @@ const EVENODD_GLYPHS: ReadonlySet<string> = new Set([
   'gemma', 'nvidia', 'mistral', 'fishaudio', 'longcat', 'moonshot', 'google',
   'microsoft', 'baai', 'aws', 'cohere', 'stability', 'nousresearch', 'ibm',
   'internlm', 'yi', 'baichuan', 'apple', 'xai', 'anthropic', 'perplexity',
-  'ai2', 'tencent', 'bytedance', 'lmstudio', 'poolside',
+  'ai2', 'tencent', 'bytedance', 'lmstudio', 'poolside', 'comfyui', 'liquid',
 ]);
 
 /**
@@ -171,6 +180,12 @@ const GLYPH_ALIASES: Readonly<Record<string, string>> = {
   'lmstudio-community': 'lmstudio',
   poolside: 'poolside',
   laguna: 'poolside',
+  comfyui: 'comfyui',
+  'comfy-org': 'comfyui',
+  comfyanonymous: 'comfyui',
+  liquid: 'liquid',
+  liquidai: 'liquid',
+  lfm: 'liquid',
 };
 
 function brandGlyph(name: string): { paths: readonly string[]; evenodd: boolean } | null {
@@ -208,32 +223,34 @@ const Tile = styled.span`
 `;
 
 /** Render the brand mark (vector or bundled raster) or monogram tile. */
-export function FamilyAvatar({ name }: FamilyAvatarProps) {
-  const raster = RASTER_ALIASES[name.toLowerCase()];
-  if (raster) {
-    return (
-      <Tile aria-hidden title={name}>
-        <img src={RASTER_MARKS[raster]} width={24} height={24} alt="" />
-      </Tile>
-    );
+export function FamilyAvatar({ name, markCandidates }: FamilyAvatarProps) {
+  for (const candidate of [...(markCandidates ?? []), name]) {
+    const key = candidate.toLowerCase();
+    const raster = RASTER_ALIASES[key];
+    if (raster) {
+      return (
+        <Tile aria-hidden title={candidate}>
+          <img src={RASTER_MARKS[raster]} width={24} height={24} alt="" />
+        </Tile>
+      );
+    }
+    const glyph = brandGlyph(candidate);
+    if (glyph) {
+      return (
+        <Tile aria-hidden title={candidate}>
+          <svg
+            width={20}
+            height={20}
+            viewBox="0 0 24 24"
+            fill="currentColor"
+            fillRule={glyph.evenodd ? 'evenodd' : undefined}
+            clipRule={glyph.evenodd ? 'evenodd' : undefined}
+          >
+            {glyph.paths.map((d) => <path key={d.slice(0, 16)} d={d} />)}
+          </svg>
+        </Tile>
+      );
+    }
   }
-  const glyph = brandGlyph(name);
-  return (
-    <Tile aria-hidden title={name}>
-      {glyph ? (
-        <svg
-          width={20}
-          height={20}
-          viewBox="0 0 24 24"
-          fill="currentColor"
-          fillRule={glyph.evenodd ? 'evenodd' : undefined}
-          clipRule={glyph.evenodd ? 'evenodd' : undefined}
-        >
-          {glyph.paths.map((d) => <path key={d.slice(0, 16)} d={d} />)}
-        </svg>
-      ) : (
-        monogram(name)
-      )}
-    </Tile>
-  );
+  return <Tile aria-hidden title={name}>{monogram(name)}</Tile>;
 }
