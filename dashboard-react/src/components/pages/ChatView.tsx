@@ -29,6 +29,7 @@ import {
   fetchSpeechVoiceCatalog,
 } from '../../audio/speechVoiceSelection';
 import {
+  batchSpeechMaxTokens,
   buildSpeechSynthesisRequest,
   DASHBOARD_SPEECH_SEED,
   speechLanguageForDashboardLocale,
@@ -919,6 +920,7 @@ export function ChatView({
         language: speechLanguage,
         responseFormat: format,
         stream,
+        maxTokens: stream ? null : batchSpeechMaxTokens(input),
         seed: DASHBOARD_SPEECH_SEED,
         voice,
         referenceAudio: referenceAudioFile,

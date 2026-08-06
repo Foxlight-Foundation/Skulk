@@ -9,7 +9,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { store } from '../../store';
 import { chatActions } from '../../store/slices/chatSlice';
-import { DASHBOARD_SPEECH_SEED } from '../../audio/speechSynthesisRequest';
+import {
+  batchSpeechMaxTokens,
+  DASHBOARD_SPEECH_SEED,
+} from '../../audio/speechSynthesisRequest';
 import { StreamingSpeechPlayback } from '../../audio/streamingSpeechPlayback';
 import { darkTheme } from '../../theme/theme';
 import { ChatView } from './ChatView';
@@ -284,6 +287,7 @@ describe('ChatView completed-message speech', () => {
   it('replays a completed turn in one request for a batch-only speech model', async () => {
     const requestedInputs: string[] = [];
     const requestedSeeds: number[] = [];
+    const requestedMaxTokens: number[] = [];
     class FakeAudio {
       onended: (() => void) | null = null;
       onerror: (() => void) | null = null;
@@ -324,9 +328,14 @@ describe('ChatView completed-message speech', () => {
         }), { status: 200 });
       }
       if (url === '/v1/audio/speech') {
-        const body = JSON.parse(String(init?.body)) as { input: string; seed: number };
+        const body = JSON.parse(String(init?.body)) as {
+          input: string;
+          max_tokens: number;
+          seed: number;
+        };
         requestedInputs.push(body.input);
         requestedSeeds.push(body.seed);
+        requestedMaxTokens.push(body.max_tokens);
         return new Response(new Uint8Array([73, 68, 51]), {
           status: 200,
           headers: { 'Content-Type': 'audio/mpeg' },
@@ -337,7 +346,7 @@ describe('ChatView completed-message speech', () => {
 
     store.dispatch(chatActions.selectModel('org/batch-speech-model'));
     store.dispatch(chatActions.selectSpeechModel('org/batch-speech-model'));
-    const completeTurn = 'First sentence. Second sentence! Final tail';
+    const completeTurn = `First sentence. ${'Carefully paced words continue. '.repeat(20)}Final tail`;
     store.dispatch(chatActions.addMessage({
       id: 'batch-assistant-message',
       role: 'assistant',
@@ -385,5 +394,7 @@ describe('ChatView completed-message speech', () => {
     );
     expect(requestedInputs).toEqual([completeTurn]);
     expect(requestedSeeds).toEqual([DASHBOARD_SPEECH_SEED]);
+    expect(requestedMaxTokens).toEqual([batchSpeechMaxTokens(completeTurn)]);
+    expect(requestedMaxTokens[0]).toBeGreaterThan(4096);
   });
 });
