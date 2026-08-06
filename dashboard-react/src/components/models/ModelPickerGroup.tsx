@@ -14,6 +14,7 @@ import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
 import { buildTagColors, CapabilityTagBadge } from '../common/capabilityTags';
 import { FamilyAvatar } from './FamilyAvatar';
+import { QuantBadge } from './quantBadge';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 export interface ModelPickerGroupProps {
@@ -251,17 +252,6 @@ const VariantRow = styled.div`
   }
 `;
 
-const QuantChip = styled.span`
-  font-family: ${({ theme }) => theme.fonts.mono};
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textSecondary};
-  background: ${({ theme }) => theme.colors.surfaceHover};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  padding: 1px 7px;
-  min-width: 42px;
-  text-align: center;
-`;
-
 const ActionArea = styled.div`
   display: flex;
   align-items: center;
@@ -421,6 +411,9 @@ export function ModelPickerGroup({
                 </CapabilityTagBadge>
               );
             })}
+            {singleVariant?.quantization && (
+              <QuantBadge>{singleVariant.quantization}</QuantBadge>
+            )}
             <MetaText>
               {[
                 hasMultipleVariants
@@ -515,7 +508,7 @@ export function ModelPickerGroup({
 
             return (
               <VariantRow key={v.id}>
-                <QuantChip>{v.quantization ?? '—'}</QuantChip>
+                <QuantBadge>{v.quantization ?? '—'}</QuantBadge>
                 <span style={{ color: fitColor(vFit, theme), fontWeight: 500, flex: 1 }}>
                   {sizeText(v.storage_size_megabytes)}
                 </span>
