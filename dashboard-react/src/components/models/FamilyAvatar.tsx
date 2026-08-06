@@ -1,4 +1,5 @@
 import styled from 'styled-components';
+import unslothMark from '../../assets/marks/unsloth.png';
 
 /**
  * Rounded tile identifying a model family (or Hugging Face author) in
@@ -54,6 +55,7 @@ const GLYPH_PATHS: Readonly<Record<string, readonly string[]>> = {
   ai2: ['M9.553 9.378H4.777V4.835H8.62c.513 0 .932-.42.932-.932V.058h4.544v4.777a4.542 4.542 0 01-4.544 4.543zm-4.776.467H0v4.543h3.845c.512 0 .932.42.932.932v3.845H9.32v-4.777a4.542 4.542 0 00-4.543-4.543zM20.05 9.61a.935.935 0 01-.932-.932V4.835h-4.543V9.61a4.542 4.542 0 004.543 4.544h4.777V9.612H20.05zM9.787 19.166v4.777h4.544v-3.845c0-.513.42-.932.932-.932h3.845V14.62H14.33a4.542 4.542 0 00-4.544 4.544z'],
   tencent: ['M9.976 1L24 9.8l-10.587.015L10.723 23H5.489L8.18 9.8H3.244L1 5.4h8.077L9.976 1z'],
   bytedance: ['M14.944 18.587l-1.704-.445V10.01l1.824-.462c1-.254 1.84-.461 1.88-.453.032 0 .056 2.235.056 4.972v4.973l-.176-.008c-.104 0-.952-.207-1.88-.446z', 'M7 16.542c0-2.736.024-4.98.064-4.98.032-.008.872.2 1.88.454l1.816.461-.016 4.05-.024 4.049-1.632.422c-.896.23-1.736.445-1.856.469L7 21.523v-4.98z', 'M19.24 12.477c0-9.03.008-9.515.144-9.475.072.024.784.207 1.576.406.792.207 1.576.405 1.744.445l.296.08-.016 8.56-.024 8.568-1.624.414c-.888.23-1.728.437-1.856.47l-.24.055v-9.523z', 'M1 12.509c0-4.678.024-8.505.064-8.505.032 0 .872.207 1.872.454l1.824.461v7.582c0 4.16-.016 7.574-.032 7.574-.024 0-.872.215-1.88.47L1 21.013v-8.505z'],
+  lmstudio: ['M2.84 2a1.273 1.273 0 100 2.547h14.107a1.273 1.273 0 100-2.547H2.84zM7.935 5.33a1.273 1.273 0 000 2.548H22.04a1.274 1.274 0 000-2.547H7.935zM3.624 9.935c0-.704.57-1.274 1.274-1.274h14.106a1.274 1.274 0 010 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM1.273 12.188a1.273 1.273 0 100 2.547H15.38a1.274 1.274 0 000-2.547H1.273zM3.624 16.792c0-.704.57-1.274 1.274-1.274h14.106a1.273 1.273 0 110 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM13.029 18.849a1.273 1.273 0 100 2.547h9.698a1.273 1.273 0 100-2.547h-9.698z', 'M2.84 2a1.273 1.273 0 100 2.547h10.287a1.274 1.274 0 000-2.547H2.84zM7.935 5.33a1.273 1.273 0 000 2.548H18.22a1.274 1.274 0 000-2.547H7.935zM3.624 9.935c0-.704.57-1.274 1.274-1.274h10.286a1.273 1.273 0 010 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM1.273 12.188a1.273 1.273 0 100 2.547H11.56a1.274 1.274 0 000-2.547H1.273zM3.624 16.792c0-.704.57-1.274 1.274-1.274h10.286a1.273 1.273 0 110 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM13.029 18.849a1.273 1.273 0 100 2.547h5.78a1.273 1.273 0 100-2.547h-5.78z'],
 };
 
 
@@ -62,8 +64,23 @@ const EVENODD_GLYPHS: ReadonlySet<string> = new Set([
   'gemma', 'nvidia', 'mistral', 'fishaudio', 'longcat', 'moonshot', 'google',
   'microsoft', 'baai', 'aws', 'cohere', 'stability', 'nousresearch', 'ibm',
   'internlm', 'yi', 'baichuan', 'apple', 'xai', 'anthropic', 'perplexity',
-  'ai2', 'tencent', 'bytedance',
+  'ai2', 'tencent', 'bytedance', 'lmstudio',
 ]);
+
+/**
+ * Bundled raster marks for brands that publish no vector logo anywhere
+ * (icon collections, press kits, or their own frontends). Raster is the
+ * last resort before a monogram; assets are bundled, never hotlinked, so
+ * offline clusters render identically.
+ */
+const RASTER_MARKS: Readonly<Record<string, string>> = {
+  unsloth: unslothMark,
+};
+
+const RASTER_ALIASES: Readonly<Record<string, string>> = {
+  unsloth: 'unsloth',
+  unslothai: 'unsloth',
+};
 
 /**
  * Family and author spellings that resolve to a bundled brand glyph.
@@ -94,6 +111,7 @@ const GLYPH_ALIASES: Readonly<Record<string, string>> = {
   stepfun: 'step',
   'stepfun-ai': 'step',
   huggingface: 'huggingface',
+  'mlx-community': 'huggingface',
   gemma: 'gemma',
   'gemma-image': 'gemma',
   bert: 'google',
@@ -148,6 +166,8 @@ const GLYPH_ALIASES: Readonly<Record<string, string>> = {
   bytedance: 'bytedance',
   'bytedance-seed': 'bytedance',
   facebook: 'llama',
+  lmstudio: 'lmstudio',
+  'lmstudio-community': 'lmstudio',
 };
 
 function brandGlyph(name: string): { paths: readonly string[]; evenodd: boolean } | null {
@@ -184,8 +204,16 @@ const Tile = styled.span`
   letter-spacing: 0.5px;
 `;
 
-/** Render the brand mark or monogram tile for one family/author name. */
+/** Render the brand mark (vector or bundled raster) or monogram tile. */
 export function FamilyAvatar({ name }: FamilyAvatarProps) {
+  const raster = RASTER_ALIASES[name.toLowerCase()];
+  if (raster) {
+    return (
+      <Tile aria-hidden title={name}>
+        <img src={RASTER_MARKS[raster]} width={24} height={24} alt="" />
+      </Tile>
+    );
+  }
   const glyph = brandGlyph(name);
   return (
     <Tile aria-hidden title={name}>
