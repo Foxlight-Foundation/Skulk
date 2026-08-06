@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { darkTheme } from '../../theme/theme';
 import type { HuggingFaceModel, ModelInfo } from '../../types/models';
 import { ModelBrowser } from './ModelBrowser';
+import type { BurstInfo } from './burst';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -55,7 +56,10 @@ const HUB_MODELS: HuggingFaceModel[] = [{
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
-async function renderBrowser(onSelect = vi.fn()): Promise<ReturnType<typeof vi.fn>> {
+async function renderBrowser(
+  onSelect = vi.fn(),
+  getBurstInfo?: (variantId: string) => BurstInfo | null,
+): Promise<ReturnType<typeof vi.fn>> {
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
@@ -72,6 +76,8 @@ async function renderBrowser(onSelect = vi.fn()): Promise<ReturnType<typeof vi.f
           onToggleFavorite={vi.fn()}
           hfTrendingModels={HUB_MODELS}
           mode="store-download"
+          getBurstInfo={getBurstInfo}
+          fleetMemoryBytes={64 * 2 ** 30}
         />
       </ThemeProvider>,
     );
@@ -159,6 +165,29 @@ describe('ModelBrowser store discovery taxonomy', () => {
     expect(onSelect).not.toHaveBeenCalled();
 
     // The explicit Download button starts it.
+    const downloadButton = container?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Download mlx-community/Qwen3-4B-4bit"]',
+    );
+    expect(downloadButton).not.toBeNull();
+    await act(async () => downloadButton?.click());
+    expect(onSelect).toHaveBeenCalledWith('mlx-community/Qwen3-4B-4bit');
+  });
+
+  it('partitions burst models after placeable ones and keeps them interactive', async () => {
+    // Qwen3 4B exceeds the (fictional) fleet; the others are placeable.
+    const onSelect = await renderBrowser(vi.fn(), (variantId) =>
+      variantId.includes('Qwen3-4B')
+        ? { reason: 'size', neededBytes: 128 * 2 ** 30 }
+        : null);
+
+    expect(container?.textContent).toContain('Needs burst capacity');
+    expect(container?.textContent).toContain('Burst');
+
+    // The burst section renders after the placeable card.
+    const text = container?.textContent ?? '';
+    expect(text.indexOf('Canary 1B')).toBeLessThan(text.indexOf('Qwen3 4B'));
+
+    // Burst rows still download from their explicit button.
     const downloadButton = container?.querySelector<HTMLButtonElement>(
       'button[aria-label="Download mlx-community/Qwen3-4B-4bit"]',
     );

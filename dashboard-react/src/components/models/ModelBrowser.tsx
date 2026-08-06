@@ -17,6 +17,7 @@ import { ModelFilterPopover } from './ModelFilterPopover';
 import { ModelPickerGroup } from './ModelPickerGroup';
 import { HuggingFaceResultItem } from './HuggingFaceResultItem';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import type { BurstInfo } from './burst';
 
 /** Data and actions used to browse Skulk-supported models or search Hugging Face. */
 export interface ModelBrowserProps {
@@ -42,6 +43,13 @@ export interface ModelBrowserProps {
   onHfSearch?: (query: string, mlxOnly?: boolean) => void;
   mlxOnly?: boolean;
   onToggleMlxOnly?: () => void;
+
+  /** Burst verdict for one catalog variant id; enables fleet-first ordering. */
+  getBurstInfo?: (variantId: string) => BurstInfo | null;
+  /** Burst verdict for one Hugging Face result (estimate-based). */
+  getHfBurstInfo?: (model: HuggingFaceModel) => BurstInfo | null;
+  /** Fleet total memory, shown in burst tooltips. */
+  fleetMemoryBytes?: number;
 }
 
 /* ---------- layout ---------- */
@@ -255,6 +263,9 @@ export function ModelBrowser({
   onHfSearch,
   mlxOnly = false,
   onToggleMlxOnly,
+  getBurstInfo,
+  getHfBurstInfo,
+  fleetMemoryBytes,
 }: ModelBrowserProps) {
   const { t } = useSkulkTranslation();
   const [source, setSource] = useState<'catalog' | 'huggingface'>('catalog');
@@ -276,9 +287,47 @@ export function ModelBrowser({
     picker.filters.downloadedOnly ||
     picker.filters.readyOnly;
 
-  const hfModels = (hfSearchResults && hfSearchResults.length > 0)
+  const hfModelsRaw = (hfSearchResults && hfSearchResults.length > 0)
     ? hfSearchResults
     : (picker.searchQuery.trim() ? [] : hfTrendingModels ?? []);
+
+  // Fleet-first ordering: stable partition so favorites/recents/popularity
+  // order survives inside each half. A group is locally placeable when ANY
+  // of its variants is; rows we can make no claim about stay with the
+  // placeable half rather than being demoted on a guess.
+  const groupIsBurst = (g: ModelGroup) =>
+    getBurstInfo !== undefined && g.variants.every((v) => getBurstInfo(v.id) !== null);
+  const localGroups = picker.filteredGroups.filter((g) => !groupIsBurst(g));
+  const burstGroups = picker.filteredGroups.filter(groupIsBurst);
+
+  const hfIsBurst = (m: HuggingFaceModel) =>
+    getHfBurstInfo !== undefined && getHfBurstInfo(m) !== null;
+  const hfLocal = hfModelsRaw.filter((m) => !hfIsBurst(m));
+  const hfBurst = hfModelsRaw.filter(hfIsBurst);
+  const hfModels = hfModelsRaw;
+
+  const renderHfItem = (m: HuggingFaceModel) => (
+    <HuggingFaceResultItem
+      key={m.id}
+      model={m}
+      isAdded={models.some((mod) => mod.id === m.id)}
+      isInStore={existingModelIds.has(m.id) && !m.matched_file}
+      isAdding={false}
+      burst={getHfBurstInfo?.(m) ?? null}
+      fleetMemoryBytes={fleetMemoryBytes}
+      onAdd={async () => {
+        const added = await onAddModel?.(m.id, m.matched_file);
+        if (added !== false) onSelect(m.id, m.matched_file);
+      }}
+      onSelect={async () => {
+        if (m.matched_file) {
+          const updated = await onAddModel?.(m.id, m.matched_file);
+          if (updated === false) return;
+        }
+        onSelect(m.id, m.matched_file);
+      }}
+    />
+  );
 
   const renderGroup = (g: ModelGroup) => (
     <ModelPickerGroup
@@ -296,6 +345,8 @@ export function ModelBrowser({
       downloadStatusMap={downloadStatusMap}
       instanceStatuses={instanceStatuses}
       mode={mode}
+      getBurstInfo={getBurstInfo}
+      fleetMemoryBytes={fleetMemoryBytes}
     />
   );
 
@@ -448,37 +499,38 @@ export function ModelBrowser({
                     <SectionHeader>{t('modelBrowser.trending', 'Trending')}</SectionHeader>
                   )}
                   <ListCard>
-                    {hfModels.map((m) => (
-                      <HuggingFaceResultItem
-                        key={m.id}
-                        model={m}
-                        isAdded={models.some((mod) => mod.id === m.id)}
-                        isInStore={existingModelIds.has(m.id) && !m.matched_file}
-                        isAdding={false}
-                        onAdd={async () => {
-                          const added = await onAddModel?.(m.id, m.matched_file);
-                          if (added !== false) onSelect(m.id, m.matched_file);
-                        }}
-                        onSelect={async () => {
-                          if (m.matched_file) {
-                            const updated = await onAddModel?.(m.id, m.matched_file);
-                            if (updated === false) return;
-                          }
-                          onSelect(m.id, m.matched_file);
-                        }}
-                      />
-                    ))}
+                    {hfLocal.map((m) => renderHfItem(m))}
                   </ListCard>
+                  {hfBurst.length > 0 && (
+                    <>
+                      <SectionHeader style={{ paddingTop: 12 }}>
+                        {t('modelBrowser.needsBurst', 'Needs burst capacity')}
+                      </SectionHeader>
+                      <ListCard>
+                        {hfBurst.map((m) => renderHfItem(m))}
+                      </ListCard>
+                    </>
+                  )}
                 </>
               )}
             </>
           ) : (
             /* Curated catalog groups */
             <>
-              {mode === 'store-download' && picker.filteredGroups.length > 0 && (
+              {mode === 'store-download' && localGroups.length > 0 && (
                 <ListCard>
-                  {picker.filteredGroups.map(renderGroup)}
+                  {localGroups.map(renderGroup)}
                 </ListCard>
+              )}
+              {mode === 'store-download' && burstGroups.length > 0 && (
+                <>
+                  <SectionHeader style={{ paddingTop: 12 }}>
+                    {t('modelBrowser.needsBurst', 'Needs burst capacity')}
+                  </SectionHeader>
+                  <ListCard>
+                    {burstGroups.map(renderGroup)}
+                  </ListCard>
+                </>
               )}
               {mode !== 'store-download' && picker.recommendedGroups.length > 0 && (
                 <>

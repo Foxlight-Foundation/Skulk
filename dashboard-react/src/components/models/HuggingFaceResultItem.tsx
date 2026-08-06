@@ -5,6 +5,8 @@ import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
 import { FamilyAvatar } from './FamilyAvatar';
 import { deriveFormatLabel, deriveQuantLabel, QuantBadge } from './quantBadge';
+import { BurstChip } from './BurstChip';
+import type { BurstInfo } from './burst';
 import type { Theme } from '../../theme';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 
@@ -16,6 +18,10 @@ export interface HuggingFaceResultItemProps {
   onAdd: () => void;
   onSelect: () => void;
   downloadedOnNodes?: string[];
+  /** Burst verdict for this result; null means locally placeable. */
+  burst?: BurstInfo | null;
+  /** Fleet total memory for the burst tooltip. */
+  fleetMemoryBytes?: number;
 }
 
 function formatCount(n: number): string {
@@ -114,6 +120,8 @@ export function HuggingFaceResultItem({
   isInStore = false,
   onAdd,
   onSelect,
+  burst = null,
+  fleetMemoryBytes,
 }: HuggingFaceResultItemProps) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
@@ -204,6 +212,8 @@ export function HuggingFaceResultItem({
           )}
         </MetaLine>
       </Info>
+
+      {burst && <BurstChip info={burst} fleetMemoryBytes={fleetMemoryBytes} />}
 
       {/* Info tooltip */}
       <InfoTooltip filled size={16} placement="left" delay={100} content={tooltipContent} />

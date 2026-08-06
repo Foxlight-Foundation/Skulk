@@ -141,6 +141,13 @@ This project records release notes here and mirrors public-facing notes in
   in the expanded size list), so clicking a row can no longer silently kick off
   a multi-hundred-gigabyte transfer. The family sidebar dropdown became a chip
   rail, and Hugging Face results gained author and popularity metadata lines.
+  Rows carry the model's brand mark (or a monogram when no vector or bundled
+  raster mark exists), quantization and artifact-format tiles, and a
+  fleet-first ordering: models the local fleet can serve list first, and
+  models needing more capacity move to a "Needs burst capacity" section with
+  an amber Burst chip explaining whether size or artifact format exceeds the
+  fleet. Burst rows stay fully downloadable; Hugging Face size verdicts are
+  name-derived estimates and marked as such.
 
 - **Concurrent slots on the served llama.cpp engine no longer shrink each
   request's context window.** `SKULK_LLAMA_SERVER_PARALLEL` asks a node to serve

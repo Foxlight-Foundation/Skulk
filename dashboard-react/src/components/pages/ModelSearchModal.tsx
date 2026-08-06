@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styled from 'styled-components';
 import { FiX } from 'react-icons/fi';
 import { ModelBrowser } from '../models/ModelBrowser';
+import { burstVerdict, estimateArtifactBytes, type BurstInfo, type FleetServingSummary } from '../models/burst';
+import { deriveFormatLabel, deriveQuantLabel } from '../models/quantBadge';
 import type { ModelInfo, HuggingFaceModel, DownloadAvailability } from '../../types/models';
 import { addToast } from '../../hooks/useToast';
 import { useSkulkTranslation } from '../../i18n/tolgee';
@@ -78,6 +80,8 @@ interface ModelSearchModalProps {
   onClose: () => void;
   existingModelIds: Set<string>;
   onDownloadStarted: () => void;
+  /** What the local fleet can serve; enables burst partitioning when set. */
+  fleet?: FleetServingSummary | null;
 }
 
 export function ModelSearchModal({
@@ -85,6 +89,7 @@ export function ModelSearchModal({
   onClose,
   existingModelIds,
   onDownloadStarted,
+  fleet = null,
 }: ModelSearchModalProps) {
   const { t } = useSkulkTranslation();
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -228,6 +233,31 @@ export function ModelSearchModal({
     });
   }, []);
 
+  // Burst verdicts: catalog variants judge by card-truth size and format;
+  // Hugging Face results fall back to a name-derived size estimate.
+  const modelById = useMemo(() => {
+    const map = new Map<string, ModelInfo>();
+    for (const m of models) map.set(m.id, m);
+    return map;
+  }, [models]);
+
+  const getBurstInfo = useCallback((variantId: string): BurstInfo | null => {
+    if (!fleet) return null;
+    const info = modelById.get(variantId);
+    const weightBytes = info?.storage_size_megabytes
+      ? info.storage_size_megabytes * 1024 * 1024
+      : null;
+    return burstVerdict(fleet, weightBytes, false, deriveFormatLabel(variantId));
+  }, [fleet, modelById]);
+
+  const getHfBurstInfo = useCallback((model: HuggingFaceModel): BurstInfo | null => {
+    if (!fleet) return null;
+    const quant = deriveQuantLabel(model.id, model.matched_file, model.tags);
+    const format = deriveFormatLabel(model.id, model.matched_file, model.tags);
+    const estimate = estimateArtifactBytes(model.id, quant);
+    return burstVerdict(fleet, estimate, true, format);
+  }, [fleet]);
+
   // Build a download status map so models already in store show a checkmark
   const storeDownloadMap = useMemo(() => {
     const map = new Map<string, DownloadAvailability>();
@@ -269,6 +299,9 @@ export function ModelSearchModal({
             mlxOnly={mlxOnly}
             onToggleMlxOnly={handleToggleMlxOnly}
             mode="store-download"
+            getBurstInfo={getBurstInfo}
+            getHfBurstInfo={getHfBurstInfo}
+            fleetMemoryBytes={fleet?.totalMemoryBytes}
           />
         </ModalBody>
       </ModalContainer>

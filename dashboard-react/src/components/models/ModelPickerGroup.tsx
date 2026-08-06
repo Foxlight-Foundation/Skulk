@@ -15,6 +15,8 @@ import { InfoTooltip } from '../common/InfoTooltip';
 import { buildTagColors, CapabilityTagBadge } from '../common/capabilityTags';
 import { FamilyAvatar } from './FamilyAvatar';
 import { deriveFormatLabel, QuantBadge } from './quantBadge';
+import { BurstChip } from './BurstChip';
+import type { BurstInfo } from './burst';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 export interface ModelPickerGroupProps {
@@ -33,6 +35,10 @@ export interface ModelPickerGroupProps {
   launchedAt?: number;
   instanceStatuses?: Record<string, InstanceStatus>;
   mode?: PickerMode;
+  /** Burst verdict per variant id; null means locally placeable. */
+  getBurstInfo?: (variantId: string) => BurstInfo | null;
+  /** Fleet total memory for burst tooltips. */
+  fleetMemoryBytes?: number;
 }
 
 /* ---------- helpers ---------- */
@@ -340,6 +346,8 @@ export function ModelPickerGroup({
   downloadStatusMap,
   launchedAt,
   instanceStatuses,
+  getBurstInfo,
+  fleetMemoryBytes,
 }: ModelPickerGroupProps) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
@@ -368,6 +376,14 @@ export function ModelPickerGroup({
   const variantFormats = variants.map((v) => deriveFormatLabel(v.id));
   const uniformFormat = variantFormats.every((f) => f === variantFormats[0])
     ? variantFormats[0]
+    : null;
+
+  // Group burst verdict: burst only when NO variant is locally placeable.
+  // The representative info is the least-demanding variant's (the smallest
+  // one still needs at least that much).
+  const variantBursts = variants.map((v) => getBurstInfo?.(v.id) ?? null);
+  const groupBurst = variantBursts.every((b) => b !== null)
+    ? variantBursts[0]
     : null;
 
   // Size summary for the meta line
@@ -475,6 +491,7 @@ export function ModelPickerGroup({
 
         {/* Primary action */}
         <ActionArea onClick={(e) => e.stopPropagation()}>
+          {groupBurst && <BurstChip info={groupBurst} fleetMemoryBytes={fleetMemoryBytes} />}
           {hasMultipleVariants ? (
             <>
               {groupDownload && inStoreChip}
@@ -521,6 +538,10 @@ export function ModelPickerGroup({
                   <QuantBadge>{deriveFormatLabel(v.id)}</QuantBadge>
                 )}
                 <QuantBadge>{v.quantization ?? '—'}</QuantBadge>
+                {groupBurst === null && (() => {
+                  const b = getBurstInfo?.(v.id) ?? null;
+                  return b ? <BurstChip info={b} fleetMemoryBytes={fleetMemoryBytes} /> : null;
+                })()}
                 <span style={{ color: fitColor(vFit, theme), fontWeight: 500, flex: 1 }}>
                   {sizeText(v.storage_size_megabytes)}
                 </span>
