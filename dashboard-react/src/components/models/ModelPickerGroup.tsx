@@ -206,13 +206,28 @@ const FavStar = styled.button<{ $active: boolean }>`
   }
 `;
 
-const Chevron = styled.span<{ $open: boolean }>`
+const Chevron = styled.button<{ $open: boolean }>`
+  all: unset;
+  cursor: pointer;
   display: flex;
   align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: ${({ theme }) => theme.radii.sm};
   color: ${({ theme }) => theme.colors.textMuted};
-  transition: transform 0.15s;
   flex-shrink: 0;
-  ${({ $open }) => $open && css`transform: rotate(180deg);`}
+  transition: color 0.15s, background 0.15s;
+
+  &:hover {
+    color: ${({ theme }) => theme.colors.text};
+    background: ${({ theme }) => theme.colors.surfaceHover};
+  }
+
+  svg {
+    transition: transform 0.15s;
+    ${({ $open }) => $open && css`transform: rotate(180deg);`}
+  }
 `;
 
 const VariantPanel = styled.div`
@@ -461,7 +476,14 @@ export function ModelPickerGroup({
           {hasMultipleVariants ? (
             <>
               {groupDownload && inStoreChip}
-              <Chevron $open={isExpanded}>
+              <Chevron
+                type="button"
+                $open={isExpanded}
+                onClick={onToggleExpand}
+                aria-expanded={isExpanded}
+                aria-label={t('modelPickerGroup.expandGroup', 'Expand {groupName}', { groupName: title })}
+                tabIndex={-1}
+              >
                 <FiChevronDown size={16} />
               </Chevron>
             </>
