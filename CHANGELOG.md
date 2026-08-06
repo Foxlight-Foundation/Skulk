@@ -19,6 +19,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Supervised Linux updates now rebuild the dashboard with Skulk's bundled
+  Node.js runtime. The launchd/systemd startup wrapper previously used bare
+  `npm` even though the official installer uses the required pinned runtime.
+  Linux nodes without a system Node.js installation therefore kept serving an
+  old dashboard after successful code updates while logging non-fatal npm
+  failures. Boot-time prep now reserves headless mode for explicitly API-only
+  nodes and retains system npm only as a recovery fallback.
+
 - Dashboard speech now sends the same deterministic seed for every generated
   sentence and replay segment. The public speech API and built-in TTS provider
   also accept an optional unsigned 32-bit seed, which the speech runner applies

@@ -37,6 +37,26 @@ def test_systemd_runner_oom_does_not_stop_skulk_node() -> None:
     assert "OOMPolicy=continue" in unit
 
 
+def test_supervised_startup_uses_bundled_npm_before_system_fallback() -> None:
+    """A Linux service without host npm must still refresh its dashboard."""
+
+    script = (_REPO_ROOT / "deployment/install/skulk-startup.sh").read_text()
+
+    assert '"$REPO_ROOT/scripts/run_bundled_npm.py" "$@"' in script
+    bundled_probe = script.index("if run_bundled_npm --version")
+    bundled_install = script.index(
+        "run_bundled_npm install --no-fund --no-audit", bundled_probe
+    )
+    bundled_build = script.index("run_bundled_npm run build", bundled_install)
+    system_fallback = script.index("command -v npm", bundled_build)
+    system_install = script.index(
+        "npm install --no-fund --no-audit", system_fallback
+    )
+
+    assert bundled_probe < bundled_install < bundled_build < system_fallback
+    assert system_fallback < system_install
+
+
 def test_vector_startup_expands_home_defaults_before_vector(
     tmp_path: Path,
 ) -> None:
