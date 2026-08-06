@@ -19,6 +19,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Dashboard speech now sends completed turns and replay requests to batch-only
+  TTS models as one synthesis call. Sentence-sized request queues remain
+  reserved for cards that truthfully advertise streaming PCM, avoiding the
+  repeated full-generation overhead that made LongCat and Fish playback
+  unnecessarily slow.
+
 - Supervised Linux updates now rebuild the dashboard with Skulk's bundled
   Node.js runtime. The launchd/systemd startup wrapper previously used bare
   `npm` even though the official installer uses the required pinned runtime.

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  batchSpeechMaxTokens,
   buildSpeechSynthesisRequest,
   DASHBOARD_SPEECH_SEED,
   MAX_REFERENCE_AUDIO_BYTES,
@@ -16,6 +17,7 @@ describe('buildSpeechSynthesisRequest', () => {
       language: 'English',
       responseFormat: 'mp3',
       stream: false,
+      maxTokens: 8192,
       seed: DASHBOARD_SPEECH_SEED,
       voice: 'ryan',
       referenceAudio: null,
@@ -30,6 +32,7 @@ describe('buildSpeechSynthesisRequest', () => {
       lang_code: 'English',
       response_format: 'mp3',
       seed: DASHBOARD_SPEECH_SEED,
+      max_tokens: 8192,
       voice: 'ryan',
     });
   });
@@ -45,6 +48,7 @@ describe('buildSpeechSynthesisRequest', () => {
       language: 'English',
       responseFormat: 'pcm',
       stream: true,
+      maxTokens: null,
       seed: DASHBOARD_SPEECH_SEED,
       voice: null,
       referenceAudio,
@@ -81,6 +85,7 @@ describe('buildSpeechSynthesisRequest', () => {
       language: 'English',
       responseFormat: 'wav',
       stream: false,
+      maxTokens: 8192,
       seed: DASHBOARD_SPEECH_SEED,
       voice: 'angus',
       referenceAudio,
@@ -90,11 +95,18 @@ describe('buildSpeechSynthesisRequest', () => {
 
     const body = request.body as FormData;
     expect(body.has('voice')).toBe(false);
+    expect(body.get('max_tokens')).toBe('8192');
     expect(body.get('reference_audio')).toBeInstanceOf(File);
   });
 
   it('mirrors the server upload bound', () => {
     expect(MAX_REFERENCE_AUDIO_BYTES).toBe(26_214_400);
+  });
+
+  it('scales batch synthesis budgets beyond the short server default', () => {
+    expect(batchSpeechMaxTokens('brief')).toBe(4096);
+    expect(batchSpeechMaxTokens('x'.repeat(500))).toBe(16_000);
+    expect(batchSpeechMaxTokens('x'.repeat(10_000))).toBe(131_072);
   });
 
   it('maps the dashboard locale to the TTS model language vocabulary', () => {

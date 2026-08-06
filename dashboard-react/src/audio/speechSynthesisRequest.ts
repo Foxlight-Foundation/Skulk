@@ -6,6 +6,30 @@ export const MAX_REFERENCE_AUDIO_BYTES = 25 * 1024 * 1024;
 /** Stable seed used for every dashboard sentence and replay generation. */
 export const DASHBOARD_SPEECH_SEED = 42;
 
+/** Default omitted server budget and bounded ceiling for dashboard batch playback. */
+const DEFAULT_BATCH_SPEECH_MAX_TOKENS = 4096;
+const MAX_BATCH_SPEECH_MAX_TOKENS = 131_072;
+const BATCH_SPEECH_TOKENS_PER_CHARACTER = 32;
+
+/**
+ * Size a batch-only synthesis budget for the complete input.
+ *
+ * Fish-family audio generation consumes substantially more acoustic tokens than
+ * text tokens. The server's safe omitted default covers only about twenty
+ * seconds, so completed-turn playback supplies a conservative length-scaled
+ * ceiling. The model may stop naturally before this limit; the upper bound
+ * prevents an unexpectedly non-terminating generator from running unbounded.
+ */
+export function batchSpeechMaxTokens(input: string): number {
+  return Math.min(
+    MAX_BATCH_SPEECH_MAX_TOKENS,
+    Math.max(
+      DEFAULT_BATCH_SPEECH_MAX_TOKENS,
+      Math.ceil(input.length * BATCH_SPEECH_TOKENS_PER_CHARACTER),
+    ),
+  );
+}
+
 /** Inputs required to construct one dashboard speech-synthesis request. */
 export interface SpeechSynthesisRequestOptions {
   model: string;
@@ -13,6 +37,7 @@ export interface SpeechSynthesisRequestOptions {
   language: string;
   responseFormat: AudioResponseFormat;
   stream: boolean;
+  maxTokens: number | null;
   seed: number;
   voice: string | null;
   referenceAudio: File | null;
@@ -55,6 +80,7 @@ export function buildSpeechSynthesisRequest(
     language,
     responseFormat,
     stream,
+    maxTokens,
     seed,
     voice,
     referenceAudio,
@@ -68,6 +94,7 @@ export function buildSpeechSynthesisRequest(
     formData.set('lang_code', language);
     formData.set('response_format', responseFormat);
     formData.set('seed', String(seed));
+    if (maxTokens !== null) formData.set('max_tokens', String(maxTokens));
     if (stream) formData.set('stream', 'true');
     // The uploaded clip is the voice condition for this request. Sending the
     // catalog selection as well would make the conditioning source ambiguous.
@@ -91,6 +118,7 @@ export function buildSpeechSynthesisRequest(
       lang_code: language,
       response_format: responseFormat,
       seed,
+      ...(maxTokens !== null ? { max_tokens: maxTokens } : {}),
       ...(stream ? { stream: true } : {}),
       ...(voice ? { voice } : {}),
     }),

@@ -29,6 +29,7 @@ import {
   fetchSpeechVoiceCatalog,
 } from '../../audio/speechVoiceSelection';
 import {
+  batchSpeechMaxTokens,
   buildSpeechSynthesisRequest,
   DASHBOARD_SPEECH_SEED,
   speechLanguageForDashboardLocale,
@@ -919,6 +920,7 @@ export function ChatView({
         language: speechLanguage,
         responseFormat: format,
         stream,
+        maxTokens: stream ? null : batchSpeechMaxTokens(input),
         seed: DASHBOARD_SPEECH_SEED,
         voice,
         referenceAudio: referenceAudioFile,
@@ -1069,17 +1071,27 @@ export function ChatView({
       effectiveSelectedVoice,
       selectedSpeechOption?.defaultVoice ?? null,
     );
-    const split = splitCompleteSpeechSentences(input);
-    const sentences = [...split.sentences];
-    if (split.remainder.trim()) sentences.push(split.remainder.trim());
+    const useSentenceStreaming = Boolean(
+      selectedSpeechOption?.supportsStreaming
+      && selectedSpeechOption.responseFormats.includes('pcm')
+      && canUseStreamingSpeechPlayback()
+    );
+    let segments = [input];
+    if (useSentenceStreaming) {
+      const split = splitCompleteSpeechSentences(input);
+      segments = [...split.sentences];
+      if (split.remainder.trim()) segments.push(split.remainder.trim());
+    }
     const queue = createSpeechSentenceQueue(messageId, selectVoice);
-    queue.enqueue(sentences);
+    queue.enqueue(segments);
     queue.finish();
   }, [
     createSpeechSentenceQueue,
     effectiveSelectedVoice,
     selectedSpeechModelId,
     selectedSpeechOption?.defaultVoice,
+    selectedSpeechOption?.responseFormats,
+    selectedSpeechOption?.supportsStreaming,
     stopSpeechPlayback,
     voiceOptions,
   ]);
