@@ -11,7 +11,12 @@ from huggingface_hub import (
     list_models,
 )
 
-from skulk.api.types import HuggingFaceSearchResult
+from skulk.api.types import GgufQuantOption, HuggingFaceSearchResult
+from skulk.shared.models.model_cards import (
+    ModelId,
+    gguf_weight_siblings,
+    is_companion_gguf,
+)
 
 _GGUF_EXTENSION = ".gguf"
 _GGUF_SHARD_SUFFIX = re.compile(r"-\d{5}-of-\d{5}$", re.IGNORECASE)
@@ -71,6 +76,46 @@ def extract_card_summary(markdown: str) -> str:
     if len(summary) > _CARD_SUMMARY_MAX_CHARS:
         summary = summary[:_CARD_SUMMARY_MAX_CHARS].rsplit(" ", 1)[0] + "…"
     return summary
+
+
+_QUANT_LABEL = re.compile(r"(I?Q\d[A-Z0-9_]*|BF16|F16|F32|FP8|FP16)", re.IGNORECASE)
+
+
+def list_gguf_quant_options(model_id: str) -> list[GgufQuantOption]:
+    """Enumerate a GGUF repository's downloadable quantizations.
+
+    Groups the repo's LM-weight GGUF files into shard groups, excluding
+    companion artifacts (drafters, imatrix calibration files, projectors),
+    and returns one option per quant with its loadable first shard, a human
+    label, exact total bytes, and shard count, smallest first. Empty for a
+    non-GGUF repo or one that ships only companions.
+    """
+    files = gguf_weight_siblings(ModelId(model_id))
+    groups: dict[str, list[tuple[str, int]]] = {}
+    for name, size in files:
+        if is_companion_gguf(name):
+            continue
+        stem = name[: -len(_GGUF_EXTENSION)]
+        group_key = _GGUF_SHARD_SUFFIX.sub("", stem)
+        groups.setdefault(group_key, []).append((name, size))
+
+    options: list[GgufQuantOption] = []
+    for group_key, members in groups.items():
+        first = min(name for name, _ in members)
+        basename = group_key.rsplit("/", 1)[-1]
+        directory = group_key.rsplit("/", 1)[0] if "/" in group_key else ""
+        label_match = _QUANT_LABEL.search(directory or basename) or _QUANT_LABEL.search(basename)
+        label = (directory or (label_match.group(1) if label_match else basename))
+        options.append(
+            GgufQuantOption(
+                gguf_file=first,
+                label=label,
+                total_bytes=sum(size for _, size in members),
+                shard_count=len(members),
+            )
+        )
+    options.sort(key=lambda option: option.total_bytes)
+    return options
 
 
 @lru_cache(maxsize=256)

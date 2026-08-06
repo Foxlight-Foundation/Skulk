@@ -222,3 +222,28 @@ def test_trending_sort_offset_and_metadata_enrichment(
     assert result.param_count == 8_000_000_000
     assert result.total_file_size == 5_000_000_000
     assert result.context_length == 131072
+
+
+def test_gguf_quant_options_group_and_exclude_companions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Quant options group shard families and never offer companion artifacts."""
+
+    def fake_siblings(model_id: object, source_revision: object = None) -> list[tuple[str, int]]:
+        return [
+            ("dspark-Big-Q8_0.gguf", 10),
+            ("UD-Q2_K_XL/Big-UD-Q2_K_XL-00001-of-00002.gguf", 50),
+            ("UD-Q2_K_XL/Big-UD-Q2_K_XL-00002-of-00002.gguf", 40),
+            ("Big-Q4_K_M.gguf", 30),
+        ]
+
+    monkeypatch.setattr(model_search, "gguf_weight_siblings", fake_siblings)
+
+    options = model_search.list_gguf_quant_options("org/Big-GGUF")
+
+    assert [(o.label, o.total_bytes, o.shard_count) for o in options] == [
+        ("Q4_K_M", 30, 1),
+        ("UD-Q2_K_XL", 90, 2),
+    ]
+    assert options[1].gguf_file == "UD-Q2_K_XL/Big-UD-Q2_K_XL-00001-of-00002.gguf"
+    assert all("dspark" not in o.gguf_file for o in options)

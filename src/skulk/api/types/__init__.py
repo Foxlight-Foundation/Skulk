@@ -41,6 +41,8 @@ from .api import ExtractPageToolRequest as ExtractPageToolRequest
 from .api import ExtractPageToolResponse as ExtractPageToolResponse
 from .api import FinishReason as FinishReason
 from .api import GenerationStats as GenerationStats
+from .api import GgufQuantOption as GgufQuantOption
+from .api import GgufQuantOptions as GgufQuantOptions
 from .api import HuggingFaceCardSummary as HuggingFaceCardSummary
 from .api import HuggingFaceSearchResult as HuggingFaceSearchResult
 from .api import ImageData as ImageData

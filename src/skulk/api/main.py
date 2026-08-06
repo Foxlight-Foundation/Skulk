@@ -96,7 +96,11 @@ from skulk.api.field_telemetry import (
     tap_generation_stream,
 )
 from skulk.api.keepalive import with_sse_keepalive
-from skulk.api.model_search import fetch_card_summary, search_hugging_face_models
+from skulk.api.model_search import (
+    fetch_card_summary,
+    list_gguf_quant_options,
+    search_hugging_face_models,
+)
 from skulk.api.node_health import (
     compute_node_health,
     live_data_transports,
@@ -154,6 +158,7 @@ from skulk.api.types import (
     ExtractPageToolResponse,
     FinishReason,
     GenerationStats,
+    GgufQuantOptions,
     HuggingFaceCardSummary,
     HuggingFaceSearchResult,
     ImageData,
@@ -1801,6 +1806,18 @@ class API:
                 "has no usable prose."
             ),
         )(self.get_model_card_summary)
+        self.app.get(
+            "/models/gguf-quants",
+            tags=["Models"],
+            summary="List a GGUF repository's quantizations",
+            description=(
+                "Enumerate the downloadable quantizations of a Hugging Face "
+                "GGUF repository: one option per quant shard group with its "
+                "loadable first shard, human label, exact total bytes, and "
+                "shard count, smallest first. Companion artifacts such as "
+                "speculative drafters and imatrix files are excluded."
+            ),
+        )(self.get_gguf_quant_options)
         self.app.post(
             "/v1/chat/completions",
             response_model=None,
@@ -7182,6 +7199,23 @@ class API:
         except Exception:
             summary = ""
         return HuggingFaceCardSummary(model_id=model_id, summary=summary)
+
+    async def get_gguf_quant_options(self, model_id: str) -> GgufQuantOptions:
+        """List one GGUF repository's downloadable quantizations.
+
+        Args:
+            model_id: Repository id in ``owner/name`` form.
+
+        Returns:
+            The quant inventory; empty options for a non-GGUF repository.
+        """
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", model_id):
+            raise HTTPException(status_code=422, detail="Invalid model id")
+        try:
+            options = await to_thread.run_sync(list_gguf_quant_options, model_id)
+        except Exception:
+            options = []
+        return GgufQuantOptions(model_id=model_id, options=options)
 
     async def search_models(
         self,

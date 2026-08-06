@@ -492,3 +492,16 @@ def test_served_spec_n_max_must_be_positive() -> None:
     for bad in (0, -1):
         with pytest.raises(ValidationError):
             RuntimeCapabilityCardConfig(served_spec_n_max=bad)
+
+
+def test_default_gguf_selection_never_picks_companion_artifacts() -> None:
+    """A repo default must not stage a drafter as the model (the dspark trap)."""
+    from skulk.shared.models.model_cards import select_preferred_gguf
+
+    files = [
+        ("dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf", 10),
+        ("UD-Q2_K_XL/DeepSeek-V4-Flash-0731-UD-Q2_K_XL-00001-of-00003.gguf", 50),
+    ]
+    assert "dspark" not in select_preferred_gguf(files)
+    # A drafter-only repo (a published draft companion) still resolves.
+    assert select_preferred_gguf([("gemma-mtp-draft-Q8_0.gguf", 1)])

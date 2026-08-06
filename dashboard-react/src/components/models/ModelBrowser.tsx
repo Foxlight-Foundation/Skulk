@@ -361,6 +361,10 @@ export function ModelBrowser({
       isAdding={false}
       burst={getHfBurstInfo?.(m) ?? null}
       fleetMemoryBytes={fleetMemoryBytes}
+      onSelectQuant={async (ggufFile) => {
+        const added = await onAddModel?.(m.id, ggufFile);
+        if (added !== false) onSelect(m.id, ggufFile);
+      }}
       onAdd={async () => {
         const added = await onAddModel?.(m.id, m.matched_file);
         if (added !== false) onSelect(m.id, m.matched_file);

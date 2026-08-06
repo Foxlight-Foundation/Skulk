@@ -1037,6 +1037,22 @@ Behavior note:
   finetune, quantized, merge, or adapter), `arxiv_ids`, `languages`, and
   `architecture`.
 
+### List a GGUF repository's quantizations
+
+**GET** `/models/gguf-quants?model_id=owner/name`
+
+```bash
+curl "http://localhost:52415/models/gguf-quants?model_id=unsloth/DeepSeek-V4-Flash-0731-GGUF"
+```
+
+Returns `{ "model_id": ..., "options": [...] }` where each option is one
+downloadable quantization: its repo-relative first shard (`gguf_file`, the
+value to pin when adding or downloading), human `label`, exact `total_bytes`,
+and `shard_count`, sorted smallest first. Companion artifacts (speculative
+drafters, imatrix calibration files, multimodal projectors) are excluded;
+`options` is empty for a non-GGUF repository. The dashboard's Hugging Face
+results use this for the per-quant download chooser.
+
 ### Fetch a model card summary
 
 **GET** `/models/card-summary?model_id=owner/name`

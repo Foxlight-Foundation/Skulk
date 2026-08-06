@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import styled, { useTheme } from 'styled-components';
-import { FiCheck, FiDownload, FiHeart, FiLock } from 'react-icons/fi';
+import { FiCheck, FiChevronDown, FiDownload, FiHeart, FiLock } from 'react-icons/fi';
 import type { HuggingFaceModel } from '../../types/models';
 import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
@@ -27,6 +28,8 @@ export interface HuggingFaceResultItemProps {
   burst?: BurstInfo | null;
   /** Fleet total memory for the burst tooltip. */
   fleetMemoryBytes?: number;
+  /** Download one specific quant (repo-relative first shard) of this repo. */
+  onSelectQuant?: (ggufFile: string) => void;
 }
 
 function formatCount(n: number): string {
@@ -146,6 +149,58 @@ const GatedChip = styled.span`
   letter-spacing: 0.3px;
 `;
 
+interface QuantOption {
+  gguf_file: string;
+  label: string;
+  total_bytes: number;
+  shard_count: number;
+}
+
+const QuantPanel = styled.div`
+  margin: 0 14px 10px 62px;
+  border: 1px solid ${({ theme }) => theme.colors.borderLight};
+  border-radius: ${({ theme }) => theme.radii.md};
+  background: ${({ theme }) => theme.colors.surfaceSunken};
+  overflow: hidden;
+`;
+
+const QuantRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  color: ${({ theme }) => theme.colors.textSecondary};
+
+  & + & {
+    border-top: 1px solid ${({ theme }) => theme.colors.borderLight};
+  }
+`;
+
+const Chevron = styled.button<{ $open: boolean }>`
+  all: unset;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: ${({ theme }) => theme.radii.sm};
+  color: ${({ theme }) => theme.colors.textMuted};
+  flex-shrink: 0;
+  transition: color 0.15s, background 0.15s;
+
+  &:hover {
+    color: ${({ theme }) => theme.colors.text};
+    background: ${({ theme }) => theme.colors.surfaceHover};
+  }
+
+  svg {
+    transition: transform 0.15s;
+    ${({ $open }) => ($open ? 'transform: rotate(180deg);' : '')}
+  }
+`;
+
 const InStoreChip = styled.span`
   display: inline-flex;
   align-items: center;
@@ -169,6 +224,7 @@ export function HuggingFaceResultItem({
   onSelect,
   burst = null,
   fleetMemoryBytes,
+  onSelectQuant,
 }: HuggingFaceResultItemProps) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
@@ -189,6 +245,24 @@ export function HuggingFaceResultItem({
     && !capability
     ? model.pipeline_tag
     : null;
+  const [quantsOpen, setQuantsOpen] = useState(false);
+  const [quantOptions, setQuantOptions] = useState<QuantOption[] | null>(null);
+
+  const toggleQuants = async () => {
+    const next = !quantsOpen;
+    setQuantsOpen(next);
+    if (next && quantOptions === null) {
+      try {
+        const res = await fetch(`/models/gguf-quants?model_id=${encodeURIComponent(model.id)}`);
+        if (!res.ok) { setQuantOptions([]); return; }
+        const data = (await res.json()) as { options?: QuantOption[] };
+        setQuantOptions(data.options ?? []);
+      } catch {
+        setQuantOptions([]);
+      }
+    }
+  };
+
   const relationChip = model.base_model_relation
     ? RELATION_CHIP[model.base_model_relation]
     : undefined;
@@ -208,6 +282,7 @@ export function HuggingFaceResultItem({
   const tooltipContent = <HfModelDossier model={model} author={author} />;
 
   return (
+    <div>
     <Row>
       <FamilyAvatar name={author || shortName} markCandidates={markCandidates} />
 
@@ -311,6 +386,56 @@ export function HuggingFaceResultItem({
           {isAdding ? '…' : <><FiDownload size={13} /> {t('huggingFaceResult.addAndDownload', 'Add & Download')}</>}
         </Button>
       )}
+
+      {/* Quant chooser for GGUF repos: pick the exact artifact to download. */}
+      {formatLabel === 'GGUF' && onSelectQuant && (
+        <Chevron
+          type="button"
+          $open={quantsOpen}
+          onClick={toggleQuants}
+          aria-expanded={quantsOpen}
+          aria-label={t('huggingFaceResult.showQuants', 'Show quantizations for {modelId}', { modelId: model.id })}
+        >
+          <FiChevronDown size={16} />
+        </Chevron>
+      )}
     </Row>
+
+    {quantsOpen && (
+      <QuantPanel>
+        {quantOptions === null && (
+          <QuantRow>{t('huggingFaceResult.loadingQuants', 'Listing quantizations…')}</QuantRow>
+        )}
+        {quantOptions !== null && quantOptions.length === 0 && (
+          <QuantRow>{t('huggingFaceResult.noQuants', 'No downloadable quantizations found')}</QuantRow>
+        )}
+        {(quantOptions ?? []).map((option) => (
+          <QuantRow key={option.gguf_file}>
+            <QuantBadge>{option.label}</QuantBadge>
+            <span style={{ fontWeight: 500, flex: 1 }}>
+              {formatBytes(option.total_bytes)}
+            </span>
+            {fleetMemoryBytes !== undefined && option.total_bytes > fleetMemoryBytes && (
+              <BurstChip
+                info={{ reason: 'size', neededBytes: option.total_bytes }}
+                fleetMemoryBytes={fleetMemoryBytes}
+              />
+            )}
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => onSelectQuant?.(option.gguf_file)}
+              aria-label={t('huggingFaceResult.downloadQuant', 'Download {label} of {modelId}', {
+                label: option.label,
+                modelId: model.id,
+              })}
+            >
+              <FiDownload size={13} /> {t('huggingFaceResult.download', 'Download')}
+            </Button>
+          </QuantRow>
+        ))}
+      </QuantPanel>
+    )}
+    </div>
   );
 }

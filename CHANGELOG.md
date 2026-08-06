@@ -162,7 +162,12 @@ This project records release notes here and mirrors public-facing notes in
   license, and arXiv papers. A task chip rail on the search tab filters
   trending and search results by Hugging Face task (text, vision, STT,
   TTS, embedding, image generation) via the endpoint's `pipeline_tag`
-  parameter.
+  parameter. GGUF results expand into a per-quantization download chooser
+  backed by the new `GET /models/gguf-quants` endpoint, and default GGUF
+  selection now ranks companion artifacts (speculative drafters such as
+  dspark/dflash files, imatrix calibration data) behind every real quant,
+  so adding a repository can no longer silently stage a 10 GB drafter
+  wearing the model's name.
 
 - **Concurrent slots on the served llama.cpp engine no longer shrink each
   request's context window.** `SKULK_LLAMA_SERVER_PARALLEL` asks a node to serve
