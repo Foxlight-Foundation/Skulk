@@ -572,6 +572,13 @@ export function ModelBrowser({
                   <ListCard>
                     {hfLocal.map((m) => renderHfItem(m))}
                   </ListCard>
+                  {onHfLoadMore && (
+                    <MoreRow>
+                      <Button variant="outline" size="sm" onClick={onHfLoadMore}>
+                        {t('modelBrowser.showMore', 'Show more')}
+                      </Button>
+                    </MoreRow>
+                  )}
                   {hfBurst.length > 0 && (
                     <>
                       {burstSectionHeader}
@@ -579,13 +586,6 @@ export function ModelBrowser({
                         {hfBurst.map((m) => renderHfItem(m))}
                       </ListCard>
                     </>
-                  )}
-                  {onHfLoadMore && (
-                    <MoreRow>
-                      <Button variant="outline" size="sm" onClick={onHfLoadMore}>
-                        {t('modelBrowser.showMore', 'Show more')}
-                      </Button>
-                    </MoreRow>
                   )}
                 </>
               )}
