@@ -280,4 +280,110 @@ describe('ChatView completed-message speech', () => {
       DASHBOARD_SPEECH_SEED,
     ]);
   });
+
+  it('replays a completed turn in one request for a batch-only speech model', async () => {
+    const requestedInputs: string[] = [];
+    const requestedSeeds: number[] = [];
+    class FakeAudio {
+      onended: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      constructor() {}
+
+      play(): Promise<void> {
+        window.setTimeout(() => this.onended?.(), 0);
+        return Promise.resolve();
+      }
+
+      pause(): void {}
+    }
+    vi.stubGlobal('Audio', FakeAudio);
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:batch-speech');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+    vi.stubGlobal('fetch', vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = String(input);
+      if (url === '/models') {
+        return new Response(JSON.stringify({
+          data: [{
+            id: 'org/batch-speech-model',
+            tasks: ['TextGeneration'],
+            audio: {
+              default_response_format: 'mp3',
+              response_formats: ['mp3'],
+              supports_streaming: false,
+            },
+            resolved_capabilities: {
+              supports_speech_synthesis: true,
+              default_audio_response_format: 'mp3',
+              audio_response_formats: ['mp3'],
+            },
+          }],
+        }), { status: 200 });
+      }
+      if (url === '/v1/audio/speech') {
+        const body = JSON.parse(String(init?.body)) as { input: string; seed: number };
+        requestedInputs.push(body.input);
+        requestedSeeds.push(body.seed);
+        return new Response(new Uint8Array([73, 68, 51]), {
+          status: 200,
+          headers: { 'Content-Type': 'audio/mpeg' },
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+
+    store.dispatch(chatActions.selectModel('org/batch-speech-model'));
+    store.dispatch(chatActions.selectSpeechModel('org/batch-speech-model'));
+    const completeTurn = 'First sentence. Second sentence! Final tail';
+    store.dispatch(chatActions.addMessage({
+      id: 'batch-assistant-message',
+      role: 'assistant',
+      content: completeTurn,
+      timestamp: Date.now(),
+    }));
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        <Provider store={store}>
+          <ThemeProvider theme={darkTheme}>
+            <ChatView readyInstances={[{
+              instanceId: 'batch-speech-instance',
+              modelId: 'org/batch-speech-model',
+              sharding: 'Pipeline',
+              instanceType: 'MlxRing',
+              engine: 'mlx_audio',
+              nodeStatuses: [],
+              status: 'ready',
+            }]} />
+          </ThemeProvider>
+        </Provider>,
+      );
+    });
+
+    await waitForReact(
+      () => container?.querySelector<HTMLButtonElement>(
+        '[aria-label="Speak message"]',
+      ) !== null,
+      'batch-only assistant replay button did not become ready',
+    );
+    const replay = container?.querySelector<HTMLButtonElement>(
+      '[aria-label="Speak message"]',
+    );
+    if (!replay) throw new Error('batch-only assistant replay button was not rendered');
+    await act(async () => {
+      await userEvent.click(replay);
+    });
+
+    await waitForReact(
+      () => requestedInputs.length === 1,
+      'batch-only completed message was not synthesized once',
+    );
+    expect(requestedInputs).toEqual([completeTurn]);
+    expect(requestedSeeds).toEqual([DASHBOARD_SPEECH_SEED]);
+  });
 });

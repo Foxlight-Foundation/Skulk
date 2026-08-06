@@ -19,6 +19,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Dashboard speech now sends completed turns and replay requests to batch-only
+  TTS models as one synthesis call. Sentence-sized request queues remain
+  reserved for cards that truthfully advertise streaming PCM, avoiding the
+  repeated full-generation overhead that made LongCat and Fish playback
+  unnecessarily slow.
+
 - Dashboard speech now sends the same deterministic seed for every generated
   sentence and replay segment. The public speech API and built-in TTS provider
   also accept an optional unsigned 32-bit seed, which the speech runner applies
