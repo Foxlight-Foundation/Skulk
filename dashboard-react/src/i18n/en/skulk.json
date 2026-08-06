@@ -302,6 +302,7 @@
   "modelBrowser.huggingFaceSearch": "Search Hugging Face",
   "modelBrowser.mlxOnly": "MLX only",
   "modelBrowser.needsBurst": "Needs burst capacity",
+  "modelBrowser.needsBurstExplainer": "These models will not fit on your local hardware, either by size or because no local node runs their artifact format. Serving one means adding remote resources to the fabric, such as a cloud GPU node. Automated burst provisioning arrives in a follow-up release.",
   "modelBrowser.noModelsAvailable": "No models available",
   "modelBrowser.noModelsMatch": "No models match your search",
   "modelBrowser.noResultsFound": "No results found",

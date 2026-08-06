@@ -17,6 +17,7 @@ import { ModelFilterPopover } from './ModelFilterPopover';
 import { ModelPickerGroup } from './ModelPickerGroup';
 import { HuggingFaceResultItem } from './HuggingFaceResultItem';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import { InfoTooltip } from '../common/InfoTooltip';
 import type { BurstInfo } from './burst';
 
 /** Data and actions used to browse Skulk-supported models or search Hugging Face. */
@@ -306,6 +307,25 @@ export function ModelBrowser({
   const hfBurst = hfModelsRaw.filter(hfIsBurst);
   const hfModels = hfModelsRaw;
 
+  const burstSectionHeader = (
+    <SectionHeader style={{ paddingTop: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+      {t('modelBrowser.needsBurst', 'Needs burst capacity')}
+      <InfoTooltip
+        size={13}
+        placement="right"
+        delay={100}
+        content={
+          <div style={{ maxWidth: 280 }}>
+            {t(
+              'modelBrowser.needsBurstExplainer',
+              'These models will not fit on your local hardware, either by size or because no local node runs their artifact format. Serving one means adding remote resources to the fabric, such as a cloud GPU node. Automated burst provisioning arrives in a follow-up release.',
+            )}
+          </div>
+        }
+      />
+    </SectionHeader>
+  );
+
   const renderHfItem = (m: HuggingFaceModel) => (
     <HuggingFaceResultItem
       key={m.id}
@@ -503,9 +523,7 @@ export function ModelBrowser({
                   </ListCard>
                   {hfBurst.length > 0 && (
                     <>
-                      <SectionHeader style={{ paddingTop: 12 }}>
-                        {t('modelBrowser.needsBurst', 'Needs burst capacity')}
-                      </SectionHeader>
+                      {burstSectionHeader}
                       <ListCard>
                         {hfBurst.map((m) => renderHfItem(m))}
                       </ListCard>
@@ -524,9 +542,7 @@ export function ModelBrowser({
               )}
               {mode === 'store-download' && burstGroups.length > 0 && (
                 <>
-                  <SectionHeader style={{ paddingTop: 12 }}>
-                    {t('modelBrowser.needsBurst', 'Needs burst capacity')}
-                  </SectionHeader>
+                  {burstSectionHeader}
                   <ListCard>
                     {burstGroups.map(renderGroup)}
                   </ListCard>
