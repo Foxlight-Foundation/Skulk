@@ -7220,9 +7220,9 @@ class API:
     async def search_models(
         self,
         query: str = "",
-        limit: int = 20,
+        limit: int = Query(default=20, ge=1, le=200),
         mlx_only: bool = False,
-        offset: int = 0,
+        offset: int = Query(default=0, ge=0, le=2000),
         pipeline_tag: str | None = None,
     ) -> list[HuggingFaceSearchResult]:
         """Search Hugging Face repositories and exact GGUF filenames.

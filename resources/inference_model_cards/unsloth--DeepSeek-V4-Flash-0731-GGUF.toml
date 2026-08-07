@@ -37,9 +37,13 @@ format = "token_delimited"
 default_effort = "medium"
 disabled_effort = "none"
 
+# CUDA lanes are deliberately absent: the shipped CUDA engine artifacts
+# (wheel and container) still build a pre-b10092 llama.cpp without deepseek4
+# support, so listing them would place an unloadable model. Restore the cuda
+# tags when the CUDA engine lane advances to b10092 or later.
 [placement]
-compatible_backends = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu", "llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu"]
-backend_preference = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"]
+compatible_backends = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cpu", "llama_server-vulkan", "llama_server-rocm", "llama_server-cpu"]
+backend_preference = ["llama_server-vulkan", "llama_server-rocm", "llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cpu"]
 
 [storage_size]
 in_bytes = 96832508352

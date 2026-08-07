@@ -147,6 +147,10 @@ export function ModelSearchModal({
   // requested while browsing trending.
   useEffect(() => {
     if (!open) return;
+    // An active text search owns hfLimit and hfHasMore; refetching trending
+    // here would race it and let whichever response lands last control the
+    // Show more button.
+    if (lastQueryRef.current.trim()) return;
     (async () => {
       try {
         const params = new URLSearchParams({ query: '', limit: String(hfLimit), mlx_only: String(mlxOnly) });
@@ -160,8 +164,11 @@ export function ModelSearchModal({
     })();
   }, [open, mlxOnly, hfLimit, hfTask]);
 
+  const searchSeqRef = useRef(0);
+
   const handleHfSearch = useCallback((query: string, mlxOnlyOverride?: boolean, limitOverride?: number, taskOverride?: string | null) => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
+    const seq = ++searchSeqRef.current;
     // A changed query restarts paging at one page.
     let limit = limitOverride ?? hfLimit;
     if (query !== lastQueryRef.current && limitOverride === undefined) {
@@ -182,13 +189,13 @@ export function ModelSearchModal({
         const task = taskOverride === undefined ? hfTask : taskOverride;
         if (task) params.set('pipeline_tag', task);
         const res = await fetch(`/models/search?${params}`);
-        if (res.ok) {
+        if (res.ok && seq === searchSeqRef.current) {
           const results = (await res.json()) as HuggingFaceModel[];
           setHfResults(results);
           setHfHasMore(results.length >= limit);
         }
       } catch { /* ignore */ }
-      finally { setHfSearching(false); }
+      finally { if (seq === searchSeqRef.current) setHfSearching(false); }
     }, 500);
   }, [mlxOnly, hfLimit, hfTask]);
 

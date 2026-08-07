@@ -22,6 +22,13 @@ _GGUF_EXTENSION = ".gguf"
 _GGUF_SHARD_SUFFIX = re.compile(r"-\d{5}-of-\d{5}$", re.IGNORECASE)
 _MIN_FILENAME_SEARCH_TERM_LENGTH = 4
 _MAX_FILENAME_SEARCH_CANDIDATES = 100
+# Upstream fetch bounds: offset paging over-fetches limit + offset expanded
+# records, so both must be clamped or a hostile query could hold a worker
+# thread on an enormous Hub listing. The dashboard pages to at most 200.
+_MAX_SEARCH_LIMIT = 200
+_MAX_SEARCH_OFFSET = 2000
+# Model card READMEs are prose; anything beyond this is not a summary source.
+_MAX_CARD_README_BYTES = 2_000_000
 
 
 # Enrichment requested from the list endpoint. Deliberately narrow: the
@@ -104,8 +111,17 @@ def list_gguf_quant_options(model_id: str) -> list[GgufQuantOption]:
         first = min(name for name, _ in members)
         basename = group_key.rsplit("/", 1)[-1]
         directory = group_key.rsplit("/", 1)[0] if "/" in group_key else ""
-        label_match = _QUANT_LABEL.search(directory or basename) or _QUANT_LABEL.search(basename)
-        label = (directory or (label_match.group(1) if label_match else basename))
+        # Prefer a quant token parsed from the directory, then the basename;
+        # a generic directory name ("gguf") must not label every option
+        # identically when basenames carry the real quant.
+        directory_match = _QUANT_LABEL.search(directory) if directory else None
+        basename_match = _QUANT_LABEL.search(basename)
+        if directory and (directory_match or not basename_match):
+            label = directory
+        elif basename_match:
+            label = basename_match.group(1)
+        else:
+            label = basename
         options.append(
             GgufQuantOption(
                 gguf_file=first,
@@ -127,7 +143,9 @@ def fetch_card_summary(model_id: str) -> str:
     """
     readme_path = hf_hub_download(model_id, "README.md")
     with open(readme_path, encoding="utf-8", errors="replace") as handle:
-        return extract_card_summary(handle.read())
+        # Bounded read: a crafted or LFS-backed README must not balloon
+        # memory; real model cards are well under this.
+        return extract_card_summary(handle.read(_MAX_CARD_README_BYTES))
 
 
 def _to_search_result(
@@ -278,6 +296,8 @@ def search_hugging_face_models(
     """
     if limit <= 0:
         return []
+    limit = min(limit, _MAX_SEARCH_LIMIT)
+    offset = min(max(offset, 0), _MAX_SEARCH_OFFSET)
 
     author = "mlx-community" if mlx_only else None
     # The list endpoint pages by cursor with no offset parameter; emulate
@@ -288,10 +308,10 @@ def search_hugging_face_models(
             author=author,
             pipeline_tag=pipeline_tag,
             sort="downloads" if query else "trending_score",
-            limit=limit + max(offset, 0),
+            limit=limit + offset,
             expand=list(_EXPAND_FIELDS),
         )
-    )[max(offset, 0):]
+    )[offset:]
 
     filename = _gguf_filename(query)
     if filename is None:

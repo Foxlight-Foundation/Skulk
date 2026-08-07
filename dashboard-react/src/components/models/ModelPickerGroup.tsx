@@ -240,6 +240,10 @@ const Chevron = styled.button<{ $open: boolean }>`
 
 const VariantPanel = styled.div`
   margin: 0 14px 10px 62px;
+
+  @media (max-width: 640px) {
+    margin-left: 14px;
+  }
   border: 1px solid ${({ theme }) => theme.colors.borderLight};
   border-radius: ${({ theme }) => theme.radii.md};
   background: ${({ theme }) => theme.colors.surfaceSunken};
@@ -249,6 +253,7 @@ const VariantPanel = styled.div`
 const VariantRow = styled.div`
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   padding: 7px 12px;
   font-size: ${({ theme }) => theme.fontSizes.sm};
@@ -360,7 +365,9 @@ export function ModelPickerGroup({
   // The group key is the card's human-readable base model ("GPT-OSS 20B")
   // when one exists; the fallback group.name is a raw repo tail. Prefer the
   // readable one as the row title.
-  const title = group.smallestVariant.base_model ?? group.name;
+  // Truthy fallback: generated custom cards leave base_model at "" and a
+  // nullish check would render blank titles for user-added models.
+  const title = group.smallestVariant.base_model || group.name;
 
   const anyFits = variants.some((v) => canModelFit(v.id));
   const anyHasInstance = variants.some((v) => instanceStatuses?.[v.id]);

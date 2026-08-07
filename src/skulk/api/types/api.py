@@ -939,6 +939,8 @@ class HuggingFaceSearchResult(BaseModel):
 class GgufQuantOption(BaseModel):
     """One downloadable quantization of a GGUF repository."""
 
+    model_config = ConfigDict(frozen=True, strict=True)
+
     gguf_file: str = Field(description="Repo-relative first shard of the quant's group; pin this to download it.")
     label: str = Field(description="Human quant label, e.g. Q4_K_M or UD-Q2_K_XL.")
     total_bytes: int = Field(description="Exact total bytes of the quant's shard group.")
@@ -948,12 +950,16 @@ class GgufQuantOption(BaseModel):
 class GgufQuantOptions(BaseModel):
     """Quantization inventory for one GGUF repository."""
 
+    model_config = ConfigDict(frozen=True, strict=True)
+
     model_id: str
     options: list[GgufQuantOption] = Field(default_factory=list)
 
 
 class HuggingFaceCardSummary(BaseModel):
     """Prose summary extracted from a Hugging Face model card README."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
 
     model_id: str
     summary: str = Field(

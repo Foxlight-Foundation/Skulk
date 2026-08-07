@@ -8,6 +8,12 @@
  */
 export type BurstReason = 'size' | 'engine';
 
+/**
+ * One row's burst verdict: why the local fleet cannot serve the artifact
+ * as-is, with the sizing evidence behind a size verdict and the artifact
+ * format behind an engine verdict. Null wherever a verdict is expected
+ * means locally placeable.
+ */
 export interface BurstInfo {
   reason: BurstReason;
   /** Weight bytes backing a size verdict; estimated when `estimated`. */
