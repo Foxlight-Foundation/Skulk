@@ -23,6 +23,7 @@ import {
   SPEECH_PAUSE_MARKER,
   SPEECH_PAUSE_SECONDS,
   SpeechSentenceQueue,
+  speechTextFromMarkdown,
   splitCompleteSpeechSentences,
   StreamingSpeechPlayback,
 } from '../../audio/streamingSpeechPlayback';
@@ -1262,15 +1263,29 @@ export function ChatView({
         })
       : null;
     const fenceProbe = codeNarrator ? new FenceProbe() : null;
-    // Narrate BEFORE enqueuing the delta's prose so a closer settles ahead
-    // of the explanation that follows a code block.
-    const narrate = (proseFollowing: boolean) => {
-      if (!codeNarrator || !sentenceQueue || !fenceProbe) return;
-      const utterance = codeNarrator.update({
+    // Two-phase narration around each delta's enqueue: a finished block's
+    // closer settles BEFORE the prose that follows it, while an opener for
+    // a fence the delta introduces plays AFTER the introductory sentence.
+    // Only sentences that will actually be spoken count as prose (completed
+    // fences and rules produce no speech and must not defeat the debounce).
+    const narrateAround = (sentences: readonly string[]) => {
+      if (!codeNarrator || !sentenceQueue || !fenceProbe) {
+        sentenceQueue?.enqueue(sentences);
+        return;
+      }
+      const proseFollowing = sentences.some(
+        (sentence) => speechTextFromMarkdown(sentence).length > 0,
+      );
+      const closer = codeNarrator.settlePendingClose({
+        fenceNowOpen: fenceProbe.isOpen(),
+        proseFollowing,
+      });
+      if (closer) sentenceQueue.enqueue([closer]);
+      sentenceQueue.enqueue(sentences);
+      const utterance = codeNarrator.observe({
         fenceOpen: fenceProbe.isOpen(),
         queueStarved: sentenceQueue.isStarved(),
         bufferedSeconds: streamingPlaybackRef.current?.bufferedSeconds() ?? 0,
-        proseFollowing,
       });
       if (utterance) sentenceQueue.enqueue([utterance]);
     };
@@ -1383,8 +1398,7 @@ export function ChatView({
                     roundSpeechSentences.push(...split.sentences);
                   } else {
                     fenceProbe?.feed(visibleDelta);
-                    narrate(split.sentences.length > 0);
-                    sentenceQueue.enqueue(split.sentences);
+                    narrateAround(split.sentences);
                   }
                 } else if (sentenceQueue) {
                   const split = resyncVisibleSpeech(
@@ -1399,8 +1413,7 @@ export function ChatView({
                   } else {
                     fenceProbe?.reset();
                     fenceProbe?.feed(separated.content);
-                    narrate(split.sentences.length > 0);
-                    sentenceQueue.enqueue(split.sentences);
+                    narrateAround(split.sentences);
                   }
                 }
               }
@@ -1537,11 +1550,9 @@ export function ChatView({
         // Settle any pending code closer ahead of the trailing prose so the
         // acknowledgement precedes the final explanation.
         if (codeNarrator && speechTail.trim()) {
-          const closer = codeNarrator.update({
-            fenceOpen: fenceProbe?.isOpen() ?? false,
-            queueStarved: sentenceQueue.isStarved(),
-            bufferedSeconds: streamingPlaybackRef.current?.bufferedSeconds() ?? 0,
-            proseFollowing: true,
+          const closer = codeNarrator.settlePendingClose({
+            fenceNowOpen: fenceProbe?.isOpen() ?? false,
+            proseFollowing: speechTextFromMarkdown(speechTail).length > 0,
           });
           if (closer) sentenceQueue.enqueue([closer]);
         }

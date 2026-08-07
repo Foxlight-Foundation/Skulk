@@ -20,18 +20,24 @@ export interface CodeNarrationPhrases {
   closers: readonly string[];
 }
 
-/** Signals sampled by the streaming loop on each delta. */
-export interface CodeNarrationSignals {
-  /** Whether the retained speech tail currently holds an unclosed fence. */
+/** Signals for the pre-enqueue phase (settling a finished block). */
+export interface CodeNarrationSettleSignals {
+  /** Fence state AFTER feeding this delta to the probe. */
+  fenceNowOpen: boolean;
+  /** Whether this delta carries sentences that will actually be spoken
+   *  (completed fence segments and horizontal rules produce no speech and
+   *  must not count, or the adjacent-fence debounce is defeated). */
+  proseFollowing: boolean;
+}
+
+/** Signals for the post-enqueue phase (edges and fillers). */
+export interface CodeNarrationObserveSignals {
+  /** Fence state AFTER feeding this delta to the probe. */
   fenceOpen: boolean;
   /** Whether the sentence queue has nothing pending or synthesizing. */
   queueStarved: boolean;
   /** Seconds of decoded audio still queued for playback. */
   bufferedSeconds: number;
-  /** Whether this delta carries prose sentences about to be enqueued. The
-   *  caller narrates BEFORE enqueuing them, so a closer emitted here plays
-   *  ahead of the prose that follows the code block. */
-  proseFollowing: boolean;
 }
 
 export interface CodeNarratorOptions {
@@ -105,7 +111,18 @@ export class FenceProbe {
   }
 }
 
-/** Emits at most one narration utterance per update; null means silence. */
+/**
+ * Two-phase narrator, matching the streaming loop's enqueue order:
+ *
+ * 1. `settlePendingClose` runs BEFORE the delta's sentences enqueue, so a
+ *    closer for a finished block always precedes the explanation that
+ *    follows it (whether the prose arrives in the closing delta or later).
+ * 2. `observe` runs AFTER they enqueue, so an opener for a fence that a
+ *    delta introduces plays after the introductory sentence, not before it.
+ *
+ * Fillers live in `observe` and fire only when the voice has genuinely run
+ * dry. Each phase emits at most one utterance; null means silence.
+ */
 export class CodeNarrator {
   private readonly minimumGapMs: number;
   private readonly reopenDebounceMs: number;
@@ -133,33 +150,39 @@ export class CodeNarrator {
     this.random = options.random ?? Math.random;
   }
 
-  /** Advance the state machine with fresh stream signals. */
-  update(signals: CodeNarrationSignals): string | null {
+  /** Phase 1: settle a finished block's closer ahead of incoming prose. */
+  settlePendingClose(signals: CodeNarrationSettleSignals): string | null {
     const timestamp = this.now();
 
-    // Settle the pending close before anything else, on either signal: the
-    // debounce window expiring (quiet stream), or prose arriving after the
-    // fence, which proves the block is over and must hear its closer BEFORE
-    // that prose plays. Only a quick fence reopen with nothing in between
-    // still counts as a continuation.
-    if (
-      this.pendingCloseSince !== null
-      && (
-        signals.proseFollowing
-        || timestamp - this.pendingCloseSince >= this.reopenDebounceMs
-      )
-    ) {
-      this.pendingCloseSince = null;
+    // Falling edge carried by this very delta, with spoken prose behind it:
+    // close now so the acknowledgement precedes the explanation.
+    if (this.fenceOpen && !signals.fenceNowOpen && signals.proseFollowing) {
+      this.fenceOpen = false;
+      if (!this.openerPlayed) return null;
       this.openerPlayed = false;
       this.lastUtteranceAt = timestamp;
       return this.pick(this.phrases.closers);
     }
 
+    if (this.pendingCloseSince === null) return null;
+    const settledByProse = signals.proseFollowing;
+    const settledByTime = timestamp - this.pendingCloseSince >= this.reopenDebounceMs;
+    if (!settledByProse && !settledByTime) return null;
+    this.pendingCloseSince = null;
+    this.openerPlayed = false;
+    this.lastUtteranceAt = timestamp;
+    return this.pick(this.phrases.closers);
+  }
+
+  /** Phase 2: edges and fillers, after the delta's sentences enqueued. */
+  observe(signals: CodeNarrationObserveSignals): string | null {
+    const timestamp = this.now();
+
     if (signals.fenceOpen && !this.fenceOpen) {
       this.fenceOpen = true;
       if (this.pendingCloseSince !== null) {
-        // Adjacent fence: the block continued, so swallow both the pending
-        // closer and a fresh opener rather than chattering between them.
+        // Quick silent reopen: the block continued; swallow both the
+        // pending closer and a fresh opener.
         this.pendingCloseSince = null;
         return null;
       }
@@ -171,15 +194,7 @@ export class CodeNarrator {
 
     if (!signals.fenceOpen && this.fenceOpen) {
       this.fenceOpen = false;
-      if (!this.openerPlayed) return null;
-      if (signals.proseFollowing) {
-        // The closing delta already carries follow-on prose: close now so
-        // the acknowledgement precedes the explanation.
-        this.openerPlayed = false;
-        this.lastUtteranceAt = timestamp;
-        return this.pick(this.phrases.closers);
-      }
-      this.pendingCloseSince = timestamp;
+      if (this.openerPlayed) this.pendingCloseSince = timestamp;
       return null;
     }
 
