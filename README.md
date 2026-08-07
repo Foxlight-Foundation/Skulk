@@ -255,7 +255,7 @@ The normal dashboard flow is: confirm topology, launch a model, wait for it to b
 <p align="center">
   <img src="docs/imgs/dash-1.png" alt="Skulk dashboard cluster view: a five-node topology serving a Qwen3 MoE placement" width="80%" />
 </p>
-<p align="center"><em>Start here: confirm the node or cluster looks healthy in the cluster view. Shown: a Qwen3 MoE pipelined across three Apple Silicon nodes of a live five-node cluster (the amber bars are memory the models are actually holding) alongside a single-node Qwen3.5 instance, with per-node memory, GPU, and temperature at a glance.</em></p>
+<p align="center"><em>Start here: confirm the node or cluster looks healthy in the cluster view. Shown: a Qwen3 MoE pipelined across three Apple Silicon nodes of a live five-node cluster (the amber fill tracks each node's used memory) alongside a single-node Qwen3.5 instance, with per-node memory, GPU, and temperature at a glance.</em></p>
 
 <p align="center">
   <img src="docs/imgs/dash-2.png" alt="Skulk dashboard model store with the active instance panel" width="80%" />
