@@ -599,11 +599,14 @@ export function App() {
           field reads as visual noise over content on a small screen. The key
           remounts the canvas when the breakpoint flips so the particle field
           re-seeds at the new density. */}
-      {/* The night palette replaces the abstract mesh with the brand scene
-          (token-driven: SceneBackdrop renders only when the palette declares
-          a scene, and the mesh only when it does not). */}
-      <SceneBackdrop />
-      {activeTheme.colors.scene === 'none' && (
+      {/* The night palette replaces the abstract mesh with the brand scene:
+          the full valley where content is sparse (the cluster view), and the
+          sky's crown fading under the header on dense routes, so every
+          screen keeps the night's warmth without a photograph competing
+          with columns of identifiers. Palettes without a scene keep the
+          mesh everywhere. */}
+      <SceneBackdrop variant={activeRoute === 'cluster' ? 'full' : 'crown'} />
+      {(activeTheme.colors.scene === 'none' || activeRoute !== 'cluster') && (
         <NetworkMesh key={isMobile ? 'mesh-mobile' : 'mesh-desktop'} radius={2.5} count={isMobile ? 14 : 43} linkDistance={430} />
       )}
       <Shell>

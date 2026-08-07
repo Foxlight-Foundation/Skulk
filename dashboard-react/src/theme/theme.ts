@@ -1,5 +1,3 @@
-import valleyNight from '../assets/scene/valley-night.webp';
-
 /**
  * Theme palettes for the Skulk dashboard.
  *
@@ -166,8 +164,13 @@ const darkColors: ColorTokens = {
   // everyday accent, amber strictly for whatever is alive. Values track
   // skulk-app/src/theme/tokens.ts (the 1a Den palette).
   bg: '#080C1A',
+  // A CSS-only night: den glow crowning the header, and the fire's warmth
+  // (the palette's horizon amber) breathing up from just below the frame,
+  // so the canvas carries the valley's atmosphere without the painting.
   bgGradient: `
     radial-gradient(ellipse 90% 55% at 50% -12%, rgba(43, 58, 99, 0.55) 0%, transparent 62%),
+    radial-gradient(ellipse 64% 34% at 82% 108%, rgba(168, 86, 12, 0.22) 0%, transparent 65%),
+    radial-gradient(ellipse 90% 30% at 12% 112%, rgba(43, 58, 99, 0.38) 0%, transparent 58%),
     #080C1A
   `,
   surface: '#12192E',
@@ -240,8 +243,8 @@ const darkColors: ColorTokens = {
   bgMeshLine: 'rgba(147, 174, 223, 0.10)',
   bgMeshNode: 'rgba(147, 174, 223, 0.08)',
 
-  scene: `url(${valleyNight})`,
-  sceneScrim: 'rgba(0, 0, 0, 0.30)',
+  scene: 'none',
+  sceneScrim: 'none',
 
   healthy: '#54C79A',
   unhealthy: '#F2707E',
