@@ -26,7 +26,7 @@ On top of that, Skulk adds:
 - Multi-node GGUF inference: a GGUF model that fits no single GPU node pools the GPU memory of several (one driver node plus memory donors over llama.cpp RPC), so two AMD Strix Halo boxes can together serve a quant neither could load alone. Guide: [AMD / Strix Halo nodes](https://foxlight-foundation.github.io/Skulk/amd-strix-halo-nodes/).
 - Production-grade speculative decoding delivering 1.16–2.2× speedups across nodes and on heterogeneous hardware.
 - Concurrent GPU serving: a served vLLM engine brings continuous batching and paged attention to NVIDIA nodes, coexisting with the llama.cpp engines (the planner picks by hardware and expected concurrency), and the served llama.cpp engine itself decodes concurrent requests with dynamically sized context.
-- A speech fabric: OpenAI-compatible `/v1/audio/speech`, `/v1/audio/transcriptions`, and `/v1/audio/voices` endpoints, a realtime transcription WebSocket at `/v1/realtime`, and a hands-free voice loop in the dashboard chat. Guide: [Speech providers and realtime transcription](https://foxlight-foundation.github.io/Skulk/speech-fabric-realtime/).
+- A speech fabric: OpenAI-compatible `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations`, and `/v1/audio/voices` endpoints, voice cloning with ten bundled reference voices, a realtime transcription WebSocket at `/v1/realtime` with server-side voice-activity detection, a composable speech-to-chat-to-speech WebSocket at `/v1/fabric/chains/speech`, and a hands-free voice loop in the dashboard chat. Guide: [Speech providers and realtime transcription](https://foxlight-foundation.github.io/Skulk/speech-fabric-realtime/).
 - An extension (plugin) API: separately installed Python packages hook the serving path (request transform, response observer, in-process embeddings) and can serve self-describing provider capabilities that stream media through the fabric and advertise themselves on the telemetry plane. A raising extension is contained and skipped, and extensions never own the response stream. Guide: [Extensions](https://foxlight-foundation.github.io/Skulk/extensions/).
 - Managed engine delivery: Linux GPU nodes get pinned `llama-server` builds as ordinary pip wheels (`skulk-llama-server-cuda`, `skulk-llama-server-vulkan`) from the Foxlight wheel index at `wheels.foxlight.ai`, built from pinned llama.cpp source with sigstore build-provenance attestations.
 - A real-time React dashboard with easy access to:
@@ -120,13 +120,13 @@ Why would you use Skulk over another solution? What does it get you?
 
 - **Family-aware behavior.** Gemma 4 multimodal (audio + vision), DeepSeek V3.2, GPT-OSS / Nemotron / Qwen 3.5 / Llama Nemotron Nano thinking-and-reasoning separation, structured output / JSON mode, OpenAI-compatible tool calling. **Why it matters:** new model releases land with explicit per-family handling, not a generic "the abstraction will figure it out."
 
-- **Speech, wired into the fabric.** Mounted TTS models serve `/v1/audio/speech` (with per-card voices listed at `/v1/audio/voices`); mounted STT models serve `/v1/audio/transcriptions` and a realtime transcription WebSocket at `/v1/realtime` that accepts streamed PCM16 audio and returns transcript deltas as they land. The dashboard chat closes the loop: speak into the microphone, get a transcript, generate a reply, and hear it spoken, all against models placed on your own cluster. Audio bytes ride dedicated node-addressed data paths, never the cluster's ordered event log. **Why it matters:** voice in and voice out are cluster capabilities like any other model, not a bolted-on sidecar service.
+- **Speech, wired into the fabric.** Mounted TTS models serve `/v1/audio/speech`, with model-native voices and per-card voice catalogs listed at `/v1/audio/voices`, streaming MP3/PCM output where the card has proven support, and an optional deterministic seed for reproducible synthesis. Voice-cloning cards accept a bounded reference-audio upload, and ten bundled, checksummed English reference voices ship in the box (Kite is the default) so cloning-capable models speak with a consistent voice from the first request. Mounted STT models serve `/v1/audio/transcriptions`, speech-to-English translation at `/v1/audio/translations` on cards that declare it, and a realtime transcription WebSocket at `/v1/realtime` that accepts streamed PCM16 audio, returns transcript deltas as they land, and supports server-side voice-activity detection with automatic turn commit and barge-in. `WS /v1/fabric/chains/speech` composes the full loop (speech in, chat model, speech out) as one typed endpoint. The dashboard chat closes that loop hands-free: speak into the microphone, get a transcript, generate a reply, and hear it spoken, all against models placed on your own cluster. Audio bytes ride dedicated node-addressed data paths, never the cluster's ordered event log. **Why it matters:** voice in and voice out are cluster capabilities like any other model, not a bolted-on sidecar service.
 
 ### APIs
 
 - **Four wire formats, one pipeline.** OpenAI Chat Completions, OpenAI Responses, Claude Messages, and Ollama-compatible endpoints all converge on the same internal `Task`. Adapters live in `src/skulk/api/adapters/`. **Why it matters:** clients pick the SDK they prefer; the cluster doesn't care.
 
-- **OpenAI-compatible speech endpoints.** `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/voices`, and the `/v1/realtime` WebSocket serve mounted TTS and STT models through the same placement lifecycle as any other model. **Why it matters:** existing OpenAI audio clients work against your own cluster unchanged.
+- **OpenAI-compatible speech endpoints.** `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/audio/voices`, and the `/v1/realtime` WebSocket serve mounted TTS and STT models through the same placement lifecycle as any other model. **Why it matters:** existing OpenAI audio clients work against your own cluster unchanged.
 
 - **Auto-generated OpenAPI.** Routes carry `tags`, `summary`, and `description`; Pydantic field descriptions flow into the schema. The interactive API browser is built from the live spec. **Why it matters:** the API surface is programmable: generate clients, run contract tests, no doc drift.
 
@@ -242,7 +242,7 @@ Build/runtime note:
 - **Cluster-wide config sync**: update config from the dashboard and sync it across nodes.
 - **Placement previews**: inspect valid placements before launching a model.
 - **Thinking-aware chat UI**: chat with compatible models and surface reasoning content, separated from the answer on both the MLX and llama.cpp engines.
-- **Speech**: OpenAI-compatible text-to-speech and transcription endpoints, a realtime transcription WebSocket, and a hands-free voice loop in the dashboard chat.
+- **Speech**: OpenAI-compatible text-to-speech, transcription, and speech-to-English translation endpoints; voice cloning with bundled reference voices; a realtime transcription WebSocket with server VAD; and a hands-free voice loop in the dashboard chat.
 - **Alternative API compatibility**: OpenAI Chat Completions, OpenAI Responses, Claude Messages, and Ollama.
 - **Experimental inference tuning**: OptiQ and other KV cache backends for long-context and memory experiments.
 
@@ -408,7 +408,7 @@ Skulk exposes several API surfaces:
 - **OpenAI Responses**: `/v1/responses`
 - **Claude Messages**: `/v1/messages`
 - **Ollama-compatible endpoints**: `/ollama/api/...`
-- **Speech endpoints**: `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/voices`, and the `/v1/realtime` WebSocket
+- **Speech endpoints**: `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/audio/voices`, the `/v1/realtime` WebSocket, and the `/v1/fabric/chains/speech` composition WebSocket
 - **Skulk control endpoints**: placement, model store, config, tracing, downloads, cluster state
 
 The most important API doc lives here:
