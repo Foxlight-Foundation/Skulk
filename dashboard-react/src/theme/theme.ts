@@ -71,6 +71,16 @@ interface ColorTokens {
   goldBg: string;
   goldStrong: string; // readable on goldBg
 
+  /**
+   * The living colour (Den design language): marks work actually in flight —
+   * a loading instance, a download in progress, RAM a model is holding.
+   * Never decoration; if it appears in three places on a screen, two are
+   * wrong. Distinct from `gold`, the everyday interactive accent.
+   */
+  live: string;
+  liveBg: string;
+  onLive: string;
+
   // Semantic
   accent: string;
   accentHover: string;
@@ -137,76 +147,87 @@ interface ColorTokens {
 }
 
 const darkColors: ColorTokens = {
-  bg: '#000000',
+  // Den (night on the ridge), from the operator app design system: indigo
+  // surfaces over a deep night canvas, starlight for hairlines and the
+  // everyday accent, amber strictly for whatever is alive. Values track
+  // skulk-app/src/theme/tokens.ts (the 1a Den palette).
+  bg: '#080C1A',
   bgGradient: `
-    radial-gradient(ellipse at 0% 0%, #141428 0%, transparent 50%),
-    radial-gradient(ellipse at 100% 100%, #141428 0%, transparent 50%),
-    #000000
+    radial-gradient(ellipse 90% 55% at 50% -12%, rgba(43, 58, 99, 0.55) 0%, transparent 62%),
+    #080C1A
   `,
-  surface: '#111111',
-  surfaceHover: '#1a1a1a',
-  surfaceElevated: 'rgba(17, 17, 17, 0.95)',
-  surfaceSunken: 'rgba(0, 0, 0, 0.4)',
-  header: 'rgba(5, 2, 31, 0.16)',
-  headerBorder: 'linear-gradient(to right, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.03))',
-  overlay: 'rgba(0, 0, 0, 0.6)',
-  shadow: 'rgba(0, 0, 0, 0.4)',
-  shadowStrong: 'rgba(0, 0, 0, 0.6)',
+  surface: '#12192E',
+  surfaceHover: '#1B2540',
+  surfaceElevated: 'rgba(16, 22, 42, 0.96)',
+  surfaceSunken: 'rgba(43, 58, 99, 0.16)',
+  header: 'rgba(8, 12, 26, 0.78)',
+  headerBorder: 'linear-gradient(to right, rgba(147, 174, 223, 0.22), rgba(147, 174, 223, 0.03))',
+  overlay: 'rgba(5, 7, 15, 0.65)',
+  shadow: 'rgba(0, 0, 0, 0.5)',
+  shadowStrong: 'rgba(0, 0, 0, 0.7)',
 
-  border: 'rgba(255, 255, 255, 0.21)',
-  borderLight: 'rgba(255, 255, 255, 0.18)',
-  borderStrong: 'rgba(255, 255, 255, 0.35)',
+  border: 'rgba(147, 174, 223, 0.13)',
+  borderLight: 'rgba(147, 174, 223, 0.10)',
+  borderStrong: 'rgba(147, 174, 223, 0.22)',
 
-  text: '#ffffff',
-  textSecondary: 'rgba(255, 255, 255, 0.7)',
-  textMuted: 'rgba(255, 255, 255, 0.45)',
-  textOnAccent: '#000000',
+  text: '#F4F6FB',
+  textSecondary: 'rgba(147, 174, 223, 0.78)',
+  textMuted: 'rgba(232, 237, 247, 0.52)',
+  textOnAccent: '#07101E',
 
-  gold: '#FFD700',
-  goldDim: 'rgba(255, 215, 0, 0.5)',
-  goldBg: 'rgba(255, 215, 0, 0.08)',
-  goldStrong: '#FFD700',
+  // The night accent is starlight, not gold: interactive emphasis borrows the
+  // Den's secondary accent so amber (see `live`) stays scarce and alive.
+  gold: '#93AEDF',
+  goldDim: 'rgba(147, 174, 223, 0.45)',
+  goldBg: 'rgba(147, 174, 223, 0.12)',
+  goldStrong: '#B9CBEC',
 
-  accent: '#22c55e',
-  accentHover: '#16a34a',
-  accentBg: 'rgba(34, 197, 94, 0.12)',
-  error: '#ef4444',
-  errorBg: 'rgba(239, 68, 68, 0.12)',
-  errorText: '#fca5a5',
+  live: '#F2A03D',
+  liveBg: 'rgba(242, 160, 61, 0.14)',
+  onLive: '#1C1206',
+
+  accent: '#54C79A',
+  accentHover: '#3FB287',
+  accentBg: 'rgba(84, 199, 154, 0.14)',
+  error: '#F2707E',
+  errorBg: 'rgba(242, 112, 126, 0.14)',
+  errorText: '#F8A9B1',
   errorFill: '#dc2626',
   errorOnFill: '#ffffff',
-  errorOnSurface: '#fca5a5',                 // light red, readable on dark surface
-  warning: '#f59e0b',
-  warningBg: 'rgba(245, 158, 11, 0.12)',
-  warningText: '#fcd34d',
+  errorOnSurface: '#F8A9B1',
+  warning: '#F2A03D',
+  warningBg: 'rgba(242, 160, 61, 0.13)',
+  warningText: '#FFD79A',
   warningFill: '#ffcc33',
   warningOnFill: '#000000',
-  warningOnSurface: '#fcd34d',               // light amber, readable on dark surface
-  info: '#3b82f6',
-  infoBg: 'rgba(59, 130, 246, 0.12)',
+  warningOnSurface: '#F2A03D',
+  info: '#93AEDF',
+  infoBg: 'rgba(147, 174, 223, 0.14)',
 
-  chatBubbleUser: 'rgba(255, 215, 0, 0.08)',
-  chatBubbleAssistant: 'rgba(255, 255, 255, 0.04)',
-  chatBubbleBorder: 'rgba(255, 255, 255, 0.12)',
-  chatCodeBg: 'rgba(0, 0, 0, 0.5)',
+  chatBubbleUser: 'rgba(43, 58, 99, 0.36)',
+  chatBubbleAssistant: 'rgba(43, 58, 99, 0.14)',
+  chatBubbleBorder: 'rgba(147, 174, 223, 0.13)',
+  chatCodeBg: 'rgba(5, 7, 15, 0.55)',
 
-  heatmapLow: '#1e3a8a',
-  heatmapMid: '#FFD700',
-  heatmapHigh: '#ef4444',
+  heatmapLow: '#16203F',
+  heatmapMid: '#93AEDF',
+  heatmapHigh: '#F2A03D',
 
-  deviceIconStroke: '#ffffff',
-  deviceIconFill: 'rgba(255, 255, 255, 0.08)',
-  deviceBody: '#1a1a1a',
-  ramFill: 'rgba(255, 215, 0, 0.75)',
-  deviceLabel: '#ffffff', // white wordmark: stays readable over both the dark case and the gold RAM fill
-  gpuBarBg: 'rgba(80, 80, 90, 0.7)',
-  meshLine: 'rgba(255, 215, 0, 0.35)',
-  meshNode: 'rgba(255, 215, 0, 0.6)',
-  bgMeshLine: 'rgba(255, 215, 0, 0.21)',
-  bgMeshNode: 'rgba(255, 215, 0, 0.10)',
+  deviceIconStroke: '#E8EDF7',
+  deviceIconFill: 'rgba(147, 174, 223, 0.08)',
+  deviceBody: '#131B30',
+  // RAM a model is holding is work in flight: the one place the topology
+  // legitimately burns amber (the Den's "node actually holding work").
+  ramFill: 'rgba(242, 160, 61, 0.75)',
+  deviceLabel: '#E8EDF7',
+  gpuBarBg: 'rgba(43, 58, 99, 0.65)',
+  meshLine: 'rgba(147, 174, 223, 0.30)',
+  meshNode: 'rgba(147, 174, 223, 0.55)',
+  bgMeshLine: 'rgba(147, 174, 223, 0.10)',
+  bgMeshNode: 'rgba(147, 174, 223, 0.08)',
 
-  healthy: '#4ade80',
-  unhealthy: '#ef4444',
+  healthy: '#54C79A',
+  unhealthy: '#F2707E',
 };
 
 const lightColors: ColorTokens = {
@@ -242,6 +263,11 @@ const lightColors: ColorTokens = {
   goldDim: 'rgba(29, 78, 216, 0.55)',
   goldBg: 'rgba(29, 78, 216, 0.10)',
   goldStrong: '#1e3a8a',
+
+  // Noon identity amber (the deeper value that reads on white).
+  live: '#AC580A',
+  liveBg: '#FCF2E6',
+  onLive: '#FFF6EA',
 
   accent: '#0ea5e9',
   accentHover: '#0284c7',

@@ -293,7 +293,7 @@ const PreviewBox = styled.div`
     content: '';
     position: absolute;
     inset: 0;
-    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(255,215,0,0.02) 2px, rgba(255,215,0,0.02) 4px);
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(147,174,223,0.03) 2px, rgba(147,174,223,0.03) 4px);
     pointer-events: none;
   }
 `;

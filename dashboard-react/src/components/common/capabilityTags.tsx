@@ -17,7 +17,10 @@ export function buildTagColors(theme: Theme): Record<string, CapabilityTagColors
   return {
     optiq: { color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.1)', border: 'rgba(167, 139, 250, 0.3)' },
     thinking: { color: theme.colors.info, bg: theme.colors.infoBg, border: theme.colors.infoBg },
-    vision: { color: theme.colors.warning, bg: theme.colors.warningBg, border: theme.colors.warningBg },
+    // Deliberately NOT the warning token: warning is amber in the dark
+    // palette, and capability chips repeat down every list, where the living
+    // colour must not appear as decoration.
+    vision: { color: '#22d3ee', bg: 'rgba(34, 211, 238, 0.1)', border: 'rgba(34, 211, 238, 0.3)' },
     tensor: { color: theme.colors.healthy, bg: theme.colors.accentBg, border: theme.colors.accentBg },
     embedding: { color: '#f472b6', bg: 'rgba(244, 114, 182, 0.1)', border: 'rgba(244, 114, 182, 0.3)' },
     tts: { color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.1)', border: 'rgba(56, 189, 248, 0.3)' },
