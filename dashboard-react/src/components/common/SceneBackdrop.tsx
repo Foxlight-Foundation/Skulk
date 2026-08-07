@@ -2,43 +2,27 @@ import styled, { useTheme } from 'styled-components';
 import type { Theme } from '../../theme';
 
 /**
- * Brand scene behind the app: the valley at night shared with foxlight.ai
- * and the operator app. Two variants, from the design system:
- *
- * - `full`: edge-to-edge painting behind a sparse screen (the cluster view).
- * - `crown`: the top of the sky only, fading out beneath the header, so
- *   dense screens keep the night's warmth without a photograph competing
- *   with columns of identifiers.
+ * Night sky crowning the app: the star field from the brand valley painting
+ * (shared with foxlight.ai and the operator app), pinned to the top of the
+ * viewport and dissolving to nothing on the way down. It sits above the
+ * palette's background gradient and beneath everything interactive, so the
+ * header floats over open sky while dense content keeps a plain ground.
  *
  * Renders only when the active palette declares a scene, so it is a token
  * decision, not a theme branch.
  */
-export interface SceneBackdropProps {
-  variant?: 'full' | 'crown';
-}
-
-const FullLayer = styled.div<{ $image: string }>`
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background-image: ${({ $image }) => $image};
-  background-size: cover;
-  background-position: center 65%;
-`;
-
-const CrownLayer = styled.div<{ $image: string }>`
+const SkyLayer = styled.div<{ $image: string }>`
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
-  height: 42vh;
+  height: 50vh;
   z-index: 0;
   pointer-events: none;
   background-image: ${({ $image }) => $image};
   background-size: cover;
   background-position: center top;
-  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 1) 0%, rgba(0, 0, 0, 0.75) 45%, transparent 100%);
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.61) 0%, rgba(0, 0, 0, 0.29) 55%, transparent 100%);
 `;
 
 const Scrim = styled.div<{ $gradient: string }>`
@@ -47,20 +31,13 @@ const Scrim = styled.div<{ $gradient: string }>`
   background: ${({ $gradient }) => $gradient};
 `;
 
-/** Render the scene layer, or nothing when the palette declares none. */
-export function SceneBackdrop({ variant = 'full' }: SceneBackdropProps) {
+/** Render the night-sky layer, or nothing when the palette declares none. */
+export function SceneBackdrop() {
   const theme = useTheme() as Theme;
   if (theme.colors.scene === 'none') return null;
-  if (variant === 'crown') {
-    return (
-      <CrownLayer aria-hidden $image={theme.colors.scene}>
-        <Scrim $gradient={theme.colors.sceneScrim} />
-      </CrownLayer>
-    );
-  }
   return (
-    <FullLayer aria-hidden $image={theme.colors.scene}>
-      <Scrim $gradient={theme.colors.sceneScrim} />
-    </FullLayer>
+    <SkyLayer aria-hidden $image={theme.colors.scene}>
+      {theme.colors.sceneScrim !== 'none' && <Scrim $gradient={theme.colors.sceneScrim} />}
+    </SkyLayer>
   );
 }

@@ -6,6 +6,8 @@
  * Components must never branch on theme name — all variation lives here.
  */
 
+import valleyNight from '../assets/scene/valley-night.webp';
+
 const sharedFonts = {
   body: "'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
   mono: "'JetBrains Mono', 'Fira Code', monospace",
@@ -142,11 +144,12 @@ interface ColorTokens {
   bgMeshNode: string;
 
   /**
-   * Full-bleed scene painting behind the whole app, or 'none'. The night
-   * palette shows the brand valley (the same painting foxlight.ai and the
-   * operator app use) in place of the abstract mesh; a palette without a
-   * scene keeps the mesh. Components branch on this token's value, never on
-   * the theme name.
+   * Scene image behind the app (a CSS background-image value), or 'none'.
+   * The night palette crowns the viewport with the star field from the
+   * brand valley painting (shared with foxlight.ai and the operator app),
+   * fading to nothing on the way down; a palette without a scene keeps the
+   * abstract mesh instead. Components branch on this token's value, never
+   * on the theme name.
    */
   scene: string;
   /** Structural scrim over the scene: sinks the top for the header and
@@ -245,7 +248,9 @@ const darkColors: ColorTokens = {
   bgMeshLine: 'rgba(147, 174, 223, 0.10)',
   bgMeshNode: 'rgba(147, 174, 223, 0.08)',
 
-  scene: 'none',
+  // The star field crowns the viewport and dissolves on the way down; the
+  // CSS night gradient beneath it carries the rest of the atmosphere.
+  scene: `url(${valleyNight})`,
   sceneScrim: 'none',
 
   healthy: '#54C79A',
