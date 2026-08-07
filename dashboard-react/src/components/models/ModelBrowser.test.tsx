@@ -6,41 +6,46 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { darkTheme } from '../../theme/theme';
 import type { HuggingFaceModel, ModelInfo } from '../../types/models';
 import { ModelBrowser } from './ModelBrowser';
+import type { BurstInfo } from './burst';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 vi.mock('../../i18n/tolgee', () => ({
   useSkulkTranslation: () => ({
-    t: (_key: string, fallback: string) => fallback,
+    t: (_key: string, fallback: string, params?: Record<string, unknown>) =>
+      params
+        ? fallback.replace(/\{(\w+)\}/g, (_, name: string) => String(params[name] ?? ''))
+        : fallback,
   }),
 }));
 
 const MODELS: ModelInfo[] = [
   {
     id: 'mlx-community/Qwen3-4B-4bit',
-    name: 'Qwen3 4B',
-    base_model: 'qwen3-4b',
+    name: 'Qwen3-4B-4bit',
+    base_model: 'Qwen3 4B',
     family: 'qwen',
+    quantization: '4bit',
     storage_size_megabytes: 2100,
   },
   {
     id: 'mlx-community/LongCat-AudioDiT-1B-4bit',
     name: 'LongCat AudioDiT',
-    base_model: 'longcat-audiodit',
+    base_model: 'LongCat AudioDiT 1B',
     family: 'longcat_audiodit',
     storage_size_megabytes: 1300,
   },
   {
     id: 'CogniSoftOrg/canary-1b-v2-mlx-bf16',
     name: 'Canary 1B',
-    base_model: 'canary-1b',
+    base_model: 'Canary 1B',
     family: 'canary',
     storage_size_megabytes: 3100,
   },
 ];
 
 const HUB_MODELS: HuggingFaceModel[] = [{
-  id: 'org/hub-model',
+  id: 'org/hub-model-8bit-GGUF',
   author: 'org',
   downloads: 100,
   likes: 10,
@@ -51,7 +56,10 @@ const HUB_MODELS: HuggingFaceModel[] = [{
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
-async function renderBrowser(): Promise<void> {
+async function renderBrowser(
+  onSelect = vi.fn(),
+  getBurstInfo?: (variantId: string) => BurstInfo | null,
+): Promise<ReturnType<typeof vi.fn>> {
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
@@ -64,14 +72,25 @@ async function renderBrowser(): Promise<void> {
           favorites={new Set()}
           canModelFit={() => true}
           getModelFitStatus={() => 'fits_now'}
-          onSelect={vi.fn()}
+          onSelect={onSelect}
           onToggleFavorite={vi.fn()}
           hfTrendingModels={HUB_MODELS}
           mode="store-download"
+          getBurstInfo={getBurstInfo}
+          fleetMemoryBytes={64 * 2 ** 30}
         />
       </ThemeProvider>,
     );
   });
+  return onSelect;
+}
+
+function familyChips(): HTMLButtonElement[] {
+  return Array.from(
+    container?.querySelectorAll<HTMLButtonElement>(
+      '[role="group"][aria-label="Filter supported models by family"] button',
+    ) ?? [],
+  );
 }
 
 afterEach(async () => {
@@ -94,12 +113,8 @@ describe('ModelBrowser store discovery taxonomy', () => {
     expect(sourceButtons?.[0]?.textContent).toBe('Supported models');
     expect(sourceButtons?.[1]?.textContent).toBe('Search Hugging Face');
 
-    const familySelect = container?.querySelector<HTMLSelectElement>(
-      'select[aria-label="Filter supported models by family"]',
-    );
-    expect(familySelect).not.toBeNull();
-    expect(Array.from(familySelect?.options ?? []).map((option) => option.text)).toEqual([
-      'All supported models',
+    expect(familyChips().map((chip) => chip.textContent)).toEqual([
+      'All',
       'Canary',
       'LongCat AudioDiT',
       'Qwen',
@@ -109,15 +124,9 @@ describe('ModelBrowser store discovery taxonomy', () => {
   it('filters catalog families and switches separately to Hugging Face discovery', async () => {
     await renderBrowser();
 
-    const familySelect = container?.querySelector<HTMLSelectElement>(
-      'select[aria-label="Filter supported models by family"]',
-    );
-    expect(familySelect).not.toBeNull();
-    await act(async () => {
-      if (!familySelect) return;
-      familySelect.value = 'canary';
-      familySelect.dispatchEvent(new Event('change', { bubbles: true }));
-    });
+    const canaryChip = familyChips().find((chip) => chip.textContent === 'Canary');
+    expect(canaryChip).not.toBeUndefined();
+    await act(async () => canaryChip?.click());
 
     expect(container?.textContent).toContain('Canary 1B');
     expect(container?.textContent).not.toContain('Qwen3 4B');
@@ -127,10 +136,63 @@ describe('ModelBrowser store discovery taxonomy', () => {
     expect(hubButton).not.toBeUndefined();
     await act(async () => hubButton?.click());
 
-    expect(container?.querySelector('select[aria-label="Filter supported models by family"]')).toBeNull();
+    expect(familyChips().length).toBe(0);
     expect(container?.querySelector<HTMLInputElement>('input')?.placeholder)
       .toBe('Search all of Hugging Face...');
-    expect(container?.textContent).toContain('org/hub-model');
+    expect(container?.textContent).toContain('hub-model');
+    // Quantization and artifact format derived from the repo name are
+    // surfaced on the row.
+    expect(container?.textContent).toContain('8bit');
+    expect(container?.textContent).toContain('GGUF');
     expect(container?.textContent).not.toContain('Canary 1B');
+  });
+
+  it('shows readable card titles and starts downloads only from the explicit button', async () => {
+    const onSelect = await renderBrowser();
+
+    // Titles come from the card's human-readable base model, not the repo tail.
+    expect(container?.textContent).toContain('Qwen3 4B');
+    // A row that represents exactly one artifact surfaces its quantization
+    // and artifact format (the fixture id is an mlx-community repo).
+    expect(container?.textContent).toContain('4bit');
+    expect(container?.textContent).toContain('MLX');
+
+    // Clicking the row body of a single-variant group must NOT start a download.
+    const rowTitle = Array.from(container?.querySelectorAll('span') ?? [])
+      .find((el) => el.textContent === 'Qwen3 4B');
+    expect(rowTitle).not.toBeUndefined();
+    await act(async () => rowTitle?.click());
+    expect(onSelect).not.toHaveBeenCalled();
+
+    // The explicit Download button starts it.
+    const downloadButton = container?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Download mlx-community/Qwen3-4B-4bit"]',
+    );
+    expect(downloadButton).not.toBeNull();
+    await act(async () => downloadButton?.click());
+    expect(onSelect).toHaveBeenCalledWith('mlx-community/Qwen3-4B-4bit');
+  });
+
+  it('partitions burst models after placeable ones and keeps them interactive', async () => {
+    // Qwen3 4B exceeds the (fictional) fleet; the others are placeable.
+    const onSelect = await renderBrowser(vi.fn(), (variantId) =>
+      variantId.includes('Qwen3-4B')
+        ? { reason: 'size', neededBytes: 128 * 2 ** 30 }
+        : null);
+
+    expect(container?.textContent).toContain('Needs burst capacity');
+    expect(container?.querySelector('[aria-label="Burst"]')).not.toBeNull();
+
+    // The burst section renders after the placeable card.
+    const text = container?.textContent ?? '';
+    expect(text.indexOf('Canary 1B')).toBeLessThan(text.indexOf('Qwen3 4B'));
+
+    // Burst rows still download from their explicit button.
+    const downloadButton = container?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Download mlx-community/Qwen3-4B-4bit"]',
+    );
+    expect(downloadButton).not.toBeNull();
+    await act(async () => downloadButton?.click());
+    expect(onSelect).toHaveBeenCalledWith('mlx-community/Qwen3-4B-4bit');
   });
 });

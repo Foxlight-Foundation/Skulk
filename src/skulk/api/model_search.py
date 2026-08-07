@@ -1,29 +1,233 @@
 """Hugging Face repository and GGUF filename search helpers."""
 
 import re
+from functools import lru_cache
 from pathlib import PurePosixPath
+from typing import cast
 
-from huggingface_hub import ModelInfo, list_models
+from huggingface_hub import (
+    ModelInfo,
+    hf_hub_download,  # pyright: ignore[reportUnknownVariableType]
+    list_models,
+)
 
-from skulk.api.types import HuggingFaceSearchResult
+from skulk.api.types import GgufQuantOption, HuggingFaceSearchResult
+from skulk.shared.models.model_cards import (
+    ModelId,
+    gguf_weight_siblings,
+    is_companion_gguf,
+)
 
 _GGUF_EXTENSION = ".gguf"
 _GGUF_SHARD_SUFFIX = re.compile(r"-\d{5}-of-\d{5}$", re.IGNORECASE)
 _MIN_FILENAME_SEARCH_TERM_LENGTH = 4
 _MAX_FILENAME_SEARCH_CANDIDATES = 100
+# Upstream fetch bounds: offset paging over-fetches limit + offset expanded
+# records, so both must be clamped or a hostile query could hold a worker
+# thread on an enormous Hub listing. The dashboard pages to at most 200.
+_MAX_SEARCH_LIMIT = 200
+_MAX_SEARCH_OFFSET = 2000
+# Model card READMEs are prose; anything beyond this is not a summary source.
+_MAX_CARD_README_BYTES = 2_000_000
+
+
+# Enrichment requested from the list endpoint. Deliberately narrow: the
+# ``gguf`` expansion also ships each repo's full chat template, which is
+# stripped before the result leaves this module.
+_EXPAND_FIELDS = (
+    "downloads",
+    "likes",
+    "lastModified",
+    "tags",
+    "pipeline_tag",
+    "library_name",
+    "gated",
+    "cardData",
+    "safetensors",
+    "gguf",
+    "config",
+)
+
+
+_BASE_MODEL_TAG = re.compile(r"^base_model:(finetune|quantized|merge|adapter):(.+)$")
+_ARXIV_TAG = re.compile(r"^arxiv:(\d{4}\.\d{4,5})$")
+_LANGUAGE_TAG = re.compile(r"^[a-z]{2}$")
+_MAX_LANGUAGES = 6
+
+_FRONTMATTER = re.compile(r"^---\n.*?\n---\n", re.S)
+_HTML_TAG = re.compile(r"<[^>]+>")
+_MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_CARD_SUMMARY_MAX_CHARS = 700
+
+
+def extract_card_summary(markdown: str) -> str:
+    """First prose paragraphs of a model card, stripped of markup.
+
+    The model card README is the only place Hugging Face describes what a
+    model actually is, so this powers the dashboard's "what is this thing"
+    popover text. Headings, tables, images, HTML, and code fences are
+    dropped; short fragments are skipped so badges and one-liners don't win.
+    """
+    body = _FRONTMATTER.sub("", markdown)
+    body = _MARKDOWN_IMAGE.sub("", body)
+    body = _HTML_TAG.sub("", body)
+    summary_parts: list[str] = []
+    for paragraph in body.split("\n\n"):
+        text = " ".join(paragraph.split())
+        if len(text) < 80 or text.startswith(("#", "|", "```", "[", "-", "*")):
+            continue
+        summary_parts.append(text)
+        if sum(len(part) for part in summary_parts) >= 300:
+            break
+    summary = "\n\n".join(summary_parts)
+    if len(summary) > _CARD_SUMMARY_MAX_CHARS:
+        summary = summary[:_CARD_SUMMARY_MAX_CHARS].rsplit(" ", 1)[0] + "…"
+    return summary
+
+
+_QUANT_LABEL = re.compile(r"(I?Q\d[A-Z0-9_]*|BF16|F16|F32|FP8|FP16)", re.IGNORECASE)
+
+
+def list_gguf_quant_options(model_id: str) -> list[GgufQuantOption]:
+    """Enumerate a GGUF repository's downloadable quantizations.
+
+    Groups the repo's LM-weight GGUF files into shard groups, excluding
+    companion artifacts (drafters, imatrix calibration files, projectors),
+    and returns one option per quant with its loadable first shard, a human
+    label, exact total bytes, and shard count, smallest first. Empty for a
+    non-GGUF repo or one that ships only companions.
+    """
+    files = gguf_weight_siblings(ModelId(model_id))
+    groups: dict[str, list[tuple[str, int]]] = {}
+    for name, size in files:
+        if is_companion_gguf(name):
+            continue
+        stem = name[: -len(_GGUF_EXTENSION)]
+        group_key = _GGUF_SHARD_SUFFIX.sub("", stem)
+        groups.setdefault(group_key, []).append((name, size))
+
+    options: list[GgufQuantOption] = []
+    for group_key, members in groups.items():
+        first = min(name for name, _ in members)
+        basename = group_key.rsplit("/", 1)[-1]
+        directory = group_key.rsplit("/", 1)[0] if "/" in group_key else ""
+        # Prefer a quant token parsed from the directory, then the basename;
+        # a generic directory name ("gguf") must not label every option
+        # identically when basenames carry the real quant.
+        directory_match = _QUANT_LABEL.search(directory) if directory else None
+        basename_match = _QUANT_LABEL.search(basename)
+        if directory and (directory_match or not basename_match):
+            label = directory
+        elif basename_match:
+            label = basename_match.group(1)
+        else:
+            label = basename
+        options.append(
+            GgufQuantOption(
+                gguf_file=first,
+                label=label,
+                total_bytes=sum(size for _, size in members),
+                shard_count=len(members),
+            )
+        )
+    options.sort(key=lambda option: option.total_bytes)
+    return options
+
+
+@lru_cache(maxsize=256)
+def fetch_card_summary(model_id: str) -> str:
+    """Download one repository's README and extract its prose summary.
+
+    Cached per process; exceptions propagate uncached so a transient network
+    failure does not pin an empty summary.
+    """
+    readme_path = hf_hub_download(model_id, "README.md")
+    with open(readme_path, encoding="utf-8", errors="replace") as handle:
+        # Bounded read: a crafted or LFS-backed README must not balloon
+        # memory; real model cards are well under this.
+        return extract_card_summary(handle.read(_MAX_CARD_README_BYTES))
 
 
 def _to_search_result(
     model: ModelInfo, *, matched_file: str | None = None
 ) -> HuggingFaceSearchResult:
+    """Map one Hugging Face listing onto the dashboard's search-result shape."""
+    param_count: int | None = None
+    if model.safetensors is not None and model.safetensors.total:
+        param_count = int(model.safetensors.total)
+
+    gguf_raw = cast(object, getattr(model, "gguf", None))
+    gguf: dict[str, object] = (
+        cast("dict[str, object]", gguf_raw) if isinstance(gguf_raw, dict) else {}
+    )
+    gguf_total = gguf.get("total")
+    if param_count is None and isinstance(gguf_total, int):
+        param_count = gguf_total
+    total_file_size = gguf.get("totalFileSize")
+    context_length = gguf.get("context_length")
+
+    license_id: str | None = None
+    if model.card_data is not None:
+        license_value = cast(object, getattr(model.card_data, "license", None))
+        if isinstance(license_value, str):
+            license_id = license_value
+
+    author = model.author or ""
+    if not author and "/" in model.id:
+        author = model.id.split("/", 1)[0]
+
+    base_model_repo: str | None = None
+    base_model_relation: str | None = None
+    arxiv_ids: list[str] = []
+    languages: list[str] = []
+    for tag in model.tags or ():
+        base_match = _BASE_MODEL_TAG.match(tag)
+        if base_match and base_model_repo is None:
+            base_model_relation = base_match.group(1)
+            base_model_repo = base_match.group(2)
+            continue
+        arxiv_match = _ARXIV_TAG.match(tag)
+        if arxiv_match:
+            arxiv_ids.append(arxiv_match.group(1))
+            continue
+        if _LANGUAGE_TAG.match(tag) and len(languages) < _MAX_LANGUAGES:
+            languages.append(tag)
+
+    architecture: str | None = None
+    config_raw = cast(object, getattr(model, "config", None))
+    if isinstance(config_raw, dict):
+        architectures = cast("dict[str, object]", config_raw).get("architectures")
+        if isinstance(architectures, list) and architectures:
+            first = cast("list[object]", architectures)[0]
+            if isinstance(first, str):
+                architecture = first
+    if architecture is None:
+        gguf_architecture = gguf.get("architecture")
+        if isinstance(gguf_architecture, str):
+            architecture = gguf_architecture
+
     return HuggingFaceSearchResult(
         id=model.id,
-        author=model.author or "",
+        author=author,
         downloads=model.downloads or 0,
         likes=model.likes or 0,
         last_modified=str(model.last_modified or ""),
         tags=list(model.tags or []),
         matched_file=matched_file,
+        pipeline_tag=model.pipeline_tag,
+        library_name=model.library_name,
+        # ``gated`` is False, "auto", or "manual"; any truthy value means the
+        # user must accept the license and present a token before downloading.
+        gated=bool(model.gated),
+        license=license_id,
+        param_count=param_count,
+        total_file_size=total_file_size if isinstance(total_file_size, int) else None,
+        context_length=context_length if isinstance(context_length, int) else None,
+        base_model_repo=base_model_repo,
+        base_model_relation=base_model_relation,
+        arxiv_ids=arxiv_ids,
+        languages=languages,
+        architecture=architecture,
     )
 
 
@@ -59,7 +263,11 @@ def _matching_file(model: ModelInfo, requested_filename: str) -> str | None:
 
 
 def search_hugging_face_models(
-    query: str, limit: int, mlx_only: bool
+    query: str,
+    limit: int,
+    mlx_only: bool,
+    offset: int = 0,
+    pipeline_tag: str | None = None,
 ) -> list[HuggingFaceSearchResult]:
     """Search repositories and resolve exact GGUF filenames when requested.
 
@@ -70,26 +278,40 @@ def search_hugging_face_models(
     repositories, and retain repositories whose manifest contains the exact
     basename. Ordinary text searches keep the single upstream repository query.
 
+    An empty query sorts by Hugging Face's trending score (what is hot right
+    now); a text query sorts by downloads. Results carry the additive metadata
+    the dashboard's discovery rows surface: task and library tags, license and
+    gating, parameter counts, and exact GGUF artifact sizes when reported.
+
     Args:
         query: User-entered repository text or GGUF filename.
         limit: Maximum number of repositories to return.
         mlx_only: Restrict both search paths to the ``mlx-community`` author.
+        offset: Number of leading results to skip, for "show more" paging.
+        pipeline_tag: Restrict results to one Hugging Face task, for example
+            ``text-generation`` or ``automatic-speech-recognition``.
 
     Returns:
         Search results, with ``matched_file`` set for exact GGUF filename matches.
     """
     if limit <= 0:
         return []
+    limit = min(limit, _MAX_SEARCH_LIMIT)
+    offset = min(max(offset, 0), _MAX_SEARCH_OFFSET)
 
     author = "mlx-community" if mlx_only else None
+    # The list endpoint pages by cursor with no offset parameter; emulate
+    # offset by over-fetching one bounded window and slicing.
     primary_models = list(
         list_models(
             search=query or None,
             author=author,
-            sort="downloads",
-            limit=limit,
+            pipeline_tag=pipeline_tag,
+            sort="downloads" if query else "trending_score",
+            limit=limit + offset,
+            expand=list(_EXPAND_FIELDS),
         )
-    )
+    )[offset:]
 
     filename = _gguf_filename(query)
     if filename is None:

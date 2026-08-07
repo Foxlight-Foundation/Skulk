@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import random
+import re
 import shutil
 import socket
 import time
@@ -95,7 +96,11 @@ from skulk.api.field_telemetry import (
     tap_generation_stream,
 )
 from skulk.api.keepalive import with_sse_keepalive
-from skulk.api.model_search import search_hugging_face_models
+from skulk.api.model_search import (
+    fetch_card_summary,
+    list_gguf_quant_options,
+    search_hugging_face_models,
+)
 from skulk.api.node_health import (
     compute_node_health,
     live_data_transports,
@@ -153,6 +158,8 @@ from skulk.api.types import (
     ExtractPageToolResponse,
     FinishReason,
     GenerationStats,
+    GgufQuantOptions,
+    HuggingFaceCardSummary,
     HuggingFaceSearchResult,
     ImageData,
     ImageEditsTaskParams,
@@ -1788,6 +1795,29 @@ class API:
                 "manifests and return the matched repo-relative file path."
             ),
         )(self.search_models)
+        self.app.get(
+            "/models/card-summary",
+            tags=["Models"],
+            summary="Fetch a Hugging Face model card summary",
+            description=(
+                "Download a repository's model card README and return its first "
+                "prose paragraphs with markup stripped, for the dashboard's "
+                "model discovery popovers. The summary is empty when the card "
+                "has no usable prose."
+            ),
+        )(self.get_model_card_summary)
+        self.app.get(
+            "/models/gguf-quants",
+            tags=["Models"],
+            summary="List a GGUF repository's quantizations",
+            description=(
+                "Enumerate the downloadable quantizations of a Hugging Face "
+                "GGUF repository: one option per quant shard group with its "
+                "loadable first shard, human label, exact total bytes, and "
+                "shard count, smallest first. Companion artifacts such as "
+                "speculative drafters and imatrix files are excluded."
+            ),
+        )(self.get_gguf_quant_options)
         self.app.post(
             "/v1/chat/completions",
             response_model=None,
@@ -7152,15 +7182,62 @@ class API:
             {"message": "Model card deleted", "model_id": str(model_id)}
         )
 
+    async def get_model_card_summary(self, model_id: str) -> HuggingFaceCardSummary:
+        """Return the prose summary of one Hugging Face repository's model card.
+
+        Args:
+            model_id: Repository id in ``owner/name`` form.
+
+        Returns:
+            The extracted summary; the ``summary`` field is empty when the
+            README is missing or carries no usable prose.
+        """
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", model_id):
+            raise HTTPException(status_code=422, detail="Invalid model id")
+        try:
+            summary = await to_thread.run_sync(fetch_card_summary, model_id)
+        except Exception:
+            summary = ""
+        return HuggingFaceCardSummary(model_id=model_id, summary=summary)
+
+    async def get_gguf_quant_options(self, model_id: str) -> GgufQuantOptions:
+        """List one GGUF repository's downloadable quantizations.
+
+        Args:
+            model_id: Repository id in ``owner/name`` form.
+
+        Returns:
+            The quant inventory; empty options for a non-GGUF repository.
+        """
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", model_id):
+            raise HTTPException(status_code=422, detail="Invalid model id")
+        try:
+            options = await to_thread.run_sync(list_gguf_quant_options, model_id)
+        except Exception:
+            options = []
+        return GgufQuantOptions(model_id=model_id, options=options)
+
     async def search_models(
-        self, query: str = "", limit: int = 20, mlx_only: bool = False
+        self,
+        query: str = "",
+        limit: int = Query(default=20, ge=1, le=200),
+        mlx_only: bool = False,
+        offset: int = Query(default=0, ge=0, le=2000),
+        pipeline_tag: str | None = None,
     ) -> list[HuggingFaceSearchResult]:
-        """Search Hugging Face repositories and exact GGUF filenames."""
+        """Search Hugging Face repositories and exact GGUF filenames.
+
+        An empty query returns trending repositories; ``offset`` skips leading
+        results for "show more" paging, and ``pipeline_tag`` restricts results
+        to one Hugging Face task.
+        """
         return await to_thread.run_sync(
             search_hugging_face_models,
             query,
             limit,
             mlx_only,
+            offset,
+            pipeline_tag,
         )
 
     async def run(self):

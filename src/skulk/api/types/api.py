@@ -880,6 +880,91 @@ class HuggingFaceSearchResult(BaseModel):
             "for ordinary repository search results."
         ),
     )
+    pipeline_tag: str | None = Field(
+        default=None,
+        description="Hugging Face task tag (for example text-generation), when declared.",
+    )
+    library_name: str | None = Field(
+        default=None,
+        description="Framework the repository targets (transformers, diffusers, mlx, gguf).",
+    )
+    gated: bool = Field(
+        default=False,
+        description=(
+            "True when downloading requires accepting the repository's license "
+            "on Hugging Face and presenting an access token."
+        ),
+    )
+    license: str | None = Field(
+        default=None,
+        description="License identifier from the model card, when declared.",
+    )
+    param_count: int | None = Field(
+        default=None,
+        description=(
+            "Total parameter count reported by the repository's safetensors or "
+            "GGUF metadata, when available."
+        ),
+    )
+    total_file_size: int | None = Field(
+        default=None,
+        description="Exact total artifact bytes reported by GGUF metadata, when available.",
+    )
+    context_length: int | None = Field(
+        default=None,
+        description="Model context window reported by GGUF metadata, when available.",
+    )
+    base_model_repo: str | None = Field(
+        default=None,
+        description="Parent repository this model derives from, when tagged.",
+    )
+    base_model_relation: str | None = Field(
+        default=None,
+        description="How this model derives from its parent: finetune, quantized, merge, or adapter.",
+    )
+    arxiv_ids: list[str] = Field(
+        default_factory=list,
+        description="arXiv paper identifiers tagged on the repository.",
+    )
+    languages: list[str] = Field(
+        default_factory=list,
+        description="ISO 639-1 language tags declared on the repository.",
+    )
+    architecture: str | None = Field(
+        default=None,
+        description="Model architecture from repository config or GGUF metadata.",
+    )
+
+
+class GgufQuantOption(BaseModel):
+    """One downloadable quantization of a GGUF repository."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    gguf_file: str = Field(description="Repo-relative first shard of the quant's group; pin this to download it.")
+    label: str = Field(description="Human quant label, e.g. Q4_K_M or UD-Q2_K_XL.")
+    total_bytes: int = Field(description="Exact total bytes of the quant's shard group.")
+    shard_count: int = Field(description="Number of GGUF shards in the group.")
+
+
+class GgufQuantOptions(BaseModel):
+    """Quantization inventory for one GGUF repository."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    model_id: str
+    options: list[GgufQuantOption] = Field(default_factory=list)
+
+
+class HuggingFaceCardSummary(BaseModel):
+    """Prose summary extracted from a Hugging Face model card README."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    model_id: str
+    summary: str = Field(
+        description="First prose paragraphs of the model card, markup stripped; empty when the card has no usable prose.",
+    )
 
 
 class StoreDownloadRequest(BaseModel):

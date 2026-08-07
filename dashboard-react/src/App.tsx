@@ -209,13 +209,13 @@ export function App() {
     localNodeId,
     connected,
     downloads,
-    nodeDisk,
     instances,
     runners,
     nodeThunderbolt,
     nodeThunderboltBridge,
     nodeRdmaCtl,
     nodeCapabilities,
+    nodeResources,
     thunderboltBridgeCycles,
   } = useClusterState();
   const realtimeTranscriptionAvailable = Boolean(
@@ -669,8 +669,8 @@ export function App() {
             {activeRoute === 'model-store' ? (
               <ModelStorePage
                 topology={topology}
+                nodeResources={nodeResources}
                 downloads={downloads}
-                nodeDisk={nodeDisk}
                 instances={instances}
                 runners={runners}
                 onChat={(modelId) => { dispatch(chatActions.selectModel(modelId)); setActiveRoute('chat'); }}

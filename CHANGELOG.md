@@ -133,6 +133,42 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- Redesigned the dashboard's Find Models dialog. Catalog rows now lead with the
+  card's human-readable model name over a family monogram tile, show capability
+  chips shared with the store table plus size and context metadata, and label
+  store state with an explicit "In store" chip instead of bare check and arrow
+  glyphs. Downloads start only from a labeled Download button (per quantization
+  in the expanded size list), so clicking a row can no longer silently kick off
+  a multi-hundred-gigabyte transfer. The family sidebar dropdown became a chip
+  rail, and Hugging Face results gained author and popularity metadata lines.
+  Rows carry the model's brand mark (or a monogram when no vector or bundled
+  raster mark exists), quantization and artifact-format tiles, and a
+  fleet-first ordering: models the local fleet can serve list first, and
+  models needing more capacity move to a "Needs burst capacity" section with
+  an amber Burst chip explaining whether size or artifact format exceeds the
+  fleet. Burst rows stay fully downloadable; Hugging Face size verdicts prefer
+  exact GGUF artifact sizes and metadata parameter counts, falling back to
+  name-derived estimates marked as such. The Hugging Face trending list now
+  sorts by Hugging Face's trending score instead of all-time downloads, gains
+  a "Show more" pager, and rows surface task chips, gated-license markers,
+  parameter counts, artifact sizes, and context lengths from the enriched
+  `/models/search` response. Results also carry derivation lineage
+  (finetune, quantized, merge, adapter, shown as a small classification
+  tile on the row), tagged papers, languages, and architecture, and every
+  discovery row links its exact Hugging Face repository. The row's info
+  popover became a real dossier: it lazily fetches the model card's own
+  description through the new `GET /models/card-summary` endpoint and shows
+  lineage with a link to the parent repository, architecture, languages,
+  license, and arXiv papers. A task chip rail on the search tab filters
+  trending and search results by Hugging Face task (text, vision, STT,
+  TTS, embedding, image generation) via the endpoint's `pipeline_tag`
+  parameter. GGUF results expand into a per-quantization download chooser
+  backed by the new `GET /models/gguf-quants` endpoint, and default GGUF
+  selection now ranks companion artifacts (speculative drafters such as
+  dspark/dflash files, imatrix calibration data) behind every real quant,
+  so adding a repository can no longer silently stage a 10 GB drafter
+  wearing the model's name.
+
 - **Concurrent slots on the served llama.cpp engine no longer shrink each
   request's context window.** `SKULK_LLAMA_SERVER_PARALLEL` asks a node to serve
   N generations at once. Until now that came with a hidden cost: llama.cpp gave

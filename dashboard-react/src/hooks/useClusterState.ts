@@ -15,6 +15,7 @@ import {
   type RawThunderboltInfo,
   type RawRdmaCtl,
   type RawNodeHealth,
+  type RawNodeResources,
   type RawConnectionEdge,
 } from '../store/endpoints/cluster';
 
@@ -330,6 +331,7 @@ export interface ClusterState {
   nodeThunderboltBridge: Record<string, RawThunderboltBridge>;
   nodeRdmaCtl: Record<string, RawRdmaCtl>;
   nodeCapabilities: Record<string, string[]>;
+  nodeResources: Record<string, RawNodeResources>;
   thunderboltBridgeCycles: string[][];
 }
 
@@ -415,6 +417,7 @@ export function useClusterState(): ClusterState {
     nodeThunderbolt: data?.nodeThunderbolt ?? {},
     nodeThunderboltBridge: data?.nodeThunderboltBridge ?? {},
     nodeRdmaCtl: data?.nodeRdmaCtl ?? {},
+    nodeResources: data?.nodeResources ?? {},
     nodeCapabilities: data?.nodeCapabilities ?? {},
     thunderboltBridgeCycles: data?.thunderboltBridgeCycles ?? [],
   };

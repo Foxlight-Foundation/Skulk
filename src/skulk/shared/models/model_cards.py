@@ -1,4 +1,5 @@
 import json
+import re
 import struct
 from collections.abc import Awaitable, Callable, Iterable
 from enum import Enum
@@ -1643,18 +1644,47 @@ def _gguf_quant_label(name: str) -> str:
     return ""
 
 
+# Companion artifacts a GGUF repo ships ALONGSIDE the model: speculative
+# drafters (dspark/dflash/draft), importance-matrix calibration files, and
+# multimodal projectors. Useless (or worse, actively misleading) as the main
+# model: a repo default that picked unsloth's ``dspark-*-Q8_0.gguf`` drafter
+# would stage a 10 GB draft model wearing a 284B model's name. Word-boundary
+# matched so ordinary model names containing these letters don't trip it.
+_COMPANION_GGUF_PATTERN: Final = re.compile(
+    r"(?:^|[^a-z0-9])(?:mmproj|imatrix|dspark|dflash|draft)(?:$|[^a-z])"
+)
+
+
+def is_companion_gguf(name: str) -> bool:
+    """True when a GGUF filename names a companion artifact, not LM weights.
+
+    Companions are speculative-decoding drafters (``dspark``/``dflash``/
+    ``draft``), importance-matrix calibration files, and multimodal
+    projectors. They are ranked dead-last by default selection so a repo
+    default never picks one, while a drafter-only repo (a published draft
+    companion) still resolves.
+    """
+    return _COMPANION_GGUF_PATTERN.search(name.rsplit("/", 1)[-1].lower()) is not None
+
+
 def select_preferred_gguf(gguf_files: "list[tuple[str, int]]") -> str:
     """Pick the GGUF weights file to load: best quant, then basename order.
 
     Prefers a real quantization (Q4_K_M first) over the unquantized BF16/F16 a
-    multi-quant repo also ships (#334). The basename tie-break makes the choice
+    multi-quant repo also ships (#334), and ranks companion artifacts
+    (drafters, imatrix files) behind every real quant so a repo default never
+    stages a speculator as the model. The basename tie-break makes the choice
     deterministic and, for a shard group, picks the first shard. The runner's
     ``select_gguf_file`` falls back to this same ranking when the card does not
     pin a file, so download, sizing, and loading all agree.
     """
     return min(
         (name for name, _ in gguf_files),
-        key=lambda name: (gguf_quant_rank(name), name.rsplit("/", 1)[-1]),
+        key=lambda name: (
+            is_companion_gguf(name),
+            gguf_quant_rank(name),
+            name.rsplit("/", 1)[-1],
+        ),
     )
 
 
