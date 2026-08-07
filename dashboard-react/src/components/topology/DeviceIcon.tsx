@@ -7,9 +7,9 @@ const APPLE_LOGO_PATH =
 const LOGO_NATIVE_WIDTH = 814;
 const LOGO_NATIVE_HEIGHT = 1000;
 
-/** Centered Apple mark shared by every Mac glyph. `fill` is the theme-aware
- *  device label colour so the mark reads on the case at both hours and over
- *  the RAM fill. */
+/** Centered Apple mark shared by every Mac glyph. `fill` is the device
+ *  outline colour, so the mark always matches the case's wire at both hours
+ *  and stays readable over the RAM fill. */
 function AppleMark({ cx, centerY, targetH, fill }: { cx: number; centerY: number; targetH: number; fill: string }) {
   const scale = targetH / LOGO_NATIVE_HEIGHT;
   const x = cx - (LOGO_NATIVE_WIDTH * scale) / 2;
@@ -53,8 +53,8 @@ export function DeviceIcon({
   const cy = height / 2;
   const common = { cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId, ramColor };
 
-  if (model === 'mac-studio') return <MacStudio {...common} bodyColor={bodyColor} labelColor={labelColor} />;
-  if (model === 'mac-mini') return <MacMini {...common} bodyColor={bodyColor} labelColor={labelColor} />;
+  if (model === 'mac-studio') return <MacStudio {...common} bodyColor={bodyColor} />;
+  if (model === 'mac-mini') return <MacMini {...common} bodyColor={bodyColor} />;
   if (model === 'macbook-pro') return <MacBookPro {...common} bodyColor={bodyColor} />;
   if (model === 'amd-strix') return <AmdStrix {...common} bodyColor={bodyColor} labelColor={labelColor} />;
   if (model === 'nvidia-gpu') return <NvidiaGpu {...common} bodyColor={bodyColor} labelColor={labelColor} />;
@@ -64,10 +64,10 @@ export function DeviceIcon({
 interface MacStudioProps {
   cx: number; cy: number; width: number; height: number;
   ramPercent: number; wireColor: string; strokeWidth: number; clipId: string;
-  bodyColor: string; ramColor: string; labelColor: string;
+  bodyColor: string; ramColor: string;
 }
 
-function MacStudio({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId, bodyColor, ramColor, labelColor }: MacStudioProps) {
+function MacStudio({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId, bodyColor, ramColor }: MacStudioProps) {
   const boxW = width * 0.82;
   const boxH = height * 0.7;
   const x = cx - boxW / 2;
@@ -104,7 +104,7 @@ function MacStudio({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, 
       <rect x={cx - boxW * 0.11} y={vSlotY} width={boxW * 0.12} height={slotH * 0.6}
         fill="rgba(0,0,0,0.35)" rx={1} />
       {/* Apple mark, centred in the upper body clear of the port row */}
-      <AppleMark cx={cx} centerY={y + topSurfaceH + bodyH * 0.34} targetH={bodyH * 0.4} fill={labelColor} />
+      <AppleMark cx={cx} centerY={y + topSurfaceH + bodyH * 0.34} targetH={bodyH * 0.4} fill={wireColor} />
     </g>
   );
 }
@@ -112,10 +112,10 @@ function MacStudio({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, 
 interface MacMiniProps {
   cx: number; cy: number; width: number; height: number;
   ramPercent: number; wireColor: string; strokeWidth: number; clipId: string;
-  bodyColor: string; ramColor: string; labelColor: string;
+  bodyColor: string; ramColor: string;
 }
 
-function MacMini({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId, bodyColor, ramColor, labelColor }: MacMiniProps) {
+function MacMini({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId, bodyColor, ramColor }: MacMiniProps) {
   const boxW = width * 0.85;
   const boxH = height * 0.58;
   const x = cx - boxW / 2;
@@ -145,8 +145,10 @@ function MacMini({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, cl
         <rect key={i} x={vx - vSlotW / 2} y={vSlotY} width={vSlotW} height={slotH}
           fill="rgba(0,0,0,0.35)" rx={1.2} />
       ))}
-      {/* Apple mark, centred on the case */}
-      <AppleMark cx={cx} centerY={y + topSurfaceH + bodyH * 0.48} targetH={bodyH * 0.52} fill={labelColor} />
+      {/* Apple mark, optically centred on the whole case (measuring from the
+          body alone reads low because the top-surface strip adds visual
+          height above it) */}
+      <AppleMark cx={cx} centerY={y + boxH * 0.47} targetH={bodyH * 0.52} fill={wireColor} />
     </g>
   );
 }
