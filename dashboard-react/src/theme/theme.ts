@@ -165,6 +165,14 @@ interface ColorTokens {
    * buries the base so dense content keeps its ground. */
   sceneScrim: string;
 
+  /**
+   * 'on' to wrap topology/placement SVG marks in their soft glow filters
+   * (reads as luminance on a dark canvas); 'none' where the same filter
+   * reads as a hard drop-shadow (light surfaces). Replaces the old habit of
+   * sniffing `bg === '#000000'`, which broke the moment the canvas moved.
+   */
+  svgGlow: string;
+
   // Status (always-on, palette-independent severity colors are ok inside semantic.*)
   healthy: string;
   unhealthy: string;
@@ -262,6 +270,7 @@ const darkColors: ColorTokens = {
   // alone and the mesh returns.
   scene: nightSkyEnabled ? `url(${valleyNight})` : 'none',
   sceneScrim: 'none',
+  svgGlow: 'on',
 
   healthy: '#54C79A',
   unhealthy: '#F2707E',
@@ -355,6 +364,7 @@ const lightColors: ColorTokens = {
 
   scene: 'none',
   sceneScrim: 'none',
+  svgGlow: 'none',
 
   healthy: '#0ea5e9',
   unhealthy: '#dc2626',

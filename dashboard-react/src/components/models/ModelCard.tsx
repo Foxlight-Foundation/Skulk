@@ -363,7 +363,7 @@ export function ModelCard({
   const theme = useTheme() as Theme;
   // Drop the SVG glow filter in light mode — looks like a hard drop-shadow against
   // the soft blue background.
-  const useGlow = theme.colors.bg === '#000000';
+  const useGlow = theme.colors.svgGlow === 'on';
   const placement = computePlacement(nodes, apiPreview, excludedNodeIds);
   const canFit = apiPreview ? apiPreview.error === null : placement.canFit;
   const perNode = downloadStatus?.perNode ?? [];
@@ -501,7 +501,7 @@ export function ModelCard({
               <g
                 key={node.id}
                 transform={`translate(${node.x}, ${node.y})`}
-                opacity={node.isUsed ? 1 : (theme.colors.bg === '#000000' ? 0.7 : 0.9)}
+                opacity={node.isUsed ? 1 : (theme.colors.svgGlow === 'on' ? 0.7 : 0.9)}
                 filter={node.isUsed && useGlow ? `url(#nodeGlow-${filterId})` : undefined}
               >
                 <PlacementDeviceIcon node={node} filterId={filterId} />
@@ -550,7 +550,7 @@ export function ModelCard({
 
 function PlacementDeviceIcon({ node, filterId }: { node: PlacementNode; filterId: string }) {
   const theme = useTheme() as Theme;
-  const useGlow = theme.colors.bg === '#000000';
+  const useGlow = theme.colors.svgGlow === 'on';
   const s = node.iconSize;
   const half = s / 2;
   const stroke = node.isUsed ? theme.colors.gold : theme.colors.border;
