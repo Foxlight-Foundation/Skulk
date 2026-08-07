@@ -81,6 +81,7 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
 - `src/skulk/worker/` — Worker node (inference, runner management, download coordination)
 - `src/skulk/store/` — Model store (registry, downloads, config, model optimizer)
 - `src/skulk/shared/` — Shared types, constants, topology
+- `src/skulk/memory/` — Fabric-memory core library (HRR primitives, pattern separation, memory index); inert until later phases wire it
 - `website/docs/` — Docusaurus documentation source, including API guide and model-capability docs
 
 ## Development Guidelines
