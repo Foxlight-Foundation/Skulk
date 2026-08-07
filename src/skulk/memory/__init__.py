@@ -1,10 +1,13 @@
-"""Skulk fabric memory: the ``skulk.memory`` core library (Phase 1).
+"""Skulk fabric memory: the ``skulk.memory`` core library.
 
-Pure, dependency-light (numpy for the math, pydantic for the settings model) building blocks for the cluster's short-term
-associative memory: HRR primitives, the fractional-ZCA pattern-separation stage,
-and the :class:`MemoryIndex` interface with an exact baseline and a holographic
-field implementation. No I/O and no fabric here; the content store, the MEMORY
-plane, and the capture/surfacing hooks are later phases that compose these.
+Dependency-light (numpy for the math, pydantic for the models) building blocks
+for the cluster's short-term associative memory: HRR primitives, the
+fractional-ZCA pattern-separation stage, the :class:`MemoryIndex` interface
+with an exact baseline and a holographic field implementation, and the durable
+node-local :class:`ContentStore` that fields are rebuildable indexes over. The
+store is the only module here that touches disk; nothing touches the fabric.
+The MEMORY plane and the capture/surfacing hooks are later phases that compose
+these, and nothing outside this package imports it yet.
 """
 
 from skulk.memory.config import (

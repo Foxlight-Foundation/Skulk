@@ -18,8 +18,10 @@ working; memory degrades to off, inference never degrades.
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import os
+import shutil
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,6 +38,13 @@ SEGMENT_ROTATION_BYTES = 64 * 1024 * 1024
 
 FSYNC_EVERY_APPENDS = 8
 """Appends between fsyncs: bounded loss window, bounded write amplification."""
+
+FREE_SPACE_FLOOR_BYTES = 256 * 1024 * 1024
+"""Refuse writes below this much free disk, before ENOSPC can even occur.
+
+Running a volume to zero bytes destabilizes the whole node (the DiskEventLog
+lesson); an optional memory subsystem must never be what fills the last byte.
+"""
 
 _MANIFEST_NAME = "MANIFEST.json"
 _TOMBSTONES_NAME = "tombstones.jsonl"
@@ -99,8 +108,10 @@ class ContentStore:
     root: Path
     rotation_bytes: int = SEGMENT_ROTATION_BYTES
     fsync_every: int = FSYNC_EVERY_APPENDS
+    free_space_floor_bytes: int = FREE_SPACE_FLOOR_BYTES
     _appends_since_sync: int = field(default=0, init=False)
     _degraded: bool = field(default=False, init=False)
+    _tails_repaired: set[str] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
         self.root = Path(self.root)
@@ -140,14 +151,30 @@ class ContentStore:
             return []
         return [self.root / str(name) for name in names]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
 
+    def _next_sequence(self) -> int:
+        """Next segment sequence number, parsed from listed names.
+
+        Parsing (rather than counting) keeps sequences monotonic across
+        compaction, so a rotation can never reuse a name an older manifest
+        generation referenced.
+        """
+        highest = 0
+        for segment in self._segments():
+            digits = segment.stem.rsplit("-", 1)[-1]
+            if digits.isdigit():
+                highest = max(highest, int(digits))
+        return highest + 1
+
     def _active_segment(self) -> Path:
         segments = self._segments()
         if segments and segments[-1].exists() and (
             segments[-1].stat().st_size < self.rotation_bytes
         ):
             return segments[-1]
-        sequence = len(segments) + 1
-        segment = self.root / f"spans-{sequence:06d}.jsonl"
+        segment = self.root / f"spans-{self._next_sequence():06d}.jsonl"
+        # A crashed compaction can leave a stray file at a name no manifest
+        # references; never let rotation silently adopt its contents.
+        segment.unlink(missing_ok=True)
         manifest = self._read_manifest()
         listed = manifest.get("segments")
         names: list[object] = listed if isinstance(listed, list) else []  # pyright: ignore[reportUnknownVariableType]
@@ -163,17 +190,73 @@ class ContentStore:
         """Whether the store refuses writes after an out-of-space failure."""
         return self._degraded
 
+    def _refuse_writes_if_degraded(self) -> None:
+        if self._degraded:
+            raise StoreFullError("memory store is in degraded (out of space) mode")
+        free = shutil.disk_usage(self.root).free
+        if free < self.free_space_floor_bytes:
+            self._degraded = True
+            raise StoreFullError(
+                f"memory store free-space floor reached ({free} bytes free); "
+                "capture disabled, reads continue"
+            )
+
+    def _translate_out_of_space(self, error: OSError) -> None:
+        """Flip degraded mode and re-raise as :class:`StoreFullError` on ENOSPC."""
+        if error.errno == errno.ENOSPC:
+            self._degraded = True
+            raise StoreFullError(
+                "memory store hit ENOSPC; capture disabled, reads continue"
+            ) from error
+
+    def _repair_torn_tail(self, segment: Path) -> None:
+        """Truncate a crash-torn final line before resuming appends.
+
+        ``scan()`` tolerates a torn tail, but appending after one would
+        concatenate the new record onto the unterminated fragment and lose
+        both. Repair runs once per segment per process, before the first
+        append that touches it.
+        """
+        if segment.name in self._tails_repaired:
+            return
+        self._tails_repaired.add(segment.name)
+        if not segment.exists() or segment.stat().st_size == 0:
+            return
+        with segment.open("rb+") as handle:
+            _ = handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            _ = handle.seek(max(0, size - 1))
+            if handle.read(1) == b"\n":
+                return
+            # Walk back to the last newline; everything after it is the torn
+            # fragment. Segments are line-oriented so a bounded backward scan
+            # (one read per 4 KiB block) finds it quickly.
+            position = size
+            keep = 0
+            while position > 0:
+                block_start = max(0, position - 4096)
+                _ = handle.seek(block_start)
+                block = handle.read(position - block_start)
+                newline_at = block.rfind(b"\n")
+                if newline_at != -1:
+                    keep = block_start + newline_at + 1
+                    break
+                position = block_start
+            handle.truncate(keep)
+            handle.flush()
+            os.fsync(handle.fileno())
+
     def append(self, record: SpanRecord) -> None:
         """Durably append one span record.
 
         Raises :class:`StoreFullError` while degraded; the caller's contract
         is that capture stops and serving continues (memory degrades to off).
         """
-        if self._degraded:
-            raise StoreFullError("memory store is in degraded (out of space) mode")
+        self._refuse_writes_if_degraded()
         line = record.model_dump_json() + "\n"
-        segment = self._active_segment()
         try:
+            segment = self._active_segment()
+            self._repair_torn_tail(segment)
             with segment.open("a", encoding="utf-8") as handle:
                 handle.write(line)
                 handle.flush()
@@ -182,22 +265,23 @@ class ContentStore:
                     os.fsync(handle.fileno())
                     self._appends_since_sync = 0
         except OSError as error:
-            if error.errno == 28:  # ENOSPC
-                self._degraded = True
-                raise StoreFullError(
-                    "memory store hit ENOSPC; capture disabled, reads continue"
-                ) from error
+            self._translate_out_of_space(error)
             raise
 
     def tombstone(self, span_id: str, *, deleted_at: float) -> None:
         """Record exact forgetting of one span (drop at next compaction)."""
-        if self._degraded:
-            raise StoreFullError("memory store is in degraded (out of space) mode")
+        self._refuse_writes_if_degraded()
         entry = json.dumps({"span_id": span_id, "deleted_at": deleted_at}) + "\n"
-        with (self.root / _TOMBSTONES_NAME).open("a", encoding="utf-8") as handle:
-            handle.write(entry)
-            handle.flush()
-            os.fsync(handle.fileno())
+        path = self.root / _TOMBSTONES_NAME
+        try:
+            self._repair_torn_tail(path)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(entry)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as error:
+            self._translate_out_of_space(error)
+            raise
 
     # --- read path -----------------------------------------------------------
 
@@ -206,18 +290,19 @@ class ContentStore:
         if not path.exists():
             return set()
         ids: set[str] = set()
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)  # pyright: ignore[reportAny] - json.loads stub gap
-            except json.JSONDecodeError:
-                continue  # torn tail on the tombstone file: skip, never fatal
-            if isinstance(entry, dict):
-                span_id = entry.get("span_id")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-                if isinstance(span_id, str):
-                    ids.add(span_id)
+        with path.open("r", encoding="utf-8") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)  # pyright: ignore[reportAny] - json.loads stub gap
+                except json.JSONDecodeError:
+                    continue  # torn tail on the tombstone file: skip, never fatal
+                if isinstance(entry, dict):
+                    span_id = entry.get("span_id")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+                    if isinstance(span_id, str):
+                        ids.add(span_id)
         return ids
 
     def scan(self, *, include_tombstoned: bool = False) -> Iterator[SpanRecord]:
@@ -231,17 +316,20 @@ class ContentStore:
         for segment in self._segments():
             if not segment.exists():
                 continue
-            for line in segment.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = SpanRecord.model_validate_json(line)
-                except ValueError:
-                    continue  # torn or corrupt line: drop, never fatal
-                if record.span_id in dead:
-                    continue
-                yield record
+            # Stream line by line so a full 64 MiB segment never has to sit
+            # in memory at once (the DiskEventLog read posture).
+            with segment.open("r", encoding="utf-8") as handle:
+                for raw in handle:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = SpanRecord.model_validate_json(line)
+                    except ValueError:
+                        continue  # torn or corrupt line: drop, never fatal
+                    if record.span_id in dead:
+                        continue
+                    yield record
 
     def get(self, span_id: str) -> SpanRecord | None:
         """Fetch one live record by id (linear; the index owns fast lookup)."""
@@ -255,35 +343,41 @@ class ContentStore:
     def compact(self) -> int:
         """Rewrite segments without tombstoned spans; returns dropped count.
 
-        Compaction writes a fresh single segment then atomically swaps the
-        manifest, so a crash at any point leaves either the old or the new
-        view, never a mix.
+        The compacted data is written under a sequence-fresh name that no
+        prior manifest generation references, then the manifest swap is the
+        single atomic commit point, and only after it do the old segments
+        retire. A crash anywhere leaves either the complete old view or the
+        complete new view, never records visible twice.
         """
         dead = self._tombstoned()
-        survivors = list(self.scan())
+        old_segments = self._segments()
+        final = self.root / f"spans-{self._next_sequence():06d}.jsonl"
+        scratch = self.root / (final.name + ".tmp")
+        survivors = 0
         dropped = 0
-        for record in self.scan(include_tombstoned=True):
-            if record.span_id in dead:
-                dropped += 1
-        fresh = self.root / "spans-compact.jsonl.tmp"
-        with fresh.open("w", encoding="utf-8") as handle:
-            for record in survivors:
-                handle.write(record.model_dump_json() + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        final = self.root / "spans-000001.jsonl"
-        old_segments = [p for p in self._segments() if p.exists()]
-        os.replace(fresh, final)
-        manifest = self._read_manifest()
-        manifest["segments"] = [final.name]
-        manifest["compacted_through"] = len(survivors)
-        self._write_manifest(manifest)
+        try:
+            with scratch.open("w", encoding="utf-8") as handle:
+                for record in self.scan(include_tombstoned=True):
+                    if record.span_id in dead:
+                        dropped += 1
+                        continue
+                    handle.write(record.model_dump_json() + "\n")
+                    survivors += 1
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(scratch, final)
+            manifest = self._read_manifest()
+            manifest["segments"] = [final.name]
+            manifest["compacted_through"] = survivors
+            self._write_manifest(manifest)
+        except OSError as error:
+            self._translate_out_of_space(error)
+            raise
+        # Past the commit point: cleanup failures cost disk, never records.
         for stale in old_segments:
-            if stale != final and stale.exists():
-                stale.unlink()
-        tombstones = self.root / _TOMBSTONES_NAME
-        if tombstones.exists():
-            tombstones.unlink()
+            if stale != final:
+                stale.unlink(missing_ok=True)
+        (self.root / _TOMBSTONES_NAME).unlink(missing_ok=True)
         return dropped
 
     def rebuild(self, index_factory: Callable[[], MemoryIndex]) -> MemoryIndex:
@@ -303,20 +397,25 @@ class ContentStore:
 
     def save_whitener(self, whitener: Whitener) -> Path:
         """Persist the frozen separation stage for exact cue-space rebuilds."""
+        self._refuse_writes_if_degraded()
         path = self.root / f"whitener-{whitener.version}.npz"
-        np.savez(
-            path,
-            mu=whitener.mu,
-            matrix=whitener.matrix,
-            alpha=np.float64(whitener.alpha),
-            shrinkage=np.float64(whitener.shrinkage),
-            embedding_model_id=np.str_(whitener.embedding_model_id),
-            version=np.str_(whitener.version),
-        )
-        manifest = self._read_manifest()
-        manifest["whitener_version"] = whitener.version
-        manifest["embedding_model_id"] = whitener.embedding_model_id
-        self._write_manifest(manifest)
+        try:
+            np.savez(
+                path,
+                mu=whitener.mu,
+                matrix=whitener.matrix,
+                alpha=np.float64(whitener.alpha),
+                shrinkage=np.float64(whitener.shrinkage),
+                embedding_model_id=np.str_(whitener.embedding_model_id),
+                version=np.str_(whitener.version),
+            )
+            manifest = self._read_manifest()
+            manifest["whitener_version"] = whitener.version
+            manifest["embedding_model_id"] = whitener.embedding_model_id
+            self._write_manifest(manifest)
+        except OSError as error:
+            self._translate_out_of_space(error)
+            raise
         return path
 
     def load_whitener(self, version: str | None = None) -> Whitener:

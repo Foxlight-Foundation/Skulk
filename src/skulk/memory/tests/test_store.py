@@ -132,6 +132,96 @@ def test_enospc_degrades_capture_and_keeps_reads(
     assert [r.span_id for r in store.scan()] == [r.span_id for r in records]
 
 
+def test_append_after_torn_tail_repairs_the_segment(tmp_path: Path) -> None:
+    """The first append after crash recovery must not fuse with the torn line."""
+    _store, records = _seeded_store(tmp_path, 4)
+    segment = next(p for p in (tmp_path / "memory").glob("spans-*.jsonl"))
+    with segment.open("a", encoding="utf-8") as handle:
+        handle.write('{"span_id": "torn", "text": "cut off mid-w')
+
+    reopened = ContentStore(root=tmp_path / "memory")
+    keys = random_vectors(1, DIM, seed=11)
+    values = random_vectors(1, DIM, seed=12)
+    reopened.append(_record("s-recovered", keys[0], values[0]))
+    survivors = [r.span_id for r in reopened.scan()]
+    assert survivors == [r.span_id for r in records] + ["s-recovered"]
+
+
+def test_tombstone_enospc_degrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, records = _seeded_store(tmp_path, 2)
+    real_open = Path.open
+
+    def failing_open(self: Path, *args: object, **kwargs: object) -> object:
+        if self.name == "tombstones.jsonl":
+            raise OSError(28, "No space left on device")
+        return real_open(self, *args, **kwargs)  # pyright: ignore[reportCallIssue, reportUnknownVariableType, reportArgumentType] - passthrough shim
+
+    monkeypatch.setattr(Path, "open", failing_open)
+    with pytest.raises(StoreFullError):
+        store.tombstone("s0", deleted_at=1_700_000_100.0)
+    monkeypatch.setattr(Path, "open", real_open)
+    assert store.degraded
+    assert [r.span_id for r in store.scan()] == [r.span_id for r in records]
+
+
+def test_enospc_during_rotation_degrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Manifest writes during segment rotation honor the degraded-mode contract."""
+    store = ContentStore(root=tmp_path / "memory")
+    keys = random_vectors(1, DIM, seed=13)
+    values = random_vectors(1, DIM, seed=14)
+
+    def failing_write_text(_self: Path, *_args: object, **_kwargs: object) -> int:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "write_text", failing_write_text)
+    with pytest.raises(StoreFullError):
+        store.append(_record("s-rotate", keys[0], values[0]))
+    assert store.degraded
+
+
+def test_free_space_floor_degrades_before_enospc(tmp_path: Path) -> None:
+    store = ContentStore(root=tmp_path / "memory", free_space_floor_bytes=1 << 60)
+    keys = random_vectors(1, DIM, seed=15)
+    values = random_vectors(1, DIM, seed=16)
+    with pytest.raises(StoreFullError):
+        store.append(_record("s-floor", keys[0], values[0]))
+    assert store.degraded
+
+
+def test_compact_never_reuses_an_old_segment_name(tmp_path: Path) -> None:
+    """The manifest swap is the commit point; old names are never overwritten."""
+    store = ContentStore(root=tmp_path / "memory", rotation_bytes=1024)
+    keys = random_vectors(6, DIM, seed=17)
+    values = random_vectors(6, DIM, seed=18)
+    for i in range(6):
+        store.append(_record(f"c{i}", keys[i], values[i]))
+    old_names = {p.name for p in (tmp_path / "memory").glob("spans-*.jsonl")}
+    assert len(old_names) > 1
+    store.tombstone("c1", deleted_at=1_700_000_100.0)
+    dropped = store.compact()
+    assert dropped == 1
+    manifest = json.loads((tmp_path / "memory" / "MANIFEST.json").read_text())
+    assert len(manifest["segments"]) == 1
+    assert manifest["segments"][0] not in old_names
+    for name in old_names:
+        assert not (tmp_path / "memory" / name).exists()
+    assert [r.span_id for r in store.scan()] == ["c0", "c2", "c3", "c4", "c5"]
+
+    # A stray file from a compaction that crashed before its manifest swap
+    # must never be silently adopted by a later rotation.
+    compacted_sequence = int(manifest["segments"][0].split("-")[1].split(".")[0])
+    next_name = f"spans-{compacted_sequence + 1:06d}.jsonl"
+    (tmp_path / "memory" / next_name).write_text('{"span_id": "ghost"}\n')
+    store2 = ContentStore(root=tmp_path / "memory", rotation_bytes=1024)
+    store2.append(_record("c-post", keys[0], values[0]))
+    assert "ghost" not in [r.span_id for r in store2.scan()]
+    assert [r.span_id for r in store2.scan()][-1] == "c-post"
+
+
 def test_whitener_round_trip_preserves_cue_space(tmp_path: Path) -> None:
     store = ContentStore(root=tmp_path / "memory")
     corpus = np.random.default_rng(3).normal(size=(32, 16)).astype(np.float32)
