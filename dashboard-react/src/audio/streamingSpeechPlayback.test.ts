@@ -410,6 +410,22 @@ describe('splitCompleteSpeechSentences structural boundaries', () => {
     });
   });
 
+  it('recognizes a fenced block inside a blockquote', () => {
+    const streamed = 'Quoting.\n> ```js\n> const x = 1;\n> ```\nDone. Tail';
+    expect(splitCompleteSpeechSentences(streamed)).toEqual({
+      sentences: ['Quoting.', '> ```js\n> const x = 1;\n> ```', 'Done.'],
+      remainder: 'Tail',
+    });
+    expect(speechTextFromMarkdown('Quoting.\n\n> ```js\n> const x = 1;\n> ```\n\nDone.'))
+      .toBe('Quoting. Done.');
+  });
+
+  it('removes keycap emoji whole, base character included', () => {
+    expect(speechTextFromMarkdown('Step 1\u{FE0F}\u{20E3} then step 2\u{FE0F}\u{20E3} done.'))
+      .toBe('Step then step done.');
+    expect(speechTextFromMarkdown('Press #\u{FE0F}\u{20E3} now.')).toBe('Press now.');
+  });
+
   it('handles Windows newlines around a title block', () => {
     expect(speechTextFromMarkdown('**A Title**\r\n\r\nBody text.')).toBe('A Title. Body text.');
   });

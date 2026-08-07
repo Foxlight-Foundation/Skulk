@@ -202,6 +202,14 @@ export const SPEECH_PAUSE_MARKER = '\u2063skulk-pause\u2063';
 /** Length of the audible pause inserted for structural breaks. */
 export const SPEECH_PAUSE_SECONDS = 0.6;
 
+/**
+ * A fence delimiter line, allowing Markdown container prefixes (blockquote
+ * markers) before the run: a fenced block inside a blockquote is still a
+ * code block, and both fence scanners must see it or its contents get read
+ * aloud. Group 1 is the delimiter run, group 2 the rest of the line.
+ */
+const FENCE_DELIMITER_LINE = /^\s{0,3}(?:>\s?)*\s{0,3}(`{3,}|~{3,})(.*)$/;
+
 /** A Markdown thematic break: three or more -, * or _ alone on a line. */
 const HORIZONTAL_RULE_LINE = /^\s*(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$/;
 
@@ -213,7 +221,7 @@ const TERMINAL_SPEECH_PUNCTUATION = /[.!?\u2026:;,]["')\]]*$/;
 
 /* Pictographs, variation selectors, joiners, skin tones, flags, keycaps:
  * none of them have a spoken reading, and engines that try produce noise. */
-const EMOJI_CHARACTERS = /\p{Extended_Pictographic}|\u{FE0F}|\u{200D}|\u{20E3}|[\u{1F3FB}-\u{1F3FF}]|[\u{1F1E6}-\u{1F1FF}]|[\u{E0020}-\u{E007F}]/gu;
+const EMOJI_CHARACTERS = /[0-9#*]\u{FE0F}?\u{20E3}|\p{Extended_Pictographic}|\u{FE0F}|\u{200D}|\u{20E3}|[\u{1F3FB}-\u{1F3FF}]|[\u{1F1E6}-\u{1F1FF}]|[\u{E0020}-\u{E007F}]/gu;
 
 /**
  * Convert rendered Markdown prose into stable text suitable for speech
@@ -236,7 +244,7 @@ function stripFencedCode(text: string): string {
   let fenceLength = 0;
   let insideFence = false;
   for (const line of text.split('\n')) {
-    const delimiterMatch = /^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    const delimiterMatch = FENCE_DELIMITER_LINE.exec(line);
     if (delimiterMatch) {
       const run = delimiterMatch[1];
       if (!insideFence) {
@@ -337,7 +345,7 @@ export function splitCompleteSpeechSentences(text: string): {
       const newline = text.indexOf('\n', scanFrom);
       const lineEnd = newline === -1 ? text.length : newline;
       const line = text.slice(scanFrom, lineEnd);
-      const delimiterMatch = /^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+      const delimiterMatch = FENCE_DELIMITER_LINE.exec(line);
       if (delimiterMatch) {
         const run = delimiterMatch[1];
         if (fenceStart === -1) {
