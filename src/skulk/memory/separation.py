@@ -1,4 +1,3 @@
-# pyright: reportAny=false
 """Pattern separation: the fractional ZCA whitener.
 
 Raw sentence embeddings are too anisotropic to use as HRR cues: unrelated
@@ -54,7 +53,7 @@ class Whitener:
     @property
     def input_dim(self) -> int:
         """Embedding dimension this whitener maps from/to."""
-        return int(self.mu.shape[0])
+        return int(self.mu.shape[0])  # pyright: ignore[reportAny] - ndarray.shape stub gap
 
     @classmethod
     def fit(
@@ -83,14 +82,15 @@ class Whitener:
             raise ValueError(f"alpha must be in [0, 1]; got {alpha}")
         if not 0.0 <= shrinkage <= 1.0:
             raise ValueError(f"shrinkage must be in [0, 1]; got {shrinkage}")
-        mu = x.mean(axis=0)
-        xc = x - mu
-        cov = (xc.T @ xc) / len(xc)
-        trace_scale = np.trace(cov) / cov.shape[0]
-        cov = (1.0 - shrinkage) * cov + shrinkage * np.eye(cov.shape[0]) * trace_scale
+        mu: NDArray[np.float64] = x.mean(axis=0)  # pyright: ignore[reportAny] - ndarray.mean stub gap
+        xc: NDArray[np.float64] = x - mu
+        dim = int(x.shape[1])  # pyright: ignore[reportAny] - ndarray.shape stub gap
+        cov: NDArray[np.float64] = (xc.T @ xc) / len(xc)
+        trace_scale = float(np.trace(cov)) / dim  # pyright: ignore[reportAny] - np.trace stub gap
+        cov = (1.0 - shrinkage) * cov + shrinkage * np.eye(dim) * trace_scale
         eigval, eigvec = np.linalg.eigh(cov)
-        scale = np.power(np.maximum(eigval, 1e-10), -alpha / 2.0)
-        matrix = eigvec @ np.diag(scale) @ eigvec.T
+        scale: NDArray[np.float64] = np.power(np.maximum(eigval, 1e-10), -alpha / 2.0)
+        matrix: NDArray[np.float64] = eigvec @ np.diag(scale) @ eigvec.T
         return cls(
             mu=mu.astype(DTYPE),
             matrix=matrix.astype(DTYPE),

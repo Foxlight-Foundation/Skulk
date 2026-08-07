@@ -1,4 +1,3 @@
-# pyright: reportAny=false
 """The MemoryIndex interface and its two implementations.
 
 An index maps a *key* cue to the *trace* whose key best matches it, over a
@@ -34,6 +33,10 @@ from skulk.memory.hrr import DTYPE, Vector, bind, cosine, normalize, unbind
 # recall was 0.000 at every field density at and above this cosine. The
 # production value is re-derived from live statistics in Phase 5.
 DEFAULT_CONFIDENCE_GATE = 0.15
+
+
+_SCORE_TIE_TOLERANCE = 1e-6
+"""Projection scores within this tolerance count as tied (shared value codes)."""
 
 
 @dataclass(frozen=True)
@@ -197,23 +200,35 @@ class HolographicField:
         recalled = normalize(unbind(self._field, cue_u))
         best_id: str | None = None
         best_score = -np.inf
+        best_key_match = -np.inf
         for trace_id, value_n in self._codebook.items():
-            score = float(np.dot(recalled, value_n))
-            if score > best_score:
+            # Amplitude folds into the score exactly as in ExactIndex, so both
+            # MemoryIndex implementations agree that decayed traces gate out;
+            # fresh traces carry amplitude 1.0, preserving the Phase 0 gate
+            # calibration unchanged.
+            score = float(np.dot(recalled, value_n)) * self._amplitude[trace_id]  # pyright: ignore[reportAny] - np.dot stub gap
+            # Traces sharing one value code score identically on projection;
+            # the cue's match against each trace's own stored key breaks the
+            # tie so a confident hit names the right trace.
+            key_match = float(np.dot(cue_u, self._keys[trace_id]))  # pyright: ignore[reportAny] - np.dot stub gap
+            if score > best_score + _SCORE_TIE_TOLERANCE or (
+                abs(score - best_score) <= _SCORE_TIE_TOLERANCE
+                and key_match > best_key_match
+            ):
                 best_score = score
+                best_key_match = key_match
                 best_id = trace_id
         confidence = float(max(best_score, 0.0))
         hit = confidence >= self.gate
         return ProbeResult(trace_id=best_id, confidence=confidence, hit=hit)
 
     def decay(self, retention: float) -> None:
-        # Scale every trace's amplitude in the field. Because the probe score is
-        # a normalized cosine, a *uniform* decay leaves recall unchanged; time
-        # forgetting emerges from interference (new traces are written at full
-        # amplitude while older ones are decayed repeatedly, so the noise floor
-        # eventually swamps a stale trace). Absolute idle-trace expiry and a
-        # rehearsal refresh are Phase 6 operator controls. Decay to zero clears
-        # the field outright.
+        """Multiply every trace's amplitude by ``retention`` (0..1)."""
+        # The tracked per-trace amplitude folds into probe confidence (matching
+        # ExactIndex), so decayed traces gate out identically in both index
+        # implementations; interference from newer full-amplitude writes
+        # remains the second forgetting force. Absolute idle-trace expiry and
+        # rehearsal refresh are later operator controls.
         self._field = (self._field * retention).astype(DTYPE)
         for trace_id in list(self._amplitude):
             self._amplitude[trace_id] *= retention

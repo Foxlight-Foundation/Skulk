@@ -198,3 +198,38 @@ def test_whitener_fit_rejects_degenerate_input() -> None:
         Whitener.fit(corpus, alpha=1.5)
     with pytest.raises(ValueError):
         Whitener.fit(corpus, shrinkage=-0.1)
+
+
+def test_holographic_decay_gates_out_like_exact_index() -> None:
+    """Amplitude folds into field confidence, matching ExactIndex semantics."""
+    from skulk.memory.hrr import random_vectors
+    from skulk.memory.index import ExactIndex, HolographicField
+
+    dim = 2048
+    keys = random_vectors(1, dim, seed=21)
+    values = random_vectors(1, dim, seed=22)
+    field = HolographicField(dim=dim)
+    exact = ExactIndex()
+    field.write("t1", keys[0], values[0])
+    exact.write("t1", keys[0], values[0])
+    assert field.probe(keys[0]).hit
+    assert exact.probe(keys[0]).hit
+    field.decay(0.05)
+    exact.decay(0.05)
+    assert not field.probe(keys[0]).hit
+    assert not exact.probe(keys[0]).hit
+
+
+def test_holographic_probe_disambiguates_shared_value_codes() -> None:
+    """Two traces with one value code resolve to the trace whose key matches."""
+    from skulk.memory.hrr import random_vectors
+    from skulk.memory.index import HolographicField
+
+    dim = 2048
+    keys = random_vectors(2, dim, seed=31)
+    values = random_vectors(1, dim, seed=32)
+    field = HolographicField(dim=dim)
+    field.write("t1", keys[0], values[0])
+    field.write("t2", keys[1], values[0])
+    assert field.probe(keys[0]).trace_id == "t1"
+    assert field.probe(keys[1]).trace_id == "t2"
