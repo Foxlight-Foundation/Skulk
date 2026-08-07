@@ -64,7 +64,34 @@ mounted TTS model's static built-in voices. It serves only models whose card
 declares `audio.supports_voice_listing = true`; the identifiers come from the
 card's `audio.voices` declaration, and a card may also declare a validated
 `audio.default_voice`, which the API applies only when a request omits `voice`.
+Cards may additionally attach an ordered `audio.voice_catalog` with display
+names and preferred-language metadata, which the dashboard's automatic voice
+selection uses to pin a language-matched voice for a whole response.
 See [Model cards](model-cards.md) for the card-side declarations.
+
+### Bundled reference voices
+
+Voice-cloning cards (those declaring reference-audio support) can list bundled
+reference profiles in their voice catalog: ten checksummed English reference
+voices ship with Skulk (Angus, Ember, Hannah, Ian, Jake, Kite, Rufus, Samson,
+Sydney, and Sylvie), with Kite as the shipped default. Selecting one behaves
+like any other voice at the API surface: the profile identifier resolves to
+its local conditioning audio and exact transcript only inside the selected
+worker, so the reference media never crosses the API or enters cluster state.
+This gives cloning-capable models a consistent, known-good voice out of the
+box while custom reference-audio uploads remain available for callers who
+bring their own clip.
+
+### Deterministic synthesis
+
+`/v1/audio/speech` and the built-in TTS provider accept an optional unsigned
+32-bit `seed`. The speech runner applies it immediately before model
+generation, so repeated requests with the same text, voice, and seed produce
+the same audio on the same model build. Callers that omit the seed retain the
+engine's default advancing-random-stream behavior. Dashboard speech playback
+sends one deterministic seed for every generated sentence and replay segment
+of a response, so replaying a sentence sounds identical to its first
+rendering.
 
 ### Reference-audio uploads
 
