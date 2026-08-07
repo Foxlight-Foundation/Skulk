@@ -22,6 +22,8 @@ import { TopologyGraph } from './components/topology/TopologyGraph';
 import { ConnectionBanner } from './components/status/ConnectionBanner';
 import { ToastContainer } from './components/status/ToastContainer';
 import { NetworkMesh } from './components/common/NetworkMesh';
+import { SceneBackdrop } from './components/common/SceneBackdrop';
+import { ShootingStars } from './components/common/ShootingStars';
 import { ObservabilityPanel } from './components/observability/ObservabilityPanel';
 import { SettingsPanel } from './components/layout/SettingsPanel';
 import { TelemetryConsentModal } from './components/layout/TelemetryConsentModal';
@@ -598,7 +600,15 @@ export function App() {
           field reads as visual noise over content on a small screen. The key
           remounts the canvas when the breakpoint flips so the particle field
           re-seeds at the new density. */}
-      <NetworkMesh key={isMobile ? 'mesh-mobile' : 'mesh-desktop'} radius={2.5} count={isMobile ? 14 : 43} linkDistance={430} />
+      {/* The night palette replaces the abstract mesh with the star field
+          crowning the viewport and fading out on the way down, so every
+          screen opens under the brand sky without a painting competing
+          with content. Palettes without a scene keep the mesh. */}
+      <SceneBackdrop />
+      <ShootingStars />
+      {activeTheme.colors.scene === 'none' && (
+        <NetworkMesh key={isMobile ? 'mesh-mobile' : 'mesh-desktop'} radius={2.5} count={isMobile ? 14 : 43} linkDistance={430} />
+      )}
       <Shell>
         <ConnectionBanner connected={connected} />
         <HeaderAnchor>

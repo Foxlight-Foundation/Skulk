@@ -64,8 +64,11 @@ function buildStatusConfig(
   t: SkulkTranslate,
 ): Record<InstanceStatus, { label: string; color: string; glow: string; defaultMessage: string }> {
   return {
-    loading:       { label: t('instance.status.loading', 'Loading'),       color: theme.colors.gold,    glow: theme.colors.goldDim,    defaultMessage: t('instance.status.loadingMessage', 'Downloading model...') },
-    warming_up:    { label: t('instance.status.warmingUp', 'Warming Up'),    color: theme.colors.gold,    glow: theme.colors.goldDim,    defaultMessage: t('instance.status.warmingUpMessage', 'Preparing for inference...') },
+    // Loading and warming are work in flight, so they burn the living
+    // colour (matching the store table's loading state), not the ordinary
+    // interactive accent.
+    loading:       { label: t('instance.status.loading', 'Loading'),       color: theme.colors.live,    glow: theme.colors.liveBg,    defaultMessage: t('instance.status.loadingMessage', 'Downloading model...') },
+    warming_up:    { label: t('instance.status.warmingUp', 'Warming Up'),    color: theme.colors.live,    glow: theme.colors.liveBg,    defaultMessage: t('instance.status.warmingUpMessage', 'Preparing for inference...') },
     ready:         { label: t('instance.status.ready', 'Ready'),         color: theme.colors.healthy, glow: theme.colors.accentBg,   defaultMessage: t('instance.status.readyMessage', 'Ready to chat!') },
     running:       { label: t('instance.status.running', 'Running'),       color: theme.colors.healthy, glow: theme.colors.accentBg,   defaultMessage: t('instance.status.runningMessage', 'Processing inference...') },
     failed:        { label: t('instance.status.failed', 'Failed'),        color: theme.colors.error,   glow: theme.colors.errorBg,    defaultMessage: t('instance.status.failedMessage', 'Instance failed') },
@@ -114,7 +117,7 @@ function nodeStateVisual(
     case 'stopping': return { Icon: FiClock, color: theme.colors.warning, spin: false };
     case 'pending': return { Icon: FiClock, color: theme.colors.textMuted, spin: false };
     case 'loading':
-    default: return { Icon: FiLoader, color: theme.colors.gold, spin: true };
+    default: return { Icon: FiLoader, color: theme.colors.live, spin: true };
   }
 }
 
@@ -291,14 +294,14 @@ const ChatBtn = styled.button`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.healthy};
-  border: 1px solid rgba(74, 222, 128, 0.3);
+  border: 1px solid ${({ theme }) => theme.colors.accentBg};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 3px 10px;
   transition: all 0.15s;
 
   &:hover {
-    background: rgba(74, 222, 128, 0.12);
-    border-color: rgba(74, 222, 128, 0.5);
+    background: ${({ theme }) => theme.colors.accentBg};
+    border-color: ${({ theme }) => theme.colors.accent};
   }
 `;
 

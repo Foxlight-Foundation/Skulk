@@ -7,6 +7,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Changed
+
+- Redesigned the dashboard's dark mode around the Foxlight operator design
+  system's Den palette, replacing the inherited high-contrast scheme: indigo
+  surfaces over a deep night canvas, a starlight accent for everyday
+  interaction, and amber reserved for work actually in flight (RAM a model is
+  holding, downloads in progress, attention badges). Light mode is unchanged.
+  Both palettes share one token vocabulary, so components never branch on the
+  theme name. Building the dashboard with `VITE_NIGHT_SKY=1` additionally
+  crowns dark mode with the brand valley's star field (occasional shooting
+  stars included, and the abstract mesh stands down); the default build ships
+  a CSS-only night gradient with the mesh.
+
 ### Added
 
 - Bundled ten checksummed English reference voices (Angus, Ember, Hannah, Ian,

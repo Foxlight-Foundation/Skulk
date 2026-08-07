@@ -124,7 +124,7 @@ const Timestamp = styled.span`
 const StatLabel = styled.span`
   color: ${({ theme }) => theme.colors.textMuted};
   font-variant-numeric: tabular-nums;
-  & > span { color: ${({ theme }) => theme.colors.goldDim}; }
+  & > span { color: ${({ theme }) => theme.colors.goldTextDim}; }
 `;
 
 const Dot = styled.span<{ $color: string }>`
@@ -223,7 +223,7 @@ const ThinkingHeader = styled.button`
   padding: 6px 10px;
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.goldDim};
+  color: ${({ theme }) => theme.colors.goldTextDim};
   transition: background 0.15s;
   box-sizing: border-box;
   &:hover { background: ${({ theme }) => theme.colors.goldBg}; }

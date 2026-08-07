@@ -207,6 +207,10 @@ const EmptyBox = styled.div`
 const Table = styled.div`
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md};
+  /* Dense content keeps its ground: near-opaque so the scene backdrop
+   * cannot compete with a column of identifiers (atmosphere yields to
+   * density). */
+  background: ${({ theme }) => theme.colors.surfaceElevated};
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -261,7 +265,7 @@ const TRow = styled.div<{ $highlight?: boolean }>`
 
   ${({ $highlight }) =>
     $highlight &&
-    css`background: ${({ theme }) => theme.colors.goldBg};`}
+    css`background: ${({ theme }) => theme.colors.liveBg};`}
 `;
 
 const ModelCell = styled.div<{ $area?: MobileGridArea }>`
@@ -290,8 +294,8 @@ const ReadyBadge = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.healthy};
-  background: rgba(34, 197, 94, 0.1);
-  border: 1px solid rgba(34, 197, 94, 0.2);
+  background: ${({ theme }) => theme.colors.accentBg};
+  border: 1px solid ${({ theme }) => theme.colors.accentBg};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 1px 6px;
 `;
@@ -303,9 +307,9 @@ const ActiveBadge = styled.span`
   flex-shrink: 0;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.gold};
-  background: ${({ theme }) => theme.colors.goldBg};
-  border: 1px solid ${({ theme }) => theme.colors.goldDim};
+  color: ${({ theme }) => theme.colors.live};
+  background: ${({ theme }) => theme.colors.liveBg};
+  border: 1px solid ${({ theme }) => theme.colors.liveBg};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 1px 6px;
 `;
@@ -322,7 +326,7 @@ const ActiveDot = styled.span`
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: ${({ theme }) => theme.colors.gold};
+  background: ${({ theme }) => theme.colors.live};
   animation: ${pulse} 1.5s ease-in-out infinite;
 `;
 
@@ -361,8 +365,8 @@ const ChatBubble = styled.button`
   transition: all 0.15s;
 
   &:hover {
-    color: #86efac;
-    filter: drop-shadow(0 0 4px rgba(74, 222, 128, 0.4));
+    color: ${({ theme }) => theme.colors.accentHover};
+    filter: drop-shadow(0 0 4px ${({ theme }) => theme.colors.accentBg});
   }
 `;
 
@@ -389,7 +393,7 @@ const ProgressTrack = styled.div`
 const ProgressFill = styled.div<{ $pct: number }>`
   width: ${({ $pct }) => $pct}%;
   height: 100%;
-  background: ${({ theme }) => theme.colors.gold};
+  background: ${({ theme }) => theme.colors.live};
   border-radius: 3px;
   transition: width 0.3s ease-out;
 `;
@@ -397,7 +401,7 @@ const ProgressFill = styled.div<{ $pct: number }>`
 const ProgressText = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.live};
 `;
 
 const spin = keyframes`

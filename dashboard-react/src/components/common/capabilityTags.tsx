@@ -17,7 +17,13 @@ export function buildTagColors(theme: Theme): Record<string, CapabilityTagColors
   return {
     optiq: { color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.1)', border: 'rgba(167, 139, 250, 0.3)' },
     thinking: { color: theme.colors.info, bg: theme.colors.infoBg, border: theme.colors.infoBg },
-    vision: { color: theme.colors.warning, bg: theme.colors.warningBg, border: theme.colors.warningBg },
+    // Palette-aware (10px text over its own faint tint needs a deep value
+    // on white); the tints derive from the token so the pair cannot drift.
+    vision: {
+      color: theme.colors.tagVision,
+      bg: `color-mix(in srgb, ${theme.colors.tagVision} 10%, transparent)`,
+      border: `color-mix(in srgb, ${theme.colors.tagVision} 30%, transparent)`,
+    },
     tensor: { color: theme.colors.healthy, bg: theme.colors.accentBg, border: theme.colors.accentBg },
     embedding: { color: '#f472b6', bg: 'rgba(244, 114, 182, 0.1)', border: 'rgba(244, 114, 182, 0.3)' },
     tts: { color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.1)', border: 'rgba(56, 189, 248, 0.3)' },
