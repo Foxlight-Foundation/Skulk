@@ -291,14 +291,14 @@ const ChatBtn = styled.button`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.healthy};
-  border: 1px solid rgba(74, 222, 128, 0.3);
+  border: 1px solid ${({ theme }) => theme.colors.accentBg};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 3px 10px;
   transition: all 0.15s;
 
   &:hover {
-    background: rgba(74, 222, 128, 0.12);
-    border-color: rgba(74, 222, 128, 0.5);
+    background: ${({ theme }) => theme.colors.accentBg};
+    border-color: ${({ theme }) => theme.colors.accent};
   }
 `;
 

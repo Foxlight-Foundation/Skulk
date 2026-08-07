@@ -243,7 +243,7 @@ const TagBadge = styled.span<{ $variant: 'green' | 'purple' }>`
   border-radius: ${({ theme }) => theme.radii.sm};
   ${({ $variant }) =>
     $variant === 'green'
-      ? css`background: rgba(34,197,94,0.2); color: ${({ theme }) => theme.colors.healthy}; border: 1px solid rgba(34,197,94,0.3);`
+      ? css`background: ${({ theme }) => theme.colors.accentBg}; color: ${({ theme }) => theme.colors.healthy}; border: 1px solid ${({ theme }) => theme.colors.accentBg};`
       : css`background: rgba(168,85,247,0.2); color: #c084fc; border: 1px solid rgba(168,85,247,0.3);`}
 `;
 

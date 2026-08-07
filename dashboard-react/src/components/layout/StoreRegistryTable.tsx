@@ -361,8 +361,8 @@ const ChatBubble = styled.button`
   transition: all 0.15s;
 
   &:hover {
-    color: #86efac;
-    filter: drop-shadow(0 0 4px rgba(74, 222, 128, 0.4));
+    color: ${({ theme }) => theme.colors.accentHover};
+    filter: drop-shadow(0 0 4px ${({ theme }) => theme.colors.accentBg});
   }
 `;
 
