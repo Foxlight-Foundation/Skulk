@@ -192,53 +192,234 @@ class PlaybackFrameAccumulator {
   }
 }
 
-/** Convert rendered Markdown prose into stable text suitable for speech synthesis. */
+/**
+ * Marker segment understood by the speech pipeline as "insert an audible
+ * pause here" rather than text to synthesize. Uses invisible-separator
+ * characters so it can never collide with model prose.
+ */
+export const SPEECH_PAUSE_MARKER = '\u2063skulk-pause\u2063';
+
+/** Length of the audible pause inserted for structural breaks. */
+export const SPEECH_PAUSE_SECONDS = 0.6;
+
+/**
+ * A fence delimiter line, allowing Markdown container prefixes (blockquote
+ * markers) before the run: a fenced block inside a blockquote is still a
+ * code block, and both fence scanners must see it or its contents get read
+ * aloud. Group 1 is the delimiter run, group 2 the rest of the line.
+ */
+const FENCE_DELIMITER_LINE = /^\s{0,3}(?:>\s?)*\s{0,3}(`{3,}|~{3,})(.*)$/;
+
+/** A Markdown thematic break: three or more -, * or _ alone on a line. */
+const HORIZONTAL_RULE_LINE = /^\s*(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$/;
+
+/** A line whose Markdown role ends at the newline (heading, quote, list, table). */
+const STRUCTURAL_SPEECH_LINE = /^\s{0,3}(?:#{1,6}\s+|>\s?|[-+*]\s+|\d+[.)]\s+|\|)/;
+
+/** Text already carrying an end-of-thought mark that gives TTS its pause. */
+const TERMINAL_SPEECH_PUNCTUATION = /[.!?\u2026:;,]["')\]]*$/;
+
+/* Pictographs, variation selectors, joiners, skin tones, flags, keycaps:
+ * none of them have a spoken reading, and engines that try produce noise. */
+const EMOJI_CHARACTERS = /[0-9#*]\u{FE0F}?\u{20E3}|\p{Extended_Pictographic}|\u{FE0F}|\u{200D}|\u{20E3}|[\u{1F3FB}-\u{1F3FF}]|[\u{1F1E6}-\u{1F1FF}]|[\u{E0020}-\u{E007F}]/gu;
+
+/**
+ * Convert rendered Markdown prose into stable text suitable for speech
+ * synthesis. Works block-by-block (blank lines separate blocks) so that any
+ * block ending without terminal punctuation, such as a bold story title,
+ * gains a period: without one the synthesized title bleeds straight into
+ * the following sentence. Emoji are stripped rather than read, and
+ * horizontal rules contribute nothing here (the sentence pipeline turns
+ * them into an audible pause).
+ */
+/**
+ * Remove fenced code blocks with the same CommonMark delimiter matching the
+ * sentence splitter uses (same character, equal-or-longer run, bare closer),
+ * so a four-backtick fence containing a three-backtick line drops whole. An
+ * unclosed fence drops through the end of the text.
+ */
+function stripFencedCode(text: string): string {
+  const kept: string[] = [];
+  let fenceCharacter = '';
+  let fenceLength = 0;
+  let insideFence = false;
+  for (const line of text.split('\n')) {
+    const delimiterMatch = FENCE_DELIMITER_LINE.exec(line);
+    if (delimiterMatch) {
+      const run = delimiterMatch[1];
+      if (!insideFence) {
+        insideFence = true;
+        fenceCharacter = run[0];
+        fenceLength = run.length;
+        continue;
+      }
+      if (
+        run[0] === fenceCharacter
+        && run.length >= fenceLength
+        && delimiterMatch[2].trim() === ''
+      ) {
+        insideFence = false;
+        continue;
+      }
+    }
+    if (!insideFence) kept.push(line);
+  }
+  return kept.join('\n');
+}
+
+/** Remove HTML tags to a fixed point so nested fragments cannot survive. */
+function stripHtmlTags(value: string): string {
+  let previous = value;
+  for (let pass = 0; pass < 5; pass += 1) {
+    const next = previous.replace(/<[^<>]*>/g, '');
+    if (next === previous) return next;
+    previous = next;
+  }
+  // Give up on pathological nesting rather than looping: angle brackets have
+  // no spoken reading anyway.
+  return previous.replace(/[<>]/g, ' ');
+}
+
 export function speechTextFromMarkdown(text: string): string {
-  const normalizedLines = text
-    .replace(/```[\s\S]*?```/g, ' ')
-    .split(/\r?\n/)
-    .map((line) => {
-      const structuralLine = /^\s*(?:#{1,6}\s+|>\s*|[-+*]\s+|\d+[.)]\s+)/.test(line);
-      let spoken = line
-        .replace(/^\s{0,3}(?:#{1,6}\s+|>\s*)/, '')
-        .replace(/^\s*(?:[-+*]|\d+[.)])\s+/, '')
-        .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-        .replace(/\[([^\]]+)]\([^)]*\)/g, '$1')
-        .replace(/<https?:\/\/[^>]+>/g, '')
-        .replace(/`([^`]+)`/g, '$1')
-        .replace(/(\*\*|__)(.*?)\1/g, '$2')
-        .replace(/(\*|_)(.*?)\1/g, '$2')
-        .replace(/~~(.*?)~~/g, '$1')
-        .replace(/<[^>]+>/g, '')
-        .replace(/[\\*_~]/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (structuralLine && spoken && !/[.!?]["')\]]*$/.test(spoken)) spoken += '.';
+  const spokenBlocks = stripFencedCode(text.replace(/\r\n/g, '\n'))
+    .split(/\n\s*\n/)
+    .map((block) => {
+      const lines = block
+        .split(/\r?\n/)
+        .map((line) => {
+          if (HORIZONTAL_RULE_LINE.test(line)) return '';
+          const structuralLine = /^\s*(?:#{1,6}\s+|>\s*|[-+*]\s+|\d+[.)]\s+)/.test(line);
+          let spoken = line
+            .replace(/^\s{0,3}(?:#{1,6}\s+|>\s*)/, '')
+            .replace(/^\s*(?:[-+*]|\d+[.)])\s+/, '')
+            .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+            .replace(/\[([^\]]+)]\([^)]*\)/g, '$1')
+            .replace(/<https?:\/\/[^>]+>/g, '')
+            .replace(/`([^`]+)`/g, '$1')
+            .replace(/(\*\*|__)(.*?)\1/g, '$2')
+            .replace(/(\*|_)(.*?)\1/g, '$2')
+            .replace(/~~(.*?)~~/g, '$1');
+          spoken = stripHtmlTags(spoken)
+            .replace(/[\\*_~]/g, '')
+            .replace(EMOJI_CHARACTERS, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (structuralLine && spoken && !TERMINAL_SPEECH_PUNCTUATION.test(spoken)) spoken += '.';
+          return spoken;
+        })
+        .filter(Boolean);
+      let spoken = lines.join(' ').replace(/\s+/g, ' ').trim();
+      if (spoken && !TERMINAL_SPEECH_PUNCTUATION.test(spoken)) spoken += '.';
       return spoken;
     })
     .filter(Boolean);
-  return normalizedLines.join(' ').replace(/\s+/g, ' ').trim();
+  return spokenBlocks.join(' ').replace(/\s+/g, ' ').trim();
 }
 
-/** Split visible text into complete synthesis sentences and one retained tail. */
+/**
+ * Split visible text into complete synthesis sentences and one retained tail.
+ *
+ * Boundaries come from three signals, merged in order: terminal punctuation
+ * followed by whitespace (the classic case), a completed blank line (the end
+ * of a Markdown block, which is how an unpunctuated bold title stops
+ * bleeding into the story's first sentence), and a completed structural line
+ * (heading, quote, list item, table row, or horizontal rule), whose Markdown
+ * role ends at its newline.
+ */
 export function splitCompleteSpeechSentences(text: string): {
   sentences: string[];
   remainder: string;
 } {
-  const sentences: string[] = [];
-  let boundary = 0;
+  // Fenced code suppresses every boundary inside it: a blank line or a
+  // list-looking line of code is not a speech boundary, and splitting there
+  // would hand the queue an unterminated fence whose contents get read
+  // aloud. An unclosed fence suppresses to the end of the text, keeping the
+  // fence in the retained tail until it completes.
+  const fenceRanges: Array<{ start: number; end: number }> = [];
+  {
+    let fenceStart = -1;
+    let fenceCharacter = '';
+    let fenceLength = 0;
+    let scanFrom = 0;
+    for (;;) {
+      const newline = text.indexOf('\n', scanFrom);
+      const lineEnd = newline === -1 ? text.length : newline;
+      const line = text.slice(scanFrom, lineEnd);
+      const delimiterMatch = FENCE_DELIMITER_LINE.exec(line);
+      if (delimiterMatch) {
+        const run = delimiterMatch[1];
+        if (fenceStart === -1) {
+          fenceStart = scanFrom;
+          fenceCharacter = run[0];
+          fenceLength = run.length;
+        } else if (
+          // CommonMark close rule: same character, a run at least as long as
+          // the opener, and nothing after it but whitespace (info strings
+          // belong to openers, so a suffixed line inside the fence is code).
+          run[0] === fenceCharacter
+          && run.length >= fenceLength
+          && delimiterMatch[2].trim() === ''
+        ) {
+          fenceRanges.push({ start: fenceStart, end: lineEnd + 1 });
+          fenceStart = -1;
+        }
+      }
+      if (newline === -1) break;
+      scanFrom = newline + 1;
+    }
+    if (fenceStart !== -1) fenceRanges.push({ start: fenceStart, end: text.length + 1 });
+  }
+  const insideFence = (position: number) => fenceRanges.some(
+    (range) => position > range.start && position <= range.end,
+  );
+
+  const boundaries: number[] = [];
+  // A completed fence is itself a segment: emit a boundary right after its
+  // closing line so the fence travels to the queue whole (where the Markdown
+  // conversion drops it) instead of gluing onto the following prose.
+  for (const range of fenceRanges) {
+    if (range.end <= text.length) boundaries.push(range.end);
+  }
   const matcher = /[.!?](?:["')\]*_~]*)\s+/g;
   for (const match of text.matchAll(matcher)) {
     const punctuation = match.index ?? 0;
+    if (insideFence(punctuation)) continue;
     const lineStart = text.lastIndexOf('\n', punctuation) + 1;
     const linePrefix = text.slice(lineStart, punctuation + 1).trim();
     if (/^(?:\d+|[A-Za-z])[.)]$/.test(linePrefix)) continue;
-    const end = (match.index ?? 0) + match[0].length;
-    const sentence = text.slice(boundary, end).trim();
-    if (sentence) sentences.push(sentence);
-    boundary = end;
+    boundaries.push((match.index ?? 0) + match[0].length);
   }
-  return { sentences, remainder: text.slice(boundary) };
+  let searchFrom = 0;
+  for (;;) {
+    const newline = text.indexOf('\n', searchFrom);
+    if (newline === -1) break;
+    const lineStart = text.lastIndexOf('\n', newline - 1) + 1;
+    const line = text.slice(lineStart, newline);
+    if (!insideFence(newline)) {
+      const structural = STRUCTURAL_SPEECH_LINE.test(line) || HORIZONTAL_RULE_LINE.test(line);
+      if (!line.trim() || structural) {
+        boundaries.push(newline + 1);
+      }
+      // A structural line also ends whatever preceded it: without this,
+      // unpunctuated prose directly above a thematic break glues to the
+      // rule and the queue never sees an exact horizontal-rule segment to
+      // turn into its audible pause.
+      if (structural && lineStart > 0) {
+        boundaries.push(lineStart);
+      }
+    }
+    searchFrom = newline + 1;
+  }
+  boundaries.sort((a, b) => a - b);
+  const sentences: string[] = [];
+  let previous = 0;
+  for (const boundary of boundaries) {
+    if (boundary <= previous) continue;
+    const sentence = text.slice(previous, boundary).trim();
+    if (sentence) sentences.push(sentence);
+    previous = boundary;
+  }
+  return { sentences, remainder: text.slice(previous) };
 }
 
 /** Re-split visible speech after a reasoning parser rewrites earlier text. */
@@ -368,6 +549,31 @@ export class StreamingSpeechPlayback {
     } finally {
       if (stopOnAbort) signal?.removeEventListener('abort', stopOnAbort);
       await reader?.cancel().catch(() => undefined);
+    }
+  }
+
+  /**
+   * Schedule a bounded run of silence between appended responses: the
+   * audible pause for structural breaks such as horizontal rules. A no-op
+   * until the first appended response has created the audio session, since
+   * a pause before any audio is indistinguishable from latency.
+   */
+  async appendSilence(seconds: number, signal?: AbortSignal): Promise<void> {
+    if (this.stopped || this.finished) return;
+    const context = this.context;
+    if (!context) return;
+    const total = Math.round(Math.max(0, Math.min(seconds, 2)) * context.sampleRate);
+    if (total === 0) return;
+    const maximumFrameSamples = Math.max(
+      1,
+      Math.floor(context.sampleRate * this.maximumBufferedSeconds),
+    );
+    for (const frame of splitPlaybackSamples(new Float32Array(total), maximumFrameSamples)) {
+      if (this.node) {
+        await this.enqueueWorkletFrame(frame, context.sampleRate, signal);
+      } else {
+        await this.enqueueScheduledFrame(context, frame, context.sampleRate, signal);
+      }
     }
   }
 
@@ -592,7 +798,9 @@ export class SpeechSentenceQueue {
   enqueue(sentences: readonly string[]): void {
     if (this.stopped || this.inputFinished) return;
     this.pending.push(...sentences
-      .map(speechTextFromMarkdown)
+      .map((raw) => (
+        HORIZONTAL_RULE_LINE.test(raw.trim()) ? SPEECH_PAUSE_MARKER : speechTextFromMarkdown(raw)
+      ))
       .filter((sentence) => sentence.length > 0));
     void this.drain();
   }

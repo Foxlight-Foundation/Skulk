@@ -7,6 +7,7 @@ import {
   SpeechSentenceQueue,
   resyncVisibleSpeech,
   speechTextFromMarkdown,
+  SPEECH_PAUSE_MARKER,
   splitPlaybackSamples,
   splitCompleteSpeechSentences,
   streamingSpeechPlaybackMode,
@@ -335,6 +336,134 @@ describe('splitCompleteSpeechSentences', () => {
   });
 });
 
+describe('splitCompleteSpeechSentences structural boundaries', () => {
+  it('finalizes an unpunctuated title once its blank line completes', () => {
+    expect(splitCompleteSpeechSentences('**The Fox and the Ember**\n\nOnce upon a time. More')).toEqual({
+      sentences: ['**The Fox and the Ember**', 'Once upon a time.'],
+      remainder: 'More',
+    });
+  });
+
+  it('finalizes a heading at its own newline without waiting for a blank line', () => {
+    expect(splitCompleteSpeechSentences('### Chapter One\nThe valley slept. Next')).toEqual({
+      sentences: ['### Chapter One', 'The valley slept.'],
+      remainder: 'Next',
+    });
+  });
+
+  it('does not split a soft-wrapped prose line', () => {
+    expect(splitCompleteSpeechSentences('the quick brown fox\njumps over the lazy dog')).toEqual({
+      sentences: [],
+      remainder: 'the quick brown fox\njumps over the lazy dog',
+    });
+  });
+
+  it('does not split inside a fenced code block', () => {
+    const streamed = 'Look at this.\n```python\n# not a heading\n\nvalue = 1\n```\nDone. Tail';
+    expect(splitCompleteSpeechSentences(streamed)).toEqual({
+      sentences: ['Look at this.', '```python\n# not a heading\n\nvalue = 1\n```', 'Done.'],
+      remainder: 'Tail',
+    });
+  });
+
+  it('retains an unterminated fence in the tail', () => {
+    const streamed = 'Intro.\n```python\nprint(1)\n\n';
+    expect(splitCompleteSpeechSentences(streamed)).toEqual({
+      sentences: ['Intro.'],
+      remainder: '```python\nprint(1)\n\n',
+    });
+  });
+
+  it('does not close a backtick fence on a tilde delimiter inside it', () => {
+    const streamed = 'Start.\n```text\n~~~\n# still code\n```\nEnd. Tail';
+    expect(splitCompleteSpeechSentences(streamed)).toEqual({
+      sentences: ['Start.', '```text\n~~~\n# still code\n```', 'End.'],
+      remainder: 'Tail',
+    });
+  });
+
+  it('keeps a longer-run fence open across an inner three-backtick line', () => {
+    const streamed = 'Start.\n````markdown\n```\n# code\n```\n````\nEnd. Tail';
+    expect(splitCompleteSpeechSentences(streamed)).toEqual({
+      sentences: ['Start.', '````markdown\n```\n# code\n```\n````', 'End.'],
+      remainder: 'Tail',
+    });
+  });
+
+  it('does not close a fence on a delimiter line carrying an info string', () => {
+    const streamed = 'Start.\n```text\n```not-a-closer\n# code\n```\nEnd. Tail';
+    expect(splitCompleteSpeechSentences(streamed)).toEqual({
+      sentences: ['Start.', '```text\n```not-a-closer\n# code\n```', 'End.'],
+      remainder: 'Tail',
+    });
+  });
+
+  it('drops a nested-fence block whole from spoken text', () => {
+    expect(speechTextFromMarkdown('Before.\n\n````markdown\n```\n# inner\n```\n````\n\nAfter.'))
+      .toBe('Before. After.');
+  });
+
+  it('separates unpunctuated prose from a thematic break with no blank line', () => {
+    expect(splitCompleteSpeechSentences('Before the break\n---\nAfter the break. Tail')).toEqual({
+      sentences: ['Before the break', '---', 'After the break.'],
+      remainder: 'Tail',
+    });
+  });
+
+  it('recognizes a fenced block inside a blockquote', () => {
+    const streamed = 'Quoting.\n> ```js\n> const x = 1;\n> ```\nDone. Tail';
+    expect(splitCompleteSpeechSentences(streamed)).toEqual({
+      sentences: ['Quoting.', '> ```js\n> const x = 1;\n> ```', 'Done.'],
+      remainder: 'Tail',
+    });
+    expect(speechTextFromMarkdown('Quoting.\n\n> ```js\n> const x = 1;\n> ```\n\nDone.'))
+      .toBe('Quoting. Done.');
+  });
+
+  it('removes keycap emoji whole, base character included', () => {
+    expect(speechTextFromMarkdown('Step 1\u{FE0F}\u{20E3} then step 2\u{FE0F}\u{20E3} done.'))
+      .toBe('Step then step done.');
+    expect(speechTextFromMarkdown('Press #\u{FE0F}\u{20E3} now.')).toBe('Press now.');
+  });
+
+  it('handles Windows newlines around a title block', () => {
+    expect(speechTextFromMarkdown('**A Title**\r\n\r\nBody text.')).toBe('A Title. Body text.');
+  });
+
+  it('strips nested HTML tag fragments to a fixed point', () => {
+    expect(speechTextFromMarkdown('safe <scr<script>ipt>alert(1)</scr</script>ipt> text')).toBe(
+      'safe alert(1) text.',
+    );
+  });
+
+  it('emits a horizontal rule as its own segment', () => {
+    expect(splitCompleteSpeechSentences('Before the break.\n\n---\n\nAfter')).toEqual({
+      sentences: ['Before the break.', '---'],
+      remainder: 'After',
+    });
+  });
+});
+
+describe('speechTextFromMarkdown', () => {
+  it('appends terminal punctuation to an unpunctuated title block', () => {
+    expect(speechTextFromMarkdown('**The Fox and the Ember**')).toBe('The Fox and the Ember.');
+  });
+
+  it('does not double-punctuate blocks that already end a thought', () => {
+    expect(speechTextFromMarkdown('A story about foxes:')).toBe('A story about foxes:');
+    expect(speechTextFromMarkdown('It ended well!')).toBe('It ended well!');
+  });
+
+  it('strips emoji instead of letting the engine read them', () => {
+    expect(speechTextFromMarkdown('Great work! \u{1F389}\u{1F525}')).toBe('Great work!');
+    expect(speechTextFromMarkdown('Family: \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} together.')).toBe('Family: together.');
+  });
+
+  it('drops horizontal rules rather than reading dashes aloud', () => {
+    expect(speechTextFromMarkdown('Before.\n\n---\n\nAfter.')).toBe('Before. After.');
+  });
+});
+
 describe('speechTextFromMarkdown', () => {
   it('removes presentation markup while preserving readable prose and pauses', () => {
     expect(speechTextFromMarkdown([
@@ -369,6 +498,16 @@ describe('resyncVisibleSpeech', () => {
 });
 
 describe('SpeechSentenceQueue', () => {
+  it('maps a horizontal-rule segment to the pause marker', async () => {
+    const calls: string[] = [];
+    let idle = false;
+    const queue = new SpeechSentenceQueue(async (text) => { calls.push(text); }, () => undefined, () => { idle = true; });
+    queue.enqueue(['Before the break.', '---', 'After the break.']);
+    queue.finish();
+    await vi.waitFor(() => { if (!idle) throw new Error('queue not idle'); });
+    expect(calls).toEqual(['Before the break.', SPEECH_PAUSE_MARKER, 'After the break.']);
+  });
+
   it('plays sentences serially in insertion order', async () => {
     const calls: string[] = [];
     let idle = false;
