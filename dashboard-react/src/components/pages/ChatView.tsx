@@ -1262,12 +1262,15 @@ export function ChatView({
         })
       : null;
     const fenceProbe = codeNarrator ? new FenceProbe() : null;
-    const narrate = () => {
+    // Narrate BEFORE enqueuing the delta's prose so a closer settles ahead
+    // of the explanation that follows a code block.
+    const narrate = (proseFollowing: boolean) => {
       if (!codeNarrator || !sentenceQueue || !fenceProbe) return;
       const utterance = codeNarrator.update({
         fenceOpen: fenceProbe.isOpen(),
         queueStarved: sentenceQueue.isStarved(),
         bufferedSeconds: streamingPlaybackRef.current?.bufferedSeconds() ?? 0,
+        proseFollowing,
       });
       if (utterance) sentenceQueue.enqueue([utterance]);
     };
@@ -1380,8 +1383,8 @@ export function ChatView({
                     roundSpeechSentences.push(...split.sentences);
                   } else {
                     fenceProbe?.feed(visibleDelta);
+                    narrate(split.sentences.length > 0);
                     sentenceQueue.enqueue(split.sentences);
-                    narrate();
                   }
                 } else if (sentenceQueue) {
                   const split = resyncVisibleSpeech(
@@ -1396,8 +1399,8 @@ export function ChatView({
                   } else {
                     fenceProbe?.reset();
                     fenceProbe?.feed(separated.content);
+                    narrate(split.sentences.length > 0);
                     sentenceQueue.enqueue(split.sentences);
-                    narrate();
                   }
                 }
               }
@@ -1531,6 +1534,17 @@ export function ChatView({
 
       addMessage(assistantMsg);
       if (sentenceQueue) {
+        // Settle any pending code closer ahead of the trailing prose so the
+        // acknowledgement precedes the final explanation.
+        if (codeNarrator && speechTail.trim()) {
+          const closer = codeNarrator.update({
+            fenceOpen: fenceProbe?.isOpen() ?? false,
+            queueStarved: sentenceQueue.isStarved(),
+            bufferedSeconds: streamingPlaybackRef.current?.bufferedSeconds() ?? 0,
+            proseFollowing: true,
+          });
+          if (closer) sentenceQueue.enqueue([closer]);
+        }
         if (speechTail.trim()) sentenceQueue.enqueue([speechTail.trim()]);
         speechTail = '';
       } else if (autoSpeakAssistant && selectedSpeechModelId && finalAssistantContent) {

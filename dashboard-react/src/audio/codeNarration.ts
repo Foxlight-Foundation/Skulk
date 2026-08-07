@@ -28,6 +28,10 @@ export interface CodeNarrationSignals {
   queueStarved: boolean;
   /** Seconds of decoded audio still queued for playback. */
   bufferedSeconds: number;
+  /** Whether this delta carries prose sentences about to be enqueued. The
+   *  caller narrates BEFORE enqueuing them, so a closer emitted here plays
+   *  ahead of the prose that follows the code block. */
+  proseFollowing: boolean;
 }
 
 export interface CodeNarratorOptions {
@@ -133,13 +137,17 @@ export class CodeNarrator {
   update(signals: CodeNarrationSignals): string | null {
     const timestamp = this.now();
 
-    // Settle an expired pending close before anything else: if the stream
-    // went quiet past the debounce window and the next delta opens a new
-    // fence, the finished block still deserves its closer (the opener for
-    // the new fence follows on the next delta).
+    // Settle the pending close before anything else, on either signal: the
+    // debounce window expiring (quiet stream), or prose arriving after the
+    // fence, which proves the block is over and must hear its closer BEFORE
+    // that prose plays. Only a quick fence reopen with nothing in between
+    // still counts as a continuation.
     if (
       this.pendingCloseSince !== null
-      && timestamp - this.pendingCloseSince >= this.reopenDebounceMs
+      && (
+        signals.proseFollowing
+        || timestamp - this.pendingCloseSince >= this.reopenDebounceMs
+      )
     ) {
       this.pendingCloseSince = null;
       this.openerPlayed = false;
@@ -163,7 +171,15 @@ export class CodeNarrator {
 
     if (!signals.fenceOpen && this.fenceOpen) {
       this.fenceOpen = false;
-      if (this.openerPlayed) this.pendingCloseSince = timestamp;
+      if (!this.openerPlayed) return null;
+      if (signals.proseFollowing) {
+        // The closing delta already carries follow-on prose: close now so
+        // the acknowledgement precedes the explanation.
+        this.openerPlayed = false;
+        this.lastUtteranceAt = timestamp;
+        return this.pick(this.phrases.closers);
+      }
+      this.pendingCloseSince = timestamp;
       return null;
     }
 

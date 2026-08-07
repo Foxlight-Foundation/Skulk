@@ -18,9 +18,10 @@ function narrator(overrides: { now: () => number; random?: () => number }) {
   });
 }
 
-const open = { fenceOpen: true, queueStarved: true, bufferedSeconds: 0 };
-const openBusy = { fenceOpen: true, queueStarved: false, bufferedSeconds: 3 };
-const closed = { fenceOpen: false, queueStarved: true, bufferedSeconds: 0 };
+const open = { fenceOpen: true, queueStarved: true, bufferedSeconds: 0, proseFollowing: false };
+const openBusy = { fenceOpen: true, queueStarved: false, bufferedSeconds: 3, proseFollowing: false };
+const closed = { fenceOpen: false, queueStarved: true, bufferedSeconds: 0, proseFollowing: false };
+const closedWithProse = { fenceOpen: false, queueStarved: true, bufferedSeconds: 0, proseFollowing: true };
 
 describe('CodeNarrator', () => {
   it('speaks an opener when a fence opens and a closer after it settles shut', () => {
@@ -138,5 +139,35 @@ describe('FenceProbe', () => {
     expect(probe.isOpen()).toBe(false);
     probe.feed('Plain prose only.\n');
     expect(probe.isOpen()).toBe(false);
+  });
+});
+
+describe('CodeNarrator closer ordering with trailing prose', () => {
+  it('closes immediately when the closing delta carries follow-on prose', () => {
+    let clock = 0;
+    const n = narrator({ now: () => clock });
+    n.update(open);
+    clock += 100;
+    expect(n.update(closedWithProse)).toMatch(/Closer/);
+  });
+
+  it('closes ahead of prose arriving shortly after the fence', () => {
+    let clock = 0;
+    const n = narrator({ now: () => clock });
+    n.update(open);
+    clock += 100;
+    n.update(closed);
+    clock += 500;
+    expect(n.update(closedWithProse)).toMatch(/Closer/);
+  });
+
+  it('still treats a silent quick reopen as a continuation', () => {
+    let clock = 0;
+    const n = narrator({ now: () => clock });
+    n.update(open);
+    clock += 100;
+    n.update(closed);
+    clock += 500;
+    expect(n.update(open)).toBeNull();
   });
 });
