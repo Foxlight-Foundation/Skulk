@@ -94,11 +94,13 @@ class ExactIndex:
         self._amplitude: dict[str, float] = {}
 
     def write(self, trace_id: str, key: Vector, value: Vector) -> None:
+        """Store (or overwrite) a trace at full amplitude."""
         self._keys[trace_id] = normalize(np.asarray(key, dtype=DTYPE))
         self._values[trace_id] = normalize(np.asarray(value, dtype=DTYPE))
         self._amplitude[trace_id] = 1.0
 
     def probe(self, cue: Vector) -> ProbeResult:
+        """Score the cue against every key; hit iff best score clears the gate."""
         if not self._keys:
             return ProbeResult(trace_id=None, confidence=0.0, hit=False)
         cue_n = normalize(np.asarray(cue, dtype=DTYPE))
@@ -114,16 +116,19 @@ class ExactIndex:
         return ProbeResult(trace_id=best_id, confidence=confidence, hit=hit)
 
     def decay(self, retention: float) -> None:
+        """Multiply every trace's amplitude by ``retention`` (0..1)."""
         for trace_id in list(self._amplitude):
             self._amplitude[trace_id] *= retention
 
     def subtract(self, trace_id: str, key: Vector, value: Vector) -> None:
+        """Forget a trace. Exact for a flat store: the row is simply dropped."""
         del key, value  # exact for a flat store: just drop the row
         self._keys.pop(trace_id, None)
         self._values.pop(trace_id, None)
         self._amplitude.pop(trace_id, None)
 
     def __len__(self) -> int:
+        """Number of live traces."""
         return len(self._keys)
 
 
@@ -143,6 +148,7 @@ class HolographicField:
     def __post_init__(self) -> None:
         self._field: Vector = np.zeros(self.dim, dtype=DTYPE)
         self._codebook: dict[str, Vector] = {}  # trace_id -> unit value
+        self._keys: dict[str, Vector] = {}  # trace_id -> unit key (authoritative)
         self._amplitude: dict[str, float] = {}
 
     def _key(self, key: Vector) -> Vector:
@@ -160,21 +166,28 @@ class HolographicField:
         return normalize(arr)
 
     def write(self, trace_id: str, key: Vector, value: Vector) -> None:
+        """Superpose a trace into the field (rewrites subtract the old binding)."""
         key_u = self._key(key)
         value_n = normalize(np.asarray(value, dtype=DTYPE))
         if value_n.shape[-1] != self.dim:
             raise ValueError(f"value dim {value_n.shape[-1]} != field dim {self.dim}")
         # If the trace already exists, remove its old contribution first so a
-        # rewrite is idempotent rather than doubly-superposed.
+        # rewrite is idempotent rather than doubly-superposed. The STORED key
+        # and value are authoritative here: subtracting with the caller's new
+        # key would leave the old binding smeared in the field forever.
         if trace_id in self._amplitude:
             self._field = (
-                self._field - self._amplitude[trace_id] * bind(key_u, self._codebook[trace_id])
+                self._field
+                - self._amplitude[trace_id]
+                * bind(self._keys[trace_id], self._codebook[trace_id])
             ).astype(DTYPE)
         self._field = self._field + bind(key_u, value_n)
         self._codebook[trace_id] = value_n
+        self._keys[trace_id] = key_u
         self._amplitude[trace_id] = 1.0
 
     def probe(self, cue: Vector) -> ProbeResult:
+        """Unbind the cue and project onto the value codebook; gate the score."""
         if not self._codebook:
             return ProbeResult(trace_id=None, confidence=0.0, hit=False)
         cue_u = self._key(cue)
@@ -206,15 +219,35 @@ class HolographicField:
             self._amplitude[trace_id] *= retention
 
     def subtract(self, trace_id: str, key: Vector, value: Vector) -> None:
+        """Remove a trace's exact contribution from the field.
+
+        The binding stored at write time is authoritative: caller-supplied
+        vectors are accepted for :class:`MemoryIndex` protocol compatibility
+        but deliberately ignored, since subtracting anything other than the
+        stored pair would leave a residue in the superposition.
+        """
+        del key, value
         if trace_id not in self._amplitude:
             return
-        key_u = self._key(key)
-        value_n = normalize(np.asarray(value, dtype=DTYPE))
         self._field = (
-            self._field - self._amplitude[trace_id] * bind(key_u, value_n)
+            self._field
+            - self._amplitude[trace_id]
+            * bind(self._keys[trace_id], self._codebook[trace_id])
         ).astype(DTYPE)
         self._codebook.pop(trace_id, None)
+        self._keys.pop(trace_id, None)
         self._amplitude.pop(trace_id, None)
 
+    def energy(self) -> float:
+        """L2 norm of the superposition.
+
+        A diagnostic for tests and future maintenance cadences: an exact
+        write/subtract lifecycle drains the field back to (near) zero energy,
+        while inexact bookkeeping leaves residue here even when the trace
+        bookkeeping looks empty.
+        """
+        return float(np.linalg.norm(self._field))
+
     def __len__(self) -> int:
+        """Number of live traces in the superposition."""
         return len(self._codebook)

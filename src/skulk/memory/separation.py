@@ -75,6 +75,14 @@ class Whitener:
         x = np.asarray(embeddings, dtype=np.float64)
         if x.ndim != 2:
             raise ValueError(f"embeddings must be 2-D (n, d); got shape {x.shape}")
+        if len(x) < 2:
+            raise ValueError(
+                f"whitener needs at least 2 embeddings to fit a covariance; got {len(x)}"
+            )
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError(f"alpha must be in [0, 1]; got {alpha}")
+        if not 0.0 <= shrinkage <= 1.0:
+            raise ValueError(f"shrinkage must be in [0, 1]; got {shrinkage}")
         mu = x.mean(axis=0)
         xc = x - mu
         cov = (xc.T @ xc) / len(xc)

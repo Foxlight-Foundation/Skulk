@@ -23,20 +23,22 @@ they have a single home before the Settings UI exposes them.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from skulk.memory.index import DEFAULT_CONFIDENCE_GATE
 from skulk.memory.separation import DEFAULT_ALPHA
+from skulk.shared.experimental import (
+    EXPERIMENTAL_MODE_ENV_VAR as EXPERIMENTAL_MODE_ENV_VAR,  # re-exported
+)
+from skulk.shared.experimental import (
+    experimental_mode_enabled as experimental_mode_enabled,  # re-exported
+)
 
 # Field dimension derived from the Phase 0 measurements (128 KB fp32 in RAM).
 DEFAULT_FIELD_DIM = 32768
 
-_TRUTHY = frozenset({"1", "true", "yes", "on"})
-
-EXPERIMENTAL_MODE_ENV_VAR = "SKULK_ENABLE_EXPERIMENTAL_MODE"
 
 
 class MemorySettings(BaseModel):
@@ -50,25 +52,43 @@ class MemorySettings(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True)
 
     enabled: bool = False
-    field_dim: int = Field(default=DEFAULT_FIELD_DIM, gt=0)
-    separation_alpha: float = Field(default=DEFAULT_ALPHA, ge=0.0, le=1.0)
-    confidence_gate: float = Field(default=DEFAULT_CONFIDENCE_GATE, ge=0.0, le=1.0)
-    decay_half_life_days: float = Field(default=3.0, gt=0.0)
+    field_dim: int = Field(
+        default=DEFAULT_FIELD_DIM,
+        gt=0,
+        description=(
+            "Holographic field dimension. The Phase 0 capacity ceiling is about "
+            "dim/20 traces with cleanup, and the default costs 128 KB of fp32."
+        ),
+    )
+    separation_alpha: float = Field(
+        default=DEFAULT_ALPHA,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Fractional-ZCA whitening exponent for the pattern-separation "
+            "stage: 0 is no whitening, 1 is full ZCA."
+        ),
+    )
+    confidence_gate: float = Field(
+        default=DEFAULT_CONFIDENCE_GATE,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum probe confidence before a trace surfaces. The Phase 0 "
+            "experiments measured zero cross-episode false confidence at the "
+            "default; surfacing, not recall, is the contract."
+        ),
+    )
+    decay_half_life_days: float = Field(
+        default=3.0,
+        gt=0.0,
+        description=(
+            "Half-life for trace amplitude decay applied by the maintenance "
+            "cadence; forgetting emerges from interference plus this decay."
+        ),
+    )
 
 
-def _is_truthy(value: str | None) -> bool:
-    return value is not None and value.strip().lower() in _TRUTHY
-
-
-def experimental_mode_enabled(env: Mapping[str, str] | None = None) -> bool:
-    """True when this node is opted into experimental features (the master gate).
-
-    Driven by ``SKULK_ENABLE_EXPERIMENTAL_MODE``; off unless explicitly set. This
-    both reveals the Experiments settings section and gates every experimental
-    feature's effect.
-    """
-    source = os.environ if env is None else env
-    return _is_truthy(source.get(EXPERIMENTAL_MODE_ENV_VAR))
 
 
 def resolve_memory_settings(

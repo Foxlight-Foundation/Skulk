@@ -12,7 +12,7 @@ from skulk.memory.separation import Whitener
 def _anisotropic_episodes(seed: int) -> tuple[Vector, np.ndarray]:
     """Synthesize embeddings with the anisotropy real sentence embeddings show.
 
-    Six episodes of six spans each, every vector loaded heavily on one shared
+    Twenty episodes of fifteen spans each, every vector loaded heavily on one shared
     dominant axis so that unrelated episodes sit at high cosine (the failure
     mode Phase 0 measured). Returns the vectors and their episode ids.
     """

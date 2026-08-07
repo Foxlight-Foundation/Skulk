@@ -1,6 +1,6 @@
 """Skulk fabric memory: the ``skulk.memory`` core library (Phase 1).
 
-Pure, dependency-light (numpy only) building blocks for the cluster's short-term
+Pure, dependency-light (numpy for the math, pydantic for the settings model) building blocks for the cluster's short-term
 associative memory: HRR primitives, the fractional-ZCA pattern-separation stage,
 and the :class:`MemoryIndex` interface with an exact baseline and a holographic
 field implementation. No I/O and no fabric here; the content store, the MEMORY

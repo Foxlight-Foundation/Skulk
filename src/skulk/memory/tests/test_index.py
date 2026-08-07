@@ -146,3 +146,55 @@ def test_rewrite_is_idempotent(factory: Callable[[], MemoryIndex]) -> None:
     index.write("t0", keys[0], values[0])
     assert len(index) == 2
     assert index.probe(keys[0]).trace_id == "t0"
+
+def test_holographic_rewrite_with_new_key_leaves_no_residue() -> None:
+    """Rewriting a trace under a different key must subtract the stored binding.
+
+    Regression test for the review finding on #782: the rewrite path
+    previously subtracted with the caller's NEW key against the old value,
+    leaving the original binding smeared in the superposition forever.
+    """
+    from skulk.memory.hrr import random_vectors
+    from skulk.memory.index import HolographicField
+
+    dim = 2048
+    field = HolographicField(dim=dim)
+    keys = random_vectors(2, dim, seed=7)
+    values = random_vectors(2, dim, seed=8)
+    field.write("t1", keys[0], values[0])
+    field.write("t1", keys[1], values[1])
+    field.subtract("t1", keys[1], values[1])
+    assert len(field) == 0
+    # An exact lifecycle drains the field to near-zero energy; the old bug
+    # left the original binding smeared in the superposition here.
+    assert field.energy() < 1e-3
+
+
+def test_holographic_subtract_ignores_caller_vectors() -> None:
+    """Subtract removes the stored binding even when the caller passes junk."""
+    from skulk.memory.hrr import random_vectors
+    from skulk.memory.index import HolographicField
+
+    dim = 2048
+    field = HolographicField(dim=dim)
+    keys = random_vectors(2, dim, seed=9)
+    values = random_vectors(2, dim, seed=10)
+    field.write("t1", keys[0], values[0])
+    field.subtract("t1", keys[1], values[1])
+    assert len(field) == 0
+    assert field.energy() < 1e-3
+
+
+def test_whitener_fit_rejects_degenerate_input() -> None:
+    import pytest
+
+    from skulk.memory.separation import Whitener
+
+    single = np.ones((1, 8), dtype=np.float32)
+    with pytest.raises(ValueError):
+        Whitener.fit(single)
+    corpus = np.random.default_rng(0).normal(size=(16, 8)).astype(np.float32)
+    with pytest.raises(ValueError):
+        Whitener.fit(corpus, alpha=1.5)
+    with pytest.raises(ValueError):
+        Whitener.fit(corpus, shrinkage=-0.1)
