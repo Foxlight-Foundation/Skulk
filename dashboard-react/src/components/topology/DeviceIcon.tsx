@@ -7,6 +7,23 @@ const APPLE_LOGO_PATH =
 const LOGO_NATIVE_WIDTH = 814;
 const LOGO_NATIVE_HEIGHT = 1000;
 
+/** Centered Apple mark shared by the Mac glyphs. The desktop Macs fill it
+ *  with the device outline colour so the mark always matches the case's
+ *  wire in both palettes; the MacBook keeps its white-on-screen fill. Marks
+ *  below a legible height render nothing, so miniature glyph contexts (the
+ *  cluster card's 48px tiles, drawn with a dimmed wire) stay clean instead
+ *  of carrying an unreadable smudge. */
+function AppleMark({ cx, centerY, targetH, fill, opacity = 0.85 }: { cx: number; centerY: number; targetH: number; fill: string; opacity?: number }) {
+  if (targetH < 12) return null;
+  const scale = targetH / LOGO_NATIVE_HEIGHT;
+  const x = cx - (LOGO_NATIVE_WIDTH * scale) / 2;
+  const y = centerY - targetH / 2;
+  return (
+    <path d={APPLE_LOGO_PATH} transform={`translate(${x}, ${y}) scale(${scale})`}
+      fill={fill} opacity={opacity} />
+  );
+}
+
 export interface DeviceIconProps {
   model: DeviceModel;
   /** 0-100 */
@@ -44,6 +61,7 @@ export function DeviceIcon({
   if (model === 'mac-mini') return <MacMini {...common} bodyColor={bodyColor} />;
   if (model === 'macbook-pro') return <MacBookPro {...common} bodyColor={bodyColor} />;
   if (model === 'amd-strix') return <AmdStrix {...common} bodyColor={bodyColor} labelColor={labelColor} />;
+  if (model === 'nvidia-gpu') return <NvidiaGpu {...common} bodyColor={bodyColor} labelColor={labelColor} />;
   return <HexagonDefault {...common} fillColor={fillColor} />;
 }
 
@@ -89,6 +107,8 @@ function MacStudio({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, 
       {/* SD card slot */}
       <rect x={cx - boxW * 0.11} y={vSlotY} width={boxW * 0.12} height={slotH * 0.6}
         fill="rgba(0,0,0,0.35)" rx={1} />
+      {/* Apple mark, centred in the upper body clear of the port row */}
+      <AppleMark cx={cx} centerY={y + topSurfaceH + bodyH * 0.34} targetH={bodyH * 0.4} fill={wireColor} />
     </g>
   );
 }
@@ -125,10 +145,89 @@ function MacMini({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, cl
         <rect x={x} y={y + topSurfaceH + (bodyH - memFillH)} width={boxW} height={memFillH}
           fill={ramColor} clipPath={`url(#${clipId}-mini)`} />
       )}
-      {[cx - boxW * 0.24, cx - boxW * 0.14].map((vx, i) => (
+      {/* Port slots sit well left of centre so they never crowd the Apple
+          mark's clear space. */}
+      {[cx - boxW * 0.34, cx - boxW * 0.24].map((vx, i) => (
         <rect key={i} x={vx - vSlotW / 2} y={vSlotY} width={vSlotW} height={slotH}
           fill="rgba(0,0,0,0.35)" rx={1.2} />
       ))}
+      {/* Apple mark, optically centred on the whole case (measuring from the
+          body alone reads low because the top-surface strip adds visual
+          height above it) */}
+      <AppleMark cx={cx} centerY={y + boxH * 0.47} targetH={bodyH * 0.52} fill={wireColor} />
+    </g>
+  );
+}
+
+
+interface NvidiaGpuProps {
+  cx: number; cy: number; width: number; height: number;
+  ramPercent: number; wireColor: string; strokeWidth: number; clipId: string;
+  bodyColor: string; ramColor: string; labelColor: string;
+}
+
+/**
+ * NVIDIA CUDA device (datacenter GPU pod or a DGX-Spark-class box). Rendered
+ * in the same visual language as the other device glyphs (theme body, memory
+ * fills from the bottom in the theme accent); the distinguishing signals are
+ * the compact spark-style cube with a front intake grid and the NVIDIA
+ * wordmark in the brand green. The memory fill represents the unified/VRAM
+ * pool like every other tile (#555).
+ */
+function NvidiaGpu({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId, bodyColor, ramColor, labelColor }: NvidiaGpuProps) {
+  const boxW = width * 0.62;
+  const boxH = height * 0.62;
+  const x = cx - boxW / 2;
+  const y = cy - boxH / 2;
+  const cornerRadius = 5;
+  const memFillH = (ramPercent / 100) * boxH;
+  const bodyClip = `${clipId}-nvidia-body`;
+  // Front intake grid: a spark-box face of small rounded cells.
+  const gridCols = 5;
+  const gridRows = 3;
+  const gridPad = boxW * 0.12;
+  const gridW = boxW - gridPad * 2;
+  const gridTop = y + boxH * 0.16;
+  const gridH = boxH * 0.42;
+  const cellGap = 2.5;
+  const cellW = (gridW - cellGap * (gridCols - 1)) / gridCols;
+  const cellH = (gridH - cellGap * (gridRows - 1)) / gridRows;
+  const cells: { cxi: number; cyi: number }[] = [];
+  for (let r = 0; r < gridRows; r += 1) {
+    for (let c = 0; c < gridCols; c += 1) {
+      cells.push({ cxi: x + gridPad + c * (cellW + cellGap), cyi: gridTop + r * (cellH + cellGap) });
+    }
+  }
+
+  return (
+    <g>
+      <defs>
+        <clipPath id={bodyClip}>
+          <rect x={x} y={y} width={boxW} height={boxH} rx={cornerRadius - 1} />
+        </clipPath>
+      </defs>
+      {/* Body: compact cube */}
+      <rect x={x} y={y} width={boxW} height={boxH} rx={cornerRadius}
+        fill={bodyColor} stroke={wireColor} strokeWidth={strokeWidth} />
+      {/* Memory fill */}
+      {ramPercent > 0 && (
+        <rect x={x} y={y + (boxH - memFillH)} width={boxW} height={memFillH}
+          fill={ramColor} clipPath={`url(#${bodyClip})`} />
+      )}
+      {/* Front intake grid */}
+      {cells.map((cell, i) => (
+        <rect key={i} x={cell.cxi} y={cell.cyi} width={cellW} height={cellH}
+          fill="rgba(0,0,0,0.28)" rx={1.5} />
+      ))}
+      {/* NVIDIA wordmark in brand green; labelColor keeps theme contrast for
+          the base line under it. */}
+      <text x={cx} y={y + boxH * 0.82} textAnchor="middle"
+        fontSize={Math.max(9, boxW * 0.16)} fontWeight={700}
+        fontFamily="inherit" letterSpacing="0.5"
+        fill="#76B900">NVIDIA</text>
+      {/* Base line, matching the AMD tile's silver base cue */}
+      <rect x={x + boxW * 0.08} y={y + boxH + 2} width={boxW * 0.84} height={2.5}
+        rx={1.25} fill={labelColor} opacity={0.55} />
     </g>
   );
 }
@@ -216,11 +315,6 @@ function MacBookPro({ cx, cy, width, height, ramPercent, wireColor, strokeWidth,
   const innerH = screenH - bezel * 2;
   const memFillH = (ramPercent / 100) * innerH;
 
-  // Apple logo sizing
-  const logoTargetH = screenH * 0.22;
-  const logoScale = logoTargetH / LOGO_NATIVE_HEIGHT;
-  const logoX = cx - (LOGO_NATIVE_WIDTH * logoScale) / 2;
-  const logoY = screenY + screenH / 2 - logoTargetH / 2;
 
   // Base (keyboard) trapezoid
   const baseY = screenY + screenH;
@@ -258,9 +352,7 @@ function MacBookPro({ cx, cy, width, height, ramPercent, wireColor, strokeWidth,
           fill={ramColor} clipPath={`url(#${clipId}-mbp-screen)`} />
       )}
       {/* Apple logo */}
-      <path d={APPLE_LOGO_PATH}
-        transform={`translate(${logoX}, ${logoY}) scale(${logoScale})`}
-        fill="#FFFFFF" opacity={0.9} />
+      <AppleMark cx={cx} centerY={screenY + screenH / 2} targetH={screenH * 0.22} fill="#FFFFFF" opacity={0.9} />
       {/* Keyboard base */}
       <path
         d={`M ${baseTopX} ${baseY} L ${baseTopX + baseTopW} ${baseY} L ${baseBottomX + baseBottomW} ${baseY + baseH} L ${baseBottomX} ${baseY + baseH} Z`}

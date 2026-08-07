@@ -1,4 +1,5 @@
 import base64
+import binascii
 import contextlib
 import copy
 import hashlib
@@ -6,15 +7,24 @@ import json
 import os
 import platform
 import random
+import re
 import shutil
 import socket
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Sequence
+import weakref
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Sequence,
+)
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
 
 import anyio
@@ -29,13 +39,24 @@ from anyio import (
     WouldBlock,
     to_thread,
 )
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    WebSocket,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from hypercorn.config import Config
 from hypercorn.typing import ASGIFramework
 from loguru import logger
+from pydantic import ValidationError
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 import skulk.shared.types.tasks as task_types
 from skulk.api.adapters.chat_completions import (
@@ -62,11 +83,56 @@ from skulk.api.adapters.responses import (
     generate_responses_stream,
     responses_request_to_text_generation,
 )
+from skulk.api.data_plane import DataPlaneObserver
+from skulk.api.diagnostics_compatibility import (
+    aggregate_diagnostics_version_status,
+    compare_diagnostics_builds,
+    parse_peer_node_diagnostics,
+)
+from skulk.api.field_telemetry import (
+    FieldTelemetryCollector,
+    hardware_class,
+    prepare_telemetry_config_update,
+    tap_generation_stream,
+)
 from skulk.api.keepalive import with_sse_keepalive
-from skulk.api.node_health import compute_node_health
+from skulk.api.model_search import (
+    fetch_card_summary,
+    list_gguf_quant_options,
+    search_hugging_face_models,
+)
+from skulk.api.node_health import (
+    compute_node_health,
+    live_data_transports,
+    live_skulk_build_mismatch,
+)
+from skulk.api.performance_envelope import (
+    ClusterPerformanceEnvelopes,
+    GenerationOutcome,
+    NodePerformanceEnvelopes,
+    PerformanceEnvelopeRegistry,
+    PerformanceEnvelopeReport,
+)
+from skulk.api.provider_diagnostics import ProviderObserver
+from skulk.api.realtime import (
+    REALTIME_WEBSOCKET_MAX_MESSAGE_BYTES,
+    ConversationMessage,
+    RealtimeResponseConfig,
+    RealtimeTranscriptionBridge,
+)
 from skulk.api.types import (
     AddCustomModelParams,
     AdvancedImageParams,
+    AudioCapabilitySection,
+    AudioSpeechRequest,
+    AudioTranscriptionCompletedEvent,
+    AudioTranscriptionDeltaEvent,
+    AudioTranscriptionErrorEvent,
+    AudioTranscriptionResponseFormat,
+    AudioTranscriptionStreamEvent,
+    AudioTranscriptionUsageEvent,
+    AudioVoice,
+    AudioVoiceList,
     BenchChatCompletionRequest,
     BenchChatCompletionResponse,
     BenchImageGenerationResponse,
@@ -92,6 +158,8 @@ from skulk.api.types import (
     ExtractPageToolResponse,
     FinishReason,
     GenerationStats,
+    GgufQuantOptions,
+    HuggingFaceCardSummary,
     HuggingFaceSearchResult,
     ImageData,
     ImageEditsTaskParams,
@@ -117,6 +185,7 @@ from skulk.api.types import (
     RuntimeCapabilitySection,
     StartDownloadParams,
     StartDownloadResponse,
+    StoreDownloadRequest,
     ToolCall,
     ToolingCapabilitySection,
     TraceCategoryStats,
@@ -157,12 +226,53 @@ from skulk.api.types.openai_responses import (
 )
 from skulk.connectivity.remote_access import RemoteAccessInfo, build_remote_access_info
 from skulk.connectivity.tailscale import TailscaleStatus, query_tailscale_status
-from skulk.extensions import ExtensionContext, LoadedExtensions, resolve_skulk_version
+from skulk.extensions import (
+    DEFAULT_CALL_TIMEOUT_SECONDS,
+    MAX_CALL_PAYLOAD_BYTES,
+    MAX_CALL_TIMEOUT_SECONDS,
+    REALTIME_STT_CAPABILITY_DESCRIPTOR,
+    STT_CAPABILITY_DESCRIPTOR,
+    TTS_CAPABILITY_DESCRIPTOR,
+    BuiltinSpeechProvider,
+    BuiltinVadProvider,
+    CapabilityCall,
+    CapabilityDescriptor,
+    CapabilityError,
+    CapabilityErrorCode,
+    CapabilityInputStreamHandler,
+    CapabilityResult,
+    CapabilityStreamAdmissionHandler,
+    CapabilityStreamCancel,
+    CapabilityStreamError,
+    CapabilityStreamErrorCode,
+    CapabilityStreamFrame,
+    CapabilityStreamHandler,
+    CapabilityStreamInput,
+    CapabilityStreamReceiver,
+    CapabilityStreamSession,
+    ExtensionContext,
+    InlineMediaAttachment,
+    LoadedExtensions,
+    call_failure,
+    descriptor_revision,
+    resolve_skulk_version,
+    snapshot_cluster,
+    validate_against_schema,
+)
 from skulk.master.image_store import ImageStore
 from skulk.master.placement import PlacementInfoPendingError
 from skulk.master.placement import place_instance as get_instance_placements
-from skulk.master.placement_utils import usable_vram_by_node
+from skulk.master.placement_utils import (
+    unified_memory_gpu_node_ids,
+    usable_vram_by_node,
+)
+from skulk.routing.provider_streams import ProviderStreamPacket
+from skulk.routing.realtime_audio import RealtimeAudioPacket
+from skulk.routing.speech_media import SpeechMediaPacket
+from skulk.routing.trace_data import TraceDataPacket
+from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.apply import apply
+from skulk.shared.backends import engine_of
 from skulk.shared.constants import (
     DASHBOARD_DIR,
     SKULK_CACHE_HOME,
@@ -175,13 +285,19 @@ from skulk.shared.constants import (
     preferred_env_value,
 )
 from skulk.shared.election import ElectionMessage
+from skulk.shared.experimental import experimental_mode_enabled
 from skulk.shared.logging import InterceptLogger
 from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.model_cards import (
+    AudioCardKind,
+    AudioResponseFormat,
     ModelCard,
     ModelId,
+    ModelTask,
+    get_bundled_card,
     get_card,
     get_model_cards,
+    preserve_generated_card_constraints,
 )
 from skulk.shared.tracing import (
     TraceEvent,
@@ -189,19 +305,27 @@ from skulk.shared.tracing import (
     export_trace,
     load_trace_file,
 )
+from skulk.shared.types.audio import (
+    AudioTranscriptionTaskParams,
+    RealtimeAudioInputFrame,
+    RealtimeAudioTranscriptionTaskParams,
+    SpeechSynthesisTaskParams,
+)
 from skulk.shared.types.chunks import (
+    AudioChunk,
     DataChunk,
     EmbeddingChunk,
     ErrorChunk,
     GenerationChunk,
     ImageChunk,
-    InputImageChunk,
     PrefillProgressChunk,
     TokenChunk,
     ToolCallChunk,
+    TranscriptionChunk,
 )
 from skulk.shared.types.commands import (
     AddCustomModelCard,
+    AudioTranscription,
     Command,
     CreateInstance,
     DeleteCustomModelCard,
@@ -214,8 +338,9 @@ from skulk.shared.types.commands import (
     ImageEdits,
     ImageGeneration,
     PlaceInstance,
-    SendInputChunk,
+    RealtimeAudioTranscription,
     SetTracingEnabled,
+    SpeechSynthesis,
     StartDownload,
     TaskCancelled,
     TaskFinished,
@@ -230,6 +355,8 @@ from skulk.shared.types.diagnostics import (
     ClusterTimelineEntry,
     ClusterTimelineRunner,
     ClusterTimelineUnreachable,
+    DataPlaneEgressDiagnostics,
+    DataPlaneTransport,
     DiagnosticCaptureRequest,
     DiagnosticCaptureResponse,
     DiagnosticProcessSample,
@@ -237,6 +364,7 @@ from skulk.shared.types.diagnostics import (
     InstancePlacementDiagnostics,
     MlxMemorySnapshot,
     NodeDiagnostics,
+    NodeDiagnosticsVersionStatus,
     NodeResourceDiagnostics,
     NodeRuntimeDiagnostics,
     NodeTailscaleDiagnostics,
@@ -246,19 +374,32 @@ from skulk.shared.types.diagnostics import (
     RunnerTaskCancelRequest,
     RunnerTaskCancelResponse,
     RunnerTaskDiagnostics,
+    TelemetryPlaneDiagnostics,
+    VisionMediaIngressDiagnostics,
 )
 from skulk.shared.types.events import (
     Event,
     IndexedEvent,
+    InstanceCreated,
+    InstanceDeleted,
+    NodeTimedOut,
+    RunnerStatusUpdated,
     StateSnapshotHydrated,
+    TaskCreated,
+    TaskDeleted,
     TaskFailed,
     TaskStatusUpdated,
-    TracesMerged,
+    TraceEventData,
 )
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.profiling import MemoryUsage, read_wired_memory_bytes
+from skulk.shared.types.profiling import (
+    MemoryUsage,
+    SystemPerformanceProfile,
+    read_wired_memory_bytes,
+)
 from skulk.shared.types.state import State
 from skulk.shared.types.telemetry import (
+    NODE_LIVENESS_TIMEOUT,
     TelemetryView,
     record_membership_from_event,
 )
@@ -270,15 +411,26 @@ from skulk.shared.types.worker.instances import (
     InstanceMeta,
     instance_meta_of,
 )
-from skulk.shared.types.worker.runners import RunnerId
-from skulk.shared.types.worker.shards import Sharding
+from skulk.shared.types.worker.runners import RunnerId, RunnerReady, RunnerRunning
+from skulk.shared.types.worker.shards import Sharding, ShardMetadata
 from skulk.shared.version import get_skulk_version, get_skulk_version_label
-from skulk.store.config import resolve_config_path, resolve_node_staging
+from skulk.store.config import (
+    TelemetryConfig,
+    load_skulk_config,
+    resolve_config_path,
+    resolve_node_staging,
+)
 from skulk.tools.web_search import default_browser_tool_provider
 from skulk.utils.banner import print_startup_banner
 from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.disk_event_log import DiskEventLog
-from skulk.utils.info_gatherer.net_profile import check_reachable
+from skulk.utils.info_gatherer.net_profile import (
+    REACHABILITY_ATTEMPTS,
+    SWEEP_ATTEMPTS,
+    SWEEP_TIMEOUT_SECONDS,
+    check_reachable,
+    first_reachable_ip,
+)
 from skulk.utils.power_sampler import PowerSampler
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.engines.mlx.constants import (
@@ -293,6 +445,10 @@ from skulk.store.staging_eviction import list_staged_models
 
 JsonObject = dict[str, object]
 _DEFAULT_OPTIMIZER_CANDIDATE_BITS = [4, 8]
+
+#: Chunk type flowing through the performance-envelope tap (duck-typed on
+#: ``text`` / ``stats`` / ``finish_reason``, like the field-telemetry tap).
+_EnvelopeChunk = TypeVar("_EnvelopeChunk")
 
 
 class _HypercornServe(Protocol):
@@ -334,6 +490,13 @@ _API_EVENT_LOG_CHECK_INTERVAL_APPENDS = 4096
 # fires on a genuine mid-stream stall, e.g. a dropped data-plane chunk.
 _STREAM_IDLE_TIMEOUT_SECONDS = 120.0
 
+# A completed realtime STT provider call must not release its client-visible
+# terminal while authoritative state can still reject the next turn as busy.
+# Normal control-plane propagation is sub-second; this bound turns a lost
+# terminal/delete event into a typed provider failure instead of an indefinite
+# resource hold.
+_REALTIME_TASK_RELEASE_TIMEOUT_SECONDS = 10.0
+
 # Largest per-command data-plane reorder window (#279 Phase 2b). The DATA topic
 # is best-effort: a genuinely dropped chunk would otherwise stall the reorder
 # buffer forever waiting for a sequence that never arrives. Once this many
@@ -342,6 +505,264 @@ _STREAM_IDLE_TIMEOUT_SECONDS = 120.0
 # and converting an undeliverable gap into (rare) minor loss rather than a hang.
 # Normal mesh reordering spans only a few chunks, far below this.
 _MAX_CHUNK_REORDER_BUFFER = 512
+
+# Concurrency bound for extension capability calls served by this node
+# (fabric-citizenship Phase 2b): one slow provider must not accumulate
+# unbounded in-flight calls on the API node. Calls beyond the bound are
+# rejected with the typed `overloaded` error rather than queued.
+_MAX_CONCURRENT_CAPABILITY_CALLS = 8
+# Provider streams hold their admission slot until a terminal frame, unlike a
+# unary call whose slot is released with its result. Keep the same initial cap
+# so an extension cannot create unbounded handler tasks or DATA queues.
+_MAX_CONCURRENT_CAPABILITY_STREAMS = 8
+_PROVIDER_STREAM_RECEIVE_BUFFER = 256
+_REALTIME_STT_OUTPUT_BUFFER = 256
+_AUDIO_CONTENT_TYPES: Final[dict[AudioResponseFormat, str]] = {
+    AudioResponseFormat.Mp3: "audio/mpeg",
+    AudioResponseFormat.Wav: "audio/wav",
+    AudioResponseFormat.Flac: "audio/flac",
+    AudioResponseFormat.Ogg: "audio/ogg",
+    AudioResponseFormat.Opus: "audio/opus",
+    AudioResponseFormat.Pcm: "audio/pcm",
+}
+_STREAMABLE_AUDIO_RESPONSE_FORMATS: Final[frozenset[AudioResponseFormat]] = frozenset(
+    {AudioResponseFormat.Mp3, AudioResponseFormat.Pcm}
+)
+_MAX_AUDIO_UPLOAD_BYTES: Final[int] = 25 * 1024 * 1024
+_SPEECH_MEDIA_CHUNK_BYTES: Final[int] = 1024 * 1024
+_AUDIO_TRANSCRIPTION_FORMATS: Final[set[str]] = {
+    "json",
+    "text",
+    "verbose_json",
+    "srt",
+    "vtt",
+    "ndjson",
+}
+_AUDIO_UPLOAD_EXTENSIONS: Final[set[str]] = {
+    ".flac",
+    ".m4a",
+    ".mp3",
+    ".mp4",
+    ".mpeg",
+    ".oga",
+    ".ogg",
+    ".opus",
+    ".wav",
+    ".webm",
+}
+_AUDIO_UPLOAD_CONTENT_TYPES: Final[set[str]] = {
+    "application/octet-stream",
+    "audio/flac",
+    "audio/mp3",
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/ogg",
+    "audio/opus",
+    "audio/wav",
+    "audio/webm",
+    "audio/x-m4a",
+    "audio/x-wav",
+}
+
+
+class _BuiltinSttInputCancelledError(Exception):
+    """Signal caller input cancellation without converting it to provider failure."""
+
+
+def _normalize_upload_content_type(content_type: str | None) -> str | None:
+    """Return the lowercase media type without parameters."""
+    if content_type is None:
+        return None
+    normalized = content_type.split(";", 1)[0].strip().lower()
+    return normalized or None
+
+
+def _validate_audio_upload_metadata(file: StarletteUploadFile) -> None:
+    """Reject uploads whose metadata is clearly not an audio container."""
+    content_type = _normalize_upload_content_type(file.content_type)
+    if file.filename is not None and len(file.filename) > 255:
+        raise HTTPException(status_code=422, detail="Audio filename is too long")
+    if content_type is not None and len(content_type) > 255:
+        raise HTTPException(status_code=422, detail="Audio content type is too long")
+    suffix = Path(file.filename or "").suffix.lower()
+    if (
+        content_type is not None
+        and content_type not in _AUDIO_UPLOAD_CONTENT_TYPES
+        and suffix not in _AUDIO_UPLOAD_EXTENSIONS
+    ):
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported audio upload content type: {content_type}",
+        )
+
+
+async def _read_audio_upload(file: StarletteUploadFile) -> bytes:
+    """Read an uploaded audio file with Skulk's non-streaming size cap."""
+    audio_bytes = await file.read(_MAX_AUDIO_UPLOAD_BYTES + 1)
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Audio upload is empty")
+    if len(audio_bytes) > _MAX_AUDIO_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "Audio upload exceeds Skulk's "
+                f"{_MAX_AUDIO_UPLOAD_BYTES} byte transcription limit"
+            ),
+        )
+    return audio_bytes
+
+
+def _decode_audio_chunk_data(chunk: AudioChunk) -> bytes:
+    """Decode one independently base64-encoded audio output chunk."""
+    try:
+        return base64.b64decode(chunk.data.encode("ascii"), validate=True)
+    except binascii.Error as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Speech runner returned invalid base64 audio",
+        ) from exc
+
+
+def _parse_timestamp_granularities(value: str | None) -> tuple[str, ...]:
+    """Parse multipart timestamp granularity hints from JSON or comma syntax."""
+    if value is None or not value.strip():
+        return ()
+    stripped = value.strip()
+    try:
+        parsed = cast(object, json.loads(stripped))
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, list):
+        parsed_items = cast(list[object], parsed)
+        if all(isinstance(item, str) for item in parsed_items):
+            return tuple(cast(list[str], parsed_items))
+    return tuple(item.strip() for item in stripped.split(",") if item.strip())
+
+
+def _segment_float(
+    segment: dict[str, str | int | float | bool | None], key: str
+) -> float | None:
+    value = segment.get(key)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _transcript_segments_or_fallback(
+    text: str,
+    segments: list[dict[str, str | int | float | bool | None]],
+) -> list[dict[str, str | int | float | bool | None]]:
+    if segments:
+        return segments
+    if not text:
+        return []
+    return [{"id": 0, "text": text, "start": 0.0, "end": 0.0}]
+
+
+def _format_srt_timestamp(seconds: float) -> str:
+    milliseconds_total = max(0, int(round(seconds * 1000)))
+    milliseconds = milliseconds_total % 1000
+    seconds_total = milliseconds_total // 1000
+    second = seconds_total % 60
+    minutes_total = seconds_total // 60
+    minute = minutes_total % 60
+    hour = minutes_total // 60
+    return f"{hour:02}:{minute:02}:{second:02},{milliseconds:03}"
+
+
+def _format_transcript_srt(
+    text: str, segments: list[dict[str, str | int | float | bool | None]]
+) -> str:
+    blocks: list[str] = []
+    for index, segment in enumerate(_transcript_segments_or_fallback(text, segments), 1):
+        segment_text = segment.get("text")
+        if not isinstance(segment_text, str):
+            segment_text = ""
+        start = _segment_float(segment, "start") or 0.0
+        end = _segment_float(segment, "end")
+        if end is None or end < start:
+            end = start
+        blocks.append(
+            f"{index}\n"
+            f"{_format_srt_timestamp(start)} --> {_format_srt_timestamp(end)}\n"
+            f"{segment_text}"
+        )
+    return "\n\n".join(blocks) + ("\n" if blocks else "")
+
+
+def _format_transcript_vtt(
+    text: str, segments: list[dict[str, str | int | float | bool | None]]
+) -> str:
+    body = _format_transcript_srt(text, segments)
+    lines = body.splitlines()
+    cleaned_lines = [
+        line
+        for line in lines
+        if not line.isdigit()
+    ]
+    return "WEBVTT\n\n" + "\n".join(
+        line.replace(",", ".") if " --> " in line else line for line in cleaned_lines
+    ) + ("\n" if cleaned_lines else "")
+
+
+def _transcription_chunk_payload(chunk: TranscriptionChunk) -> dict[str, object]:
+    """Return the public JSON shape for one transcription chunk."""
+    payload: dict[str, object] = {"text": chunk.text}
+    if chunk.language is not None:
+        payload["language"] = chunk.language
+    if chunk.segments:
+        payload["segments"] = chunk.segments
+    if chunk.finish_reason is not None:
+        payload["finish_reason"] = chunk.finish_reason
+    return payload
+
+
+def _build_audio_transcription_response(
+    response_format: AudioTranscriptionResponseFormat,
+    chunks: list[TranscriptionChunk],
+) -> Response:
+    """Format collected transcription chunks as an OpenAI-compatible response."""
+    text = "".join(chunk.text for chunk in chunks).strip()
+    language = next(
+        (chunk.language for chunk in chunks if chunk.language is not None), None
+    )
+    segments: list[dict[str, str | int | float | bool | None]] = []
+    for chunk in chunks:
+        segments.extend(chunk.segments)
+
+    if response_format == "text":
+        return Response(content=text, media_type="text/plain; charset=utf-8")
+    if response_format == "srt":
+        return Response(
+            content=_format_transcript_srt(text, segments),
+            media_type="application/x-subrip; charset=utf-8",
+        )
+    if response_format == "vtt":
+        return Response(
+            content=_format_transcript_vtt(text, segments),
+            media_type="text/vtt; charset=utf-8",
+        )
+    if response_format == "ndjson":
+        content = "".join(
+            json.dumps(_transcription_chunk_payload(chunk), separators=(",", ":"))
+            + "\n"
+            for chunk in chunks
+        )
+        return Response(content=content, media_type="application/x-ndjson")
+    if response_format == "verbose_json":
+        payload: dict[str, object] = {"text": text, "segments": segments}
+        if language is not None:
+            payload["language"] = language
+        return JSONResponse(payload)
+    return JSONResponse({"text": text})
+
+
+def _encode_audio_transcription_sse(
+    event: AudioTranscriptionStreamEvent,
+) -> str:
+    """Encode one typed transcription event as an SSE record."""
+
+    return f"event: {event.type}\ndata: {event.model_dump_json()}\n\n"
 
 # How long the reorder buffer waits for a missing sequence before giving up on
 # it and releasing the chunks behind the gap (#279 Phase 2b). A genuine mesh
@@ -352,6 +773,18 @@ _MAX_CHUNK_REORDER_BUFFER = 512
 # the chunks behind it forever — and the stream's own idle backstop never arms
 # because nothing has been yielded yet. A periodic sweep flushes such gaps.
 _REORDER_GAP_FLUSH_SECONDS = 5.0
+_VISION_MEDIA_PENDING_COMMANDS = 64
+_VISION_MEDIA_PENDING_FRAMES = 64
+_VISION_MEDIA_PENDING_COMMAND_BYTES = 32 * 1024 * 1024
+_VISION_MEDIA_PENDING_TOTAL_BYTES = 512 * 1024 * 1024
+_VISION_MEDIA_PENDING_TTL_SECONDS = 5 * 60.0
+_VISION_MEDIA_ACK_TIMEOUT_SECONDS = 5 * 60.0
+_VISION_MEDIA_RAW_IMAGE_BYTES = (_VISION_MEDIA_PENDING_COMMAND_BYTES // 4) * 3
+_SPEECH_MEDIA_PENDING_COMMANDS = 64
+_SPEECH_MEDIA_PENDING_TOTAL_BYTES = 512 * 1024 * 1024
+_SPEECH_MEDIA_PENDING_TTL_SECONDS = 5 * 60.0
+_TRACE_DATA_PENDING_TASKS = 256
+_TRACE_DATA_PENDING_TTL_SECONDS = 5 * 60.0
 
 
 @dataclass
@@ -359,7 +792,7 @@ class _ChunkReorderState:
     """Per-command reorder cursor for the data plane (#279 Phase 2b)."""
 
     next_seq: int = 0
-    pending: dict[int, GenerationChunk] = field(default_factory=dict)
+    pending: dict[int, DataChunk] = field(default_factory=dict)
     # Monotonic time the current head-of-line gap was first observed (chunks
     # buffered above next_seq that couldn't drain). None when there is no gap.
     # `gap_at` is the next_seq the timer started waiting on, so later chunks
@@ -367,6 +800,74 @@ class _ChunkReorderState:
     # resets it; a stuck one ages to the flush window).
     gap_since: float | None = None
     gap_at: int | None = None
+
+
+@dataclass
+class _ProviderStreamReceiveState:
+    """Caller-side queue and lifecycle state for one provider stream."""
+
+    output_sender: Sender[CapabilityStreamFrame]
+    receiver: CapabilityStreamReceiver
+    call: CapabilityCall
+    deadline_at: float
+    input_stream: CapabilityStreamInput | None = None
+    transport_failure: str | None = None
+    cancel_provider: bool = False
+    cancellation_scheduled: bool = False
+
+
+@dataclass
+class _ActiveProviderStream:
+    """Provider-side lifecycle state for one admitted handler."""
+
+    caller_node: str
+    cancel_requested: anyio.Event
+    descriptor: CapabilityDescriptor
+    cancel_message: str = "caller cancelled the provider stream"
+    cancel_scope: anyio.CancelScope | None = None
+    input_sender: Sender[CapabilityStreamFrame] | None = None
+    input_receiver: Receiver[CapabilityStreamFrame] | None = None
+    input_lifecycle: CapabilityStreamReceiver | None = None
+    input_failure: CapabilityStreamError | None = None
+    reserved_instance_id: InstanceId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingVisionMedia:
+    """Request-scoped image chunks awaiting authoritative task placement."""
+
+    model: ModelId
+    chunks: tuple[tuple[int, bytes], ...]
+    image_count: int
+    sha256: str
+    created_at: float
+
+    @property
+    def byte_count(self) -> int:
+        """Return serialized media bytes retained by this request."""
+
+        return sum(len(data) for _, data in self.chunks)
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingSpeechMedia:
+    """Request-scoped batch audio awaiting authoritative task placement."""
+
+    model: ModelId
+    data: bytes
+    filename: str | None
+    content_type: str | None
+    sha256: str
+    created_at: float
+
+
+@dataclass(slots=True)
+class _PendingTraceData:
+    """Bounded owner-side assembly for one multi-rank task trace."""
+
+    expected_ranks: frozenset[int]
+    traces_by_rank: dict[int, tuple[TraceEventData, ...]]
+    updated_at: float
 
 
 # Task statuses for which the runner has stopped producing — a mid-stream idle
@@ -667,6 +1168,33 @@ def _json_request_body(schema: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _audio_speech_request_body() -> dict[str, object]:
+    """Describe the JSON and multipart forms accepted by the speech route."""
+
+    json_schema = cast(
+        dict[str, object], AudioSpeechRequest.model_json_schema()
+    )
+    multipart_schema = cast(
+        dict[str, object], json.loads(json.dumps(json_schema))
+    )
+    properties = cast(dict[str, object], multipart_schema.get("properties", {}))
+    properties["reference_audio"] = {
+        "type": "string",
+        "format": "binary",
+        "description": "Bounded request-scoped reference audio upload.",
+    }
+    multipart_schema["properties"] = properties
+    return {
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {"schema": json_schema},
+                "multipart/form-data": {"schema": multipart_schema},
+            },
+        }
+    }
+
+
 class API:
     def __init__(
         self,
@@ -684,14 +1212,55 @@ class API:
         mount_dashboard: bool = True,
         telemetry_view: "TelemetryView | None" = None,
         data_receiver: "Receiver[DataChunk] | None" = None,
+        provider_stream_sender: "Sender[ProviderStreamPacket] | None" = None,
+        provider_stream_receiver: "Receiver[ProviderStreamPacket] | None" = None,
+        realtime_audio_sender: "Sender[RealtimeAudioInputFrame] | None" = None,
+        realtime_audio_packet_sender: "Sender[RealtimeAudioPacket] | None" = None,
+        realtime_audio_packet_receiver: "Receiver[RealtimeAudioPacket] | None" = None,
+        speech_media_packet_sender: "Sender[SpeechMediaPacket] | None" = None,
+        speech_media_packet_receiver: "Receiver[SpeechMediaPacket] | None" = None,
+        trace_data_receiver: "Receiver[TraceDataPacket] | None" = None,
+        vision_media_packet_sender: "Sender[VisionMediaPacket] | None" = None,
+        vision_media_packet_receiver: "Receiver[VisionMediaPacket] | None" = None,
         data_plane_zenoh: bool = False,
+        data_plane_egress_provider: (
+            Callable[[], DataPlaneEgressDiagnostics] | None
+        ) = None,
+        vision_media_egress_provider: (
+            Callable[[], DataPlaneEgressDiagnostics] | None
+        ) = None,
+        telemetry_plane_provider: (
+            Callable[[], TelemetryPlaneDiagnostics] | None
+        ) = None,
         extensions: LoadedExtensions | None = None,
+        enable_builtin_providers: bool = False,
     ) -> None:
         self.state = State()
-        # Extensions (plugins) discovered at node startup. None or an empty
-        # set keeps every extension hook inert: no extension installed =
-        # Skulk unchanged.
-        self._extensions = extensions
+        # External extensions remain optional. Production nodes prepend
+        # first-party provider facades that expose core services through the
+        # same generic contracts without duplicating their runtimes.
+        self._builtin_speech_provider_enabled = enable_builtin_providers
+        if enable_builtin_providers:
+            loaded_extensions = extensions or LoadedExtensions([])
+            self._extensions: LoadedExtensions | None = (
+                loaded_extensions.with_builtin_extensions(
+                    (
+                        BuiltinSpeechProvider(
+                            admit_tts=self._admit_builtin_tts_stream,
+                            stream_tts=self._stream_builtin_tts,
+                            admit_stt=self._admit_builtin_stt_stream,
+                            stream_stt=self._stream_builtin_stt,
+                            admit_realtime_stt=(
+                                self._admit_builtin_realtime_stt_stream
+                            ),
+                            stream_realtime_stt=self._stream_builtin_realtime_stt,
+                        ),
+                        BuiltinVadProvider(),
+                    )
+                )
+            )
+        else:
+            self._extensions = extensions
         # (timestamp, result) of the last tailscale diagnostics probe; see
         # _tailscale_diagnostics for the TTL rationale.
         self._tailscale_diag_cache: tuple[float, NodeTailscaleDiagnostics | None] | None = None
@@ -699,7 +1268,60 @@ class API:
             node_id=node_id,
             skulk_version=resolve_skulk_version(),
             embed_texts=self.embed_texts,
+            # Telemetry-plane read access (fabric-citizenship Phase 1): snapshot
+            # the live view at call time. `self._telemetry_view` is assigned just
+            # below, so the closure reads it lazily, never at construction.
+            read_cluster=lambda: snapshot_cluster(self._telemetry_view),
+            # Telemetry-plane advertise access (fabric-citizenship Phase 1): record
+            # the tag on the shared view's outbound set; the worker's info gatherer
+            # gossips it on its next poll. Reads self._telemetry_view lazily too.
+            advertise_capability=self._advertise_capability,
+            withdraw_capability=self._withdraw_capability,
+            # Capability discovery, heavy half (fabric-citizenship Phase 2a):
+            # full descriptors on demand, local or via a reachable peer API.
+            describe_node=self._describe_node_capabilities,
+            # The generic call verb (Phase 2b): node-addressed, master never in
+            # the hot path, typed results; local target is an in-process fast
+            # path with the same guards.
+            call_capability=self._call_capability,
+            # Phase 3 streaming directions travel on the provider DATA topic.
+            # The extension-facing callable remains transport-abstract.
+            stream_capability=self._stream_capability,
         )
+        # In-flight extension capability calls served by this node; bounded by
+        # _MAX_CONCURRENT_CAPABILITY_CALLS (single-threaded loop => plain int).
+        self._active_capability_calls = 0
+        self._active_capability_streams: dict[str, _ActiveProviderStream] = {}
+        self._provider_stream_sender = provider_stream_sender
+        self._provider_stream_receiver = provider_stream_receiver
+        self._realtime_audio_sender = realtime_audio_sender
+        self._realtime_audio_packet_sender = realtime_audio_packet_sender
+        self._realtime_audio_packet_receiver = realtime_audio_packet_receiver
+        self._speech_media_packet_sender = speech_media_packet_sender
+        self._speech_media_packet_receiver = speech_media_packet_receiver
+        self._speech_media_commands: set[CommandId] = set()
+        self._speech_media_targets: dict[CommandId, NodeId] = {}
+        self._transcription_media_targets: dict[CommandId, tuple[NodeId, ...]] = {}
+        self._pending_speech_media: dict[CommandId, _PendingSpeechMedia] = {}
+        self._pending_speech_media_bytes = 0
+        self._trace_data_receiver = trace_data_receiver
+        self._pending_trace_data: dict[task_types.TaskId, _PendingTraceData] = {}
+        self._vision_media_packet_sender = vision_media_packet_sender
+        self._vision_media_packet_receiver = vision_media_packet_receiver
+        self._pending_vision_media: dict[CommandId, _PendingVisionMedia] = {}
+        self._pending_vision_media_bytes = 0
+        self._active_vision_media_bytes: dict[CommandId, int] = {}
+        self._active_vision_media_total_bytes = 0
+        self._vision_media_commands: set[CommandId] = set()
+        self._vision_media_targets: dict[CommandId, tuple[NodeId, ...]] = {}
+        self._vision_media_pending_acks: dict[CommandId, set[NodeId]] = {}
+        self._vision_media_ack_deadlines: dict[CommandId, float] = {}
+        self._vision_media_models: dict[CommandId, ModelId] = {}
+        self._vision_media_failures: dict[CommandId, ErrorChunk] = {}
+        self._data_plane_zenoh = data_plane_zenoh
+        self._provider_stream_receivers: dict[
+            str, _ProviderStreamReceiveState
+        ] = {}
         # Data plane (#279 Phase 2): per-token output chunks arrive here direct
         # from the serving worker (DATA topic), not as ChunkGenerated events off
         # the master. Demuxed by command_id into the per-command stream queues.
@@ -710,6 +1332,15 @@ class API:
         self._telemetry_view = (
             telemetry_view if telemetry_view is not None else TelemetryView()
         )
+        # Provider extensions (fabric-citizenship Phase 2a): auto-advertise
+        # each served capability's id as its telemetry discovery tag, then run
+        # the extensions' startup hooks with the live context (a pure provider
+        # has no chat hook through which to reach it). Both are guarded; a
+        # broken plugin can never block node startup.
+        if self._extensions is not None:
+            for descriptor in self._extensions.capability_descriptors:
+                self._telemetry_view.local_advertised_capabilities.add(descriptor.id)
+            self._extensions.run_startup_hooks(self._extension_context)
         self._event_log = DiskEventLog(_API_EVENT_LOG_DIR) if enable_event_log else None
         self._event_log_appends_since_retention_check = 0
         self._system_id = SystemId()
@@ -724,6 +1355,27 @@ class API:
         self._skulk_config = skulk_config
         self._store_client = store_client
         self._config_path = resolve_config_path()
+        # Field telemetry (opt-in, consent-gated in skulk.yaml). The config
+        # provider re-reads the file per check so dashboard consent changes
+        # apply without a restart; the hardware provider snapshots the
+        # telemetry plane. Node ids feed only in-process death diffing.
+        self._telemetry_config_cache: "TelemetryConfig | None" = None
+        self._telemetry_config_cached_until = 0.0
+        self._field_telemetry = FieldTelemetryCollector(
+            config_provider=self._current_telemetry_config,
+            hardware_provider=self._telemetry_hardware_snapshot,
+        )
+        # Observe-only performance envelopes (adaptive concurrency, Phase 0): the
+        # throughput/latency-vs-concurrency curve per (hardware x model x engine x
+        # quant), fed one observation per completed generation. In-memory,
+        # bounded, off State/event-log/telemetry-plane; exposed only via a
+        # read-only diagnostics endpoint.
+        self._performance_envelopes = PerformanceEnvelopeRegistry(
+            now=lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        )
+        # This API node's outstanding requests per model, the concurrency signal
+        # captured at each request's admission.
+        self._envelope_inflight: dict[str, int] = {}
         self._model_optimizer: "ModelOptimizer | None" = None
         self._runner_diagnostics_provider: (
             Callable[[], Sequence[RunnerSupervisorDiagnostics]] | None
@@ -731,6 +1383,9 @@ class API:
         self._runner_cancel_provider: (
             Callable[[RunnerId, task_types.TaskId], Awaitable[RunnerTaskCancelResponse]]
             | None
+        ) = None
+        self._vision_media_ingress_provider: (
+            Callable[[], VisionMediaIngressDiagnostics] | None
         ) = None
         self._sent_image_hashes: set[str] = set()
         # Initialize optimizer if store path is available
@@ -808,6 +1463,14 @@ class API:
         self._embedding_queues: dict[
             CommandId, Sender[EmbeddingChunk | ErrorChunk]
         ] = {}
+        self._audio_speech_queues: dict[
+            CommandId, Sender[AudioChunk | ErrorChunk]
+        ] = {}
+        self._audio_transcription_queues: dict[
+            CommandId, Sender[TranscriptionChunk | ErrorChunk]
+        ] = {}
+        self._realtime_audio_transcription_commands: set[CommandId] = set()
+        self._realtime_task_release_events: dict[CommandId, anyio.Event] = {}
         self._cancelled_command_ids: set[CommandId] = set()
         # Per-command data-plane reorder buffers (#279 Phase 2b). The DATA gossip
         # topic has no total order (unlike the master event idx it replaced), so
@@ -848,6 +1511,20 @@ class API:
             # Default by transport: gossipsub reorders (buffer on), Zenoh is
             # per-publisher FIFO (buffer off).
             self._reorder_buffer_enabled = not data_plane_zenoh
+        if data_receiver is None:
+            data_plane_transport: DataPlaneTransport = "disabled"
+        elif data_plane_zenoh:
+            data_plane_transport = "zenoh"
+        else:
+            data_plane_transport = "gossipsub"
+        self._data_plane_observer = DataPlaneObserver(
+            transport=data_plane_transport,
+            reorder_buffer_enabled=self._reorder_buffer_enabled,
+        )
+        self._provider_observer = ProviderObserver()
+        self._data_plane_egress_provider = data_plane_egress_provider
+        self._vision_media_egress_provider = vision_media_egress_provider
+        self._telemetry_plane_provider = telemetry_plane_provider
         self._image_store = ImageStore(SKULK_IMAGE_CACHE_DIR)
         self._tg: TaskGroup = TaskGroup()
 
@@ -870,6 +1547,35 @@ class API:
 
         self._runner_cancel_provider = provider
 
+    def set_vision_media_ingress_provider(
+        self,
+        provider: Callable[[], VisionMediaIngressDiagnostics] | None,
+    ) -> None:
+        """Attach local worker vision-ingress diagnostics to this API."""
+
+        self._vision_media_ingress_provider = provider
+
+    def _vision_media_ingress_diagnostics(self) -> VisionMediaIngressDiagnostics:
+        """Combine local API admission pressure with worker ingress occupancy."""
+
+        worker = (
+            self._vision_media_ingress_provider()
+            if self._vision_media_ingress_provider is not None
+            else VisionMediaIngressDiagnostics.empty()
+        )
+        return worker.model_copy(
+            update={
+                "pending_api_commands": len(self._pending_vision_media),
+                "pending_api_bytes": self._pending_vision_media_bytes,
+                "active_api_commands": len(self._active_vision_media_bytes),
+                "active_api_bytes": self._active_vision_media_total_bytes,
+                "pending_worker_acknowledgements": sum(
+                    len(targets)
+                    for targets in self._vision_media_pending_acks.values()
+                ),
+            }
+        )
+
     def reset(
         self,
         result_clock: int,
@@ -887,6 +1593,28 @@ class API:
         self._text_generation_queues = {}
         self._image_generation_queues = {}
         self._embedding_queues = {}
+        self._audio_speech_queues = {}
+        self._audio_transcription_queues = {}
+        self._realtime_audio_transcription_commands = set()
+        for release_event in self._realtime_task_release_events.values():
+            release_event.set()
+        self._realtime_task_release_events = {}
+        self._speech_media_commands = set()
+        self._speech_media_targets = {}
+        self._transcription_media_targets = {}
+        self._pending_speech_media = {}
+        self._pending_speech_media_bytes = 0
+        self._pending_trace_data = {}
+        self._pending_vision_media = {}
+        self._pending_vision_media_bytes = 0
+        self._active_vision_media_bytes = {}
+        self._active_vision_media_total_bytes = 0
+        self._vision_media_commands = set()
+        self._vision_media_targets = {}
+        self._vision_media_pending_acks = {}
+        self._vision_media_ack_deadlines = {}
+        self._vision_media_models = {}
+        self._vision_media_failures = {}
         self._cancelled_command_ids = set()
         self.unpause(result_clock, master_node_id=master_node_id)
         self.event_receiver.close()
@@ -916,6 +1644,8 @@ class API:
             self._text_generation_queues,
             self._image_generation_queues,
             self._embedding_queues,
+            self._audio_speech_queues,
+            self._audio_transcription_queues,
         ):
             for sender in list(queue_map.values()):
                 # The originating task is gone with the old session, so the
@@ -961,6 +1691,11 @@ class API:
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
+            expose_headers=[
+                "X-Audio-Sample-Rate",
+                "X-Audio-Channels",
+                "X-Audio-Sample-Format",
+            ],
         )
 
     def _setup_routes(self) -> None:
@@ -1004,7 +1739,11 @@ class API:
                 "Return candidate placements for a model before launch. This is the best first "
                 "step when you want to see what Skulk can place on the current node or cluster. "
                 "Pass `excluded_node_ids` (repeatable) to mirror the `excluded_nodes` field on "
-                "POST /place_instance and preview against the post-exclusion topology."
+                "POST /place_instance and preview against the post-exclusion topology. "
+                "Besides the planner's ranked pick per placement shape, the response includes "
+                "per-host single-node previews marked `alternative: true` for every other host "
+                "that passes admission, so heterogeneous fleets expose the full set of valid "
+                "hosts rather than only the ranking winner."
             ),
         )(self.get_placement_previews)
         self.app.get(
@@ -1033,7 +1772,11 @@ class API:
             "/models/add",
             tags=["Models"],
             summary="Fetch and add a custom model card",
-            description="Add a custom model card to Skulk's model catalog so it becomes searchable and launchable through the API or dashboard.",
+            description=(
+                "Add a custom model card to Skulk's model catalog so it becomes "
+                "searchable and launchable. An optional gguf_file selects one exact "
+                "quant from a multi-quant GGUF repository."
+            ),
         )(self.add_custom_model)
         self.app.delete(
             "/models/custom/{model_id:path}",
@@ -1047,9 +1790,34 @@ class API:
             summary="Search Hugging Face for models",
             description=(
                 "Search for models to add or launch. Pass mlx_only=true to restrict results "
-                "to mlx-community; omit or pass false to search all of Hugging Face."
+                "to mlx-community; omit or pass false to search all of Hugging Face. "
+                "Exact GGUF filename queries also inspect bounded candidate repository "
+                "manifests and return the matched repo-relative file path."
             ),
         )(self.search_models)
+        self.app.get(
+            "/models/card-summary",
+            tags=["Models"],
+            summary="Fetch a Hugging Face model card summary",
+            description=(
+                "Download a repository's model card README and return its first "
+                "prose paragraphs with markup stripped, for the dashboard's "
+                "model discovery popovers. The summary is empty when the card "
+                "has no usable prose."
+            ),
+        )(self.get_model_card_summary)
+        self.app.get(
+            "/models/gguf-quants",
+            tags=["Models"],
+            summary="List a GGUF repository's quantizations",
+            description=(
+                "Enumerate the downloadable quantizations of a Hugging Face "
+                "GGUF repository: one option per quant shard group with its "
+                "loadable first shard, human label, exact total bytes, and "
+                "shard count, smallest first. Companion artifacts such as "
+                "speculative drafters and imatrix files are excluded."
+            ),
+        )(self.get_gguf_quant_options)
         self.app.post(
             "/v1/chat/completions",
             response_model=None,
@@ -1057,7 +1825,8 @@ class API:
             summary="OpenAI Chat Completions-compatible text generation",
             description=(
                 "Generate text with an OpenAI Chat Completions-compatible payload. The requested "
-                "model must already be placed and running or Skulk will return a not-found error."
+                "model must already be placed, running, and declare TextGeneration; speech-only "
+                "models are rejected before command dispatch."
             ),
         )(self.chat_completions)
         self.app.post(
@@ -1066,9 +1835,63 @@ class API:
             summary="Generate embeddings",
         )(self.embeddings)
         self.app.post(
+            "/v1/audio/speech",
+            response_model=None,
+            tags=["Audio"],
+            summary="Generate speech audio",
+            description=(
+                "OpenAI-compatible text-to-speech endpoint. The requested model "
+                "must already be placed and running as a text-to-speech model. "
+                "The stream=true path requires a mounted card that declares "
+                "audio.supports_streaming=true."
+            ),
+            openapi_extra=_audio_speech_request_body(),
+        )(self.audio_speech_http)
+        self.app.post(
+            "/v1/audio/transcriptions",
+            response_model=None,
+            tags=["Audio"],
+            summary="Transcribe speech audio",
+            description=(
+                "OpenAI-compatible speech-to-text endpoint. The requested model "
+                "must already be placed and running as a speech-to-text model. "
+                "stream=true returns typed SSE events for cards declaring "
+                "audio.supports_streaming=true; response_format=ndjson retains "
+                "progressive NDJSON framing."
+            ),
+        )(self.audio_transcriptions)
+        self.app.post(
+            "/v1/audio/translations",
+            response_model=None,
+            tags=["Audio"],
+            summary="Translate speech audio to English",
+            description=(
+                "OpenAI-compatible speech translation endpoint (translation "
+                "target is English). The requested mounted model must "
+                "explicitly declare translation support on its model card."
+            ),
+        )(self.audio_translations)
+        self.app.get(
+            "/v1/audio/voices",
+            response_model=AudioVoiceList,
+            tags=["Audio"],
+            summary="List voices for a mounted speech model",
+            description=(
+                "Skulk extension that returns stable model-native and bundled-"
+                "reference voice identifiers declared by a mounted text-to-speech "
+                "model."
+            ),
+        )(self.audio_voices)
+        self.app.websocket("/v1/realtime")(self.realtime_transcription)
+        self.app.websocket("/v1/fabric/chains/speech")(self.fabric_speech_chain)
+        self.app.post(
             "/bench/chat/completions",
             tags=["Compatibility APIs"],
             summary="Benchmark chat completions",
+            description=(
+                "Benchmark text generation for a placed model that declares "
+                "TextGeneration. Speech-only models are rejected before dispatch."
+            ),
         )(self.bench_chat_completions)
         self.app.post(
             "/v1/images/generations",
@@ -1105,7 +1928,7 @@ class API:
             summary="Anthropic Claude Messages-compatible endpoint",
             description=(
                 "Claude Messages-compatible text generation endpoint. As with chat completions, "
-                "the target model must already be placed and ready."
+                "the target model must already be placed, ready, and declare TextGeneration."
             ),
         )(self.claude_messages)
         self.app.post(
@@ -1115,14 +1938,14 @@ class API:
             summary="OpenAI Responses-compatible endpoint",
             description=(
                 "OpenAI Responses-compatible endpoint for text generation and reasoning-style "
-                "workflows backed by a placed Skulk model."
+                "workflows backed by a placed Skulk model that declares TextGeneration."
             ),
         )(self.openai_responses)
         self.app.post(
             "/v1/cancel/{command_id}",
             tags=["Compatibility APIs"],
-            summary="Cancel an active text or image command",
-            description="Request cancellation for an in-flight text or image generation command by its command ID.",
+            summary="Cancel an active generation command",
+            description="Request cancellation for an in-flight text, image, embedding, or speech command by its command ID.",
         )(self.cancel_command)
         self.app.post(
             "/v1/tools/web_search",
@@ -1166,7 +1989,10 @@ class API:
             response_model=None,
             tags=["Compatibility APIs"],
             summary="Ollama chat",
-            description="Ollama-compatible chat endpoint backed by Skulk model placement and routing.",
+            description=(
+                "Ollama-compatible chat endpoint backed by a placed model that "
+                "declares TextGeneration."
+            ),
             openapi_extra=_json_request_body(OllamaChatRequest.model_json_schema()),
         )(self.ollama_chat)
         self.app.post(
@@ -1186,7 +2012,10 @@ class API:
             response_model=None,
             tags=["Compatibility APIs"],
             summary="Ollama generate",
-            description="Ollama-compatible prompt-completion endpoint backed by a placed Skulk model.",
+            description=(
+                "Ollama-compatible prompt completion backed by a placed model "
+                "that declares TextGeneration."
+            ),
             openapi_extra=_json_request_body(OllamaGenerateRequest.model_json_schema()),
         )(self.ollama_generate)
         self.app.get(
@@ -1250,6 +2079,18 @@ class API:
             summary="Get cluster tracing state",
             description="Return whether runtime tracing is currently enabled for new requests across the cluster session.",
         )(self.get_tracing_state)
+        self.app.get(
+            "/v1/telemetry/preview",
+            tags=["State & Tracing"],
+            summary="Preview pending field telemetry",
+            description=(
+                "Return the current field-telemetry consent state and the exact"
+                " pending sample batch that would be sent to the ingest service,"
+                " so operators can inspect precisely what leaves the cluster."
+                " Collection is opt-in and content-free (metrics, hardware"
+                " classes, and error classes only)."
+            ),
+        )(self.get_telemetry_preview)
         self.app.put(
             "/v1/tracing",
             tags=["State & Tracing"],
@@ -1294,6 +2135,70 @@ class API:
             response_model=None,
         )(self.get_cluster_trace_raw)
         self.app.get(
+            "/v1/capabilities",
+            tags=["Extensions"],
+            summary="List this node's extension-served capabilities",
+            description=(
+                "Return the self-describing capability descriptors served by "
+                "this node's provider extensions (fabric-citizenship). Each "
+                "descriptor carries the capability id, semantic version, "
+                "human/LLM-readable description, JSON Schemas for input and "
+                "output, the call's I/O mode, and a content revision digest. "
+                "This is the heavy half of capability discovery; the light "
+                "half is the capability tag gossiped on the telemetry plane "
+                "(surfaced per node as nodeCapabilities in GET /state). "
+                "Pass the node_id query parameter to describe a reachable "
+                "peer instead of this node (an empty list when the peer is "
+                "unreachable). An empty list otherwise means no provider "
+                "extension is installed."
+            ),
+        )(self.list_node_capabilities)
+        self.app.post(
+            "/v1/capabilities/call",
+            tags=["Extensions"],
+            summary="Invoke a capability served by this node",
+            description=(
+                "Dispatch one unary capability call to this node's provider "
+                "extensions (fabric-citizenship). The body is the typed call "
+                "envelope (call id, capability id and exact version, the "
+                "descriptor revision pinned at discovery, deadline, and the "
+                "opaque payload). The payload is validated against the "
+                "descriptor's input schema before the provider runs and the "
+                "result against its output schema after. A syntactically valid "
+                "envelope always gets HTTP 200 with a typed result: failures "
+                "arrive as machine-readable error codes (not_found, "
+                "version_mismatch, revision_mismatch, invalid_payload, "
+                "invalid_result, payload_too_large, overloaded, timeout, "
+                "provider_error) rather than transport errors. A body that "
+                "does not parse as the envelope at all (malformed JSON, "
+                "missing fields, out-of-range values) gets the standard 422, "
+                "since there is no call id to correlate a typed result to. Callers normally use this through their extension "
+                "context's call_capability rather than directly."
+            ),
+        )(self.serve_capability_call)
+        self.app.post(
+            "/v1/capabilities/stream",
+            tags=["Extensions"],
+            summary="Open a capability stream on this node",
+            description=(
+                "Validate and admit one server-, client-, or bidirectional "
+                "provider stream. This control-sized request returns a typed "
+                "opening result; active media directions travel separately on "
+                "the provider DATA plane with ordered lifecycle headers, "
+                "optional raw media, and explicit caller input half-close."
+            ),
+        )(self.serve_capability_stream)
+        self.app.post(
+            "/v1/capabilities/stream/cancel",
+            tags=["Extensions"],
+            summary="Cancel an admitted capability stream",
+            description=(
+                "Request explicit cancellation of one admitted provider "
+                "stream. The provider emits one cancelled terminal frame when "
+                "the stream is still active; repeated cancellation is idempotent."
+            ),
+        )(self.cancel_capability_stream)
+        self.app.get(
             "/v1/diagnostics/node",
             tags=["Diagnostics"],
             summary="Get local node diagnostics",
@@ -1303,6 +2208,37 @@ class API:
                 "state, local resources, and relevant OS processes."
             ),
         )(self.get_node_diagnostics)
+        self.app.get(
+            "/v1/diagnostics/telemetry",
+            tags=["Diagnostics"],
+            summary="Get local telemetry-plane diagnostics",
+            description=(
+                "Return aggregate bounded-admission, coalescing, drop, queue, and "
+                "publish metrics for this node's isolated telemetry transport."
+            ),
+        )(self.get_telemetry_plane_diagnostics)
+        self.app.get(
+            "/v1/diagnostics/performance-envelopes",
+            tags=["Diagnostics"],
+            summary="Get this node's performance envelopes",
+            description=(
+                "Return the observe-only throughput-and-latency-versus-concurrency "
+                "curve this API node has measured for each (hardware class x model "
+                "x engine x quantization) it has served, including a simple knee "
+                "estimate. Adaptive-concurrency Phase 0: data only, no behavior "
+                "change."
+            ),
+        )(self.get_performance_envelopes)
+        self.app.get(
+            "/v1/diagnostics/performance-envelopes/cluster",
+            tags=["Diagnostics"],
+            summary="Get performance envelopes across the cluster",
+            description=(
+                "Fan out to every reachable cluster member and return each one's "
+                "performance-envelope report. Unreachable members appear as "
+                "explicit failures rather than vanishing."
+            ),
+        )(self.get_cluster_performance_envelopes)
         self.app.post(
             "/v1/diagnostics/node/runners/{runner_id}/cancel",
             tags=["Diagnostics"],
@@ -1331,7 +2267,9 @@ class API:
             description=(
                 "Fan out to reachable peer APIs and return read-only diagnostic "
                 "bundles for the local node and peers. Unreachable peers are "
-                "reported as partial failures instead of failing the whole request."
+                "reported as partial failures instead of failing the whole request. "
+                "Peer bundles tolerate additive diagnostic fields, and aggregate "
+                "plus per-node versionStatus values expose mixed-build rollouts."
             ),
         )(self.get_cluster_diagnostics)
         self.app.get(
@@ -1354,7 +2292,8 @@ class API:
             summary="Get one cluster node diagnostic bundle",
             description=(
                 "Return diagnostics for the requested node from local state or by "
-                "proxying to a reachable peer API."
+                "proxying to a reachable peer API. Peer responses tolerate unknown "
+                "additive diagnostic fields."
             ),
         )(self.get_cluster_node_diagnostics)
         self.app.post(
@@ -1363,7 +2302,8 @@ class API:
             summary="Capture one cluster node diagnostic bundle",
             description=(
                 "Return an on-demand diagnostic capture bundle for the requested "
-                "node, proxying to a reachable peer API when the target is remote."
+                "node, proxying to a reachable peer API when the target is remote. "
+                "Peer responses tolerate unknown additive diagnostic fields."
             ),
         )(self.capture_cluster_node_diagnostics)
         self.app.post(
@@ -1452,7 +2392,12 @@ class API:
             "/store/models/{model_id:path}/download",
             tags=["Store"],
             summary="Request a store download",
-            description="Ask the shared model store to download and register a model by model ID.",
+            description=(
+                "Ask the shared model store to download and register a model by model ID. "
+                "Optional gguf_file and source_revision fields pin one exact "
+                "quant and immutable Hugging Face commit; omitted values inherit "
+                "from a bundled model card when declared."
+            ),
         )(self.request_store_download)
         self.app.get(
             "/store/models/{model_id:path}/download/status",
@@ -1572,10 +2517,17 @@ class API:
                     current_instances=self.state.instances,
                     node_memory=self._telemetry_view.node_memory,
                     node_network=self.state.node_network,
-                    download_status=self.state.downloads,
+                    download_status=self._telemetry_view.effective_downloads(
+                        self.state.downloads
+                    ),
                     excluded_nodes=set(command.excluded_nodes),
                     node_resources=self._telemetry_view.node_resources,
                     node_vram=usable_vram_by_node(
+                        self._telemetry_view.node_system,
+                        self._telemetry_view.node_resources,
+                        node_memory=self._telemetry_view.node_memory,
+                    ),
+                    unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                         self._telemetry_view.node_system,
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
@@ -1646,9 +2598,16 @@ class API:
                 node_network=self.state.node_network,
                 topology=self.state.topology,
                 current_instances=self.state.instances,
-                download_status=self.state.downloads,
+                download_status=self._telemetry_view.effective_downloads(
+                    self.state.downloads
+                ),
                 node_resources=self._telemetry_view.node_resources,
                 node_vram=usable_vram_by_node(
+                    self._telemetry_view.node_system,
+                    self._telemetry_view.node_resources,
+                    node_memory=self._telemetry_view.node_memory,
+                ),
+                unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                     self._telemetry_view.node_system,
                     self._telemetry_view.node_resources,
                     node_memory=self._telemetry_view.node_memory,
@@ -1689,6 +2648,16 @@ class API:
             raise HTTPException(
                 status_code=400, detail=f"Failed to load model card: {exc}"
             ) from exc
+        placement_node_vram = usable_vram_by_node(
+            self._telemetry_view.node_system,
+            self._telemetry_view.node_resources,
+            node_memory=self._telemetry_view.node_memory,
+        )
+        placement_unified_memory_gpu_nodes = unified_memory_gpu_node_ids(
+            self._telemetry_view.node_system,
+            self._telemetry_view.node_resources,
+            node_memory=self._telemetry_view.node_memory,
+        )
         instance_combinations: list[tuple[Sharding, InstanceMeta, int]] = []
         for sharding in (Sharding.Pipeline, Sharding.Tensor):
             for instance_meta in (InstanceMeta.MlxRing, InstanceMeta.MlxJaccl):
@@ -1717,14 +2686,13 @@ class API:
                     topology=self.state.topology,
                     current_instances=self.state.instances,
                     required_nodes=required_nodes,
-                    download_status=self.state.downloads,
+                    download_status=self._telemetry_view.effective_downloads(
+                        self.state.downloads
+                    ),
                     excluded_nodes=excluded_nodes,
                     node_resources=self._telemetry_view.node_resources,
-                    node_vram=usable_vram_by_node(
-                        self._telemetry_view.node_system,
-                        self._telemetry_view.node_resources,
-                        node_memory=self._telemetry_view.node_memory,
-                    ),
+                    node_vram=placement_node_vram,
+                    unified_memory_gpu_nodes=placement_unified_memory_gpu_nodes,
                 )
             except ValueError as exc:
                 if (model_card.model_id, sharding, instance_meta, 0) not in seen:
@@ -1807,6 +2775,99 @@ class API:
                 )
             )
 
+        # Per-host single-node alternatives (#557): the ranked pick above is
+        # one preview per shape, so on a heterogeneous fleet the winner
+        # (typically the largest free GPU) hides every other host that passes
+        # admission, and the operator cannot choose cost/locality/keeping the
+        # big GPU free. Re-run the planner once per remaining host as a
+        # required single-node placement and surface the viable ones, marked
+        # as alternatives. Skipped when the caller already constrained hosts
+        # via node_ids. Hosts that fail admission stay silent: the ranked
+        # pass already reported shape-level errors.
+        if required_nodes is None:
+            winner_hosts: set[NodeId] = set()
+            # The (sharding, meta) shapes that actually single-node place for
+            # this model, taken from the ranked previews. A model whose only
+            # single-node shape is Tensor (e.g. DeepSeek-V3.1-8bit) would be
+            # invisible if alternatives hardcoded Pipeline/MlxRing (#557).
+            single_node_shapes: list[tuple[Sharding, InstanceMeta]] = []
+            for preview in previews:
+                if preview.instance is None:
+                    continue
+                nodes_of_preview = list(
+                    preview.instance.shard_assignments.node_to_runner.keys()
+                )
+                if len(nodes_of_preview) != 1:
+                    continue
+                winner_hosts.add(nodes_of_preview[0])
+                shape = (preview.sharding, preview.instance_meta)
+                if shape not in single_node_shapes:
+                    single_node_shapes.append(shape)
+            # Hoisted: both depend only on telemetry snapshots and current
+            # instances, not on the candidate.
+            existing_instance_ids = set(self.state.instances.keys())
+            for candidate in self.state.topology.list_nodes():
+                if candidate in winner_hosts:
+                    continue
+                if excluded_nodes is not None and candidate in excluded_nodes:
+                    continue
+                for alt_sharding, alt_meta in single_node_shapes:
+                    try:
+                        alt_placements = get_instance_placements(
+                            PlaceInstance(
+                                model_card=model_card,
+                                sharding=alt_sharding,
+                                instance_meta=alt_meta,
+                                min_nodes=1,
+                            ),
+                            node_memory=self._telemetry_view.node_memory,
+                            node_network=self.state.node_network,
+                            topology=self.state.topology,
+                            current_instances=self.state.instances,
+                            required_nodes={candidate},
+                            download_status=self._telemetry_view.effective_downloads(
+                                self.state.downloads
+                            ),
+                            excluded_nodes=excluded_nodes,
+                            node_resources=self._telemetry_view.node_resources,
+                            node_vram=placement_node_vram,
+                            unified_memory_gpu_nodes=placement_unified_memory_gpu_nodes,
+                        )
+                    except ValueError:
+                        continue
+                    alt_instances = [
+                        instance
+                        for instance_id, instance in alt_placements.items()
+                        if instance_id not in existing_instance_ids
+                    ]
+                    if len(alt_instances) != 1:
+                        continue
+                    alt_instance = alt_instances[0]
+                    alt_nodes = list(
+                        alt_instance.shard_assignments.node_to_runner.keys()
+                    )
+                    # The planner may satisfy required_nodes with a larger
+                    # cycle; only a true single-host placement on the candidate
+                    # is an alternative the operator can reason about.
+                    if alt_nodes != [candidate]:
+                        continue
+                    previews.append(
+                        PlacementPreview(
+                            model_id=model_card.model_id,
+                            sharding=alt_sharding,
+                            instance_meta=instance_meta_of(alt_instance),
+                            instance=alt_instance,
+                            memory_delta_by_node={
+                                str(candidate): model_card.storage_size.in_bytes
+                            },
+                            error=None,
+                            alternative=True,
+                        )
+                    )
+                    # One alternative per host is enough; stop at the first
+                    # shape that places.
+                    break
+
         return PlacementPreviewResponse(previews=previews)
 
     def get_instance(self, instance_id: InstanceId) -> Instance:
@@ -1834,6 +2895,8 @@ class API:
             self._text_generation_queues.get(command_id)
             or self._image_generation_queues.get(command_id)
             or self._embedding_queues.get(command_id)
+            or self._audio_speech_queues.get(command_id)
+            or self._audio_transcription_queues.get(command_id)
         )
         if sender is None:
             raise HTTPException(
@@ -1884,7 +2947,34 @@ class API:
         """
 
         should_send_finished = command_id not in self._cancelled_command_ids
+        vision_targets = self._vision_media_targets.get(command_id, ())
+        vision_model = self._vision_media_models.get(command_id)
+        if (
+            not should_send_finished
+            and vision_targets
+            and vision_model is not None
+            and self._vision_media_packet_sender is not None
+        ):
+            with anyio.move_on_after(2, shield=True):
+                await self._cancel_vision_media_transport(
+                    command_id,
+                    vision_model,
+                    vision_targets,
+                )
         self._cancelled_command_ids.discard(command_id)
+        self._realtime_audio_transcription_commands.discard(command_id)
+        self._speech_media_commands.discard(command_id)
+        self._speech_media_targets.pop(command_id, None)
+        self._transcription_media_targets.pop(command_id, None)
+        self._take_pending_speech_media(command_id)
+        self._take_pending_vision_media(command_id)
+        self._release_active_vision_media(command_id)
+        self._vision_media_commands.discard(command_id)
+        self._vision_media_targets.pop(command_id, None)
+        self._vision_media_pending_acks.pop(command_id, None)
+        self._vision_media_ack_deadlines.pop(command_id, None)
+        self._vision_media_models.pop(command_id, None)
+        self._vision_media_failures.pop(command_id, None)
         if should_send_finished:
             await self._send(TaskFinished(finished_command_id=command_id))
         queue_map.pop(command_id, None)
@@ -1893,6 +2983,7 @@ class API:
         # of leaking state.
         self._chunk_reorder.pop(command_id, None)
         self._data_dedup_cursor.pop(command_id, None)
+        self._data_plane_observer.finalize(command_id)
 
     async def _token_chunk_stream(
         self, command_id: CommandId
@@ -1907,6 +2998,10 @@ class API:
             self._text_generation_queues[command_id], recv = channel[
                 TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk
             ]()
+
+            if pending_error := self._take_vision_media_failure(command_id):
+                yield pending_error
+                return
 
             with recv as token_chunks:
                 # Idle backstop (#279 Phase 2b): the DATA plane is best-effort, so
@@ -1934,6 +3029,7 @@ class API:
                         except (EndOfStream, ClosedResourceError):
                             return  # producer closed normally
                     if scope.cancelled_caught:
+                        self._data_plane_observer.record_idle_timeout()
                         # Mid-stream stall: the receive went idle for longer than
                         # the inter-token bound. Two distinct causes, disambiguated
                         # by the master's task status (#298 review):
@@ -2009,8 +3105,52 @@ class API:
                 ),
             )
 
+    def _tapped_text_stream(
+        self,
+        command_id: CommandId,
+        model_id: ModelId,
+        *,
+        task_params: TextGenerationTaskParams | None = None,
+    ) -> AsyncGenerator[
+        TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None
+    ]:
+        """Wrap the raw token stream with the standard observation taps.
+
+        Every text-generation surface (chat completions, the Claude/Responses
+        adapters, the Ollama endpoints, realtime assistant turns) routes through
+        here so throughput/latency learning and field telemetry are not confined
+        to ``/v1/chat/completions``. Applies, in order: field telemetry (a plain
+        passthrough unless the operator opted in), the observe-only performance
+        envelope (adaptive concurrency, Phase 0), and -- when ``task_params`` is
+        given and chat middleware is loaded -- the extension chat-summary tap.
+        All three are fully guarded and never alter token delivery.
+
+        ``model_id`` must be the POST-transform model actually dispatched (chat
+        middleware may reroute it), so observations attribute to the served
+        model, not the caller's requested alias.
+        """
+        chunk_stream: AsyncGenerator[
+            TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None
+        ] = self._token_chunk_stream(command_id)
+        chunk_stream = tap_generation_stream(
+            self._field_telemetry,
+            str(model_id),
+            None,
+            chunk_stream,
+        )
+        chunk_stream = self._tap_performance_envelope(model_id, chunk_stream)
+        if (
+            task_params is not None
+            and self._extensions is not None
+            and self._extensions.has_chat_middleware
+        ):
+            chunk_stream = self._extensions.tap_chat_stream(
+                self._extension_context, task_params, chunk_stream
+            )
+        return chunk_stream
+
     async def _collect_text_generation_with_stats(
-        self, command_id: CommandId
+        self, command_id: CommandId, model_id: ModelId
     ) -> BenchChatCompletionResponse:
         sampler = PowerSampler(
             get_node_system=lambda: {
@@ -2029,7 +3169,13 @@ class API:
         async with anyio.create_task_group() as tg:
             tg.start_soon(sampler.run)
 
-            async for chunk in self._token_chunk_stream(command_id):
+            # Route the bench collector through the same taps as every other text
+            # surface (#596): /bench/chat/completions is the concurrency load
+            # generator this envelope is meant to learn from (the harness
+            # `concurrent` suite is its offline mirror), so its completed
+            # generations must feed the envelope and field telemetry, not bypass
+            # them. No task_params here, so the extension chat tap is skipped.
+            async for chunk in self._tapped_text_stream(command_id, model_id):
                 if isinstance(chunk, PrefillProgressChunk):
                     continue
 
@@ -2080,7 +3226,11 @@ class API:
                     finish_reason=finish_reason,
                 )
             ],
-            generation_stats=stats,
+            # The explicit benchmark surface exposes only non-identifying
+            # batching truth; node and backend attribution remain private.
+            generation_stats=(
+                stats.redacted_for_benchmark_client() if stats else None
+            ),
             power_usage=sampler.result(),
         )
 
@@ -2108,17 +3258,47 @@ class API:
         ]
         return max(limits) if limits else None
 
+    def _live_node_timestamps(self) -> dict[NodeId, datetime]:
+        """Return replicated membership plus fresh telemetry-only participants.
+
+        Replicated ``State.last_seen`` tracks worker control-plane activity and
+        can omit local or remote ``--no-worker`` API nodes. Fresh telemetry is
+        positive liveness evidence for those management participants. Bound it
+        by the shared node timeout so a stopped telemetry-only node cannot
+        remain in API health and resource views indefinitely.
+
+        Returns:
+            Live-node timestamps suitable for telemetry filtering and health
+            derivation on this API process.
+        """
+        live = dict(self.state.last_seen)
+        now = datetime.now(tz=timezone.utc)
+        telemetry_nodes = set(self._telemetry_view.node_last_heartbeat) | set(
+            self._telemetry_view.node_last_telemetry
+        )
+        for node_id in telemetry_nodes - live.keys():
+            seen_at = self._telemetry_view.last_liveness_receipt(node_id)
+            if seen_at is None:
+                continue
+            aware_seen_at = (
+                seen_at
+                if seen_at.tzinfo is not None
+                else seen_at.replace(tzinfo=timezone.utc)
+            )
+            if now - aware_seen_at <= NODE_LIVENESS_TIMEOUT:
+                live[node_id] = seen_at
+        return live
+
     async def get_cluster_state(self) -> dict[str, object]:
         """Cluster state for ``GET /state``: event-sourced ``State`` plus live
-        telemetry (per-node memory + system profile) merged back in.
+        telemetry (per-node memory, system profile, and resources) merged back in.
 
-        ``node_memory`` and ``node_system`` moved off event-sourced ``State`` to
-        the telemetry plane (#279 slice 2), but ``/state`` is the dashboard's
-        single data source and still renders per-node memory/system. Merge the
-        ``TelemetryView`` maps in under their camelCase keys so the wire shape is
-        unchanged for the dashboard and any external consumer. The merge is
-        filtered to ``last_seen``-live nodes as defense-in-depth on top of the
-        worker's ``NodeTimedOut`` prune, so a dead node never shows as a ghost.
+        ``node_memory``, ``node_system``, and ``node_resources`` live on the
+        telemetry plane, but ``/state`` is the dashboard's single data source.
+        Merge the ``TelemetryView`` maps in under camelCase keys so the dashboard
+        and external consumers can observe those facts. The merge is filtered to
+        ``last_seen``-live nodes as defense-in-depth on top of the worker's
+        ``NodeTimedOut`` prune, so a dead node never shows as a ghost.
 
         Declared ``async`` so FastAPI serves it ON the event loop rather than a
         worker thread: the telemetry subscriber and the ``NodeTimedOut`` prune
@@ -2127,8 +3307,13 @@ class API:
         There is no ``await`` here, so the comprehensions run atomically wrt
         those same-loop mutators.
         """
-        live = self.state.last_seen
-        payload = self.state.model_dump(mode="json", by_alias=True)
+        live = self._live_node_timestamps()
+        effective_downloads = self._telemetry_view.effective_downloads(
+            self.state.downloads
+        )
+        payload = self.state.model_copy(
+            update={"downloads": effective_downloads}
+        ).model_dump(mode="json", by_alias=True)
         payload["nodeMemory"] = {
             str(node_id): usage.model_dump(mode="json", by_alias=True)
             for node_id, usage in self._telemetry_view.node_memory.items()
@@ -2137,6 +3322,11 @@ class API:
         payload["nodeSystem"] = {
             str(node_id): profile.model_dump(mode="json", by_alias=True)
             for node_id, profile in self._telemetry_view.node_system.items()
+            if node_id in live
+        }
+        payload["nodeResources"] = {
+            str(node_id): resources.model_dump(mode="json", by_alias=True)
+            for node_id, resources in self._telemetry_view.node_resources.items()
             if node_id in live
         }
         # Observational readings moved to telemetry in #279 slice 3; merge them
@@ -2157,6 +3347,14 @@ class API:
             for node_id, status in self._telemetry_view.node_rdma_ctl.items()
             if node_id in live
         }
+        # Extension-advertised capability tags (fabric-citizenship): the light
+        # discovery layer, made operator-visible. Full descriptors are fetched
+        # via GET /v1/capabilities, not carried here.
+        payload["nodeCapabilities"] = {
+            str(node_id): sorted(tags)
+            for node_id, tags in self._telemetry_view.node_capabilities.items()
+            if node_id in live and tags
+        }
         # Derived per-node health (#388): explain a node's problems (and the fix)
         # in the topology so the master's silent recovery of a wedged/failed node
         # is legible. Read-only derivation from the same state/telemetry above; no
@@ -2165,13 +3363,506 @@ class API:
             node_id: summary.model_dump(mode="json", by_alias=True)
             for node_id, summary in compute_node_health(
                 live_nodes=live,
-                downloads=self.state.downloads,
+                downloads=effective_downloads,
                 node_disk=self._telemetry_view.node_disk,
+                node_resources=self._telemetry_view.node_resources,
+                node_identities=self._telemetry_view.node_identities,
+                heartbeat_last_seen=self._telemetry_view.node_last_heartbeat,
                 telemetry_last_seen=self._telemetry_view.node_last_telemetry,
                 now=datetime.now(tz=timezone.utc),
             ).items()
         }
         return payload
+
+    def _stage_audio_transcription_media(
+        self,
+        command_id: CommandId,
+        task_params: AudioTranscriptionTaskParams,
+        audio_bytes: bytes,
+    ) -> None:
+        """Retain bounded batch audio until the master selects its worker."""
+
+        if self._speech_media_packet_sender is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Speech media transport is unavailable on this node",
+            )
+        pending = _PendingSpeechMedia(
+            model=task_params.model,
+            data=audio_bytes,
+            filename=task_params.filename,
+            content_type=task_params.content_type,
+            sha256=hashlib.sha256(audio_bytes).hexdigest(),
+            created_at=time.monotonic(),
+        )
+        if (
+            len(self._pending_speech_media) >= _SPEECH_MEDIA_PENDING_COMMANDS
+            or self._pending_speech_media_bytes + len(audio_bytes)
+            > _SPEECH_MEDIA_PENDING_TOTAL_BYTES
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="Speech media admission capacity is exhausted",
+            )
+        self._pending_speech_media[command_id] = pending
+        self._pending_speech_media_bytes += len(audio_bytes)
+        self._speech_media_commands.add(command_id)
+
+    def _take_pending_speech_media(
+        self, command_id: CommandId
+    ) -> _PendingSpeechMedia | None:
+        """Release one pending batch upload from API admission accounting."""
+
+        pending = self._pending_speech_media.pop(command_id, None)
+        if pending is not None:
+            self._pending_speech_media_bytes = max(
+                0, self._pending_speech_media_bytes - len(pending.data)
+            )
+        return pending
+
+    def _dispatch_pending_speech_media(self, task: task_types.Task) -> None:
+        """Send batch STT audio after authoritative task placement replicates."""
+
+        if not isinstance(task, task_types.AudioTranscription):
+            return
+        pending = self._take_pending_speech_media(task.command_id)
+        if pending is None:
+            return
+        instance = self.state.instances.get(task.instance_id)
+        if instance is None:
+            self._tg.start_soon(
+                self._fail_audio_transcription_media,
+                task.command_id,
+                "The selected model instance disappeared before audio upload",
+            )
+            return
+        targets = tuple(sorted(instance.shard_assignments.node_to_runner, key=str))
+        if not targets:
+            self._tg.start_soon(
+                self._fail_audio_transcription_media,
+                task.command_id,
+                "The selected model instance has no worker participants",
+            )
+            return
+        self._transcription_media_targets[task.command_id] = targets
+        self._tg.start_soon(
+            self._send_audio_transcription_media,
+            task.command_id,
+            pending,
+            targets,
+        )
+
+    async def _send_audio_transcription_media(
+        self,
+        command_id: CommandId,
+        pending: _PendingSpeechMedia,
+        targets: tuple[NodeId, ...],
+    ) -> None:
+        """Fan one bounded raw-audio stream to the task's selected workers."""
+
+        sender = self._speech_media_packet_sender
+        if sender is None:
+            await self._fail_audio_transcription_media(
+                command_id, "Speech media transport is unavailable"
+            )
+            return
+        total_chunks = max(
+            1,
+            (len(pending.data) + _SPEECH_MEDIA_CHUNK_BYTES - 1)
+            // _SPEECH_MEDIA_CHUNK_BYTES,
+        )
+        try:
+            for target in targets:
+                for sequence, offset in enumerate(
+                    range(0, len(pending.data), _SPEECH_MEDIA_CHUNK_BYTES)
+                ):
+                    if command_id not in self._speech_media_commands:
+                        return
+                    await sender.send(
+                        SpeechMediaPacket(
+                            source_node=self.node_id,
+                            target_node=target,
+                            command_id=command_id,
+                            sequence=sequence,
+                            kind="chunk",
+                            purpose="transcription_audio",
+                            filename=pending.filename,
+                            content_type=pending.content_type,
+                            data=pending.data[
+                                offset : offset + _SPEECH_MEDIA_CHUNK_BYTES
+                            ],
+                        )
+                    )
+                await sender.send(
+                    SpeechMediaPacket(
+                        source_node=self.node_id,
+                        target_node=target,
+                        command_id=command_id,
+                        sequence=total_chunks,
+                        kind="completed",
+                        purpose="transcription_audio",
+                        filename=pending.filename,
+                        content_type=pending.content_type,
+                        sha256=pending.sha256,
+                    )
+                )
+        except anyio.get_cancelled_exc_class():
+            raise
+        except Exception as exception:  # noqa: BLE001 - transport boundary
+            logger.opt(exception=exception).warning(
+                f"Speech media upload failed for command {command_id}"
+            )
+            await self._fail_audio_transcription_media(
+                command_id,
+                "Speech media transport failed while uploading transcription input",
+            )
+
+    async def _fail_audio_transcription_media(
+        self, command_id: CommandId, message: str
+    ) -> None:
+        """Fail one batch STT upload without disturbing unrelated streams."""
+
+        if command_id not in self._speech_media_commands:
+            return
+        self._speech_media_commands.discard(command_id)
+        self._take_pending_speech_media(command_id)
+        await self._dispatch_generation_chunk(
+            command_id,
+            ErrorChunk(model=ModelId("unknown"), error_message=message),
+        )
+        await self._cancel_audio_transcription_command(command_id)
+        self._cancelled_command_ids.discard(command_id)
+
+    async def _sweep_pending_speech_media(self) -> None:
+        """Fail batch uploads that never acquire authoritative placement."""
+
+        while True:
+            await anyio.sleep(5)
+            cutoff = time.monotonic() - _SPEECH_MEDIA_PENDING_TTL_SECONDS
+            expired = [
+                command_id
+                for command_id, pending in self._pending_speech_media.items()
+                if pending.created_at <= cutoff
+            ]
+            for command_id in expired:
+                await self._fail_audio_transcription_media(
+                    command_id,
+                    "Speech media timed out waiting for authoritative placement",
+                )
+
+    def _stage_vision_media(
+        self,
+        command_id: CommandId,
+        model: ModelId,
+        chunks: Sequence[tuple[int, str]],
+        image_count: int,
+    ) -> None:
+        """Retain bounded image chunks until the master selects an instance."""
+
+        if self._vision_media_packet_sender is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Vision media transport is unavailable on this node",
+            )
+        if not chunks:
+            raise HTTPException(
+                status_code=400,
+                detail="Image input must not be empty",
+            )
+        if len(chunks) > _VISION_MEDIA_PENDING_FRAMES:
+            raise HTTPException(
+                status_code=413,
+                detail="Image input exceeds the per-request media frame limit",
+            )
+        encoded_chunks = tuple(
+            (image_index, data.encode("ascii")) for image_index, data in chunks
+        )
+        pending = _PendingVisionMedia(
+            model=model,
+            chunks=encoded_chunks,
+            image_count=image_count,
+            sha256=hashlib.sha256(
+                b"".join(data for _, data in encoded_chunks)
+            ).hexdigest(),
+            created_at=time.monotonic(),
+        )
+        if pending.byte_count > _VISION_MEDIA_PENDING_COMMAND_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="Image input exceeds the per-request media limit",
+            )
+        if (
+            len(self._pending_vision_media) + len(self._active_vision_media_bytes)
+            >= _VISION_MEDIA_PENDING_COMMANDS
+            or self._pending_vision_media_bytes + pending.byte_count
+            + self._active_vision_media_total_bytes
+            > _VISION_MEDIA_PENDING_TOTAL_BYTES
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="Vision media admission capacity is exhausted",
+            )
+        self._pending_vision_media[command_id] = pending
+        self._pending_vision_media_bytes += pending.byte_count
+        self._vision_media_commands.add(command_id)
+        self._vision_media_models[command_id] = model
+
+    def _take_pending_vision_media(
+        self, command_id: CommandId
+    ) -> _PendingVisionMedia | None:
+        """Release one pending upload from API admission accounting."""
+
+        pending = self._pending_vision_media.pop(command_id, None)
+        if pending is not None:
+            self._pending_vision_media_bytes = max(
+                0, self._pending_vision_media_bytes - pending.byte_count
+            )
+        return pending
+
+    def _retain_active_vision_media(
+        self, command_id: CommandId, byte_count: int
+    ) -> None:
+        """Keep transferred bytes charged until all selected ranks verify them."""
+
+        previous = self._active_vision_media_bytes.get(command_id, 0)
+        self._active_vision_media_bytes[command_id] = byte_count
+        self._active_vision_media_total_bytes += byte_count - previous
+
+    def _release_active_vision_media(self, command_id: CommandId) -> None:
+        """Release source-side transfer accounting after terminal delivery."""
+
+        released = self._active_vision_media_bytes.pop(command_id, 0)
+        self._active_vision_media_total_bytes = max(
+            0, self._active_vision_media_total_bytes - released
+        )
+
+    def _dispatch_pending_vision_media(self, task: task_types.Task) -> None:
+        """Start direct upload after authoritative task placement is replicated."""
+
+        if not isinstance(task, (task_types.TextGeneration, task_types.ImageEdits)):
+            return
+        pending = self._take_pending_vision_media(task.command_id)
+        if pending is None:
+            return
+        self._retain_active_vision_media(task.command_id, pending.byte_count)
+        instance = self.state.instances.get(task.instance_id)
+        if instance is None:
+            self._tg.start_soon(
+                self._fail_vision_media_command,
+                task.command_id,
+                pending.model,
+                "The selected model instance disappeared before image upload",
+            )
+            return
+        targets = tuple(
+            sorted(instance.shard_assignments.node_to_runner, key=str)
+        )
+        if not targets:
+            self._tg.start_soon(
+                self._fail_vision_media_command,
+                task.command_id,
+                pending.model,
+                "The selected model instance has no worker participants",
+            )
+            return
+        self._vision_media_targets[task.command_id] = targets
+        self._vision_media_pending_acks[task.command_id] = set(targets)
+        self._vision_media_ack_deadlines[task.command_id] = (
+            time.monotonic() + _VISION_MEDIA_ACK_TIMEOUT_SECONDS
+        )
+        self._tg.start_soon(
+            self._send_vision_media_to_targets,
+            task.command_id,
+            pending,
+            targets,
+        )
+
+    async def _send_vision_media_to_targets(
+        self,
+        command_id: CommandId,
+        pending: _PendingVisionMedia,
+        targets: tuple[NodeId, ...],
+    ) -> None:
+        """Fan one ordered image stream directly to every selected rank."""
+
+        try:
+            async with anyio.create_task_group() as task_group:
+                for target in targets:
+                    task_group.start_soon(
+                        self._send_vision_media_to_target,
+                        command_id,
+                        pending,
+                        target,
+                    )
+        except anyio.get_cancelled_exc_class():
+            raise
+        except Exception as exception:  # noqa: BLE001 - transport boundary
+            logger.opt(exception=exception).warning(
+                f"Vision media upload failed for command {command_id}"
+            )
+            await self._fail_vision_media_command(
+                command_id,
+                pending.model,
+                "Vision media transport failed while uploading image input",
+            )
+
+    async def _send_vision_media_to_target(
+        self,
+        command_id: CommandId,
+        pending: _PendingVisionMedia,
+        target: NodeId,
+    ) -> None:
+        """Send one rank's explicit open, ordered chunks, and completion."""
+
+        sender = self._vision_media_packet_sender
+        if sender is None:
+            raise RuntimeError("vision media transport is unavailable")
+        total_chunks = len(pending.chunks)
+        if command_id not in self._vision_media_commands:
+            return
+        await sender.send(
+            VisionMediaPacket(
+                source_node=self.node_id,
+                target_node=target,
+                command_id=command_id,
+                model=pending.model,
+                sequence=0,
+                kind="opened",
+                total_chunks=total_chunks,
+                image_count=pending.image_count,
+            )
+        )
+        for sequence, (image_index, data) in enumerate(pending.chunks, start=1):
+            if command_id not in self._vision_media_commands:
+                return
+            await sender.send(
+                VisionMediaPacket(
+                    source_node=self.node_id,
+                    target_node=target,
+                    command_id=command_id,
+                    model=pending.model,
+                    sequence=sequence,
+                    kind="chunk",
+                    data=data,
+                    image_index=image_index,
+                    total_chunks=total_chunks,
+                )
+            )
+        if command_id not in self._vision_media_commands:
+            return
+        await sender.send(
+            VisionMediaPacket(
+                source_node=self.node_id,
+                target_node=target,
+                command_id=command_id,
+                model=pending.model,
+                sequence=total_chunks + 1,
+                kind="completed",
+                total_chunks=total_chunks,
+                image_count=pending.image_count,
+                sha256=pending.sha256,
+            )
+        )
+
+    async def _cancel_vision_media_transport(
+        self,
+        command_id: CommandId,
+        model: ModelId,
+        targets: tuple[NodeId, ...],
+    ) -> None:
+        """Send best-effort media cancellation to every selected worker."""
+
+        sender = self._vision_media_packet_sender
+        if sender is None:
+            return
+        for target in targets:
+            with contextlib.suppress(
+                BrokenResourceError, ClosedResourceError, WouldBlock
+            ):
+                await sender.send(
+                    VisionMediaPacket(
+                        source_node=self.node_id,
+                        target_node=target,
+                        command_id=command_id,
+                        model=model,
+                        sequence=0,
+                        kind="cancelled",
+                    )
+                )
+
+    async def _fail_vision_media_command(
+        self,
+        command_id: CommandId,
+        model: ModelId,
+        message: str,
+    ) -> None:
+        """Fail one upload without disturbing unrelated inference streams."""
+
+        if (
+            command_id not in self._vision_media_commands
+            or command_id in self._vision_media_failures
+        ):
+            return
+        error = ErrorChunk(model=model, error_message=message)
+        self._vision_media_failures[command_id] = error
+        self._vision_media_commands.discard(command_id)
+        self._release_active_vision_media(command_id)
+        self._vision_media_pending_acks.pop(command_id, None)
+        self._vision_media_ack_deadlines.pop(command_id, None)
+        await self._dispatch_generation_chunk(command_id, error)
+        self._close_command_queue(command_id)
+        self._cancelled_command_ids.add(command_id)
+        await self.command_sender.send(
+            ForwarderCommand(
+                origin=self._system_id,
+                command=TaskCancelled(cancelled_command_id=command_id),
+            )
+        )
+        # Transport rejection is terminal to the caller. Let stream finalization
+        # emit TaskFinished after cancellation so the master releases its mapping.
+        self._cancelled_command_ids.discard(command_id)
+
+    def _take_vision_media_failure(self, command_id: CommandId) -> ErrorChunk | None:
+        """Consume a transport error that arrived before its response queue."""
+
+        return self._vision_media_failures.pop(command_id, None)
+
+    async def _sweep_pending_vision_media(self) -> None:
+        """Fail uploads missing placement or worker verification acknowledgements."""
+
+        while True:
+            await anyio.sleep(5)
+            await self._expire_stale_vision_media(time.monotonic())
+
+    async def _expire_stale_vision_media(self, now: float) -> None:
+        """Fail placement and acknowledgement deadlines at one monotonic instant."""
+
+        cutoff = now - _VISION_MEDIA_PENDING_TTL_SECONDS
+        expired = [
+            (command_id, pending.model)
+            for command_id, pending in self._pending_vision_media.items()
+            if pending.created_at <= cutoff
+        ]
+        for command_id, model in expired:
+            self._take_pending_vision_media(command_id)
+            await self._fail_vision_media_command(
+                command_id,
+                model,
+                "Vision media timed out waiting for authoritative placement",
+            )
+        unacknowledged = [
+            command_id
+            for command_id, deadline in self._vision_media_ack_deadlines.items()
+            if deadline <= now
+        ]
+        for command_id in unacknowledged:
+            model = self._vision_media_models.get(command_id)
+            if model is not None:
+                await self._fail_vision_media_command(
+                    command_id,
+                    model,
+                    "Vision media timed out waiting for worker verification",
+                )
 
     async def _send_text_generation_with_images(
         self, task_params: TextGenerationTaskParams
@@ -2264,22 +3955,19 @@ class API:
             }
         )
         command = TextGeneration(task_params=task_params, owner_node=self.node_id)
-
-        for global_idx, (img_idx, chunk_data) in enumerate(all_chunks):
-            await self._send(
-                SendInputChunk(
-                    chunk=InputImageChunk(
-                        model=task_params.model,
-                        command_id=command.command_id,
-                        data=chunk_data,
-                        chunk_index=global_idx,
-                        total_chunks=len(all_chunks),
-                        image_index=img_idx,
-                    )
-                )
-            )
-
-        await self._send(command)
+        self._stage_vision_media(
+            command.command_id,
+            task_params.model,
+            all_chunks,
+            len(new_images),
+        )
+        try:
+            await self._send(command)
+        except BaseException:
+            self._take_pending_vision_media(command.command_id)
+            self._vision_media_commands.discard(command.command_id)
+            self._vision_media_models.pop(command.command_id, None)
+            raise
         return command
 
     async def chat_completions(
@@ -2304,11 +3992,14 @@ class API:
 
         command = await self._send_text_generation_with_images(task_params)
 
-        chunk_stream = self._token_chunk_stream(command.command_id)
-        if self._extensions is not None and self._extensions.has_chat_middleware:
-            chunk_stream = self._extensions.tap_chat_stream(
-                self._extension_context, task_params, chunk_stream
-            )
+        # All observation taps (field telemetry, performance envelope, extension
+        # chat summary) applied through the shared helper. The POST-transform
+        # model is passed so observations attribute to the dispatched model.
+        chunk_stream = self._tapped_text_stream(
+            command.command_id,
+            task_params.model,
+            task_params=task_params,
+        )
 
         if payload.stream:
             return StreamingResponse(
@@ -2347,12 +4038,15 @@ class API:
 
         command = await self._send_text_generation_with_images(task_params)
 
-        return await self._collect_text_generation_with_stats(command.command_id)
+        return await self._collect_text_generation_with_stats(
+            command.command_id, task_params.model
+        )
 
     async def _resolve_and_validate_text_model(self, model_id: ModelId) -> ModelId:
-        """Validate a text model exists and return the resolved model ID.
+        """Validate a mounted model supports text generation.
 
-        Raises HTTPException 404 if no instance is found for the model.
+        Raises HTTPException 404 if no instance is found for the model, or 400
+        when the mounted model does not declare ``TextGeneration``.
         """
         if not any(
             instance.shard_assignments.model_id == model_id
@@ -2362,6 +4056,12 @@ class API:
             raise HTTPException(
                 status_code=404,
                 detail=f"No instance found for model {model_id}",
+            )
+        model_card = await self._get_running_model_card(model_id)
+        if ModelTask.TextGeneration not in model_card.tasks:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {model_card.model_id} is not a text-generation model",
             )
         return model_id
 
@@ -2374,25 +4074,34 @@ class API:
         """
         for instance in self.state.instances.values():
             if instance.shard_assignments.model_id == model_id:
-                runner_to_shard = getattr(
-                    instance.shard_assignments, "runner_to_shard", None
-                )
-                if isinstance(runner_to_shard, dict):
-                    for shard in cast(dict[object, object], runner_to_shard).values():
-                        shard_model_card = cast(
-                            object, getattr(shard, "model_card", None)
-                        )
-                        if isinstance(shard_model_card, ModelCard):
-                            return shard_model_card
-                fallback_card = cast(
-                    object,
-                    getattr(instance.shard_assignments, "model_card", None),
-                )
-                if isinstance(fallback_card, ModelCard):
-                    # Older tests and any simplified in-memory stubs may attach the
-                    # card directly to shard_assignments instead of runner_to_shard.
-                    return fallback_card
+                card = self._model_card_for_instance(instance)
+                if card is not None:
+                    return card
         return await ModelCard.load(model_id)
+
+    @staticmethod
+    def _model_card_for_instance(instance: Instance) -> ModelCard | None:
+        """Return the replicated model card carried by one mounted instance."""
+
+        runner_to_shard = getattr(
+            instance.shard_assignments, "runner_to_shard", None
+        )
+        if isinstance(runner_to_shard, dict):
+            for shard in cast(dict[object, object], runner_to_shard).values():
+                shard_model_card = cast(
+                    object, getattr(shard, "model_card", None)
+                )
+                if isinstance(shard_model_card, ModelCard):
+                    return shard_model_card
+        fallback_card = cast(
+            object,
+            getattr(instance.shard_assignments, "model_card", None),
+        )
+        if isinstance(fallback_card, ModelCard):
+            # Older tests and simplified in-memory stubs may attach the card
+            # directly instead of through runner_to_shard.
+            return fallback_card
+        return None
 
     async def _validate_image_model(self, model: ModelId) -> ModelId:
         """Validate model exists and return resolved model ID.
@@ -2435,6 +4144,1916 @@ class API:
                 detail=f"No instance found for model {resolved}",
             )
         return resolved
+
+    async def _validate_speech_synthesis_model(
+        self,
+        model_id: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        """Validate a mounted TTS model and resolve the output audio format."""
+
+        model_card = await self._get_running_model_card(model_id)
+        resolved = model_card.model_id
+        profile = resolve_model_capability_profile(resolved, model_card=model_card)
+        if not profile.supports_speech_synthesis:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {resolved} is not a text-to-speech model",
+            )
+        if stream and (
+            model_card.audio is None or model_card.audio.supports_streaming is not True
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Model {resolved} does not declare streaming speech support"
+                ),
+            )
+        if not any(
+            instance.shard_assignments.model_id == resolved
+            for instance in self.state.instances.values()
+        ):
+            await self._trigger_notify_user_to_download_model(resolved)
+            raise HTTPException(
+                status_code=404,
+                detail=f"No instance found for model {resolved}",
+            )
+        resolved_response_format = (
+            response_format
+            or profile.default_audio_response_format
+            or AudioResponseFormat.Mp3
+        )
+        if (
+            profile.audio_response_formats
+            and resolved_response_format not in profile.audio_response_formats
+        ):
+            supported = ", ".join(
+                audio_format.value for audio_format in profile.audio_response_formats
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Model {resolved} does not support audio response format "
+                    f"{resolved_response_format.value}; supported formats: {supported}"
+                ),
+            )
+        if stream and resolved_response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
+            supported = ", ".join(
+                audio_format.value
+                for audio_format in sorted(
+                    _STREAMABLE_AUDIO_RESPONSE_FORMATS,
+                    key=lambda audio_format: audio_format.value,
+                )
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"`stream=true` supports only {supported} responses for now; "
+                    f"requested {resolved_response_format.value}"
+                ),
+            )
+        if stream and not self._streaming_tts_model_is_ready(
+            resolved,
+            resolved_response_format,
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"All mounted instances of streaming speech model {resolved} "
+                    "must have a ready runner"
+                ),
+            )
+        return resolved, resolved_response_format
+
+    def _reference_tts_target(
+        self,
+        model_id: ModelId,
+    ) -> tuple[InstanceId, NodeId]:
+        """Select ready single-host TTS capacity supporting reference audio."""
+
+        candidates: list[tuple[str, str, InstanceId, NodeId]] = []
+        for instance_id, instance in self.state.instances.items():
+            if instance.shard_assignments.model_id != model_id:
+                continue
+            if len(instance.shard_assignments.node_to_runner) != 1:
+                continue
+            card = self._model_card_for_instance(instance)
+            if (
+                card is None
+                or card.audio is None
+                or card.audio.supports_reference_audio is not True
+            ):
+                continue
+            target_node, runner_id = next(
+                iter(instance.shard_assignments.node_to_runner.items())
+            )
+            if not isinstance(
+                self.state.runners.get(runner_id),
+                (RunnerReady, RunnerRunning),
+            ):
+                continue
+            candidates.append(
+                (str(instance_id), str(target_node), instance_id, target_node)
+            )
+        if not candidates:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Model {model_id} has no ready mounted instance that "
+                    "supports reference audio"
+                ),
+            )
+        _, _, instance_id, target_node = min(candidates)
+        return instance_id, target_node
+
+    def _streaming_tts_model_is_ready(
+        self,
+        model_id: ModelId | None = None,
+        response_format: AudioResponseFormat = AudioResponseFormat.Mp3,
+    ) -> bool:
+        """Return whether every routable instance of one streaming model is ready."""
+
+        eligible_by_model: dict[ModelId, list[Instance]] = {}
+        for instance in self.state.instances.values():
+            if model_id is not None and instance.shard_assignments.model_id != model_id:
+                continue
+            card = self._model_card_for_instance(instance)
+            if card is None or card.audio is None:
+                continue
+            profile = resolve_model_capability_profile(
+                card.model_id,
+                model_card=card,
+            )
+            if (
+                profile.supports_speech_synthesis
+                and card.audio.supports_streaming is True
+                and (
+                    not profile.audio_response_formats
+                    or response_format in profile.audio_response_formats
+                )
+            ):
+                eligible_by_model.setdefault(card.model_id, []).append(instance)
+
+        def instance_is_ready(instance: Instance) -> bool:
+            runner_ids = tuple(instance.shard_assignments.node_to_runner.values())
+            return len(runner_ids) == 1 and all(
+                isinstance(
+                    self.state.runners.get(runner_id),
+                    (RunnerReady, RunnerRunning),
+                )
+                for runner_id in runner_ids
+            )
+
+        return any(
+            instances and all(instance_is_ready(instance) for instance in instances)
+            for instances in eligible_by_model.values()
+        )
+
+    def _has_mounted_streaming_tts_model(self) -> bool:
+        """Return whether core serving currently exposes eligible TTS capacity."""
+
+        return self._builtin_speech_provider_enabled and self._streaming_tts_model_is_ready()
+
+    def _realtime_stt_instance(
+        self,
+        model_id: ModelId | None = None,
+        *,
+        call_id: str | None = None,
+        require_idle: bool = False,
+    ) -> tuple[InstanceId, ModelCard, NodeId] | None:
+        """Return eligible cluster realtime STT capacity and its hosting node."""
+
+        if (
+            not self._builtin_speech_provider_enabled
+            or (
+                self._realtime_audio_sender is None
+                and self._realtime_audio_packet_sender is None
+            )
+        ):
+            return None
+        candidates: list[tuple[bool, str, str, InstanceId, ModelCard, NodeId]] = []
+        for instance_id, instance in self.state.instances.items():
+            if len(instance.shard_assignments.node_to_runner) != 1:
+                continue
+            if require_idle and (
+                any(
+                    active.reserved_instance_id == instance_id
+                    for active_call_id, active in self._active_capability_streams.items()
+                    if active_call_id != call_id
+                )
+                or any(
+                    task.instance_id == instance_id
+                    # RunnerReady is authoritative for lifecycle completion.
+                    # Download/load bookkeeping can remain non-terminal briefly
+                    # on another API node after the runner becomes ready, but it
+                    # does not occupy STT inference capacity. Only active STT
+                    # workloads must block cross-owner admission here.
+                    and isinstance(
+                        task,
+                        (
+                            task_types.AudioTranscription,
+                            task_types.RealtimeAudioTranscription,
+                        ),
+                    )
+                    and task.task_status not in _TERMINAL_TASK_STATUSES
+                    for task in self.state.tasks.values()
+                )
+            ):
+                continue
+            if (
+                model_id is not None
+                and instance.shard_assignments.model_id != model_id
+            ):
+                continue
+            card = self._model_card_for_instance(instance)
+            if card is None or card.audio is None:
+                continue
+            profile = resolve_model_capability_profile(
+                card.model_id,
+                model_card=card,
+            )
+            if (
+                profile.supports_transcription
+                and card.audio.supports_streaming is True
+                and card.audio.supports_realtime is True
+            ):
+                for target_node, runner_id in (
+                    instance.shard_assignments.node_to_runner.items()
+                ):
+                    if not isinstance(
+                        self.state.runners.get(runner_id),
+                        (RunnerReady, RunnerRunning),
+                    ):
+                        continue
+                    is_remote = target_node != self.node_id
+                    if is_remote and (
+                        not self._data_plane_zenoh
+                        or self._realtime_audio_packet_sender is None
+                    ):
+                        continue
+                    if (
+                        not is_remote
+                        and self._realtime_audio_sender is None
+                        and self._realtime_audio_packet_sender is None
+                    ):
+                        continue
+                    candidates.append(
+                        (
+                            is_remote,
+                            str(instance_id),
+                            str(target_node),
+                            instance_id,
+                            card,
+                            target_node,
+                        )
+                    )
+        if not candidates:
+            return None
+        _, _, _, instance_id, card, target_node = min(candidates)
+        return instance_id, card, target_node
+
+    def _has_realtime_stt_model(self) -> bool:
+        """Return whether this API can reach true realtime STT capacity."""
+
+        return self._realtime_stt_instance() is not None
+
+    def _mounted_stt_model_is_ready(self, model_id: ModelId | None = None) -> bool:
+        """Return whether every routable requested STT instance is ready."""
+
+        def instance_is_ready(instance: Instance) -> bool:
+            if len(instance.shard_assignments.node_to_runner) != 1:
+                return False
+            card = self._model_card_for_instance(instance)
+            if card is None:
+                return False
+            profile = resolve_model_capability_profile(card.model_id, model_card=card)
+            if not profile.supports_transcription:
+                return False
+            placement_runners = tuple(
+                instance.shard_assignments.node_to_runner.values()
+            )
+            return bool(placement_runners) and all(
+                isinstance(
+                    self.state.runners.get(runner_id), (RunnerReady, RunnerRunning)
+                )
+                for runner_id in placement_runners
+            )
+
+        if model_id is None:
+            return any(instance_is_ready(instance) for instance in self.state.instances.values())
+        matching_instances = tuple(
+            instance
+            for instance in self.state.instances.values()
+            if instance.shard_assignments.model_id == model_id
+        )
+        # AudioTranscription is not instance-pinned: the master may choose any
+        # mounted instance of the model. Admission is truthful only if every
+        # candidate it could choose is ready at this snapshot.
+        return bool(matching_instances) and all(
+            instance_is_ready(instance) for instance in matching_instances
+        )
+
+    def _has_mounted_stt_model(self, model_id: ModelId | None = None) -> bool:
+        """Return whether the built-in provider can advertise ready STT."""
+
+        return (
+            self._builtin_speech_provider_enabled
+            and self._mounted_stt_model_is_ready(model_id)
+        )
+
+    def _sync_builtin_speech_capability(self) -> None:
+        """Advertise speech facades only while core capacity can serve them."""
+
+        if not self._builtin_speech_provider_enabled:
+            return
+        if self._has_mounted_streaming_tts_model():
+            self._advertise_capability(TTS_CAPABILITY_DESCRIPTOR.id)
+        else:
+            self._withdraw_capability(TTS_CAPABILITY_DESCRIPTOR.id)
+        if self._has_mounted_stt_model():
+            self._advertise_capability(STT_CAPABILITY_DESCRIPTOR.id)
+        else:
+            self._withdraw_capability(STT_CAPABILITY_DESCRIPTOR.id)
+        if self._has_realtime_stt_model():
+            self._advertise_capability(REALTIME_STT_CAPABILITY_DESCRIPTOR.id)
+        else:
+            self._withdraw_capability(REALTIME_STT_CAPABILITY_DESCRIPTOR.id)
+
+    def refresh_config_dependent_capabilities(self) -> None:
+        """Refresh capability advertisements after local config application."""
+
+        self._sync_builtin_speech_capability()
+
+    def set_model_store_runtime(
+        self,
+        skulk_config: "SkulkConfig | None",
+        store_client: "ModelStoreClient | None",
+    ) -> None:
+        """Replace config and store client after cluster-config convergence.
+
+        Args:
+            skulk_config: The authoritative cluster configuration, or ``None``
+                when the cluster has no configuration.
+            store_client: Client for the authoritative model store, or ``None``
+                when the model store is disabled.
+
+        Side effects:
+            Subsequent dashboard store requests use the replacement client and
+            config-dependent provider advertisements are refreshed.
+        """
+
+        self._skulk_config = skulk_config
+        self._store_client = store_client
+        self.refresh_config_dependent_capabilities()
+
+    async def _validate_audio_transcription_model(
+        self,
+        model_id: ModelId,
+        *,
+        stream: bool = False,
+    ) -> ModelId:
+        """Validate a mounted speech-to-text model exists and is servable."""
+
+        model_card = await self._get_running_model_card(model_id)
+        resolved = model_card.model_id
+        profile = resolve_model_capability_profile(resolved, model_card=model_card)
+        if not profile.supports_transcription:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {resolved} is not a speech-to-text model",
+            )
+        if stream and (
+            model_card.audio is None or model_card.audio.supports_streaming is not True
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Model {resolved} does not declare streaming transcription support"
+                ),
+            )
+        if not any(
+            instance.shard_assignments.model_id == resolved
+            for instance in self.state.instances.values()
+        ):
+            await self._trigger_notify_user_to_download_model(resolved)
+            raise HTTPException(
+                status_code=404,
+                detail=f"No instance found for model {resolved}",
+            )
+        if stream and not self._mounted_stt_model_is_ready(resolved):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"All mounted instances of streaming transcription model "
+                    f"{resolved} must have a ready runner"
+                ),
+            )
+        return resolved
+
+    async def _validate_audio_translation_model(
+        self,
+        model_id: ModelId,
+        source_language: str | None,
+    ) -> ModelId:
+        """Validate a mounted translation-capable model for `/v1/audio/translations`.
+
+        Speech translation is a standard capability: the only gates are model
+        truth (a mounted card that declares translation support) and instance
+        availability, matching every other speech endpoint.
+        """
+
+        if not any(
+            instance.shard_assignments.model_id == model_id
+            for instance in self.state.instances.values()
+        ):
+            await self._trigger_notify_user_to_download_model(model_id)
+            raise HTTPException(
+                status_code=404,
+                detail=f"No instance found for model {model_id}",
+            )
+        model_card = await self._get_running_model_card(model_id)
+        resolved = model_card.model_id
+        profile = resolve_model_capability_profile(resolved, model_card=model_card)
+        if not profile.supports_speech_translation:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {resolved} does not support speech translation",
+            )
+        if model_card.family == "canary" and not source_language:
+            raise HTTPException(
+                status_code=400,
+                detail="Canary translation requires a source `language` code",
+            )
+        return resolved
+
+    def _advertise_capability(self, capability: str) -> None:
+        """Advertise a capability tag on this node's telemetry plane.
+
+        The telemetry-plane advertise surface extensions receive via their
+        ``ExtensionContext`` (fabric-citizenship Phase 1). Records the tag on the
+        shared ``TelemetryView`` outbound set; the worker's info gatherer gossips
+        it last-write-wins on its next poll, so peers see it in their own
+        ``read_cluster`` snapshots. Advertising is additive and idempotent.
+
+        Empty or whitespace-only tags are ignored (a defensive guard: a tag is a
+        discovery key, and a blank one would be meaningless gossip). A node that
+        runs no worker never emits (it has no gatherer), so the tag is recorded
+        but not gossiped there; the mainstream node runs both.
+
+        Args:
+            capability: The opaque capability tag to advertise (for example
+                ``"memory"``).
+        """
+        tag = capability.strip()
+        if not tag:
+            logger.warning(
+                "Extension advertised an empty capability tag; ignoring it"
+            )
+            return
+        self._telemetry_view.local_advertised_capabilities.add(tag)
+
+    def _withdraw_capability(self, capability: str) -> None:
+        """Withdraw a previously advertised capability tag.
+
+        The liveness counterpart of :meth:`_advertise_capability`
+        (fabric-citizenship Phase 2a): a provider that stops offering a
+        capability withdraws the tag so callers stop selecting this node for
+        it. The worker's info gatherer publishes the shrunken set on its next
+        poll (including a final empty reading when the last tag goes, so peers
+        clear the entry instead of keeping the stale last-write-wins value).
+        Withdrawing a tag that was never advertised is a no-op.
+
+        Args:
+            capability: The tag to withdraw (matched after whitespace trim).
+        """
+        self._telemetry_view.local_advertised_capabilities.discard(capability.strip())
+
+    async def list_node_capabilities(
+        self, node_id: str | None = None
+    ) -> dict[str, object]:
+        """Serve ``GET /v1/capabilities``: a node's capability descriptors.
+
+        The describe surface of capability discovery (fabric-citizenship
+        Phase 2a). Without ``node_id`` (or with this node's id), returns the
+        descriptors served by this node's provider extensions; with a peer's
+        ``node_id``, proxies the peer's describe surface (the same read-only
+        fan-out pattern the trace cluster browsing uses), returning an empty
+        list when the peer is unreachable. Each descriptor's content revision
+        digest is included so callers can pin the exact shape they discovered.
+        Extensions consume this through ``describe_node``.
+
+        Args:
+            node_id: Optional peer node to describe instead of this node.
+
+        Returns:
+            ``{"node_id": ..., "capabilities": [...], "revisions": {...}}``
+            where ``revisions`` maps ``id@version`` to the revision digest.
+        """
+        # A blank or whitespace-padded node_id means "this node", not a
+        # literal peer id that would always proxy to nothing.
+        requested = node_id.strip() if node_id is not None else None
+        if not requested or requested == str(self.node_id):
+            descriptors = (
+                self._extensions.capability_descriptors
+                if self._extensions is not None
+                else ()
+            )
+            described: NodeId = self.node_id
+        else:
+            described = NodeId(requested)
+            descriptors = await self._describe_node_capabilities(described)
+        return {
+            "node_id": str(described),
+            "capabilities": [
+                descriptor.model_dump(mode="json") for descriptor in descriptors
+            ],
+            "revisions": {
+                descriptor.qualified_id: descriptor_revision(descriptor)
+                for descriptor in descriptors
+            },
+        }
+
+    async def serve_capability_call(self, call: CapabilityCall) -> CapabilityResult:
+        """Serve ``POST /v1/capabilities/call``: dispatch a call to a provider.
+
+        The provider-side entry of the generic capability call (fabric-
+        citizenship Phase 2b). The body is the typed call envelope; the
+        response is always a :class:`CapabilityResult` (HTTP 200 even for
+        typed failures, so callers switch on ``result.error.code`` rather than
+        transport status). All isolation guards live in
+        :meth:`_dispatch_capability_call`.
+        """
+        return await self._dispatch_capability_call(call)
+
+    async def _dispatch_capability_call(
+        self, call: CapabilityCall
+    ) -> CapabilityResult:
+        """Run one capability call against this node's providers, guarded.
+
+        Guard order (each failure is a typed error, never an exception):
+        target-node addressing check; handler lookup (``not_found`` vs
+        ``version_mismatch``); descriptor revision pin; then, INSIDE the
+        provider concurrency bound (``overloaded``) and the caller's deadline
+        (``timeout``): payload size cap, input-schema validation, and the
+        handler itself (exceptions become ``provider_error``); finally result
+        shape, size cap, and output-schema validation (``invalid_result``).
+        Serialization and validation work counts against the bound and the
+        deadline (#513); cheap guards stay outside so trivially-rejectable
+        calls never consume a slot. The master is never involved and nothing
+        here touches ``State``.
+        """
+        if call.target_node != str(self.node_id):
+            # A misrouted or misaddressed envelope must not execute here: the
+            # call is node-addressed, and accepting it would make logs and
+            # auditing claim a different target than the one that served it.
+            return call_failure(
+                call.call_id,
+                "invalid_payload",
+                f"call addressed to {call.target_node}, served by {self.node_id}",
+            )
+        if self._extensions is None:
+            return call_failure(
+                call.call_id, "not_found", "this node loads no extensions"
+            )
+        qualified_id = f"{call.capability_id}@{call.version}"
+        entry = self._extensions.call_handler(qualified_id)
+        if entry is None:
+            code: CapabilityErrorCode = (
+                "version_mismatch"
+                if call.capability_id in self._extensions.handled_capability_ids()
+                else "not_found"
+            )
+            return call_failure(
+                call.call_id, code, f"no callable capability {qualified_id!r}"
+            )
+        extension_name, handler, descriptor = entry
+        current_revision = descriptor_revision(descriptor)
+        if call.descriptor_revision != current_revision:
+            return call_failure(
+                call.call_id,
+                "revision_mismatch",
+                f"descriptor revision is {current_revision}, caller pinned "
+                f"{call.descriptor_revision}; re-discover before calling",
+            )
+        # Bounded concurrency: one slow provider must not accumulate unbounded
+        # in-flight calls on the API node, and (#513) the serialization and
+        # schema-validation work below counts against the bound and the
+        # deadline too, so a storm of large-but-invalid payloads cannot drive
+        # unbounded concurrent validation outside the guard. The event loop is
+        # single-threaded, so a plain counter is race-free here. Cheap guards
+        # (addressing, handler lookup, revision pin) stay outside the bound so
+        # trivially-rejectable calls never consume a slot.
+        if self._active_capability_calls >= _MAX_CONCURRENT_CAPABILITY_CALLS:
+            return call_failure(
+                call.call_id,
+                "overloaded",
+                f"provider concurrency bound "
+                f"({_MAX_CONCURRENT_CAPABILITY_CALLS}) reached",
+            )
+        self._active_capability_calls += 1
+        try:
+            with anyio.fail_after(call.timeout_seconds):
+                try:
+                    payload_bytes = len(
+                        json.dumps(
+                            call.payload, separators=(",", ":"), allow_nan=False
+                        ).encode("utf-8")
+                    )
+                except (TypeError, ValueError, RecursionError, OverflowError) as exc:
+                    # A local fast-path caller can hand a payload the
+                    # endpoint's JSON parsing would never produce (bytes,
+                    # sets, NaN); typed error, not an exception.
+                    return call_failure(
+                        call.call_id,
+                        "invalid_payload",
+                        f"payload is not JSON-serializable: {exc}",
+                    )
+                if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
+                    return call_failure(
+                        call.call_id,
+                        "payload_too_large",
+                        f"payload is {payload_bytes} bytes "
+                        f"(limit {MAX_CALL_PAYLOAD_BYTES})",
+                    )
+                schema_error = validate_against_schema(
+                    call.payload, descriptor.input_schema, what="payload"
+                )
+                if schema_error is not None:
+                    return call_failure(
+                        call.call_id, "invalid_payload", schema_error
+                    )
+                try:
+                    result_payload = await handler.handle_call(
+                        self._extension_context, call
+                    )
+                except Exception as exc:  # noqa: BLE001 - a raising handler must not 500 the node
+                    # logger.exception keeps the traceback: debugging a
+                    # misbehaving extension from the message alone is much
+                    # harder in production.
+                    logger.exception(
+                        f"capability handler '{extension_name}' for "
+                        f"{qualified_id} raised: {exc}"
+                    )
+                    return call_failure(
+                        call.call_id,
+                        "provider_error",
+                        f"{type(exc).__name__}: {exc}",
+                    )
+        except TimeoutError:
+            return call_failure(
+                call.call_id,
+                "timeout",
+                f"call did not finish within {call.timeout_seconds}s "
+                f"(payload validation plus provider execution)",
+            )
+        finally:
+            self._active_capability_calls -= 1
+        if not isinstance(result_payload, dict):  # pyright: ignore[reportUnnecessaryIsInstance]
+            # The handler protocol says dict, but a misbehaving plugin can
+            # return anything; the strict result model would raise on it.
+            return call_failure(
+                call.call_id,
+                "invalid_result",
+                f"provider returned {type(result_payload).__name__}, not an object",
+            )
+        if any(not isinstance(key, str) for key in result_payload):  # pyright: ignore[reportUnnecessaryIsInstance]
+            # json.dumps silently stringifies non-string keys (so the size
+            # check passes), but the strict result model rejects them; catch
+            # it here as a typed error instead of a 500.
+            return call_failure(
+                call.call_id,
+                "invalid_result",
+                "provider result has non-string keys",
+            )
+        try:
+            result_bytes = len(
+                json.dumps(
+                    result_payload, separators=(",", ":"), allow_nan=False
+                ).encode("utf-8")
+            )
+        except (TypeError, ValueError, RecursionError, OverflowError) as exc:
+            # allow_nan=False also rejects NaN/Infinity here: json.dumps would
+            # otherwise accept them but the HTTP response renderer refuses
+            # non-finite JSON, turning the call into a 500 downstream.
+            return call_failure(
+                call.call_id,
+                "invalid_result",
+                f"provider result is not JSON-serializable: {exc}",
+            )
+        if result_bytes > MAX_CALL_PAYLOAD_BYTES:
+            return call_failure(
+                call.call_id,
+                "payload_too_large",
+                f"result is {result_bytes} bytes "
+                f"(limit {MAX_CALL_PAYLOAD_BYTES})",
+            )
+        if descriptor.output_schema is not None:
+            schema_error = validate_against_schema(
+                result_payload, descriptor.output_schema, what="result"
+            )
+            if schema_error is not None:
+                return call_failure(call.call_id, "invalid_result", schema_error)
+        return CapabilityResult(call_id=call.call_id, ok=True, result=result_payload)
+
+    async def serve_capability_stream(
+        self, call: CapabilityCall
+    ) -> CapabilityResult:
+        """Admit one streaming provider call on this node.
+
+        The response covers only opening validation and admission. Once
+        admitted, active lifecycle directions travel on ``PROVIDER_DATA``
+        between caller and provider; no media bytes use this HTTP request.
+        """
+
+        return await self._dispatch_capability_stream(call)
+
+    async def cancel_capability_stream(
+        self, request: CapabilityStreamCancel
+    ) -> CapabilityResult:
+        """Cancel one admitted provider stream idempotently."""
+
+        if request.target_node != str(self.node_id):
+            return call_failure(
+                request.call_id,
+                "invalid_payload",
+                f"cancellation addressed to {request.target_node}, served by "
+                f"{self.node_id}",
+            )
+        active = self._active_capability_streams.get(request.call_id)
+        if active is None:
+            return CapabilityResult(
+                call_id=request.call_id,
+                ok=True,
+                result={"cancelled": False},
+            )
+        if active.caller_node != request.caller_node:
+            return call_failure(
+                request.call_id,
+                "invalid_payload",
+                "only the caller that opened a provider stream may cancel it",
+            )
+        active.cancel_message = request.message
+        self._provider_observer.record_cancellation_request(request.call_id)
+        active.cancel_requested.set()
+        if active.cancel_scope is not None:
+            active.cancel_scope.cancel()
+        return CapabilityResult(
+            call_id=request.call_id,
+            ok=True,
+            result={"cancelled": True},
+        )
+
+    async def _dispatch_capability_stream(
+        self, call: CapabilityCall
+    ) -> CapabilityResult:
+        """Validate, admit, and start one guarded provider stream."""
+
+        started_at = anyio.current_time()
+        if call.target_node != str(self.node_id):
+            return call_failure(
+                call.call_id,
+                "invalid_payload",
+                f"call addressed to {call.target_node}, served by {self.node_id}",
+            )
+        if self._extensions is None:
+            return call_failure(
+                call.call_id, "not_found", "this node loads no extensions"
+            )
+        qualified_id = f"{call.capability_id}@{call.version}"
+        entry = self._extensions.stream_handler(qualified_id)
+        if entry is None:
+            code: CapabilityErrorCode = (
+                "version_mismatch"
+                if call.capability_id
+                in self._extensions.handled_stream_capability_ids()
+                else "not_found"
+            )
+            return call_failure(
+                call.call_id,
+                code,
+                f"no streaming capability {qualified_id!r}",
+            )
+        extension_name, handler, descriptor = entry
+        current_revision = descriptor_revision(descriptor)
+        if call.descriptor_revision != current_revision:
+            self._provider_observer.record_rejected(qualified_id)
+            return call_failure(
+                call.call_id,
+                "revision_mismatch",
+                f"descriptor revision is {current_revision}, caller pinned "
+                f"{call.descriptor_revision}; re-discover before streaming",
+            )
+        if self._provider_stream_sender is None or not self._tg.is_running():
+            self._provider_observer.record_rejected(qualified_id)
+            return call_failure(
+                call.call_id,
+                "unreachable",
+                "provider DATA transport is not running on this node",
+            )
+        if call.call_id in self._active_capability_streams:
+            self._provider_observer.record_rejected(qualified_id)
+            return call_failure(
+                call.call_id,
+                "invalid_payload",
+                "call_id already names an active provider stream",
+            )
+        if (
+            len(self._active_capability_streams)
+            >= _MAX_CONCURRENT_CAPABILITY_STREAMS
+        ):
+            self._provider_observer.record_rejected(qualified_id, overloaded=True)
+            return call_failure(
+                call.call_id,
+                "overloaded",
+                f"provider stream concurrency bound "
+                f"({_MAX_CONCURRENT_CAPABILITY_STREAMS}) reached",
+            )
+
+        try:
+            with anyio.fail_after(call.timeout_seconds):
+                try:
+                    payload_bytes = len(
+                        json.dumps(
+                            call.payload,
+                            separators=(",", ":"),
+                            allow_nan=False,
+                        ).encode("utf-8")
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                    RecursionError,
+                    OverflowError,
+                ) as exc:
+                    self._provider_observer.record_rejected(qualified_id)
+                    return call_failure(
+                        call.call_id,
+                        "invalid_payload",
+                        f"payload is not JSON-serializable: {exc}",
+                    )
+                if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
+                    self._provider_observer.record_rejected(qualified_id)
+                    return call_failure(
+                        call.call_id,
+                        "payload_too_large",
+                        f"payload is {payload_bytes} bytes "
+                        f"(limit {MAX_CALL_PAYLOAD_BYTES})",
+                    )
+                schema_error = validate_against_schema(
+                    call.payload, descriptor.input_schema, what="payload"
+                )
+                if schema_error is not None:
+                    self._provider_observer.record_rejected(qualified_id)
+                    return call_failure(
+                        call.call_id, "invalid_payload", schema_error
+                    )
+
+                input_sender: Sender[CapabilityStreamFrame] | None = None
+                input_receiver: Receiver[CapabilityStreamFrame] | None = None
+                input_lifecycle: CapabilityStreamReceiver | None = None
+                if descriptor.io_mode in ("client_streaming", "bidirectional"):
+                    if self._provider_stream_receiver is None:
+                        self._provider_observer.record_rejected(qualified_id)
+                        return call_failure(
+                            call.call_id,
+                            "unreachable",
+                            "provider DATA input transport is not running on this node",
+                        )
+                    input_sender, input_receiver = channel[CapabilityStreamFrame](
+                        _PROVIDER_STREAM_RECEIVE_BUFFER
+                    )
+                    input_lifecycle = CapabilityStreamReceiver(
+                        call_id=call.call_id,
+                        direction="caller_to_provider",
+                        gap_timeout_seconds=5.0,
+                        idle_timeout_seconds=call.timeout_seconds,
+                    )
+
+                # Reserve before admission can yield so concurrent opens cannot
+                # race past the stream bound. Rejections release this provisional
+                # entry; successful dispatch hands ownership to the runner.
+                active = _ActiveProviderStream(
+                    caller_node=call.caller_node,
+                    cancel_requested=anyio.Event(),
+                    descriptor=descriptor,
+                    input_sender=input_sender,
+                    input_receiver=input_receiver,
+                    input_lifecycle=input_lifecycle,
+                )
+                self._active_capability_streams[call.call_id] = active
+                if isinstance(handler, CapabilityStreamAdmissionHandler):
+                    try:
+                        admission_error = await handler.admit_stream(
+                            self._extension_context,
+                            call,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - provider boundary
+                        logger.opt(exception=exc).warning(
+                            f"capability stream admission for {qualified_id} raised"
+                        )
+                        self._active_capability_streams.pop(call.call_id, None)
+                        self._close_active_provider_input(active)
+                        self._provider_observer.record_rejected(qualified_id)
+                        return call_failure(
+                            call.call_id,
+                            "provider_error",
+                            f"stream admission raised {type(exc).__name__}: {exc}",
+                        )
+                    if admission_error is not None:
+                        self._active_capability_streams.pop(call.call_id, None)
+                        self._close_active_provider_input(active)
+                        self._provider_observer.record_rejected(
+                            qualified_id,
+                            overloaded=admission_error.code == "overloaded",
+                        )
+                        if not isinstance(admission_error, CapabilityError):  # pyright: ignore[reportUnnecessaryIsInstance]
+                            return call_failure(
+                                call.call_id,
+                                "provider_error",
+                                "stream admission returned an invalid result",
+                            )
+                        return CapabilityResult(
+                            call_id=call.call_id,
+                            ok=False,
+                            error=admission_error,
+                        )
+        except anyio.get_cancelled_exc_class():
+            active = self._active_capability_streams.pop(call.call_id, None)
+            if active is not None:
+                self._close_active_provider_input(active)
+            raise
+        except TimeoutError:
+            active = self._active_capability_streams.pop(call.call_id, None)
+            if active is not None:
+                self._close_active_provider_input(active)
+            self._provider_observer.record_rejected(qualified_id)
+            return call_failure(
+                call.call_id,
+                "timeout",
+                "provider stream deadline expired during admission",
+            )
+
+        remaining = call.timeout_seconds - (anyio.current_time() - started_at)
+        if remaining <= 0:
+            active = self._active_capability_streams.pop(call.call_id, None)
+            if active is not None:
+                self._close_active_provider_input(active)
+            self._provider_observer.record_rejected(qualified_id)
+            return call_failure(
+                call.call_id,
+                "timeout",
+                "provider stream deadline expired during admission",
+            )
+        admitted_call = call.model_copy(update={"timeout_seconds": remaining})
+        try:
+            self._tg.start_soon(
+                self._run_capability_stream,
+                admitted_call,
+                extension_name,
+                handler,
+                descriptor,
+                active,
+            )
+        except RuntimeError as exc:
+            self._active_capability_streams.pop(call.call_id, None)
+            self._close_active_provider_input(active)
+            self._provider_observer.record_rejected(qualified_id)
+            return call_failure(
+                call.call_id,
+                "unreachable",
+                f"provider stream runtime could not start: {exc}",
+            )
+        self._provider_observer.record_admitted(call.call_id, qualified_id)
+        return CapabilityResult(
+            call_id=call.call_id,
+            ok=True,
+            result={"admitted": True, "io_mode": descriptor.io_mode},
+        )
+
+    async def _run_capability_stream(
+        self,
+        call: CapabilityCall,
+        extension_name: str,
+        handler: CapabilityStreamHandler | CapabilityInputStreamHandler,
+        descriptor: CapabilityDescriptor,
+        active: _ActiveProviderStream,
+    ) -> None:
+        """Execute one admitted handler and enforce its output contract."""
+
+        next_sequence = 0
+        terminal_sent = False
+
+        async def emit(frame: CapabilityStreamFrame) -> None:
+            if self._provider_stream_sender is None:
+                raise ClosedResourceError
+            await self._provider_stream_sender.send(
+                ProviderStreamPacket(
+                    owner_node=NodeId(call.caller_node),
+                    frame=frame,
+                )
+            )
+            self._provider_observer.record_output(call.call_id, frame)
+
+        async def fail(code: CapabilityStreamErrorCode, message: str) -> None:
+            nonlocal next_sequence, terminal_sent
+            if terminal_sent:
+                return
+            await emit(
+                CapabilityStreamFrame(
+                    call_id=call.call_id,
+                    direction="provider_to_caller",
+                    sequence=next_sequence,
+                    kind="failed",
+                    synthetic=True,
+                    error=CapabilityStreamError(
+                        code=code,
+                        message=message,
+                    ),
+                )
+            )
+            next_sequence += 1
+            terminal_sent = True
+
+        async def close_provider_output(
+            stream: AsyncIterator[CapabilityStreamFrame],
+        ) -> None:
+            """Run iterator cleanup before exposing a synthetic failure."""
+
+            close = cast(
+                Callable[[], Awaitable[None]] | None,
+                getattr(stream, "aclose", None),
+            )
+            if close is None:
+                return
+            try:
+                await close()
+            except anyio.get_cancelled_exc_class():
+                raise
+            except Exception as exc:  # noqa: BLE001 - provider boundary
+                logger.opt(exception=exc).warning(
+                    f"capability stream handler '{extension_name}' for "
+                    f"{descriptor.qualified_id} raised during iterator cleanup"
+                )
+
+        try:
+            with anyio.CancelScope() as cancel_scope:
+                try:
+                    with anyio.fail_after(call.timeout_seconds):
+                        await emit(
+                            CapabilityStreamFrame(
+                                call_id=call.call_id,
+                                direction="provider_to_caller",
+                                sequence=0,
+                                kind="started",
+                            )
+                        )
+                        next_sequence = 1
+                        # Cancellation cannot preempt the lifecycle opener. A
+                        # request racing admission is recorded on the event and
+                        # applied only after sequence zero is on the DATA plane.
+                        active.cancel_scope = cancel_scope
+                        if active.cancel_requested.is_set():
+                            cancel_scope.cancel()
+                        stream: AsyncIterator[CapabilityStreamFrame] | None = None
+                        if not cancel_scope.cancel_called:
+                            if descriptor.io_mode in (
+                                "client_streaming",
+                                "bidirectional",
+                            ):
+                                assert isinstance(
+                                    handler, CapabilityInputStreamHandler
+                                )
+                                assert active.input_receiver is not None
+                                stream = handler.handle_input_stream(
+                                    self._extension_context,
+                                    call,
+                                    self._consume_provider_input(active),
+                                )
+                            else:
+                                assert isinstance(handler, CapabilityStreamHandler)
+                                stream = handler.handle_stream(
+                                    self._extension_context, call
+                                )
+                        if stream is None:
+                            stream = self._empty_capability_stream()
+                        async for frame in stream:
+                            if active.input_failure is not None:
+                                await close_provider_output(stream)
+                                await fail(
+                                    active.input_failure.code,
+                                    active.input_failure.message,
+                                )
+                                break
+                            if not isinstance(frame, CapabilityStreamFrame):  # pyright: ignore[reportUnnecessaryIsInstance]
+                                await close_provider_output(stream)
+                                await fail(
+                                    "invalid_frame",
+                                    f"provider yielded {type(frame).__name__}, "
+                                    "not CapabilityStreamFrame",
+                                )
+                                break
+                            if (
+                                frame.call_id != call.call_id
+                                or frame.direction != "provider_to_caller"
+                                or frame.sequence != next_sequence
+                                or frame.kind == "started"
+                            ):
+                                await close_provider_output(stream)
+                                await fail(
+                                    "invalid_frame",
+                                    "provider yielded a frame with invalid "
+                                    "identity, direction, sequence, or lifecycle",
+                                )
+                                break
+                            if frame.kind == "chunk" or (
+                                frame.kind == "completed"
+                                and (
+                                    descriptor.output_schema is not None
+                                    or frame.payload is not None
+                                    or frame.media is not None
+                                )
+                            ):
+                                payload = frame.payload or {}
+                                try:
+                                    payload_bytes = len(
+                                        json.dumps(
+                                            payload,
+                                            separators=(",", ":"),
+                                            allow_nan=False,
+                                        ).encode("utf-8")
+                                    )
+                                except (
+                                    TypeError,
+                                    ValueError,
+                                    RecursionError,
+                                    OverflowError,
+                                ) as exc:
+                                    await close_provider_output(stream)
+                                    await fail(
+                                        "invalid_frame",
+                                        f"provider chunk payload is not JSON: {exc}",
+                                    )
+                                    break
+                                if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
+                                    await close_provider_output(stream)
+                                    await fail(
+                                        "invalid_frame",
+                                        "provider chunk payload exceeds 1 MiB",
+                                    )
+                                    break
+                                output_schema = (
+                                    descriptor.output_chunk_schema
+                                    if frame.kind == "chunk"
+                                    else descriptor.output_schema
+                                )
+                                if output_schema is None:
+                                    await close_provider_output(stream)
+                                    await fail(
+                                        "invalid_frame",
+                                        "provider output carries data without a "
+                                        "matching descriptor schema",
+                                    )
+                                    break
+                                schema_error = validate_against_schema(
+                                    payload,
+                                    output_schema,
+                                    what=(
+                                        "output chunk"
+                                        if frame.kind == "chunk"
+                                        else "completed output"
+                                    ),
+                                )
+                                if schema_error is not None:
+                                    await close_provider_output(stream)
+                                    await fail("invalid_frame", schema_error)
+                                    break
+                            if frame.is_terminal:
+                                # A provider terminal is not observable until the
+                                # handler has actually returned. Built-in speech
+                                # handlers release core commands in ``finally``;
+                                # stopping at the yielded terminal would leave
+                                # that cleanup to nondeterministic async-generator
+                                # finalization and could retain runner admission.
+                                try:
+                                    trailing_frame = await anext(stream)
+                                except StopAsyncIteration:
+                                    pass
+                                else:
+                                    await close_provider_output(stream)
+                                    await fail(
+                                        "invalid_frame",
+                                        "provider yielded a frame after its terminal",
+                                    )
+                                    logger.warning(
+                                        "provider stream handler "
+                                        f"'{extension_name}' for "
+                                        f"{descriptor.qualified_id} yielded "
+                                        "after its terminal: "
+                                        f"{type(trailing_frame).__name__}"
+                                    )
+                                    break
+                                if active.input_failure is not None:
+                                    await fail(
+                                        active.input_failure.code,
+                                        active.input_failure.message,
+                                    )
+                                    break
+                            await emit(frame)
+                            next_sequence += 1
+                            if frame.is_terminal:
+                                terminal_sent = True
+                                break
+                        if (
+                            not terminal_sent
+                            and not active.cancel_requested.is_set()
+                            and active.input_failure is None
+                        ):
+                            await fail(
+                                "provider_error",
+                                "provider stream ended without a terminal frame",
+                            )
+                except TimeoutError:
+                    with anyio.CancelScope(shield=True):
+                        if active.input_failure is not None:
+                            await fail(
+                                active.input_failure.code,
+                                active.input_failure.message,
+                            )
+                        else:
+                            await fail(
+                                "timeout",
+                                "provider stream exceeded its single deadline budget",
+                            )
+                except anyio.get_cancelled_exc_class():
+                    if not active.cancel_requested.is_set():
+                        raise
+            if active.input_failure is not None and not terminal_sent:
+                with anyio.CancelScope(shield=True):
+                    await fail(
+                        active.input_failure.code,
+                        active.input_failure.message,
+                    )
+            elif active.cancel_requested.is_set() and not terminal_sent:
+                with anyio.CancelScope(shield=True):
+                    await emit(
+                        CapabilityStreamFrame(
+                            call_id=call.call_id,
+                            direction="provider_to_caller",
+                            sequence=next_sequence,
+                            kind="cancelled",
+                            synthetic=True,
+                            error=CapabilityStreamError(
+                                code="cancelled",
+                                message=active.cancel_message,
+                            ),
+                        )
+                    )
+                    terminal_sent = True
+        except (BrokenResourceError, ClosedResourceError):
+            logger.warning(
+                f"provider DATA transport closed during {call.call_id}"
+            )
+        except Exception as exc:  # noqa: BLE001 - plugin/transport must not escape
+            logger.exception(
+                f"capability stream handler '{extension_name}' for "
+                f"{descriptor.qualified_id} raised: {exc}"
+            )
+            if not terminal_sent:
+                with anyio.CancelScope(shield=True):
+                    with contextlib.suppress(
+                        BrokenResourceError, ClosedResourceError
+                    ):
+                        if active.input_failure is not None:
+                            await fail(
+                                active.input_failure.code,
+                                active.input_failure.message,
+                            )
+                        else:
+                            await fail(
+                                "provider_error",
+                                f"{type(exc).__name__}: {exc}",
+                            )
+        finally:
+            self._provider_observer.finalize(call.call_id)
+            self._close_active_provider_input(active)
+            current = self._active_capability_streams.get(call.call_id)
+            if current is active:
+                self._active_capability_streams.pop(call.call_id, None)
+
+    async def _consume_provider_input(
+        self,
+        active: _ActiveProviderStream,
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        """Yield one bounded caller input direction through its terminal."""
+
+        assert active.input_receiver is not None
+        assert active.input_lifecycle is not None
+        last_sequence = -1
+        terminal_yielded = False
+        with active.input_receiver as frames:
+            async for frame in frames:
+                self._provider_observer.record_input_queue_depth(
+                    active.input_lifecycle.call_id,
+                    active.input_receiver.statistics().current_buffer_used,
+                )
+                last_sequence = frame.sequence
+                terminal_yielded = frame.is_terminal
+                yield frame
+                if frame.is_terminal:
+                    return
+        if not terminal_yielded and active.input_failure is not None:
+            yield CapabilityStreamFrame(
+                call_id=active.input_lifecycle.call_id,
+                direction="caller_to_provider",
+                sequence=last_sequence + 1,
+                kind="failed",
+                synthetic=True,
+                error=active.input_failure,
+            )
+
+    @staticmethod
+    def _close_active_provider_input(active: _ActiveProviderStream) -> None:
+        """Close both ends of a provider input queue idempotently."""
+
+        if active.input_sender is not None:
+            active.input_sender.close()
+        if active.input_receiver is not None:
+            active.input_receiver.close()
+
+    async def _stream_capability(
+        self,
+        node_id: NodeId,
+        capability_id: str,
+        version: str,
+        descriptor_revision: str,
+        payload: dict[str, object],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> CapabilityStreamSession:
+        """Open a provider stream and receive output over ``PROVIDER_DATA``."""
+
+        call_id = str(uuid4())
+        requested_timeout = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else DEFAULT_CALL_TIMEOUT_SECONDS
+        )
+
+        def failed(code: CapabilityErrorCode, message: str) -> CapabilityStreamSession:
+            return CapabilityStreamSession(
+                open_result=call_failure(call_id, code, message),
+                frames=self._empty_capability_stream(),
+            )
+
+        if not isinstance(requested_timeout, (int, float)) or not (  # pyright: ignore[reportUnnecessaryIsInstance]
+            0 < requested_timeout <= MAX_CALL_TIMEOUT_SECONDS
+        ):
+            return failed(
+                "invalid_payload",
+                f"timeout_seconds must be in (0, {MAX_CALL_TIMEOUT_SECONDS}]",
+            )
+        try:
+            payload_bytes = len(
+                json.dumps(
+                    payload, separators=(",", ":"), allow_nan=False
+                ).encode("utf-8")
+            )
+        except (TypeError, ValueError, RecursionError, OverflowError) as exc:
+            return failed(
+                "invalid_payload", f"payload is not JSON-serializable: {exc}"
+            )
+        if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
+            return failed(
+                "payload_too_large",
+                f"payload is {payload_bytes} bytes "
+                f"(limit {MAX_CALL_PAYLOAD_BYTES})",
+            )
+        try:
+            call = CapabilityCall(
+                call_id=call_id,
+                capability_id=capability_id,
+                version=version,
+                descriptor_revision=descriptor_revision,
+                caller_node=str(self.node_id),
+                target_node=str(node_id),
+                timeout_seconds=requested_timeout,
+                payload=payload,
+            )
+        except ValidationError as exc:
+            return failed(
+                "invalid_payload", f"invalid stream call envelope: {exc}"
+            )
+        if self._provider_stream_receiver is None:
+            return failed(
+                "unreachable",
+                "provider DATA receive transport is not running on this node",
+            )
+
+        output_sender, output_receiver = channel[CapabilityStreamFrame](
+            _PROVIDER_STREAM_RECEIVE_BUFFER
+        )
+        started_at = anyio.current_time()
+        deadline_at = started_at + requested_timeout
+        receive_state = _ProviderStreamReceiveState(
+            output_sender=output_sender,
+            receiver=CapabilityStreamReceiver(
+                call_id=call_id,
+                direction="provider_to_caller",
+                gap_timeout_seconds=5.0,
+                idle_timeout_seconds=requested_timeout,
+            ),
+            call=call,
+            deadline_at=deadline_at,
+        )
+        self._provider_stream_receivers[call_id] = receive_state
+
+        if node_id == self.node_id:
+            opened = await self._dispatch_capability_stream(call)
+        else:
+            base_url: str | None = None
+            with anyio.move_on_after(requested_timeout) as lookup_scope:
+                base_url = await self._peer_api_url_for(node_id)
+            if lookup_scope.cancelled_caught:
+                opened = call_failure(
+                    call_id,
+                    "timeout",
+                    f"deadline exhausted resolving target {node_id}",
+                )
+            elif base_url is None:
+                opened = call_failure(
+                    call_id, "unreachable", f"node {node_id} is not reachable"
+                )
+            else:
+                remaining = deadline_at - anyio.current_time()
+                if remaining < 0.05:
+                    opened = call_failure(
+                        call_id,
+                        "timeout",
+                        f"target {node_id} resolved, but no stream budget remains",
+                    )
+                else:
+                    remote_call = call.model_copy(
+                        update={"timeout_seconds": remaining}
+                    )
+                    try:
+                        async with httpx.AsyncClient(
+                            timeout=httpx.Timeout(
+                                timeout=remaining + 5.0,
+                                connect=2.0,
+                            ),
+                            verify=False,
+                        ) as client:
+                            response = await client.post(
+                                f"{base_url}/v1/capabilities/stream",
+                                json=remote_call.model_dump(mode="json"),
+                            )
+                            response.raise_for_status()
+                            opened = CapabilityResult.model_validate(response.json())
+                    except (httpx.HTTPError, ValueError, ValidationError) as exc:
+                        opened = call_failure(
+                            call_id,
+                            "unreachable",
+                            f"stream open to {node_id} failed: {exc}",
+                        )
+
+        if not opened.ok:
+            self._provider_stream_receivers.pop(call_id, None)
+            output_sender.close()
+            output_receiver.close()
+            return CapabilityStreamSession(
+                open_result=opened,
+                frames=self._empty_capability_stream(),
+            )
+        assert opened.result is not None
+        io_mode = opened.result.get("io_mode")
+        if io_mode not in (
+            "server_streaming",
+            "client_streaming",
+            "bidirectional",
+        ):
+            await self._cancel_remote_capability_stream(call)
+            self._provider_stream_receivers.pop(call_id, None)
+            output_sender.close()
+            output_receiver.close()
+            return failed(
+                "invalid_result",
+                "provider stream admission returned no valid io_mode",
+            )
+
+        input_stream: CapabilityStreamInput | None = None
+        if io_mode in ("client_streaming", "bidirectional"):
+            if self._provider_stream_sender is None:
+                await self._cancel_remote_capability_stream(call)
+                self._provider_stream_receivers.pop(call_id, None)
+                output_sender.close()
+                output_receiver.close()
+                return failed(
+                    "unreachable",
+                    "provider DATA send transport is not running on this node",
+                )
+
+            async def send_input_frame(frame: CapabilityStreamFrame) -> None:
+                assert self._provider_stream_sender is not None
+                await self._provider_stream_sender.send(
+                    ProviderStreamPacket(owner_node=node_id, frame=frame)
+                )
+
+            input_stream = CapabilityStreamInput(
+                call_id=call_id,
+                deadline_at=deadline_at,
+                send_frame=send_input_frame,
+            )
+            receive_state.input_stream = input_stream
+            try:
+                await input_stream.start()
+            except (BrokenResourceError, ClosedResourceError, TimeoutError) as exc:
+                await self._cancel_remote_capability_stream(call)
+                self._provider_stream_receivers.pop(call_id, None)
+                output_sender.close()
+                output_receiver.close()
+                return failed(
+                    "unreachable",
+                    f"provider input stream could not start: {exc}",
+                )
+        async def cancel_output() -> None:
+            if receive_state.cancellation_scheduled:
+                return
+            receive_state.cancel_provider = True
+            receive_state.cancellation_scheduled = True
+            try:
+                await self._cancel_remote_capability_stream(call)
+            except Exception as exc:
+                logger.opt(exception=exc).warning(
+                    "Best-effort provider stream cancellation failed"
+                )
+
+        return CapabilityStreamSession(
+            open_result=opened,
+            frames=self._consume_capability_stream(
+                call,
+                receive_state,
+                output_receiver,
+            ),
+            input=input_stream,
+            cancel_output=cancel_output,
+        )
+
+    async def _consume_capability_stream(
+        self,
+        call: CapabilityCall,
+        state: _ProviderStreamReceiveState,
+        output_receiver: Receiver[CapabilityStreamFrame],
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        """Yield one caller stream and cancel its provider on early close."""
+
+        terminal_yielded = False
+        last_yielded_sequence = -1
+        try:
+            deadline_expired = False
+            with output_receiver as frames:
+                while True:
+                    remaining = max(0.0, state.deadline_at - anyio.current_time())
+                    frame: CapabilityStreamFrame | None = None
+                    with anyio.move_on_after(remaining) as deadline_scope:
+                        try:
+                            frame = await frames.receive()
+                        except (EndOfStream, ClosedResourceError):
+                            break
+                    if deadline_scope.cancelled_caught:
+                        deadline_expired = True
+                        break
+                    assert frame is not None
+                    last_yielded_sequence = frame.sequence
+                    if frame.is_terminal:
+                        terminal_yielded = True
+                    # A cancel scope must never span an async-generator yield:
+                    # finalization may resume the generator in a different task.
+                    yield frame
+                    if frame.is_terminal:
+                        return
+            if state.transport_failure is not None:
+                state.cancel_provider = True
+                terminal = CapabilityStreamFrame(
+                    call_id=call.call_id,
+                    direction="provider_to_caller",
+                    sequence=last_yielded_sequence + 1,
+                    kind="failed",
+                    synthetic=True,
+                    error=CapabilityStreamError(
+                        code="transport_error",
+                        message=state.transport_failure,
+                    ),
+                )
+            elif deadline_expired:
+                state.cancel_provider = True
+                terminal = state.receiver.fail(
+                    "timeout",
+                    "provider stream exceeded its single deadline budget",
+                )
+            else:
+                terminal = state.receiver.terminal or state.receiver.fail(
+                    "transport_error",
+                    "provider DATA stream closed without a terminal frame",
+                )
+                if terminal is not None:
+                    state.cancel_provider = True
+            if terminal is not None:
+                terminal_yielded = True
+                yield terminal
+        finally:
+            if state.input_stream is not None:
+                self._schedule_provider_input_close(state.input_stream)
+            self._provider_stream_receivers.pop(call.call_id, None)
+            state.output_sender.close()
+            output_receiver.close()
+            if (
+                not terminal_yielded or state.cancel_provider
+            ) and not state.cancellation_scheduled:
+                await self._cancel_remote_capability_stream(call)
+
+    def _schedule_provider_stream_cancellation(
+        self, state: _ProviderStreamReceiveState
+    ) -> None:
+        """Cancel a failed caller stream without waiting for its consumer."""
+
+        state.cancel_provider = True
+        if state.cancellation_scheduled:
+            return
+        state.cancellation_scheduled = True
+        try:
+            self._tg.start_soon(
+                self._cancel_remote_capability_stream,
+                state.call,
+            )
+        except RuntimeError:
+            # API teardown may close the task group while DATA is draining.
+            state.cancellation_scheduled = False
+
+    def _schedule_provider_input_close(
+        self, input_stream: CapabilityStreamInput
+    ) -> None:
+        """Close caller input immediately and retire its DATA stream safely."""
+
+        input_stream.close_locally()
+        try:
+            self._tg.start_soon(input_stream.finish_local_close)
+        except RuntimeError:
+            # API teardown may close the task group while DATA is draining.
+            return
+
+    async def _cancel_remote_capability_stream(self, call: CapabilityCall) -> None:
+        """Best-effort explicit cancellation for an early-closing caller."""
+
+        request = CapabilityStreamCancel(
+            call_id=call.call_id,
+            caller_node=call.caller_node,
+            target_node=call.target_node,
+        )
+        if call.target_node == str(self.node_id):
+            await self.cancel_capability_stream(request)
+            return
+        with anyio.move_on_after(2.0):
+            base_url = await self._peer_api_url_for(NodeId(call.target_node))
+            if base_url is None:
+                return
+            try:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(timeout=2.0, connect=1.0),
+                    verify=False,
+                ) as client:
+                    await client.post(
+                        f"{base_url}/v1/capabilities/stream/cancel",
+                        json=request.model_dump(mode="json"),
+                    )
+            except httpx.HTTPError:
+                return
+
+    async def _empty_capability_stream(
+        self,
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        """Return an empty iterator for a stream that failed before admission."""
+
+        if False:
+            yield CapabilityStreamFrame(
+                call_id="unreachable",
+                direction="provider_to_caller",
+                sequence=0,
+                kind="started",
+            )
+
+    async def _call_capability(
+        self,
+        node_id: NodeId,
+        capability_id: str,
+        version: str,
+        descriptor_revision: str,
+        payload: dict[str, object],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> CapabilityResult:
+        """Invoke a capability on a provider node (the caller side of the verb).
+
+        Extensions receive this via ``ExtensionContext.call_capability``. The
+        local node is a fast path (in-process dispatch, same guards); a peer is
+        reached directly over its API (node-addressed; the master is never in
+        the hot path and calls are never event-sourced). Every failure mode
+        returns a typed :class:`CapabilityResult` error; this never raises.
+        Transport-abstract: the peer hop can move to a Zenoh queryable without
+        changing this contract.
+
+        Args:
+            node_id: The provider node to call.
+            capability_id: The capability's descriptor id.
+            version: The exact negotiated semantic version.
+            descriptor_revision: The revision digest discovered via
+                describe, pinning the contract shape. Shadows the module-level
+                digest helper inside this method (unused here) because the
+                caller protocol fixes the parameter name.
+            payload: The opaque call payload.
+            timeout_seconds: Deadline for the call (default
+                ``DEFAULT_CALL_TIMEOUT_SECONDS``).
+
+        Returns:
+            The typed result of the call.
+        """
+        call_id = str(uuid4())
+        requested_timeout = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else DEFAULT_CALL_TIMEOUT_SECONDS
+        )
+        if not isinstance(requested_timeout, (int, float)) or not (  # pyright: ignore[reportUnnecessaryIsInstance]
+            0 < requested_timeout <= MAX_CALL_TIMEOUT_SECONDS
+        ):
+            # Validate the timeout BEFORE it becomes the lookup budget: an
+            # out-of-range value must fail fast as a typed error, not stall
+            # the reachability probe or surface as a misleading unreachable.
+            return call_failure(
+                call_id,
+                "invalid_payload",
+                f"timeout_seconds must be in (0, {MAX_CALL_TIMEOUT_SECONDS}]; "
+                f"got {requested_timeout}",
+            )
+        try:
+            payload_bytes = len(
+                json.dumps(payload, separators=(",", ":"), allow_nan=False).encode(
+                    "utf-8"
+                )
+            )
+        except (TypeError, ValueError, RecursionError, OverflowError) as exc:
+            return call_failure(
+                call_id,
+                "invalid_payload",
+                f"payload is not JSON-serializable: {exc}",
+            )
+        if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
+            # Enforce the cap before the POST ships an oversized body across
+            # the network just to be rejected on arrival.
+            return call_failure(
+                call_id,
+                "payload_too_large",
+                f"payload is {payload_bytes} bytes "
+                f"(limit {MAX_CALL_PAYLOAD_BYTES})",
+            )
+
+        # Validate the FULL envelope before any network work: a violation from
+        # an untyped caller (non-string ids and the like) fails fast as a
+        # typed error instead of after a wasted reachability probe.
+        try:
+            call = CapabilityCall(
+                call_id=call_id,
+                capability_id=capability_id,
+                version=version,
+                descriptor_revision=descriptor_revision,
+                caller_node=str(self.node_id),
+                target_node=str(node_id),
+                timeout_seconds=requested_timeout,
+                payload=payload,
+            )
+        except ValidationError as exc:
+            return call_failure(
+                call_id, "invalid_payload", f"invalid call envelope: {exc}"
+            )
+
+        if node_id == self.node_id:
+            return await self._dispatch_capability_call(call)
+        # One budget clock spans the WHOLE remote call (#513): target
+        # resolution consumes from the same deadline the provider gets, so the
+        # caller can never wait materially longer than it asked for (the old
+        # shape allowed lookup + provider to each use the full budget).
+        started_at = anyio.current_time()
+        base_url: str | None = None
+        with anyio.move_on_after(requested_timeout) as lookup_scope:
+            base_url = await self._peer_api_url_for(node_id)
+        if lookup_scope.cancelled_caught:
+            # Deadline exhaustion while resolving is a timeout, not a verdict
+            # that the node is unreachable; the caller can retry with a larger
+            # budget where a true unreachable would not change.
+            return call_failure(
+                call_id,
+                "timeout",
+                f"deadline exhausted resolving target {node_id}",
+            )
+        if base_url is None:
+            return call_failure(
+                call_id, "unreachable", f"node {node_id} is not reachable"
+            )
+        remaining = requested_timeout - (anyio.current_time() - started_at)
+        if remaining < 0.05:
+            return call_failure(
+                call_id,
+                "timeout",
+                f"target {node_id} resolved, but no budget remains for the "
+                f"call itself",
+            )
+        # Re-stamp the envelope with the remaining budget. model_copy skips
+        # validation, which is safe here: remaining is bounded by the already
+        # validated requested_timeout above and the 0.05s floor just checked.
+        call = call.model_copy(update={"timeout_seconds": remaining})
+        # The HTTP deadline extends slightly past the provider's remaining
+        # budget so a typed timeout from the provider wins over a transport
+        # timeout.
+        http_timeout = httpx.Timeout(timeout=remaining + 5.0, connect=2.0)
+        try:
+            async with httpx.AsyncClient(
+                timeout=http_timeout, verify=False
+            ) as client:
+                response = await client.post(
+                    f"{base_url}/v1/capabilities/call",
+                    json=call.model_dump(mode="json"),
+                )
+                response.raise_for_status()
+                return CapabilityResult.model_validate(response.json())
+        except (httpx.HTTPError, ValueError, ValidationError) as exc:
+            return call_failure(
+                call.call_id, "unreachable", f"call to {node_id} failed: {exc}"
+            )
+
+    async def _describe_node_capabilities(
+        self, node_id: NodeId
+    ) -> tuple[CapabilityDescriptor, ...]:
+        """Fetch a node's full capability descriptors (the describe verb).
+
+        The heavy half of capability discovery (fabric-citizenship Phase 2a):
+        the telemetry tag says *that* a node offers a capability; this returns
+        the self-describing descriptors that say *how to call it*. For the
+        local node it reads the loaded extensions directly; for a peer it
+        proxies ``GET /v1/capabilities`` over the reachable-peer-API path the
+        trace cluster-browse already uses (an existing mechanism, not a new
+        transport; the extension-facing contract stays transport-abstract so
+        this can later ride the provider call plane instead).
+
+        Returns an empty tuple when the node is unreachable, serves no
+        capabilities, or returns an unparsable payload; never raises.
+
+        Args:
+            node_id: The node whose descriptors to fetch.
+
+        Returns:
+            The node's capability descriptors, or ``()``.
+        """
+        if node_id == self.node_id:
+            if self._extensions is None:
+                return ()
+            return self._extensions.capability_descriptors
+        peer_urls = await self._reachable_peer_api_urls()
+        base_url = peer_urls.get(str(node_id))
+        if base_url is None:
+            return ()
+        timeout = httpx.Timeout(timeout=10.0, connect=2.0)
+        try:
+            async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+                response = await client.get(f"{base_url}/v1/capabilities")
+                response.raise_for_status()
+                payload_raw = cast("object", response.json())
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning(
+                f"describe_node: peer {node_id} capabilities fetch failed: {exc}"
+            )
+            return ()
+        # A peer can return any JSON shape; a non-object payload degrades to
+        # "no capabilities" rather than violating the never-raises contract.
+        if not isinstance(payload_raw, dict):
+            return ()
+        payload = cast("dict[str, object]", payload_raw)
+        raw_descriptors = payload.get("capabilities")
+        if not isinstance(raw_descriptors, list):
+            return ()
+        descriptors: list[CapabilityDescriptor] = []
+        for entry in cast("list[object]", raw_descriptors):
+            try:
+                descriptors.append(CapabilityDescriptor.model_validate(entry))
+            except ValidationError as exc:
+                # A malformed entry degrades to "not offered" rather than
+                # poisoning the whole describe (mixed-version peers are
+                # unsupported, but a plugin can publish garbage on any version).
+                logger.warning(
+                    f"describe_node: peer {node_id} returned an invalid "
+                    f"capability descriptor; skipping it: {exc}"
+                )
+        return tuple(descriptors)
 
     async def embed_texts(
         self,
@@ -2567,7 +6186,10 @@ class API:
     def _build_image_url(self, request: Request, image_id: Id) -> str:
         host = request.headers.get("host", f"localhost:{self.port}")
         scheme = "https" if request.url.scheme == "https" else "http"
-        return f"{scheme}://{host}/v1/images/{image_id}"
+        # The stored-image fetch route is GET /images/{image_id} (no /v1
+        # prefix); emitting /v1/... here returned URLs that always 404ed,
+        # found when the 1.5.0 docs review documented the url response mode.
+        return f"{scheme}://{host}/images/{image_id}"
 
     async def image_generations(
         self, request: Request, payload: ImageGenerationTaskParams
@@ -2628,6 +6250,19 @@ class API:
             self._image_generation_queues[command_id], recv = channel[
                 ImageChunk | ErrorChunk
             ]()
+
+            if pending_error := self._take_vision_media_failure(command_id):
+                error_response = ErrorResponse(
+                    error=ErrorInfo(
+                        message=pending_error.error_message
+                        or "Vision media transport failed",
+                        type="InternalServerError",
+                        code=500,
+                    )
+                )
+                yield f"data: {error_response.model_dump_json()}\n\n"
+                yield "data: [DONE]\n\n"
+                return
 
             with recv as chunks:
                 async for chunk in chunks:
@@ -2750,6 +6385,13 @@ class API:
             self._image_generation_queues[command_id], recv = channel[
                 ImageChunk | ErrorChunk
             ]()
+
+            if pending_error := self._take_vision_media_failure(command_id):
+                raise HTTPException(
+                    status_code=500,
+                    detail=pending_error.error_message
+                    or "Vision media transport failed",
+                )
 
             while images_complete < num_images:
                 with recv as chunks:
@@ -2904,7 +6546,12 @@ class API:
         resolved_model = await self._validate_image_model(model)
         advanced_params = _ensure_seed(advanced_params)
 
-        image_content = await image.read()
+        image_content = await image.read(_VISION_MEDIA_RAW_IMAGE_BYTES + 1)
+        if len(image_content) > _VISION_MEDIA_RAW_IMAGE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="Input image exceeds the per-request media limit",
+            )
         image_data = base64.b64encode(image_content).decode("utf-8")
 
         image_strength = 0.7 if input_fidelity == "high" else 0.3
@@ -2938,20 +6585,19 @@ class API:
         logger.info(
             f"Sending input image: {len(image_data)} bytes in {total_chunks} chunks"
         )
-        for chunk_index, chunk_data in enumerate(data_chunks):
-            await self._send(
-                SendInputChunk(
-                    chunk=InputImageChunk(
-                        model=resolved_model,
-                        command_id=command.command_id,
-                        data=chunk_data,
-                        chunk_index=chunk_index,
-                        total_chunks=total_chunks,
-                    )
-                )
-            )
-
-        await self._send(command)
+        self._stage_vision_media(
+            command.command_id,
+            resolved_model,
+            [(0, chunk_data) for chunk_data in data_chunks],
+            1,
+        )
+        try:
+            await self._send(command)
+        except BaseException:
+            self._take_pending_vision_media(command.command_id)
+            self._vision_media_commands.discard(command.command_id)
+            self._vision_media_models.pop(command.command_id, None)
+            raise
         return command
 
     async def image_edits(
@@ -3088,7 +6734,11 @@ class API:
                     generate_claude_stream(
                         command.command_id,
                         payload.model,
-                        self._token_chunk_stream(command.command_id),
+                        self._tapped_text_stream(
+                            command.command_id,
+                            task_params.model,
+                            task_params=task_params,
+                        ),
                     ),
                 ),
                 media_type="text/event-stream",
@@ -3103,7 +6753,11 @@ class API:
                 collect_claude_response(
                     command.command_id,
                     payload.model,
-                    self._token_chunk_stream(command.command_id),
+                    self._tapped_text_stream(
+                        command.command_id,
+                        task_params.model,
+                        task_params=task_params,
+                    ),
                 ),
                 media_type="application/json",
             )
@@ -3127,7 +6781,11 @@ class API:
                     generate_responses_stream(
                         command.command_id,
                         payload.model,
-                        self._token_chunk_stream(command.command_id),
+                        self._tapped_text_stream(
+                            command.command_id,
+                            task_params.model,
+                            task_params=task_params,
+                        ),
                     ),
                 ),
                 media_type="text/event-stream",
@@ -3143,7 +6801,11 @@ class API:
                 collect_responses_response(
                     command.command_id,
                     payload.model,
-                    self._token_chunk_stream(command.command_id),
+                    self._tapped_text_stream(
+                        command.command_id,
+                        task_params.model,
+                        task_params=task_params,
+                    ),
                 ),
                 media_type="application/json",
             )
@@ -3216,7 +6878,11 @@ class API:
             return StreamingResponse(
                 generate_ollama_chat_stream(
                     command.command_id,
-                    self._token_chunk_stream(command.command_id),
+                    self._tapped_text_stream(
+                        command.command_id,
+                        task_params.model,
+                        task_params=task_params,
+                    ),
                 ),
                 media_type="application/x-ndjson",
                 headers={
@@ -3229,7 +6895,11 @@ class API:
             return StreamingResponse(
                 collect_ollama_chat_response(
                     command.command_id,
-                    self._token_chunk_stream(command.command_id),
+                    self._tapped_text_stream(
+                        command.command_id,
+                        task_params.model,
+                        task_params=task_params,
+                    ),
                 ),
                 media_type="application/json",
             )
@@ -3253,7 +6923,11 @@ class API:
             return StreamingResponse(
                 generate_ollama_generate_stream(
                     command.command_id,
-                    self._token_chunk_stream(command.command_id),
+                    self._tapped_text_stream(
+                        command.command_id,
+                        task_params.model,
+                        task_params=task_params,
+                    ),
                 ),
                 media_type="application/x-ndjson",
                 headers={
@@ -3266,7 +6940,11 @@ class API:
             return StreamingResponse(
                 collect_ollama_generate_response(
                     command.command_id,
-                    self._token_chunk_stream(command.command_id),
+                    self._tapped_text_stream(
+                        command.command_id,
+                        task_params.model,
+                        task_params=task_params,
+                    ),
                 ),
                 media_type="application/json",
             )
@@ -3386,6 +7064,26 @@ class API:
         # Embedding models
         if "embedding" in card.capabilities:
             tags.append("embedding")
+        # Speech models
+        if (
+            "tts" in card.capabilities
+            or ModelTask.TextToSpeech in card.tasks
+            or (
+                card.audio is not None
+                and card.audio.kind == AudioCardKind.TextToSpeech
+            )
+        ):
+            tags.append("tts")
+        if (
+            "stt" in card.capabilities
+            or ModelTask.SpeechToText in card.tasks
+            or ModelTask.SpeechTranslation in card.tasks
+            or (
+                card.audio is not None
+                and card.audio.kind == AudioCardKind.SpeechToText
+            )
+        ):
+            tags.append("stt")
         return tags
 
     @staticmethod
@@ -3413,10 +7111,12 @@ class API:
             family=card.family,
             quantization=card.quantization,
             base_model=card.base_model,
+            source_revision=card.source_revision,
             capabilities=card.capabilities,
             context_length=card.context_length,
             reasoning=ReasoningCapabilitySection.from_model_card(card),
             modalities=ModalitiesCapabilitySection.from_model_card(card),
+            audio=AudioCapabilitySection.from_model_card(card),
             tooling=ToolingCapabilitySection.from_model_card(card),
             runtime=RuntimeCapabilitySection.from_model_card(card),
             resolved_capabilities=ResolvedModelCapabilities.from_profile(
@@ -3439,9 +7139,18 @@ class API:
         return ModelList(data=[self._model_list_entry(card) for card in cards])
 
     async def add_custom_model(self, payload: AddCustomModelParams) -> ModelListModel:
-        """Fetch a model from HuggingFace and save as a custom model card, then sync across the cluster."""
+        """Fetch a Hugging Face model card, optionally pinning one GGUF file."""
+        # Load curated truth before generating the override. A generated card
+        # is a metadata cache, not operator-authored placement policy, and must
+        # retain architecture safety constraints from an exact bundled match.
+        bundled_card = await get_bundled_card(payload.model_id)
         try:
-            card = await ModelCard.fetch_from_hf(payload.model_id)
+            card = await ModelCard.fetch_from_hf(
+                payload.model_id,
+                gguf_file=payload.gguf_file,
+                source_revision=payload.source_revision,
+            )
+            card = preserve_generated_card_constraints(card, bundled_card)
         except Exception as exc:
             raise HTTPException(
                 status_code=400, detail=f"Failed to fetch model: {exc}"
@@ -3473,32 +7182,62 @@ class API:
             {"message": "Model card deleted", "model_id": str(model_id)}
         )
 
+    async def get_model_card_summary(self, model_id: str) -> HuggingFaceCardSummary:
+        """Return the prose summary of one Hugging Face repository's model card.
+
+        Args:
+            model_id: Repository id in ``owner/name`` form.
+
+        Returns:
+            The extracted summary; the ``summary`` field is empty when the
+            README is missing or carries no usable prose.
+        """
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", model_id):
+            raise HTTPException(status_code=422, detail="Invalid model id")
+        try:
+            summary = await to_thread.run_sync(fetch_card_summary, model_id)
+        except Exception:
+            summary = ""
+        return HuggingFaceCardSummary(model_id=model_id, summary=summary)
+
+    async def get_gguf_quant_options(self, model_id: str) -> GgufQuantOptions:
+        """List one GGUF repository's downloadable quantizations.
+
+        Args:
+            model_id: Repository id in ``owner/name`` form.
+
+        Returns:
+            The quant inventory; empty options for a non-GGUF repository.
+        """
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", model_id):
+            raise HTTPException(status_code=422, detail="Invalid model id")
+        try:
+            options = await to_thread.run_sync(list_gguf_quant_options, model_id)
+        except Exception:
+            options = []
+        return GgufQuantOptions(model_id=model_id, options=options)
+
     async def search_models(
-        self, query: str = "", limit: int = 20, mlx_only: bool = False
+        self,
+        query: str = "",
+        limit: int = Query(default=20, ge=1, le=200),
+        mlx_only: bool = False,
+        offset: int = Query(default=0, ge=0, le=2000),
+        pipeline_tag: str | None = None,
     ) -> list[HuggingFaceSearchResult]:
-        """Search HuggingFace Hub. When mlx_only=True, restricts to mlx-community."""
-        from huggingface_hub import ModelInfo, list_models
+        """Search Hugging Face repositories and exact GGUF filenames.
 
-        def _to_results(models: Iterable[ModelInfo]) -> list[HuggingFaceSearchResult]:
-            return [
-                HuggingFaceSearchResult(
-                    id=m.id,
-                    author=m.author or "",
-                    downloads=m.downloads or 0,
-                    likes=m.likes or 0,
-                    last_modified=str(m.last_modified or ""),
-                    tags=list(m.tags or []),
-                )
-                for m in models
-            ]
-
-        return _to_results(
-            list_models(
-                search=query or None,
-                author="mlx-community" if mlx_only else None,
-                sort="downloads",
-                limit=limit,
-            )
+        An empty query returns trending repositories; ``offset`` skips leading
+        results for "show more" paging, and ``pipeline_tag`` restricts results
+        to one Hugging Face task.
+        """
+        return await to_thread.run_sync(
+            search_hugging_face_models,
+            query,
+            limit,
+            mlx_only,
+            offset,
+            pipeline_tag,
         )
 
     async def run(self):
@@ -3513,6 +7252,15 @@ class API:
                 # subscription is session-independent, so (unlike _apply_state)
                 # it is NOT re-spawned by reset().
                 tg.start_soon(self._apply_data)
+                tg.start_soon(self._apply_provider_data)
+                tg.start_soon(self._apply_realtime_audio_transport)
+                tg.start_soon(self._apply_speech_media_transport)
+                tg.start_soon(self._apply_trace_data)
+                tg.start_soon(self._apply_vision_media_transport)
+                tg.start_soon(self._sweep_pending_speech_media)
+                tg.start_soon(self._sweep_pending_trace_data)
+                tg.start_soon(self._sweep_pending_vision_media)
+                tg.start_soon(self._sweep_provider_stream_receivers)
                 # Releases reorder gaps stuck on a chunk dropped by the
                 # best-effort DATA topic (#279 Phase 2b); lifetime-scoped like
                 # _apply_data. Only meaningful while the reorder buffer is on;
@@ -3522,6 +7270,8 @@ class API:
                 tg.start_soon(self._pause_on_new_election)
                 tg.start_soon(self._cleanup_expired_images)
                 tg.start_soon(self._prune_old_traces)
+                # Opt-in field telemetry: consent-gated, fail-silent, bounded.
+                tg.start_soon(self._field_telemetry.flush_loop)
                 print_startup_banner(self.port)
                 tg.start_soon(self.run_api, shutdown_ev)
                 try:
@@ -3542,6 +7292,8 @@ class API:
         cfg.accesslog = None
         cfg.errorlog = "-"
         cfg.logger_class = InterceptLogger
+        cfg.websocket_max_message_size = REALTIME_WEBSOCKET_MAX_MESSAGE_BYTES
+        cfg.websocket_ping_interval = 20.0
         with anyio.CancelScope(shield=True):
             await serve(
                 cast(ASGIFramework, self.app),
@@ -3554,8 +7306,8 @@ class API:
 
         Every few thousand appends, check the active file size; past the
         budget, compact away everything but the most recent tail. The log
-        only backs GET /events, so old history is droppable — and without
-        this it grows per generated token for the life of the session.
+        only backs GET /events, so old diagnostic history is droppable even
+        though payload events no longer enter it.
         """
         if self._event_log is None:
             return
@@ -3580,6 +7332,7 @@ class API:
         with self.event_receiver as events:
             async for i_event in events:
                 event = i_event.event
+                previous_tasks = self.state.tasks
                 if self._event_log is not None and not isinstance(
                     event, StateSnapshotHydrated
                 ):
@@ -3587,9 +7340,41 @@ class API:
                     self._maybe_compact_event_log()
                 self.state = apply(self.state, i_event)
 
+                released_task: task_types.Task | None = None
+                if isinstance(event, TaskDeleted):
+                    released_task = previous_tasks.get(event.task_id)
+                elif (
+                    isinstance(event, TaskFailed)
+                    or (
+                        isinstance(event, TaskStatusUpdated)
+                        and event.task_status in _TERMINAL_TASK_STATUSES
+                    )
+                ):
+                    released_task = self.state.tasks.get(event.task_id)
+                if isinstance(
+                    released_task, task_types.RealtimeAudioTranscription
+                ):
+                    self._mark_realtime_task_released(released_task.command_id)
+
+                if isinstance(
+                    event,
+                    (
+                        InstanceCreated,
+                        InstanceDeleted,
+                        NodeTimedOut,
+                        RunnerStatusUpdated,
+                        StateSnapshotHydrated,
+                    ),
+                ):
+                    self._sync_builtin_speech_capability()
+
                 # Prune telemetry for timed-out nodes from the API applier too,
                 # so a --no-worker node still tracks live membership (#279).
                 record_membership_from_event(self._telemetry_view, event)
+
+                if isinstance(event, TaskCreated):
+                    self._dispatch_pending_speech_media(event.task)
+                    self._dispatch_pending_vision_media(event.task)
 
                 # Output chunks no longer travel the event log — they arrive on
                 # the data plane (#279 Phase 2), demuxed by _apply_data.
@@ -3612,9 +7397,6 @@ class API:
                         event.task_id,
                         "The request was cancelled because its instance was deleted",
                     )
-                if isinstance(event, TracesMerged):
-                    self._save_merged_trace(event)
-
     async def _apply_data(self) -> None:
         """Consume the data plane (#279 Phase 2): per-command output chunks.
 
@@ -3636,10 +7418,9 @@ class API:
             )
         with self._data_receiver as data_chunks:
             async for data in data_chunks:
+                self._data_plane_observer.record_received()
                 if self._reorder_buffer_enabled:
-                    await self._reorder_and_dispatch(
-                        data.command_id, data.sequence, data.chunk
-                    )
+                    await self._reorder_and_dispatch(data)
                 elif self._command_has_queue(data.command_id):
                     # Buffer off: dispatch in arrival order (the transport orders
                     # per command), but still dedupe by sequence so a same-node
@@ -3648,21 +7429,432 @@ class API:
                     # _command_has_queue above.
                     cursor = self._data_dedup_cursor.get(data.command_id, 0)
                     if data.sequence < cursor:
+                        self._data_plane_observer.record_duplicate()
                         continue  # duplicate (local publish + Zenoh loopback)
+                    if data.sequence > cursor:
+                        self._data_plane_observer.record_out_of_order()
+                        self._data_plane_observer.record_skipped_sequences(
+                            data.sequence - cursor
+                        )
+                        await self._fail_data_stream_transport(
+                            data.command_id,
+                            f"DATA sequence gap: expected {cursor}, received "
+                            f"{data.sequence}",
+                        )
+                        continue
                     self._data_dedup_cursor[data.command_id] = data.sequence + 1
-                    await self._dispatch_generation_chunk(data.command_id, data.chunk)
+                    await self._dispatch_data_frame(data)
+                else:
+                    self._data_plane_observer.record_late()
+
+    async def _apply_provider_data(self) -> None:
+        """Demultiplex both provider DATA directions into isolated call queues."""
+
+        if self._provider_stream_receiver is None:
+            return
+        with self._provider_stream_receiver as packets:
+            async for packet in packets:
+                if packet.owner_node != self.node_id:
+                    # The gossipsub fallback broadcasts provider DATA; only the
+                    # addressed owner may consume it. Zenoh filters by key.
+                    continue
+                call_id = packet.frame.call_id
+                if packet.frame.direction == "caller_to_provider":
+                    self._apply_provider_input_frame(packet.frame)
+                    continue
+                state = self._provider_stream_receivers.get(call_id)
+                if state is None:
+                    continue
+                batch = state.receiver.accept(
+                    packet.frame,
+                    observed_at=anyio.current_time(),
+                )
+                queue_failed = False
+                for frame in batch.ready:
+                    try:
+                        state.output_sender.send_nowait(frame)
+                    except WouldBlock:
+                        state.transport_failure = (
+                            "caller provider stream queue exceeded its bound"
+                        )
+                        state.cancel_provider = True
+                        queue_failed = True
+                        break
+                    except (BrokenResourceError, ClosedResourceError):
+                        state.transport_failure = (
+                            "caller provider stream queue closed before delivery"
+                        )
+                        state.cancel_provider = True
+                        queue_failed = True
+                        break
+                if batch.synthesized_terminal is not None:
+                    self._schedule_provider_stream_cancellation(state)
+                    with contextlib.suppress(
+                        WouldBlock, BrokenResourceError, ClosedResourceError
+                    ):
+                        state.output_sender.send_nowait(
+                            batch.synthesized_terminal
+                        )
+                    queue_failed = True
+                if queue_failed or state.receiver.terminal is not None:
+                    if queue_failed:
+                        self._schedule_provider_stream_cancellation(state)
+                    self._provider_stream_receivers.pop(call_id, None)
+                    if state.input_stream is not None:
+                        self._schedule_provider_input_close(state.input_stream)
+                    state.output_sender.close()
+
+    async def _apply_realtime_audio_transport(self) -> None:
+        """Fail source commands when remote PCM transport rejects a stream."""
+
+        if self._realtime_audio_packet_receiver is None:
+            return
+        with self._realtime_audio_packet_receiver as packets:
+            async for packet in packets:
+                if (
+                    packet.target_node != self.node_id
+                    or packet.kind != "transport_failed"
+                    or packet.command_id
+                    not in self._realtime_audio_transcription_commands
+                ):
+                    continue
+                await self._dispatch_generation_chunk(
+                    packet.command_id,
+                    ErrorChunk(
+                        model=ModelId("unknown"),
+                        error_message=(
+                            packet.error_message
+                            or "realtime audio transport failed"
+                        ),
+                    ),
+                )
+                await self._cancel_audio_transcription_command(packet.command_id)
+
+    async def _apply_speech_media_transport(self) -> None:
+        """Fail source commands when ephemeral media transport rejects input."""
+
+        if self._speech_media_packet_receiver is None:
+            return
+        with self._speech_media_packet_receiver as packets:
+            async for packet in packets:
+                if (
+                    packet.target_node != self.node_id
+                    or packet.kind != "transport_failed"
+                    or packet.command_id not in self._speech_media_commands
+                ):
+                    continue
+                message = packet.error_message or "speech media transport failed"
+                await self._dispatch_generation_chunk(
+                    packet.command_id,
+                    ErrorChunk(model=ModelId("unknown"), error_message=message),
+                )
+                if packet.purpose == "transcription_audio":
+                    await self._cancel_audio_transcription_command(packet.command_id)
+                else:
+                    await self._cancel_audio_speech_command(packet.command_id)
+                # Unlike a client disconnect, a transport rejection is already
+                # terminal from the caller's perspective. Allow finalization to
+                # notify the master after cancellation stops the runner, or the
+                # command-to-task mapping remains orphaned indefinitely.
+                self._cancelled_command_ids.discard(packet.command_id)
+
+    async def _apply_trace_data(self) -> None:
+        """Merge node-addressed runner traces without involving the master."""
+
+        if self._trace_data_receiver is None:
+            return
+        with self._trace_data_receiver as packets:
+            async for packet in packets:
+                if packet.owner_node != self.node_id:
+                    continue
+                expected_ranks = frozenset(packet.expected_ranks)
+                if packet.rank not in expected_ranks:
+                    logger.warning(
+                        f"Ignoring trace rank {packet.rank} outside its expected set"
+                    )
+                    continue
+                pending = self._pending_trace_data.get(packet.task_id)
+                if pending is None:
+                    if len(self._pending_trace_data) >= _TRACE_DATA_PENDING_TASKS:
+                        oldest_task_id = min(
+                            self._pending_trace_data,
+                            key=lambda task_id: self._pending_trace_data[
+                                task_id
+                            ].updated_at,
+                        )
+                        self._pending_trace_data.pop(oldest_task_id, None)
+                        logger.warning(
+                            "Evicted the oldest incomplete trace assembly at the "
+                            "owner-side capacity limit"
+                        )
+                    pending = _PendingTraceData(
+                        expected_ranks=expected_ranks,
+                        traces_by_rank={},
+                        updated_at=time.monotonic(),
+                    )
+                    self._pending_trace_data[packet.task_id] = pending
+                elif pending.expected_ranks != expected_ranks:
+                    logger.warning(
+                        f"Ignoring inconsistent expected ranks for trace {packet.task_id}"
+                    )
+                    continue
+                pending.traces_by_rank.setdefault(packet.rank, packet.traces)
+                pending.updated_at = time.monotonic()
+                if set(pending.traces_by_rank) >= pending.expected_ranks:
+                    traces = [
+                        trace
+                        for rank in sorted(pending.expected_ranks)
+                        for trace in pending.traces_by_rank[rank]
+                    ]
+                    self._pending_trace_data.pop(packet.task_id, None)
+                    self._save_trace(packet.task_id, traces)
+
+    async def _sweep_pending_trace_data(self) -> None:
+        """Bound incomplete trace assemblies whose ranks never all report."""
+
+        while True:
+            await anyio.sleep(30)
+            cutoff = time.monotonic() - _TRACE_DATA_PENDING_TTL_SECONDS
+            for task_id in [
+                task_id
+                for task_id, pending in self._pending_trace_data.items()
+                if pending.updated_at <= cutoff
+            ]:
+                self._pending_trace_data.pop(task_id, None)
+                logger.warning(f"Expired incomplete trace assembly for {task_id}")
+
+    async def _apply_vision_media_transport(self) -> None:
+        """Apply worker verification or failure to the source image request."""
+
+        if self._vision_media_packet_receiver is None:
+            return
+        with self._vision_media_packet_receiver as packets:
+            async for packet in packets:
+                if (
+                    packet.target_node != self.node_id
+                    or packet.command_id not in self._vision_media_commands
+                ):
+                    continue
+                targets = self._vision_media_targets.get(packet.command_id, ())
+                model = self._vision_media_models.get(packet.command_id)
+                if packet.source_node not in targets or packet.model != model:
+                    logger.warning(
+                        "Ignoring vision media terminal from a node that does not "
+                        f"own command {packet.command_id}"
+                    )
+                    continue
+                if packet.kind == "accepted":
+                    pending = self._vision_media_pending_acks.get(packet.command_id)
+                    if pending is None:
+                        continue
+                    pending.discard(packet.source_node)
+                    if not pending:
+                        self._vision_media_pending_acks.pop(packet.command_id, None)
+                        self._vision_media_ack_deadlines.pop(packet.command_id, None)
+                        self._release_active_vision_media(packet.command_id)
+                    continue
+                if packet.kind == "transport_failed":
+                    await self._fail_vision_media_command(
+                        packet.command_id,
+                        packet.model,
+                        packet.error_message or "vision media transport failed",
+                    )
+
+    def _apply_provider_input_frame(self, frame: CapabilityStreamFrame) -> None:
+        """Validate and queue one caller frame for its active provider handler."""
+
+        active = self._active_capability_streams.get(frame.call_id)
+        if (
+            active is None
+            or active.input_lifecycle is None
+            or active.input_sender is None
+        ):
+            return
+        batch = active.input_lifecycle.accept(
+            frame,
+            observed_at=anyio.current_time(),
+        )
+        if batch.synthesized_terminal is not None:
+            error = batch.synthesized_terminal.error
+            self._fail_active_provider_input(
+                active,
+                error
+                or CapabilityStreamError(
+                    code="transport_error",
+                    message="provider input lifecycle rejected a frame",
+                ),
+            )
+            return
+
+        for ready in batch.ready:
+            if ready.kind == "chunk":
+                payload = ready.payload or {}
+                try:
+                    payload_bytes = len(
+                        json.dumps(
+                            payload,
+                            separators=(",", ":"),
+                            allow_nan=False,
+                        ).encode("utf-8")
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                    RecursionError,
+                    OverflowError,
+                ) as exc:
+                    self._fail_active_provider_input(
+                        active,
+                        CapabilityStreamError(
+                            code="invalid_frame",
+                            message=f"provider input chunk is not JSON: {exc}",
+                        ),
+                    )
+                    return
+                if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
+                    self._fail_active_provider_input(
+                        active,
+                        CapabilityStreamError(
+                            code="invalid_frame",
+                            message="provider input chunk payload exceeds 1 MiB",
+                        ),
+                    )
+                    return
+                assert active.descriptor.input_chunk_schema is not None
+                schema_error = validate_against_schema(
+                    payload,
+                    active.descriptor.input_chunk_schema,
+                    what="input chunk",
+                )
+                if schema_error is not None:
+                    self._fail_active_provider_input(
+                        active,
+                        CapabilityStreamError(
+                            code="invalid_frame",
+                            message=schema_error,
+                        ),
+                    )
+                    return
+            elif ready.kind == "completed" and (
+                ready.payload is not None or ready.media is not None
+            ):
+                self._fail_active_provider_input(
+                    active,
+                    CapabilityStreamError(
+                        code="invalid_frame",
+                        message="provider input half-close carries no data",
+                    ),
+                )
+                return
+
+            try:
+                active.input_sender.send_nowait(ready)
+            except WouldBlock:
+                self._fail_active_provider_input(
+                    active,
+                    CapabilityStreamError(
+                        code="transport_error",
+                        message="provider input queue exceeded its bound",
+                    ),
+                )
+                return
+            except (BrokenResourceError, ClosedResourceError):
+                self._fail_active_provider_input(
+                    active,
+                    CapabilityStreamError(
+                        code="transport_error",
+                        message="provider input queue closed before delivery",
+                    ),
+                )
+                return
+
+            self._provider_observer.record_input(
+                frame.call_id,
+                ready,
+                queue_depth=active.input_sender.statistics().current_buffer_used,
+            )
+
+            if ready.kind == "completed":
+                active.input_sender.close()
+            elif ready.kind == "cancelled":
+                active.cancel_message = (
+                    ready.error.message
+                    if ready.error is not None
+                    else "caller cancelled the provider input stream"
+                )
+                active.cancel_requested.set()
+                active.input_sender.close()
+                if active.cancel_scope is not None:
+                    active.cancel_scope.cancel()
+            elif ready.kind == "failed":
+                self._fail_active_provider_input(
+                    active,
+                    ready.error
+                    or CapabilityStreamError(
+                        code="transport_error",
+                        message="caller input direction failed",
+                    ),
+                )
+
+    @staticmethod
+    def _fail_active_provider_input(
+        active: _ActiveProviderStream,
+        error: CapabilityStreamError,
+    ) -> None:
+        """Fail one input direction and wake its provider without affecting peers."""
+
+        if active.input_failure is None:
+            active.input_failure = error
+        if active.input_sender is not None:
+            active.input_sender.close()
+
+    async def _sweep_provider_stream_receivers(self) -> None:
+        """Expire provider sequence gaps without waiting for the call deadline."""
+
+        while True:
+            await anyio.sleep(0.5)
+            observed_at = anyio.current_time()
+            for call_id, state in list(self._provider_stream_receivers.items()):
+                batch = state.receiver.expire(observed_at=observed_at)
+                terminal = batch.synthesized_terminal
+                if terminal is None:
+                    continue
+                self._schedule_provider_stream_cancellation(state)
+                with contextlib.suppress(
+                    WouldBlock, BrokenResourceError, ClosedResourceError
+                ):
+                    state.output_sender.send_nowait(terminal)
+                self._provider_stream_receivers.pop(call_id, None)
+                if state.input_stream is not None:
+                    self._schedule_provider_input_close(state.input_stream)
+                state.output_sender.close()
+            for active in list(self._active_capability_streams.values()):
+                if active.input_lifecycle is None:
+                    continue
+                batch = active.input_lifecycle.expire(observed_at=observed_at)
+                terminal = batch.synthesized_terminal
+                if terminal is None:
+                    continue
+                self._fail_active_provider_input(
+                    active,
+                    terminal.error
+                    or CapabilityStreamError(
+                        code="transport_error",
+                        message="provider input stream expired",
+                    ),
+                )
 
     def _command_has_queue(self, command_id: CommandId) -> bool:
         return (
             command_id in self._text_generation_queues
             or command_id in self._image_generation_queues
             or command_id in self._embedding_queues
+            or command_id in self._audio_speech_queues
+            or command_id in self._audio_transcription_queues
         )
 
-    async def _reorder_and_dispatch(
-        self, command_id: CommandId, sequence: int, chunk: GenerationChunk
-    ) -> None:
-        """Reorder a command's data-plane chunks by sequence, then dispatch.
+    async def _reorder_and_dispatch(self, frame: DataChunk) -> None:
+        """Reorder one command's data-plane frames by sequence, then dispatch.
 
         The DATA gossip topic has no total order (it replaced the master event
         ``idx`` that did), so a multi-node producer's per-token chunks can arrive
@@ -3670,30 +7862,44 @@ class API:
         output. We hold each command's chunks in a small per-command buffer and
         release them strictly in ``sequence`` order. Late duplicates (below the
         cursor) are dropped; if the buffer exceeds ``_MAX_CHUNK_REORDER_BUFFER``
-        (a genuinely dropped sequence on the best-effort topic) we skip past the
-        gap rather than stall. State is only created while the command has a live
+        (a genuinely dropped sequence on the best-effort topic) we fail the
+        affected stream rather than return incomplete output. State is only
+        created while the command has a live
         stream queue, so a chunk arriving after the stream finalized is dropped
         without leaking a buffer (the queue and buffer are cleared together).
         """
+        command_id = frame.command_id
         if not self._command_has_queue(command_id):
+            self._data_plane_observer.record_late()
             return  # client gone / stream finalized: drop late chunk, no buffer
         state = self._chunk_reorder.setdefault(command_id, _ChunkReorderState())
-        if sequence < state.next_seq:
+        if frame.sequence < state.next_seq or frame.sequence in state.pending:
+            self._data_plane_observer.record_duplicate()
             return  # already delivered (duplicate / late re-send)
-        state.pending[sequence] = chunk
+        if frame.sequence > state.next_seq:
+            self._data_plane_observer.record_out_of_order()
+        state.pending[frame.sequence] = frame
         await self._drain_in_order(command_id, state)
-        # Emergency size cap: if the buffer runs away (a dropped sequence the
-        # later chunks keep piling up behind), skip the gap and keep draining.
-        # Looped so several gaps in one burst are all cleared in this call.
-        while len(state.pending) > _MAX_CHUNK_REORDER_BUFFER:
+        # Emergency size cap: if the buffer runs away behind a dropped sequence,
+        # fail the affected stream rather than returning incomplete output.
+        if len(state.pending) > _MAX_CHUNK_REORDER_BUFFER:
             skipped_to = min(state.pending)
             logger.warning(
                 f"Data-plane reorder buffer for command {command_id} exceeded "
                 f"{_MAX_CHUNK_REORDER_BUFFER}; a chunk was likely dropped on the "
-                f"best-effort DATA topic. Skipping seq {state.next_seq}..{skipped_to - 1}."
+                f"best-effort DATA topic. Failing at seq {state.next_seq} "
+                f"before buffered seq {skipped_to}."
             )
-            state.next_seq = skipped_to
-            await self._drain_in_order(command_id, state)
+            self._data_plane_observer.record_skipped_sequences(
+                skipped_to - state.next_seq
+            )
+            await self._fail_data_stream_transport(
+                command_id,
+                f"DATA reorder window exceeded waiting for sequence "
+                f"{state.next_seq}",
+            )
+            self._chunk_reorder.pop(command_id, None)
+            return
         self._mark_reorder_gap(state)
 
     @staticmethod
@@ -3721,24 +7927,24 @@ class API:
         while state.next_seq in state.pending:
             ready = state.pending.pop(state.next_seq)
             state.next_seq += 1
-            await self._dispatch_generation_chunk(command_id, ready)
+            await self._dispatch_data_frame(ready)
 
     async def _sweep_reorder_buffers(self) -> None:
-        """Release reorder gaps stuck waiting for a sequence dropped on the topic.
+        """Fail reorder gaps stuck waiting for a sequence dropped on the topic.
 
         A genuine mesh reorder resolves in milliseconds; a gap older than
         ``_REORDER_GAP_FLUSH_SECONDS`` means the missing sequence was dropped on
-        the best-effort DATA topic. Skipping ahead to the lowest buffered
-        sequence releases the held chunks (so the stream yields and its idle
-        backstop can arm) instead of hanging forever — the case the size cap
-        misses when no later chunk arrives to trigger it (#279 Phase 2b review).
+        the best-effort DATA topic. The affected command receives an explicit
+        transport error and cancellation instead of hanging or returning a
+        partial response. This covers the case the size cap misses when no later
+        chunk arrives to trigger it (#279 Phase 2b review).
         """
         while True:
             await anyio.sleep(1.0)
             await self._flush_stale_reorder_gaps(time.monotonic())
 
     async def _flush_stale_reorder_gaps(self, now: float) -> None:
-        """One sweep pass: release reorder gaps older than the flush window."""
+        """One sweep pass: fail reorder gaps older than the flush window."""
         for command_id, state in list(self._chunk_reorder.items()):
             if (
                 state.pending
@@ -3750,11 +7956,68 @@ class API:
                     f"Data-plane reorder gap for command {command_id} unfilled "
                     f"for >{_REORDER_GAP_FLUSH_SECONDS:g}s (seq "
                     f"{state.next_seq}..{skipped_to - 1} dropped on the "
-                    "best-effort DATA topic); releasing buffered chunks."
+                    "best-effort DATA topic); failing the affected stream."
                 )
-                state.next_seq = skipped_to
-                await self._drain_in_order(command_id, state)
-                self._mark_reorder_gap(state)
+                self._data_plane_observer.record_skipped_sequences(
+                    skipped_to - state.next_seq
+                )
+                await self._fail_data_stream_transport(
+                    command_id,
+                    f"DATA sequence gap at {state.next_seq} did not resolve "
+                    f"within {_REORDER_GAP_FLUSH_SECONDS:g}s",
+                )
+                self._chunk_reorder.pop(command_id, None)
+
+    async def _fail_data_stream_transport(
+        self,
+        command_id: CommandId,
+        detail: str,
+    ) -> None:
+        """Synthesize one terminal error for an unrecoverable DATA delivery gap."""
+
+        if not self._command_has_queue(command_id):
+            return
+        self._data_plane_observer.record_transport_failure(command_id)
+        logger.warning(f"Failing command {command_id} after {detail}")
+        if not self._command_task_is_terminal(command_id):
+            self._cancelled_command_ids.add(command_id)
+            with anyio.CancelScope(shield=True):
+                await self.command_sender.send(
+                    ForwarderCommand(
+                        origin=self._system_id,
+                        command=TaskCancelled(cancelled_command_id=command_id),
+                    )
+                )
+        await self._dispatch_generation_chunk(
+            command_id,
+            ErrorChunk(
+                model=ModelId("unknown"),
+                error_message=f"Data-plane transport failure: {detail}",
+            ),
+        )
+        self._close_command_queue(command_id)
+
+    async def _dispatch_data_frame(self, frame: DataChunk) -> None:
+        """Observe and route one ordered lifecycle frame for a live command."""
+
+        self._data_plane_observer.record_dispatched(frame)
+        if frame.chunk is not None:
+            await self._dispatch_generation_chunk(frame.command_id, frame.chunk)
+        if frame.is_terminal:
+            self._close_command_queue(frame.command_id)
+
+    def _close_command_queue(self, command_id: CommandId) -> None:
+        """Close the endpoint queue after an explicit terminal lifecycle frame."""
+
+        for queue_map in (
+            self._text_generation_queues,
+            self._image_generation_queues,
+            self._embedding_queues,
+            self._audio_speech_queues,
+            self._audio_transcription_queues,
+        ):
+            if queue := queue_map.get(command_id):
+                queue.close()
 
     async def _dispatch_generation_chunk(
         self, command_id: CommandId, chunk: GenerationChunk
@@ -3777,7 +8040,14 @@ class API:
             except (BrokenResourceError, ClosedResourceError):
                 self._image_generation_queues.pop(command_id, None)
         if queue := self._text_generation_queues.get(command_id, None):
-            assert not isinstance(chunk, (ImageChunk, EmbeddingChunk))
+            if not isinstance(
+                chunk, (TokenChunk, ErrorChunk, ToolCallChunk, PrefillProgressChunk)
+            ):
+                logger.warning(
+                    "Dropping unsupported output chunk "
+                    f"{type(chunk).__name__} for text command {command_id}"
+                )
+                return
             try:
                 await queue.send(chunk)
             except (BrokenResourceError, ClosedResourceError):
@@ -3788,6 +8058,32 @@ class API:
                 await queue.send(chunk)
             except (BrokenResourceError, ClosedResourceError):
                 self._embedding_queues.pop(command_id, None)
+        if queue := self._audio_speech_queues.get(command_id, None):
+            assert isinstance(chunk, (AudioChunk, ErrorChunk))
+            try:
+                await queue.send(chunk)
+            except (BrokenResourceError, ClosedResourceError):
+                self._audio_speech_queues.pop(command_id, None)
+        if queue := self._audio_transcription_queues.get(command_id, None):
+            assert isinstance(chunk, (TranscriptionChunk, ErrorChunk))
+            if command_id in self._realtime_audio_transcription_commands:
+                try:
+                    queue.send_nowait(chunk)
+                except WouldBlock:
+                    logger.warning(
+                        "Realtime STT output exceeded its bounded API queue; "
+                        f"cancelling command {command_id}"
+                    )
+                    queue.close()
+                    self._audio_transcription_queues.pop(command_id, None)
+                    await self._cancel_audio_transcription_command(command_id)
+                except (BrokenResourceError, ClosedResourceError):
+                    self._audio_transcription_queues.pop(command_id, None)
+                return
+            try:
+                await queue.send(chunk)
+            except (BrokenResourceError, ClosedResourceError):
+                self._audio_transcription_queues.pop(command_id, None)
 
     async def _terminate_command_stream(
         self, task_id: task_types.TaskId, error_message: str
@@ -3809,6 +8105,9 @@ class API:
                 task_types.ImageGeneration,
                 task_types.ImageEdits,
                 task_types.TextEmbedding,
+                task_types.SpeechSynthesis,
+                task_types.AudioTranscription,
+                task_types.RealtimeAudioTranscription,
             ),
         ):
             return
@@ -3818,10 +8117,24 @@ class API:
             model=ModelId(task.task_params.model),
             error_message=error_message,
         )
+        if isinstance(task, task_types.RealtimeAudioTranscription):
+            queue = self._audio_transcription_queues.get(task.command_id)
+            if queue is not None:
+                try:
+                    queue.send_nowait(error_chunk)
+                except WouldBlock:
+                    queue.close()
+                    self._audio_transcription_queues.pop(task.command_id, None)
+                    await self._cancel_audio_transcription_command(task.command_id)
+                except (BrokenResourceError, ClosedResourceError):
+                    self._audio_transcription_queues.pop(task.command_id, None)
+            return
         for queue_map in (
             self._text_generation_queues,
             self._image_generation_queues,
             self._embedding_queues,
+            self._audio_speech_queues,
+            self._audio_transcription_queues,
         ):
             if queue := queue_map.get(task.command_id):
                 try:
@@ -3829,7 +8142,11 @@ class API:
                 except (BrokenResourceError, ClosedResourceError):
                     queue_map.pop(task.command_id, None)
 
-    def _save_merged_trace(self, event: TracesMerged) -> None:
+    def _save_trace(
+        self, task_id: task_types.TaskId, trace_data: Sequence[TraceEventData]
+    ) -> None:
+        """Persist one completely assembled task trace on its owning API node."""
+
         traces = [
             TraceEvent(
                 name=t.name,
@@ -3843,11 +8160,11 @@ class API:
                 tags=tuple(t.tags),
                 attrs=t.attrs,
             )
-            for t in event.traces
+            for t in trace_data
         ]
-        output_path = SKULK_TRACING_CACHE_DIR / f"trace_{event.task_id}.json"
+        output_path = SKULK_TRACING_CACHE_DIR / f"trace_{task_id}.json"
         export_trace(traces, output_path)
-        logger.debug(f"Saved merged trace to {output_path}")
+        logger.debug(f"Saved assembled trace to {output_path}")
 
     async def _pause_on_new_election(self):
         with self.election_receiver as ems:
@@ -4177,14 +8494,43 @@ class API:
             }
         )
 
-    async def _reachable_peer_api_urls(self) -> dict[str, str]:
-        """Return reachable peer API base URLs keyed by node ID."""
+    async def _peer_api_url_for(self, node_id: NodeId) -> str | None:
+        """Resolve one peer's API base URL, stopping at the first hit.
+
+        The capability-call hot path must not wait for every peer probe to
+        finish (a stale peer's failed probe would delay an unrelated call).
+        Probe only the requested node and cancel its remaining interface probes
+        as soon as one verified address answers.
+        """
+
+        ip_address = await first_reachable_ip(
+            self.state.topology,
+            self.node_id,
+            self.state.node_network,
+            node_id,
+        )
+        if ip_address is None:
+            return None
+        host = f"[{ip_address}]" if ":" in ip_address else ip_address
+        return f"http://{host}:52415"
+
+    async def _reachable_peer_api_urls(self, fail_fast: bool = False) -> dict[str, str]:
+        """Return reachable peer API base URLs keyed by node ID.
+
+        ``fail_fast`` selects the probe budget: the interactive observability
+        sweep passes ``True`` so one dead advertised address costs ~2s rather
+        than the patient retry budget (#558); targeted proxy paths (runner
+        cancellation, per-node diagnostics) keep the patient default, where
+        tolerating a slow link matters more than latency.
+        """
 
         reachable_by_node: dict[str, str] = {}
         async for ip_address, node_id in check_reachable(
             self.state.topology,
             self.node_id,
             self.state.node_network,
+            attempts=SWEEP_ATTEMPTS if fail_fast else REACHABILITY_ATTEMPTS,
+            timeout_seconds=SWEEP_TIMEOUT_SECONDS if fail_fast else 5.0,
         ):
             normalized_node_id = str(node_id)
             if normalized_node_id in reachable_by_node:
@@ -4233,6 +8579,9 @@ class API:
                 task_types.ImageGeneration,
                 task_types.ImageEdits,
                 task_types.TextEmbedding,
+                task_types.SpeechSynthesis,
+                task_types.AudioTranscription,
+                task_types.RealtimeAudioTranscription,
             ),
         ):
             return str(task.command_id)
@@ -4251,6 +8600,9 @@ class API:
                 task_types.ImageGeneration,
                 task_types.ImageEdits,
                 task_types.TextEmbedding,
+                task_types.SpeechSynthesis,
+                task_types.AudioTranscription,
+                task_types.RealtimeAudioTranscription,
             ),
         ):
             return str(task.task_params.model)
@@ -4707,6 +9059,25 @@ class API:
         leak = _leaked_wired_warning(resources.current_wired, supervisor_runners)
         if leak is not None:
             warnings.add(leak)
+        fleet_data_transports = live_data_transports(
+            live_nodes=self._live_node_timestamps(),
+            node_resources=self._telemetry_view.node_resources,
+        )
+        if len(fleet_data_transports) > 1:
+            warnings.add(
+                "Fleet DATA transport mismatch: live nodes advertise "
+                f"{', '.join(sorted(fleet_data_transports))}. Cross-transport "
+                "inference output cannot be delivered."
+            )
+        if live_skulk_build_mismatch(
+            live_nodes=self._live_node_timestamps(),
+            node_identities=self._telemetry_view.node_identities,
+        ):
+            warnings.add(
+                "Fleet Skulk version mismatch: live nodes report different "
+                "package versions or source commits. Complete the deployment "
+                "before starting new inference work."
+            )
         return NodeDiagnostics(
             generated_at=datetime.now(tz=timezone.utc).isoformat(),
             runtime=self._runtime_diagnostics(),
@@ -4715,8 +9086,101 @@ class API:
             processes=self._collect_process_diagnostics(supervisor_runners),
             supervisor_runners=supervisor_runners,
             placements=placements,
+            data_plane=self._data_plane_observer.snapshot(
+                self._data_plane_egress_provider()
+                if self._data_plane_egress_provider is not None
+                else None
+            ),
+            vision_media_egress=(
+                self._vision_media_egress_provider()
+                if self._vision_media_egress_provider is not None
+                else DataPlaneEgressDiagnostics.empty()
+            ),
+            vision_media_ingress=self._vision_media_ingress_diagnostics(),
+            provider=self._provider_observer.snapshot(
+                active_unary_calls=self._active_capability_calls,
+                stream_slots_in_use=len(self._active_capability_streams),
+                unary_concurrency_limit=_MAX_CONCURRENT_CAPABILITY_CALLS,
+                stream_concurrency_limit=_MAX_CONCURRENT_CAPABILITY_STREAMS,
+            ),
             warnings=sorted(warnings),
             tailscale=tailscale,
+        )
+
+    async def get_telemetry_plane_diagnostics(self) -> TelemetryPlaneDiagnostics:
+        """Return aggregate local telemetry admission and egress diagnostics."""
+
+        if self._telemetry_plane_provider is None:
+            return TelemetryPlaneDiagnostics.empty()
+        return self._telemetry_plane_provider()
+
+    async def get_performance_envelopes(self) -> PerformanceEnvelopeReport:
+        """Return this node's observe-only performance-envelope report."""
+
+        return self._performance_envelopes.snapshot()
+
+    async def get_cluster_performance_envelopes(self) -> ClusterPerformanceEnvelopes:
+        """Return performance envelopes gathered from every reachable member.
+
+        The local report is always first; each reachable peer contributes its
+        own, and a member with no reachable API route appears as an explicit
+        failure so the fleet view never silently omits a node.
+        """
+
+        local = self._performance_envelopes.snapshot()
+        nodes = [
+            NodePerformanceEnvelopes(
+                node_id=str(self.node_id), url=None, ok=True, report=local
+            )
+        ]
+        peer_urls = await self._reachable_peer_api_urls(fail_fast=True)
+        timeout = httpx.Timeout(timeout=10.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            for node_id, base_url in peer_urls.items():
+                try:
+                    response = await client.get(
+                        f"{base_url}/v1/diagnostics/performance-envelopes"
+                    )
+                    response.raise_for_status()
+                    report = PerformanceEnvelopeReport.model_validate(response.json())
+                    nodes.append(
+                        NodePerformanceEnvelopes(
+                            node_id=node_id, url=base_url, ok=True, report=report
+                        )
+                    )
+                except (httpx.HTTPError, ValueError) as exc:
+                    nodes.append(
+                        NodePerformanceEnvelopes(
+                            node_id=node_id,
+                            url=base_url,
+                            ok=False,
+                            error=f"{exc.__class__.__name__}: {exc}",
+                        )
+                    )
+        # A topology member with no reachable API route must appear as an
+        # explicit failure rather than vanish, matching get_cluster_diagnostics
+        # and this endpoint's documented contract (an overlay-joined node whose
+        # advertised addresses its peers cannot route otherwise has no
+        # observability presence at all).
+        reported = {entry.node_id for entry in nodes}
+        for topology_node_id in self.state.topology.list_nodes():
+            normalized = str(topology_node_id)
+            if normalized in reported:
+                continue
+            nodes.append(
+                NodePerformanceEnvelopes(
+                    node_id=normalized,
+                    url=None,
+                    ok=False,
+                    error=(
+                        "no reachable API route among the node's advertised "
+                        "addresses"
+                    ),
+                )
+            )
+        return ClusterPerformanceEnvelopes(
+            generated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            nodes=nodes,
         )
 
     @staticmethod
@@ -5014,10 +9478,17 @@ class API:
                 status_code=response.status_code,
                 detail=self._proxy_error_detail(response),
             )
-        return DiagnosticCaptureResponse.model_validate(response.json())
+        return DiagnosticCaptureResponse.model_validate(
+            response.json(), extra="ignore"
+        )
 
     async def get_cluster_diagnostics(self) -> ClusterDiagnostics:
-        """Return read-only diagnostics for local and reachable peer nodes."""
+        """Return read-only diagnostics for every topology member.
+
+        Reachable peers carry their collected bundle; topology members with no
+        reachable API route appear as explicit ``ok=false`` entries so an
+        overlay-joined node keeps an observability presence (#558).
+        """
 
         local_diagnostics = await self.get_node_diagnostics()
         nodes = [
@@ -5025,23 +9496,30 @@ class API:
                 node_id=str(self.node_id),
                 url=None,
                 ok=True,
+                version_status="current",
                 diagnostics=local_diagnostics,
             )
         ]
 
-        peer_urls = await self._reachable_peer_api_urls()
+        peer_urls = await self._reachable_peer_api_urls(fail_fast=True)
         timeout = httpx.Timeout(timeout=10.0, connect=2.0)
         async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
             for node_id, base_url in peer_urls.items():
                 try:
                     response = await client.get(f"{base_url}/v1/diagnostics/node")
                     response.raise_for_status()
-                    diagnostics = NodeDiagnostics.model_validate(response.json())
+                    diagnostics = parse_peer_node_diagnostics(
+                        cast(object, response.json())
+                    )
                     nodes.append(
                         ClusterNodeDiagnostics(
                             node_id=node_id,
                             url=base_url,
                             ok=True,
+                            version_status=compare_diagnostics_builds(
+                                local_diagnostics.runtime,
+                                diagnostics.runtime,
+                            ),
                             diagnostics=diagnostics,
                         )
                     )
@@ -5055,10 +9533,42 @@ class API:
                         )
                     )
 
+        # Every advertised route participates in the comparison, including a
+        # failed collection whose build is therefore unknown. Topology members
+        # with no route remain visible below but cannot be queried by this API
+        # owner and do not make the reachable-build result uncertain.
+        routed_version_statuses: list[NodeDiagnosticsVersionStatus] = [
+            entry.version_status for entry in nodes
+        ]
+
+        # A topology member with no reachable API route must appear as an
+        # explicit failure, not vanish: an overlay-joined node (advertising
+        # only addresses its peers cannot route) otherwise has no
+        # observability presence at all and the gap is invisible (#558).
+        reported = {entry.node_id for entry in nodes}
+        for topology_node_id in self.state.topology.list_nodes():
+            normalized = str(topology_node_id)
+            if normalized in reported:
+                continue
+            nodes.append(
+                ClusterNodeDiagnostics(
+                    node_id=normalized,
+                    url=None,
+                    ok=False,
+                    error=(
+                        "no reachable API route among the node's advertised "
+                        "addresses"
+                    ),
+                )
+            )
+
         return ClusterDiagnostics(
             generated_at=datetime.now(tz=timezone.utc).isoformat(),
             local_node_id=str(self.node_id),
             master_node_id=str(self._master_node_id),
+            version_status=aggregate_diagnostics_version_status(
+                routed_version_statuses
+            ),
             nodes=nodes,
         )
 
@@ -5170,7 +9680,7 @@ class API:
                     detail=f"Node diagnostics not found: {node_id}",
                 )
             response.raise_for_status()
-            return NodeDiagnostics.model_validate(response.json())
+            return parse_peer_node_diagnostics(cast(object, response.json()))
 
     async def get_tracing_state(self) -> TracingStateResponse:
         return TracingStateResponse(enabled=self.state.tracing_enabled)
@@ -5407,9 +9917,348 @@ class API:
             return DEFAULT_KV_CACHE_BACKEND
         return configured_backend
 
-    async def get_config(self) -> JSONResponse:
-        from skulk.memory.config import experimental_mode_enabled
+    def _current_telemetry_config(self) -> "TelemetryConfig | None":
+        """Read the current telemetry consent from skulk.yaml (never raises).
 
+        Cached for a few seconds: the enabled-check runs per generation, and
+        a YAML parse on that hot path would be wasted work. Dashboard consent
+        changes still apply within the TTL.
+        """
+        now = time.monotonic()
+        if now < self._telemetry_config_cached_until:
+            return self._telemetry_config_cache
+        try:
+            config = load_skulk_config(self._config_path)
+            self._telemetry_config_cache = (
+                config.telemetry if config is not None else None
+            )
+        except Exception:  # noqa: BLE001 - consent read must never break the API
+            self._telemetry_config_cache = None
+        self._telemetry_config_cached_until = now + 5.0
+        return self._telemetry_config_cache
+
+    def _telemetry_hardware_snapshot(
+        self,
+    ) -> dict[str, tuple[SystemPerformanceProfile | None, int | None]]:
+        """Per-node (system profile, ram bytes) for hardware classification."""
+        snapshot: dict[str, tuple[SystemPerformanceProfile | None, int | None]] = {}
+        for node_id in self.state.last_seen:
+            memory = self._telemetry_view.node_memory.get(node_id)
+            snapshot[str(node_id)] = (
+                self._telemetry_view.node_system.get(node_id),
+                memory.ram_total.in_bytes if memory is not None else None,
+            )
+        return snapshot
+
+    def _hardware_class_for_node(self, node_id: NodeId) -> str | None:
+        """Return the envelope hardware class for one node, or ``None``.
+
+        Requires BOTH the node's system profile and memory reading before
+        answering. They populate independently (on Linux GPU nodes
+        ``LinuxGpuMetrics`` and ``MemoryUsage`` arrive separately), so answering
+        with one missing yields an incomplete class (a missing memory tier, or an
+        "unknown" accelerator) that later samples would correct -- splitting the
+        very envelope this feature is meant to learn. The accelerator within the
+        profile stays optional (a CPU-only node reports none).
+        """
+        profile = self._telemetry_view.node_system.get(node_id)
+        memory = self._telemetry_view.node_memory.get(node_id)
+        if profile is None or memory is None:
+            return None
+        accelerator = profile.accelerator
+        return hardware_class(
+            accelerator.vendor if accelerator is not None else None,
+            accelerator.name if accelerator is not None else None,
+            memory.ram_total.in_bytes,
+        )
+
+    def _model_quantization(self, model_id: ModelId) -> str | None:
+        """Return the card quantization for any instance serving ``model_id``.
+
+        Quantization is model truth: identical across replicas, so any serving
+        shard answers. Used by the runner-reported envelope path, where the
+        serving node/backend/concurrency come from the terminal stats but the
+        quantization still lives on the card. Returns ``None`` when the model is
+        not currently served here.
+        """
+        for instance in self.state.instances.values():
+            if instance.shard_assignments.model_id != model_id:
+                continue
+            for shard in instance.shard_assignments.runner_to_shard.values():
+                return shard.model_card.quantization
+        return None
+
+    def _resolve_envelope_context(
+        self, model_id: ModelId
+    ) -> tuple[str, str, str] | None:
+        """Resolve ``(hardware_class, backend, quantization)`` for a served model.
+
+        The fallback path for in-process serial engines (MLX, in-process
+        llama.cpp) whose runner does not report a serving node. Uses the rank-0
+        shard's node for the hardware class (a multi-node instance spans hardware;
+        rank 0 is the deterministic representative) and that shard's resolved
+        backend and card quantization. Returns ``None`` when no instance or node
+        telemetry is available, so an observation is skipped rather than recorded
+        against a wrong key. Records only when EXACTLY one instance serves the
+        model: with replicas, attributing to an arbitrary one could mis-key
+        hardware/backend/quantization. The served engines (llama_server, vLLM)
+        instead stamp their own node/backend/concurrency onto the terminal stats,
+        so their observations are per-instance and replica-safe without this path.
+        """
+        matching = [
+            candidate
+            for candidate in self.state.instances.values()
+            if candidate.shard_assignments.model_id == model_id
+        ]
+        if len(matching) != 1:
+            # Zero: not served here. More than one: replicas, and an arbitrary
+            # pick could corrupt the envelope key. Skip rather than mis-attribute.
+            return None
+        instance = matching[0]
+        rank_zero: tuple[RunnerId, ShardMetadata] | None = None
+        for runner_id, shard in instance.shard_assignments.runner_to_shard.items():
+            if rank_zero is None or shard.device_rank < rank_zero[1].device_rank:
+                rank_zero = (runner_id, shard)
+        if rank_zero is None:
+            return None
+        rank_zero_runner, rank_zero_shard = rank_zero
+        backend = rank_zero_shard.resolved_backend
+        if backend is None:
+            # The master has not stamped the resolved backend yet (node resources
+            # had not gossiped at placement). Skip rather than collapse different
+            # actual serving backends under one empty-backend key.
+            return None
+        quantization = rank_zero_shard.model_card.quantization
+        node_id = next(
+            (
+                node
+                for node, runner in instance.shard_assignments.node_to_runner.items()
+                if runner == rank_zero_runner
+            ),
+            None,
+        )
+        if node_id is None:
+            return None
+        node_hardware = self._hardware_class_for_node(node_id)
+        if node_hardware is None:
+            # Skip until the serving node's hardware is fully known (both system
+            # and memory readings), rather than record an incomplete key.
+            return None
+        return (node_hardware, backend, quantization)
+
+    def _envelope_record_args(
+        self,
+        *,
+        model_id: ModelId,
+        fallback_context: tuple[str, str, str] | None,
+        fallback_concurrency: int,
+        serving_node: str | None,
+        serving_backend: str | None,
+        in_flight_at_admission: int | None,
+        serving_batches: bool | None,
+    ) -> tuple[str, str, str, int, bool] | None:
+        """Resolve the envelope record args, preferring runner-reported context.
+
+        Returns ``(hardware_class, backend, quantization, concurrency, batches)``
+        or ``None`` when the serving context cannot be keyed (skip rather than
+        mis-attribute).
+
+        When the terminal stats carry a ``serving_node`` (the served engines
+        stamp it), the observation is per-instance: hardware comes from that
+        node's telemetry, the backend and batching mode from the runner, the
+        quantization from the model card, and the concurrency from the runner's
+        in-flight-at-admission count. This un-blinds replicas and is correct when
+        several API nodes drive one instance, because the count is the serving
+        process's own, not any single API node's offered load.
+
+        Absent a runner-reported node (in-process serial engines: MLX, in-process
+        llama.cpp), it falls back to the dispatch-time API context and this API
+        node's offered in-flight count -- correct for serial engines, which serve
+        one request at a time so the API's outstanding count is the load the
+        instance actually sees.
+        """
+        if serving_node is not None and serving_backend is not None:
+            hardware = self._hardware_class_for_node(NodeId(serving_node))
+            if hardware is None:
+                return None
+            quantization = self._model_quantization(model_id)
+            if quantization is None:
+                return None
+            # Runner reports its in-flight at admission; fall back to this API
+            # node's offered count if the field is absent (older stamp path).
+            concurrency = (
+                in_flight_at_admission
+                if in_flight_at_admission is not None
+                else fallback_concurrency
+            )
+            # The runner declares whether it batches concurrent requests
+            # (continuous batching); default to False (serial) when unstamped so
+            # aggregate throughput is never falsely scaled upward.
+            batches = serving_batches if serving_batches is not None else False
+            return (hardware, serving_backend, quantization, concurrency, batches)
+        if fallback_context is None:
+            return None
+        hardware, backend, quantization = fallback_context
+        # The fallback path is for the in-process serial engines (MLX, in-process
+        # llama.cpp): they never stamp and genuinely serve one request at a time,
+        # so batches=False is correct. A SERVED backend (llama_server, vLLM)
+        # reaching here means the stamp was MISSING -- most commonly a request
+        # that errored before terminal stats (an ErrorChunk carries no stats). We
+        # cannot know a served engine's batching mode without the stamp, and
+        # recording batches=False for it would flip the per-key batching
+        # classification (the registry stores it once per key), corrupting the
+        # knee for previously-stamped successful batching samples until the next
+        # success re-stamps it. Skip rather than corrupt.
+        if engine_of(backend) in ("llama_server", "vllm"):
+            return None
+        return (hardware, backend, quantization, fallback_concurrency, False)
+
+    def _tap_performance_envelope(
+        self, model_id: ModelId, stream: AsyncIterator[_EnvelopeChunk]
+    ) -> AsyncGenerator[_EnvelopeChunk, None]:
+        """Record one performance-envelope observation per completed generation.
+
+        Observe-only and fully guarded: any failure here disturbs neither the
+        stream nor the response. The in-flight counter is incremented EAGERLY at
+        dispatch so a request admitted during the window before this response's
+        body starts iterating still sees it (a lazy, in-generator increment would
+        under-count concurrent bursts and corrupt the knee). The matching
+        decrement runs at most once, from the generator's ``finally`` on the
+        common path AND from a ``weakref.finalize`` safety net: closing an async
+        generator that never started does not run its ``finally``, so without the
+        finalizer a client that disconnects before the body iterates would strand
+        the counter forever. An aborted stream (no terminal chunk) is not
+        recorded, matching the field-telemetry tap.
+        """
+        key = str(model_id)
+        # Eager increment: the concurrency this and later requests observe must
+        # include this one from the moment it is dispatched.
+        concurrency = self._envelope_inflight.get(key, 0) + 1
+        self._envelope_inflight[key] = concurrency
+        started = time.monotonic()
+        released = False
+        # Resolve the serving context ONCE at dispatch and reuse it when
+        # recording, so a mid-stream placement change (a same-model replica added
+        # or removed while this response is still open) cannot drop the sample or
+        # attribute it to a different instance's hardware/backend. Guarded: a
+        # resolution failure must never break the response.
+        try:
+            envelope_context = self._resolve_envelope_context(model_id)
+        except Exception:  # noqa: BLE001 - observability must not propagate
+            envelope_context = None
+
+        def _release() -> None:
+            # Idempotent single decrement, called from the generator finally
+            # (common path) or the finalizer (never-started path), whichever runs.
+            nonlocal released
+            if released:
+                return
+            released = True
+            remaining = self._envelope_inflight.get(key, 1) - 1
+            if remaining > 0:
+                self._envelope_inflight[key] = remaining
+            else:
+                # Drop the key at zero so a long-lived API node serving many
+                # distinct models does not accumulate idle entries.
+                self._envelope_inflight.pop(key, None)
+
+        async def _recording() -> AsyncGenerator[_EnvelopeChunk, None]:
+            ttft_seconds: float | None = None
+            decode_tps: float | None = None
+            outcome: GenerationOutcome = "cancelled"
+            # Runner-reported serving context, latched from the terminal stats.
+            # The served engines (llama_server, vLLM) stamp the actual serving
+            # node, backend, in-flight-at-admission, and batching mode onto their
+            # final GenerationStats, so their observations are per-instance and
+            # survive replicas and multiple API nodes. Absent (in-process serial
+            # engines) the tap falls back to the dispatch-time API context below.
+            serving_node: str | None = None
+            serving_backend: str | None = None
+            in_flight_at_admission: int | None = None
+            serving_batches: bool | None = None
+            try:
+                async for chunk in stream:
+                    if ttft_seconds is None and getattr(chunk, "text", None):
+                        ttft_seconds = time.monotonic() - started
+                    stats = cast("object | None", getattr(chunk, "stats", None))
+                    if stats is not None:
+                        tps = cast(
+                            "float | None", getattr(stats, "generation_tps", None)
+                        )
+                        if tps is not None:
+                            decode_tps = float(tps)
+                        node = cast(
+                            "str | None", getattr(stats, "serving_node", None)
+                        )
+                        if node is not None:
+                            serving_node = node
+                            serving_backend = cast(
+                                "str | None", getattr(stats, "serving_backend", None)
+                            )
+                            in_flight_at_admission = cast(
+                                "int | None",
+                                getattr(stats, "in_flight_at_admission", None),
+                            )
+                            serving_batches = cast(
+                                "bool | None", getattr(stats, "serving_batches", None)
+                            )
+                    finish = cast("str | None", getattr(chunk, "finish_reason", None))
+                    if finish == "error":
+                        outcome = "error"
+                    elif finish is not None and outcome != "error":
+                        # Latch an observed error: a later terminal chunk must not
+                        # reclassify an errored generation as success (matches the
+                        # field-telemetry tap).
+                        outcome = "success"
+                    yield chunk
+            finally:
+                try:
+                    _release()
+                    if outcome != "cancelled":
+                        recorded = self._envelope_record_args(
+                            model_id=model_id,
+                            fallback_context=envelope_context,
+                            fallback_concurrency=concurrency,
+                            serving_node=serving_node,
+                            serving_backend=serving_backend,
+                            in_flight_at_admission=in_flight_at_admission,
+                            serving_batches=serving_batches,
+                        )
+                        if recorded is not None:
+                            hardware, backend, quantization, obs_conc, batches = (
+                                recorded
+                            )
+                            self._performance_envelopes.record(
+                                hardware_class=hardware,
+                                model_id=key,
+                                backend=backend,
+                                quantization=quantization,
+                                concurrency=obs_conc,
+                                ttft_seconds=ttft_seconds,
+                                decode_tps=decode_tps,
+                                outcome=outcome,
+                                batches=batches,
+                            )
+                except Exception as exc:  # noqa: BLE001 - must not propagate
+                    logger.debug(f"performance-envelope record failed: {exc}")
+
+        recording = _recording()
+        # Safety net: if the response is discarded before the body ever iterates
+        # (client disconnect after dispatch, before the first SSE payload), the
+        # generator's finally never runs, so decrement on GC instead. Idempotent
+        # with the finally, so the common path decrements exactly once. Guarded so
+        # observability never breaks the response.
+        try:
+            weakref.finalize(recording, _release)
+        except Exception as exc:  # noqa: BLE001 - observability must not propagate
+            logger.debug(f"performance-envelope finalizer setup failed: {exc}")
+        return recording
+
+    async def get_telemetry_preview(self) -> JSONResponse:
+        """Return consent state and the exact pending telemetry batch."""
+        return JSONResponse(self._field_telemetry.preview())
+
+    async def get_config(self) -> JSONResponse:
         if not self._config_path.exists():
             return JSONResponse(
                 {
@@ -5418,6 +10267,10 @@ class API:
                     "fileExists": False,
                     "effective": {
                         "kv_cache_backend": self._effective_kv_cache_backend(),
+                        # No config file, so no file token; a token can still come
+                        # from the environment. Keep the effective shape identical
+                        # to the file-present branch so clients never branch on it.
+                        "has_hf_token": "HF_TOKEN" in os.environ,
                         "experimental_mode_enabled": experimental_mode_enabled(),
                     },
                 }
@@ -5453,24 +10306,32 @@ class API:
             config_data = dict(body)
         # Preserve existing secrets if not provided in this update
         # (GET /config strips them for security, so saves won't have them)
+        existing_config_object: dict[str, object] | None = None
         if self._config_path.exists():
             try:
                 existing = _load_yaml_object(self._config_path)
+                existing_config_object = existing
                 if "hf_token" not in config_data and "hf_token" in existing:
                     config_data["hf_token"] = existing["hf_token"]
                 # Preserve logging config when omitted from the request
                 if "logging" not in config_data and "logging" in existing:
                     config_data["logging"] = existing["logging"]
-                # Preserve experiments config when omitted from the request
+                # Preserve experiment toggles when omitted from the request.
                 if "experiments" not in config_data and "experiments" in existing:
                     config_data["experiments"] = existing["experiments"]
             except Exception:
                 pass
+        # Telemetry section normalization (preserve on partial saves, stamp
+        # consented_version only once decided, backfill install_id): pure
+        # logic lives in field_telemetry.prepare_telemetry_config_update.
+        # Reuses the YAML object already loaded for the secrets-preservation
+        # block above; None when the file was absent or unreadable.
+        prepare_telemetry_config_update(config_data, existing_config_object)
         # Validate by attempting to parse with Pydantic
         from skulk.store.config import SkulkConfig
 
         try:
-            SkulkConfig.model_validate(config_data)
+            parsed_config = SkulkConfig.model_validate(config_data)
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         config_yaml = yaml.safe_dump(
@@ -5479,6 +10340,10 @@ class API:
         # Write locally
         with self._config_path.open("w") as f:
             f.write(config_yaml)
+        self._skulk_config = parsed_config
+        # A consent change must apply immediately, not after the TTL.
+        self._telemetry_config_cached_until = 0.0
+        self._sync_builtin_speech_capability()
         # Broadcast to all nodes via gossipsub — strip hf_token (secret).
         import copy
 
@@ -5675,10 +10540,29 @@ class API:
         downloads = await self._store_client.list_active_downloads()
         return JSONResponse({"downloads": downloads})
 
-    async def request_store_download(self, model_id: str) -> JSONResponse:
+    async def request_store_download(
+        self,
+        model_id: str,
+        payload: StoreDownloadRequest | None = None,
+    ) -> JSONResponse:
+        """Request a store download with optional GGUF and source-revision pins."""
         if self._store_client is None:
             raise HTTPException(status_code=503, detail="Store not configured")
-        result = await self._store_client.request_store_download(model_id)
+        requested_model_id = ModelId(model_id)
+        card = get_card(requested_model_id)
+        if card is None:
+            await get_model_cards()
+            card = get_card(requested_model_id)
+        gguf_file = payload.gguf_file if payload is not None else None
+        source_revision = payload.source_revision if payload is not None else None
+        if card is not None:
+            gguf_file = gguf_file or card.gguf_file
+            source_revision = source_revision or card.source_revision
+        result = await self._store_client.request_store_download(
+            model_id,
+            gguf_file=gguf_file,
+            source_revision=source_revision,
+        )
         return JSONResponse(result)
 
     async def get_store_download_status(self, model_id: str) -> JSONResponse:
@@ -5854,6 +10738,2228 @@ class API:
                     self._embedding_queues,
                 ),
             )
+
+    @staticmethod
+    def _speech_synthesis_task_params(
+        request: AudioSpeechRequest,
+        model_id: ModelId,
+        response_format: AudioResponseFormat,
+        *,
+        reference_voice_profile: str | None = None,
+        reference_audio_filename: str | None = None,
+        reference_audio_content_type: str | None = None,
+        reference_audio_sha256: str | None = None,
+    ) -> SpeechSynthesisTaskParams:
+        """Translate a validated API/facade request into the core task contract."""
+
+        return SpeechSynthesisTaskParams(
+            model=model_id,
+            input_text=request.input,
+            response_format=response_format,
+            voice=request.voice,
+            speed=request.speed,
+            instruct=request.instruct,
+            lang_code=request.lang_code,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            top_k=request.top_k,
+            repetition_penalty=request.repetition_penalty,
+            max_tokens=request.max_tokens,
+            seed=request.seed,
+            stream=request.stream,
+            streaming_interval=request.streaming_interval,
+            reference_text=request.reference_text,
+            reference_voice_profile=reference_voice_profile,
+            reference_audio_present=reference_audio_sha256 is not None,
+            reference_audio_filename=reference_audio_filename,
+            reference_audio_content_type=reference_audio_content_type,
+            reference_audio_sha256=reference_audio_sha256,
+        )
+
+    async def _apply_default_speech_voice(
+        self,
+        request: AudioSpeechRequest,
+        model_id: ModelId,
+    ) -> AudioSpeechRequest:
+        """Validate explicit voices and apply the card default when omitted."""
+
+        matching_instances = tuple(
+            instance
+            for instance in self.state.instances.values()
+            if instance.shard_assignments.model_id == model_id
+        )
+        # Normal callers reach this only after mounted-model validation. Keep
+        # the helper inert for isolated adapters/tests that intentionally
+        # replace that validator without constructing replicated state.
+        if not matching_instances:
+            return request
+        card = next(
+            (
+                candidate
+                for instance in matching_instances
+                if (candidate := self._model_card_for_instance(instance)) is not None
+            ),
+            None,
+        )
+        if card is None:
+            card = await self._get_running_model_card(model_id)
+        if card.audio is None:
+            return request
+        if request.voice is not None:
+            if card.audio.supports_voice_listing is not True:
+                reference_guidance = (
+                    "; omit `voice` and provide `reference_audio` instead"
+                    if card.audio.supports_reference_audio is True
+                    else "; omit `voice`"
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Model {model_id} does not expose a voice catalog"
+                        f"{reference_guidance}"
+                    ),
+                )
+            if request.voice not in card.audio.voices:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Voice {request.voice!r} is not available for model "
+                        f"{model_id}; use GET /v1/audio/voices"
+                    ),
+                )
+            return request
+        if card.audio.default_voice is None:
+            return request
+        return request.model_copy(update={"voice": card.audio.default_voice})
+
+    async def _bundled_reference_profile_for_voice(
+        self,
+        model_id: ModelId,
+        voice: str | None,
+    ) -> str | None:
+        """Return the bundled profile backing a validated voice selection.
+
+        Args:
+            model_id: Mounted TTS model selected for synthesis.
+            voice: Explicit or card-default voice identifier.
+
+        Returns:
+            The bundled profile identifier, or ``None`` for model-native voices.
+        """
+
+        if voice is None:
+            return None
+        matching_instances = tuple(
+            instance
+            for instance in self.state.instances.values()
+            if instance.shard_assignments.model_id == model_id
+        )
+        # Request validation normally guarantees mounted state. Keep this
+        # lookup inert for isolated adapters/tests that replace validation.
+        if not matching_instances:
+            return None
+        card = next(
+            (
+                candidate
+                for instance in matching_instances
+                if (candidate := self._model_card_for_instance(instance)) is not None
+            ),
+            None,
+        )
+        if card is None:
+            card = await self._get_running_model_card(model_id)
+        if card.audio is None:
+            return None
+        for catalog_voice in card.audio.voice_catalog:
+            if catalog_voice.id == voice:
+                return catalog_voice.reference_profile
+        return None
+
+    async def _start_speech_synthesis(
+        self,
+        task_params: SpeechSynthesisTaskParams,
+        *,
+        target_instance_id: InstanceId | None = None,
+        target_node: NodeId | None = None,
+        reference_audio: bytes | None = None,
+    ) -> tuple[CommandId, Receiver[AudioChunk | ErrorChunk]]:
+        """Submit one core TTS command and register its DATA receive queue."""
+
+        command = SpeechSynthesis(
+            owner_node=self.node_id,
+            task_params=task_params,
+            target_instance_id=target_instance_id,
+        )
+        command_id = command.command_id
+        self._audio_speech_queues[command_id], recv = channel[AudioChunk | ErrorChunk]()
+        if reference_audio is not None:
+            self._speech_media_commands.add(command_id)
+            assert target_node is not None
+            self._speech_media_targets[command_id] = target_node
+        try:
+            await self._send(command)
+            if reference_audio is not None:
+                if target_node is None or self._speech_media_packet_sender is None:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Ephemeral speech media transport is unavailable",
+                    )
+                for sequence, offset in enumerate(
+                    range(0, len(reference_audio), _SPEECH_MEDIA_CHUNK_BYTES)
+                ):
+                    await self._speech_media_packet_sender.send(
+                        SpeechMediaPacket(
+                            source_node=self.node_id,
+                            target_node=target_node,
+                            command_id=command_id,
+                            sequence=sequence,
+                            kind="chunk",
+                            filename=task_params.reference_audio_filename,
+                            content_type=task_params.reference_audio_content_type,
+                            data=reference_audio[
+                                offset : offset + _SPEECH_MEDIA_CHUNK_BYTES
+                            ],
+                        )
+                    )
+                await self._speech_media_packet_sender.send(
+                    SpeechMediaPacket(
+                        source_node=self.node_id,
+                        target_node=target_node,
+                        command_id=command_id,
+                        sequence=(
+                            len(reference_audio) + _SPEECH_MEDIA_CHUNK_BYTES - 1
+                        )
+                        // _SPEECH_MEDIA_CHUNK_BYTES,
+                        kind="completed",
+                        filename=task_params.reference_audio_filename,
+                        content_type=task_params.reference_audio_content_type,
+                        sha256=task_params.reference_audio_sha256,
+                    )
+                )
+        except Exception:
+            if command_id not in self._cancelled_command_ids:
+                with anyio.CancelScope(shield=True):
+                    await self._cancel_audio_speech_command(command_id)
+            if reference_audio is not None and target_node is not None:
+                with contextlib.suppress(Exception):
+                    assert self._speech_media_packet_sender is not None
+                    await self._speech_media_packet_sender.send(
+                        SpeechMediaPacket(
+                            source_node=self.node_id,
+                            target_node=target_node,
+                            command_id=command_id,
+                            sequence=0,
+                            kind="cancelled",
+                        )
+                    )
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._audio_speech_queues,
+                ),
+            )
+            raise
+        return command_id, recv
+
+    async def _prepare_builtin_tts_task(
+        self,
+        call: CapabilityCall,
+    ) -> SpeechSynthesisTaskParams:
+        """Validate one generic TTS payload against live core speech state."""
+
+        request_payload = dict(call.payload)
+        text = request_payload.pop("text", None)
+        if not isinstance(text, str) or not text:
+            raise HTTPException(
+                status_code=422,
+                detail="TTS provider payload requires non-empty text",
+            )
+        request_payload["input"] = text
+        request_payload["stream"] = True
+        request_payload.setdefault("response_format", AudioResponseFormat.Mp3.value)
+        request = AudioSpeechRequest.model_validate(request_payload)
+        model_id, response_format = await self._validate_speech_synthesis_model(
+            ModelId(request.model),
+            request.response_format,
+            stream=True,
+        )
+        request = await self._apply_default_speech_voice(request, model_id)
+        reference_voice_profile = await self._bundled_reference_profile_for_voice(
+            model_id,
+            request.voice,
+        )
+        if response_format != AudioResponseFormat.Mp3:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "The TTS provider facade currently streams only mp3 audio; "
+                    f"resolved {response_format.value}"
+                ),
+            )
+        return self._speech_synthesis_task_params(
+            request,
+            model_id,
+            response_format,
+            reference_voice_profile=reference_voice_profile,
+        )
+
+    async def _admit_builtin_tts_stream(
+        self,
+        call: CapabilityCall,
+    ) -> CapabilityError | None:
+        """Reject an unavailable or invalid mounted TTS request before start."""
+
+        if not self._has_mounted_streaming_tts_model():
+            return CapabilityError(
+                code="not_found",
+                message="no streaming TTS capacity is currently advertised",
+            )
+        requested_model = call.payload.get("model")
+        if not isinstance(requested_model, str) or not any(
+            instance.shard_assignments.model_id == ModelId(requested_model)
+            for instance in self.state.instances.values()
+        ):
+            return CapabilityError(
+                code="not_found",
+                message=f"no mounted TTS instance for model {requested_model!r}",
+            )
+        try:
+            await self._prepare_builtin_tts_task(call)
+        except ValidationError as exc:
+            return CapabilityError(code="invalid_payload", message=str(exc))
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                code: CapabilityErrorCode = "not_found"
+            elif exc.status_code in (400, 422):
+                code = "invalid_payload"
+            else:
+                code = "provider_error"
+            return CapabilityError(code=code, message=str(exc.detail))
+        return None
+
+    async def _stream_builtin_tts(
+        self,
+        call: CapabilityCall,
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        """Stream core ``AudioChunk`` output as generic binary media frames."""
+
+        try:
+            task_params = await self._prepare_builtin_tts_task(call)
+        except (ValidationError, HTTPException) as exc:
+            raise RuntimeError(f"TTS availability changed after admission: {exc}") from exc
+        command_id, recv = await self._start_speech_synthesis(task_params)
+        sequence = 1
+        received_audio = False
+        terminal_received = False
+        try:
+            with recv as chunks:
+                while True:
+                    chunk: AudioChunk | ErrorChunk | None = None
+                    with anyio.move_on_after(_STREAM_IDLE_TIMEOUT_SECONDS) as scope:
+                        try:
+                            chunk = await chunks.receive()
+                        except (EndOfStream, ClosedResourceError) as exc:
+                            raise RuntimeError(
+                                "Core TTS DATA stream closed without a terminal chunk"
+                            ) from exc
+                    if scope.cancelled_caught:
+                        self._data_plane_observer.record_idle_timeout()
+                        raise RuntimeError(
+                            "Core TTS DATA stream exceeded its idle deadline"
+                        )
+                    assert chunk is not None
+                    if isinstance(chunk, ErrorChunk):
+                        raise RuntimeError(
+                            f"Core speech synthesis failed: {chunk.error_message}"
+                        )
+                    audio_bytes = _decode_audio_chunk_data(chunk)
+                    if audio_bytes:
+                        received_audio = True
+                        payload: dict[str, object] = {
+                            "model": str(chunk.model),
+                            "format": chunk.format.value,
+                            "chunk_index": chunk.chunk_index,
+                            "is_partial": chunk.is_partial,
+                        }
+                        if chunk.sample_rate is not None:
+                            payload["sample_rate"] = chunk.sample_rate
+                        yield CapabilityStreamFrame(
+                            call_id=call.call_id,
+                            direction="provider_to_caller",
+                            sequence=sequence,
+                            kind="chunk",
+                            payload=payload,
+                            media=InlineMediaAttachment(
+                                data=audio_bytes,
+                                media_type=_AUDIO_CONTENT_TYPES[chunk.format],
+                                codec=chunk.format.value,
+                                sample_rate=chunk.sample_rate,
+                            ),
+                        )
+                        sequence += 1
+                    if chunk.finish_reason is not None:
+                        if not received_audio:
+                            raise RuntimeError("Core TTS produced no audio")
+                        terminal_received = True
+                        yield CapabilityStreamFrame(
+                            call_id=call.call_id,
+                            direction="provider_to_caller",
+                            sequence=sequence,
+                            kind="completed",
+                        )
+                        return
+        finally:
+            if (
+                not terminal_received
+                and not self._command_task_is_terminal(command_id)
+            ):
+                await self._cancel_audio_speech_command(command_id)
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._audio_speech_queues,
+                ),
+            )
+
+    async def _prepare_builtin_stt_task(
+        self,
+        call: CapabilityCall,
+    ) -> AudioTranscriptionTaskParams:
+        """Validate batch STT metadata against mounted core speech state."""
+
+        payload = dict(call.payload)
+        model = payload.pop("model", None)
+        if not isinstance(model, str) or not model:
+            raise HTTPException(
+                status_code=422,
+                detail="STT provider payload requires a non-empty model",
+            )
+        model_id = await self._validate_audio_transcription_model(ModelId(model))
+        filename = payload.get("filename")
+        content_type = _normalize_upload_content_type(
+            cast(str | None, payload.get("content_type"))
+        )
+        suffix = Path(filename if isinstance(filename, str) else "").suffix.lower()
+        if (
+            content_type is not None
+            and content_type not in _AUDIO_UPLOAD_CONTENT_TYPES
+            and suffix not in _AUDIO_UPLOAD_EXTENSIONS
+        ):
+            raise HTTPException(
+                status_code=415,
+                detail=f"Unsupported audio input content type: {content_type}",
+            )
+        payload["content_type"] = content_type
+        return AudioTranscriptionTaskParams.model_validate(
+            {
+                **payload,
+                "model": model_id,
+                "audio_sha256": "0" * 64,
+            }
+        )
+
+    async def _admit_builtin_stt_stream(
+        self,
+        call: CapabilityCall,
+    ) -> CapabilityError | None:
+        """Reject batch STT before start unless mounted capacity is available."""
+
+        if not self._has_mounted_stt_model():
+            return CapabilityError(
+                code="not_found",
+                message="no batch STT capacity is currently advertised",
+            )
+        try:
+            task_params = await self._prepare_builtin_stt_task(call)
+        except ValidationError as exc:
+            return CapabilityError(code="invalid_payload", message=str(exc))
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                code: CapabilityErrorCode = "not_found"
+            elif exc.status_code in (400, 415, 422):
+                code = "invalid_payload"
+            else:
+                code = "provider_error"
+            return CapabilityError(code=code, message=str(exc.detail))
+        if not self._has_mounted_stt_model(task_params.model):
+            return CapabilityError(
+                code="overloaded",
+                message=(
+                    f"no ready batch STT runner for requested model "
+                    f"{task_params.model}"
+                ),
+            )
+        return None
+
+    async def _collect_builtin_stt_audio(
+        self,
+        input_frames: AsyncIterator[CapabilityStreamFrame],
+    ) -> tuple[bytes, str]:
+        """Collect one bounded encoded clip from ordered provider media frames."""
+
+        audio_parts: list[bytes] = []
+        total_bytes = 0
+        completed = False
+        media_type: str | None = None
+        async for frame in input_frames:
+            if frame.kind == "started":
+                continue
+            if frame.kind == "chunk":
+                if not isinstance(frame.media, InlineMediaAttachment):
+                    raise ValueError(
+                        "batch STT requires inline binary media attachments; "
+                        "managed blob resolution is not available yet"
+                    )
+                frame_media_type = _normalize_upload_content_type(
+                    frame.media.media_type
+                )
+                if frame_media_type not in _AUDIO_UPLOAD_CONTENT_TYPES:
+                    raise ValueError(
+                        f"unsupported batch STT media type: {frame_media_type}"
+                    )
+                if media_type is None:
+                    media_type = frame_media_type
+                elif media_type != frame_media_type:
+                    raise ValueError(
+                        "batch STT media frames must use one consistent media type"
+                    )
+                total_bytes += len(frame.media.data)
+                if total_bytes > _MAX_AUDIO_UPLOAD_BYTES:
+                    raise ValueError(
+                        f"batch STT audio exceeds {_MAX_AUDIO_UPLOAD_BYTES} bytes"
+                    )
+                audio_parts.append(frame.media.data)
+                continue
+            if frame.kind == "completed":
+                completed = True
+                break
+            if frame.kind == "cancelled":
+                detail = (
+                    frame.error.message
+                    if frame.error is not None
+                    else "caller cancelled batch STT input"
+                )
+                raise _BuiltinSttInputCancelledError(detail)
+            detail = frame.error.message if frame.error is not None else frame.kind
+            raise RuntimeError(f"batch STT input terminated: {detail}")
+        if not completed:
+            raise RuntimeError("batch STT input ended without half-close")
+        audio_bytes = b"".join(audio_parts)
+        if not audio_bytes:
+            raise ValueError("batch STT audio input is empty")
+        assert media_type is not None
+        return audio_bytes, media_type
+
+    async def _stream_builtin_stt(
+        self,
+        call: CapabilityCall,
+        input_frames: AsyncIterator[CapabilityStreamFrame],
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        """Transcribe one bounded provider media input after input half-close."""
+
+        try:
+            task_params = await self._prepare_builtin_stt_task(call)
+        except (ValidationError, HTTPException) as exc:
+            raise RuntimeError(
+                f"batch STT availability changed after admission: {exc}"
+            ) from exc
+        try:
+            audio_bytes, media_type = await self._collect_builtin_stt_audio(
+                input_frames
+            )
+        except _BuiltinSttInputCancelledError as exc:
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="cancelled",
+                error=CapabilityStreamError(code="cancelled", message=str(exc)),
+            )
+            return
+        except ValueError as exc:
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="failed",
+                error=CapabilityStreamError(
+                    code="invalid_frame",
+                    message=str(exc),
+                ),
+            )
+            return
+        if (
+            task_params.content_type is not None
+            and task_params.content_type != media_type
+        ):
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="failed",
+                error=CapabilityStreamError(
+                    code="invalid_frame",
+                    message=(
+                        "batch STT attachment media type does not match opening "
+                        "content_type"
+                    ),
+                ),
+            )
+            return
+        if not self._has_mounted_stt_model(task_params.model):
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="failed",
+                error=CapabilityStreamError(
+                    code="unreachable",
+                    message=(
+                        "batch STT capacity changed while receiving input; "
+                        "retry after the requested model is ready"
+                    ),
+                ),
+            )
+            return
+        task_params = task_params.model_copy(update={"content_type": media_type})
+        chunks = await self._execute_audio_transcription(task_params, audio_bytes)
+        text = "".join(chunk.text for chunk in chunks).strip()
+        language = next(
+            (chunk.language for chunk in chunks if chunk.language is not None),
+            None,
+        )
+        segments: list[dict[str, str | int | float | bool | None]] = []
+        for chunk in chunks:
+            segments.extend(chunk.segments)
+        payload: dict[str, object] = {
+            "model": str(task_params.model),
+            "text": text,
+        }
+        if language is not None:
+            payload["language"] = language
+        if segments:
+            payload["segments"] = segments
+        yield CapabilityStreamFrame(
+            call_id=call.call_id,
+            direction="provider_to_caller",
+            sequence=1,
+            kind="completed",
+            payload=payload,
+        )
+
+    async def _prepare_builtin_realtime_stt_task(
+        self,
+        call: CapabilityCall,
+    ) -> tuple[RealtimeAudioTranscriptionTaskParams, InstanceId, NodeId]:
+        """Validate one realtime STT call against mounted cluster capacity."""
+
+        payload = dict(call.payload)
+        sample_rate = payload.pop("sample_rate", None)
+        params = RealtimeAudioTranscriptionTaskParams.model_validate(
+            {**payload, "input_sample_rate": sample_rate}
+        )
+        if self._realtime_stt_instance(params.model) is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"No reachable realtime STT instance for model {params.model}"
+                ),
+            )
+        selected = self._realtime_stt_instance(
+            params.model,
+            call_id=call.call_id,
+            require_idle=True,
+        )
+        if selected is None:
+            raise HTTPException(
+                status_code=409,
+                detail="All realtime STT runners for this model are already busy",
+            )
+        instance_id, _, target_node = selected
+        return params, instance_id, target_node
+
+    async def _admit_builtin_realtime_stt_stream(
+        self,
+        call: CapabilityCall,
+    ) -> CapabilityError | None:
+        """Reject realtime STT before start unless reachable capacity is truthful."""
+
+        if not self._has_realtime_stt_model():
+            return CapabilityError(
+                code="not_found",
+                message="no reachable realtime STT capacity is currently advertised",
+            )
+        try:
+            _, instance_id, _ = await self._prepare_builtin_realtime_stt_task(call)
+        except ValidationError as exc:
+            return CapabilityError(code="invalid_payload", message=str(exc))
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                code: CapabilityErrorCode = "not_found"
+            elif exc.status_code == 409:
+                code = "overloaded"
+            elif exc.status_code in (400, 422):
+                code = "invalid_payload"
+            else:
+                code = "provider_error"
+            return CapabilityError(code=code, message=str(exc.detail))
+        active = self._active_capability_streams.get(call.call_id)
+        if active is None:
+            return CapabilityError(
+                code="provider_error",
+                message="realtime STT admission lost its stream reservation",
+            )
+        active.reserved_instance_id = instance_id
+        return None
+
+    async def _start_realtime_audio_transcription(
+        self,
+        params: RealtimeAudioTranscriptionTaskParams,
+        instance_id: InstanceId,
+    ) -> tuple[
+        CommandId,
+        Sender[TranscriptionChunk | ErrorChunk],
+        Receiver[TranscriptionChunk | ErrorChunk],
+    ]:
+        """Submit one pinned realtime STT command and register its output."""
+
+        command = RealtimeAudioTranscription(
+            owner_node=self.node_id,
+            target_instance_id=instance_id,
+            task_params=params,
+        )
+        command_id = command.command_id
+        output_sender, output_receiver = channel[TranscriptionChunk | ErrorChunk](
+            _REALTIME_STT_OUTPUT_BUFFER
+        )
+        self._audio_transcription_queues[command_id] = output_sender
+        self._realtime_audio_transcription_commands.add(command_id)
+        self._realtime_task_release_events[command_id] = anyio.Event()
+        try:
+            await self._send(command)
+        except Exception:
+            self._realtime_task_release_events.pop(command_id, None)
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._audio_transcription_queues,
+                ),
+            )
+            raise
+        return command_id, output_sender, output_receiver
+
+    def _mark_realtime_task_released(self, command_id: CommandId) -> None:
+        """Wake a provider waiting for authoritative realtime task release."""
+
+        release_event = self._realtime_task_release_events.get(command_id)
+        if release_event is not None:
+            release_event.set()
+
+    async def _cancel_audio_transcription_command(
+        self, command_id: CommandId
+    ) -> None:
+        """Cancel one core STT command while preserving cleanup ordering."""
+
+        if command_id in self._cancelled_command_ids:
+            return
+        self._cancelled_command_ids.add(command_id)
+        sender = self._speech_media_packet_sender
+        if sender is not None:
+            for target_node in self._transcription_media_targets.get(command_id, ()):
+                with contextlib.suppress(Exception):
+                    await sender.send(
+                        SpeechMediaPacket(
+                            source_node=self.node_id,
+                            target_node=target_node,
+                            command_id=command_id,
+                            sequence=0,
+                            kind="cancelled",
+                            purpose="transcription_audio",
+                        )
+                    )
+        await self.command_sender.send(
+            ForwarderCommand(
+                origin=self._system_id,
+                command=TaskCancelled(cancelled_command_id=command_id),
+            )
+        )
+
+    async def _send_realtime_audio_input(
+        self,
+        target_node: NodeId,
+        frame: RealtimeAudioInputFrame,
+    ) -> None:
+        """Send one PCM frame through the local fast path or remote DATA path."""
+
+        if target_node == self.node_id and self._realtime_audio_sender is not None:
+            try:
+                await self._realtime_audio_sender.send(frame)
+            except (BrokenResourceError, ClosedResourceError):
+                # Worker recreation closes the original receive end while the
+                # API survives. Fall through to the node-local packet topic,
+                # whose receiver is rewired on every Worker construction.
+                self._realtime_audio_sender = None
+            else:
+                return
+        if self._realtime_audio_packet_sender is not None:
+            await self._realtime_audio_packet_sender.send(
+                RealtimeAudioPacket(
+                    source_node=self.node_id,
+                    target_node=target_node,
+                    command_id=frame.command_id,
+                    sequence=frame.sequence,
+                    kind=frame.kind,
+                    data=frame.data,
+                )
+            )
+            return
+        raise RuntimeError("realtime audio worker ingress is unavailable")
+
+    async def _pump_builtin_realtime_stt_input(
+        self,
+        *,
+        command_id: CommandId,
+        params: RealtimeAudioTranscriptionTaskParams,
+        target_node: NodeId,
+        input_frames: AsyncIterator[CapabilityStreamFrame],
+    ) -> None:
+        """Translate provider frames into local or remote worker PCM ingress."""
+
+        terminal_sent = False
+        async for frame in input_frames:
+            if frame.kind == "started":
+                continue
+            if frame.kind == "chunk":
+                media = frame.media
+                payload = frame.payload or {}
+                if not isinstance(media, InlineMediaAttachment):
+                    raise ValueError(
+                        "realtime STT requires inline PCM media attachments"
+                    )
+                if (
+                    media.codec != "pcm_s16le"
+                    or media.channels != 1
+                    or media.sample_rate != params.input_sample_rate
+                    or payload.get("format") != "pcm_s16le"
+                    or payload.get("channels") != 1
+                    or payload.get("sample_rate") != params.input_sample_rate
+                ):
+                    raise ValueError(
+                        "realtime STT frame metadata must match the negotiated "
+                        "mono pcm_s16le sample rate"
+                    )
+                await self._send_realtime_audio_input(
+                    target_node,
+                    RealtimeAudioInputFrame(
+                        command_id=command_id,
+                        sequence=frame.sequence,
+                        kind="chunk",
+                        data=media.data,
+                    )
+                )
+                continue
+            if frame.kind == "failed":
+                detail = frame.error.message if frame.error is not None else "unknown"
+                raise RuntimeError(f"caller input stream failed: {detail}")
+            kind = "completed" if frame.kind == "completed" else "cancelled"
+            await self._send_realtime_audio_input(
+                target_node,
+                RealtimeAudioInputFrame(
+                    command_id=command_id,
+                    sequence=frame.sequence,
+                    kind=kind,
+                )
+            )
+            terminal_sent = True
+            return
+        if not terminal_sent:
+            raise RuntimeError("realtime STT input ended without a terminal frame")
+
+    async def _stream_builtin_realtime_stt(
+        self,
+        call: CapabilityCall,
+        input_frames: AsyncIterator[CapabilityStreamFrame],
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        """Bridge provider PCM input to a true incremental core STT session."""
+
+        try:
+            params, instance_id, target_node = (
+                await self._prepare_builtin_realtime_stt_task(call)
+            )
+        except (ValidationError, HTTPException) as exc:
+            raise RuntimeError(
+                f"realtime STT availability changed after admission: {exc}"
+            ) from exc
+        command_id, output_sender, output_receiver = (
+            await self._start_realtime_audio_transcription(params, instance_id)
+        )
+        input_cancel_scope = anyio.CancelScope()
+        input_done = anyio.Event()
+
+        async def pump_input() -> None:
+            with input_cancel_scope:
+                try:
+                    await self._pump_builtin_realtime_stt_input(
+                        command_id=command_id,
+                        params=params,
+                        target_node=target_node,
+                        input_frames=input_frames,
+                    )
+                except anyio.get_cancelled_exc_class():
+                    raise
+                except Exception as exc:
+                    with contextlib.suppress(
+                        BrokenResourceError, ClosedResourceError
+                    ):
+                        await output_sender.send(
+                            ErrorChunk(
+                                model=params.model,
+                                error_message=f"Realtime STT input failed: {exc}",
+                            )
+                        )
+                    with anyio.CancelScope(shield=True):
+                        await self._cancel_audio_transcription_command(command_id)
+                finally:
+                    input_done.set()
+
+        try:
+            self._tg.start_soon(pump_input)
+        except RuntimeError as exc:
+            await self._cancel_audio_transcription_command(command_id)
+            raise RuntimeError("realtime STT input pump could not start") from exc
+
+        sequence = 1
+        terminal_received = False
+        try:
+            with output_receiver as chunks:
+                while True:
+                    chunk: TranscriptionChunk | ErrorChunk | None = None
+                    with anyio.move_on_after(_STREAM_IDLE_TIMEOUT_SECONDS) as scope:
+                        try:
+                            chunk = await chunks.receive()
+                        except (EndOfStream, ClosedResourceError) as exc:
+                            raise RuntimeError(
+                                "Core realtime STT DATA stream closed without "
+                                "a terminal chunk"
+                            ) from exc
+                    if scope.cancelled_caught:
+                        raise RuntimeError(
+                            "Core realtime STT DATA stream exceeded its idle deadline"
+                        )
+                    assert chunk is not None
+                    if isinstance(chunk, ErrorChunk):
+                        terminal_received = True
+                        raise RuntimeError(
+                            f"Core realtime transcription failed: "
+                            f"{chunk.error_message}"
+                        )
+                    if chunk.finish_reason is not None:
+                        terminal_received = True
+                        yield CapabilityStreamFrame(
+                            call_id=call.call_id,
+                            direction="provider_to_caller",
+                            sequence=sequence,
+                            kind="completed",
+                            payload={
+                                "model": str(chunk.model),
+                                "text": chunk.text,
+                                "is_partial": False,
+                            },
+                        )
+                        return
+                    yield CapabilityStreamFrame(
+                        call_id=call.call_id,
+                        direction="provider_to_caller",
+                        sequence=sequence,
+                        kind="chunk",
+                        payload={
+                            "model": str(chunk.model),
+                            "text": chunk.text,
+                            "is_partial": True,
+                        },
+                    )
+                    sequence += 1
+        finally:
+            input_cancel_scope.cancel()
+            try:
+                with anyio.CancelScope(shield=True):
+                    with anyio.move_on_after(1.0):
+                        await input_done.wait()
+                    if (
+                        not terminal_received
+                        and not self._command_task_is_terminal(command_id)
+                    ):
+                        await self._cancel_audio_transcription_command(command_id)
+                    await self._finalize_command_stream(
+                        command_id,
+                        cast(
+                            dict[CommandId, Sender[object]],
+                            self._audio_transcription_queues,
+                        ),
+                    )
+                    release_event = self._realtime_task_release_events.get(
+                        command_id
+                    )
+                    if terminal_received and release_event is not None:
+                        with anyio.move_on_after(
+                            _REALTIME_TASK_RELEASE_TIMEOUT_SECONDS
+                        ) as release_scope:
+                            await release_event.wait()
+                        if release_scope.cancelled_caught:
+                            raise RuntimeError(
+                                "Core realtime STT task did not reach authoritative "
+                                "terminal state"
+                            )
+            finally:
+                self._realtime_task_release_events.pop(command_id, None)
+
+    async def _open_realtime_transcription_session(
+        self,
+        model: str,
+        sample_rate: int,
+    ) -> CapabilityStreamSession:
+        """Open the built-in realtime STT provider for one WebSocket owner.
+
+        Args:
+            model: Mounted model selected by the compatibility client.
+            sample_rate: Negotiated PCM16 sample rate.
+
+        Returns:
+            Generic Fabric provider session owned by this API node.
+        """
+
+        return await self._stream_capability(
+            self.node_id,
+            REALTIME_STT_CAPABILITY_DESCRIPTOR.id,
+            REALTIME_STT_CAPABILITY_DESCRIPTOR.version,
+            descriptor_revision(REALTIME_STT_CAPABILITY_DESCRIPTOR),
+            {"model": model, "sample_rate": sample_rate},
+            timeout_seconds=MAX_CALL_TIMEOUT_SECONDS,
+        )
+
+    async def _generate_realtime_assistant(
+        self,
+        model: str,
+        messages: tuple[ConversationMessage, ...],
+        max_output_tokens: int,
+        enable_thinking: bool,
+    ) -> AsyncIterator[str]:
+        """Stream one token-bounded assistant response for a realtime turn."""
+
+        resolved_model = await self._resolve_and_validate_text_model(ModelId(model))
+        model_card = await self._get_running_model_card(resolved_model)
+        request = ChatCompletionRequest(
+            model=resolved_model,
+            messages=[
+                ChatCompletionMessage(role=role, content=content)
+                for role, content in messages
+            ],
+            stream=True,
+            max_tokens=max_output_tokens,
+            enable_thinking=enable_thinking,
+        )
+        task_params = await chat_request_to_text_generation(
+            request,
+            model_card=model_card,
+        )
+        if self._extensions is not None and self._extensions.has_chat_middleware:
+            task_params = await self._extensions.transform_chat_request(
+                self._extension_context,
+                task_params,
+            )
+        command = await self._send_text_generation_with_images(task_params)
+        chunk_stream = self._tapped_text_stream(
+            command.command_id,
+            task_params.model,
+            task_params=task_params,
+        )
+        async for chunk in chunk_stream:
+            if isinstance(chunk, PrefillProgressChunk):
+                continue
+            if isinstance(chunk, ErrorChunk):
+                raise RuntimeError(
+                    chunk.error_message or "assistant model generation failed"
+                )
+            if isinstance(chunk, ToolCallChunk):
+                raise RuntimeError(
+                    "realtime automatic responses do not support tool calls"
+                )
+            if not chunk.is_thinking and chunk.text:
+                yield chunk.text
+
+    async def _open_realtime_speech_session(
+        self,
+        model: str,
+        text: str,
+        voice: str | None,
+    ) -> CapabilityStreamSession:
+        """Open one mounted TTS provider stream for a realtime response."""
+
+        model_id, response_format = await self._validate_speech_synthesis_model(
+            ModelId(model),
+            AudioResponseFormat.Mp3,
+            stream=True,
+        )
+        request = await self._apply_default_speech_voice(
+            AudioSpeechRequest(
+                model=str(model_id),
+                input=text,
+                voice=voice,
+                response_format=response_format,
+                stream=True,
+            ),
+            model_id,
+        )
+        payload: dict[str, object] = {
+            "model": str(model_id),
+            "text": text,
+            "response_format": "mp3",
+        }
+        if request.voice is not None:
+            payload["voice"] = request.voice
+        return await self._stream_capability(
+            self.node_id,
+            TTS_CAPABILITY_DESCRIPTOR.id,
+            TTS_CAPABILITY_DESCRIPTOR.version,
+            descriptor_revision(TTS_CAPABILITY_DESCRIPTOR),
+            payload,
+            timeout_seconds=MAX_CALL_TIMEOUT_SECONDS,
+        )
+
+    async def _validate_realtime_response_config(
+        self,
+        config: RealtimeResponseConfig,
+    ) -> None:
+        """Validate mounted chat and TTS participants before accepting a session."""
+
+        await self._resolve_and_validate_text_model(ModelId(config.model))
+        if config.tts_model is None:
+            return
+        model_id, response_format = await self._validate_speech_synthesis_model(
+            ModelId(config.tts_model),
+            AudioResponseFormat.Mp3,
+            stream=True,
+        )
+        await self._apply_default_speech_voice(
+            AudioSpeechRequest(
+                model=str(model_id),
+                input="realtime participant readiness probe",
+                voice=config.voice,
+                response_format=response_format,
+                stream=True,
+            ),
+            model_id,
+        )
+
+    async def realtime_transcription(
+        self,
+        websocket: WebSocket,
+        model: Annotated[str, Query(min_length=1, max_length=512)],
+    ) -> None:
+        """Serve one OpenAI-compatible realtime transcription WebSocket.
+
+        Args:
+            websocket: Client WebSocket owned by this API node.
+            model: Mounted realtime STT model selected in the URL query.
+
+        Side effects:
+            Opens one stable ``stt.realtime`` provider session and
+            cancels it when the socket disconnects or reaches a terminal event.
+        """
+
+        await RealtimeTranscriptionBridge(
+            websocket=websocket,
+            model=model,
+            open_session=self._open_realtime_transcription_session,
+            generate_assistant=self._generate_realtime_assistant,
+            open_speech_session=self._open_realtime_speech_session,
+            validate_response_config=self._validate_realtime_response_config,
+        ).serve()
+
+    async def fabric_speech_chain(
+        self,
+        websocket: WebSocket,
+        stt_model: Annotated[str, Query(min_length=1, max_length=512)],
+    ) -> None:
+        """Serve one typed Fabric speech composition WebSocket.
+
+        Args:
+            websocket: Client WebSocket owned by this API node.
+            stt_model: Mounted realtime STT participant selected for the chain.
+
+        Side effects:
+            Composes the selected STT participant with optional mounted chat and
+            TTS participants declared by ``session.update``. Media remains on
+            bounded provider transports and disconnect cancels active work.
+        """
+
+        await RealtimeTranscriptionBridge(
+            websocket=websocket,
+            model=stt_model,
+            open_session=self._open_realtime_transcription_session,
+            generate_assistant=self._generate_realtime_assistant,
+            open_speech_session=self._open_realtime_speech_session,
+            validate_response_config=self._validate_realtime_response_config,
+        ).serve()
+
+    async def audio_speech_http(self, http_request: Request) -> Response:
+        """Parse JSON or multipart speech requests into one strict core path."""
+
+        content_type = _normalize_upload_content_type(
+            http_request.headers.get("content-type")
+        )
+        if content_type == "application/json":
+            try:
+                request = AudioSpeechRequest.model_validate(await http_request.json())
+            except (json.JSONDecodeError, ValidationError) as exc:
+                detail = (
+                    json.dumps(exc.errors(include_context=False))
+                    if isinstance(exc, ValidationError)
+                    else "Malformed JSON request body"
+                )
+                raise HTTPException(status_code=422, detail=detail) from exc
+            return await self.audio_speech(request)
+        if content_type != "multipart/form-data":
+            raise HTTPException(
+                status_code=415,
+                detail="Speech requests require application/json or multipart/form-data",
+            )
+        form = await http_request.form()
+        reference_value = form.get("reference_audio")
+        if reference_value is not None and not isinstance(
+            reference_value, StarletteUploadFile
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Multipart `reference_audio` must be a file upload",
+            )
+        reference_audio = (
+            reference_value
+            if isinstance(reference_value, StarletteUploadFile)
+            else None
+        )
+        payload: dict[str, object] = {
+            key: value
+            for key, value in form.multi_items()
+            if key != "reference_audio" and isinstance(value, str)
+        }
+        try:
+            for key in (
+                "speed",
+                "streaming_interval",
+                "temperature",
+                "top_p",
+                "repetition_penalty",
+            ):
+                if key in payload:
+                    payload[key] = float(cast(str, payload[key]))
+            for key in ("top_k", "max_tokens", "seed"):
+                if key in payload:
+                    payload[key] = int(cast(str, payload[key]))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="Multipart numeric fields must contain valid numbers",
+            ) from exc
+        if "stream" in payload:
+            stream_value = cast(str, payload["stream"]).strip().lower()
+            if stream_value not in {"true", "false"}:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Multipart `stream` must be true or false",
+                )
+            payload["stream"] = stream_value == "true"
+        try:
+            request = AudioSpeechRequest.model_validate(payload)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=json.dumps(exc.errors(include_context=False)),
+            ) from exc
+        return await self.audio_speech(
+            request,
+            reference_audio_file=reference_audio,
+        )
+
+    async def audio_speech(
+        self,
+        request: AudioSpeechRequest,
+        *,
+        reference_audio_file: StarletteUploadFile | None = None,
+    ) -> Response:
+        """OpenAI-compatible text-to-speech endpoint."""
+
+        if request.streaming_interval is not None and not request.stream:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "`streaming_interval` is only supported with `stream=true`"
+                ),
+            )
+        if request.reference_audio is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "`reference_audio` managed uploads are not supported yet; "
+                    "server-local paths are never accepted"
+                ),
+            )
+        if request.reference_text is not None and reference_audio_file is None:
+            raise HTTPException(
+                status_code=400,
+                detail="`reference_text` is only supported with reference-audio TTS flows",
+            )
+
+        requested_response_format = (
+            AudioResponseFormat.Mp3
+            if request.stream and request.response_format is None
+            else request.response_format
+        )
+        model_id, response_format = await self._validate_speech_synthesis_model(
+            ModelId(request.model), requested_response_format, stream=request.stream
+        )
+        if reference_audio_file is not None and request.voice is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "`voice` cannot be combined with an uploaded `reference_audio`; "
+                    "omit `voice` to use the request-scoped reference"
+                ),
+            )
+        reference_voice_profile: str | None = None
+        if reference_audio_file is None:
+            request = await self._apply_default_speech_voice(request, model_id)
+            reference_voice_profile = (
+                await self._bundled_reference_profile_for_voice(
+                    model_id,
+                    request.voice,
+                )
+            )
+        if request.stream and response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
+            supported = ", ".join(
+                audio_format.value
+                for audio_format in sorted(
+                    _STREAMABLE_AUDIO_RESPONSE_FORMATS,
+                    key=lambda audio_format: audio_format.value,
+                )
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"`stream=true` supports only {supported} responses for now; "
+                    f"requested {response_format.value}"
+                ),
+            )
+        reference_audio: bytes | None = None
+        reference_filename: str | None = None
+        reference_content_type: str | None = None
+        reference_sha256: str | None = None
+        target_instance_id: InstanceId | None = None
+        target_node: NodeId | None = None
+        if reference_audio_file is not None:
+            if not self._data_plane_zenoh or self._speech_media_packet_sender is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Reference audio requires the node-addressed Zenoh data plane; "
+                        "broadcast fallback is not permitted for private media"
+                    ),
+                )
+            target_instance_id, target_node = self._reference_tts_target(model_id)
+            _validate_audio_upload_metadata(reference_audio_file)
+            try:
+                reference_audio = await _read_audio_upload(reference_audio_file)
+            finally:
+                await reference_audio_file.close()
+            reference_filename = reference_audio_file.filename
+            reference_content_type = _normalize_upload_content_type(
+                reference_audio_file.content_type
+            )
+            reference_sha256 = hashlib.sha256(reference_audio).hexdigest()
+        command_id, recv = await self._start_speech_synthesis(
+            self._speech_synthesis_task_params(
+                request,
+                model_id,
+                response_format,
+                reference_voice_profile=reference_voice_profile,
+                reference_audio_filename=reference_filename,
+                reference_audio_content_type=reference_content_type,
+                reference_audio_sha256=reference_sha256,
+            ),
+            target_instance_id=target_instance_id,
+            target_node=target_node,
+            reference_audio=reference_audio,
+        )
+
+        if request.stream:
+            try:
+                first_chunk = await self._receive_initial_audio_speech_chunk(
+                    command_id, recv
+                )
+                if first_chunk.format != response_format:
+                    await self._cancel_audio_speech_command(command_id)
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Speech synthesis returned an unexpected audio format",
+                    )
+                if (
+                    response_format == AudioResponseFormat.Pcm
+                    and first_chunk.sample_rate is None
+                ):
+                    await self._cancel_audio_speech_command(command_id)
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Raw PCM speech response did not declare a sample rate",
+                    )
+            except anyio.get_cancelled_exc_class():
+                await self._cancel_audio_speech_command(command_id)
+                await self._finalize_command_stream(
+                    command_id,
+                    cast(
+                        dict[CommandId, Sender[object]],
+                        self._audio_speech_queues,
+                    ),
+                )
+                raise
+            except HTTPException:
+                await self._finalize_command_stream(
+                    command_id,
+                    cast(
+                        dict[CommandId, Sender[object]],
+                        self._audio_speech_queues,
+                    ),
+                )
+                raise
+            return StreamingResponse(
+                self._stream_audio_speech_chunks(command_id, recv, first_chunk),
+                media_type=_AUDIO_CONTENT_TYPES[response_format],
+                headers={
+                    "Content-Disposition": (
+                        f"attachment; filename=speech.{response_format.value}"
+                    ),
+                    **(
+                        {
+                            "X-Audio-Sample-Rate": str(first_chunk.sample_rate),
+                            "X-Audio-Channels": "1",
+                            "X-Audio-Sample-Format": "s16le",
+                        }
+                        if response_format == AudioResponseFormat.Pcm
+                        and first_chunk.sample_rate is not None
+                        else {}
+                    ),
+                },
+            )
+
+        try:
+            audio_bytes, response_format, sample_rate = await self._collect_audio_speech_chunks(
+                command_id, recv
+            )
+            if response_format == AudioResponseFormat.Pcm and sample_rate is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Raw PCM speech response did not declare a sample rate",
+                )
+            return Response(
+                content=audio_bytes,
+                media_type=_AUDIO_CONTENT_TYPES[response_format],
+                headers=(
+                    {
+                        "X-Audio-Sample-Rate": str(sample_rate),
+                        "X-Audio-Channels": "1",
+                        "X-Audio-Sample-Format": "s16le",
+                    }
+                    if response_format == AudioResponseFormat.Pcm
+                    else {}
+                ),
+            )
+
+        except anyio.get_cancelled_exc_class():
+            await self._cancel_audio_speech_command(command_id)
+            raise
+        finally:
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._audio_speech_queues,
+                ),
+            )
+
+    async def _collect_audio_speech_chunks(
+        self,
+        command_id: CommandId,
+        recv: Receiver[AudioChunk | ErrorChunk],
+    ) -> tuple[bytes, AudioResponseFormat, int | None]:
+        """Collect a non-streaming TTS response with a terminal-task backstop."""
+        audio_parts: list[bytes] = []
+        response_format: AudioResponseFormat | None = None
+        sample_rate: int | None = None
+        with recv as chunks:
+            while True:
+                chunk: AudioChunk | ErrorChunk | None = None
+                with anyio.move_on_after(_STREAM_IDLE_TIMEOUT_SECONDS) as scope:
+                    try:
+                        chunk = await chunks.receive()
+                    except (EndOfStream, ClosedResourceError) as exc:
+                        if not self._command_task_is_terminal(command_id):
+                            await self._cancel_audio_speech_command(command_id)
+                        detail = (
+                            "Speech synthesis stream closed before receiving "
+                            "a terminal chunk"
+                            if audio_parts
+                            else "No speech audio response received"
+                        )
+                        raise HTTPException(
+                            status_code=500, detail=detail
+                        ) from exc
+                if scope.cancelled_caught:
+                    if self._command_task_is_terminal(command_id):
+                        detail = (
+                            "Speech synthesis completed, but the final response "
+                            "chunk was not received"
+                            if audio_parts
+                            else (
+                                "Speech synthesis completed, but no audio response "
+                                "was received"
+                            )
+                        )
+                        raise HTTPException(
+                            status_code=500,
+                            detail=detail,
+                        )
+                    continue
+                assert chunk is not None
+                if isinstance(chunk, ErrorChunk):
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Speech synthesis failed: {chunk.error_message}",
+                    )
+                if response_format is not None and response_format != chunk.format:
+                    await self._cancel_audio_speech_command(command_id)
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Speech synthesis changed format mid-response",
+                    )
+                audio_parts.append(_decode_audio_chunk_data(chunk))
+                response_format = chunk.format
+                if chunk.sample_rate is not None:
+                    if sample_rate is not None and sample_rate != chunk.sample_rate:
+                        await self._cancel_audio_speech_command(command_id)
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Speech synthesis changed sample rate mid-response",
+                        )
+                    sample_rate = chunk.sample_rate
+                if chunk.finish_reason is not None:
+                    break
+        if not audio_parts:
+            raise HTTPException(
+                status_code=500, detail="No speech audio response received"
+            )
+        return b"".join(audio_parts), response_format, sample_rate
+
+    async def _cancel_audio_speech_command(self, command_id: CommandId) -> None:
+        """Cancel a speech synthesis command that cannot finish cleanly."""
+
+        self._cancelled_command_ids.add(command_id)
+        with anyio.CancelScope(shield=True):
+            target_node = self._speech_media_targets.get(command_id)
+            if target_node is not None and self._speech_media_packet_sender is not None:
+                with contextlib.suppress(Exception):
+                    await self._speech_media_packet_sender.send(
+                        SpeechMediaPacket(
+                            source_node=self.node_id,
+                            target_node=target_node,
+                            command_id=command_id,
+                            sequence=0,
+                            kind="cancelled",
+                        )
+                    )
+            await self.command_sender.send(
+                ForwarderCommand(
+                    origin=self._system_id,
+                    command=TaskCancelled(cancelled_command_id=command_id),
+                )
+            )
+
+    async def _receive_initial_audio_speech_chunk(
+        self,
+        command_id: CommandId,
+        recv: Receiver[AudioChunk | ErrorChunk],
+    ) -> AudioChunk:
+        """Receive the first TTS stream chunk before response headers commit."""
+        while True:
+            chunk: AudioChunk | ErrorChunk | None = None
+            with anyio.move_on_after(_STREAM_IDLE_TIMEOUT_SECONDS) as scope:
+                try:
+                    chunk = await recv.receive()
+                except (EndOfStream, ClosedResourceError) as exc:
+                    raise HTTPException(
+                        status_code=500, detail="No speech audio response received"
+                    ) from exc
+            if scope.cancelled_caught:
+                if self._command_task_is_terminal(command_id):
+                    raise HTTPException(
+                        status_code=500,
+                        detail=(
+                            "Speech synthesis completed, but no audio response "
+                            "was received"
+                        ),
+                    )
+                continue
+            assert chunk is not None
+            if isinstance(chunk, ErrorChunk):
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Speech synthesis failed: {chunk.error_message}",
+                )
+            chunk_data = _decode_audio_chunk_data(chunk)
+            if chunk.finish_reason is not None and len(chunk_data) == 0:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        "Speech synthesis completed, but no audio response "
+                        "was received"
+                    ),
+                )
+            return chunk
+
+    async def _stream_audio_speech_chunks(
+        self,
+        command_id: CommandId,
+        recv: Receiver[AudioChunk | ErrorChunk],
+        first_chunk: AudioChunk | None = None,
+    ) -> AsyncGenerator[bytes, None]:
+        """Yield TTS audio bytes as chunks arrive from the data plane."""
+        received_audio = False
+        expected_format = first_chunk.format if first_chunk is not None else None
+        expected_pcm_sample_rate = (
+            first_chunk.sample_rate
+            if first_chunk is not None and first_chunk.format == AudioResponseFormat.Pcm
+            else None
+        )
+        try:
+            if first_chunk is not None:
+                first_chunk_data = _decode_audio_chunk_data(first_chunk)
+                if first_chunk_data:
+                    received_audio = True
+                    yield first_chunk_data
+                if first_chunk.finish_reason is not None:
+                    if not received_audio:
+                        raise RuntimeError("No speech audio response received")
+                    return
+            with recv as chunks:
+                while True:
+                    chunk: AudioChunk | ErrorChunk | None = None
+                    delay = _STREAM_IDLE_TIMEOUT_SECONDS if received_audio else None
+                    with anyio.move_on_after(delay) as scope:
+                        try:
+                            chunk = await chunks.receive()
+                        except (EndOfStream, ClosedResourceError) as exc:
+                            if self._command_task_is_terminal(command_id):
+                                if received_audio:
+                                    return
+                                raise RuntimeError(
+                                    "No speech audio response received"
+                                ) from exc
+                            await self._cancel_audio_speech_command(command_id)
+                            raise RuntimeError(
+                                "Speech stream closed before receiving "
+                                "a terminal chunk"
+                            ) from exc
+                    if scope.cancelled_caught:
+                        self._data_plane_observer.record_idle_timeout()
+                        task_done = self._command_task_is_terminal(command_id)
+                        logger.warning(
+                            f"Speech stream for command {command_id} idle for "
+                            f">{_STREAM_IDLE_TIMEOUT_SECONDS:g}s mid-stream; "
+                            + (
+                                "task already terminal — finishing (a final "
+                                "data-plane chunk was likely dropped)."
+                                if task_done
+                                else "task still active — cancelling (a data-plane "
+                                "chunk may have been dropped)."
+                            )
+                        )
+                        if not task_done:
+                            await self._cancel_audio_speech_command(command_id)
+                        else:
+                            return
+                        raise RuntimeError(
+                            "Speech stream stalled before receiving a terminal chunk"
+                        )
+                    assert chunk is not None
+                    if isinstance(chunk, ErrorChunk):
+                        raise RuntimeError(
+                            f"Speech synthesis failed: {chunk.error_message}"
+                        )
+                    if expected_format is None:
+                        expected_format = chunk.format
+                    elif chunk.format != expected_format:
+                        await self._cancel_audio_speech_command(command_id)
+                        raise RuntimeError(
+                            "Speech synthesis changed format mid-stream"
+                        )
+                    if (
+                        expected_pcm_sample_rate is not None
+                        and chunk.sample_rate != expected_pcm_sample_rate
+                    ):
+                        await self._cancel_audio_speech_command(command_id)
+                        raise RuntimeError(
+                            "Speech synthesis changed sample rate mid-stream"
+                        )
+                    chunk_data = _decode_audio_chunk_data(chunk)
+                    if chunk_data:
+                        received_audio = True
+                        yield chunk_data
+                    if chunk.finish_reason is not None:
+                        if not received_audio:
+                            raise RuntimeError("No speech audio response received")
+                        return
+            if not received_audio:
+                raise RuntimeError("No speech audio response received")
+        except anyio.get_cancelled_exc_class():
+            command = TaskCancelled(cancelled_command_id=command_id)
+            self._cancelled_command_ids.add(command_id)
+            with anyio.CancelScope(shield=True):
+                await self.command_sender.send(
+                    ForwarderCommand(origin=self._system_id, command=command)
+                )
+            raise
+        finally:
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._audio_speech_queues,
+                ),
+            )
+
+    async def audio_transcriptions(
+        self,
+        file: Annotated[
+            UploadFile,
+            File(
+                description="Audio file to transcribe.",
+            ),
+        ],
+        model: Annotated[
+            str,
+            Form(
+                description="Mounted speech-to-text model id to serve.",
+            ),
+        ],
+        language: Annotated[
+            str | None,
+            Form(
+                description="Optional input language hint.",
+            ),
+        ] = None,
+        prompt: Annotated[
+            str | None,
+            Form(
+                description="Optional transcription prompt or context.",
+            ),
+        ] = None,
+        response_format: Annotated[
+            AudioTranscriptionResponseFormat,
+            Form(
+                description="Transcription response format.",
+            ),
+        ] = "json",
+        temperature: Annotated[
+            float | None,
+            Form(
+                description="Optional model-specific sampling temperature.",
+            ),
+        ] = None,
+        stream: Annotated[
+            bool,
+            Form(
+                description=(
+                    "Return typed SSE transcript events as model deltas arrive. "
+                    "With response_format=ndjson, retain progressive NDJSON framing."
+                ),
+            ),
+        ] = False,
+        max_tokens: Annotated[
+            int | None,
+            Form(
+                description="Optional model-specific maximum token budget.",
+            ),
+        ] = None,
+        chunk_duration: Annotated[
+            float | None,
+            Form(
+                description="Optional model-specific audio chunk duration.",
+            ),
+        ] = None,
+        frame_threshold: Annotated[
+            int | None,
+            Form(
+                description="Optional model-specific frame threshold.",
+            ),
+        ] = None,
+        context: Annotated[
+            str | None,
+            Form(
+                description="Optional model-specific context text.",
+            ),
+        ] = None,
+        prefill_step_size: Annotated[
+            int | None,
+            Form(
+                description="Optional model-specific prefill step size.",
+            ),
+        ] = None,
+        text: Annotated[
+            str | None,
+            Form(
+                description="Optional model-specific text prefix.",
+            ),
+        ] = None,
+        word_timestamps: Annotated[
+            bool,
+            Form(
+                description="Whether to request word timestamp metadata when supported.",
+            ),
+        ] = False,
+        timestamp_granularities: Annotated[
+            str | None,
+            Form(
+                description="Comma-separated or JSON list of timestamp granularities.",
+            ),
+        ] = None,
+    ) -> Response:
+        """OpenAI-compatible speech-to-text endpoint."""
+
+        if not model.strip():
+            raise HTTPException(status_code=400, detail="`model` must not be empty")
+        if response_format not in _AUDIO_TRANSCRIPTION_FORMATS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported transcription response_format: {response_format}",
+            )
+
+        _validate_audio_upload_metadata(file)
+        audio_bytes = await _read_audio_upload(file)
+        model_id = (
+            await self._validate_audio_transcription_model(
+                ModelId(model), stream=True
+            )
+            if stream
+            else await self._validate_audio_transcription_model(ModelId(model))
+        )
+        normalized_content_type = _normalize_upload_content_type(file.content_type)
+        task_params = AudioTranscriptionTaskParams(
+            model=model_id,
+            filename=file.filename,
+            content_type=normalized_content_type,
+            audio_sha256=hashlib.sha256(audio_bytes).hexdigest(),
+            language=language,
+            prompt=prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            chunk_duration=chunk_duration,
+            frame_threshold=frame_threshold,
+            context=context,
+            prefill_step_size=prefill_step_size,
+            text=text,
+            word_timestamps=word_timestamps,
+            timestamp_granularities=_parse_timestamp_granularities(
+                timestamp_granularities
+            ),
+            stream=stream,
+        )
+        if stream:
+            command_id, recv = await self._start_audio_transcription(
+                task_params, audio_bytes
+            )
+            ndjson = response_format == "ndjson"
+            body = self._stream_audio_transcription(
+                command_id,
+                recv,
+                model_id=model_id,
+                input_bytes=len(audio_bytes),
+                ndjson=ndjson,
+            )
+            return StreamingResponse(
+                body if ndjson else with_sse_keepalive(body),
+                media_type=(
+                    "application/x-ndjson" if ndjson else "text/event-stream"
+                ),
+                headers=(
+                    {}
+                    if ndjson
+                    else {
+                        "Cache-Control": "no-cache",
+                        "X-Accel-Buffering": "no",
+                    }
+                ),
+            )
+        transcript_chunks = await self._execute_audio_transcription(
+            task_params,
+            audio_bytes,
+        )
+        return _build_audio_transcription_response(response_format, transcript_chunks)
+
+    async def audio_translations(
+        self,
+        file: Annotated[
+            UploadFile,
+            File(description="Audio file to translate to English."),
+        ],
+        model: Annotated[
+            str,
+            Form(description="Mounted translation-capable speech model id."),
+        ],
+        language: Annotated[
+            str | None,
+            Form(description="Optional model-specific source language code."),
+        ] = None,
+        prompt: Annotated[
+            str | None,
+            Form(description="Optional translation prompt or context."),
+        ] = None,
+        response_format: Annotated[
+            AudioTranscriptionResponseFormat,
+            Form(description="Translation response format."),
+        ] = "json",
+        temperature: Annotated[
+            float | None,
+            Form(description="Optional model-specific sampling temperature."),
+        ] = None,
+    ) -> Response:
+        """Translate uploaded speech into English with a mounted STT model."""
+
+        if not model.strip():
+            raise HTTPException(status_code=400, detail="`model` must not be empty")
+        if response_format not in _AUDIO_TRANSCRIPTION_FORMATS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported translation response_format: {response_format}",
+            )
+        model_id = await self._validate_audio_translation_model(
+            ModelId(model), language
+        )
+        _validate_audio_upload_metadata(file)
+        audio_bytes = await _read_audio_upload(file)
+        transcript_chunks = await self._execute_audio_transcription(
+            AudioTranscriptionTaskParams(
+                model=model_id,
+                filename=file.filename,
+                content_type=_normalize_upload_content_type(file.content_type),
+                audio_sha256=hashlib.sha256(audio_bytes).hexdigest(),
+                language=language,
+                prompt=prompt,
+                temperature=temperature,
+                translate_to_english=True,
+            ),
+            audio_bytes,
+        )
+        return _build_audio_transcription_response(response_format, transcript_chunks)
+
+    async def audio_voices(
+        self,
+        model: Annotated[
+            str,
+            Query(description="Mounted text-to-speech model id."),
+        ],
+    ) -> AudioVoiceList:
+        """Return stable built-in and bundled-reference voices for a TTS model."""
+
+        if not model.strip():
+            raise HTTPException(status_code=400, detail="`model` must not be empty")
+        requested_model = ModelId(model)
+        if not any(
+            instance.shard_assignments.model_id == requested_model
+            for instance in self.state.instances.values()
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail=f"No instance found for model {requested_model}",
+            )
+        model_card = await self._get_running_model_card(requested_model)
+        resolved = model_card.model_id
+        profile = resolve_model_capability_profile(resolved, model_card=model_card)
+        if not profile.supports_speech_synthesis:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {resolved} is not a text-to-speech model",
+            )
+        if (
+            model_card.audio is None
+            or model_card.audio.supports_voice_listing is not True
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {resolved} does not support voice listing",
+            )
+        catalog_by_id = {
+            voice.id: voice for voice in model_card.audio.voice_catalog
+        }
+        return AudioVoiceList(
+            data=tuple(
+                AudioVoice(
+                    id=voice,
+                    name=catalog_by_id[voice].name if voice in catalog_by_id else voice,
+                    model=str(resolved),
+                    preferred_languages=(
+                        catalog_by_id[voice].preferred_languages
+                        if voice in catalog_by_id
+                        else ()
+                    ),
+                    kind=(
+                        "reference"
+                        if voice in catalog_by_id
+                        and catalog_by_id[voice].reference_profile is not None
+                        else "builtin"
+                    ),
+                )
+                for voice in model_card.audio.voices
+            )
+        )
+
+    async def _execute_audio_transcription(
+        self,
+        task_params: AudioTranscriptionTaskParams,
+        audio_bytes: bytes,
+    ) -> list[TranscriptionChunk]:
+        """Run the shared bounded batch STT command path for REST and Fabric."""
+
+        command_id, recv = await self._start_audio_transcription(
+            task_params, audio_bytes
+        )
+        try:
+            transcript_chunks = await self._collect_transcription_chunks(
+                command_id, recv
+            )
+            if not transcript_chunks:
+                raise HTTPException(
+                    status_code=500,
+                    detail="No speech transcription response received",
+                )
+            return transcript_chunks
+        except anyio.get_cancelled_exc_class():
+            with anyio.CancelScope(shield=True):
+                await self._cancel_audio_transcription_command(command_id)
+            raise
+        finally:
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._audio_transcription_queues,
+                ),
+            )
+
+    async def _start_audio_transcription(
+        self,
+        task_params: AudioTranscriptionTaskParams,
+        audio_bytes: bytes,
+    ) -> tuple[CommandId, Receiver[TranscriptionChunk | ErrorChunk]]:
+        """Submit one bounded batch-file STT command before response admission."""
+
+        audio_sha256 = hashlib.sha256(audio_bytes).hexdigest()
+        total_chunks = max(
+            1,
+            (len(audio_bytes) + _SPEECH_MEDIA_CHUNK_BYTES - 1)
+            // _SPEECH_MEDIA_CHUNK_BYTES,
+        )
+        params = task_params.model_copy(
+            update={
+                "total_input_chunks": total_chunks,
+                "audio_sha256": audio_sha256,
+            }
+        )
+        command = AudioTranscription(owner_node=self.node_id, task_params=params)
+        command_id = command.command_id
+        try:
+            self._audio_transcription_queues[command_id], recv = channel[
+                TranscriptionChunk | ErrorChunk
+            ]()
+            self._stage_audio_transcription_media(command_id, params, audio_bytes)
+            await self._send(command)
+        except BaseException:
+            self._speech_media_commands.discard(command_id)
+            self._take_pending_speech_media(command_id)
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._audio_transcription_queues,
+                ),
+            )
+            raise
+        return command_id, recv
+
+    async def _stream_audio_transcription(
+        self,
+        command_id: CommandId,
+        recv: Receiver[TranscriptionChunk | ErrorChunk],
+        *,
+        model_id: ModelId,
+        input_bytes: int,
+        ndjson: bool,
+    ) -> AsyncIterator[str]:
+        """Yield progressive STT output and own cancellation through cleanup."""
+
+        text_parts: list[str] = []
+        language: str | None = None
+        segments: list[dict[str, str | int | float | bool | None]] = []
+        sequence = 0
+        terminal = False
+        try:
+            with recv as chunks:
+                while True:
+                    chunk: TranscriptionChunk | ErrorChunk | None = None
+                    with anyio.move_on_after(_STREAM_IDLE_TIMEOUT_SECONDS) as scope:
+                        try:
+                            chunk = await chunks.receive()
+                        except (EndOfStream, ClosedResourceError):
+                            break
+                    if scope.cancelled_caught:
+                        if self._command_task_is_terminal(command_id):
+                            error_event = AudioTranscriptionErrorEvent(
+                                model=str(model_id),
+                                sequence=sequence,
+                                code="missing_terminal_chunk",
+                                message=(
+                                    "Speech transcription completed without a final "
+                                    "response chunk"
+                                ),
+                            )
+                            yield (
+                                json.dumps(
+                                    {"error": error_event.model_dump(mode="json")},
+                                    separators=(",", ":"),
+                                )
+                                + "\n"
+                                if ndjson
+                                else _encode_audio_transcription_sse(error_event)
+                            )
+                            terminal = True
+                            return
+                        continue
+                    assert chunk is not None
+                    if isinstance(chunk, ErrorChunk):
+                        error_event = AudioTranscriptionErrorEvent(
+                            model=str(model_id),
+                            sequence=sequence,
+                            code="transcription_failed",
+                            message=chunk.error_message,
+                        )
+                        yield (
+                            json.dumps(
+                                {"error": error_event.model_dump(mode="json")},
+                                separators=(",", ":"),
+                            )
+                            + "\n"
+                            if ndjson
+                            else _encode_audio_transcription_sse(error_event)
+                        )
+                        terminal = True
+                        return
+                    if chunk.text:
+                        text_parts.append(chunk.text)
+                    if chunk.language is not None:
+                        language = chunk.language
+                    segments.extend(chunk.segments)
+                    if ndjson:
+                        yield (
+                            json.dumps(
+                                _transcription_chunk_payload(chunk),
+                                separators=(",", ":"),
+                            )
+                            + "\n"
+                        )
+                    elif chunk.text:
+                        yield _encode_audio_transcription_sse(
+                            AudioTranscriptionDeltaEvent(
+                                model=str(model_id),
+                                sequence=sequence,
+                                delta=chunk.text,
+                                language=chunk.language,
+                                segment_index=chunk.segment_index,
+                            )
+                        )
+                        sequence += 1
+                    if chunk.finish_reason is None:
+                        continue
+                    if not ndjson:
+                        complete_text = "".join(text_parts)
+                        yield _encode_audio_transcription_sse(
+                            AudioTranscriptionCompletedEvent(
+                                model=str(model_id),
+                                sequence=sequence,
+                                text=complete_text,
+                                language=language,
+                                segments=tuple(segments),
+                            )
+                        )
+                        sequence += 1
+                        yield _encode_audio_transcription_sse(
+                            AudioTranscriptionUsageEvent(
+                                model=str(model_id),
+                                sequence=sequence,
+                                input_bytes=input_bytes,
+                                output_characters=len(complete_text),
+                            )
+                        )
+                    terminal = True
+                    return
+        finally:
+            if not terminal and not self._command_task_is_terminal(command_id):
+                with anyio.CancelScope(shield=True):
+                    with anyio.move_on_after(1.0):
+                        await self._cancel_audio_transcription_command(command_id)
+            with anyio.CancelScope(shield=True):
+                await self._finalize_command_stream(
+                    command_id,
+                    cast(
+                        dict[CommandId, Sender[object]],
+                        self._audio_transcription_queues,
+                    ),
+                )
+
+    async def _collect_transcription_chunks(
+        self,
+        command_id: CommandId,
+        recv: Receiver[TranscriptionChunk | ErrorChunk],
+    ) -> list[TranscriptionChunk]:
+        """Collect a non-streaming STT response with a terminal-task backstop."""
+        transcript_chunks: list[TranscriptionChunk] = []
+        with recv as chunks:
+            while True:
+                chunk: TranscriptionChunk | ErrorChunk | None = None
+                with anyio.move_on_after(_STREAM_IDLE_TIMEOUT_SECONDS) as scope:
+                    try:
+                        chunk = await chunks.receive()
+                    except (EndOfStream, ClosedResourceError):
+                        break
+                if scope.cancelled_caught:
+                    if self._command_task_is_terminal(command_id):
+                        raise HTTPException(
+                            status_code=500,
+                            detail=(
+                                "Speech transcription completed, but the final "
+                                "response chunk was not received"
+                            ),
+                        )
+                    continue
+                assert chunk is not None
+                if isinstance(chunk, ErrorChunk):
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Speech transcription failed: {chunk.error_message}",
+                    )
+                transcript_chunks.append(chunk)
+                if chunk.finish_reason is not None:
+                    break
+        return transcript_chunks
 
     async def restart_node(self, node_id: NodeId | None = None) -> JSONResponse:
         """Restart the Skulk process on this or a remote node.

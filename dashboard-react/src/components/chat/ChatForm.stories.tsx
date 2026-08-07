@@ -1,12 +1,48 @@
 import { useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { ChatForm } from './ChatForm';
+import type { ChatSpeechModelOption } from '../../types/chat';
+
+const sttModel: ChatSpeechModelOption = {
+  modelId: 'mlx-community/whisper-large-v3-mlx',
+  label: 'whisper-large-v3-mlx',
+  defaultResponseFormat: 'wav',
+  responseFormats: ['wav'],
+};
+
+const realtimeSttModel: ChatSpeechModelOption = {
+  modelId: 'mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit',
+  label: 'Voxtral-Mini-4B-Realtime-2602-4bit',
+  defaultResponseFormat: 'wav',
+  responseFormats: ['wav'],
+  supportsRealtime: true,
+};
+
+const ttsModel: ChatSpeechModelOption = {
+  modelId: 'mlx-community/Kokoro-82M-bf16',
+  label: 'Kokoro-82M-bf16',
+  defaultResponseFormat: 'mp3',
+  responseFormats: ['mp3', 'wav'],
+};
+
+const referenceTtsModel: ChatSpeechModelOption = {
+  modelId: 'mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit',
+  label: 'Qwen3-TTS-Base-4bit',
+  defaultResponseFormat: 'mp3',
+  responseFormats: ['mp3', 'pcm'],
+  supportsStreaming: true,
+  supportsReferenceAudio: true,
+};
 
 const meta: Meta<typeof ChatForm> = {
   title: 'Chat/ChatForm',
   component: ChatForm,
   parameters: { layout: 'centered' },
-  decorators: [(Story) => <div style={{ width: 600, padding: 24, background: '#000' }}><Story /></div>],
+  decorators: [(Story) => (
+    <div style={{ width: 'min(600px, calc(100vw - 48px))', padding: 24, background: '#000' }}>
+      <Story />
+    </div>
+  )],
 };
 
 export default meta;
@@ -29,6 +65,91 @@ export const WithModelHeader: Story = {
     onToggleThinking: () => {},
     ttftMs: 245,
     tps: 42.3,
+  },
+};
+
+export const NoSpeechModels: Story = {
+  args: {
+    onSend: () => {},
+    modelLabel: 'Qwen3-30B-A3B-4bit',
+    transcriptionModels: [],
+    speechModels: [],
+  },
+};
+
+export const SttOnly: Story = {
+  args: {
+    onSend: () => {},
+    modelLabel: 'Qwen3-30B-A3B-4bit',
+    transcriptionModels: [sttModel],
+    selectedTranscriptionModelId: sttModel.modelId,
+    onTranscribeAudio: async () => 'recorded transcript',
+  },
+};
+
+export const RealtimeStt: Story = {
+  args: {
+    onSend: () => {},
+    modelLabel: 'Qwen3-30B-A3B-4bit',
+    transcriptionModels: [realtimeSttModel],
+    selectedTranscriptionModelId: realtimeSttModel.modelId,
+    realtimeTranscriptionAvailable: true,
+    realtimeVoiceEnabled: true,
+    autoSubmitVoice: true,
+    onTranscribeAudio: async () => 'batch fallback transcript',
+    onRealtimeVoiceEnabledChange: () => {},
+    onAutoSubmitVoiceChange: () => {},
+  },
+};
+
+export const TtsOnly: Story = {
+  args: {
+    onSend: () => {},
+    canSendMessages: false,
+    speechModels: [ttsModel],
+    selectedSpeechModelId: ttsModel.modelId,
+    selectedVoice: 'af_heart',
+    autoSpeakAssistant: true,
+    onSpeakText: (text) => console.log('Speak:', text),
+    onAutoSpeakAssistantChange: (enabled) => console.log('Auto speak:', enabled),
+  },
+};
+
+export const PlaybackActive: Story = {
+  args: {
+    onSend: () => {},
+    modelLabel: 'Qwen3-30B-A3B-4bit',
+    speechModels: [ttsModel],
+    selectedSpeechModelId: ttsModel.modelId,
+    isSpeaking: true,
+    onStopSpeaking: () => console.log('Stop speech'),
+  },
+};
+
+export const ReferenceAudio: Story = {
+  args: {
+    onSend: () => {},
+    canSendMessages: false,
+    speechModels: [referenceTtsModel],
+    selectedSpeechModelId: referenceTtsModel.modelId,
+    referenceAudioFile: new File(['RIFF-reference'], 'speaker.wav', { type: 'audio/wav' }),
+    referenceAudioText: 'A short transcript of the reference clip.',
+    onReferenceAudioChange: () => {},
+    onReferenceAudioTextChange: () => {},
+    onSpeakText: (text) => console.log('Speak with reference:', text),
+  },
+};
+
+export const TranscriptionError: Story = {
+  args: {
+    onSend: () => {},
+    modelLabel: 'Qwen3-30B-A3B-4bit',
+    transcriptionModels: [sttModel],
+    selectedTranscriptionModelId: sttModel.modelId,
+    voiceError: 'Transcription failed.',
+    onTranscribeAudio: async () => {
+      throw new Error('Transcription failed.');
+    },
   },
 };
 

@@ -22,8 +22,11 @@ import { TopologyGraph } from './components/topology/TopologyGraph';
 import { ConnectionBanner } from './components/status/ConnectionBanner';
 import { ToastContainer } from './components/status/ToastContainer';
 import { NetworkMesh } from './components/common/NetworkMesh';
+import { SceneBackdrop } from './components/common/SceneBackdrop';
+import { ShootingStars } from './components/common/ShootingStars';
 import { ObservabilityPanel } from './components/observability/ObservabilityPanel';
 import { SettingsPanel } from './components/layout/SettingsPanel';
+import { TelemetryConsentModal } from './components/layout/TelemetryConsentModal';
 import { ModelStorePage } from './components/pages/DownloadsPage';
 import { ChatView } from './components/pages/ChatView';
 import { OperatorPage } from './components/pages/OperatorPage';
@@ -35,6 +38,7 @@ import { chatActions } from './store/slices/chatSlice';
 import { useAppDispatch, useAppSelector } from './store/hooks';
 import { uiActions, type ObservabilityTab } from './store/slices/uiSlice';
 import { useSkulkTranslation, type SkulkTranslate } from './i18n/tolgee';
+import { modelSupportsTextChat } from './types/models';
 
 const Shell = styled.div`
   position: relative;
@@ -204,16 +208,21 @@ export function App() {
   const { t } = useSkulkTranslation();
   const {
     topology,
+    localNodeId,
     connected,
     downloads,
-    nodeDisk,
     instances,
     runners,
     nodeThunderbolt,
     nodeThunderboltBridge,
     nodeRdmaCtl,
+    nodeCapabilities,
+    nodeResources,
     thunderboltBridgeCycles,
   } = useClusterState();
+  const realtimeTranscriptionAvailable = Boolean(
+    localNodeId && nodeCapabilities[localNodeId]?.includes('stt.realtime'),
+  );
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Phone-width header: nav and icon actions collapse into the hamburger
   // sheet. The open flag resets when the viewport grows past the breakpoint
@@ -470,6 +479,7 @@ export function App() {
       // the backend read below only refines the in-process MLX/llama_cpp split.
       let engine: InstanceCardData['engine'] = instanceType === 'LlamaRpc' ? 'served' : 'mlx';
       let isEmbedding = false;
+      let supportsTextChat = true;
       let speculation: InstanceCardData['speculation'];
       if (runnerToShard) {
         const firstShard = Object.values(runnerToShard)[0];
@@ -481,6 +491,10 @@ export function App() {
         const mc = (shardInner?.modelCard ?? shardInner?.model_card) as Record<string, unknown> | undefined;
         const tasks = mc?.tasks as string[] | undefined;
         if (tasks?.includes('TextEmbedding')) isEmbedding = true;
+        supportsTextChat = modelSupportsTextChat({
+          tasks,
+          capabilities: mc?.capabilities as string[] | undefined,
+        });
 
         // Engine: every instance is wrapped as an MlxRing/Jaccl instance on the
         // wire, so the card's placement backends (not the wrapper) tell us which
@@ -557,6 +571,7 @@ export function App() {
         statusMessage: derived.message,
         loadProgress: derived.progress,
         isEmbedding,
+        supportsTextChat,
         speculation,
       });
     }
@@ -585,7 +600,15 @@ export function App() {
           field reads as visual noise over content on a small screen. The key
           remounts the canvas when the breakpoint flips so the particle field
           re-seeds at the new density. */}
-      <NetworkMesh key={isMobile ? 'mesh-mobile' : 'mesh-desktop'} radius={2.5} count={isMobile ? 14 : 43} linkDistance={430} />
+      {/* The night palette replaces the abstract mesh with the star field
+          crowning the viewport and fading out on the way down, so every
+          screen opens under the brand sky without a painting competing
+          with content. Palettes without a scene keep the mesh. */}
+      <SceneBackdrop />
+      <ShootingStars />
+      {activeTheme.colors.scene === 'none' && (
+        <NetworkMesh key={isMobile ? 'mesh-mobile' : 'mesh-desktop'} radius={2.5} count={isMobile ? 14 : 43} linkDistance={430} />
+      )}
       <Shell>
         <ConnectionBanner connected={connected} />
         <HeaderAnchor>
@@ -656,14 +679,17 @@ export function App() {
             {activeRoute === 'model-store' ? (
               <ModelStorePage
                 topology={topology}
+                nodeResources={nodeResources}
                 downloads={downloads}
-                nodeDisk={nodeDisk}
                 instances={instances}
                 runners={runners}
                 onChat={(modelId) => { dispatch(chatActions.selectModel(modelId)); setActiveRoute('chat'); }}
               />
             ) : activeRoute === 'chat' ? (
-              <ChatView readyInstances={instanceCards} />
+              <ChatView
+                readyInstances={instanceCards}
+                realtimeTranscriptionAvailable={realtimeTranscriptionAvailable}
+              />
             ) : activeRoute === 'operator' ? (
               <OperatorPage />
             ) : topology ? (
@@ -692,6 +718,7 @@ export function App() {
         <ToastContainer />
         <ObservabilityPanel />
         <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+        <TelemetryConsentModal />
       </Shell>
     </ThemeProvider>
   );

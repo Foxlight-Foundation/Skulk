@@ -6,14 +6,18 @@ from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from skulk.shared.models import model_cards
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
+    ModelTask,
     _gguf_shard_base,
     gguf_weight_siblings,
+    select_requested_gguf,
 )
+from skulk.shared.types.memory import Memory
 
 # --- GGUF binary header builders (for #327 header-parse tests) --------------
 #
@@ -105,6 +109,19 @@ def test_non_gguf_repo_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     assert gguf_weight_siblings(ModelId("some/mlx-repo")) == []
 
 
+def test_model_card_source_revision_requires_full_commit() -> None:
+    with pytest.raises(ValidationError):
+        ModelCard(
+            model_id=ModelId("some/model"),
+            storage_size=Memory.from_bytes(1),
+            n_layers=1,
+            hidden_size=1,
+            supports_tensor=False,
+            tasks=[ModelTask.TextGeneration],
+            source_revision="main",
+        )
+
+
 def test_shard_base_detection() -> None:
     assert _gguf_shard_base("model.gguf") is None
     assert _gguf_shard_base("model-00001-of-00003.gguf") == "model"
@@ -114,7 +131,7 @@ def test_shard_base_detection() -> None:
     )
 
 
-async def test_fetch_gguf_card_stamps_llama_cpp_backends(
+async def test_fetch_gguf_card_stamps_both_llama_engines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(model_cards, "model_info", _fake_model_info(["model-q4.gguf"]))
@@ -130,13 +147,79 @@ async def test_fetch_gguf_card_stamps_llama_cpp_backends(
     monkeypatch.setattr(model_cards, "fetch_config_data", _fake_config)
 
     card = await ModelCard.fetch_from_hf(ModelId("some/gguf-repo"))
+    # Both llama.cpp engines, served first (mirrors the bundled GGUF cards,
+    # #607): only llama_server pools multiple nodes via RPC, and a
+    # llama_cpp-only card would be silently ineligible for every multi-node
+    # GGUF placement.
     assert card.placement.compatible_backends == frozenset(
-        {"llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"}
+        {
+            "llama_server-vulkan",
+            "llama_server-rocm",
+            "llama_server-cuda",
+            "llama_server-cpu",
+            "llama_cpp-vulkan",
+            "llama_cpp-rocm",
+            "llama_cpp-cuda",
+            "llama_cpp-cpu",
+        }
     )
-    assert card.placement.backend_preference[0] == "llama_cpp-vulkan"
-    assert card.supports_tensor is False  # single-node engine
+    assert card.placement.backend_preference[0] == "llama_server-vulkan"
+    assert card.supports_tensor is False  # no tensor parallelism either way
     assert card.n_layers == 32 and card.hidden_size == 4096
     assert card.storage_size.in_bytes == 100  # the single selected gguf
+
+
+async def test_fetch_gguf_card_honors_requested_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested = "model-IQ3_XXS.gguf"
+    monkeypatch.setattr(
+        model_cards,
+        "model_info",
+        _fake_model_info(["model-Q4_K_M.gguf", requested]),
+    )
+
+    async def _fake_config(_model_id: object) -> object:
+        return SimpleNamespace(
+            layer_count=32,
+            hidden_size=4096,
+            num_key_value_heads=8,
+            max_position_embeddings=8192,
+        )
+
+    monkeypatch.setattr(model_cards, "fetch_config_data", _fake_config)
+
+    card = await ModelCard.fetch_from_hf(
+        ModelId("some/multi-quant-repo"),
+        gguf_file=requested,
+    )
+
+    assert card.gguf_file == requested
+    assert card.quantization == "IQ3"
+
+
+def test_requested_gguf_must_exist_in_repository() -> None:
+    with pytest.raises(ValueError, match="was not found"):
+        select_requested_gguf(
+            "model-IQ3_XXS.gguf",
+            [("model-Q4_K_M.gguf", 100)],
+        )
+
+
+def test_requested_sharded_gguf_uses_first_shard_as_entrypoint() -> None:
+    files = [
+        ("weights/model-IQ3_XXS-00001-of-00002.gguf", 100),
+        ("weights/model-IQ3_XXS-00002-of-00002.gguf", 120),
+        ("weights/model-Q4_K_M.gguf", 200),
+    ]
+
+    assert (
+        select_requested_gguf(
+            "weights/model-IQ3_XXS-00002-of-00002.gguf",
+            files,
+        )
+        == "weights/model-IQ3_XXS-00001-of-00002.gguf"
+    )
 
 
 async def test_fetch_gguf_card_reads_header_when_no_config(
@@ -409,3 +492,16 @@ def test_served_spec_n_max_must_be_positive() -> None:
     for bad in (0, -1):
         with pytest.raises(ValidationError):
             RuntimeCapabilityCardConfig(served_spec_n_max=bad)
+
+
+def test_default_gguf_selection_never_picks_companion_artifacts() -> None:
+    """A repo default must not stage a drafter as the model (the dspark trap)."""
+    from skulk.shared.models.model_cards import select_preferred_gguf
+
+    files = [
+        ("dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf", 10),
+        ("UD-Q2_K_XL/DeepSeek-V4-Flash-0731-UD-Q2_K_XL-00001-of-00003.gguf", 50),
+    ]
+    assert "dspark" not in select_preferred_gguf(files)
+    # A drafter-only repo (a published draft companion) still resolves.
+    assert select_preferred_gguf([("gemma-mtp-draft-Q8_0.gguf", 1)])

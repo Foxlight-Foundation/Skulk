@@ -6,6 +6,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from skulk.api.data_plane import DataPlaneObserver
 from skulk.api.main import API
 from skulk.shared.types.common import CommandId
 from skulk.utils.channels import Sender
@@ -20,9 +21,33 @@ def _make_api() -> Any:
     api._text_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._image_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._embedding_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._audio_speech_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._audio_transcription_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._realtime_audio_transcription_commands = set()  # pyright: ignore[reportPrivateUsage]
+    api._speech_media_commands = set()  # pyright: ignore[reportPrivateUsage]
+    api._speech_media_targets = {}  # pyright: ignore[reportPrivateUsage]
+    api._transcription_media_targets = {}  # pyright: ignore[reportPrivateUsage]
+    api._pending_speech_media = {}  # pyright: ignore[reportPrivateUsage]
+    api._pending_speech_media_bytes = 0  # pyright: ignore[reportPrivateUsage]
+    api._speech_media_packet_sender = None  # pyright: ignore[reportPrivateUsage]
+    api._pending_vision_media = {}  # pyright: ignore[reportPrivateUsage]
+    api._pending_vision_media_bytes = 0  # pyright: ignore[reportPrivateUsage]
+    api._active_vision_media_bytes = {}  # pyright: ignore[reportPrivateUsage]
+    api._active_vision_media_total_bytes = 0  # pyright: ignore[reportPrivateUsage]
+    api._vision_media_commands = set()  # pyright: ignore[reportPrivateUsage]
+    api._vision_media_targets = {}  # pyright: ignore[reportPrivateUsage]
+    api._vision_media_pending_acks = {}  # pyright: ignore[reportPrivateUsage]
+    api._vision_media_ack_deadlines = {}  # pyright: ignore[reportPrivateUsage]
+    api._vision_media_models = {}  # pyright: ignore[reportPrivateUsage]
+    api._vision_media_failures = {}  # pyright: ignore[reportPrivateUsage]
+    api._vision_media_packet_sender = None  # pyright: ignore[reportPrivateUsage]
     api._cancelled_command_ids = set()  # pyright: ignore[reportPrivateUsage]
     api._chunk_reorder = {}  # pyright: ignore[reportPrivateUsage]
     api._data_dedup_cursor = {}  # pyright: ignore[reportPrivateUsage]
+    api._data_plane_observer = DataPlaneObserver(  # pyright: ignore[reportPrivateUsage]
+        transport="disabled",
+        reorder_buffer_enabled=True,
+    )
     api._send = AsyncMock()  # pyright: ignore[reportPrivateUsage]
     api._setup_exception_handlers()  # pyright: ignore[reportPrivateUsage]
     app.post("/v1/cancel/{command_id}")(api.cancel_command)
@@ -72,6 +97,48 @@ def test_cancel_active_image_generation() -> None:
     cid = CommandId("img-cmd-456")
     sender = MagicMock()
     api._image_generation_queues[cid] = sender
+
+    response = client.post(f"/v1/cancel/{cid}")
+    assert response.status_code == 200
+    data: dict[str, Any] = response.json()
+    assert data["message"] == "Command cancelled."
+    assert data["command_id"] == str(cid)
+    sender.close.assert_called_once()
+    api._send.assert_called_once()
+    assert cid in api._cancelled_command_ids
+    task_cancelled = api._send.call_args[0][0]
+    assert task_cancelled.cancelled_command_id == cid
+
+
+def test_cancel_active_audio_speech() -> None:
+    """Cancel an active speech synthesis command: returns 200 and closes sender."""
+    api = _make_api()
+    client = TestClient(api.app)
+
+    cid = CommandId("speech-cmd-789")
+    sender = MagicMock()
+    api._audio_speech_queues[cid] = sender
+
+    response = client.post(f"/v1/cancel/{cid}")
+    assert response.status_code == 200
+    data: dict[str, Any] = response.json()
+    assert data["message"] == "Command cancelled."
+    assert data["command_id"] == str(cid)
+    sender.close.assert_called_once()
+    api._send.assert_called_once()
+    assert cid in api._cancelled_command_ids
+    task_cancelled = api._send.call_args[0][0]
+    assert task_cancelled.cancelled_command_id == cid
+
+
+def test_cancel_active_audio_transcription() -> None:
+    """Cancel an active speech transcription command."""
+    api = _make_api()
+    client = TestClient(api.app)
+
+    cid = CommandId("transcription-cmd-789")
+    sender = MagicMock()
+    api._audio_transcription_queues[cid] = sender
 
     response = client.post(f"/v1/cancel/{cid}")
     assert response.status_code == 200

@@ -32,14 +32,17 @@ import signal
 import socket
 import subprocess
 import tempfile
+import threading
 import time
+from collections import deque
 from pathlib import Path
-from typing import Any, Final, Literal, NamedTuple
+from typing import Any, Final, Literal, NamedTuple, cast
 
 import httpx
-from anyio import ClosedResourceError, EndOfStream, WouldBlock
 
+from skulk.api.types import GenerationStats
 from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
+from skulk.shared.constants import MAX_OUTPUT_TOKENS
 from skulk.shared.models.model_cards import OutputParserType
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
@@ -50,10 +53,9 @@ from skulk.shared.types.events import (
     TaskAcknowledged,
     TaskStatusUpdated,
 )
+from skulk.shared.types.memory import Memory
 from skulk.shared.types.tasks import (
-    CANCEL_ALL_TASKS,
     LoadModel,
-    Shutdown,
     Task,
     TaskId,
     TaskStatus,
@@ -64,7 +66,6 @@ from skulk.shared.types.worker.runners import (
     RunnerIdle,
     RunnerLoading,
     RunnerReady,
-    RunnerRunning,
     RunnerShutdown,
     RunnerShuttingDown,
     RunnerStatus,
@@ -72,6 +73,13 @@ from skulk.shared.types.worker.runners import (
 from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
+from skulk.worker.runner.generation_stats import (
+    StreamStatsClock,
+    blocking_call_stats,
+    served_stream_stats,
+    stats_from_llama_server_timings,
+    subprocess_peak_memory,
+)
 from skulk.worker.runner.llama_cpp.runner import (
     generation_kwargs,
     map_finish_reason,
@@ -84,21 +92,25 @@ from skulk.worker.runner.llama_cpp.runner import (
 from skulk.worker.runner.llama_server.channel_text_parser import (
     GemmaChannelTextParser,
 )
+from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 
 # Card ``served_spec_type`` value -> the ``llama-server --spec-type`` token.
-# ``draft_mtp`` uses the model's own built-in MTP heads (no draft model needed).
+# ``draft_mtp`` usually uses the model's own built-in MTP heads; a separate
+# draft is optional (Gemma 4 supplies its assistant as one).
 _SPEC_TYPE_FLAG: Final[dict[str, str]] = {
     "draft_mtp": "draft-mtp",
     "draft_eagle3": "draft-eagle3",
     "draft_simple": "draft-simple",
+    "draft_dflash": "draft-dflash",
     "ngram": "ngram-cache",
 }
 
-# Served spec modes that REQUIRE a separate `--model-draft` GGUF. ``draft_mtp`` is
-# optional (Qwen/DeepSeek/GLM bake the heads into the base GGUF; Gemma 4 instead
-# supplies its assistant as a draft), and ``ngram`` needs no model at all.
+# Served spec modes that REQUIRE a separate ``--model-draft`` GGUF (DFlash's
+# block-parallel drafter always ships separately). For ``draft_mtp`` a draft is
+# optional (Qwen/DeepSeek/GLM bake the heads into the base GGUF; Gemma 4
+# instead supplies its assistant as one), and ``ngram`` needs no model at all.
 _DRAFT_MODEL_REQUIRED: Final[frozenset[str]] = frozenset(
-    {"draft_simple", "draft_eagle3"}
+    {"draft_simple", "draft_eagle3", "draft_dflash"}
 )
 
 
@@ -119,35 +131,223 @@ def _force_no_spec() -> bool:
     )
 
 
-def _draft_model_args(runtime: Any, spec_type: str) -> list[str]:
+_LLAMA_SERVER_PARALLEL_ENV: Final = "SKULK_LLAMA_SERVER_PARALLEL"
+# The served engine exists to batch concurrent requests; shipping it serial made
+# fresh installs behave materially worse than the fleet used to qualify them.
+# Sixteen is the exercised fleet setting. A unified KV buffer keeps every slot's
+# advertised context window truthful without allocating N private caches; users
+# dominated by near-window prompts can still opt back to serial explicitly.
+_DEFAULT_LLAMA_SERVER_PARALLEL: Final = 16
+# An omitted OpenAI ``max_tokens`` value otherwise lets llama-server consume the
+# remainder of the shared KV pool. Bound it to the same normal-generation width
+# as Skulk's MLX path so aggregate admission has a finite reservation and one
+# unconstrained request cannot silently monopolize every concurrent slot.
+_LLAMA_SERVER_MAX_OUTPUT_TOKENS: Final = MAX_OUTPUT_TOKENS
+
+
+def _llama_server_parallel() -> int:
+    """Return the operator-declared concurrent-generation slot count.
+
+    The declared value is honored EXACTLY (#689). It used to be capped to
+    ``floor(n_ctx / 8192)`` because llama.cpp sliced the one
+    ``-c`` window into fixed per-slot shares, so a high count silently shrank
+    every request's real window to ``n_ctx / N`` while Skulk's API kept admitting
+    against the full one. That slicing is not a llama.cpp law, it is a
+    consequence of how the server is launched: ``llama_context`` sets
+    ``n_ctx_seq = n_ctx`` under a unified KV buffer and only falls back to
+    ``n_ctx / n_seq_max`` without one (``src/llama-context.cpp``). The runner now
+    passes ``--kv-unified`` whenever it asks for more than one slot, so each slot
+    sees the whole window, the stamped ``context_token_limit`` stays the truth,
+    and there is nothing left for a cap to protect.
+
+    Under a unified buffer the slots draw from ONE pool of ``n_ctx`` tokens
+    rather than N private slices. The runner therefore counts each exact
+    rendered input and admits prompt-plus-output reservations in FIFO order
+    only while their aggregate fits the pool. The shipped 16-slot default is a
+    real concurrency ceiling without making aggregate exhaustion possible;
+    setting the override to ``1`` remains an explicit serial-isolation option.
+
+    Returns:
+        The declared slot count, or ``16`` when unset. An unparseable or
+        below-one value also yields ``16``, but is warned about first: an
+        operator who declared something meant it, so a rejected declaration is
+        never applied silently. An absent declaration is not a mistake and
+        stays quiet.
+    """
+    raw = os.environ.get(_LLAMA_SERVER_PARALLEL_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_LLAMA_SERVER_PARALLEL
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            f"{_LLAMA_SERVER_PARALLEL_ENV}={raw!r} is not an integer; "
+            f"using {_DEFAULT_LLAMA_SERVER_PARALLEL}"
+        )
+        return _DEFAULT_LLAMA_SERVER_PARALLEL
+    if value < 1:
+        logger.warning(
+            f"{_LLAMA_SERVER_PARALLEL_ENV}={value} is below 1; "
+            f"using {_DEFAULT_LLAMA_SERVER_PARALLEL}"
+        )
+        return _DEFAULT_LLAMA_SERVER_PARALLEL
+    return value
+
+
+def _request_context_reservation(
+    input_tokens: int,
+    requested_max_output_tokens: int | None,
+    context_pool_tokens: int,
+) -> tuple[int, int]:
+    """Return the bounded output limit and shared-KV reservation for a request.
+
+    ``llama-server``'s unified KV cache keeps each slot's per-request window
+    truthful, but all slots consume cells from one fixed pool. The runner counts
+    the exact rendered input through llama-server's token-count endpoint and
+    reserves ``input + max_output`` before starting generation. This helper
+    normalizes that reservation:
+
+    * an omitted output limit becomes the shipped 4096-token bound;
+    * an over-window request reserves the whole pool and then runs alone so the
+      server can return its normal context error;
+    * a valid bounded request reserves no more than the pool.
+
+    Args:
+        input_tokens: Exact prompt token count reported by llama-server.
+        requested_max_output_tokens: Caller-supplied output bound, when present.
+        context_pool_tokens: Total unified KV cells available to all slots.
+
+    Returns:
+        ``(effective_max_output_tokens, reservation_tokens)``.
+    """
+    if input_tokens < 0:
+        raise ValueError("input token count cannot be negative")
+    if context_pool_tokens < 1:
+        raise ValueError("context pool must contain at least one token")
+    available_output = max(1, context_pool_tokens - input_tokens)
+    effective_max_output = (
+        requested_max_output_tokens
+        if requested_max_output_tokens is not None
+        else min(_LLAMA_SERVER_MAX_OUTPUT_TOKENS, available_output)
+    )
+    reservation = min(
+        context_pool_tokens,
+        input_tokens + max(1, effective_max_output),
+    )
+    return effective_max_output, reservation
+
+
+def _slot_server_args(max_concurrency: int) -> list[str]:
+    """llama-server flags that govern slot count and how slots share the window.
+
+    Returns ``--parallel N``, plus ``--kv-unified`` above one slot (#689).
+
+    The unified flag is what makes concurrency honest. llama.cpp sets a slot's
+    context to the whole ``-c`` window under a unified KV buffer and to
+    ``n_ctx / n_seq_max`` without one (``src/llama-context.cpp``: ``n_ctx_seq``),
+    and the server reads exactly that for each slot
+    (``tools/server/server-context.cpp``: ``llama_n_ctx_seq``). So without it,
+    asking for N slots silently reduces every request's real window to a
+    fraction of the ``context_token_limit`` that placement stamped and the API
+    admits against, and a long prompt truncates mid-generation instead of being
+    refused. It costs no extra memory: the cache allocates
+    ``n_ctx_seq * n_stream`` cells and ``n_stream`` collapses to 1 when unified,
+    so the same buffer is shared rather than sliced.
+
+    Passed only above one slot, so an explicit serial override keeps the
+    validated single-slot command line used by draft-mtp speculation and the
+    RPC driver.
+
+    Args:
+        max_concurrency: Effective slot count from the shipped default or an
+            operator override.
+
+    Returns:
+        The flags to splice into the llama-server command line.
+    """
+    args = ["--parallel", str(max_concurrency)]
+    if max_concurrency > 1:
+        args.append("--kv-unified")
+    return args
+
+
+def _draft_model_args(
+    runtime: Any,
+    spec_type: str,
+    *,
+    base_model_id: ModelId | None = None,
+    source_revision: str | None = None,
+) -> list[str] | None:
     """Resolve the ``--model-draft`` args for a served spec mode.
 
     When the card declares a draft GGUF (``served_spec_draft_repo`` +
     ``served_spec_draft_file``), resolve its on-disk path and return
     ``["--model-draft", path]`` (Gemma 4 draft_mtp, draft_simple, draft_eagle3).
-    Modes in ``_DRAFT_MODEL_REQUIRED`` raise loudly when no draft is configured;
-    ``draft_mtp`` without a draft is fine (built-in heads), and ``ngram`` needs
-    none. Returns ``[]`` when no draft applies. Pure except for the on-disk path
-    resolution, so the validation branches are unit-testable.
+
+    Returns ``None`` when the card DECLARES a draft but it cannot be provided
+    (missing ``served_spec_draft_file``, or the draft GGUF is not on disk): the
+    draft is best-effort at download (a failed cross-repo co-fetch is swallowed,
+    #574), so a declared-but-absent draft must degrade to serving WITHOUT
+    speculation rather than crashing the runner. The caller drops ``--spec-type``
+    entirely in that case, since a draft-backed mode without its draft is not a
+    valid llama-server invocation.
+
+    Returns ``[]`` when no draft applies (``draft_mtp`` with built-in heads,
+    ``ngram``); the caller still passes ``--spec-type`` for those. Modes in
+    ``_DRAFT_MODEL_REQUIRED`` with no draft declared at all are a card
+    misconfiguration and still raise loudly. Pure except for the on-disk path
+    resolution, so the validation branches are unit-testable. A draft sharing
+    the base repository inherits the base card's immutable source revision;
+    separate-repository drafts retain their own unpinned lookup contract.
+
+    Args:
+        runtime: Resolved runtime capability section from the base model card.
+        spec_type: Served speculative-decoding mode.
+        base_model_id: Base repository identifier, used to identify a bundled
+            same-repository draft.
+        source_revision: Immutable base repository revision, when pinned.
+
+    Returns:
+        ``--model-draft`` arguments, an empty list for draft-free modes, or
+        ``None`` when a declared best-effort draft is unavailable.
     """
     draft_repo = getattr(runtime, "served_spec_draft_repo", None) if runtime else None
     draft_file = getattr(runtime, "served_spec_draft_file", None) if runtime else None
-    if draft_repo:
+    # ngram-cache speculation uses no `--model-draft`, so a draft repo on an
+    # ngram card is spurious: ignore it and keep `--spec-type ngram-cache`
+    # rather than dropping speculation for a draft that mode never consults.
+    if draft_repo and spec_type != "ngram":
         if not draft_file:
-            raise RuntimeError(
-                "served_spec_draft_repo is set but served_spec_draft_file is "
-                "missing; both are required to pass --model-draft"
+            logger.warning(
+                f"Card declares served_spec_draft_repo {draft_repo!r} without "
+                "served_spec_draft_file; serving without speculation."
             )
+            return None
         from skulk.download.download_utils import build_model_path
 
-        draft_dir = build_model_path(ModelId(draft_repo))
+        draft_revision = (
+            source_revision
+            if base_model_id is not None and draft_repo == str(base_model_id)
+            else None
+        )
+        try:
+            draft_dir = build_model_path(ModelId(draft_repo), draft_revision)
+        except FileNotFoundError:
+            logger.warning(
+                f"Served {spec_type} draft repo {draft_repo!r} is not on disk; "
+                "serving without speculation (the draft is a best-effort "
+                "companion, so its absence must not fail the model)."
+            )
+            return None
         draft_path = (draft_dir / draft_file).resolve()
         if not draft_path.is_file() or not draft_path.is_relative_to(
             draft_dir.resolve()
         ):
-            raise RuntimeError(
-                f"served draft GGUF {draft_file!r} not found under {draft_dir}"
+            logger.warning(
+                f"Served draft GGUF {draft_file!r} not found under {draft_dir}; "
+                "serving without speculation."
             )
+            return None
         return ["--model-draft", str(draft_path)]
     if spec_type in _DRAFT_MODEL_REQUIRED:
         raise RuntimeError(
@@ -218,6 +418,17 @@ class _StreamDelta(NamedTuple):
     content: str
     finish: Literal["stop", "length", "content_filter"] | None
     done: bool  # the terminal ``data: [DONE]`` sentinel
+    # llama-server's native phase measurements, present on the final chunk
+    # when the request asked for them (timings_per_token); source of the
+    # engine-exact GenerationStats (#532).
+    timings: dict[str, object] | None = None
+
+
+class _ContextWaiter(NamedTuple):
+    """One FIFO admission request against llama-server's shared KV pool."""
+
+    task_id: TaskId
+    reservation_tokens: int
 
 
 def _gpu_layers_for_backend(resolved_backend: str | None) -> str:
@@ -259,16 +470,27 @@ def _parse_sse_line(line: str) -> _StreamDelta | None:
         chunk = json.loads(data)
     except json.JSONDecodeError:
         return None
-    choices = chunk.get("choices") or []
-    if not choices:
+    if not isinstance(chunk, dict):
+        return None
+    choices = chunk.get("choices")
+    if (
+        not isinstance(choices, list)
+        or not choices
+        or not isinstance(choices[0], dict)
+    ):
         return None
     choice = choices[0]
-    delta = choice.get("delta") or {}
+    raw_delta = choice.get("delta")
+    # Non-dict shapes are skipped (the docstring's malformed-payload promise),
+    # not raised: one stray line must never break the whole stream.
+    delta = raw_delta if isinstance(raw_delta, dict) else {}
+    raw_timings = chunk.get("timings")
     return _StreamDelta(
         reasoning=delta.get("reasoning_content") or "",
         content=delta.get("content") or "",
         finish=map_finish_reason(choice.get("finish_reason")),
         done=False,
+        timings=raw_timings if isinstance(raw_timings, dict) else None,
     )
 
 
@@ -288,7 +510,7 @@ def _set_pdeathsig() -> None:
         pass
 
 
-class Runner:
+class Runner(ServedConcurrentDispatch):
     """Single-node served-backend runner that proxies an external ``llama-server``.
 
     Lifecycle mirrors the in-process llama.cpp runner: it skips the ring
@@ -347,6 +569,35 @@ class Runner:
         # itself (llama-server can't), splitting reasoning from the answer.
         self._uses_channel_parser: bool = False
         self.current_status: RunnerStatus = RunnerIdle()
+        self._serving_context_tokens = serving_n_ctx(
+            self.context_token_limit, logits_all=False
+        )
+        self._context_budget_condition = threading.Condition()
+        self._reserved_context_tokens = 0
+        self._context_active_requests = 0
+        self._context_waiters: deque[_ContextWaiter] = deque()
+        # The declared slot count is honored exactly; --kv-unified (added in
+        # _spawn_server) keeps every slot's context at the full stamped window,
+        # while the weighted gate below prevents their aggregate reservations
+        # from exhausting the one shared pool.
+        self._init_concurrent_dispatch(_llama_server_parallel(), "llama-gen")
+        if self._max_concurrency > 1:
+            # The shipped default uses the shared buffer, so normal startup
+            # records the trade without presenting the supported default as an
+            # operator error. Explicit non-default concurrency remains visible
+            # at warning level because it changes the exercised admission width.
+            raw_parallel = os.environ.get(_LLAMA_SERVER_PARALLEL_ENV, "").strip()
+            log_slot_contract = (
+                logger.warning
+                if raw_parallel and raw_parallel != str(_DEFAULT_LLAMA_SERVER_PARALLEL)
+                else logger.info
+            )
+            log_slot_contract(
+                f"serving up to {self._max_concurrency} concurrent generations "
+                f"from one shared {self._serving_context_tokens}-token KV pool "
+                f"(set {_LLAMA_SERVER_PARALLEL_ENV}=1 for serial service); "
+                "aggregate token reservations queue before the pool can be exhausted"
+            )
         logger.info("llama-server runner created")
         self.update_status(RunnerIdle())
 
@@ -374,61 +625,12 @@ class Runner:
         )
         self.event_sender.send(TaskAcknowledged(task_id=task.task_id))
 
-    def _drain_cancellations(self) -> None:
-        while True:
-            try:
-                cancelled = self.cancel_receiver.receive_nowait()
-            except WouldBlock:
-                break
-            self.cancelled_tasks.add(cancelled)
-
-    def _is_cancelled(self, task_id: TaskId) -> bool:
-        self._drain_cancellations()
-        return (
-            task_id in self.cancelled_tasks or CANCEL_ALL_TASKS in self.cancelled_tasks
-        )
-
     def main(self) -> None:
-        try:
-            with self.task_receiver as tasks:
-                while True:
-                    try:
-                        task = tasks.receive_timeout(_LIVENESS_POLL_S)
-                    except WouldBlock:
-                        # No task within the poll window: verify the server
-                        # subprocess is still alive. Without this a llama-server
-                        # that dies BETWEEN requests (e.g. SIGABRT when an RPC
-                        # donor vanishes) leaves the runner gossiping Ready
-                        # forever while every future request 500s.
-                        self._ensure_server_alive()
-                        continue
-                    except (EndOfStream, ClosedResourceError):
-                        # receive_timeout raises ClosedResourceError when the
-                        # sender closed before the end-of-stream sentinel was
-                        # drained (the shared closed flag is checked first);
-                        # treat it like EndOfStream: clean loop exit.
-                        break
-                    if task.task_id in self.seen:
-                        logger.warning("repeat task - potential error")
-                    self.seen.add(task.task_id)
-                    self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
-                    self.send_task_status(task, TaskStatus.Running)
-                    self.handle_task(task)
-                    was_cancelled = (
-                        task.task_id in self.cancelled_tasks
-                        or CANCEL_ALL_TASKS in self.cancelled_tasks
-                    )
-                    self.send_task_status(
-                        task,
-                        TaskStatus.Cancelled if was_cancelled else TaskStatus.Complete,
-                    )
-                    self.update_status(self.current_status)
-                    if isinstance(self.current_status, RunnerShutdown):
-                        break
-        finally:
-            # Never leave the server subprocess running past the runner loop, even
-            # on an unexpected exit (PR_SET_PDEATHSIG is the SIGKILL backstop).
-            self._teardown_server()
+        # Concurrent dispatch: keeps up to SKULK_LLAMA_SERVER_PARALLEL generations
+        # in flight so llama-server's continuous batching engages (the shared loop
+        # streams each request on its own thread). LoadModel / Shutdown run inline
+        # on the dispatch thread. Logic lives in ServedConcurrentDispatch.
+        self.run_dispatch_loop()
 
     def _ensure_server_alive(self) -> None:
         """Raise if the spawned llama-server exited behind our back.
@@ -454,27 +656,12 @@ class Runner:
             )
 
     def handle_task(self, task: Task) -> None:
+        # TextGeneration and Shutdown are handled directly by the concurrent
+        # dispatch loop (ServedConcurrentDispatch); this serves the inline
+        # lifecycle path (LoadModel).
         match task:
             case LoadModel() if isinstance(self.current_status, RunnerIdle):
                 self._load_model(task)
-            case TextGeneration() if isinstance(self.current_status, RunnerReady):
-                self._generate(task)
-            case Shutdown():
-                logger.info("llama-server runner shutting down")
-                record_runner_phase(
-                    "shutdown_cleanup",
-                    event="runner_shutdown_requested",
-                    task_id=task.task_id,
-                )
-                self.update_status(RunnerShuttingDown())
-                self.acknowledge_task(task)
-                self._teardown_server()
-                record_runner_phase(
-                    "shutdown_cleanup",
-                    event="server_teardown_complete",
-                    task_id=task.task_id,
-                )
-                self.current_status = RunnerShutdown()
             case _:
                 raise RuntimeError(
                     f"llama-server runner received unsupported task "
@@ -492,7 +679,7 @@ class Runner:
 
         card = self.shard_metadata.model_card
         model_id = card.model_id
-        model_dir = build_model_path(ModelId(model_id))
+        model_dir = build_model_path(ModelId(model_id), card.source_revision)
         # Load the file the card pinned (the selected quant); fall back to scanning
         # so download / sizing / loading stay in agreement. Reject an absolute or
         # ``..`` path that escapes the model dir.
@@ -521,13 +708,21 @@ class Runner:
         reasoning_format_none = self._uses_channel_parser or not (
             _model_declares_reasoning(card)
         )
-        n_ctx = serving_n_ctx(self.context_token_limit, logits_all=False)
+        n_ctx = self._serving_context_tokens
         try:
             with runner_phase(
                 "load_model",
                 detail="spawn_llama_server",
                 task_id=task.task_id,
-                attrs={"gguf_file": gguf_path.name, "n_ctx": n_ctx},
+                attrs={
+                    "gguf_file": gguf_path.name,
+                    "n_ctx": n_ctx,
+                    "parallel": self._max_concurrency,
+                    # Every slot sees the whole window: above one slot the
+                    # server runs with --kv-unified, and at one slot there is
+                    # nothing to divide.
+                    "slot_context_tokens": n_ctx,
+                },
             ):
                 self._spawn_server(
                     gguf_path, n_ctx, card.runtime, reasoning_format_none
@@ -573,6 +768,7 @@ class Runner:
             n_gpu_layers,
             "-c",
             str(n_ctx),
+            *_slot_server_args(self._max_concurrency),
             "--host",
             "127.0.0.1",
             "--port",
@@ -614,11 +810,28 @@ class Runner:
                     "speculative decoding"
                 )
             else:
-                cmd += ["--spec-type", flag]
-                n_max = getattr(runtime, "served_spec_n_max", None)
-                if n_max is not None:
-                    cmd += ["--spec-draft-n-max", str(n_max)]
-                cmd += _draft_model_args(runtime, spec_type)
+                # Resolve the draft FIRST: a card that declares a draft it
+                # cannot provide (the draft is a best-effort companion, so a
+                # failed cross-repo co-fetch is swallowed and the model is still
+                # marked complete, #574) degrades to plain decode rather than
+                # crashing. --spec-type is dropped too, since a draft-backed mode
+                # without its draft is not a valid llama-server invocation.
+                # None => the declared draft is unavailable; _draft_model_args
+                # has already logged the specific reason, so drop the spec
+                # silently (serve plain decode). Otherwise pass the spec + draft.
+                card = self.shard_metadata.model_card
+                draft_args = _draft_model_args(
+                    runtime,
+                    spec_type,
+                    base_model_id=card.model_id,
+                    source_revision=card.source_revision,
+                )
+                if draft_args is not None:
+                    cmd += ["--spec-type", flag]
+                    n_max = getattr(runtime, "served_spec_n_max", None)
+                    if n_max is not None:
+                        cmd += ["--spec-draft-n-max", str(n_max)]
+                    cmd += draft_args
 
         self.server_log_path = (
             Path(tempfile.gettempdir()) / f"skulk-llama-server-{self.runner_id}.log"
@@ -711,10 +924,106 @@ class Runner:
 
     # --- generation: proxy the server's OpenAI streaming API ------------------
 
+    def _count_input_tokens(self, body: dict[str, Any]) -> int | None:
+        """Ask llama-server to count the exact rendered chat input.
+
+        The endpoint applies the same model chat template and tokenizer as the
+        subsequent completion, including tools and thinking controls. Returning
+        ``None`` is a fail-safe signal: callers reserve the entire shared pool
+        and run alone rather than guessing low and risking server termination.
+
+        Args:
+            body: OpenAI chat-completion body before stream-only fields.
+
+        Returns:
+            Exact input-token count, or ``None`` if the server cannot provide it.
+        """
+        assert self.base_url is not None
+        try:
+            response = httpx.post(
+                f"{self.base_url}/v1/chat/completions/input_tokens",
+                json=body,
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            raw_count = response.json().get("input_tokens")
+            if isinstance(raw_count, int) and not isinstance(raw_count, bool):
+                return max(0, raw_count)
+            raise ValueError("token-count response omitted integer input_tokens")
+        except Exception as exc:  # noqa: BLE001 - safe full-pool fallback
+            logger.opt(exception=exc).warning(
+                "llama-server input-token count unavailable; reserving the "
+                "whole shared KV pool for this request"
+            )
+            return None
+
+    def _acquire_context_budget(self, task_id: TaskId, reservation: int) -> bool:
+        """Wait in FIFO order until ``reservation`` fits the shared KV pool.
+
+        Args:
+            task_id: Generation waiting for admission.
+            reservation: Exact prompt plus bounded maximum output tokens.
+
+        Returns:
+            ``True`` after reserving the budget, or ``False`` if cancelled while
+            queued.
+        """
+        reservation = min(max(1, reservation), self._serving_context_tokens)
+        waiter = _ContextWaiter(task_id, reservation)
+        admitted = False
+        with self._context_budget_condition:
+            self._context_waiters.append(waiter)
+            self._context_budget_condition.notify_all()
+        try:
+            while True:
+                if self._is_cancelled(task_id):
+                    return False
+                with self._context_budget_condition:
+                    is_next = (
+                        bool(self._context_waiters)
+                        and self._context_waiters[0] == waiter
+                    )
+                    if (
+                        is_next
+                        and self._reserved_context_tokens + reservation
+                        <= self._serving_context_tokens
+                    ):
+                        self._context_waiters.popleft()
+                        self._reserved_context_tokens += reservation
+                        self._context_active_requests += 1
+                        active_requests = self._context_active_requests
+                        admitted = True
+                        self._context_budget_condition.notify_all()
+                        break
+                    self._context_budget_condition.wait(timeout=_LIVENESS_POLL_S)
+                self._ensure_server_alive()
+        finally:
+            if not admitted:
+                with self._context_budget_condition:
+                    with contextlib.suppress(ValueError):
+                        self._context_waiters.remove(waiter)
+                    self._context_budget_condition.notify_all()
+        # Refine the generic submitted-task stamp: only requests past this gate
+        # actively compete inside llama-server.
+        self._set_admission_concurrency(task_id, active_requests)
+        return True
+
+    def _release_context_budget(self, reservation: int) -> None:
+        """Release one request's shared-KV reservation and wake queued work."""
+        reservation = min(max(1, reservation), self._serving_context_tokens)
+        with self._context_budget_condition:
+            self._reserved_context_tokens = max(
+                0, self._reserved_context_tokens - reservation
+            )
+            self._context_active_requests = max(0, self._context_active_requests - 1)
+            self._context_budget_condition.notify_all()
+
     def _generate(self, task: Task) -> None:
+        # Runs on a pool worker thread. Runner status (Running/Ready) is owned by
+        # the dispatch loop's in-flight counter, and the task was already
+        # acknowledged at acceptance in the loop (before backpressure), so neither
+        # is touched here.
         assert isinstance(task, TextGeneration)
-        self.update_status(RunnerRunning())
-        self.acknowledge_task(task)
         assert self.base_url is not None
 
         model_id = self.shard_metadata.model_card.model_id
@@ -725,6 +1034,29 @@ class Runner:
         # llama-server. Without this a reasoning model thinks on every request and
         # can return empty content under a bounded budget (#428/#420).
         body.update(reasoning_request_overrides(task.task_params))
+        # Tool definitions change the rendered prompt, so include them before the
+        # exact token-count request. _generate_with_tools sets the same fields
+        # again before the real completion for local clarity.
+        if task.task_params.tools:
+            body["tools"] = task.task_params.tools
+            tool_choice = getattr(task.task_params, "tool_choice", None)
+            if tool_choice is not None:
+                body["tool_choice"] = tool_choice
+
+        input_tokens = self._count_input_tokens(body)
+        if input_tokens is None:
+            reservation = self._serving_context_tokens
+            if "max_tokens" not in body:
+                body["max_tokens"] = _LLAMA_SERVER_MAX_OUTPUT_TOKENS
+        else:
+            effective_max_output, reservation = _request_context_reservation(
+                input_tokens,
+                task.task_params.max_output_tokens,
+                self._serving_context_tokens,
+            )
+            body["max_tokens"] = effective_max_output
+        if not self._acquire_context_budget(task.task_id, reservation):
+            return
 
         record_runner_phase(
             "task_submission",
@@ -734,58 +1066,62 @@ class Runner:
             attrs={"tools": bool(task.task_params.tools)},
         )
         try:
-            # Per-token logprobs are not wired over the SSE proxy yet. Fail loud
-            # rather than return a successful response with logprobs silently
-            # missing, matching the in-process runner's #385 no-silent-empty
-            # contract (the raise surfaces as an ErrorChunk below).
-            if wants_logprobs(task.task_params.logprobs, task.task_params.top_logprobs):
-                body.pop("logprobs", None)
-                body.pop("top_logprobs", None)
-                raise RuntimeError(
-                    "Per-token logprobs are not supported on the served "
-                    "(llama_server) engine: the OpenAI SSE proxy does not surface "
-                    "them. Retry without logprobs/top_logprobs."
+            try:
+                # Per-token logprobs are not wired over the SSE proxy yet. Fail loud
+                # rather than return a successful response with logprobs silently
+                # missing, matching the in-process runner's #385 no-silent-empty
+                # contract (the raise surfaces as an ErrorChunk below).
+                if wants_logprobs(
+                    task.task_params.logprobs, task.task_params.top_logprobs
+                ):
+                    body.pop("logprobs", None)
+                    body.pop("top_logprobs", None)
+                    raise RuntimeError(
+                        "Per-token logprobs are not supported on the served "
+                        "(llama_server) engine: the OpenAI SSE proxy does not "
+                        "surface them. Retry without logprobs/top_logprobs."
+                    )
+                record_runner_phase(
+                    "decode_stream",
+                    event="request_started",
+                    task_id=task.task_id,
+                    command_id=str(command_id),
                 )
-            record_runner_phase(
-                "decode_stream",
-                event="request_started",
-                task_id=task.task_id,
-                command_id=str(command_id),
-            )
-            if task.task_params.tools:
-                self._generate_with_tools(task, body, model_id, command_id)
+                if task.task_params.tools:
+                    self._generate_with_tools(task, body, model_id, command_id)
+                else:
+                    self._generate_streaming(task, body, model_id, command_id)
+            except Exception as exc:  # noqa: BLE001 - surface as an ErrorChunk
+                record_runner_phase(
+                    "error",
+                    event="generation_failed",
+                    detail=f"{type(exc).__name__}: {exc}",
+                    task_id=task.task_id,
+                    command_id=str(command_id),
+                )
+                logger.opt(exception=exc).warning("llama-server generation failed")
+                self.event_sender.send(
+                    ChunkGenerated(
+                        command_id=command_id,
+                        chunk=ErrorChunk(model=model_id, error_message=str(exc)),
+                    )
+                )
             else:
-                self._generate_streaming(task, body, model_id, command_id)
-        except Exception as exc:  # noqa: BLE001 - surface as an ErrorChunk
-            record_runner_phase(
-                "error",
-                event="generation_failed",
-                detail=f"{type(exc).__name__}: {exc}",
-                task_id=task.task_id,
-                command_id=str(command_id),
-            )
-            logger.opt(exception=exc).warning("llama-server generation failed")
-            self.event_sender.send(
-                ChunkGenerated(
-                    command_id=command_id,
-                    chunk=ErrorChunk(model=model_id, error_message=str(exc)),
+                # Read the shared cancel set through the lock-guarded helper:
+                # generations run concurrently, so an unlocked membership read
+                # here races the pool workers mutating cancelled_tasks.
+                was_cancelled = self._was_cancelled(task.task_id)
+                record_runner_phase(
+                    "cancel_observed" if was_cancelled else "completion",
+                    event="generation_finished",
+                    task_id=task.task_id,
+                    command_id=str(command_id),
                 )
-            )
-        else:
-            # Only cancellations OBSERVED during execution: draining the cancel
-            # pipe here would retroactively flip a finished task (see main()).
-            was_cancelled = (
-                task.task_id in self.cancelled_tasks
-                or CANCEL_ALL_TASKS in self.cancelled_tasks
-            )
-            record_runner_phase(
-                "cancel_observed" if was_cancelled else "completion",
-                event="generation_finished",
-                task_id=task.task_id,
-                command_id=str(command_id),
-            )
-        self.current_status = RunnerReady()
-        record_runner_phase("idle", event="runner_ready", task_id=task.task_id)
+        finally:
+            self._release_context_budget(reservation)
+        # Status is NOT flipped here: the dispatch loop returns the runner to Ready
+        # only when the LAST in-flight generation drains, so a peer generation still
+        # streaming keeps the runner Running.
 
     def _generate_streaming(
         self,
@@ -795,7 +1131,30 @@ class Runner:
         command_id: CommandId,
     ) -> None:
         body["stream"] = True
+        # Ask llama-server to attach its native timings object to the final
+        # streamed chunk: engine-side prompt_n/prompt_ms/predicted_n/
+        # predicted_ms beat any proxy-side wall clock (#532).
+        body["timings_per_token"] = True
         assert self.base_url is not None
+        clock = StreamStatsClock()
+        last_timings: dict[str, object] | None = None
+        # In-flight captured at THIS task's admission on the dispatch loop, for
+        # the performance-envelope tap (#596): the runner's own count is the true
+        # per-instance concurrency, and reading it from the admission capture
+        # (not live here on the worker thread) avoids a burst collapsing every
+        # sample into one concurrency bucket.
+        admission_in_flight = self._admission_concurrency(task.task_id)
+
+        def final_stats() -> GenerationStats:
+            # Engine timings win single-stream; under --parallel batching the
+            # per-slot eval rates are not wall rates, so the proxy clock
+            # provides the rates and the engine keeps the token counts (#611).
+            # Peak memory always comes from the server child, never this proxy.
+            base = served_stream_stats(
+                clock, last_timings, batching=self._max_concurrency > 1
+            ).model_copy(update={"peak_memory_usage": self._server_peak_memory()})
+            return self.stamp_runner_stats(base, admission_in_flight)
+
         emitted_finish = False
         # Gemma 4 emits its reasoning as literal <|channel> markers in content;
         # reparse them here (llama-server can't) into reasoning/content chunks.
@@ -819,6 +1178,11 @@ class Runner:
                     continue
                 if delta.done:
                     break
+                if delta.timings is not None:
+                    last_timings = delta.timings
+                if delta.reasoning or delta.content:
+                    # One SSE delta per generated token piece.
+                    clock.mark_piece()
                 if delta.reasoning:
                     self._send_token(
                         command_id, model_id, delta.reasoning, is_thinking=True
@@ -838,7 +1202,11 @@ class Runner:
                                 command_id, model_id, text, is_thinking=is_thinking
                             )
                     self._send_token(
-                        command_id, model_id, "", finish_reason=delta.finish
+                        command_id,
+                        model_id,
+                        "",
+                        finish_reason=delta.finish,
+                        stats=final_stats(),
                     )
                     emitted_finish = True
         # Guarantee a terminal chunk so the consumer's stream closes even if the
@@ -849,7 +1217,9 @@ class Runner:
                     self._send_token(
                         command_id, model_id, text, is_thinking=is_thinking
                     )
-            self._send_token(command_id, model_id, "", finish_reason="stop")
+            self._send_token(
+                command_id, model_id, "", finish_reason="stop", stats=final_stats()
+            )
 
     def _generate_with_tools(
         self,
@@ -870,10 +1240,12 @@ class Runner:
         if self._is_cancelled(task.task_id):
             return
         timeout = httpx.Timeout(connect=15.0, read=None, write=30.0, pool=None)
+        request_started = time.perf_counter()
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(f"{self.base_url}/v1/chat/completions", json=body)
             resp.raise_for_status()
             result = resp.json()
+        request_seconds = time.perf_counter() - request_started
         # A cancel that arrived while the (non-streamed) request was in flight:
         # drain it (the streaming path checks every chunk; this blocking path has
         # no mid-flight checkpoint) and skip emission so main() marks the task
@@ -883,13 +1255,47 @@ class Runner:
             return
         choice = (result.get("choices") or [{}])[0]
         message = choice.get("message") or {}
+        # Engine-side timings when the server includes them, usage-derived
+        # effective rates otherwise (#532).
+        raw_timings = result.get("timings")
+        # Same wall-honesty rule as the streaming path (#611): engine timings
+        # only when serving single-stream; under batching the usage-derived
+        # whole-request wall rates are the honest ones, with the prompt RATE
+        # over the engine's processed count so a slot-cache hit's cached
+        # prefix cannot inflate it.
+        processed_prompt: int | None = None
+        if isinstance(raw_timings, dict):
+            raw_prompt_n = cast("dict[str, object]", raw_timings).get("prompt_n")
+            if isinstance(raw_prompt_n, (int, float)) and not isinstance(
+                raw_prompt_n, bool
+            ):
+                processed_prompt = int(raw_prompt_n)
+        stats = (
+            stats_from_llama_server_timings(raw_timings)
+            if isinstance(raw_timings, dict) and self._max_concurrency <= 1
+            else None
+        ) or blocking_call_stats(
+            result.get("usage"), request_seconds, processed_prompt
+        )
+        if stats is not None:
+            # The model lives in the server child; never report proxy RSS.
+            stats = stats.model_copy(
+                update={"peak_memory_usage": self._server_peak_memory()}
+            )
+            # Stamp runner attribution (#596) so tool-call generations feed the
+            # per-instance performance envelope exactly like the streaming path;
+            # otherwise tool workloads (the agentic served audience) would fall
+            # back to the API's ambiguous offered-count attribution.
+            stats = self.stamp_runner_stats(
+                stats, self._admission_concurrency(task.task_id)
+            )
         tool_calls = tool_calls_from_message(message)
         if tool_calls:
             self.event_sender.send(
                 ChunkGenerated(
                     command_id=command_id,
                     chunk=ToolCallChunk(
-                        model=model_id, tool_calls=tool_calls, usage=None
+                        model=model_id, tool_calls=tool_calls, usage=None, stats=stats
                     ),
                 )
             )
@@ -913,7 +1319,20 @@ class Runner:
             else:
                 self._send_token(command_id, model_id, content)
         finish = map_finish_reason(choice.get("finish_reason")) or "stop"
-        self._send_token(command_id, model_id, "", finish_reason=finish)
+        self._send_token(command_id, model_id, "", finish_reason=finish, stats=stats)
+
+    def _server_peak_memory(self) -> Memory:
+        """Peak RSS of the llama-server child, or zero when unmeasurable.
+
+        The weights and KV cache live in the external server process, so the
+        proxy's own RSS would misattribute memory in telemetry (#536 review).
+        Zero means "unmeasured" (non-Linux, or the child already exited);
+        a fabricated proxy-side figure would be worse than none.
+        """
+        proc = self.server_proc
+        if proc is None:
+            return Memory.from_bytes(0)
+        return subprocess_peak_memory(proc.pid) or Memory.from_bytes(0)
 
     def _send_token(
         self,
@@ -923,6 +1342,7 @@ class Runner:
         *,
         is_thinking: bool = False,
         finish_reason: Any = None,
+        stats: GenerationStats | None = None,
     ) -> None:
         """Emit one TokenChunk; skip empty non-terminal chunks."""
         if not text and finish_reason is None:
@@ -937,6 +1357,7 @@ class Runner:
                     usage=None,
                     finish_reason=finish_reason,
                     is_thinking=is_thinking,
+                    stats=stats,
                 ),
             )
         )

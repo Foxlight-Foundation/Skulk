@@ -11,7 +11,8 @@ from skulk.api.node_health import (
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.profiling import DiskUsage
+from skulk.shared.types.node_facts import CapabilityConflict
+from skulk.shared.types.profiling import DiskUsage, NodeIdentity, NodeResources
 from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
     DownloadFailed,
@@ -199,16 +200,30 @@ def test_only_live_nodes_get_entries() -> None:
     assert health["node-a"].level == "ok"
 
 
-def test_stale_last_seen_but_fresh_telemetry_does_not_warn() -> None:
-    # Connectivity change-gate/de-dup (the AMD gossip-storm fix) leaves a
-    # follower's State.last_seen stale for a healthy node. Telemetry still gossips
-    # every ~1s, so a fresh telemetry receipt must suppress the "heartbeats late"
-    # warning.
+def test_stale_last_seen_but_fresh_heartbeat_does_not_warn() -> None:
+    # State.last_seen is the last indexed event and goes stale by design. The
+    # dedicated heartbeat is the primary liveness signal.
     stale = _NOW - UNREACHABLE_WARN_AFTER - timedelta(seconds=5)
     health = compute_node_health(
         live_nodes={_NODE: stale},
         downloads={},
         node_disk={},
+        heartbeat_last_seen={_NODE: _NOW},
+        now=_NOW,
+    )
+    assert health["node-a"].level == "ok"
+    assert list(health["node-a"].reasons) == []
+
+
+def test_fresh_ordinary_telemetry_remains_a_liveness_fallback() -> None:
+    # A heartbeat-path defect must not warn about a node that is still sending
+    # ordinary telemetry.
+    stale = _NOW - UNREACHABLE_WARN_AFTER - timedelta(seconds=5)
+    health = compute_node_health(
+        live_nodes={_NODE: stale},
+        downloads={},
+        node_disk={},
+        heartbeat_last_seen={_NODE: stale},
         telemetry_last_seen={_NODE: _NOW},
         now=_NOW,
     )
@@ -216,7 +231,7 @@ def test_stale_last_seen_but_fresh_telemetry_does_not_warn() -> None:
     assert list(health["node-a"].reasons) == []
 
 
-def test_tz_naive_last_seen_with_aware_telemetry_does_not_raise() -> None:
+def test_tz_naive_last_seen_with_aware_heartbeat_does_not_raise() -> None:
     # A tz-naive State.last_seen (odd snapshot) compared against the tz-aware
     # telemetry stamp would raise on the freshness `>` and 500 /state. It must be
     # normalized before the comparison; here fresh telemetry suppresses the warning.
@@ -227,24 +242,290 @@ def test_tz_naive_last_seen_with_aware_telemetry_does_not_raise() -> None:
         live_nodes={_NODE: naive_stale},
         downloads={},
         node_disk={},
-        telemetry_last_seen={_NODE: _NOW},
+        heartbeat_last_seen={_NODE: _NOW},
         now=_NOW,
     )
     assert health["node-a"].level == "ok"
     assert list(health["node-a"].reasons) == []
 
 
-def test_stale_last_seen_and_stale_telemetry_still_warns() -> None:
-    # A genuinely departing node stops both signals, so the warning must still
+def test_all_stale_liveness_signals_still_warn() -> None:
+    # A genuinely departing node stops every signal, so the warning must still
     # fire in the window before the master prunes it.
     stale = _NOW - UNREACHABLE_WARN_AFTER - timedelta(seconds=5)
     health = compute_node_health(
         live_nodes={_NODE: stale},
         downloads={},
         node_disk={},
+        heartbeat_last_seen={_NODE: stale},
         telemetry_last_seen={_NODE: stale},
         now=_NOW,
     )
     node = health["node-a"]
     assert node.level == "warn"
     assert any(r.code == "unreachable" for r in node.reasons)
+
+
+def test_mixed_data_transports_are_error_on_every_live_node() -> None:
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_resources={
+            _NODE: NodeResources(data_transport="zenoh"),
+            other: NodeResources(data_transport="gossipsub"),
+        },
+        now=_NOW,
+    )
+
+    for node_id in ("node-a", "node-b"):
+        node = health[node_id]
+        assert node.level == "error"
+        reason = next(
+            reason
+            for reason in node.reasons
+            if reason.code == "data_transport_mismatch"
+        )
+        assert "gossipsub, zenoh" in reason.message
+        assert "Cross-transport inference output cannot be delivered" in reason.message
+
+
+def test_uniform_data_transport_is_healthy() -> None:
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_resources={
+            _NODE: NodeResources(data_transport="zenoh"),
+            other: NodeResources(data_transport="zenoh"),
+        },
+        now=_NOW,
+    )
+    assert all(node.level == "ok" for node in health.values())
+
+
+def test_missing_transport_telemetry_does_not_create_false_mismatch() -> None:
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_resources={_NODE: NodeResources(data_transport="zenoh")},
+        now=_NOW,
+    )
+    assert all(node.level == "ok" for node in health.values())
+
+
+def test_zenoh_isolated_node_is_error() -> None:
+    """A trustworthy 0 peer count with a live Zenoh fleet names the node."""
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_resources={
+            _NODE: NodeResources(data_transport="zenoh", zenoh_connected_peers=0),
+            other: NodeResources(data_transport="zenoh", zenoh_connected_peers=1),
+        },
+        now=_NOW,
+    )
+    isolated = health["node-a"]
+    assert isolated.level == "error"
+    reason = next(r for r in isolated.reasons if r.code == "zenoh_isolated")
+    assert "0 peer transports" in reason.message
+    assert "SKULK_ZENOH_CONNECT" in reason.remediation
+    # The connected node is not flagged.
+    assert all(r.code != "zenoh_isolated" for r in health["node-b"].reasons)
+
+
+def test_zenoh_unknown_count_does_not_flag() -> None:
+    """None (startup grace / sample failure) is not isolation evidence."""
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_resources={
+            _NODE: NodeResources(data_transport="zenoh", zenoh_connected_peers=None),
+            other: NodeResources(data_transport="zenoh", zenoh_connected_peers=2),
+        },
+        now=_NOW,
+    )
+    assert all(node.level == "ok" for node in health.values())
+
+
+def test_zenoh_zero_peers_without_zenoh_fleet_does_not_flag() -> None:
+    """A lone Zenoh node (or an all-gossipsub fleet) has no mesh to join."""
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_resources={
+            _NODE: NodeResources(data_transport="zenoh", zenoh_connected_peers=0),
+            other: NodeResources(data_transport="gossipsub"),
+        },
+        now=_NOW,
+    )
+    assert all(
+        reason.code != "zenoh_isolated"
+        for node in health.values()
+        for reason in node.reasons
+    )
+
+
+def test_zenoh_isolated_ignores_dead_peer_advertisements() -> None:
+    """Stale resources from a departed node cannot manufacture isolation."""
+    departed = NodeId("node-dead")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW},
+        downloads={},
+        node_disk={},
+        node_resources={
+            _NODE: NodeResources(data_transport="zenoh", zenoh_connected_peers=0),
+            departed: NodeResources(data_transport="zenoh", zenoh_connected_peers=1),
+        },
+        now=_NOW,
+    )
+    assert all(r.code != "zenoh_isolated" for r in health["node-a"].reasons)
+
+
+def test_mixed_source_commits_warn_on_every_live_node() -> None:
+    """Equal package versions at different commits are a degraded rollout."""
+
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_identities={
+            _NODE: NodeIdentity(skulk_version="1.4.3", skulk_commit="aaaaaaaa"),
+            other: NodeIdentity(skulk_version="1.4.3", skulk_commit="bbbbbbbb"),
+        },
+        now=_NOW,
+    )
+
+    for node in health.values():
+        assert node.level == "warn"
+        reason = next(reason for reason in node.reasons if reason.code == "version_mismatch")
+        assert "Correctness-bearing wire compatibility is not guaranteed" in reason.message
+
+
+def test_uniform_source_build_is_healthy() -> None:
+    """Matching package and commit identities do not create a rollout warning."""
+
+    other = NodeId("node-b")
+    identity = NodeIdentity(skulk_version="1.4.3", skulk_commit="aaaaaaaa")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_identities={_NODE: identity, other: identity},
+        now=_NOW,
+    )
+
+    assert all(node.level == "ok" for node in health.values())
+
+
+def test_prefix_equivalent_source_commits_are_healthy() -> None:
+    """Different Git abbreviation lengths do not create a rollout warning."""
+
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_identities={
+            _NODE: NodeIdentity(skulk_version="1.4.3", skulk_commit="abcdef1"),
+            other: NodeIdentity(
+                skulk_version="1.4.3",
+                skulk_commit="abcdef123456",
+            ),
+        },
+        now=_NOW,
+    )
+
+    assert all(node.level == "ok" for node in health.values())
+
+
+def test_unknown_build_identity_does_not_create_false_mismatch() -> None:
+    """Startup gaps are not positive evidence of a mixed deployment."""
+
+    other = NodeId("node-b")
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW, other: _NOW},
+        downloads={},
+        node_disk={},
+        node_identities={
+            _NODE: NodeIdentity(skulk_version="1.4.3", skulk_commit="aaaaaaaa"),
+            other: NodeIdentity(),
+        },
+        now=_NOW,
+    )
+
+    assert all(node.level == "ok" for node in health.values())
+
+
+def _conflict(code: str) -> "CapabilityConflict":
+    return CapabilityConflict(
+        code=code,  # pyright: ignore[reportArgumentType]
+        message=f"synthetic {code}",
+        remediation="fix it and restart skulk",
+    )
+
+
+def test_capability_conflicts_map_onto_health_reasons() -> None:
+    # Backend derivation conflicts (#614) advertised on NodeResources become
+    # per-node health reasons verbatim: same code, message, and remediation.
+    resources = NodeResources(
+        backends=frozenset({"llama_server", "llama_server-cpu"}),
+        capability_conflicts=(
+            _conflict("gpu_serving_disabled"),
+            _conflict("gpu_detection_degraded"),
+        ),
+    )
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW},
+        downloads={},
+        node_disk={},
+        now=_NOW,
+        node_resources={_NODE: resources},
+    )
+    node = health["node-a"]
+    codes = [reason.code for reason in node.reasons]
+    assert codes == ["gpu_serving_disabled", "gpu_detection_degraded"]
+    # gpu_serving_disabled is the error-severity conflict; the aggregate is red.
+    assert node.level == "error"
+    assert node.reasons[0].remediation == "fix it and restart skulk"
+
+
+def test_warn_only_capability_conflicts_aggregate_to_warn() -> None:
+    resources = NodeResources(
+        backends=frozenset({"llama_server", "llama_server-cuda"}),
+        capability_conflicts=(
+            _conflict("invalid_engine_binary"),
+            _conflict("backend_override_conflict"),
+        ),
+    )
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW},
+        downloads={},
+        node_disk={},
+        now=_NOW,
+        node_resources={_NODE: resources},
+    )
+    assert health["node-a"].level == "warn"
+
+
+def test_no_capability_conflicts_stays_ok() -> None:
+    resources = NodeResources(backends=frozenset({"mlx"}))
+    health = compute_node_health(
+        live_nodes={_NODE: _NOW},
+        downloads={},
+        node_disk={},
+        now=_NOW,
+        node_resources={_NODE: resources},
+    )
+    assert health["node-a"].level == "ok"

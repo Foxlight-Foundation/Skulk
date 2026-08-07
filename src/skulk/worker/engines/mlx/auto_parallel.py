@@ -44,7 +44,7 @@ from mlx_lm.models.nemotron_h import (
     NemotronHMoE,
 )
 from mlx_lm.models.nemotron_h import NemotronHModel as NemotronHInnerModel
-from mlx_lm.models.qwen3_5 import DecoderLayer as Qwen3_5DecoderLayer
+from mlx_lm.models.qwen3_5 import GatedDeltaNet as Qwen3_5GatedDeltaNet
 from mlx_lm.models.qwen3_5 import Model as Qwen3_5TextModel
 from mlx_lm.models.qwen3_5 import Qwen3_5TextModel as Qwen3_5TextModelInner
 from mlx_lm.models.qwen3_5 import SparseMoeBlock as Qwen3_5SparseMoeBlock
@@ -52,11 +52,7 @@ from mlx_lm.models.qwen3_5_moe import Model as Qwen3_5MoeModel
 from mlx_lm.models.qwen3_moe import Model as Qwen3MoeModel
 from mlx_lm.models.qwen3_moe import Qwen3MoeDecoderLayer, Qwen3MoeSparseMoeBlock
 from mlx_lm.models.qwen3_next import Model as Qwen3NextModel
-from mlx_lm.models.qwen3_next import (
-    Qwen3NextDecoderLayer,
-    Qwen3NextGatedDeltaNet,
-    Qwen3NextSparseMoeBlock,
-)
+from mlx_lm.models.qwen3_next import Qwen3NextGatedDeltaNet, Qwen3NextSparseMoeBlock
 from mlx_lm.models.qwen3_next import Qwen3NextModel as Qwen3NextInnerModel
 from mlx_lm.models.step3p5 import Model as Step35Model
 from mlx_lm.models.step3p5 import Step3p5MLP as Step35MLP
@@ -283,6 +279,20 @@ class _LayerCallable(Protocol):
     """
 
     def __call__(self, x: mx.array, *args: object, **kwargs: object) -> mx.array: ...
+
+
+class _CacheContainer(Protocol):
+    """Cache wrapper whose first item carries the tensor dependency."""
+
+    caches: object
+
+    def __getitem__(self, index: int) -> object: ...
+
+
+class _CacheWithKeys(Protocol):
+    """KV cache entry exposing the keys array used for synchronization."""
+
+    keys: mx.array
 
 
 class CustomMlxLayer(nn.Module):
@@ -602,6 +612,259 @@ class _Gemma4ArgsLike(Protocol):
     num_kv_shared_layers: int
 
 
+class _Gemma3nConfigLike(Protocol):
+    """Configuration fields that must become rank-local after pipeline slicing."""
+
+    model_type: str
+    layer_types: list[str]
+    num_hidden_layers: int
+    num_kv_shared_layers: int
+    hidden_size_per_layer_input: int
+
+
+class _Gemma3nTrunkLike(Protocol):
+    """Gemma 3n trunk state coupled to full-model layer numbering."""
+
+    config: _Gemma3nConfigLike
+    layer_idx_to_cache_idx: list[int]
+    first_kv_shared_layer_idx: int
+    first_full_idx: int
+    first_sliding_idx: int
+    num_hidden_layers: int
+    embed_tokens_per_layer: nn.Module
+    per_layer_model_projection: nn.Module
+
+
+class _EmbeddingParameters(Protocol):
+    """Mutable feature-axis parameters shared by MLX embedding variants."""
+
+    weight: mx.array
+    dims: int
+
+
+class _QuantizedEmbeddingParameters(_EmbeddingParameters, Protocol):
+    """Mutable quantization metadata for an MLX quantized embedding."""
+
+    scales: mx.array
+    biases: mx.array | None
+
+
+class _LinearParameters(Protocol):
+    """Mutable output-axis parameters shared by MLX linear variants."""
+
+    weight: mx.array
+    bias: mx.array
+
+
+class _QuantizedLinearParameters(_LinearParameters, Protocol):
+    """Mutable quantization metadata for an MLX quantized linear layer."""
+
+    scales: mx.array
+    biases: mx.array | None
+
+
+def _slice_embedding_features(
+    module: nn.Module,
+    start_feature: int,
+    end_feature: int,
+    total_features: int,
+) -> None:
+    """Retain one contiguous output-feature range in an embedding module."""
+    if isinstance(module, nn.QuantizedEmbedding):
+        quantized = cast(_QuantizedEmbeddingParameters, cast(object, module))
+        packed_width = int(quantized.weight.shape[1])
+        scale_width = int(quantized.scales.shape[1])
+        packed_start = start_feature * packed_width // total_features
+        packed_end = end_feature * packed_width // total_features
+        scale_start = start_feature * scale_width // total_features
+        scale_end = end_feature * scale_width // total_features
+        quantized.weight = quantized.weight[:, packed_start:packed_end]
+        quantized.scales = quantized.scales[:, scale_start:scale_end]
+        if quantized.biases is not None:
+            quantized.biases = quantized.biases[:, scale_start:scale_end]
+        quantized.dims = end_feature - start_feature
+        return
+
+    if isinstance(module, nn.Embedding):
+        embedding = cast(_EmbeddingParameters, cast(object, module))
+        embedding.weight = embedding.weight[:, start_feature:end_feature]
+        embedding.dims = end_feature - start_feature
+        return
+
+    raise TypeError(
+        "Gemma 3n per-layer embedding must be an MLX Embedding or "
+        f"QuantizedEmbedding, got {type(module).__name__}"
+    )
+
+
+def _slice_linear_outputs(
+    module: nn.Module,
+    start_feature: int,
+    end_feature: int,
+) -> None:
+    """Retain one contiguous output-feature range in a linear module."""
+    if isinstance(module, nn.QuantizedLinear):
+        quantized = cast(_QuantizedLinearParameters, cast(object, module))
+        quantized.weight = quantized.weight[start_feature:end_feature]
+        quantized.scales = quantized.scales[start_feature:end_feature]
+        if quantized.biases is not None:
+            quantized.biases = quantized.biases[start_feature:end_feature]
+        if "bias" in module:
+            quantized.bias = quantized.bias[start_feature:end_feature]
+        return
+
+    if isinstance(module, nn.Linear):
+        linear = cast(_LinearParameters, cast(object, module))
+        linear.weight = linear.weight[start_feature:end_feature]
+        if "bias" in module:
+            linear.bias = linear.bias[start_feature:end_feature]
+        return
+
+    raise TypeError(
+        "Gemma 3n per-layer projection must be an MLX Linear or "
+        f"QuantizedLinear, got {type(module).__name__}"
+    )
+
+
+def _slice_gemma3n_pipeline_state(
+    inner_model_instance: nn.Module,
+    start_layer: int,
+    end_layer: int,
+) -> None:
+    """Convert Gemma 3n's full-model cache and per-layer inputs to rank-local state.
+
+    Gemma 3n's final layers reuse K/V produced by the last concrete sliding and
+    full-attention layers. Its two per-layer input projections also concatenate
+    one feature block per original layer. Pipeline ranks therefore cannot merely
+    replace ``layers``: every dependent index and projection must be sliced in
+    the same coordinate system or the first shared layer reads an empty cache.
+    """
+    config_source = getattr(inner_model_instance, "config", None)
+    if getattr(config_source, "model_type", None) != "gemma3n_text":
+        return
+    if not all(
+        hasattr(inner_model_instance, name)
+        for name in (
+            "layer_idx_to_cache_idx",
+            "first_kv_shared_layer_idx",
+            "embed_tokens_per_layer",
+            "per_layer_model_projection",
+        )
+    ):
+        raise ValueError(
+            "Gemma 3n pipeline trunk is missing cache or per-layer input metadata"
+        )
+
+    trunk = cast(_Gemma3nTrunkLike, cast(object, inner_model_instance))
+    config = trunk.config
+    full_layer_types = list(config.layer_types)
+    full_cache_indices = list(trunk.layer_idx_to_cache_idx)
+    if len(full_layer_types) != len(full_cache_indices):
+        raise ValueError(
+            "Gemma 3n layer type and cache dependency metadata have different lengths"
+        )
+
+    shard_cache_indices = full_cache_indices[start_layer:end_layer]
+    external_dependencies = sorted(
+        {
+            cache_index
+            for cache_index in shard_cache_indices
+            if cache_index < start_layer or cache_index >= end_layer
+        }
+    )
+    if external_dependencies:
+        raise ValueError(
+            "Gemma 3n pipeline slice crosses a shared-KV dependency: "
+            f"slice=[{start_layer}, {end_layer}), "
+            f"external_cache_layers={external_dependencies}"
+        )
+
+    local_layer_types = full_layer_types[start_layer:end_layer]
+    local_layer_count = end_layer - start_layer
+    local_concrete_count = max(
+        min(trunk.first_kv_shared_layer_idx, end_layer) - start_layer,
+        0,
+    )
+    feature_width = config.hidden_size_per_layer_input
+    feature_start = start_layer * feature_width
+    feature_end = end_layer * feature_width
+    total_features = len(full_layer_types) * feature_width
+
+    _slice_embedding_features(
+        trunk.embed_tokens_per_layer,
+        feature_start,
+        feature_end,
+        total_features,
+    )
+    _slice_linear_outputs(
+        trunk.per_layer_model_projection,
+        feature_start,
+        feature_end,
+    )
+
+    config.layer_types = local_layer_types
+    config.num_hidden_layers = local_layer_count
+    config.num_kv_shared_layers = local_layer_count - local_concrete_count
+    trunk.num_hidden_layers = local_layer_count
+    trunk.first_kv_shared_layer_idx = local_concrete_count
+    trunk.layer_idx_to_cache_idx = [
+        cache_index - start_layer for cache_index in shard_cache_indices
+    ]
+    trunk.first_full_idx = (
+        local_layer_types.index("full_attention")
+        if "full_attention" in local_layer_types
+        else 0
+    )
+    trunk.first_sliding_idx = (
+        local_layer_types.index("sliding_attention")
+        if "sliding_attention" in local_layer_types
+        else 0
+    )
+
+
+def _slice_qwen3_vl_deepstack_inputs(
+    inner_model_instance: nn.Module,
+    start_layer: int,
+    end_layer: int,
+) -> None:
+    """Align Qwen3-VL deep-stack image features with rank-local layer indices.
+
+    MLX-VLM enumerates the trunk's current ``layers`` list from zero and adds
+    ``deepstack_visual_embeds[layer_idx]`` to each matching layer. Pipeline
+    slicing also renumbers every rank's local layer list from zero, so without
+    this adapter every later rank injects the image features again into the
+    wrong global layers. The adapter slices the per-layer feature list by the
+    rank's original global range before the upstream trunk consumes it.
+    """
+    if not _is_qwen3_vl_pipeline_trunk(inner_model_instance):
+        return
+
+    inner_model_instance._skulk_deepstack_start_layer = start_layer
+    inner_model_instance._skulk_deepstack_end_layer = end_layer
+    cls = inner_model_instance.__class__
+    if getattr(cls, "_skulk_deepstack_pipeline_patched", False):
+        return
+
+    original_call = cls.__call__
+    call_signature = signature(original_call)
+
+    def patched_call(
+        self: object,
+        *args: object,
+        **kwargs: object,
+    ) -> mx.array:
+        bound = call_signature.bind_partial(self, *args, **kwargs)
+        deepstack = bound.arguments.get("deepstack_visual_embeds")
+        if deepstack is not None:
+            start = cast(int, self._skulk_deepstack_start_layer)  # type: ignore[attr-defined]
+            end = cast(int, self._skulk_deepstack_end_layer)  # type: ignore[attr-defined]
+            bound.arguments["deepstack_visual_embeds"] = deepstack[start:end]
+        return original_call(*bound.args, **bound.kwargs)  # type: ignore[misc]
+
+    cls.__call__ = patched_call
+    cls._skulk_deepstack_pipeline_patched = True  # type: ignore[attr-defined]
+
+
 def pipeline_auto_parallel(
     model: nn.Module,
     group: mx.distributed.Group,
@@ -672,7 +935,9 @@ def pipeline_auto_parallel(
         inner_model_instance._swa_idx = 0 if not sliding_layers else sliding_layers[0]
         inner_model_instance._full_idx = 0 if not full_layers else full_layers[0]
 
-    if isinstance(inner_model_instance, (Qwen3_5TextModelInner, Qwen3NextInnerModel)):
+    if isinstance(
+        inner_model_instance, (Qwen3_5TextModelInner, Qwen3NextInnerModel)
+    ) or _is_native_qwen_vlm_language_model(inner_model_instance):
         full_attn_layers = [
             i for i, layer in enumerate(layers) if not getattr(layer, "is_linear", True)
         ]
@@ -689,6 +954,17 @@ def pipeline_auto_parallel(
                 ssm_idx=inner_model_instance.ssm_idx,
                 has_linear=bool(linear_layers),
             )
+
+    _slice_gemma3n_pipeline_state(
+        inner_model_instance,
+        start_layer,
+        end_layer,
+    )
+    _slice_qwen3_vl_deepstack_inputs(
+        inner_model_instance,
+        start_layer,
+        end_layer,
+    )
 
     if isinstance(inner_model_instance, NemotronHInnerModel):
         # NemotronH uses block_type: "M" (Mamba/SSM), "*" (Attention), "E" (MoE), "-" (MLP)
@@ -840,16 +1116,33 @@ def patch_tensor_model[T](model: T) -> T:
         **kwargs: object,
     ) -> mx.array:
         logits: mx.array = original_call(self, *args, **kwargs)  # pyright: ignore[reportAny]
-        cache = call_signature.bind_partial(self, *args, **kwargs).arguments.get(
-            "cache", None
+        bound_arguments = cast(
+            Mapping[str, object],
+            cast(
+                object,
+                call_signature.bind_partial(self, *args, **kwargs).arguments,
+            ),
         )
+        cache = bound_arguments.get("cache")
+        if cache is None:
+            cache = next(
+                (
+                    cast(Mapping[object, object], value).get("cache")
+                    for value in bound_arguments.values()
+                    if isinstance(value, Mapping) and "cache" in value
+                ),
+                None,
+            )
 
         # Add dependency to last cache entry to ensure distributed ops are evaluated
-        if cache is not None and len(cache) > 0:  # pyright: ignore[reportAny]
-            last = cache[-1]  # pyright: ignore[reportAny]
-            dep_cache = last[0] if hasattr(last, "caches") else last  # pyright: ignore[reportAny]
-            if hasattr(dep_cache, "keys"):  # type: ignore
-                dep_cache.keys = mx.depends(dep_cache.keys, logits)  # pyright: ignore[reportAny]
+        if isinstance(cache, (list, tuple)) and cache:
+            last = cast(object, cache[-1])
+            dep_cache = (
+                cast(_CacheContainer, last)[0] if hasattr(last, "caches") else last
+            )
+            if hasattr(dep_cache, "keys"):
+                cache_with_keys = cast(_CacheWithKeys, dep_cache)
+                cache_with_keys.keys = mx.depends(cache_with_keys.keys, logits)
 
         return logits
 
@@ -863,7 +1156,17 @@ def tensor_auto_parallel(
     timeout_seconds: float,
     on_timeout: TimeoutCallback | None,
     on_layer_loaded: LayerLoadedCallback | None,
+    *,
+    generation_model: nn.Module | None = None,
 ) -> nn.Module:
+    """Shard a language trunk and patch its logits-returning generation model.
+
+    Native VLMs wrap their language trunk in a multimodal model whose call
+    returns a structured output. ``model`` is therefore the object whose
+    weights and layers are sharded, while ``generation_model`` is the optional
+    Skulk compatibility wrapper whose call participates in distributed
+    synchronization.
+    """
     all_to_sharded_linear = partial(
         shard_linear,
         sharding="all-to-sharded",
@@ -946,7 +1249,7 @@ def tensor_auto_parallel(
         )
     elif isinstance(
         model, (Qwen3MoeModel, Qwen3NextModel, Qwen3_5TextModel, Qwen3_5MoeModel)
-    ):
+    ) or _is_native_qwen_vlm_language_model(model):
         tensor_parallel_sharding_strategy = QwenShardingStrategy(
             group,
             all_to_sharded_linear,
@@ -984,7 +1287,38 @@ def tensor_auto_parallel(
     model = tensor_parallel_sharding_strategy.shard_model(
         model, timeout_seconds, on_timeout, on_layer_loaded
     )
-    return patch_tensor_model(model)
+    patch_target = model if generation_model is None else generation_model
+    return patch_tensor_model(patch_target)
+
+
+def _is_native_qwen_vlm_language_model(model: nn.Module) -> bool:
+    """Return whether ``model`` is a supported MLX-VLM Qwen language component.
+
+    Tensor placement receives MLX-VLM's outer ``LanguageModel`` while pipeline
+    placement slices its nested ``Qwen3_5Model`` or ``Qwen3_5MoeModel``. Both
+    own family-specific sharding state, but only the outer class exposes
+    ``model_type``.
+    """
+    module_name = type(model).__module__
+    if not module_name.startswith("mlx_vlm.models.qwen3_5"):
+        return False
+    model_type = getattr(model, "model_type", None)
+    if model_type in {
+        "qwen3_5",
+        "qwen3_5_text",
+        "qwen3_5_moe",
+        "qwen3_5_moe_text",
+    }:
+        return True
+    return type(model).__name__ in {"Qwen3_5Model", "Qwen3_5MoeModel"}
+
+
+def _is_qwen3_vl_pipeline_trunk(model: nn.Module) -> bool:
+    """Return whether ``model`` owns Qwen3-VL's deep-stack language layers."""
+    return (
+        type(model).__module__.startswith("mlx_vlm.models.qwen3_vl.language")
+        and type(model).__name__ == "Qwen3VLModel"
+    )
 
 
 class TensorParallelShardingStrategy(ABC):
@@ -1145,10 +1479,15 @@ class ShardedMoE(CustomMlxLayer):
         super().__init__(layer)
         self.sharding_group: mx.distributed.Group | None = None
 
-    def __call__(self, x: mx.array) -> mx.array:
+    def __call__(
+        self,
+        x: mx.array,
+        *args: object,
+        **kwargs: object,
+    ) -> mx.array:
         if self.sharding_group is not None:
             x = sum_gradients(self.sharding_group)(x)
-        y = self.original_layer.__call__(x)
+        y = self.original_layer.__call__(x, *args, **kwargs)
         if self.sharding_group is not None:
             y = mx.distributed.all_sum(y, group=self.sharding_group)
         return y
@@ -1350,7 +1689,8 @@ class QwenShardingStrategy(TensorParallelShardingStrategy):
         on_layer_loaded: LayerLoadedCallback | None,
     ) -> nn.Module:
         model = cast(
-            Qwen3MoeModel | Qwen3NextModel | Qwen3_5TextModel | Qwen3_5MoeModel, model
+            Qwen3MoeModel | Qwen3NextModel | Qwen3_5TextModel | Qwen3_5MoeModel,
+            model,
         )
         total = len(model.layers)
         for i, layer in enumerate(model.layers):
@@ -1372,49 +1712,56 @@ class QwenShardingStrategy(TensorParallelShardingStrategy):
                 layer.self_attn.n_heads //= self.N
                 layer.self_attn.n_kv_heads //= self.N
             else:
-                assert isinstance(layer, (Qwen3NextDecoderLayer, Qwen3_5DecoderLayer))
-                if hasattr(layer, "linear_attn"):
-                    linear_attn = layer.linear_attn
+                qwen_layer = layer
+                if hasattr(qwen_layer, "linear_attn"):
+                    linear_attn = qwen_layer.linear_attn
 
-                    if isinstance(linear_attn, Qwen3NextGatedDeltaNet):
+                    if hasattr(linear_attn, "in_proj_qkvz"):
+                        next_linear_attn = cast(Qwen3NextGatedDeltaNet, linear_attn)
                         # Qwen3-Next: combined projections
-                        linear_attn.in_proj_qkvz = self.all_to_sharded_linear(
-                            linear_attn.in_proj_qkvz
+                        next_linear_attn.in_proj_qkvz = self.all_to_sharded_linear(
+                            next_linear_attn.in_proj_qkvz
                         )
-                        linear_attn.in_proj_ba = self.all_to_sharded_linear(
-                            linear_attn.in_proj_ba
+                        next_linear_attn.in_proj_ba = self.all_to_sharded_linear(
+                            next_linear_attn.in_proj_ba
                         )
                     else:
+                        qwen35_linear_attn = cast(
+                            Qwen3_5GatedDeltaNet, linear_attn
+                        )
                         # Qwen3.5: separate projections
                         # in_proj_qkv has sections [q(key_dim), k(key_dim), v(value_dim)]
                         # that must be split section-aware, not as a contiguous block
-                        key_dim = linear_attn.key_dim
-                        value_dim = linear_attn.value_dim
-                        linear_attn.in_proj_qkv = shard_linear(
-                            linear_attn.in_proj_qkv,
+                        key_dim = qwen35_linear_attn.key_dim
+                        value_dim = qwen35_linear_attn.value_dim
+                        qwen35_linear_attn.in_proj_qkv = shard_linear(
+                            qwen35_linear_attn.in_proj_qkv,
                             "all-to-sharded",
                             segments=[key_dim, key_dim + key_dim],
                             group=self.group,
                         )
-                        linear_attn.in_proj_z = self.all_to_sharded_linear(
-                            linear_attn.in_proj_z
+                        qwen35_linear_attn.in_proj_z = self.all_to_sharded_linear(
+                            qwen35_linear_attn.in_proj_z
                         )
-                        linear_attn.in_proj_b = self.all_to_sharded_linear(
-                            linear_attn.in_proj_b
+                        qwen35_linear_attn.in_proj_b = self.all_to_sharded_linear(
+                            qwen35_linear_attn.in_proj_b
                         )
-                        linear_attn.in_proj_a = self.all_to_sharded_linear(
-                            linear_attn.in_proj_a
+                        qwen35_linear_attn.in_proj_a = self.all_to_sharded_linear(
+                            qwen35_linear_attn.in_proj_a
                         )
-                    linear_attn.out_proj = self.sharded_to_all_linear(
-                        linear_attn.out_proj
+                    qwen35_or_next_linear_attn = linear_attn
+                    qwen35_or_next_linear_attn.out_proj = (
+                        self.sharded_to_all_linear(
+                            qwen35_or_next_linear_attn.out_proj
+                        )
                     )
 
                     # Shard conv1d: depthwise conv with non-contiguous channel slicing.
                     # Channel layout is [q(key_dim), k(key_dim), v(value_dim)].
                     # Each rank takes its head-slice from each of the three sections.
                     rank = self.group.rank()
-                    key_dim = linear_attn.key_dim
-                    value_dim = linear_attn.value_dim
+                    key_dim = qwen35_or_next_linear_attn.key_dim
+                    value_dim = qwen35_or_next_linear_attn.value_dim
                     key_dim_shard = key_dim // self.N
                     value_dim_shard = value_dim // self.N
 
@@ -1428,42 +1775,51 @@ class QwenShardingStrategy(TensorParallelShardingStrategy):
                         2 * key_dim + (rank + 1) * value_dim_shard,
                     )
                     conv_indices = mx.concatenate([q_idx, k_idx, v_idx])
-                    linear_attn.conv1d.weight = linear_attn.conv1d.weight[conv_indices]
+                    qwen35_or_next_linear_attn.conv1d.weight = (
+                        qwen35_or_next_linear_attn.conv1d.weight[conv_indices]
+                    )
                     new_conv_dim = key_dim_shard * 2 + value_dim_shard
-                    linear_attn.conv1d.groups = new_conv_dim
+                    qwen35_or_next_linear_attn.conv1d.groups = new_conv_dim
 
-                    num_v_shard = linear_attn.num_v_heads // self.N
+                    num_v_shard = qwen35_or_next_linear_attn.num_v_heads // self.N
                     v_start = rank * num_v_shard
                     v_end = v_start + num_v_shard
-                    linear_attn.A_log = linear_attn.A_log[v_start:v_end]
-                    linear_attn.dt_bias = linear_attn.dt_bias[v_start:v_end]
+                    qwen35_or_next_linear_attn.A_log = (
+                        qwen35_or_next_linear_attn.A_log[v_start:v_end]
+                    )
+                    qwen35_or_next_linear_attn.dt_bias = (
+                        qwen35_or_next_linear_attn.dt_bias[v_start:v_end]
+                    )
 
-                    linear_attn.num_k_heads //= self.N
-                    linear_attn.num_v_heads //= self.N
-                    linear_attn.key_dim = (
-                        linear_attn.head_k_dim * linear_attn.num_k_heads
+                    qwen35_or_next_linear_attn.num_k_heads //= self.N
+                    qwen35_or_next_linear_attn.num_v_heads //= self.N
+                    qwen35_or_next_linear_attn.key_dim = (
+                        qwen35_or_next_linear_attn.head_k_dim
+                        * qwen35_or_next_linear_attn.num_k_heads
                     )
-                    linear_attn.value_dim = (
-                        linear_attn.head_v_dim * linear_attn.num_v_heads
+                    qwen35_or_next_linear_attn.value_dim = (
+                        qwen35_or_next_linear_attn.head_v_dim
+                        * qwen35_or_next_linear_attn.num_v_heads
                     )
-                    linear_attn.conv_dim = (
-                        linear_attn.key_dim * 2 + linear_attn.value_dim
+                    qwen35_or_next_linear_attn.conv_dim = (
+                        qwen35_or_next_linear_attn.key_dim * 2
+                        + qwen35_or_next_linear_attn.value_dim
                     )
                 else:
-                    layer.self_attn.q_proj = self.all_to_sharded_linear(
-                        layer.self_attn.q_proj
+                    qwen_layer.self_attn.q_proj = self.all_to_sharded_linear(
+                        qwen_layer.self_attn.q_proj
                     )
-                    layer.self_attn.k_proj = self.all_to_sharded_linear(
-                        layer.self_attn.k_proj
+                    qwen_layer.self_attn.k_proj = self.all_to_sharded_linear(
+                        qwen_layer.self_attn.k_proj
                     )
-                    layer.self_attn.v_proj = self.all_to_sharded_linear(
-                        layer.self_attn.v_proj
+                    qwen_layer.self_attn.v_proj = self.all_to_sharded_linear(
+                        qwen_layer.self_attn.v_proj
                     )
-                    layer.self_attn.o_proj = self.sharded_to_all_linear(
-                        layer.self_attn.o_proj
+                    qwen_layer.self_attn.o_proj = self.sharded_to_all_linear(
+                        qwen_layer.self_attn.o_proj
                     )
-                    layer.self_attn.num_attention_heads //= self.N
-                    layer.self_attn.num_key_value_heads //= self.N
+                    qwen_layer.self_attn.num_attention_heads //= self.N
+                    qwen_layer.self_attn.num_key_value_heads //= self.N
 
             # Shard the MoE.
             if isinstance(
@@ -1473,22 +1829,26 @@ class QwenShardingStrategy(TensorParallelShardingStrategy):
                     Qwen3NextSparseMoeBlock,
                     Qwen3_5SparseMoeBlock,
                 ),
-            ):
-                self.all_to_sharded_linear_in_place(layer.mlp.switch_mlp.gate_proj)
-                self.sharded_to_all_linear_in_place(layer.mlp.switch_mlp.down_proj)
-                self.all_to_sharded_linear_in_place(layer.mlp.switch_mlp.up_proj)
-                if isinstance(
-                    layer.mlp, (Qwen3NextSparseMoeBlock, Qwen3_5SparseMoeBlock)
-                ):
+            ) or hasattr(layer.mlp, "switch_mlp"):
+                sparse_mlp = cast(Qwen3NextSparseMoeBlock, layer.mlp)
+                self.all_to_sharded_linear_in_place(sparse_mlp.switch_mlp.gate_proj)
+                self.sharded_to_all_linear_in_place(sparse_mlp.switch_mlp.down_proj)
+                self.all_to_sharded_linear_in_place(sparse_mlp.switch_mlp.up_proj)
+                if not isinstance(sparse_mlp, Qwen3MoeSparseMoeBlock):
                     self.all_to_sharded_linear_in_place(
-                        layer.mlp.shared_expert.gate_proj
+                        sparse_mlp.shared_expert.gate_proj
                     )
                     self.sharded_to_all_linear_in_place(
-                        layer.mlp.shared_expert.down_proj
+                        sparse_mlp.shared_expert.down_proj
                     )
-                    self.all_to_sharded_linear_in_place(layer.mlp.shared_expert.up_proj)
-                layer.mlp = ShardedMoE(layer.mlp)  # pyright: ignore[reportAttributeAccessIssue, reportArgumentType]
-                layer.mlp.sharding_group = self.group
+                    self.all_to_sharded_linear_in_place(
+                        sparse_mlp.shared_expert.up_proj
+                    )
+                sharded_mlp = ShardedMoE(
+                    cast(_LayerCallable, cast(object, sparse_mlp))
+                )
+                sharded_mlp.sharding_group = self.group
+                layer.mlp = sharded_mlp  # pyright: ignore[reportAttributeAccessIssue]
 
             # Shard the MLP
             else:

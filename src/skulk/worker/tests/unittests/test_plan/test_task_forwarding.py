@@ -1,7 +1,18 @@
 from typing import cast
 
 import skulk.worker.plan as plan_mod
-from skulk.shared.types.tasks import Task, TaskId, TaskStatus, TextGeneration
+from skulk.shared.types.audio import (
+    AudioTranscriptionTaskParams,
+    RealtimeAudioTranscriptionTaskParams,
+)
+from skulk.shared.types.tasks import (
+    AudioTranscription,
+    RealtimeAudioTranscription,
+    Task,
+    TaskId,
+    TaskStatus,
+    TextGeneration,
+)
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.shared.types.worker.instances import BoundInstance, InstanceId
 from skulk.shared.types.worker.runners import (
@@ -272,3 +283,96 @@ def test_plan_returns_none_when_nothing_to_do():
     )
 
     assert result is None
+
+
+def test_plan_waits_for_verified_speech_media_before_forwarding_transcription():
+    """STT tasks must wait for the complete verified data-plane payload."""
+
+    shard = get_pipeline_shard_metadata(model_id=MODEL_A_ID, device_rank=0)
+    instance = get_mlx_ring_instance(
+        instance_id=INSTANCE_1_ID,
+        model_id=MODEL_A_ID,
+        node_to_runner={NODE_A: RUNNER_1_ID},
+        runner_to_shard={RUNNER_1_ID: shard},
+    )
+    bound_instance = BoundInstance(
+        instance=instance, bound_runner_id=RUNNER_1_ID, bound_node_id=NODE_A
+    )
+    local_runner = FakeRunnerSupervisor(
+        bound_instance=bound_instance, status=RunnerReady()
+    )
+    task = AudioTranscription(
+        task_id=TASK_1_ID,
+        instance_id=INSTANCE_1_ID,
+        task_status=TaskStatus.Pending,
+        command_id=COMMAND_1_ID,
+        task_params=AudioTranscriptionTaskParams(
+            model=MODEL_A_ID,
+            total_input_chunks=2,
+            audio_sha256="abc123",
+        ),
+    )
+
+    missing_result = plan_mod.plan(
+        node_id=NODE_A,
+        runners={RUNNER_1_ID: local_runner},  # type: ignore
+        global_download_status={NODE_A: []},
+        instances={INSTANCE_1_ID: instance},
+        all_runners={RUNNER_1_ID: RunnerReady()},
+        tasks={TASK_1_ID: task},
+        speech_media_ready=set(),
+    )
+    ready_result = plan_mod.plan(
+        node_id=NODE_A,
+        runners={RUNNER_1_ID: local_runner},  # type: ignore
+        global_download_status={NODE_A: []},
+        instances={INSTANCE_1_ID: instance},
+        all_runners={RUNNER_1_ID: RunnerReady()},
+        tasks={TASK_1_ID: task},
+        speech_media_ready={COMMAND_1_ID},
+    )
+
+    assert missing_result is None
+    assert ready_result is task
+
+
+def test_plan_forwards_realtime_transcription_without_batch_chunks() -> None:
+    """Realtime STT reaches its local runner without batch-upload assembly."""
+
+    shard = get_pipeline_shard_metadata(model_id=MODEL_A_ID, device_rank=0)
+    instance = get_mlx_ring_instance(
+        instance_id=INSTANCE_1_ID,
+        model_id=MODEL_A_ID,
+        node_to_runner={NODE_A: RUNNER_1_ID},
+        runner_to_shard={RUNNER_1_ID: shard},
+    )
+    local_runner = FakeRunnerSupervisor(
+        bound_instance=BoundInstance(
+            instance=instance,
+            bound_runner_id=RUNNER_1_ID,
+            bound_node_id=NODE_A,
+        ),
+        status=RunnerReady(),
+    )
+    task = RealtimeAudioTranscription(
+        task_id=TASK_1_ID,
+        instance_id=INSTANCE_1_ID,
+        task_status=TaskStatus.Pending,
+        command_id=COMMAND_1_ID,
+        owner_node=NODE_A,
+        task_params=RealtimeAudioTranscriptionTaskParams(
+            model=MODEL_A_ID,
+            input_sample_rate=16000,
+        ),
+    )
+
+    result = plan_mod.plan(
+        node_id=NODE_A,
+        runners={RUNNER_1_ID: local_runner},  # type: ignore
+        global_download_status={NODE_A: []},
+        instances={INSTANCE_1_ID: instance},
+        all_runners={RUNNER_1_ID: RunnerReady()},
+        tasks={TASK_1_ID: task},
+    )
+
+    assert result is task

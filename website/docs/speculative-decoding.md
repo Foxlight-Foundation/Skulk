@@ -60,7 +60,42 @@ each model to the right one from its card:
 Everything below (the MLX drafter table, the multi-node speedups, and the
 turn-itself-off cases) is about the MLX engine. The served engine's speculation
 is configured on the model card (`served_spec_type`, `served_spec_n_max`) and,
-like MLX MTP, is carded off per model when a pairing does not pay.
+like MLX MTP, is carded off per model when a pairing does not pay. That is the
+per-model opt-out pattern across engines: a model whose measured
+drafter-and-target pairing nets negative carries the disable on its own card,
+rather than a global switch.
+
+The [vLLM engine](vllm-engine.md) runs its own speculative decoding for
+checkpoints that ship native multi-token-prediction heads (Qwen3.6 among
+them): the card's `vllm_spec_method = "mtp"` and `vllm_spec_num_tokens`
+fields map to vLLM's `--speculative-config`, and vLLM resolves the matching
+drafter architecture from the checkpoint itself, with no separate draft
+model. Measured on an A100-80GB, this roughly doubles single-stream decode
+on Qwen3.6-27B-FP8 (about 2x at depth 2, 70-83% draft acceptance). The same
+per-model carding rule applies: a model whose measured pairing does not pay
+simply omits the fields. Models without native heads placed on vLLM decode
+plain; that engine's headline win remains aggregate throughput under
+concurrent load (continuous batching), so the two mechanisms address
+different bottlenecks and now both exist on the served path.
+
+The same card fields absorb vendor speculation schemes that use a separate
+published speculator instead of in-checkpoint heads. Poolside's Laguna
+models ship a block-parallel **DFlash** drafter as its own Hugging Face
+repo; the card declares `vllm_spec_method = "dflash"` with
+`vllm_spec_draft_repo` naming that drafter (mapped to the
+speculative-config `model` key), and vLLM (0.25.1 or later, which serves
+both the Laguna architecture and its DFlash drafter natively) fetches and
+runs it. No vendor fork or engine-specific code is involved: a new scheme
+is a new card declaration. Block-parallel drafters propose a whole block
+per step, so their carded depths run much deeper than MTP's (the Laguna
+XS 2.1 FP8 card uses the vendor-recommended 15 for a 16-token block).
+
+One served-engine degradation behavior worth knowing: a card-declared separate
+draft GGUF is a best-effort companion at download time, so if the draft file is
+missing on disk when the model loads, the served runner logs a warning and
+**serves the model without speculation** rather than failing the placement. If
+a served MTP model decodes at plain speed, check the runner log for that
+warning before suspecting the model.
 
 ### Served-engine speedups (AMD / llama.cpp)
 

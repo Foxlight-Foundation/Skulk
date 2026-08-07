@@ -23,7 +23,7 @@ from skulk.shared.backends import (
     resolve_node_backend,
 )
 from skulk.shared.models.memory_estimate import instance_context_token_limit
-from skulk.shared.models.model_cards import ModelCard, ModelId
+from skulk.shared.models.model_cards import ModelCard, ModelId, card_serves_speech
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import (
     CancelDownload,
@@ -138,6 +138,7 @@ def add_instance_to_placements(
     current_instances: Mapping[InstanceId, Instance],
     node_memory: Mapping[NodeId, MemoryUsage],
     node_vram: Mapping[NodeId, Memory] | None = None,
+    unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
 ) -> Mapping[InstanceId, Instance]:
     # TODO: validate against topology
 
@@ -160,6 +161,7 @@ def add_instance_to_placements(
             if node_id in node_memory
         },
         node_vram=node_vram,
+        unified_memory_gpu_nodes=unified_memory_gpu_nodes,
     )
     instance = command.instance.model_copy(update={"context_token_limit": ceiling})
     return {**current_instances, instance.instance_id: instance}
@@ -247,6 +249,7 @@ def _card_platform_backends(card: ModelCard) -> frozenset[str]:
     return platform_compatible_backends(
         card.placement.compatible_backends,
         card_serves_vision=card.vision is not None,
+        card_serves_speech=card_serves_speech(card),
     )
 
 
@@ -340,6 +343,8 @@ def place_instance(
     excluded_nodes: set[NodeId] | None = None,
     node_resources: Mapping[NodeId, NodeResources] | None = None,
     node_vram: Mapping[NodeId, Memory] | None = None,
+    unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
+    stamped_exclusions: set[NodeId] | None = None,
 ) -> dict[InstanceId, Instance]:
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
@@ -748,11 +753,24 @@ def place_instance(
             for node_id in selected_cycle.node_ids
         },
         node_vram=node_vram,
+        unified_memory_gpu_nodes=unified_memory_gpu_nodes,
     )
 
     cycle_digraph: Topology = topology.get_subgraph_from_nodes(selected_cycle.node_ids)
 
     instance_id = InstanceId()
+    # Persist the CALLER'S per-placement exclusions on the instance (#658):
+    # repair re-placements reconstruct intent from the instance, and without
+    # this record they widened eligibility back to the full topology. Repair
+    # callers pass ``stamped_exclusions`` (the original intent) separately
+    # from ``excluded_nodes`` (intent plus their own transiently failed
+    # nodes), so one transient failure is not laundered into permanent
+    # operator intent across repair generations (PR #667 review). Sorted so
+    # the replicated placement event is deterministic.
+    stamp_source = (
+        stamped_exclusions if stamped_exclusions is not None else excluded_nodes
+    )
+    stamped_exclusions_list = sorted(stamp_source) if stamp_source else []
     target_instances = dict(deepcopy(current_instances))
 
     if selected_is_rpc:
@@ -780,6 +798,7 @@ def place_instance(
             instance_id=instance_id,
             shard_assignments=shard_assignments,
             context_token_limit=context_token_limit,
+            excluded_nodes=stamped_exclusions_list,
             driver_node=driver_node,
             donor_endpoints=donor_endpoints,
         )
@@ -826,6 +845,7 @@ def place_instance(
                 instance_id=instance_id,
                 shard_assignments=shard_assignments,
                 context_token_limit=context_token_limit,
+                excluded_nodes=stamped_exclusions_list,
                 jaccl_devices=mlx_jaccl_devices,
                 jaccl_coordinators=mlx_jaccl_coordinators,
             )
@@ -843,6 +863,7 @@ def place_instance(
                 instance_id=instance_id,
                 shard_assignments=shard_assignments,
                 context_token_limit=context_token_limit,
+                excluded_nodes=stamped_exclusions_list,
                 hosts_by_node=hosts_by_node,
                 ephemeral_port=ephemeral_port,
             )
@@ -903,7 +924,10 @@ def fallback_command_for_refused_instance(
         sharding=sharding,
         instance_meta=instance_meta,
         min_nodes=1,
-        excluded_nodes=[refusing_node],
+        # The refusing node plus the instance's original per-placement
+        # exclusions (#658): the anywhere-fallback still may not land on
+        # nodes the caller excluded.
+        excluded_nodes=sorted({*instance.excluded_nodes, refusing_node}),
     )
 
 
@@ -913,9 +937,10 @@ def replacement_command_for_refused_instance(instance: Instance) -> PlaceInstanc
     When a worker refuses its shard for lack of GPU-wireable memory at load
     time (#290), the master re-places the same model one node wider so every
     node holds a smaller share. The placement intent (model card, sharding
-    family, instance backend) is recovered from the instance itself; the
-    operator's original per-placement node exclusions are not retained on the
-    instance, so the wider re-placement searches the full topology.
+    family, instance backend, per-placement node exclusions) is recovered
+    from the instance itself; the caller's original exclusions are stamped
+    on the instance at placement time (#658), so the wider re-placement
+    keeps honoring them instead of searching the full topology.
 
     ``min_nodes`` is the refused width plus one. Raising it past the cluster
     size makes :func:`place_instance` raise :class:`PlacementError`, which the
@@ -932,6 +957,9 @@ def replacement_command_for_refused_instance(instance: Instance) -> PlaceInstanc
         sharding=sharding,
         instance_meta=instance_meta,
         min_nodes=width + 1,
+        # The instance's original per-placement exclusions (#658); the wider
+        # re-placement keeps honoring the caller's intent.
+        excluded_nodes=sorted(instance.excluded_nodes),
     )
 
 
@@ -961,7 +989,10 @@ def replacement_command_for_download_failed_instance(
         sharding=sharding,
         instance_meta=instance_meta,
         min_nodes=width,
-        excluded_nodes=list(excluded_nodes),
+        # The union of the instance's original per-placement exclusions
+        # (#658) and the newly failed node(s): repair must not land on
+        # nodes the caller excluded, nor on the nodes that just failed.
+        excluded_nodes=sorted({*instance.excluded_nodes, *excluded_nodes}),
     )
 
 

@@ -25,6 +25,21 @@ def preferred_env_value(*keys: str, default: str | None = None) -> str | None:
     return default
 
 
+DEFAULT_MAX_OUTPUT_TOKENS: int = 4096
+_max_output_tokens_value = preferred_env_value(
+    "SKULK_MAX_OUTPUT_TOKENS",
+    "SKULK_MAX_TOKENS",
+    default=str(DEFAULT_MAX_OUTPUT_TOKENS),
+)
+MAX_OUTPUT_TOKENS: int = (
+    int(_max_output_tokens_value)
+    if _max_output_tokens_value
+    else DEFAULT_MAX_OUTPUT_TOKENS
+)
+if MAX_OUTPUT_TOKENS < 1:
+    raise ValueError("SKULK_MAX_OUTPUT_TOKENS must be greater than 0")
+
+
 _SKULK_HOME_ENV = _env("SKULK_HOME")
 
 
@@ -141,6 +156,12 @@ SKULK_MAX_CHUNK_SIZE = 512 * 1024
 
 SKULK_CUSTOM_MODEL_CARDS_DIR = SKULK_DATA_HOME / "custom_model_cards"
 
+# Managed engine binaries (#614 Phase 3): pinned prebuilt inference-engine
+# builds provisioned by skulk.provisioning live here, keyed by engine and
+# build tag (e.g. engines/llama-server/b10068/vulkan/...). SKULK_LLAMA_SERVER_BIN
+# always overrides a managed binary.
+SKULK_ENGINES_DIR = SKULK_DATA_HOME / "engines"
+
 SKULK_EVENT_LOG_DIR = SKULK_DATA_HOME / "event_log"
 SKULK_IMAGE_CACHE_DIR = SKULK_CACHE_HOME / "images"
 SKULK_TRACING_CACHE_DIR = SKULK_CACHE_HOME / "traces"
@@ -162,6 +183,15 @@ SKULK_IMAGE_TRANSPORT_DEBUG = (
     or "false"
 ).lower() == "true"
 
+# MLX batch-generator admission width: how many generations are ACTIVE at
+# once (each admitted task owns its own KV cache after prefill; excess tasks
+# queue). Unlike the served llama.cpp engine, whose slots split one fixed
+# context window, MLX has no aggregate KV admission budget, so raising this
+# raises worst-case memory with it - on smaller unified-memory Macs that is
+# the Metal OOM path. The default therefore stays at the memory-safe 8 (the
+# qualification fleet's 16 is an operator override on known hardware); do not
+# raise it until admission accounts for aggregate KV (#683 review, the
+# adaptive-concurrency arc).
 SKULK_MAX_CONCURRENT_REQUESTS = int(
     _env("SKULK_MAX_CONCURRENT_REQUESTS", "8") or "8"
 )

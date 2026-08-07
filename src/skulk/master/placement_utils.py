@@ -74,19 +74,20 @@ class CycleMemoryDiagnostics(CamelCaseModel):
 # against VRAM, not system RAM). Both the in-process llama.cpp runner and the
 # served llama-server engine launch with ``-ngl`` full-GPU offload; vLLM would
 # join here too. The bare CPU compute tag is excluded by the ``-cpu`` check.
-_GPU_OFFLOAD_ENGINE_PREFIXES: Final = ("llama_cpp-", "llama_server-")
+_GPU_OFFLOAD_ENGINE_PREFIXES: Final = ("llama_cpp-", "llama_server-", "vllm-")
 
 
 def _has_gpu_offload_backend(backends: frozenset[str]) -> bool:
     """Whether a node advertises a discrete-GPU-offload backend.
 
-    True for a non-CPU GPU-offload compute tag (``llama_cpp-vulkan/rocm/cuda`` or
-    ``llama_server-vulkan/rocm/cuda``). A node that exposes a GPU but advertises
-    only a ``-cpu`` tag (the default when ``SKULK_LLAMA_CPP_BACKENDS`` is unset, or
-    after a GPU wheel is replaced) runs out of system RAM, so it must NOT be
-    admitted against VRAM it will not use. The served ``llama_server`` engine is
-    included because it launches ``llama-server -ngl 99``, allocating weights + KV
-    from the GPU exactly like the in-process llama.cpp runner.
+    True for a non-CPU GPU-offload compute tag (``llama_cpp-vulkan/rocm/cuda``,
+    ``llama_server-vulkan/rocm/cuda``, or ``vllm-cuda/rocm``). A node that exposes a
+    GPU but advertises only a ``-cpu`` tag (the default when
+    ``SKULK_LLAMA_CPP_BACKENDS`` is unset, or after a GPU wheel is replaced) runs out
+    of system RAM, so it must NOT be admitted against VRAM it will not use. The
+    served ``llama_server`` engine is included because it launches
+    ``llama-server -ngl 99``, and ``vllm`` because ``vllm serve`` allocates weights +
+    KV from the GPU -- both use VRAM exactly like the in-process llama.cpp runner.
     """
     return any(
         tag.startswith(_GPU_OFFLOAD_ENGINE_PREFIXES) and not tag.endswith("-cpu")
@@ -183,6 +184,57 @@ def usable_vram_by_node(
     return usable
 
 
+def unified_memory_gpu_node_ids(
+    node_system: Mapping[NodeId, SystemPerformanceProfile],
+    node_resources: Mapping[NodeId, NodeResources] | None = None,
+    node_memory: Mapping[NodeId, MemoryUsage] | None = None,
+) -> frozenset[NodeId]:
+    """Return GPU-offload nodes whose accelerator pool includes host RAM.
+
+    A Strix-class APU reports a BIOS VRAM carve-out plus a GTT aperture spanning
+    all remaining system RAM. Placement may use that combined pool, but served
+    engines that allocate a fixed context window at startup cannot treat it as
+    discrete VRAM: amdgpu may need host pages while constructing the GPU
+    buffers, so the steady-state combined-pool fit does not bound peak host
+    memory. The returned set lets context admission preserve the conservative
+    served-engine floor on those nodes without giving up UMA-aware placement.
+
+    Args:
+        node_system: Per-node accelerator telemetry.
+        node_resources: Optional backend telemetry. When supplied, only nodes
+            advertising a GPU-offload backend are considered.
+        node_memory: Per-node system-memory telemetry required to prove that GTT
+            spans the whole host-memory pool.
+
+    Returns:
+        Immutable IDs of confirmed unified-memory GPU-offload nodes.
+    """
+    node_memory = node_memory or {}
+    unified: set[NodeId] = set()
+    for node_id, profile in node_system.items():
+        accelerator = profile.accelerator
+        memory = node_memory.get(node_id)
+        if (
+            accelerator is None
+            or accelerator.vendor != "amd"
+            or not accelerator.vram_total_bytes
+            or accelerator.vram_total_bytes <= 0
+            or accelerator.gtt_total_bytes is None
+            or memory is None
+        ):
+            continue
+        if node_resources is not None:
+            resources = node_resources.get(node_id)
+            if resources is None or not _has_gpu_offload_backend(resources.backends):
+                continue
+        if (
+            accelerator.gtt_total_bytes > accelerator.vram_total_bytes
+            and accelerator.gtt_total_bytes >= memory.ram_total.in_bytes
+        ):
+            unified.add(node_id)
+    return frozenset(unified)
+
+
 def _per_node_required_memory(
     cycle: Cycle,
     node_memory: Mapping[NodeId, MemoryUsage],
@@ -244,8 +296,8 @@ def _per_node_required_memory(
         pipeline_total_usable = sum(pipeline_usable.values(), start=Memory())
         if pipeline_total_usable.in_bytes == 0:
             return {node_id: required_memory for node_id in cycle.node_ids}
-        layer_allocations = allocate_layers_proportionally(
-            total_layers=model_card.n_layers,
+        layer_allocations = allocate_pipeline_layers(
+            model_card=model_card,
             memory_fractions=[
                 pipeline_usable[node_id] / pipeline_total_usable
                 for node_id in pipeline_node_ids
@@ -259,8 +311,8 @@ def _per_node_required_memory(
             // model_card.n_layers
             for index, node_id in enumerate(cycle.node_ids)
         }
-    layer_allocations = allocate_layers_proportionally(
-        total_layers=model_card.n_layers,
+    layer_allocations = allocate_pipeline_layers(
+        model_card=model_card,
         memory_fractions=[
             node_usable[node_id] / total_usable for node_id in cycle.node_ids
         ],
@@ -344,6 +396,17 @@ def filter_cycles_by_memory(
     diagnostics = CycleMemoryDiagnostics()
     filtered_cycles: list[Cycle] = []
     required_memory = model_card.storage_size
+    # ``context_budget`` (KV_CONTEXT_BUDGET_TOKENS) is the admission FLOOR, not the
+    # served window: a node is admissible only if it can hold at least this much KV,
+    # so every placement can serve at least this context. The runner then serves the
+    # LARGER memory-fit window from ``instance_context_token_limit`` (up to the card
+    # max), derived from the SAME working set this filter admits against (VRAM on a
+    # GPU node), so loading KV at that larger window fits by construction and is
+    # >= this floor -- except when the model's own advertised max context is smaller
+    # (then it serves that smaller max), or when the fit is uncomputable for a gguf
+    # card (then it clamps back to this floor to avoid a load-time OOM; see
+    # instance_context_token_limit). (Lifting the floor itself, to admit a big model
+    # at a reduced context rather than reject it, is a separate future lever.)
     total_kv = _estimate_kv_cache_bytes(model_card, model_card.n_layers, context_budget)
     kv_ratio = (
         total_kv.in_bytes / required_memory.in_bytes
@@ -370,6 +433,19 @@ def filter_cycles_by_memory(
                 f"({sharding.value} sharding): {pipeline_stage_count} pipeline "
                 "stages exceed "
                 f"{model_card.n_layers} model layers"
+            )
+            continue
+        split_limit = model_card.placement.max_pipeline_split_layer
+        if (
+            exact_pipeline_layers
+            and sharding == Sharding.Pipeline
+            and split_limit is not None
+            and pipeline_stage_count - 1 > split_limit
+        ):
+            diagnostics.rejection_reasons.append(
+                f"cycle [{', '.join(str(n) for n in cycle.node_ids)}] "
+                f"({sharding.value} sharding): {pipeline_stage_count} pipeline "
+                f"stages cannot fit before safe split boundary {split_limit}"
             )
             continue
 
@@ -452,6 +528,69 @@ def allocate_layers_proportionally(
     return result
 
 
+def allocate_pipeline_layers(
+    model_card: ModelCard,
+    memory_fractions: list[float],
+) -> list[int]:
+    """Allocate pipeline layers while honoring model-specific safe boundaries.
+
+    The ordinary proportional allocation remains the target. When the model's
+    tail reuses KV from earlier concrete layers, its card caps the final split
+    boundary so the last rank also owns every producer. Earlier boundaries are
+    shifted left only when necessary, preserving at least one layer per rank.
+
+    Args:
+        model_card: Model whose layer and placement constraints are applied.
+        memory_fractions: Per-rank shares of usable memory in pipeline order.
+
+    Returns:
+        Positive contiguous layer counts whose sum is ``model_card.n_layers``.
+
+    Raises:
+        ValueError: The safe boundary cannot accommodate the requested ranks.
+    """
+    allocations = allocate_layers_proportionally(
+        total_layers=model_card.n_layers,
+        memory_fractions=memory_fractions,
+    )
+    split_limit = model_card.placement.max_pipeline_split_layer
+    stage_count = len(allocations)
+    if split_limit is None or stage_count == 1:
+        return allocations
+    if stage_count - 1 > split_limit:
+        raise ValueError(
+            f"Cannot distribute {model_card.n_layers} layers across {stage_count} "
+            f"pipeline ranks before safe split boundary {split_limit}"
+        )
+
+    desired_boundaries: list[int] = []
+    layers_before = 0
+    for layer_count in allocations[:-1]:
+        layers_before += layer_count
+        desired_boundaries.append(layers_before)
+
+    safe_boundaries = [0] * len(desired_boundaries)
+    next_boundary = split_limit + 1
+    for index in reversed(range(len(desired_boundaries))):
+        boundary = min(desired_boundaries[index], next_boundary - 1)
+        minimum_boundary = index + 1
+        if boundary < minimum_boundary:
+            raise ValueError(
+                f"Cannot assign positive pipeline shards before safe split "
+                f"boundary {split_limit}"
+            )
+        safe_boundaries[index] = boundary
+        next_boundary = boundary
+
+    constrained: list[int] = []
+    previous_boundary = 0
+    for boundary in safe_boundaries:
+        constrained.append(boundary - previous_boundary)
+        previous_boundary = boundary
+    constrained.append(model_card.n_layers - previous_boundary)
+    return constrained
+
+
 def _validate_cycle(cycle: Cycle) -> None:
     if not cycle.node_ids:
         raise ValueError("Cannot create shard assignments for empty node cycle")
@@ -487,8 +626,8 @@ def _allocate_and_validate_layers(
     node_vram: Mapping[NodeId, Memory] | None = None,
 ) -> list[int]:
     node_vram = node_vram or {}
-    layer_allocations = allocate_layers_proportionally(
-        total_layers=model_card.n_layers,
+    layer_allocations = allocate_pipeline_layers(
+        model_card=model_card,
         memory_fractions=[
             _node_usable_memory(node_memory[node_id], node_vram.get(node_id))
             / total_memory
@@ -847,9 +986,15 @@ def _find_connection_ip(
     node_j: NodeId,
     cycle_digraph: Topology,
 ) -> Generator[str, None, None]:
-    """Find all IP addresses that connect node i to node j."""
+    """Find all IP addresses that connect node i to node j.
+
+    Session edges are skipped (#662): they prove connectivity, but their
+    annotated address is the observed remote endpoint of a libp2p
+    connection, which for a NAT'd or proxied member is not a dialable
+    listener address and must never become a ring/coordinator host.
+    """
     for connection in cycle_digraph.get_all_connections_between(node_i, node_j):
-        if isinstance(connection, SocketConnection):
+        if isinstance(connection, SocketConnection) and not connection.session:
             yield connection.sink_multiaddr.ip_address
 
 

@@ -1,10 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { MOBILE_BREAKPOINT_PX } from '../../hooks/useMediaQuery';
-import styled, { css, keyframes } from 'styled-components';
-import type { ChatUploadedFile } from '../../types/chat';
+import styled, { css } from 'styled-components';
+import { FiMic, FiPaperclip, FiSend, FiSquare, FiVolume2, FiVolumeX, FiX } from 'react-icons/fi';
+import type { ChatSpeechModelOption, ChatUploadedFile, ChatVoiceOption } from '../../types/chat';
 import { ChatAttachments } from './ChatAttachments';
 import { Button } from '../common/Button';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import {
+  finalizeRealtimeCaptureStartup,
+  RealtimeConversationSocket,
+  RealtimePcmCapture,
+  RealtimeTranscriptionSocket,
+  selectTranscriptionCaptureMode,
+} from '../../audio/realtimeTranscription';
+import { MAX_REFERENCE_AUDIO_BYTES } from '../../audio/speechSynthesisRequest';
 
 export interface ChatFormProps {
   onSend: (message: string, files: ChatUploadedFile[]) => void;
@@ -29,6 +38,63 @@ export interface ChatFormProps {
   onToggleThinking?: () => void;
   /** Whether the selected model accepts image attachments. */
   supportsImageAttachments?: boolean;
+  /** Whether the text chat send action is currently available. */
+  canSendMessages?: boolean;
+  /** Mounted STT models available for browser microphone transcription. */
+  transcriptionModels?: ChatSpeechModelOption[];
+  /** Whether the local API node currently advertises realtime STT service. */
+  realtimeTranscriptionAvailable?: boolean;
+  /** Mounted TTS models available for browser playback. */
+  speechModels?: ChatSpeechModelOption[];
+  /** Selected STT model id, persisted by the chat slice. */
+  selectedTranscriptionModelId?: string | null;
+  /** Selected TTS model id, persisted by the chat slice. */
+  selectedSpeechModelId?: string | null;
+  /** Optional model-specific TTS voice or preset. */
+  selectedVoice?: string | null;
+  /** Discovered model-native or bundled-reference voices for the TTS model. */
+  voiceOptions?: ChatVoiceOption[];
+  /** Whether the selected model's voice catalog is still loading. */
+  isVoiceCatalogLoading?: boolean;
+  /** Request-scoped reference clip used to condition dashboard TTS playback. */
+  referenceAudioFile?: File | null;
+  /** Optional transcript paired with the request-scoped reference clip. */
+  referenceAudioText?: string;
+  /** Whether final assistant messages should be spoken automatically. */
+  autoSpeakAssistant?: boolean;
+  /** Speak short interjections while a code block streams. */
+  narrateCodeBlocks?: boolean;
+  /** Enable a persistent server-VAD conversation instead of push-to-transcribe. */
+  realtimeVoiceEnabled?: boolean;
+  /** Submit final realtime transcripts through the dashboard chat flow. */
+  autoSubmitVoice?: boolean;
+  /** Whether a dashboard-managed audio playback is active. */
+  isSpeaking?: boolean;
+  /** Speech-related API error surfaced from the page container. */
+  voiceError?: string | null;
+  /** Persist the selected STT model. */
+  onSelectTranscriptionModel?: (modelId: string | null) => void;
+  /** Persist the selected TTS model. */
+  onSelectSpeechModel?: (modelId: string | null) => void;
+  /** Persist the optional model-specific voice or preset. */
+  onSelectedVoiceChange?: (voice: string | null) => void;
+  /** Select or clear the request-scoped reference clip. */
+  onReferenceAudioChange?: (file: File | null) => void;
+  /** Update the optional transcript for the request-scoped reference clip. */
+  onReferenceAudioTextChange?: (text: string) => void;
+  /** Toggle automatic TTS playback for final assistant messages. */
+  onAutoSpeakAssistantChange?: (enabled: boolean) => void;
+  /** Toggle spoken interjections while a code block streams. */
+  onNarrateCodeBlocksChange?: (enabled: boolean) => void;
+  onRealtimeVoiceEnabledChange?: (enabled: boolean) => void;
+  onAutoSubmitVoiceChange?: (enabled: boolean) => void;
+  onRealtimeTranscript?: (text: string, final: boolean) => void;
+  /** Transcribe a browser-recorded audio blob and return transcript text. */
+  onTranscribeAudio?: (audio: Blob) => Promise<string>;
+  /** Speak the current draft text with the selected TTS model. */
+  onSpeakText?: (text: string) => void | Promise<void>;
+  /** Stop dashboard-managed audio playback. */
+  onStopSpeaking?: () => void;
   className?: string;
 }
 
@@ -74,6 +140,135 @@ const HeaderRow = styled.div`
   }
 `;
 
+const VoiceRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 0 12px 8px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-family: ${({ theme }) => theme.fonts.body};
+  color: ${({ theme }) => theme.colors.textMuted};
+`;
+
+const VoiceGroup = styled.div`
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+`;
+
+const ReferenceAudioGroup = styled(VoiceGroup)`
+  flex-wrap: wrap;
+`;
+
+const VoiceLabel = styled.span`
+  color: ${({ theme }) => theme.colors.textMuted};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+`;
+
+const VoiceSelect = styled.select`
+  appearance: none;
+  min-width: 96px;
+  max-width: 180px;
+  height: 28px;
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  background: transparent;
+  color: ${({ theme }) => theme.colors.textSecondary};
+  font-family: ${({ theme }) => theme.fonts.body};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  outline: none;
+  padding: 0 8px;
+
+  &:focus {
+    border-color: ${({ theme }) => theme.colors.goldDim};
+  }
+
+  &:disabled {
+    color: ${({ theme }) => theme.colors.textMuted};
+  }
+
+  option {
+    background: ${({ theme }) => theme.colors.surface};
+    color: ${({ theme }) => theme.colors.text};
+  }
+`;
+
+const VoiceInput = styled.input`
+  all: unset;
+  box-sizing: border-box;
+  width: 92px;
+  height: 28px;
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  font-family: ${({ theme }) => theme.fonts.body};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  padding: 0 8px;
+
+  &:focus {
+    border-color: ${({ theme }) => theme.colors.goldDim};
+  }
+
+  &::placeholder {
+    color: ${({ theme }) => theme.colors.textMuted};
+  }
+`;
+
+const ReferenceTextInput = styled(VoiceInput)`
+  width: 156px;
+`;
+
+const ReferenceAudioName = styled.span`
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: ${({ theme }) => theme.colors.textSecondary};
+`;
+
+const VoiceToggle = styled.button<{ $active: boolean }>`
+  all: unset;
+  cursor: pointer;
+  font: inherit;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: ${({ theme }) => theme.radii.sm};
+  border: 1px solid;
+  transition: all 0.15s;
+
+  ${({ $active }) =>
+    $active
+      ? css`border-color: ${({ theme }) => theme.colors.gold}; color: ${({ theme }) => theme.colors.gold}; background: ${({ theme }) => theme.colors.goldBg};`
+      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.textMuted}; &:hover { border-color: ${({ theme }) => theme.colors.goldTextDim}; color: ${({ theme }) => theme.colors.gold}; }`}
+
+  &:disabled {
+    opacity: 0.88;
+    cursor: not-allowed;
+  }
+
+  &:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim};
+  }
+`;
+
+const VoiceIconBtn = styled(Button)<{ $active?: boolean }>`
+  ${({ $active }) =>
+    $active &&
+    css`
+      color: ${({ theme }) => theme.colors.gold};
+      border-color: ${({ theme }) => theme.colors.goldDim};
+      background: ${({ theme }) => theme.colors.goldBg};
+    `}
+`;
+
+const VoiceStatus = styled.span<{ $error?: boolean }>`
+  color: ${({ $error, theme }) => ($error ? theme.colors.error : theme.colors.goldTextDim)};
+  font-variant-numeric: tabular-nums;
+`;
+
 /*
  * Groups the model label + name so that, at phone width, the model gets its
  * own full line and the stats (ctx / thinking / TTFT / TPS) flow onto the
@@ -113,7 +308,7 @@ const ThinkingBtn = styled.button<{ $active: boolean }>`
   ${({ $active }) =>
     $active
       ? css`border-color: ${({ theme }) => theme.colors.gold}; color: ${({ theme }) => theme.colors.gold}; background: ${({ theme }) => theme.colors.goldBg};`
-      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.textMuted}; &:hover { border-color: ${({ theme }) => theme.colors.goldDim}; color: ${({ theme }) => theme.colors.gold}; }`}
+      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.textMuted}; &:hover { border-color: ${({ theme }) => theme.colors.goldTextDim}; color: ${({ theme }) => theme.colors.gold}; }`}
 `;
 
 const Stat = styled.span`
@@ -122,7 +317,7 @@ const Stat = styled.span`
 `;
 
 const StatValue = styled.span`
-  color: ${({ theme }) => theme.colors.goldDim};
+  color: ${({ theme }) => theme.colors.goldTextDim};
 `;
 
 const Spacer = styled.span`
@@ -134,6 +329,10 @@ const InputRow = styled.div`
   align-items: flex-end;
   gap: 8px;
   padding: 8px 12px;
+
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    gap: 6px;
+  }
 `;
 
 const AttachBtn = styled(Button)`
@@ -151,6 +350,7 @@ const Prompt = styled.span`
 const TextArea = styled.textarea`
   all: unset;
   flex: 1;
+  min-width: 0;
   font-size: ${({ theme }) => theme.fontSizes.md};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.text};
@@ -201,6 +401,10 @@ const BottomAccentLine = styled(AccentLine)`
   }
 `;
 
+function isLocalBrowserHostname(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+}
+
 /* ---- component ---- */
 
 export function ChatForm({
@@ -219,18 +423,146 @@ export function ChatForm({
   thinkingEnabled = false,
   onToggleThinking,
   supportsImageAttachments = false,
+  canSendMessages = true,
+  transcriptionModels = [],
+  realtimeTranscriptionAvailable = false,
+  speechModels = [],
+  selectedTranscriptionModelId = null,
+  selectedSpeechModelId = null,
+  selectedVoice = null,
+  voiceOptions = [],
+  isVoiceCatalogLoading = false,
+  referenceAudioFile = null,
+  referenceAudioText = '',
+  autoSpeakAssistant = false,
+  narrateCodeBlocks = true,
+  realtimeVoiceEnabled = true,
+  autoSubmitVoice = false,
+  isSpeaking = false,
+  voiceError = null,
+  onSelectTranscriptionModel,
+  onSelectSpeechModel,
+  onSelectedVoiceChange,
+  onReferenceAudioChange,
+  onReferenceAudioTextChange,
+  onAutoSpeakAssistantChange,
+  onNarrateCodeBlocksChange,
+  onRealtimeVoiceEnabledChange,
+  onAutoSubmitVoiceChange,
+  onRealtimeTranscript,
+  onTranscribeAudio,
+  onSpeakText,
+  onStopSpeaking,
   className,
 }: ChatFormProps) {
   const { t } = useSkulkTranslation();
   const [message, setMessage] = useState('');
   const [files, setFiles] = useState<ChatUploadedFile[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [isStartingRecording, setIsStartingRecording] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [mediaError, setMediaError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const referenceAudioInputRef = useRef<HTMLInputElement>(null);
   const filesRef = useRef<ChatUploadedFile[]>([]);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const realtimeSocketRef = useRef<RealtimeTranscriptionSocket | null>(null);
+  const realtimeConversationRef = useRef<RealtimeConversationSocket | null>(null);
+  const realtimeCommitSocketRef = useRef<RealtimeTranscriptionSocket | null>(null);
+  const realtimeCaptureRef = useRef<RealtimePcmCapture | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordingCancelledRef = useRef(false);
+  const recordingStartingRef = useRef(false);
+  const conversationStoppingRef = useRef(false);
+  const componentMountedRef = useRef(true);
+  const onRealtimeTranscriptRef = useRef(onRealtimeTranscript);
+  const submitRealtimeTranscriptRef = useRef(false);
+  const recordingStartedAtRef = useRef(0);
+  const recordingTimerRef = useRef<number | null>(null);
 
-  const canSend = message.trim().length > 0 || files.length > 0;
+  const canSend = canSendMessages && (message.trim().length > 0 || files.length > 0);
   const inputPlaceholder = placeholder ?? t('chat.form.placeholder', 'Type a message...');
+  const selectedTranscriptionId = selectedTranscriptionModelId ?? transcriptionModels[0]?.modelId ?? null;
+  const selectedTranscriptionModel = transcriptionModels.find(
+    (model) => model.modelId === selectedTranscriptionId,
+  );
+  const selectedSpeechId = selectedSpeechModelId ?? speechModels[0]?.modelId ?? null;
+  const selectedSpeechModel = speechModels.find(
+    (model) => model.modelId === selectedSpeechId,
+  );
+  const secureRecordingContext = typeof window === 'undefined'
+    || window.isSecureContext
+    || isLocalBrowserHostname(window.location.hostname);
+  const microphoneAvailable = secureRecordingContext
+    && typeof navigator !== 'undefined'
+    && Boolean(navigator.mediaDevices?.getUserMedia);
+  const useRealtimeTranscription = Boolean(
+    realtimeTranscriptionAvailable && selectedTranscriptionModel?.supportsRealtime,
+  );
+  const realtimeCaptureAvailable = microphoneAvailable
+    && typeof AudioContext !== 'undefined'
+    && typeof AudioWorkletNode !== 'undefined';
+  const batchCaptureAvailable = microphoneAvailable
+    && typeof MediaRecorder !== 'undefined'
+    && Boolean(onTranscribeAudio);
+  const captureMode = selectTranscriptionCaptureMode(
+    useRealtimeTranscription,
+    realtimeCaptureAvailable,
+    batchCaptureAvailable,
+  );
+  const browserRecordingAvailable = captureMode !== null;
+  const useRealtimeCapture = captureMode === 'realtime';
+  const useRealtimeConversation = useRealtimeCapture && realtimeVoiceEnabled;
+  const submitRealtimeTranscript = autoSubmitVoice && canSendMessages && !isLoading;
+  useEffect(() => {
+    submitRealtimeTranscriptRef.current = submitRealtimeTranscript;
+  }, [submitRealtimeTranscript]);
+  useEffect(() => {
+    onRealtimeTranscriptRef.current = onRealtimeTranscript;
+  }, [onRealtimeTranscript]);
+  const recordingUnavailableReason = !secureRecordingContext
+    ? t('chat.form.voiceErrors.secureContextRequired', 'Microphone requires HTTPS or localhost.')
+    : !browserRecordingAvailable
+      ? t('chat.form.voiceErrors.unsupportedRecording', 'Browser audio recording is unavailable.')
+      : null;
+  const speechReady = Boolean(
+    selectedSpeechId
+    && onSpeakText
+    && (
+      !selectedSpeechModel?.supportsVoiceListing
+      || (!isVoiceCatalogLoading && voiceOptions.length > 0)
+    ),
+  );
+  const transcriptionReady = Boolean(
+    selectedTranscriptionId && browserRecordingAvailable,
+  );
+  const canSpeakDraft = speechReady && message.trim().length > 0
+    && !isStartingRecording && !isRecording && !isTranscribing;
+  const displayVoiceError = mediaError ?? voiceError;
+  const showVoiceControls = transcriptionModels.length > 0 || speechModels.length > 0 || Boolean(displayVoiceError);
+  const startRecordingLabel = useRealtimeCapture
+    ? t('chat.form.startRealtimeTranscription', 'Start realtime transcription')
+    : t('chat.form.startRecording', 'Start recording');
+  const recordingButtonLabel = transcriptionReady && recordingUnavailableReason
+    ? `${startRecordingLabel}. ${recordingUnavailableReason}`
+    : startRecordingLabel;
+
+  const selectReferenceAudio = useCallback((file: File | null) => {
+    if (file && file.size > MAX_REFERENCE_AUDIO_BYTES) {
+      setMediaError(t(
+        'chat.form.voiceErrors.referenceAudioTooLarge',
+        'Reference audio must be 25 MiB or smaller.',
+      ));
+      return;
+    }
+    setMediaError(null);
+    onReferenceAudioChange?.(file);
+    onReferenceAudioTextChange?.('');
+  }, [onReferenceAudioChange, onReferenceAudioTextChange, t]);
 
   // Auto-resize textarea
   const resize = useCallback(() => {
@@ -239,6 +571,407 @@ export function ChatForm({
     el.style.height = 'auto';
     el.style.height = `${Math.min(el.scrollHeight, 150)}px`;
   }, []);
+
+  useEffect(() => {
+    resize();
+  }, [message, resize]);
+
+  const stopRecordingTimer = useCallback(() => {
+    if (recordingTimerRef.current !== null) {
+      window.clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+  }, []);
+
+  const cleanupRecordingResources = useCallback(() => {
+    stopRecordingTimer();
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+    mediaRecorderRef.current = null;
+    if (componentMountedRef.current) {
+      setIsRecording(false);
+      setRecordingSeconds(0);
+    }
+  }, [stopRecordingTimer]);
+
+  const appendTranscript = useCallback((transcript: string) => {
+    const trimmed = transcript.trim();
+    if (!trimmed) return;
+    setMessage((prev) => {
+      const current = prev.trimEnd();
+      if (!current) return trimmed;
+      return `${current}\n${trimmed}`;
+    });
+  }, []);
+
+  const startRecording = useCallback(async () => {
+    if (
+      !transcriptionReady
+      || isLoading
+      || isTranscribing
+      || recordingStartingRef.current
+    ) return;
+    if (!secureRecordingContext) {
+      setMediaError(t('chat.form.voiceErrors.secureContextRequired', 'Microphone requires HTTPS or localhost.'));
+      return;
+    }
+    if (
+      typeof navigator === 'undefined'
+      || !navigator.mediaDevices?.getUserMedia
+      || captureMode === null
+    ) {
+      setMediaError(t('chat.form.voiceErrors.unsupportedRecording', 'Browser audio recording is unavailable.'));
+      return;
+    }
+
+    recordingStartingRef.current = true;
+    setIsStartingRecording(true);
+    try {
+      setMediaError(null);
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!componentMountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      mediaStreamRef.current = stream;
+      if (useRealtimeConversation && selectedTranscriptionId) {
+        let capture: RealtimePcmCapture | null = null;
+        const socket = new RealtimeConversationSocket({
+          transcriptionModelId: selectedTranscriptionId,
+          onSpeechStarted: onStopSpeaking,
+          onTranscript: (text, final) => {
+            if (realtimeConversationRef.current !== socket) return;
+            const shouldSubmit = submitRealtimeTranscriptRef.current;
+            if (!text.trim()) {
+              if (final && conversationStoppingRef.current) {
+                finishConversation();
+              }
+              return;
+            }
+            if (final && shouldSubmit) {
+              socket.setInputPaused(true);
+              capture?.setEnabled(false);
+            }
+            setMessage(final && shouldSubmit ? '' : text);
+            onRealtimeTranscriptRef.current?.(text, final);
+            if (final && conversationStoppingRef.current) {
+              finishConversation();
+            }
+          },
+          onError: (error) => {
+            if (realtimeConversationRef.current !== socket) return;
+            setMediaError(error.message);
+            finishConversation();
+            stream.getTracks().forEach((track) => track.stop());
+            void capture?.stop();
+          },
+        });
+        const finishConversation = () => {
+          if (realtimeConversationRef.current !== socket) return;
+          realtimeConversationRef.current = null;
+          mediaStreamRef.current = null;
+          conversationStoppingRef.current = false;
+          socket.close();
+          stopRecordingTimer();
+          setIsRecording(false);
+          setIsTranscribing(false);
+          setRecordingSeconds(0);
+        };
+        realtimeConversationRef.current = socket;
+        conversationStoppingRef.current = false;
+        try {
+          await socket.connect();
+          capture = await RealtimePcmCapture.start(stream, (samples, sampleRate) => {
+            try {
+              socket.append(samples, sampleRate);
+            } catch (error) {
+              if (realtimeConversationRef.current !== socket) return;
+              const messageText = error instanceof Error
+                ? error.message
+                : t('chat.form.voiceErrors.recordingFailed', 'Recording failed.');
+              setMediaError(messageText);
+              finishConversation();
+              void capture?.stop();
+            }
+          });
+          if (!await finalizeRealtimeCaptureStartup(
+            capture,
+            componentMountedRef.current,
+            realtimeConversationRef.current === socket,
+          )) return;
+        } catch (error) {
+          realtimeConversationRef.current = null;
+          mediaStreamRef.current = null;
+          socket.close();
+          stream.getTracks().forEach((track) => track.stop());
+          throw error;
+        }
+        realtimeCaptureRef.current = capture;
+        recordingStartedAtRef.current = Date.now();
+        setIsRecording(true);
+        setRecordingSeconds(0);
+        stopRecordingTimer();
+        recordingTimerRef.current = window.setInterval(() => {
+          setRecordingSeconds(Math.floor((Date.now() - recordingStartedAtRef.current) / 1000));
+        }, 250);
+        return;
+      }
+      if (useRealtimeCapture && selectedTranscriptionId) {
+        let capture: RealtimePcmCapture | null = null;
+        const socket = new RealtimeTranscriptionSocket({
+          modelId: selectedTranscriptionId,
+          onError: (error) => {
+            if (realtimeSocketRef.current !== socket) return;
+            realtimeSocketRef.current = null;
+            realtimeCaptureRef.current = null;
+            mediaStreamRef.current = null;
+            stopRecordingTimer();
+            setIsRecording(false);
+            setRecordingSeconds(0);
+            setMediaError(error.message);
+            stream.getTracks().forEach((track) => track.stop());
+            void capture?.stop();
+          },
+        });
+        realtimeSocketRef.current = socket;
+        try {
+          await socket.connect();
+          capture = await RealtimePcmCapture.start(stream, (samples, sampleRate) => {
+            try {
+              socket.append(samples, sampleRate);
+            } catch (error) {
+              const messageText = error instanceof Error
+                ? error.message
+                : t('chat.form.voiceErrors.recordingFailed', 'Recording failed.');
+              if (
+                componentMountedRef.current
+                && realtimeSocketRef.current === socket
+              ) {
+                realtimeSocketRef.current = null;
+                realtimeCaptureRef.current = null;
+                mediaStreamRef.current = null;
+                stopRecordingTimer();
+                setIsRecording(false);
+                setRecordingSeconds(0);
+                stream.getTracks().forEach((track) => track.stop());
+                void capture?.stop();
+                setMediaError(messageText);
+              }
+              socket.cancel();
+            }
+          });
+          if (!await finalizeRealtimeCaptureStartup(
+            capture,
+            componentMountedRef.current,
+            realtimeSocketRef.current === socket,
+          )) {
+            return;
+          }
+        } catch (error) {
+          realtimeSocketRef.current = null;
+          mediaStreamRef.current = null;
+          socket.cancel();
+          stream.getTracks().forEach((track) => track.stop());
+          throw error;
+        }
+        realtimeCaptureRef.current = capture;
+        recordingStartedAtRef.current = Date.now();
+        setIsRecording(true);
+        setRecordingSeconds(0);
+        stopRecordingTimer();
+        recordingTimerRef.current = window.setInterval(() => {
+          setRecordingSeconds(Math.floor((Date.now() - recordingStartedAtRef.current) / 1000));
+        }, 250);
+        return;
+      }
+
+      const recorder = new MediaRecorder(stream);
+      mediaStreamRef.current = stream;
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+      recordingCancelledRef.current = false;
+      recordingStartedAtRef.current = Date.now();
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onerror = () => {
+        recordingCancelledRef.current = true;
+        setMediaError(t('chat.form.voiceErrors.recordingFailed', 'Recording failed.'));
+        if (recorder.state === 'inactive') {
+          cleanupRecordingResources();
+          return;
+        }
+
+        try {
+          recorder.stop();
+        } catch {
+          cleanupRecordingResources();
+        }
+      };
+
+      recorder.onstop = () => {
+        const chunks = [...audioChunksRef.current];
+        const cancelled = recordingCancelledRef.current;
+        const mimeType = recorder.mimeType || chunks[0]?.type || 'audio/webm';
+        cleanupRecordingResources();
+        audioChunksRef.current = [];
+
+        if (cancelled || chunks.length === 0 || !onTranscribeAudio) return;
+
+        const audio = new Blob(chunks, { type: mimeType });
+        setIsTranscribing(true);
+        void onTranscribeAudio(audio)
+          .then(appendTranscript)
+          .catch((error: unknown) => {
+            const messageText = error instanceof Error
+              ? error.message
+              : t('chat.form.voiceErrors.transcriptionFailed', 'Transcription failed.');
+            setMediaError(messageText);
+          })
+          .finally(() => setIsTranscribing(false));
+      };
+
+      recorder.start();
+      setIsRecording(true);
+      setRecordingSeconds(0);
+      stopRecordingTimer();
+      recordingTimerRef.current = window.setInterval(() => {
+        setRecordingSeconds(Math.floor((Date.now() - recordingStartedAtRef.current) / 1000));
+      }, 250);
+    } catch (error) {
+      cleanupRecordingResources();
+      if (!componentMountedRef.current) return;
+      const messageText = error instanceof DOMException && error.name === 'NotAllowedError'
+        ? t('chat.form.voiceErrors.microphoneDenied', 'Microphone permission denied.')
+        : error instanceof Error
+          ? error.message
+          : t('chat.form.voiceErrors.microphoneUnavailable', 'Microphone unavailable.');
+      setMediaError(messageText);
+    } finally {
+      recordingStartingRef.current = false;
+      if (componentMountedRef.current) setIsStartingRecording(false);
+    }
+  }, [
+    appendTranscript,
+    cleanupRecordingResources,
+    isLoading,
+    isTranscribing,
+    onTranscribeAudio,
+    secureRecordingContext,
+    selectedTranscriptionId,
+    stopRecordingTimer,
+    t,
+    transcriptionReady,
+    captureMode,
+    onStopSpeaking,
+    useRealtimeConversation,
+    useRealtimeCapture,
+  ]);
+
+  const stopRecording = useCallback((cancelled: boolean) => {
+    const conversationSocket = realtimeConversationRef.current;
+    if (conversationSocket) {
+      const realtimeCapture = realtimeCaptureRef.current;
+      realtimeCaptureRef.current = null;
+      mediaStreamRef.current = null;
+      stopRecordingTimer();
+      setIsRecording(false);
+      setRecordingSeconds(0);
+      void realtimeCapture?.stop();
+      if (cancelled) {
+        realtimeConversationRef.current = null;
+        conversationStoppingRef.current = false;
+        conversationSocket.close();
+        return;
+      }
+      conversationStoppingRef.current = true;
+      setIsTranscribing(true);
+      const committed = conversationSocket.commitTurn();
+      if (!committed && !conversationSocket.hasActiveResponse()) {
+        realtimeConversationRef.current = null;
+        conversationStoppingRef.current = false;
+        conversationSocket.close();
+        setIsTranscribing(false);
+      }
+      return;
+    }
+    const realtimeSocket = realtimeSocketRef.current;
+    if (realtimeSocket) {
+      const realtimeCapture = realtimeCaptureRef.current;
+      realtimeSocketRef.current = null;
+      realtimeCaptureRef.current = null;
+      mediaStreamRef.current = null;
+      stopRecordingTimer();
+      setIsRecording(false);
+      setRecordingSeconds(0);
+      if (!cancelled) realtimeCommitSocketRef.current = realtimeSocket;
+      void (async () => {
+        await realtimeCapture?.stop();
+        if (cancelled) {
+          realtimeSocket.cancel();
+          return;
+        }
+        if (!componentMountedRef.current) {
+          realtimeCommitSocketRef.current = null;
+          realtimeSocket.cancel();
+          return;
+        }
+        setIsTranscribing(true);
+        try {
+          const transcript = await realtimeSocket.commit();
+          if (componentMountedRef.current) appendTranscript(transcript);
+        } catch (error) {
+          const messageText = error instanceof Error
+            ? error.message
+            : t('chat.form.voiceErrors.transcriptionFailed', 'Transcription failed.');
+          if (componentMountedRef.current) setMediaError(messageText);
+        } finally {
+          if (realtimeCommitSocketRef.current === realtimeSocket) {
+            realtimeCommitSocketRef.current = null;
+          }
+          if (componentMountedRef.current) setIsTranscribing(false);
+        }
+      })();
+      return;
+    }
+
+    const recorder = mediaRecorderRef.current;
+    if (!recorder) return;
+    recordingCancelledRef.current = cancelled;
+    if (recorder.state === 'inactive') {
+      cleanupRecordingResources();
+      return;
+    }
+    recorder.stop();
+  }, [appendTranscript, cleanupRecordingResources, stopRecordingTimer, t]);
+
+  useEffect(() => {
+    componentMountedRef.current = true;
+    return () => {
+      componentMountedRef.current = false;
+      stopRecordingTimer();
+      recordingStartingRef.current = false;
+      const mediaStream = mediaStreamRef.current;
+      const realtimeSocket = realtimeSocketRef.current;
+      const realtimeCommitSocket = realtimeCommitSocketRef.current;
+      const realtimeConversation = realtimeConversationRef.current;
+      const realtimeCapture = realtimeCaptureRef.current;
+      mediaStreamRef.current = null;
+      realtimeSocketRef.current = null;
+      realtimeCommitSocketRef.current = null;
+      realtimeConversationRef.current = null;
+      realtimeCaptureRef.current = null;
+      mediaStream?.getTracks().forEach((track) => track.stop());
+      realtimeSocket?.cancel();
+      realtimeCommitSocket?.cancel();
+      realtimeConversation?.close();
+      void realtimeCapture?.stop();
+    };
+  }, [stopRecordingTimer]);
 
   // Refocus after loading completes
   const prevLoading = useRef(isLoading);
@@ -283,6 +1016,8 @@ export function ChatForm({
     (e?: React.FormEvent) => {
       e?.preventDefault();
       if (isLoading || !canSend) return;
+      realtimeConversationRef.current?.setInputPaused(true);
+      realtimeCaptureRef.current?.setEnabled(false);
       onSend(message.trim(), files);
       setMessage('');
       clearFiles();
@@ -293,9 +1028,15 @@ export function ChatForm({
     [isLoading, canSend, message, files, onSend, clearFiles],
   );
 
+  useEffect(() => {
+    const microphonePaused = isLoading || isSpeaking;
+    realtimeConversationRef.current?.setInputPaused(microphonePaused);
+    realtimeCaptureRef.current?.setEnabled(!microphonePaused);
+  }, [isLoading, isSpeaking]);
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if (e.key === 'Enter' && !e.shiftKey && !(e.nativeEvent as any).isComposing) {
+      if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
         e.preventDefault();
         handleSubmit();
       }
@@ -343,6 +1084,12 @@ export function ChatForm({
       return prev.filter((f) => f.id !== id);
     });
   }, []);
+
+  const formatRecordingSeconds = (seconds: number) => {
+    const minutes = Math.floor(seconds / 60).toString().padStart(2, '0');
+    const remaining = (seconds % 60).toString().padStart(2, '0');
+    return `${minutes}:${remaining}`;
+  };
 
   const showHeader = modelLabel || modelSelector || showThinkingToggle || ttftMs != null || tps != null || contextLength > 0;
 
@@ -393,6 +1140,244 @@ export function ChatForm({
         </HeaderRow>
       )}
 
+      {showVoiceControls && (
+        <VoiceRow>
+          <VoiceGroup>
+            <VoiceLabel>{t('chat.form.sttLabel', 'STT')}</VoiceLabel>
+            <VoiceSelect
+              value={selectedTranscriptionId ?? ''}
+              disabled={transcriptionModels.length === 0 || isStartingRecording || isRecording || isTranscribing}
+              onChange={(event) => onSelectTranscriptionModel?.(event.target.value || null)}
+              aria-label={t('chat.form.selectTranscriptionModel', 'Select transcription model')}
+            >
+              {transcriptionModels.length === 0 ? (
+                <option value="">{t('chat.form.noTranscriptionModels', 'No STT')}</option>
+              ) : (
+                transcriptionModels.map((model) => (
+                  <option key={model.modelId} value={model.modelId}>
+                    {model.label}
+                  </option>
+                ))
+              )}
+            </VoiceSelect>
+            {isRecording ? (
+              <>
+                <VoiceIconBtn
+                  variant="danger"
+                  size="sm"
+                  icon
+                  type="button"
+                  onClick={() => stopRecording(false)}
+                  aria-label={t('chat.form.stopRecording', 'Stop recording')}
+                  title={t('chat.form.stopRecording', 'Stop recording')}
+                  $active
+                >
+                  <FiSquare size={14} />
+                </VoiceIconBtn>
+                <VoiceIconBtn
+                  variant="ghost"
+                  size="sm"
+                  icon
+                  type="button"
+                  onClick={() => stopRecording(true)}
+                  aria-label={t('chat.form.cancelRecording', 'Cancel recording')}
+                  title={t('chat.form.cancelRecording', 'Cancel recording')}
+                >
+                  <FiX size={15} />
+                </VoiceIconBtn>
+                <VoiceStatus>{formatRecordingSeconds(recordingSeconds)}</VoiceStatus>
+              </>
+            ) : (
+              <VoiceIconBtn
+                variant="ghost"
+                size="sm"
+                icon
+                type="button"
+                loading={isStartingRecording || isTranscribing}
+                disabled={!transcriptionReady || isLoading || isStartingRecording}
+                onClick={startRecording}
+                aria-label={recordingButtonLabel}
+                title={recordingButtonLabel}
+              >
+                <FiMic size={16} />
+              </VoiceIconBtn>
+            )}
+            {selectedTranscriptionModel?.supportsRealtime && realtimeTranscriptionAvailable && (
+              <VoiceToggle
+                type="button"
+                disabled={isStartingRecording || isRecording || isTranscribing}
+                $active={realtimeVoiceEnabled}
+                aria-pressed={realtimeVoiceEnabled}
+                onClick={() => onRealtimeVoiceEnabledChange?.(!realtimeVoiceEnabled)}
+              >
+                {t('chat.form.realtime', 'Realtime')}
+              </VoiceToggle>
+            )}
+            {useRealtimeConversation && canSendMessages && (
+              <VoiceToggle
+                type="button"
+                disabled={isStartingRecording || isRecording || isTranscribing}
+                $active={autoSubmitVoice}
+                aria-pressed={autoSubmitVoice}
+                onClick={() => onAutoSubmitVoiceChange?.(!autoSubmitVoice)}
+              >
+                {t('chat.form.autoSubmit', 'Auto-send')}
+              </VoiceToggle>
+            )}
+          </VoiceGroup>
+
+          <VoiceGroup>
+            <VoiceLabel>{t('chat.form.ttsLabel', 'TTS')}</VoiceLabel>
+            <VoiceSelect
+              value={selectedSpeechId ?? ''}
+              disabled={speechModels.length === 0}
+              onChange={(event) => onSelectSpeechModel?.(event.target.value || null)}
+              aria-label={t('chat.form.selectSpeechModel', 'Select speech model')}
+            >
+              {speechModels.length === 0 ? (
+                <option value="">{t('chat.form.noSpeechModels', 'No TTS')}</option>
+              ) : (
+                speechModels.map((model) => (
+                  <option key={model.modelId} value={model.modelId}>
+                    {model.label}
+                  </option>
+                ))
+              )}
+            </VoiceSelect>
+            {speechModels.length > 0 && selectedSpeechModel?.supportsVoiceListing && (
+                <VoiceSelect
+                  value={voiceOptions.some((voice) => voice.id === selectedVoice) ? selectedVoice ?? '' : ''}
+                  disabled={isVoiceCatalogLoading}
+                  onChange={(event) => onSelectedVoiceChange?.(event.target.value || null)}
+                  aria-label={t('chat.form.voiceName', 'Voice')}
+                >
+                  <option value="">
+                    {isVoiceCatalogLoading
+                      ? t('chat.form.loadingVoices', 'Loading voices...')
+                      : t('chat.form.autoVoice', 'Auto (match language)')}
+                  </option>
+                  {voiceOptions.map((voice) => (
+                    <option key={voice.id} value={voice.id}>
+                      {voice.preferredLanguages.length > 0
+                        ? `${voice.name} (${voice.preferredLanguages.join(', ')})`
+                        : voice.name}
+                    </option>
+                  ))}
+                </VoiceSelect>
+            )}
+            <VoiceToggle
+              type="button"
+              disabled={!speechReady}
+              $active={autoSpeakAssistant}
+              aria-pressed={autoSpeakAssistant}
+              onClick={() => onAutoSpeakAssistantChange?.(!autoSpeakAssistant)}
+            >
+              {t('chat.form.autoSpeak', 'Auto')}
+            </VoiceToggle>
+            {autoSpeakAssistant && (
+              <VoiceToggle
+                type="button"
+                disabled={!speechReady}
+                $active={narrateCodeBlocks}
+                aria-pressed={narrateCodeBlocks}
+                onClick={() => onNarrateCodeBlocksChange?.(!narrateCodeBlocks)}
+                title={t(
+                  'chat.form.narrateCodeTitle',
+                  'Speak short interjections while a code block streams instead of staying silent',
+                )}
+              >
+                {t('chat.form.narrateCode', 'Narrate code')}
+              </VoiceToggle>
+            )}
+            {isSpeaking ? (
+              <VoiceIconBtn
+                variant="ghost"
+                size="sm"
+                icon
+                type="button"
+                onClick={onStopSpeaking}
+                aria-label={t('chat.form.stopSpeech', 'Stop speech')}
+                title={t('chat.form.stopSpeech', 'Stop speech')}
+                $active
+              >
+                <FiVolumeX size={16} />
+              </VoiceIconBtn>
+            ) : (
+              <VoiceIconBtn
+                variant="ghost"
+                size="sm"
+                icon
+                type="button"
+                disabled={!canSpeakDraft}
+                onClick={() => { void onSpeakText?.(message.trim()); }}
+                aria-label={t('chat.form.speakDraft', 'Speak draft')}
+                title={t('chat.form.speakDraft', 'Speak draft')}
+              >
+                <FiVolume2 size={16} />
+              </VoiceIconBtn>
+            )}
+          </VoiceGroup>
+
+          {selectedSpeechModel?.supportsReferenceAudio && (
+            <ReferenceAudioGroup>
+              <VoiceLabel>{t('chat.form.referenceLabel', 'Reference')}</VoiceLabel>
+              <VoiceIconBtn
+                variant="ghost"
+                size="sm"
+                icon
+                type="button"
+                disabled={isLoading || isSpeaking}
+                onClick={() => referenceAudioInputRef.current?.click()}
+                aria-label={t('chat.form.chooseReferenceAudio', 'Choose reference audio')}
+                title={t('chat.form.chooseReferenceAudio', 'Choose reference audio')}
+                $active={Boolean(referenceAudioFile)}
+              >
+                <FiPaperclip size={15} />
+              </VoiceIconBtn>
+              <input
+                ref={referenceAudioInputRef}
+                type="file"
+                accept="audio/*"
+                style={{ display: 'none' }}
+                aria-label={t('chat.form.referenceAudioFile', 'Reference audio file')}
+                onChange={(event) => {
+                  selectReferenceAudio(event.target.files?.[0] ?? null);
+                  event.target.value = '';
+                }}
+              />
+              {referenceAudioFile && (
+                <>
+                  <ReferenceAudioName title={referenceAudioFile.name}>
+                    {referenceAudioFile.name}
+                  </ReferenceAudioName>
+                  <VoiceIconBtn
+                    variant="ghost"
+                    size="sm"
+                    icon
+                    type="button"
+                    disabled={isLoading || isSpeaking}
+                    onClick={() => selectReferenceAudio(null)}
+                    aria-label={t('chat.form.removeReferenceAudio', 'Remove reference audio')}
+                    title={t('chat.form.removeReferenceAudio', 'Remove reference audio')}
+                  >
+                    <FiX size={14} />
+                  </VoiceIconBtn>
+                  <ReferenceTextInput
+                    value={referenceAudioText}
+                    disabled={isLoading || isSpeaking}
+                    onChange={(event) => onReferenceAudioTextChange?.(event.target.value)}
+                    placeholder={t('chat.form.referenceTranscriptPlaceholder', 'reference transcript')}
+                    aria-label={t('chat.form.referenceTranscript', 'Reference transcript')}
+                  />
+                </>
+              )}
+            </ReferenceAudioGroup>
+          )}
+
+          {displayVoiceError && <VoiceStatus $error>{displayVoiceError}</VoiceStatus>}
+        </VoiceRow>
+      )}
+
       {/* Attachments */}
       {files.length > 0 && (
         <div style={{ padding: '0 12px' }}>
@@ -411,9 +1396,7 @@ export function ChatForm({
           disabled={!supportsImageAttachments}
           aria-label={t('chat.form.attachFile', 'Attach file')}
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
-          </svg>
+          <FiPaperclip size={17} />
         </AttachBtn>
         <Prompt>▶</Prompt>
         <TextArea
@@ -427,6 +1410,7 @@ export function ChatForm({
           placeholder={inputPlaceholder}
           rows={1}
           autoFocus={autoFocus}
+          aria-label={t('chat.form.message', 'Chat message')}
         />
         {isLoading ? (
           <SendBtn
@@ -437,9 +1421,7 @@ export function ChatForm({
             onClick={onCancel}
             aria-label={t('chat.form.cancelGeneration', 'Cancel generation')}
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-              <rect x="6" y="6" width="12" height="12" rx="2" />
-            </svg>
+            <FiSquare size={15} />
           </SendBtn>
         ) : (
           <SendBtn
@@ -450,10 +1432,7 @@ export function ChatForm({
             disabled={!canSend}
             aria-label={t('chat.form.sendMessage', 'Send message')}
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <line x1="22" y1="2" x2="11" y2="13" />
-              <polygon points="22 2 15 22 11 13 2 9 22 2" />
-            </svg>
+            <FiSend size={15} />
           </SendBtn>
         )}
       </InputRow>
@@ -475,6 +1454,7 @@ export function ChatForm({
         multiple
         accept="image/*"
         style={{ display: 'none' }}
+        aria-label={t('chat.form.imageAttachmentFile', 'Image attachment file')}
         onChange={(e) => {
           if (e.target.files) addFiles(Array.from(e.target.files));
           e.target.value = '';

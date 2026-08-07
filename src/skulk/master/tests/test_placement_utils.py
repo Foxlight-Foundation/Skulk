@@ -2,18 +2,25 @@ import pytest
 
 from skulk.master.placement_utils import (
     allocate_layers_proportionally,
+    allocate_pipeline_layers,
     filter_cycles_by_memory,
     get_mlx_jaccl_coordinators,
     get_shard_assignments,
     get_shard_assignments_for_pipeline_parallel,
     get_smallest_cycles,
+    unified_memory_gpu_node_ids,
     usable_vram_by_node,
 )
 from skulk.master.tests.conftest import (
     create_node_memory,
     create_socket_connection,
 )
-from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    PlacementCardConfig,
+)
 from skulk.shared.topology import Topology
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
@@ -61,6 +68,44 @@ def _card(
         uses_cfg=uses_cfg,
         tasks=[ModelTask.TextToImage if uses_cfg else ModelTask.TextGeneration],
     )
+
+
+def test_pipeline_allocation_moves_tail_behind_safe_split_boundary() -> None:
+    """A shared-KV tail must remain with both of its concrete producers."""
+    card = _card(storage_gb=2, n_layers=30).model_copy(
+        update={
+            "placement": PlacementCardConfig(max_pipeline_split_layer=18),
+        }
+    )
+
+    allocations = allocate_pipeline_layers(card, [0.63, 0.37])
+
+    assert allocations == [18, 12]
+
+
+def test_pipeline_allocation_preserves_earlier_safe_boundaries() -> None:
+    """Only boundaries beyond the shared-tail limit should move."""
+    card = _card(storage_gb=2, n_layers=30).model_copy(
+        update={
+            "placement": PlacementCardConfig(max_pipeline_split_layer=18),
+        }
+    )
+
+    allocations = allocate_pipeline_layers(card, [0.34, 0.33, 0.33])
+
+    assert allocations == [10, 8, 12]
+
+
+def test_pipeline_allocation_rejects_too_many_constrained_ranks() -> None:
+    """Every pipeline rank still requires at least one owned layer."""
+    card = _card(storage_gb=2, n_layers=30).model_copy(
+        update={
+            "placement": PlacementCardConfig(max_pipeline_split_layer=1),
+        }
+    )
+
+    with pytest.raises(ValueError, match="before safe split boundary 1"):
+        allocate_pipeline_layers(card, [0.34, 0.33, 0.33])
 
 
 def test_filter_cycles_by_memory():
@@ -626,6 +671,51 @@ def test_usable_vram_by_node_uma_counts_gtt():
         node_vram=usable,
     )
     assert len(fitting) == 1, diagnostics.rejection_reasons
+
+
+def test_unified_memory_gpu_node_ids_requires_uma_and_gpu_backend():
+    """Only an AMD APU with host-spanning GTT and GPU offload is classified UMA."""
+    uma = NodeId()
+    discrete = NodeId()
+    cpu_only_uma = NodeId()
+    memory = {
+        node_id: create_node_memory(
+            Memory.from_gb(30).in_bytes, ram_total=Memory.from_gb(32).in_bytes
+        )
+        for node_id in (uma, discrete, cpu_only_uma)
+    }
+    node_system = {
+        uma: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=Memory.from_gb(32).in_bytes,
+                gtt_total_bytes=Memory.from_gb(60).in_bytes,
+            )
+        ),
+        discrete: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=Memory.from_gb(32).in_bytes,
+                gtt_total_bytes=Memory.from_gb(16).in_bytes,
+            )
+        ),
+        cpu_only_uma: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=Memory.from_gb(32).in_bytes,
+                gtt_total_bytes=Memory.from_gb(60).in_bytes,
+            )
+        ),
+    }
+    resources = {
+        uma: NodeResources(backends=frozenset({"llama_server-vulkan"})),
+        discrete: NodeResources(backends=frozenset({"llama_server-vulkan"})),
+        cpu_only_uma: NodeResources(backends=frozenset({"llama_server-cpu"})),
+    }
+
+    assert unified_memory_gpu_node_ids(
+        node_system, resources, node_memory=memory
+    ) == frozenset({uma})
 
 
 def test_usable_vram_by_node_discrete_without_gtt_uses_vram_only():

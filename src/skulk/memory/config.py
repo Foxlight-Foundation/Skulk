@@ -6,8 +6,11 @@ Memory is **off by default** and gated by two independent switches:
    master gate. It reveals the "Experiments" section in the dashboard Settings
    and is required for any experimental feature to take effect. A node without
    it behaves exactly as it does today.
-2. ``experiments.memory_enabled`` (a fleet-synced Settings field) is the
-   per-feature toggle inside that section.
+2. A fleet-synced per-feature toggle passed by the caller. Phase 1 landed
+   while the legacy ``experiments`` config section was being deprecated
+   (1.5.0 accepts and ignores it), so the toggle's durable home is a Phase 2
+   decision under the configuration-taxonomy doctrine; callers pass the
+   resolved boolean and this module stays agnostic about where it lives.
 
 Effective memory state is the AND of the two: the operator has opted the node
 into experimental mode *and* turned the memory toggle on. The later phases'
@@ -73,8 +76,9 @@ def resolve_memory_settings(
 ) -> MemorySettings:
     """Resolve effective memory settings.
 
-    ``feature_enabled`` is the fleet-synced ``experiments.memory_enabled`` toggle
-    (defaults off, and passed by the caller from the loaded cluster config).
+    ``feature_enabled`` is the fleet-synced per-feature toggle (defaults off;
+    the caller passes the resolved boolean from wherever Phase 2 homes it,
+    since the legacy experiments config section is deprecated).
     Memory is enabled only when experimental mode is on *and* the toggle is on.
     ``env`` is injectable so tests never touch real process state.
     """

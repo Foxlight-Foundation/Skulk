@@ -37,8 +37,11 @@ degraded counting-only mode while 2 GiB remain keeps the node alive and
 loudly diagnosable instead."""
 
 _DISK_CHECK_INTERVAL_APPENDS = 1024
-"""How many appends between free-space checks (a statvfs call is cheap but
-not free; per-token chunk events make append a hot path)."""
+"""How many appends between free-space checks.
+
+The statvfs call is cheap but still stays amortized across bursts of durable
+control events.
+"""
 
 _METADATA_WRITE_INTERVAL_APPENDS = 256
 """How many appends between events.meta.json refreshes. The metadata file is

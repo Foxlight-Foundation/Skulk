@@ -14,21 +14,34 @@ import pytest
 
 from skulk.master.main import Master
 from skulk.shared.session_carryover import seed_state_for_new_session
+from skulk.shared.tests.conftest import get_pipeline_shard_metadata
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
 from skulk.shared.types.common import NodeId, SessionId
 from skulk.shared.types.events import (
     Event,
     GlobalForwarderEvent,
+    IndexedEvent,
     LocalForwarderEvent,
+    NodeDownloadProgress,
     StateSnapshotHydrated,
 )
+from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSyncMessage
+from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
+from skulk.shared.types.worker.downloads import (
+    DownloadAttemptId,
+    DownloadCompleted,
+    DownloadOngoing,
+    DownloadProgressData,
+)
 from skulk.utils.channels import Receiver, channel
+from skulk.worker.tests.constants import MODEL_A_ID
 
 
 def _master(
     initial_state: State | None,
+    telemetry_view: TelemetryView | None = None,
 ) -> tuple[Master, Receiver[GlobalForwarderEvent]]:
     global_send, global_recv = channel[GlobalForwarderEvent]()
     master = Master(
@@ -42,6 +55,7 @@ def _master(
         state_sync_sender=channel[StateSyncMessage]()[0],
         download_command_sender=channel[ForwarderDownloadCommand]()[0],
         initial_state=initial_state,
+        telemetry_view=telemetry_view,
     )
     return master, global_recv
 
@@ -88,3 +102,49 @@ async def test_no_seed_indexes_nothing():
 def test_construction_never_pre_seeds(tracing: bool):
     master, _ = _master(seed_state_for_new_session(State(tracing_enabled=tracing)))
     assert master.state.last_event_applied_idx == -1
+
+
+def test_master_applies_download_ordering_without_colocated_applier() -> None:
+    """Master planning must reject stale telemetry on both durable event paths."""
+
+    node = NodeId("node-a")
+    shard = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=1)
+    attempt = DownloadAttemptId("attempt-a")
+    ongoing = DownloadOngoing(
+        node_id=node,
+        shard_metadata=shard,
+        attempt_id=attempt,
+        download_progress=DownloadProgressData(
+            total=Memory.from_mb(100),
+            downloaded=Memory.from_mb(50),
+            downloaded_this_session=Memory.from_mb(50),
+            completed_files=1,
+            total_files=2,
+            speed=1.0,
+            eta_ms=1_000,
+            files={},
+        ),
+    )
+    completed = DownloadCompleted(
+        node_id=node,
+        shard_metadata=shard,
+        attempt_id=attempt,
+        total=Memory.from_mb(100),
+    )
+    durable_events = (
+        NodeDownloadProgress(download_progress=completed),
+        StateSnapshotHydrated(
+            state=State(downloads={node: [completed]}, last_event_applied_idx=0)
+        ),
+    )
+
+    for durable_event in durable_events:
+        telemetry = TelemetryView()
+        telemetry.apply(NodeTelemetry(node_id=node, info=ongoing))
+        master, _ = _master(None, telemetry)
+        master._apply_indexed_event(  # pyright: ignore[reportPrivateUsage]
+            IndexedEvent(event=durable_event, idx=0)
+        )
+        telemetry.apply(NodeTelemetry(node_id=node, info=ongoing))
+
+        assert master._effective_downloads()[node] == [completed]  # pyright: ignore[reportPrivateUsage]

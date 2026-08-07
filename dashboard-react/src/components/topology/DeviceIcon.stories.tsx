@@ -12,7 +12,7 @@ const meta: Meta<typeof DeviceIcon> = {
   component: DeviceIcon,
   parameters: { layout: 'centered' },
   argTypes: {
-    model: { control: 'select', options: ['macbook-pro', 'mac-studio', 'mac-mini', 'amd-strix', 'unknown'] },
+    model: { control: 'select', options: ['macbook-pro', 'mac-studio', 'mac-mini', 'amd-strix', 'nvidia-gpu', 'unknown'] },
     ramPercent: { control: { type: 'range', min: 0, max: 100, step: 1 } },
     wireColor: { control: 'color' },
     strokeWidth: { control: { type: 'range', min: 0.5, max: 4, step: 0.5 } },
@@ -44,6 +44,11 @@ export const MacMini: Story = {
 export const AmdStrix: Story = {
   args: { model: 'amd-strix', ramPercent: 45, width: 150, height: 110 },
   name: 'AMD Ryzen AI Max',
+};
+
+export const NvidiaGpu: Story = {
+  args: { model: 'nvidia-gpu', ramPercent: 45, width: 150, height: 110 },
+  name: 'NVIDIA CUDA Device',
 };
 
 export const AmdStrixFull: Story = {

@@ -5,7 +5,7 @@ from pydantic import Field
 
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.topology import Connection
-from skulk.shared.types.chunks import GenerationChunk, InputImageChunk
+from skulk.shared.types.chunks import GenerationChunk, InputChunk
 from skulk.shared.types.common import (
     CommandId,
     Id,
@@ -16,10 +16,21 @@ from skulk.shared.types.common import (
 )
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import Task, TaskId, TaskStatus
-from skulk.shared.types.worker.downloads import DownloadProgress
+from skulk.shared.types.worker.downloads import (
+    DownloadCompleted,
+    DownloadFailed,
+    DownloadPending,
+    DownloadProgress,
+)
 from skulk.shared.types.worker.instances import Instance, InstanceId
 from skulk.shared.types.worker.runners import RunnerId, RunnerStatus
-from skulk.utils.info_gatherer.info_gatherer import GatheredInfo
+from skulk.utils.info_gatherer.info_gatherer import (
+    GatheredInfo,
+    MacThunderboltConnections,
+    MacThunderboltIdentifiers,
+    NodeNetworkInterfaces,
+    ThunderboltBridgeInfo,
+)
 from skulk.utils.pydantic_ext import CamelCaseModel, FrozenModel, TaggedModel
 
 
@@ -82,8 +93,44 @@ class RunnerStatusUpdated(BaseEvent):
     runner_status: RunnerStatus
 
 
+class NodeTimeoutEvidence(FrozenModel):
+    """Signal ages captured when the master decides to prune a node."""
+
+    last_logged_event_age_seconds: float = Field(
+        ge=0,
+        description="Age of the node's last indexed control-plane event.",
+    )
+    heartbeat_age_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description="Age of the node's last dedicated telemetry heartbeat receipt.",
+    )
+    fallback_telemetry_age_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description="Age of the node's last non-heartbeat telemetry receipt.",
+    )
+    effective_age_seconds: float = Field(
+        ge=0,
+        description="Age of the freshest available liveness signal.",
+    )
+    timeout_seconds: float = Field(
+        gt=0,
+        description="Configured liveness timeout used for the prune decision.",
+    )
+
+
 class NodeTimedOut(BaseEvent):
-    node_id: NodeId
+    """Remove a node after every available liveness signal becomes stale."""
+
+    node_id: NodeId = Field(description="Node removed from cluster membership.")
+    evidence: NodeTimeoutEvidence | None = Field(
+        default=None,
+        description=(
+            "Signal ages captured by the deciding master; absent only on legacy "
+            "or manually constructed events."
+        ),
+    )
 
 
 # TODO: bikeshed this name
@@ -94,6 +141,13 @@ class NodeGatheredInfo(BaseEvent):
 
 
 class NodeDownloadProgress(BaseEvent):
+    """Durable download outcome or reset decision.
+
+    Current producers emit only ``DownloadCompleted``/``DownloadFailed`` and
+    rare ``DownloadPending`` reset decisions here. ``DownloadOngoing`` remains
+    decodable for replay of older event logs but is ignored by current apply.
+    """
+
     download_progress: DownloadProgress
 
 
@@ -104,7 +158,7 @@ class ChunkGenerated(BaseEvent):
 
 class InputChunkReceived(BaseEvent):
     command_id: CommandId
-    chunk: InputImageChunk
+    chunk: InputChunk
 
 
 class TopologyEdgeCreated(BaseEvent):
@@ -149,7 +203,7 @@ class TraceEventData(FrozenModel):
     category: str
     node_id: str | None = None
     model_id: str | None = None
-    task_kind: Literal["image", "text", "embedding"] | None = None
+    task_kind: Literal["image", "text", "embedding", "speech"] | None = None
     tags: list[str] = Field(default_factory=list)
     attrs: dict[str, str | int | float | bool | list[str]] = Field(
         default_factory=dict
@@ -201,6 +255,52 @@ Event = (
     | StagedModelEvicted
     | StateSnapshotHydrated
 )
+
+
+_PERSISTED_CONTROL_EVENT_TYPES: tuple[type[BaseEvent], ...] = (
+    TestEvent,
+    TaskCreated,
+    TaskStatusUpdated,
+    TaskFailed,
+    TaskDeleted,
+    TaskAcknowledged,
+    InstanceCreated,
+    InstanceDeleted,
+    RunnerStatusUpdated,
+    NodeTimedOut,
+    TopologyEdgeCreated,
+    TopologyEdgeDeleted,
+    TracingStateChanged,
+    CustomModelCardAdded,
+    CustomModelCardDeleted,
+    StagedModelEvicted,
+    StateSnapshotHydrated,
+)
+
+_CONTROL_TOPOLOGY_INFO_TYPES = (
+    NodeNetworkInterfaces,
+    MacThunderboltIdentifiers,
+    MacThunderboltConnections,
+    ThunderboltBridgeInfo,
+)
+
+
+def is_persistable_control_event(event: Event) -> bool:
+    """Return whether an event is a durable control-plane decision or fact.
+
+    Payload-bearing runner IPC events and observational telemetry remain
+    decodable for compatibility, but the master must reject them before
+    ordering, indexing, persistence, replay, or global broadcast.
+    """
+
+    if isinstance(event, NodeGatheredInfo):
+        return isinstance(event.info, _CONTROL_TOPOLOGY_INFO_TYPES)
+    if isinstance(event, NodeDownloadProgress):
+        return isinstance(
+            event.download_progress,
+            (DownloadPending, DownloadCompleted, DownloadFailed),
+        )
+    return isinstance(event, _PERSISTED_CONTROL_EVENT_TYPES)
 
 
 class IndexedEvent(CamelCaseModel):

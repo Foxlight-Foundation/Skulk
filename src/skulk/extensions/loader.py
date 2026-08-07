@@ -16,11 +16,17 @@ from loguru import logger
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
+from skulk.extensions.capabilities import CapabilityDescriptor
 from skulk.extensions.types import (
+    CapabilityCallHandler,
+    CapabilityInputStreamHandler,
+    CapabilityProvider,
+    CapabilityStreamHandler,
     ChatMiddleware,
     ChatResponseSummary,
     ExtensionContext,
     SkulkExtension,
+    SupportsExtensionStartup,
 )
 from skulk.shared.types.chunks import (
     ErrorChunk,
@@ -66,14 +72,32 @@ class LoadedExtensions:
         ``chat_middleware()`` raises must be skipped loudly, never allowed to
         crash the process (the "loader never raises" contract).
         """
+        self._extension_instances: list[SkulkExtension] = []
         self._names: list[str] = []
         self._chat_middlewares: list[tuple[str, ChatMiddleware]] = []
+        self._startup_hooks: list[tuple[str, SupportsExtensionStartup]] = []
+        self._capability_descriptors: list[CapabilityDescriptor] = []
+        # qualified_id -> (extension name, handler, descriptor) for providers
+        # that also serve unary calls (fabric-citizenship Phase 2b).
+        self._call_handlers: dict[
+            str, tuple[str, CapabilityCallHandler, CapabilityDescriptor]
+        ] = {}
+        self._stream_handlers: dict[
+            str,
+            tuple[
+                str,
+                CapabilityStreamHandler | CapabilityInputStreamHandler,
+                CapabilityDescriptor,
+            ],
+        ] = {}
+        seen_qualified_ids: set[str] = set()
         for extension in extensions:
             try:
                 name = str(extension.name)
             except Exception as exc:  # noqa: BLE001 - plugin must not crash startup
                 logger.error(f"extension name property raised; skipping: {exc}")
                 continue
+            self._extension_instances.append(extension)
             try:
                 middleware = extension.chat_middleware()
             except Exception as exc:  # noqa: BLE001 - plugin must not crash startup
@@ -85,6 +109,114 @@ class LoadedExtensions:
             self._names.append(name)
             if middleware is not None:
                 self._chat_middlewares.append((name, middleware))
+            # Provider facet (fabric-citizenship): collect this extension's
+            # capability descriptors. Structural check + guarded call so a
+            # non-provider extension or a raising capabilities() can never
+            # break loading.
+            if isinstance(extension, CapabilityProvider):
+                try:
+                    descriptors = list(extension.capabilities())
+                except Exception as exc:  # noqa: BLE001 - plugin must not crash startup
+                    logger.error(
+                        f"extension '{name}' capabilities() raised; loading it "
+                        f"without capabilities: {exc}"
+                    )
+                    descriptors = []
+                for descriptor in descriptors:
+                    if not isinstance(descriptor, CapabilityDescriptor):  # pyright: ignore[reportUnnecessaryIsInstance]
+                        logger.error(
+                            f"extension '{name}' returned a non-descriptor "
+                            f"capability entry; skipping it"
+                        )
+                        continue
+                    # One provider per id@version per node: a duplicate would
+                    # make describe/call ambiguous locally.
+                    if descriptor.qualified_id in seen_qualified_ids:
+                        logger.error(
+                            f"extension '{name}' capability "
+                            f"'{descriptor.qualified_id}' is already provided "
+                            f"by another extension on this node; skipping it"
+                        )
+                        continue
+                    seen_qualified_ids.add(descriptor.qualified_id)
+                    self._capability_descriptors.append(descriptor)
+                    # Call facet (Phase 2b): a provider that also implements
+                    # handle_call serves this descriptor's unary calls. A
+                    # descriptor without a handler is discovery-only (valid:
+                    # for example a streaming-only capability before Phase 3).
+                    # Only unary descriptors register: routing a streaming
+                    # capability through the unary surface would serve it with
+                    # the wrong payload/result contract.
+                    if descriptor.io_mode == "unary" and isinstance(
+                        extension, CapabilityCallHandler
+                    ):
+                        self._call_handlers[descriptor.qualified_id] = (
+                            name,
+                            extension,
+                            descriptor,
+                        )
+                    if descriptor.io_mode == "server_streaming" and isinstance(
+                        extension, CapabilityStreamHandler
+                    ):
+                        self._stream_handlers[descriptor.qualified_id] = (
+                            name,
+                            extension,
+                            descriptor,
+                        )
+                    if descriptor.io_mode in (
+                        "client_streaming",
+                        "bidirectional",
+                    ) and isinstance(extension, CapabilityInputStreamHandler):
+                        self._stream_handlers[descriptor.qualified_id] = (
+                            name,
+                            extension,
+                            descriptor,
+                        )
+            # Startup-hook facet: a pure provider has no chat hook through
+            # which to reach the context, so registration must not depend on
+            # a chat request arriving.
+            if isinstance(extension, SupportsExtensionStartup):
+                self._startup_hooks.append((name, extension))
+
+    def with_builtin_extensions(
+        self, extensions: Sequence[SkulkExtension]
+    ) -> "LoadedExtensions":
+        """Return a registry with first-party providers taking precedence.
+
+        Built-ins are prepended so their reserved ``id@version`` contracts win
+        deterministically over an external extension attempting to publish the
+        same qualified capability. Existing extension facets are copied from
+        this registry rather than discovered again because middleware and
+        capability factories may be stateful.
+        """
+
+        combined = LoadedExtensions(extensions)
+        combined._extension_instances.extend(self._extension_instances)
+        combined._names.extend(self._names)
+        combined._chat_middlewares.extend(self._chat_middlewares)
+        combined._startup_hooks.extend(self._startup_hooks)
+
+        seen_qualified_ids = {
+            descriptor.qualified_id
+            for descriptor in combined._capability_descriptors
+        }
+        for descriptor in self._capability_descriptors:
+            qualified_id = descriptor.qualified_id
+            if qualified_id in seen_qualified_ids:
+                logger.error(
+                    f"external capability '{qualified_id}' is reserved by a "
+                    "first-party provider on this node; skipping it"
+                )
+                continue
+            seen_qualified_ids.add(qualified_id)
+            combined._capability_descriptors.append(descriptor)
+            call_handler = self._call_handlers.get(qualified_id)
+            if call_handler is not None:
+                combined._call_handlers[qualified_id] = call_handler
+            stream_handler = self._stream_handlers.get(qualified_id)
+            if stream_handler is not None:
+                combined._stream_handlers[qualified_id] = stream_handler
+        return combined
 
     @property
     def names(self) -> list[str]:
@@ -95,6 +227,66 @@ class LoadedExtensions:
     def has_chat_middleware(self) -> bool:
         """Whether any loaded extension provides chat middleware."""
         return bool(self._chat_middlewares)
+
+    @property
+    def capability_descriptors(self) -> tuple[CapabilityDescriptor, ...]:
+        """All capability descriptors served by loaded provider extensions."""
+        return tuple(self._capability_descriptors)
+
+    def call_handler(
+        self, qualified_id: str
+    ) -> tuple[str, CapabilityCallHandler, CapabilityDescriptor] | None:
+        """Look up the call handler serving ``id@version`` on this node.
+
+        Returns ``(extension name, handler, descriptor)``, or ``None`` when no
+        loaded provider serves unary calls for that capability (unknown id,
+        wrong version, or a discovery-only descriptor without a handler).
+        """
+        return self._call_handlers.get(qualified_id)
+
+    def handled_capability_ids(self) -> frozenset[str]:
+        """Capability ids (bare, unversioned) with at least one call handler."""
+        return frozenset(
+            entry[2].id for entry in self._call_handlers.values()
+        )
+
+    def stream_handler(
+        self, qualified_id: str
+    ) -> (
+        tuple[
+            str,
+            CapabilityStreamHandler | CapabilityInputStreamHandler,
+            CapabilityDescriptor,
+        ]
+        | None
+    ):
+        """Look up the streaming handler serving ``id@version`` on this node."""
+
+        return self._stream_handlers.get(qualified_id)
+
+    def handled_stream_capability_ids(self) -> frozenset[str]:
+        """Bare capability ids with an executable streaming handler."""
+
+        return frozenset(
+            entry[2].id for entry in self._stream_handlers.values()
+        )
+
+    def run_startup_hooks(self, context: ExtensionContext) -> None:
+        """Run every extension's ``on_start`` hook, each one guarded.
+
+        Called once when the node's extension surface comes up (the API wires
+        the context and invokes this). A raising hook is logged loudly and the
+        extension continues without its startup work; startup of the node is
+        never blocked by a broken plugin.
+        """
+        for name, extension in self._startup_hooks:
+            try:
+                extension.on_start(context)
+            except Exception as exc:  # noqa: BLE001 - extension must not break startup
+                logger.error(
+                    f"extension '{name}' on_start failed; continuing without "
+                    f"its startup work: {exc}"
+                )
 
     async def transform_chat_request(
         self,

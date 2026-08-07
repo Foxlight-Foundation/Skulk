@@ -187,7 +187,12 @@ class Runner:
                 from skulk.download.download_utils import build_model_path
                 from skulk.shared.types.common import ModelId
 
-                local_path = str(build_model_path(ModelId(model_id)))
+                local_path = str(
+                    build_model_path(
+                        ModelId(model_id),
+                        self.shard_metadata.model_card.source_revision,
+                    )
+                )
                 logger.info(f"loading from local path: {local_path}")
                 self.tokenizer = AutoTokenizer.from_pretrained(
                     local_path, local_files_only=True

@@ -17,22 +17,48 @@ endpoint, so you can run models far larger than any single machine could hold.
 
 ## Get started
 
-1. On each machine, install [`uv`](https://docs.astral.sh/uv/), clone the repo,
-   and start Skulk from the repo root:
+1. On each machine, run the one-command installer:
 
    ```bash
-   uv run skulk
+   curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash
    ```
 
-   See [build and runtime paths](build-and-runtime) for prerequisites and the
-   dashboard build, and [run as a service](run-skulk-as-a-service) to keep Skulk
-   running across reboots.
+   The installer targets the stable branch (`main`) regardless of which docs
+   channel you are reading. To install the development branch instead
+   (matching the `/next/` docs), pass a ref:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash -s -- --ref dev
+   ```
+
+   It installs prerequisites, builds the node, writes a `skulk.yaml` with
+   bootstrap [model store](./model-store.md) defaults (only when none exists),
+   and finishes with `skulk doctor --fix`, which audits the machine (GPUs,
+   inference engines, storage) and fixes what it safely can. A single node
+   serves its own store immediately; several fresh nodes converge on the
+   elected master's store when their cluster forms. Then start Skulk from the
+   install directory:
+
+   ```bash
+   cd ~/skulk && uv run skulk
+   ```
+
+   See [build and runtime paths](build-and-runtime) for the manual development
+   setup, [Node doctor](node-doctor) to audit a node at any time, and
+   [run as a service](run-skulk-as-a-service) to keep Skulk running across
+   reboots.
 2. Open the dashboard (default `http://localhost:52415`), pick a model, and
    launch it. Skulk places it across the cluster and starts serving when it is
    ready.
 3. Call the OpenAI-compatible endpoint at `/v1/chat/completions` with any client
    that speaks that format. The [API guide](api-guide) walks through a first
    request step by step, from placement to first token.
+
+Speech works the same way: launch a speech model and the dashboard chat gains a
+hands-free voice loop, while the cluster serves OpenAI-compatible
+`/v1/audio/speech` and `/v1/audio/transcriptions` endpoints plus a realtime
+transcription WebSocket at `/v1/realtime`
+([speech guide](speech-fabric-realtime)).
 
 For the runtime details, see [build and runtime paths](build-and-runtime) and
 [run as a service](run-skulk-as-a-service).

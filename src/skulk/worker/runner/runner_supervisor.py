@@ -15,7 +15,16 @@ from anyio import (
 )
 from loguru import logger
 
-from skulk.shared.types.chunks import DataChunk, EmbeddingChunk, ErrorChunk
+from skulk.routing.trace_data import TraceDataPacket
+from skulk.shared.log_summaries import summarize_task_for_log
+from skulk.shared.models.model_cards import ModelId
+from skulk.shared.types.audio import RealtimeAudioInputFrame
+from skulk.shared.types.chunks import (
+    DataChunk,
+    EmbeddingChunk,
+    ErrorChunk,
+    GenerationChunk,
+)
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.diagnostics import (
     MlxMemorySnapshot,
@@ -33,12 +42,18 @@ from skulk.shared.types.events import (
     RunnerStatusUpdated,
     TaskAcknowledged,
     TaskDeleted,
+    TaskFailed,
     TaskStatusUpdated,
+    TracesCollected,
 )
+from skulk.shared.types.streaming import StreamFrameKind, is_terminal_stream_frame_kind
 from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
+    AudioTranscription,
     ImageEdits,
     ImageGeneration,
+    RealtimeAudioTranscription,
+    SpeechSynthesis,
     Task,
     TaskId,
     TaskStatus,
@@ -56,7 +71,7 @@ from skulk.shared.types.worker.runners import (
     RunnerStatus,
     RunnerWarmingUp,
 )
-from skulk.shared.types.worker.shards import ShardMetadata
+from skulk.shared.types.worker.shards import RpcDonorShardMetadata, ShardMetadata
 from skulk.utils.channels import MpReceiver, MpSender, Sender, mp_channel
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.runner.bootstrap import (
@@ -64,6 +79,10 @@ from skulk.worker.runner.bootstrap import (
     WEDGE_FAILURE_MARKER,
     entrypoint,
 )
+from skulk.worker.runner.image_models.output import is_primary_image_output_node
+
+_TRACE_ROUTE_CAPACITY = 256
+_TRACE_ROUTE_TTL_SECONDS = 5 * 60.0
 
 PREFILL_TIMEOUT_SECONDS = 60
 DECODE_TIMEOUT_SECONDS = 5
@@ -75,6 +94,30 @@ _TERMINAL_TASK_STATUSES = {
 }
 
 
+def _trace_expected_ranks(bound_instance: BoundInstance) -> tuple[int, ...]:
+    """Return only ranks whose runners execute tasks and can emit traces."""
+
+    return tuple(
+        sorted(
+            shard.device_rank
+            for shard in bound_instance.instance.shard_assignments.runner_to_shard.values()
+            if not isinstance(shard, RpcDonorShardMetadata)
+        )
+    )
+
+
+def _stream_frame_kind(chunk: GenerationChunk) -> StreamFrameKind:
+    """Classify one runner payload within the explicit stream lifecycle."""
+
+    if isinstance(chunk, ErrorChunk):
+        return "failed"
+    if isinstance(chunk, EmbeddingChunk):
+        return "completed"
+    if getattr(chunk, "finish_reason", None) is not None:
+        return "completed"
+    return "chunk"
+
+
 def _now_utc_iso() -> str:
     """Return a compact UTC timestamp for live runner diagnostics."""
 
@@ -83,21 +126,7 @@ def _now_utc_iso() -> str:
 
 def _summarize_task(task: Task) -> str:
     """Return a compact task summary for logs."""
-    if isinstance(task, TextGeneration):
-        params = task.task_params
-        return (
-            "TextGeneration("
-            f"task_id={task.task_id!r}, "
-            f"command_id={task.command_id!r}, "
-            f"model={params.model!r}, "
-            f"input_messages={len(params.input)}, "
-            f"chat_template_messages={len(params.chat_template_messages or [])}, "
-            f"images={len(params.images)}, "
-            f"cached_image_indices={sorted(params.image_hashes.keys())}, "
-            f"total_input_chunks={params.total_input_chunks}, "
-            f"image_count={params.image_count})"
-        )
-    return repr(task)
+    return summarize_task_for_log(task)
 
 
 @dataclass(eq=False)
@@ -111,14 +140,19 @@ class RunnerSupervisor:
     _task_sender: MpSender[Task]
     _event_sender: Sender[Event]
     _cancel_sender: MpSender[TaskId]
+    _realtime_audio_sender: MpSender[RealtimeAudioInputFrame] | None = None
     # Data plane (#279 Phase 2): generation output chunks (ChunkGenerated) are
     # diverted here and streamed direct to the owning API node instead of the
-    # event log. None falls back to the event path (tests / a node with no DATA
-    # topic wired), preserving the pre-Phase-2 behavior.
+    # event log. Production wiring always supplies both senders; the master
+    # independently rejects payload events if a malformed participant sends one.
     _data_sender: "Sender[DataChunk] | None" = None
+    _trace_sender: "Sender[TraceDataPacket] | None" = None
     _tg: TaskGroup = field(default_factory=TaskGroup, init=False)
     status: RunnerStatus = field(default_factory=RunnerIdle, init=False)
     pending: dict[TaskId, anyio.Event] = field(default_factory=dict, init=False)
+    _terminal_waiters: dict[TaskId, anyio.Event] = field(
+        default_factory=dict, init=False
+    )
     in_progress: dict[TaskId, Task] = field(default_factory=dict, init=False)
     completed: set[TaskId] = field(default_factory=set, init=False)
     cancelled: set[TaskId] = field(default_factory=set, init=False)
@@ -132,6 +166,11 @@ class RunnerSupervisor:
     # _forward_events reads the runner's events in generation order, so the
     # counter assigned here is the true order.
     _chunk_sequence: dict[CommandId, int] = field(default_factory=dict, init=False)
+    # Commands for which the explicit lifecycle start/terminal frames have been
+    # emitted. These remain bounded to in-flight commands and are cleared with
+    # sequence/owner state on terminal task status.
+    _stream_started: set[CommandId] = field(default_factory=set, init=False)
+    _stream_terminal: set[CommandId] = field(default_factory=set, init=False)
     # The owning API node for each in-flight serving command (#279 Phase 2).
     # Populated when a serving task is submitted (the master carries the owning
     # API node onto the task), read in _emit to stamp each DataChunk so the Zenoh
@@ -142,6 +181,9 @@ class RunnerSupervisor:
     # ignored (the bare topic broadcasts). Entries are absent only for tasks that
     # carry no owner_node at all.
     _command_owner: dict[CommandId, NodeId] = field(default_factory=dict, init=False)
+    _trace_routes: dict[TaskId, tuple[NodeId, tuple[int, ...], float]] = field(
+        default_factory=dict, init=False
+    )
     _cancel_watch_runner: anyio.CancelScope = field(
         default_factory=anyio.CancelScope, init=False
     )
@@ -201,6 +243,7 @@ class RunnerSupervisor:
         initialize_timeout: float = 400,
         context_token_limit: int | None = None,
         data_sender: "Sender[DataChunk] | None" = None,
+        trace_sender: "Sender[TraceDataPacket] | None" = None,
     ) -> Self:
         """Spawn the runner subprocess for one shard of a placed instance.
 
@@ -210,8 +253,15 @@ class RunnerSupervisor:
         """
         ev_send, ev_recv = mp_channel[Event]()
         diag_send, diag_recv = mp_channel[RunnerDiagnosticUpdate](max_buffer_size=256)
-        task_sender, task_recv = mp_channel[Task]()
+        # Bounded like the sibling channels (#692): cluster-level admission keeps
+        # this queue near-empty in health, so the bound only bites when something
+        # upstream has already gone wrong -- and then send_async parks in its
+        # worker thread (backpressure) instead of growing runner memory silently.
+        task_sender, task_recv = mp_channel[Task](max_buffer_size=256)
         cancel_sender, cancel_recv = mp_channel[TaskId]()
+        realtime_audio_sender, realtime_audio_recv = mp_channel[
+            RealtimeAudioInputFrame
+        ](max_buffer_size=256)
 
         runner_process = mp.Process(
             target=entrypoint,
@@ -221,6 +271,7 @@ class RunnerSupervisor:
                 diag_send,
                 task_recv,
                 cancel_recv,
+                realtime_audio_recv,
                 logger,
                 context_token_limit,
             ),
@@ -238,8 +289,10 @@ class RunnerSupervisor:
             _diag_recv=diag_recv,
             _task_sender=task_sender,
             _cancel_sender=cancel_sender,
+            _realtime_audio_sender=realtime_audio_sender,
             _event_sender=event_sender,
             _data_sender=data_sender,
+            _trace_sender=trace_sender,
         )
 
         return self
@@ -247,36 +300,138 @@ class RunnerSupervisor:
     async def _emit(self, event: Event) -> None:
         """Forward one runner event to the right plane (#279 Phase 2).
 
-        Generation output chunks (``ChunkGenerated``) are diverted to the data
-        plane (``DATA`` topic, direct to the owning API node) so they never hit
-        the master's event log; every other event (task status, acks, runner
-        status) stays on the ordered control-plane event sender. Falls back to
-        the event sender when no data sender is wired (tests / no DATA topic).
+        Generation output and trace payloads are diverted to node-addressed data
+        topics so they never hit the master's event log. Task lifecycle and
+        runner status remain on the ordered control-plane event sender.
         """
-        if isinstance(event, ChunkGenerated) and self._data_sender is not None:
-            seq = self._chunk_sequence.get(event.command_id, 0)
-            await self._data_sender.send(
-                DataChunk(
-                    command_id=event.command_id,
-                    chunk=event.chunk,
-                    sequence=seq,
-                    owner_node=self._command_owner.get(event.command_id),
+        if isinstance(event, TracesCollected):
+            route = self._trace_routes.pop(event.task_id, None)
+            if route is None or self._trace_sender is None:
+                logger.warning(
+                    f"Dropping trace payload without an owner route for {event.task_id}"
+                )
+                return
+            owner_node, expected_ranks, _created_at = route
+            await self._trace_sender.send(
+                TraceDataPacket(
+                    owner_node=owner_node,
+                    source_node=self.bound_instance.bound_node_id,
+                    task_id=event.task_id,
+                    rank=event.rank,
+                    expected_ranks=expected_ranks,
+                    traces=tuple(event.traces),
                 )
             )
-            # Drop the per-command counter on the terminal chunk so a long-lived
-            # runner doesn't accumulate one entry per command served (#301 review).
-            # EmbeddingChunk is single-shot (no finish_reason) but also terminal.
-            chunk_finished = (
-                getattr(event.chunk, "finish_reason", None) is not None
-                or isinstance(event.chunk, EmbeddingChunk)
+        elif isinstance(event, ChunkGenerated):
+            if self._data_sender is None:
+                logger.error(
+                    "Dropping generated output because the DATA sender is unavailable "
+                    f"(command_id={event.command_id})"
+                )
+                return
+            if not self._owns_data_stream():
+                return
+            if event.command_id not in self._stream_started:
+                await self._send_data_frame(event.command_id, "started")
+            await self._send_data_frame(
+                event.command_id,
+                _stream_frame_kind(event.chunk),
+                event.chunk,
             )
-            if chunk_finished:
-                self._chunk_sequence.pop(event.command_id, None)
-                self._command_owner.pop(event.command_id, None)
-            else:
-                self._chunk_sequence[event.command_id] = seq + 1
         else:
             await self._event_sender.send(event)
+
+    async def _send_data_frame(
+        self,
+        command_id: CommandId,
+        kind: StreamFrameKind,
+        chunk: GenerationChunk | None = None,
+    ) -> None:
+        """Send one sequenced lifecycle frame to the command's owning API."""
+
+        assert self._data_sender is not None
+        sequence = self._chunk_sequence.get(command_id, 0)
+        await self._data_sender.send(
+            DataChunk(
+                command_id=command_id,
+                kind=kind,
+                chunk=chunk,
+                sequence=sequence,
+                owner_node=self._command_owner.get(command_id),
+            )
+        )
+        self._chunk_sequence[command_id] = sequence + 1
+        if kind == "started":
+            self._stream_started.add(command_id)
+        if is_terminal_stream_frame_kind(kind):
+            self._stream_terminal.add(command_id)
+
+    async def _finish_data_stream(self, task: Task, status: TaskStatus) -> None:
+        """Emit a terminal lifecycle frame when task status closes the stream."""
+
+        if (
+            self._data_sender is None
+            or not self._owns_data_stream()
+            or not isinstance(
+                task,
+                (
+                    TextGeneration,
+                    ImageGeneration,
+                    ImageEdits,
+                    TextEmbedding,
+                    SpeechSynthesis,
+                    AudioTranscription,
+                    RealtimeAudioTranscription,
+                ),
+            )
+        ):
+            return
+        command_id = task.command_id
+        if command_id in self._stream_terminal:
+            return
+        if command_id not in self._stream_started:
+            await self._send_data_frame(command_id, "started")
+        if status == TaskStatus.Complete:
+            await self._send_data_frame(command_id, "completed")
+            return
+        kind: StreamFrameKind = (
+            "cancelled" if status == TaskStatus.Cancelled else "failed"
+        )
+        message = {
+            TaskStatus.Cancelled: "Runner task was cancelled",
+            TaskStatus.Failed: "Runner task failed before completing the command",
+            TaskStatus.TimedOut: "Runner task timed out before completing the command",
+        }[status]
+        await self._send_data_frame(
+            command_id,
+            kind,
+            ErrorChunk(
+                model=ModelId(task.task_params.model),
+                error_message=message,
+            ),
+        )
+
+    def _clear_data_stream(self, command_id: CommandId) -> None:
+        """Release all bounded producer state for one terminal command."""
+
+        self._chunk_sequence.pop(command_id, None)
+        self._command_owner.pop(command_id, None)
+        self._stream_started.discard(command_id)
+        self._stream_terminal.discard(command_id)
+
+    def _owns_data_stream(self) -> bool:
+        """Return whether this runner is the instance's sole DATA producer.
+
+        Distributed ranks execute the command in lockstep, but independent
+        network publishers cannot preserve cross-rank lifecycle order. Only
+        the runner that emits this model family's output may therefore publish
+        lifecycle or payload frames. Text-family runners emit on rank zero;
+        image runners emit on their primary terminal pipeline stage.
+        """
+
+        if self.bound_instance.is_image_model:
+            return is_primary_image_output_node(self.shard_metadata)
+        return self.shard_metadata.device_rank == 0
 
     async def run(self):
         self._record_milestone("process_start_requested")
@@ -314,6 +469,9 @@ class RunnerSupervisor:
                     self._diag_recv.close()
                 with contextlib.suppress(ClosedResourceError):
                     self._task_sender.close()
+                with contextlib.suppress(ClosedResourceError):
+                    if self._realtime_audio_sender is not None:
+                        self._realtime_audio_sender.close()
                 with contextlib.suppress(ClosedResourceError):
                     self._event_sender.close()
                 with contextlib.suppress(ClosedResourceError):
@@ -356,20 +514,36 @@ class RunnerSupervisor:
         self._record_milestone("shutdown_requested")
         self._tg.cancel_tasks()
 
-    async def start_task(self, task: Task):
+    async def start_task(
+        self, task: Task, *, wait_for_terminal: bool = False
+    ) -> None:
+        """Submit a task and wait for its acknowledgement or terminal status.
+
+        Args:
+            task: Runner task to submit over the process boundary.
+            wait_for_terminal: When true, do not return after acknowledgement;
+                wait until the runner's terminal task status has been forwarded.
+                Shutdown uses this to prevent supervisor cancellation from racing
+                and dropping its completion event.
+        """
         if task.task_id in self.pending:
             logger.warning(
-                f"Skipping invalid task {task} as it has already been submitted"
+                "Skipping invalid task "
+                f"{_summarize_task(task)} as it has already been submitted"
             )
             return
         if task.task_id in self.completed:
             logger.warning(
-                f"Skipping invalid task {task} as it has already been completed"
+                "Skipping invalid task "
+                f"{_summarize_task(task)} as it has already been completed"
             )
             return
         logger.info(f"Starting task {_summarize_task(task)}")
         event = anyio.Event()
         self.pending[task.task_id] = event
+        terminal_event = anyio.Event() if wait_for_terminal else None
+        if terminal_event is not None:
+            self._terminal_waiters[task.task_id] = terminal_event
         self.in_progress[task.task_id] = task
         # Record the owning API node so _emit can address this command's output
         # chunks to it over the Zenoh data plane (#279 Phase 2). Set before the
@@ -377,11 +551,50 @@ class RunnerSupervisor:
         if (
             isinstance(
                 task,
-                (TextGeneration, ImageGeneration, ImageEdits, TextEmbedding),
+                (
+                    TextGeneration,
+                    ImageGeneration,
+                    ImageEdits,
+                    TextEmbedding,
+                    SpeechSynthesis,
+                    AudioTranscription,
+                    RealtimeAudioTranscription,
+                ),
             )
             and task.owner_node is not None
+            and self._owns_data_stream()
         ):
             self._command_owner[task.command_id] = task.owner_node
+        if isinstance(
+            task,
+            (
+                TextGeneration,
+                ImageGeneration,
+                ImageEdits,
+                TextEmbedding,
+                SpeechSynthesis,
+                AudioTranscription,
+            ),
+        ) and task.trace_enabled:
+            now = time.monotonic()
+            for stale_task_id in [
+                task_id
+                for task_id, (_owner, _ranks, created_at) in self._trace_routes.items()
+                if created_at <= now - _TRACE_ROUTE_TTL_SECONDS
+            ]:
+                self._trace_routes.pop(stale_task_id, None)
+            if len(self._trace_routes) >= _TRACE_ROUTE_CAPACITY:
+                oldest_task_id = min(
+                    self._trace_routes,
+                    key=lambda task_id: self._trace_routes[task_id][2],
+                )
+                self._trace_routes.pop(oldest_task_id, None)
+            if task.owner_node is not None:
+                self._trace_routes[task.task_id] = (
+                    task.owner_node,
+                    _trace_expected_ranks(self.bound_instance),
+                    now,
+                )
         self._last_task_sent_at = _now_utc_iso()
         self._record_milestone(
             "task_sent",
@@ -390,14 +603,33 @@ class RunnerSupervisor:
         try:
             await self._task_sender.send_async(task)
         except ClosedResourceError:
+            self.pending.pop(task.task_id, None)
             self.in_progress.pop(task.task_id, None)
-            logger.warning(f"Task {task} dropped, runner closed communication.")
+            self._terminal_waiters.pop(task.task_id, None)
+            logger.warning(
+                f"Task {_summarize_task(task)} dropped, runner closed communication."
+            )
             self._record_milestone(
                 "task_send_failed",
                 f"{task.__class__.__name__}:{task.task_id}",
             )
             return
-        await event.wait()
+        try:
+            await event.wait()
+            if terminal_event is not None:
+                await terminal_event.wait()
+        finally:
+            self._terminal_waiters.pop(task.task_id, None)
+
+    async def send_realtime_audio(self, frame: RealtimeAudioInputFrame) -> None:
+        """Forward one bounded PCM frame to this runner process."""
+
+        if self._realtime_audio_sender is None:
+            raise RuntimeError("runner has no realtime audio IPC sender")
+        try:
+            await self._realtime_audio_sender.send_async(frame)
+        except (ClosedResourceError, ValueError, OSError) as exc:
+            await self._check_runner(exc)
 
     async def cancel_task(self, task_id: TaskId):
         if task_id in self.completed:
@@ -473,13 +705,9 @@ class RunnerSupervisor:
                                 RunnerShuttingDown,
                             ),
                         )
-                        # Drop the per-command data-plane sequence counter on any
-                        # terminal task status, covering commands that end without
-                        # a finish_reason chunk: image generation (ImageChunk has
-                        # no finish_reason) and cancellations/failures that arrive
-                        # as terminal TaskStatusUpdated bypassing _emit (#301
-                        # review). Done before popping in_progress, which holds the
-                        # task->command_id mapping.
+                        # Emit an explicit terminal frame before dropping the
+                        # task->command mapping. This covers no-payload completion,
+                        # cancellation, failure, and timeout paths.
                         ending_task = self.in_progress.get(event.task_id)
                         if isinstance(
                             ending_task,
@@ -488,10 +716,15 @@ class RunnerSupervisor:
                                 ImageGeneration,
                                 ImageEdits,
                                 TextEmbedding,
+                                SpeechSynthesis,
+                                AudioTranscription,
+                                RealtimeAudioTranscription,
                             ),
                         ):
-                            self._chunk_sequence.pop(ending_task.command_id, None)
-                            self._command_owner.pop(ending_task.command_id, None)
+                            await self._finish_data_stream(
+                                ending_task, event.task_status
+                            )
+                            self._clear_data_stream(ending_task.command_id)
                         self.in_progress.pop(event.task_id, None)
                         if event.task_status == TaskStatus.Complete:
                             self.completed.add(event.task_id)
@@ -513,6 +746,9 @@ class RunnerSupervisor:
                             await self._event_sender.send(
                                 TaskDeleted(task_id=event.task_id)
                             )
+                        terminal_waiter = self._terminal_waiters.get(event.task_id)
+                        if terminal_waiter is not None:
+                            terminal_waiter.set()
                         continue
                     # Catch-all: runner-produced events, including the per-token
                     # ChunkGenerated output, which _emit diverts to the data
@@ -575,20 +811,43 @@ class RunnerSupervisor:
         logger.opt(exception=e).error(f"Runner terminated with {cause}")
 
         for task in self.in_progress.values():
-            if isinstance(task, (TextGeneration, ImageGeneration, ImageEdits)):
+            if isinstance(
+                task,
+                (
+                    TextGeneration,
+                    ImageGeneration,
+                    ImageEdits,
+                    TextEmbedding,
+                    SpeechSynthesis,
+                    AudioTranscription,
+                    RealtimeAudioTranscription,
+                ),
+            ):
+                failure_message = f"Runner shutdown before completing command ({cause})"
                 with anyio.CancelScope(shield=True):
-                    await self._emit(
-                        ChunkGenerated(
-                            command_id=task.command_id,
-                            chunk=ErrorChunk(
-                                model=self.shard_metadata.model_card.model_id,
-                                error_message=(
-                                    "Runner shutdown before completing command "
-                                    f"({cause})"
-                                ),
-                            ),
+                    if self._data_sender is not None and not self._owns_data_stream():
+                        # A non-output rank must not become a competing DATA
+                        # publisher, but its death still invalidates the whole
+                        # distributed task. Fail it on the ordered control plane
+                        # so every owning API terminates the command promptly.
+                        await self._event_sender.send(
+                            TaskFailed(
+                                task_id=task.task_id,
+                                error_type="runner_terminated",
+                                error_message=failure_message,
+                            )
                         )
-                    )
+                    else:
+                        await self._emit(
+                            ChunkGenerated(
+                                command_id=task.command_id,
+                                chunk=ErrorChunk(
+                                    model=self.shard_metadata.model_card.model_id,
+                                    error_message=failure_message,
+                                ),
+                            )
+                        )
+                self._clear_data_stream(task.command_id)
 
         try:
             self.status = RunnerFailed(error_message=f"Terminated ({cause})")
@@ -702,7 +961,14 @@ class RunnerSupervisor:
         model_id = str(self.shard_metadata.model_card.model_id)
         if isinstance(
             task,
-            (TextGeneration, ImageGeneration, ImageEdits, TextEmbedding),
+            (
+                TextGeneration,
+                ImageGeneration,
+                ImageEdits,
+                TextEmbedding,
+                SpeechSynthesis,
+                AudioTranscription,
+            ),
         ):
             command_id = str(task.command_id)
             model_id = str(task.task_params.model)

@@ -1,20 +1,38 @@
 """Unit tests for the Router's data-plane transport selection (Zenoh, #279).
 
-The Router routes the DATA topic over Zenoh only when a ZenohHandle is present
-(the SKULK_ZENOH_DATA_PLANE flag); every other topic, and all topics when the
-flag is off, stay on libp2p gossipsub. These tests pin that decision without
+The Router routes the DATA topic over Zenoh when a ZenohHandle is present;
+every other topic, and all topics when the explicit compatibility fallback is
+selected, stay on libp2p gossipsub. These tests pin that decision without
 opening a network session.
 """
 
-from typing import cast
+from typing import Literal, cast
 
+import anyio
+import pytest
 from skulk_pyo3_bindings import NetworkingHandle, ZenohHandle
 
 from skulk.routing.router import (
+    _ELECTION_OUTBOUND_BUFFER,  # pyright: ignore[reportPrivateUsage]
+    _VISION_NETWORK_PAYLOAD_BUFFER,  # pyright: ignore[reportPrivateUsage]
     _ZENOH_DATA_OUTBOUND_BUFFER,  # pyright: ignore[reportPrivateUsage]
+    _ZENOH_VISION_OUTBOUND_BUFFER,  # pyright: ignore[reportPrivateUsage]
+    _ZENOH_VISION_STREAM_BUFFER,  # pyright: ignore[reportPrivateUsage]
+    OutboundPacket,
     Router,
 )
-from skulk.routing.topics import COMMANDS, DATA, GLOBAL_EVENTS
+from skulk.routing.topics import (
+    COMMANDS,
+    DATA,
+    ELECTION_MESSAGES,
+    GLOBAL_EVENTS,
+    PROVIDER_DATA,
+    REALTIME_AUDIO,
+    VISION_MEDIA,
+)
+from skulk.routing.vision_media import VisionMediaPacket
+from skulk.shared.models.model_cards import ModelId
+from skulk.shared.types.common import CommandId, NodeId
 
 
 def _router(*, zenoh: bool) -> Router:
@@ -26,9 +44,32 @@ def _router(*, zenoh: bool) -> Router:
     return Router(handle=fake_net, zenoh=fake_zenoh, node_id="test-node")
 
 
+async def test_connected_peer_count_none_without_zenoh() -> None:
+    # Gossipsub fallback: there is no session to introspect, and None must be
+    # distinguishable from a real 0 (which means isolation).
+    router = _router(zenoh=False)
+    assert await router.zenoh_connected_peer_count() is None
+
+
+async def test_connected_peer_count_delegates_to_session() -> None:
+    class _CountingHandle:
+        async def zenoh_connected_peer_count(self) -> int:
+            return 3
+
+    router = Router(
+        handle=cast(NetworkingHandle, object()),
+        zenoh=cast(ZenohHandle, cast(object, _CountingHandle())),
+        node_id="test-node",
+    )
+    assert await router.zenoh_connected_peer_count() == 3
+
+
 def test_data_routes_over_zenoh_when_enabled() -> None:
     router = _router(zenoh=True)
     assert router.uses_zenoh(DATA.topic) is True
+    assert router.uses_zenoh(PROVIDER_DATA.topic) is True
+    assert router.uses_zenoh(REALTIME_AUDIO.topic) is True
+    assert router.uses_zenoh(VISION_MEDIA.topic) is True
     # Control/telemetry/election planes stay on gossipsub even with zenoh on.
     assert router.uses_zenoh(COMMANDS.topic) is False
     assert router.uses_zenoh(GLOBAL_EVENTS.topic) is False
@@ -50,6 +91,272 @@ def test_zenoh_outbound_channel_is_bounded() -> None:
     assert stats.max_buffer_size == _ZENOH_DATA_OUTBOUND_BUFFER
     # Sanity: a finite (non-inf) bound.
     assert stats.max_buffer_size < float("inf")
+
+
+@pytest.mark.parametrize("zenoh", [False, True])
+async def test_vision_ingress_has_an_independent_bounded_channel(
+    zenoh: bool,
+) -> None:
+    """Uploads cannot consume control or generated-output queue capacity."""
+
+    router = _router(zenoh=zenoh)
+    await router.register_topic(VISION_MEDIA)
+    local_receiver = router.receiver(VISION_MEDIA)
+    assert local_receiver.statistics().max_buffer_size == 0
+    assert router._zenoh_vision_out_send is not None  # pyright: ignore[reportPrivateUsage]
+    vision_stats = router._zenoh_vision_out_send.statistics()  # pyright: ignore[reportPrivateUsage]
+    assert vision_stats.max_buffer_size == _ZENOH_VISION_OUTBOUND_BUFFER
+    packet = OutboundPacket(
+        topic=VISION_MEDIA.topic,
+        routing_key="remote-node",
+        stream_key="vision-command",
+        is_terminal=False,
+        data=b"vision",
+    )
+    received: OutboundPacket | None = None
+
+    async with (
+        router._zenoh_vision_out_send as sender,  # pyright: ignore[reportPrivateUsage]
+        anyio.create_task_group() as task_group,
+    ):
+        task_group.start_soon(sender.send, packet)
+        received = await router._zenoh_vision_out_recv.receive()  # pyright: ignore[reportPrivateUsage]
+        task_group.cancel_scope.cancel()
+
+    assert received == packet
+    assert router.networking_receiver.collect() == []
+    if zenoh:
+        assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
+        assert router._zenoh_vision_out_send is not router._zenoh_out_send  # pyright: ignore[reportPrivateUsage]
+
+
+def test_vision_acknowledgements_from_multiple_ranks_use_distinct_streams() -> None:
+    """One rank's terminal acknowledgement cannot close another rank's queue."""
+
+    assert VISION_MEDIA.stream_key is not None
+    command_id = CommandId("multi-rank-command")
+    first = VisionMediaPacket(
+        source_node=NodeId("worker-1"),
+        target_node=NodeId("api-node"),
+        command_id=command_id,
+        model=ModelId("org/model"),
+        sequence=2,
+        kind="accepted",
+    )
+    second = first.model_copy(update={"source_node": NodeId("worker-2")})
+
+    assert VISION_MEDIA.routing_key is not None
+    assert VISION_MEDIA.routing_key(first) == VISION_MEDIA.routing_key(second)
+    assert VISION_MEDIA.stream_key(first) != VISION_MEDIA.stream_key(second)
+
+
+def test_vision_network_ingress_is_bounded_and_source_routes_overflow() -> None:
+    """Upload pressure cannot block shared receive or fail without a terminal."""
+
+    router = _router(zenoh=False)
+    for index in range(_VISION_NETWORK_PAYLOAD_BUFFER):
+        packet = VisionMediaPacket(
+            source_node=NodeId(f"api-{index}"),
+            target_node=NodeId("test-node"),
+            command_id=CommandId(f"command-{index}"),
+            model=ModelId("org/model"),
+            sequence=0,
+            kind="opened",
+            total_chunks=1,
+            image_count=1,
+        )
+        router._offer_vision_network_packet(  # pyright: ignore[reportPrivateUsage]
+            VISION_MEDIA.serialize(packet), None
+        )
+
+    rejected = VisionMediaPacket(
+        source_node=NodeId("overflow-api"),
+        target_node=NodeId("test-node"),
+        command_id=CommandId("overflow-command"),
+        model=ModelId("org/model"),
+        sequence=0,
+        kind="opened",
+        total_chunks=1,
+        image_count=1,
+    )
+    router._offer_vision_network_packet(  # pyright: ignore[reportPrivateUsage]
+        VISION_MEDIA.serialize(rejected), None
+    )
+
+    terminal = router._vision_network_terminal_recv.receive_nowait()  # pyright: ignore[reportPrivateUsage]
+    assert terminal.outbound is True
+    assert terminal.packet.kind == "transport_failed"
+    assert terminal.packet.source_node == NodeId("test-node")
+    assert terminal.packet.target_node == NodeId("overflow-api")
+    diagnostics = router.vision_media_egress_diagnostics()
+    assert diagnostics.inbound_payload_queue_depth == _VISION_NETWORK_PAYLOAD_BUFFER
+    assert diagnostics.inbound_payload_queue_capacity == _VISION_NETWORK_PAYLOAD_BUFFER
+    assert diagnostics.inbound_frames_dropped == 1
+
+
+def test_vision_network_terminal_lane_bypasses_full_payload_lane() -> None:
+    """Worker acknowledgements remain progressive during a saturated upload lane."""
+
+    router = _router(zenoh=False)
+    for index in range(_VISION_NETWORK_PAYLOAD_BUFFER):
+        opened = VisionMediaPacket(
+            source_node=NodeId(f"api-{index}"),
+            target_node=NodeId("test-node"),
+            command_id=CommandId(f"command-{index}"),
+            model=ModelId("org/model"),
+            sequence=0,
+            kind="opened",
+            total_chunks=1,
+            image_count=1,
+        )
+        router._offer_vision_network_packet(  # pyright: ignore[reportPrivateUsage]
+            VISION_MEDIA.serialize(opened), None
+        )
+    accepted = VisionMediaPacket(
+        source_node=NodeId("worker-node"),
+        target_node=NodeId("test-node"),
+        command_id=CommandId("accepted-command"),
+        model=ModelId("org/model"),
+        sequence=2,
+        kind="accepted",
+    )
+
+    router._offer_vision_network_packet(  # pyright: ignore[reportPrivateUsage]
+        VISION_MEDIA.serialize(accepted), None
+    )
+
+    terminal = router._vision_network_terminal_recv.receive_nowait()  # pyright: ignore[reportPrivateUsage]
+    assert terminal.outbound is False
+    assert terminal.packet == accepted
+
+
+def test_vision_network_completion_stays_ordered_with_upload_payload() -> None:
+    """Completion cannot overtake the open and chunk frames it verifies."""
+
+    router = _router(zenoh=False)
+    opened = VisionMediaPacket(
+        source_node=NodeId("api-node"),
+        target_node=NodeId("test-node"),
+        command_id=CommandId("ordered-command"),
+        model=ModelId("org/model"),
+        sequence=0,
+        kind="opened",
+        total_chunks=1,
+        image_count=1,
+    )
+    chunk = VisionMediaPacket(
+        source_node=opened.source_node,
+        target_node=opened.target_node,
+        command_id=opened.command_id,
+        model=opened.model,
+        sequence=1,
+        kind="chunk",
+        data=b"image-data",
+        image_index=0,
+        total_chunks=1,
+    )
+    completed = VisionMediaPacket(
+        source_node=opened.source_node,
+        target_node=opened.target_node,
+        command_id=opened.command_id,
+        model=opened.model,
+        sequence=2,
+        kind="completed",
+        total_chunks=1,
+        image_count=1,
+        sha256="0" * 64,
+    )
+
+    for packet in (opened, chunk, completed):
+        router._offer_vision_network_packet(  # pyright: ignore[reportPrivateUsage]
+            VISION_MEDIA.serialize(packet), None
+        )
+
+    received = [
+        router._vision_network_ingress_recv.receive_nowait().packet  # pyright: ignore[reportPrivateUsage]
+        for _ in range(3)
+    ]
+    assert received == [opened, chunk, completed]
+
+
+def test_vision_transport_buffers_cover_maximum_upload() -> None:
+    """The documented 64-chunk request fits even before consumers run."""
+
+    maximum_frame_count = 1 + 64 + 1
+    assert maximum_frame_count <= _ZENOH_VISION_STREAM_BUFFER
+    assert maximum_frame_count <= _VISION_NETWORK_PAYLOAD_BUFFER
+
+    router = _router(zenoh=False)
+    packets = [
+        VisionMediaPacket(
+            source_node=NodeId("api-node"),
+            target_node=NodeId("test-node"),
+            command_id=CommandId("maximum-command"),
+            model=ModelId("org/model"),
+            sequence=0,
+            kind="opened",
+            total_chunks=64,
+            image_count=1,
+        ),
+        *[
+            VisionMediaPacket(
+                source_node=NodeId("api-node"),
+                target_node=NodeId("test-node"),
+                command_id=CommandId("maximum-command"),
+                model=ModelId("org/model"),
+                sequence=sequence,
+                kind="chunk",
+                data=b"image-data",
+                image_index=0,
+                total_chunks=64,
+            )
+            for sequence in range(1, 65)
+        ],
+        VisionMediaPacket(
+            source_node=NodeId("api-node"),
+            target_node=NodeId("test-node"),
+            command_id=CommandId("maximum-command"),
+            model=ModelId("org/model"),
+            sequence=65,
+            kind="completed",
+            total_chunks=64,
+            image_count=1,
+            sha256="0" * 64,
+        ),
+    ]
+
+    for packet in packets:
+        router._offer_vision_network_packet(  # pyright: ignore[reportPrivateUsage]
+            VISION_MEDIA.serialize(packet), None
+        )
+
+    diagnostics = router.vision_media_egress_diagnostics()
+    assert diagnostics.inbound_payload_queue_depth == maximum_frame_count
+    assert diagnostics.inbound_frames_dropped == 0
+
+
+async def test_election_egress_uses_a_dedicated_bounded_channel() -> None:
+    """Ordinary outbound backlog cannot queue ahead of election liveness."""
+
+    router = _router(zenoh=False)
+    await router.register_topic(ELECTION_MESSAGES)
+    election_router = router.topic_routers[ELECTION_MESSAGES.topic]
+    packet = OutboundPacket(
+        topic=ELECTION_MESSAGES.topic,
+        routing_key=None,
+        stream_key=None,
+        is_terminal=False,
+        data=b"election",
+    )
+
+    await election_router.networking_sender.send(packet)
+
+    assert await router._election_out_recv.receive() == packet  # pyright: ignore[reportPrivateUsage]
+    assert router.networking_receiver.collect() == []
+    assert (
+        election_router.networking_sender.statistics().max_buffer_size
+        == _ELECTION_OUTBOUND_BUFFER
+    )
 
 
 def test_data_owner_key_addresses_owning_node() -> None:
@@ -136,10 +443,674 @@ def test_zenoh_publish_keys_by_owner_and_subscribe_keys_by_self() -> None:
         # shared control-plane loop, so feed its channel and drain it.
         assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
         send = router._zenoh_out_send.clone()  # pyright: ignore[reportPrivateUsage]
-        await send.send((topic, routing_key, payload))
+        await send.send(
+            OutboundPacket(
+                topic=topic,
+                routing_key=routing_key,
+                stream_key="c",
+                is_terminal=True,
+                data=payload,
+            )
+        )
         send.close()
         with anyio.move_on_after(1):
             await router._zenoh_networking_publish()  # pyright: ignore[reportPrivateUsage]
         assert zenoh.published == [("data/owner-9", payload)]
+
+    anyio.run(_run)
+
+
+def test_blocked_command_does_not_stall_another_command_for_same_owner() -> None:
+    """Per-command egress workers isolate streams behind one slow owner."""
+
+    import anyio
+
+    from skulk.routing.router import OutboundPacket
+    from skulk.shared.types.chunks import DataChunk
+    from skulk.shared.types.common import CommandId, NodeId
+
+    class _CommandBlockingZenoh:
+        def __init__(self) -> None:
+            self.slow_started = anyio.Event()
+            self.release_slow = anyio.Event()
+            self.fast_published = anyio.Event()
+
+        async def zenoh_publish(self, _key: str, data: bytes) -> None:
+            frame = DATA.deserialize(data)
+            if frame.command_id == CommandId("slow-command"):
+                self.slow_started.set()
+                await self.release_slow.wait()
+            else:
+                self.fast_published.set()
+
+    def _terminal_packet(command_id: str) -> OutboundPacket:
+        frame = DataChunk(
+            command_id=CommandId(command_id),
+            kind="completed",
+            sequence=0,
+            owner_node=NodeId("shared-owner"),
+        )
+        return OutboundPacket(
+            topic=DATA.topic,
+            routing_key="shared-owner",
+            stream_key=command_id,
+            is_terminal=True,
+            data=DATA.serialize(frame),
+        )
+
+    async def _run() -> None:
+        zenoh = _CommandBlockingZenoh()
+        router = Router(
+            handle=cast(NetworkingHandle, object()),
+            zenoh=cast(ZenohHandle, cast(object, zenoh)),
+            node_id="self-node",
+        )
+        assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                router._zenoh_networking_publish  # pyright: ignore[reportPrivateUsage]
+            )
+            await router._zenoh_out_send.send(  # pyright: ignore[reportPrivateUsage]
+                _terminal_packet("slow-command")
+            )
+            with anyio.fail_after(0.5):
+                await zenoh.slow_started.wait()
+
+            await router._zenoh_out_send.send(  # pyright: ignore[reportPrivateUsage]
+                _terminal_packet("fast-command")
+            )
+            with anyio.fail_after(0.5):
+                await zenoh.fast_published.wait()
+
+            diagnostics = router.data_plane_egress_diagnostics()
+            assert diagnostics.remote_frames_published == 1
+            assert diagnostics.active_stream_queues == 1
+            zenoh.release_slow.set()
+            task_group.cancel_scope.cancel()
+
+    anyio.run(_run)
+
+
+def test_matching_ids_on_data_topics_use_distinct_egress_queues() -> None:
+    """Matching ids on distinct data topics cannot share egress queues."""
+
+    import anyio
+
+    from skulk.extensions import CapabilityStreamFrame
+    from skulk.routing.provider_streams import ProviderStreamPacket
+    from skulk.shared.types.chunks import DataChunk
+    from skulk.shared.types.common import CommandId, NodeId
+
+    class _BlockingDataZenoh:
+        def __init__(self) -> None:
+            self.data_started = anyio.Event()
+            self.release_data = anyio.Event()
+            self.provider_published = anyio.Event()
+
+        async def zenoh_publish(self, key: str, _data: bytes) -> None:
+            if key.startswith("data/"):
+                self.data_started.set()
+                await self.release_data.wait()
+            elif key.startswith("provider_data/"):
+                self.provider_published.set()
+
+    async def _run() -> None:
+        owner = NodeId("shared-owner")
+        shared_id = "same-stream-id"
+        data_frame = DataChunk(
+            command_id=CommandId(shared_id),
+            kind="completed",
+            sequence=0,
+            owner_node=owner,
+        )
+        provider_frame = ProviderStreamPacket(
+            owner_node=owner,
+            frame=CapabilityStreamFrame(
+                call_id=shared_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="completed",
+            ),
+        )
+        zenoh = _BlockingDataZenoh()
+        router = Router(
+            handle=cast(NetworkingHandle, object()),
+            zenoh=cast(ZenohHandle, cast(object, zenoh)),
+            node_id="self-node",
+        )
+        assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                router._zenoh_networking_publish  # pyright: ignore[reportPrivateUsage]
+            )
+            await router._zenoh_out_send.send(  # pyright: ignore[reportPrivateUsage]
+                OutboundPacket(
+                    topic=DATA.topic,
+                    routing_key=str(owner),
+                    stream_key=shared_id,
+                    is_terminal=True,
+                    data=DATA.serialize(data_frame),
+                )
+            )
+            with anyio.fail_after(0.5):
+                await zenoh.data_started.wait()
+
+            await router._zenoh_out_send.send(  # pyright: ignore[reportPrivateUsage]
+                OutboundPacket(
+                    topic=PROVIDER_DATA.topic,
+                    routing_key=str(owner),
+                    stream_key=shared_id,
+                    is_terminal=True,
+                    data=PROVIDER_DATA.serialize(provider_frame),
+                )
+            )
+            with anyio.fail_after(0.5):
+                await zenoh.provider_published.wait()
+            zenoh.release_data.set()
+            task_group.cancel_scope.cancel()
+
+    anyio.run(_run)
+
+
+def test_stream_admission_limit_sends_terminal_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An over-cap command must fail at its API instead of hanging forever."""
+
+    import anyio
+
+    import skulk.routing.router as router_module
+    from skulk.shared.types.chunks import DataChunk, ErrorChunk
+    from skulk.shared.types.common import CommandId, NodeId
+
+    monkeypatch.setattr(router_module, "_ZENOH_DATA_MAX_STREAMS_PER_OWNER", 0)
+
+    class _RecordingZenoh:
+        def __init__(self) -> None:
+            self.frames: list[DataChunk] = []
+            self.complete = anyio.Event()
+
+        async def zenoh_publish(self, _key: str, data: bytes) -> None:
+            self.frames.append(DATA.deserialize(data))
+            if len(self.frames) == 2:
+                self.complete.set()
+
+    async def _run() -> None:
+        zenoh = _RecordingZenoh()
+        router = Router(
+            handle=cast(NetworkingHandle, object()),
+            zenoh=cast(ZenohHandle, cast(object, zenoh)),
+            node_id="self-node",
+        )
+        assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
+        started = DataChunk(
+            command_id=CommandId("rejected-command"),
+            kind="started",
+            sequence=0,
+            owner_node=NodeId("remote-owner"),
+        )
+        packet = OutboundPacket(
+            topic=DATA.topic,
+            routing_key="remote-owner",
+            stream_key="rejected-command",
+            is_terminal=False,
+            data=DATA.serialize(started),
+        )
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                router._zenoh_networking_publish  # pyright: ignore[reportPrivateUsage]
+            )
+            await router._zenoh_out_send.send(packet)  # pyright: ignore[reportPrivateUsage]
+            with anyio.fail_after(0.5):
+                await zenoh.complete.wait()
+            task_group.cancel_scope.cancel()
+
+        assert [frame.kind for frame in zenoh.frames] == ["started", "failed"]
+        assert [frame.sequence for frame in zenoh.frames] == [0, 1]
+        assert isinstance(zenoh.frames[1].chunk, ErrorChunk)
+        diagnostics = router.data_plane_egress_diagnostics()
+        assert diagnostics.remote_frames_dropped == 1
+        assert diagnostics.remote_frames_published == 2
+
+    anyio.run(_run)
+
+
+def test_idle_command_queue_emits_terminal_failure_and_releases_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A producer that omits its terminal cannot retain an egress slot forever."""
+
+    import anyio
+
+    import skulk.routing.router as router_module
+    from skulk.shared.types.chunks import DataChunk, ErrorChunk
+    from skulk.shared.types.common import CommandId, NodeId
+
+    monkeypatch.setattr(
+        router_module,
+        "_ZENOH_DATA_STREAM_IDLE_LEASE_SECONDS",
+        0.05,
+    )
+
+    class _RecordingZenoh:
+        def __init__(self) -> None:
+            self.frames: list[DataChunk] = []
+            self.idle_failure = anyio.Event()
+            self.follow_up_completed = anyio.Event()
+
+        async def zenoh_publish(self, _key: str, data: bytes) -> None:
+            frame = DATA.deserialize(data)
+            self.frames.append(frame)
+            if frame.kind == "failed":
+                self.idle_failure.set()
+            if frame.command_id == CommandId("follow-up"):
+                self.follow_up_completed.set()
+
+    def _packet(command_id: str, *, terminal: bool) -> OutboundPacket:
+        frame = DataChunk(
+            command_id=CommandId(command_id),
+            kind="completed" if terminal else "started",
+            sequence=0,
+            owner_node=NodeId("remote-owner"),
+        )
+        return OutboundPacket(
+            topic=DATA.topic,
+            routing_key="remote-owner",
+            stream_key=command_id,
+            is_terminal=frame.is_terminal,
+            data=DATA.serialize(frame),
+        )
+
+    async def _run() -> None:
+        zenoh = _RecordingZenoh()
+        router = Router(
+            handle=cast(NetworkingHandle, object()),
+            zenoh=cast(ZenohHandle, cast(object, zenoh)),
+            node_id="self-node",
+        )
+        assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                router._zenoh_networking_publish  # pyright: ignore[reportPrivateUsage]
+            )
+            await router._zenoh_out_send.send(  # pyright: ignore[reportPrivateUsage]
+                _packet("abandoned", terminal=False)
+            )
+            with anyio.fail_after(0.5):
+                await zenoh.idle_failure.wait()
+
+            await router._zenoh_out_send.send(  # pyright: ignore[reportPrivateUsage]
+                _packet("follow-up", terminal=True)
+            )
+            with anyio.fail_after(0.5):
+                await zenoh.follow_up_completed.wait()
+            await anyio.sleep(0)
+            task_group.cancel_scope.cancel()
+
+        abandoned = [
+            frame
+            for frame in zenoh.frames
+            if frame.command_id == CommandId("abandoned")
+        ]
+        assert [frame.kind for frame in abandoned] == ["started", "failed"]
+        assert [frame.sequence for frame in abandoned] == [0, 1]
+        assert isinstance(abandoned[-1].chunk, ErrorChunk)
+        assert "idle lease expired" in abandoned[-1].chunk.error_message
+        diagnostics = router.data_plane_egress_diagnostics()
+        assert diagnostics.active_stream_queues == 0
+        assert diagnostics.idle_stream_reclaims == 1
+        assert diagnostics.owners["remote-owner"].idle_stream_reclaims == 1
+
+    anyio.run(_run)
+
+
+def test_malformed_rejections_release_bounded_task_slots() -> None:
+    """Bad rejection frames cannot leak slots or fail later rejections."""
+
+    import anyio
+    from anyio import Semaphore
+
+    class _UnusedZenoh:
+        async def zenoh_publish(self, _key: str, _data: bytes) -> None:
+            raise AssertionError("malformed rejection must not publish")
+
+    async def _run() -> None:
+        router = Router(
+            handle=cast(NetworkingHandle, object()),
+            zenoh=cast(ZenohHandle, cast(object, _UnusedZenoh())),
+            node_id="self-node",
+        )
+        slots = Semaphore(1)
+        malformed = OutboundPacket(
+            topic=PROVIDER_DATA.topic,
+            routing_key="remote-owner",
+            stream_key="malformed-call",
+            is_terminal=False,
+            data=b"not-a-provider-packet",
+        )
+
+        for _ in range(3):
+            slots.acquire_nowait()
+            await router._publish_zenoh_data_rejection(  # pyright: ignore[reportPrivateUsage]
+                malformed,
+                "remote-owner",
+                slots,
+                True,
+            )
+
+        slots.acquire_nowait()
+        slots.release()
+
+    anyio.run(_run)
+
+
+def test_realtime_audio_admission_rejection_routes_back_to_source() -> None:
+    """Ingress pressure must fail the source API, not publish to the worker."""
+
+    import anyio
+    from anyio import Semaphore
+
+    from skulk.routing.realtime_audio import RealtimeAudioPacket
+    from skulk.shared.types.common import CommandId, NodeId
+
+    class _RecordingZenoh:
+        def __init__(self) -> None:
+            self.key = ""
+            self.packet: RealtimeAudioPacket | None = None
+
+        async def zenoh_publish(self, key: str, data: bytes) -> None:
+            self.key = key
+            self.packet = REALTIME_AUDIO.deserialize(data)
+
+    async def _run() -> None:
+        zenoh = _RecordingZenoh()
+        router = Router(
+            handle=cast(NetworkingHandle, object()),
+            zenoh=cast(ZenohHandle, cast(object, zenoh)),
+            node_id="api-node",
+        )
+        original = RealtimeAudioPacket(
+            source_node=NodeId("api-node"),
+            target_node=NodeId("worker-node"),
+            command_id=CommandId("remote-command"),
+            sequence=1,
+            kind="chunk",
+            data=b"\x00\x00",
+        )
+        slots = Semaphore(1)
+        slots.acquire_nowait()
+        await router._publish_zenoh_data_rejection(  # pyright: ignore[reportPrivateUsage]
+            OutboundPacket(
+                topic=REALTIME_AUDIO.topic,
+                routing_key="worker-node",
+                stream_key="remote-command",
+                is_terminal=False,
+                data=REALTIME_AUDIO.serialize(original),
+            ),
+            "worker-node",
+            slots,
+            True,
+        )
+
+        assert zenoh.key == "realtime_audio/api-node"
+        assert zenoh.packet is not None
+        assert zenoh.packet.kind == "transport_failed"
+        assert zenoh.packet.target_node == NodeId("api-node")
+        diagnostics = router.data_plane_egress_diagnostics()
+        assert diagnostics.owners["api-node"].frames_published == 1
+        assert "worker-node" not in diagnostics.owners
+
+    anyio.run(_run)
+
+
+def test_realtime_audio_chunk_overflow_fails_source_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped PCM chunk must fail rather than silently truncate input."""
+
+    import anyio
+
+    import skulk.routing.router as router_module
+    from skulk.routing.realtime_audio import RealtimeAudioPacket
+    from skulk.shared.types.common import CommandId, NodeId
+
+    monkeypatch.setattr(router_module, "_ZENOH_DATA_STREAM_BUFFER", 1)
+
+    class _BlockingZenoh:
+        def __init__(self) -> None:
+            self.first_chunk_started = anyio.Event()
+            self.release_first_chunk = anyio.Event()
+            self.failure_published = anyio.Event()
+            self.packets: list[RealtimeAudioPacket] = []
+
+        async def zenoh_publish(self, _key: str, data: bytes) -> None:
+            packet = REALTIME_AUDIO.deserialize(data)
+            self.packets.append(packet)
+            if packet.kind == "chunk" and not self.first_chunk_started.is_set():
+                self.first_chunk_started.set()
+                await self.release_first_chunk.wait()
+            elif packet.kind == "transport_failed":
+                self.failure_published.set()
+
+    def packet(
+        sequence: int,
+        kind: Literal["chunk", "completed"] = "chunk",
+    ) -> OutboundPacket:
+        frame = RealtimeAudioPacket(
+            source_node=NodeId("api-node"),
+            target_node=NodeId("worker-node"),
+            command_id=CommandId("overflow-command"),
+            sequence=sequence,
+            kind=kind,
+            data=b"\x00\x00" if kind == "chunk" else b"",
+        )
+        return OutboundPacket(
+            topic=REALTIME_AUDIO.topic,
+            routing_key="worker-node",
+            stream_key="overflow-command",
+            is_terminal=frame.is_terminal,
+            data=REALTIME_AUDIO.serialize(frame),
+        )
+
+    async def _run() -> None:
+        zenoh = _BlockingZenoh()
+        router = Router(
+            handle=cast(NetworkingHandle, object()),
+            zenoh=cast(ZenohHandle, cast(object, zenoh)),
+            node_id="api-node",
+        )
+        assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                router._zenoh_networking_publish  # pyright: ignore[reportPrivateUsage]
+            )
+            await router._zenoh_out_send.send(packet(1))  # pyright: ignore[reportPrivateUsage]
+            with anyio.fail_after(0.5):
+                await zenoh.first_chunk_started.wait()
+            await router._zenoh_out_send.send(packet(2))  # pyright: ignore[reportPrivateUsage]
+            await router._zenoh_out_send.send(packet(3))  # pyright: ignore[reportPrivateUsage]
+            with anyio.fail_after(0.5):
+                await zenoh.failure_published.wait()
+            await router._zenoh_out_send.send(packet(4, "completed"))  # pyright: ignore[reportPrivateUsage]
+            zenoh.release_first_chunk.set()
+            task_group.cancel_scope.cancel()
+
+        failures = [item for item in zenoh.packets if item.kind == "transport_failed"]
+        assert len(failures) == 1
+        assert failures[0].target_node == NodeId("api-node")
+        assert router.data_plane_egress_diagnostics().remote_frames_dropped >= 1
+
+    anyio.run(_run)
+
+
+def test_realtime_audio_publish_failure_fails_source_stream() -> None:
+    """A failed Zenoh PCM publish must terminate the source command."""
+
+    import anyio
+
+    from skulk.routing.realtime_audio import RealtimeAudioPacket
+    from skulk.shared.types.common import CommandId, NodeId
+
+    class _FailingWorkerZenoh:
+        def __init__(self) -> None:
+            self.failure_published = anyio.Event()
+            self.worker_attempts = 0
+            self.failure: RealtimeAudioPacket | None = None
+
+        async def zenoh_publish(self, key: str, data: bytes) -> None:
+            packet = REALTIME_AUDIO.deserialize(data)
+            if key == "realtime_audio/worker-node":
+                self.worker_attempts += 1
+                raise RuntimeError("worker route unavailable")
+            self.failure = packet
+            self.failure_published.set()
+
+    async def _run() -> None:
+        zenoh = _FailingWorkerZenoh()
+        router = Router(
+            handle=cast(NetworkingHandle, object()),
+            zenoh=cast(ZenohHandle, cast(object, zenoh)),
+            node_id="api-node",
+        )
+        assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
+
+        def packet(sequence: int) -> OutboundPacket:
+            frame = RealtimeAudioPacket(
+                source_node=NodeId("api-node"),
+                target_node=NodeId("worker-node"),
+                command_id=CommandId("publish-failure-command"),
+                sequence=sequence,
+                kind="chunk",
+                data=b"\x00\x00",
+            )
+            return OutboundPacket(
+                topic=REALTIME_AUDIO.topic,
+                routing_key="worker-node",
+                stream_key="publish-failure-command",
+                is_terminal=False,
+                data=REALTIME_AUDIO.serialize(frame),
+            )
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                router._zenoh_networking_publish  # pyright: ignore[reportPrivateUsage]
+            )
+            await router._zenoh_out_send.send(packet(1))  # pyright: ignore[reportPrivateUsage]
+            with anyio.fail_after(0.5):
+                await zenoh.failure_published.wait()
+            await router._zenoh_out_send.send(packet(2))  # pyright: ignore[reportPrivateUsage]
+            await anyio.sleep(0)
+            task_group.cancel_scope.cancel()
+
+        assert zenoh.worker_attempts == 1
+        assert zenoh.failure is not None
+        assert zenoh.failure.kind == "transport_failed"
+        assert zenoh.failure.target_node == NodeId("api-node")
+
+    anyio.run(_run)
+
+
+def test_full_stream_queue_replaces_terminal_and_ignores_closed_sender(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full queue emits failure and cannot tear down sibling egress."""
+
+    import anyio
+
+    import skulk.routing.router as router_module
+    from skulk.shared.models.model_cards import ModelId
+    from skulk.shared.types.chunks import DataChunk, ErrorChunk, TokenChunk
+    from skulk.shared.types.common import CommandId, NodeId
+
+    monkeypatch.setattr(router_module, "_ZENOH_DATA_STREAM_BUFFER", 1)
+
+    class _BlockingZenoh:
+        def __init__(self) -> None:
+            self.started = anyio.Event()
+            self.release_started = anyio.Event()
+            self.failed = anyio.Event()
+            self.frames: list[DataChunk] = []
+
+        async def zenoh_publish(self, _key: str, data: bytes) -> None:
+            frame = DATA.deserialize(data)
+            self.frames.append(frame)
+            if frame.kind == "started":
+                self.started.set()
+                await self.release_started.wait()
+            elif frame.kind == "failed":
+                self.failed.set()
+
+    def _packet(frame: DataChunk) -> OutboundPacket:
+        return OutboundPacket(
+            topic=DATA.topic,
+            routing_key="remote-owner",
+            stream_key="full-command",
+            is_terminal=frame.is_terminal,
+            data=DATA.serialize(frame),
+        )
+
+    async def _run() -> None:
+        zenoh = _BlockingZenoh()
+        router = Router(
+            handle=cast(NetworkingHandle, object()),
+            zenoh=cast(ZenohHandle, cast(object, zenoh)),
+            node_id="self-node",
+        )
+        assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
+        command_id = CommandId("full-command")
+        owner = NodeId("remote-owner")
+        frames = (
+            DataChunk(
+                command_id=command_id,
+                kind="started",
+                sequence=0,
+                owner_node=owner,
+            ),
+            DataChunk(
+                command_id=command_id,
+                kind="chunk",
+                chunk=TokenChunk(
+                    model=ModelId("model"),
+                    text="payload",
+                    token_id=1,
+                    usage=None,
+                ),
+                sequence=1,
+                owner_node=owner,
+            ),
+            DataChunk(
+                command_id=command_id,
+                kind="completed",
+                sequence=2,
+                owner_node=owner,
+            ),
+        )
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                router._zenoh_networking_publish  # pyright: ignore[reportPrivateUsage]
+            )
+            await router._zenoh_out_send.send(_packet(frames[0]))  # pyright: ignore[reportPrivateUsage]
+            with anyio.fail_after(0.5):
+                await zenoh.started.wait()
+            await router._zenoh_out_send.send(_packet(frames[1]))  # pyright: ignore[reportPrivateUsage]
+            await router._zenoh_out_send.send(_packet(frames[2]))  # pyright: ignore[reportPrivateUsage]
+            await router._zenoh_out_send.send(_packet(frames[1]))  # pyright: ignore[reportPrivateUsage]
+            with anyio.fail_after(0.5):
+                await zenoh.failed.wait()
+            zenoh.release_started.set()
+            task_group.cancel_scope.cancel()
+
+        failed_frames = [frame for frame in zenoh.frames if frame.kind == "failed"]
+        assert len(failed_frames) == 1
+        assert failed_frames[0].sequence == 2
+        assert isinstance(failed_frames[0].chunk, ErrorChunk)
+        diagnostics = router.data_plane_egress_diagnostics()
+        assert diagnostics.remote_frames_dropped >= 2
 
     anyio.run(_run)

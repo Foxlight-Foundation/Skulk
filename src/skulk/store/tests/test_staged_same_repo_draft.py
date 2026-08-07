@@ -11,6 +11,12 @@ co-fetched, and scope strictly to the same-repo case.
 
 from pathlib import Path
 
+import pytest
+
+from skulk.download.download_utils import (
+    companion_download_specs,
+    resolve_allow_patterns,
+)
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -75,6 +81,23 @@ def test_same_repo_draft_files_returns_draft_when_repo_matches() -> None:
         draft_file="draft.gguf",
     )
     assert _same_repo_draft_files(card) == ["draft.gguf"]
+
+
+@pytest.mark.asyncio
+async def test_same_repo_draft_is_fetched_with_base_transaction() -> None:
+    """A bundled draft must share the base card's revision and cache swap."""
+
+    card = _card(
+        model_id="org/bundle",
+        draft_repo="org/bundle",
+        draft_file="draft.gguf",
+    )
+
+    patterns = await resolve_allow_patterns(_shard(card))
+
+    assert "base-IQ4_XS.gguf" in patterns
+    assert "draft.gguf" in patterns
+    assert companion_download_specs(card) == []
 
 
 def test_same_repo_draft_files_empty_for_separate_repo() -> None:

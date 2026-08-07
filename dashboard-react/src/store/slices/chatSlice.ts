@@ -23,7 +23,9 @@ function stripTransientFields(
     stripped[id] = {
       ...convo,
       messages: convo.messages.map((msg) => {
-        const { tokens, generatedImages, ...rest } = msg;
+        const rest = { ...msg };
+        delete rest.tokens;
+        delete rest.generatedImages;
         return rest;
       }),
     };
@@ -40,17 +42,32 @@ export interface ChatState {
   conversations: Record<string, Conversation>;
   activeConversationId: string | null;
   selectedModelId: string | null;
+  selectedTranscriptionModelId: string | null;
+  selectedSpeechModelId: string | null;
+  selectedVoice: string | null;
+  autoSpeakAssistant: boolean;
+  /** Speak short interjections while a code block streams (voice loop). */
+  narrateCodeBlocks: boolean;
+  realtimeVoiceEnabled: boolean;
+  autoSubmitVoice: boolean;
   modelToConversationId: Record<string, string>;
 }
 
 interface PersistedDurable {
   conversations?: Record<string, Conversation>;
   modelToConversationId?: Record<string, string>;
+  selectedVoice?: string | null;
+  autoSpeakAssistant?: boolean;
+  narrateCodeBlocks?: boolean;
+  realtimeVoiceEnabled?: boolean;
+  autoSubmitVoice?: boolean;
 }
 
 interface PersistedSession {
   activeConversationId?: string | null;
   selectedModelId?: string | null;
+  selectedTranscriptionModelId?: string | null;
+  selectedSpeechModelId?: string | null;
 }
 
 function loadDurable(): PersistedDurable {
@@ -85,6 +102,13 @@ function initialState(): ChatState {
     modelToConversationId: durable.modelToConversationId ?? {},
     activeConversationId: session.activeConversationId ?? null,
     selectedModelId: session.selectedModelId ?? null,
+    selectedTranscriptionModelId: session.selectedTranscriptionModelId ?? null,
+    selectedSpeechModelId: session.selectedSpeechModelId ?? null,
+    selectedVoice: durable.selectedVoice ?? null,
+    autoSpeakAssistant: durable.autoSpeakAssistant ?? false,
+    narrateCodeBlocks: durable.narrateCodeBlocks ?? true,
+    realtimeVoiceEnabled: durable.realtimeVoiceEnabled ?? true,
+    autoSubmitVoice: durable.autoSubmitVoice ?? false,
   };
 }
 
@@ -141,6 +165,35 @@ const slice = createSlice({
         state.selectedModelId = modelId;
         state.modelToConversationId[modelId] = newId;
       }
+    },
+
+    selectTranscriptionModel(state, action: PayloadAction<string | null>) {
+      state.selectedTranscriptionModelId = action.payload;
+    },
+
+    selectSpeechModel(state, action: PayloadAction<string | null>) {
+      state.selectedSpeechModelId = action.payload;
+    },
+
+    setSelectedVoice(state, action: PayloadAction<string | null>) {
+      const normalized = action.payload?.trim() || null;
+      state.selectedVoice = normalized;
+    },
+
+    setAutoSpeakAssistant(state, action: PayloadAction<boolean>) {
+      state.autoSpeakAssistant = action.payload;
+    },
+
+    setNarrateCodeBlocks(state, action: PayloadAction<boolean>) {
+      state.narrateCodeBlocks = action.payload;
+    },
+
+    setRealtimeVoiceEnabled(state, action: PayloadAction<boolean>) {
+      state.realtimeVoiceEnabled = action.payload;
+    },
+
+    setAutoSubmitVoice(state, action: PayloadAction<boolean>) {
+      state.autoSubmitVoice = action.payload;
     },
 
     addMessage(state, action: PayloadAction<ChatMessage>) {
@@ -303,6 +356,11 @@ export function subscribeChatPersistence(
       state: {
         conversations: stripTransientFields(chat.conversations),
         modelToConversationId: chat.modelToConversationId,
+        selectedVoice: chat.selectedVoice,
+        autoSpeakAssistant: chat.autoSpeakAssistant,
+        narrateCodeBlocks: chat.narrateCodeBlocks,
+        realtimeVoiceEnabled: chat.realtimeVoiceEnabled,
+        autoSubmitVoice: chat.autoSubmitVoice,
       },
       version: 1,
     };
@@ -320,6 +378,8 @@ export function subscribeChatPersistence(
       state: {
         activeConversationId: chat.activeConversationId,
         selectedModelId: chat.selectedModelId,
+        selectedTranscriptionModelId: chat.selectedTranscriptionModelId,
+        selectedSpeechModelId: chat.selectedSpeechModelId,
       },
       version: 1,
     };

@@ -16,16 +16,19 @@ warmup), mirroring the embeddings runner's group-less lifecycle.
 cleanly on nodes (e.g. Macs) where the binding is not installed.
 """
 
+import inspect
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Final, Literal
 
-from anyio import WouldBlock
-
-from skulk.api.types import ToolCallItem, TopLogprobItem
+from skulk.api.types import GenerationStats, ToolCallItem, TopLogprobItem
 from skulk.shared.models.capabilities import resolve_model_capability_profile
-from skulk.shared.models.memory_estimate import KV_CONTEXT_BUDGET_TOKENS
+from skulk.shared.models.memory_estimate import (
+    KV_CONTEXT_BUDGET_TOKENS,
+    LLAMA_CPP_FULL_SWA_CACHE,
+)
 from skulk.shared.models.model_cards import OutputParserType, ReasoningFormat
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
@@ -37,9 +40,7 @@ from skulk.shared.types.events import (
     TaskStatusUpdated,
 )
 from skulk.shared.types.tasks import (
-    CANCEL_ALL_TASKS,
     LoadModel,
-    Shutdown,
     Task,
     TaskId,
     TaskStatus,
@@ -51,19 +52,22 @@ from skulk.shared.types.worker.runners import (
     RunnerIdle,
     RunnerLoading,
     RunnerReady,
-    RunnerRunning,
-    RunnerShutdown,
-    RunnerShuttingDown,
     RunnerStatus,
 )
 from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
+from skulk.worker.runner.generation_stats import (
+    StreamStatsClock,
+    blocking_call_stats,
+    resolve_stream_token_counts,
+)
 from skulk.worker.runner.llm_inference.harmony_text_parser import HarmonyTextParser
 from skulk.worker.runner.llm_inference.think_text_parser import ThinkTextParser
 from skulk.worker.runner.llm_inference.tool_text_parser import (
     parse_tool_calls_from_text,
 )
+from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 
 
 def select_gguf_file(model_dir: Path) -> Path:
@@ -112,6 +116,29 @@ _VISION_HANDLER_BY_MODEL_TYPE: dict[str, str] = {
     "moondream": "MoondreamChatHandler",
     "nanollava": "NanoLlavaChatHandler",
 }
+
+
+def _require_bounded_swa_support(llama_class: Callable[..., object]) -> None:
+    """Fail closed when the installed binding cannot apply ``swa_full``.
+
+    Older llama-cpp-python releases accept arbitrary keyword arguments and
+    silently ignore ``swa_full``. Continuing on those builds would restore the
+    runtime/admission mismatch this runner is required to prevent.
+    """
+    try:
+        parameters = inspect.signature(llama_class).parameters
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "cannot verify llama-cpp-python bounded SWA support; install a "
+            "build whose Llama constructor explicitly declares swa_full"
+        ) from exc
+    if "swa_full" not in parameters:
+        raise RuntimeError(
+            "installed llama-cpp-python does not explicitly support swa_full; "
+            "refusing to load because full SWA cache can exceed admission"
+        )
+
+
 _DEFAULT_VISION_HANDLER: Final = "MTMDChatHandler"
 
 
@@ -544,33 +571,52 @@ def _logits_all_n_ctx() -> int:
 
 
 def serving_n_ctx(context_token_limit: int | None, logits_all: bool) -> int:
-    """Context window (tokens) to allocate for the llama.cpp KV cache on load.
+    """Load-time context window (tokens) for a served engine.
 
-    llama.cpp allocates the whole KV cache up front from ``n_ctx`` (unlike MLX,
-    which grows it per request), so ``n_ctx`` must not exceed the memory placement
-    actually reserved. Two failure modes this guards against:
+    Shared by the served engines that commit a fixed context window at load:
+    in-process ``llama_cpp`` and ``llama_server`` allocate the whole KV cache up
+    front from ``n_ctx``, and ``vllm`` passes the returned value as ``vllm serve
+    --max-model-len`` (the max sequence length the loaded server accepts). Unlike
+    MLX, which grows KV per request, this window must be a value placement actually
+    reserved
+    memory for. That value is the instance's stamped
+    ``context_token_limit`` (``instance_context_token_limit``): the largest context
+    that fits the hosting node's working set after weights and overhead, capped at
+    the model's own advertised maximum -- and, for a gguf instance on a node WITHOUT
+    discrete VRAM, conservatively clamped back to ``KV_CONTEXT_BUDGET_TOKENS`` (that
+    node's fit is derived from static ram_total but load competes with live
+    ram_available, so a larger window could OOM; see ``instance_context_token_limit``).
+    Because placement admits a node against the SAME working set (VRAM on a GPU node)
+    that this ceiling is derived from, loading the whole KV cache at this window fits
+    by construction. On an admitted node the
+    fit is >= ``KV_CONTEXT_BUDGET_TOKENS`` (the admission floor), so the window is
+    too -- EXCEPT when the model's own advertised max context is smaller, in which
+    case it serves that smaller max (a 4k-context model serves 4k). When the fit is
+    uncomputable for a gguf card (no ``num_key_value_heads``, missing memory, or an
+    RPC-donor shard), ``instance_context_token_limit`` clamps the stamped ceiling
+    back to the budget floor so this never preallocates a fictitious window and
+    OOMs the node on load.
 
-    - ``n_ctx=0`` tells llama.cpp to size the cache for the model's FULL trained
-      context (e.g. gemma-4's 128k), which OOM-killed the whole worker on load
-      (observed loading gemma-4-31B on a Vulkan node: the process was oom-killed
-      and the instance vanished).
-    - The instance's request-admission ceiling (#145, ``context_token_limit``) is
-      NOT a safe size either: it is derived from ~0.75 x total RAM and can be tens
-      of thousands of tokens, whereas placement's fit check
-      (``filter_cycles_by_memory``) only reserved KV for ``KV_CONTEXT_BUDGET_TOKENS``
-      (8192). Allocating the larger ceiling up front would again exceed reserved
-      memory and OOM the node.
+    This replaces the previous fixed clamp to ``KV_CONTEXT_BUDGET_TOKENS`` (8192),
+    which made a served model unusable for real-context work (a whole codebase does
+    not fit in 8192 tokens). ``n_ctx=0`` (the model's full trained context, e.g.
+    gemma-4's 128k, which OOM-killed the worker on load) is still never used; the
+    memory-fit ceiling is the cap.
 
-    So the load-time window is the placement KV budget -- the value placement
-    sized node memory against -- additionally clamped down by the admission
-    ceiling on the (degenerate) tiny node where it is even smaller, and by the
-    logits-buffer window when ``logits_all`` is on (that buffer scales with
-    ``n_ctx``). Serving llama.cpp beyond this budget requires placement to reserve
-    the larger KV footprint first (tracked separately with VRAM-aware admission).
+    Falls back to ``KV_CONTEXT_BUDGET_TOKENS`` only when no ceiling was stamped
+    (missing memory info), and is additionally bounded by the logits-buffer window
+    when ``logits_all`` is on (that buffer scales with ``n_ctx``).
+
+    NOTE (KV dtype, #584): the fit that sizes ``context_token_limit`` assumes fp16
+    KV (``KV_DTYPE_BYTES``). If KV-cache quantization is ever enabled at the runner,
+    that same estimate must use the quantized bytes-per-token or this window would
+    be sized against the wrong footprint.
     """
-    ceiling = KV_CONTEXT_BUDGET_TOKENS
-    if context_token_limit and 0 < context_token_limit < ceiling:
-        ceiling = context_token_limit
+    ceiling = (
+        context_token_limit
+        if context_token_limit and context_token_limit > 0
+        else KV_CONTEXT_BUDGET_TOKENS
+    )
     if logits_all:
         return min(ceiling, _logits_all_n_ctx())
     return ceiling
@@ -588,12 +634,22 @@ def map_finish_reason(
     return "stop"
 
 
-class Runner:
+class Runner(ServedConcurrentDispatch):
     """Single-node llama.cpp text-generation runner.
 
     Lifecycle mirrors the embeddings runner: it skips ``ConnectToGroup`` and
     ``StartWarmup`` (no ring), loads on ``LoadModel``, and serves
     ``TextGeneration`` by streaming tokens.
+
+    Dispatch runs through ``ServedConcurrentDispatch`` at **width 1** (#692).
+    That is not for parallelism -- ``llama_cpp_python``'s ``Llama`` object is
+    not safe for concurrent generation, so generations stay strictly serial --
+    it is for the admission machinery the served engines already proved:
+    ack-on-accept before backpressure, a bounded number of admitted
+    generations, lock-guarded cancellation, stale-``CANCEL_ALL`` hygiene, and
+    the #596 admission stamp that lets the performance-envelope registry see
+    this path at all. Raising the width later is a knob-turn plus a memory
+    conversation, not a rewrite.
     """
 
     def __init__(
@@ -629,6 +685,11 @@ class Runner:
         self.seen: set[TaskId] = set()
         self.model: Any = None
         self.current_status: RunnerStatus = RunnerIdle()
+        # Width 1: the in-process Llama object cannot generate concurrently.
+        # The mixin still bounds admitted work and stamps admission concurrency.
+        self._init_concurrent_dispatch(
+            max_concurrency=1, thread_name_prefix="llama-cpp-gen"
+        )
         logger.info("llama.cpp runner created")
         self.update_status(RunnerIdle())
 
@@ -654,69 +715,35 @@ class Runner:
         )
         self.event_sender.send(TaskAcknowledged(task_id=task.task_id))
 
-    def _drain_cancellations(self) -> None:
-        """Move any pending cancellation task-ids into ``cancelled_tasks``."""
-        while True:
-            try:
-                cancelled = self.cancel_receiver.receive_nowait()
-            except WouldBlock:
-                break
-            self.cancelled_tasks.add(cancelled)
-
-    def _is_cancelled(self, task_id: TaskId) -> bool:
-        self._drain_cancellations()
-        return (
-            task_id in self.cancelled_tasks or CANCEL_ALL_TASKS in self.cancelled_tasks
-        )
-
     def main(self) -> None:
-        with self.task_receiver as tasks:
-            for task in tasks:
-                if task.task_id in self.seen:
-                    logger.warning("repeat task - potential error")
-                self.seen.add(task.task_id)
-                self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
-                self.send_task_status(task, TaskStatus.Running)
-                self.handle_task(task)
-                # Use only cancellations OBSERVED during execution (the streaming
-                # loop drains the cancel pipe via _is_cancelled as it runs). Do
-                # NOT re-drain here: a cancel that loses the race with completion
-                # must not retroactively flip an already-finished task (which has
-                # streamed its tokens + finish chunk) to Cancelled.
-                was_cancelled = (
-                    task.task_id in self.cancelled_tasks
-                    or CANCEL_ALL_TASKS in self.cancelled_tasks
-                )
-                self.send_task_status(
-                    task,
-                    TaskStatus.Cancelled if was_cancelled else TaskStatus.Complete,
-                )
-                self.update_status(self.current_status)
-                if isinstance(self.current_status, RunnerShutdown):
-                    break
+        # Width-1 concurrent dispatch (#692): the shared loop keeps generations
+        # strictly serial (the Llama object requires it) while bounding admitted
+        # work, guarding cancellation behind locks, and stamping each task's
+        # admission concurrency for the performance-envelope tap. LoadModel and
+        # Shutdown run inline on the dispatch thread.
+        self.run_dispatch_loop()
+
+    def _ensure_server_alive(self) -> None:
+        """No-op: there is no server subprocess to poll.
+
+        The served engines use this hook to detect an external server that died
+        between requests. This engine runs in-process, where a native llama.cpp
+        crash takes the whole runner process with it and the supervisor observes
+        the exit directly, so there is nothing separate to check.
+        """
+
+    def _teardown_server(self) -> None:
+        """Release the in-process model on shutdown or loop exit."""
+        self.model = None
+        record_runner_phase("shutdown_cleanup", event="model_released")
 
     def handle_task(self, task: Task) -> None:
+        # TextGeneration and Shutdown are handled directly by the concurrent
+        # dispatch loop (ServedConcurrentDispatch); this serves the inline
+        # lifecycle path (LoadModel).
         match task:
             case LoadModel() if isinstance(self.current_status, RunnerIdle):
                 self._load_model(task)
-            case TextGeneration() if isinstance(self.current_status, RunnerReady):
-                self._generate(task)
-            case Shutdown():
-                logger.info("llama.cpp runner shutting down")
-                record_runner_phase(
-                    "shutdown_cleanup",
-                    event="runner_shutdown_requested",
-                    task_id=task.task_id,
-                )
-                self.update_status(RunnerShuttingDown())
-                self.acknowledge_task(task)
-                self.model = None
-                record_runner_phase(
-                    "shutdown_cleanup",
-                    event="model_released",
-                    task_id=task.task_id,
-                )
-                self.current_status = RunnerShutdown()
             case _:
                 raise RuntimeError(
                     f"llama.cpp runner received unsupported task "
@@ -732,8 +759,11 @@ class Runner:
 
         from skulk.download.download_utils import build_model_path
 
-        model_id = self.shard_metadata.model_card.model_id
-        model_dir = build_model_path(ModelId(model_id))
+        _require_bounded_swa_support(Llama)
+
+        card = self.shard_metadata.model_card
+        model_id = card.model_id
+        model_dir = build_model_path(ModelId(model_id), card.source_revision)
         # Load the exact file the card pinned at creation (the selected quant);
         # fall back to scanning if it's absent (older card / manual staging), so
         # download, sizing, and loading stay in agreement.
@@ -756,9 +786,12 @@ class Runner:
         # built with (Vulkan/ROCm/CUDA). n_ctx is bounded by the KV budget
         # placement reserved (never 0/full-context nor the larger admission
         # ceiling, either of which OOM-kills the node on a large-context model --
-        # see serving_n_ctx). logits_all (logprobs, opt-in) further bounds it
-        # because it pre-allocates an n_ctx*vocab*4 logits buffer. See
-        # _logits_all_enabled / _logits_all_n_ctx.
+        # see serving_n_ctx). Sliding-window attention must remain bounded: the
+        # shared estimator conservatively accounts for that mode, while
+        # llama-cpp-python defaults swa_full to true and can otherwise allocate a
+        # full-context cache for every sliding layer. logits_all (logprobs,
+        # opt-in) further bounds n_ctx because it pre-allocates an n_ctx*vocab*4
+        # logits buffer. See _logits_all_enabled / _logits_all_n_ctx.
         logits_all = _logits_all_enabled()
         n_ctx = serving_n_ctx(self.context_token_limit, logits_all)
         # Vision GGUF (#128): when the card declares a vision config, load the
@@ -785,7 +818,7 @@ class Runner:
         logger.info(
             f"loading GGUF {gguf_path.name} for {model_id} "
             f"(n_ctx={n_ctx}, logits_all={logits_all}, flash_attn={flash_attn}, "
-            f"vision={vision is not None})"
+            f"swa_full={LLAMA_CPP_FULL_SWA_CACHE}, vision={vision is not None})"
         )
         with runner_phase(
             "load_model",
@@ -796,6 +829,7 @@ class Runner:
                 "n_ctx": n_ctx,
                 "logits_all": logits_all,
                 "flash_attn": flash_attn,
+                "swa_full": LLAMA_CPP_FULL_SWA_CACHE,
                 "vision": vision is not None,
             },
         ):
@@ -805,6 +839,7 @@ class Runner:
                 n_ctx=n_ctx,
                 logits_all=logits_all,
                 flash_attn=flash_attn,
+                swa_full=LLAMA_CPP_FULL_SWA_CACHE,
                 verbose=False,
                 chat_handler=chat_handler,
             )
@@ -816,15 +851,19 @@ class Runner:
 
     def _generate(self, task: Task) -> None:
         assert isinstance(task, TextGeneration)
-        # Must be an ACTIVE status (not RunnerReady) for the whole task: the
-        # supervisor asserts the runner is RunnerRunning/Loading/etc. when the
-        # terminal TaskStatus arrives (runner_supervisor._forward_events). main()
-        # sends Complete after this returns, so we stay RunnerRunning until then
-        # and only flip current_status back to Ready (without an event) at the
-        # end, so the Ready event is ordered after Complete.
-        self.update_status(RunnerRunning())
-        self.acknowledge_task(task)
+        # Acknowledgement and the Ready<->Running transitions are owned by the
+        # dispatch loop (ServedConcurrentDispatch): it acks on admission and
+        # flips status around the in-flight count, ordering Ready after the
+        # terminal task status exactly as the supervisor asserts.
         assert self.model is not None
+        # In-flight captured at THIS task's admission on the dispatch loop, for
+        # the performance-envelope tap (#596). At width 1 this is always 1 --
+        # which is precisely the ground truth the envelopes need from a serial
+        # engine, along with the serving node/backend stamp (#692).
+        admission_in_flight = self._admission_concurrency(task.task_id)
+        if self._is_cancelled(task.task_id):
+            logger.info(f"llama.cpp generation skipped (cancelled): {task.task_id}")
+            return
 
         model_id = self.shard_metadata.model_card.model_id
         command_id = task.command_id
@@ -879,19 +918,15 @@ class Runner:
                 self._generate_with_tools(task, messages, kwargs, model_id, command_id)
                 # Same observed-cancellation rule as the streaming path: a task
                 # cancelled during the non-streamed tool call must not be
-                # recorded as a completion.
-                tools_cancelled = (
-                    task.task_id in self.cancelled_tasks
-                    or CANCEL_ALL_TASKS in self.cancelled_tasks
-                )
+                # recorded as a completion. _was_cancelled reads without
+                # draining, so a cancel that lost the race stays unobserved.
+                tools_cancelled = self._was_cancelled(task.task_id)
                 record_runner_phase(
                     "cancel_observed" if tools_cancelled else "completion",
                     event="generation_finished",
                     task_id=task.task_id,
                     command_id=str(command_id),
                 )
-                self.current_status = RunnerReady()
-                record_runner_phase("idle", event="runner_ready", task_id=task.task_id)
                 return
 
             # A reasoning model's markers arrive as literal text in the content
@@ -923,16 +958,51 @@ class Runner:
                 task_id=task.task_id,
                 command_id=str(command_id),
             )
+            clock = StreamStatsClock()
             stream = self.model.create_chat_completion(
                 messages=messages, stream=True, **kwargs
             )
+            # KV position when the first piece arrives == evaluated prompt
+            # size; token-level truth that text-chunk counting lacks (the
+            # binding buffers multi-byte UTF-8 into combined deltas).
+            position_at_first_piece: int | None = None
+
+            def read_kv_position() -> int:
+                # getattr so a binding attribute rename degrades stats to
+                # the piece-count fallback instead of failing generation.
+                raw_position = getattr(self.model, "n_tokens", 0)
+                return raw_position if isinstance(raw_position, int) else 0
+
+            def final_stats() -> GenerationStats:
+                prompt_tokens, generation_tokens = resolve_stream_token_counts(
+                    context_tokens=read_kv_position(),
+                    position_at_first_piece=position_at_first_piece,
+                    pieces=clock.pieces,
+                )
+                # Stamp runner ground truth (#596/#692) so the API's
+                # performance-envelope tap can attribute this generation; this
+                # path previously never stamped, leaving the registry blind to
+                # the in-process engine.
+                return self.stamp_runner_stats(
+                    clock.stats(
+                        prompt_tokens=prompt_tokens,
+                        generation_tokens=generation_tokens,
+                    ),
+                    admission_in_flight,
+                )
+
             emitted_finish = False
             for chunk in stream:
                 if self._is_cancelled(task.task_id):
                     logger.info(f"llama.cpp generation cancelled: {task.task_id}")
                     break
                 choice = chunk["choices"][0]
-                text = choice.get("delta", {}).get("content") or ""
+                raw_content = choice.get("delta", {}).get("content")
+                if raw_content is not None:
+                    if position_at_first_piece is None:
+                        position_at_first_piece = read_kv_position()
+                    clock.mark_piece()
+                text = raw_content or ""
                 finish = map_finish_reason(choice.get("finish_reason"))
                 logprob, top_logprobs = (
                     _logprob_fields(choice) if want_logprobs else (None, None)
@@ -953,7 +1023,11 @@ class Runner:
                             )
                         emitted_finish = True
                         self._send_token_chunk(
-                            command_id, model_id, "", finish_reason=finish
+                            command_id,
+                            model_id,
+                            "",
+                            finish_reason=finish,
+                            stats=final_stats(),
                         )
                     continue
 
@@ -971,6 +1045,7 @@ class Runner:
                             finish_reason=finish,
                             logprob=logprob,
                             top_logprobs=top_logprobs,
+                            stats=final_stats() if finish is not None else None,
                         ),
                     )
                 )
@@ -994,6 +1069,7 @@ class Runner:
                             token_id=-1,
                             usage=None,
                             finish_reason="stop",
+                            stats=final_stats(),
                         ),
                     )
                 )
@@ -1013,21 +1089,18 @@ class Runner:
                 )
             )
         else:
-            # Only cancellations OBSERVED during execution: draining the cancel
-            # pipe here would retroactively flip a finished task (see main()).
-            was_cancelled = (
-                task.task_id in self.cancelled_tasks
-                or CANCEL_ALL_TASKS in self.cancelled_tasks
-            )
+            # Only cancellations OBSERVED during execution: _was_cancelled reads
+            # the shared set without draining the pipe, so a cancel that loses
+            # the race with completion cannot retroactively flip a finished
+            # task. The dispatch loop's done-callback applies the same rule to
+            # the terminal task status.
+            was_cancelled = self._was_cancelled(task.task_id)
             record_runner_phase(
                 "cancel_observed" if was_cancelled else "completion",
                 event="generation_finished",
                 task_id=task.task_id,
                 command_id=str(command_id),
             )
-
-        self.current_status = RunnerReady()
-        record_runner_phase("idle", event="runner_ready", task_id=task.task_id)
 
     def _is_harmony_model(self) -> bool:
         """Whether this runner serves a gpt-oss (harmony-format) model.
@@ -1092,6 +1165,7 @@ class Runner:
         *,
         is_thinking: bool = False,
         finish_reason: Literal["stop", "length", "content_filter"] | None = None,
+        stats: GenerationStats | None = None,
     ) -> None:
         """Emit one harmony-parsed token chunk; skip empty non-terminal chunks."""
         if not text and finish_reason is None:
@@ -1106,6 +1180,7 @@ class Runner:
                     usage=None,
                     finish_reason=finish_reason,
                     is_thinking=is_thinking,
+                    stats=stats,
                 ),
             )
         )
@@ -1140,15 +1215,29 @@ class Runner:
         if self._is_cancelled(task.task_id):
             logger.info(f"llama.cpp tool generation skipped (cancelled): {task.task_id}")
             return
+        request_started = time.perf_counter()
         result = self.model.create_chat_completion(
             messages=messages,
             stream=False,
             tools=task.task_params.tools,
             **kwargs,
         )
+        request_seconds = time.perf_counter() - request_started
         if self._is_cancelled(task.task_id):
             logger.info(f"llama.cpp tool generation cancelled: {task.task_id}")
             return
+        # Stamped like the streaming path (#596/#692): tool calls are
+        # generations too, and the envelope tap must see them. A missing usage
+        # block yields no stats at all, which stays None rather than stamping
+        # an empty shell.
+        base_stats = blocking_call_stats(result.get("usage"), request_seconds)
+        stats = (
+            self.stamp_runner_stats(
+                base_stats, self._admission_concurrency(task.task_id)
+            )
+            if base_stats is not None
+            else None
+        )
         choice = result["choices"][0]
         message = choice.get("message", {})
         content = message.get("content") or ""
@@ -1191,7 +1280,7 @@ class Runner:
                 ChunkGenerated(
                     command_id=command_id,
                     chunk=ToolCallChunk(
-                        model=model_id, tool_calls=tool_calls, usage=None
+                        model=model_id, tool_calls=tool_calls, usage=None, stats=stats
                     ),
                 )
             )
@@ -1204,7 +1293,9 @@ class Runner:
                 self._send_token_chunk(
                     command_id, model_id, clean_text, is_thinking=is_thinking
                 )
-            self._send_token_chunk(command_id, model_id, "", finish_reason=finish)
+            self._send_token_chunk(
+                command_id, model_id, "", finish_reason=finish, stats=stats
+            )
             return
         self.event_sender.send(
             ChunkGenerated(
@@ -1215,6 +1306,7 @@ class Runner:
                     token_id=-1,
                     usage=None,
                     finish_reason=finish,
+                    stats=stats,
                 ),
             )
         )

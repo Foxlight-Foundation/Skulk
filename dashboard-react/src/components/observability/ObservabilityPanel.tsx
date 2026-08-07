@@ -13,6 +13,7 @@ import {
 import { LiveTab } from './LiveTab';
 import { NodeTab } from './NodeTab';
 import { TracesTab } from './TracesTab';
+import { PerformanceTab } from './PerformanceTab';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 
 /**
@@ -176,6 +177,7 @@ const TAB_ORDER: { key: ObservabilityTab }[] = [
   { key: 'live' },
   { key: 'node' },
   { key: 'traces' },
+  { key: 'performance' },
 ];
 
 export function ObservabilityPanel() {
@@ -300,7 +302,9 @@ export function ObservabilityPanel() {
                 ? t('observability.tabs.live', 'Live')
                 : tab.key === 'node'
                   ? t('observability.tabs.node', 'Node')
-                  : t('observability.tabs.traces', 'Traces')}
+                  : tab.key === 'traces'
+                    ? t('observability.tabs.traces', 'Traces')
+                    : t('observability.tabs.performance', 'Performance')}
             </TabButton>
           ))}
         </TabBar>
@@ -312,6 +316,7 @@ export function ObservabilityPanel() {
           {activeTab === 'live' && <LiveTab />}
           {activeTab === 'node' && <NodeTab nodeId={selectedNodeId} />}
           {activeTab === 'traces' && <TracesTab />}
+          {activeTab === 'performance' && <PerformanceTab />}
         </Body>
       </Aside>
     </>

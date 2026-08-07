@@ -4,13 +4,16 @@ import {
   useUpdateConfigMutation,
   type FullConfig,
   type EffectiveConfig,
-  type StoreConfig,
+  type PersistedStoreConfig,
 } from '../store/endpoints/config';
 
 export type {
   StoreConfig,
+  PersistedStoreConfig,
   InferenceConfig,
   LoggingConfig,
+  TelemetryConfig,
+  TelemetryConsent,
   ExperimentsConfig,
   FullConfig,
   EffectiveConfig,
@@ -19,7 +22,7 @@ export type {
 
 /** State and actions exposed by {@link useConfig}. */
 export interface UseConfigReturn {
-  config: StoreConfig | null;
+  config: PersistedStoreConfig | null;
   fullConfig: FullConfig | null;
   effective: EffectiveConfig | null;
   configPath: string | null;

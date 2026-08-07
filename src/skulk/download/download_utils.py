@@ -6,6 +6,7 @@ import ssl
 import time
 import traceback
 from collections.abc import Awaitable
+from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
 from typing import Callable, Literal
@@ -42,6 +43,15 @@ from skulk.shared.types.worker.downloads import (
     RepoFileDownloadProgress,
 )
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
+
+_SOURCE_REVISION_MARKER = ".skulk-source-revision"
+_SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
+_MODEL_SWAP_BACKUP_SUFFIX = ".skulk-swap-backup"
+DownloadCapacityPreflight = Callable[
+    [Path, list[FileListEntry]],
+    Awaitable[None],
+]
+"""Async capacity check for an exact filtered Hugging Face transfer."""
 
 
 class HuggingFaceAuthenticationError(Exception):
@@ -92,7 +102,19 @@ def map_repo_file_download_progress_to_download_progress_data(
 
 def map_repo_download_progress_to_download_progress_data(
     repo_download_progress: RepoDownloadProgress,
+    *,
+    include_files: bool = True,
 ) -> DownloadProgressData:
+    """Map repository progress to its wire-safe aggregate representation.
+
+    Args:
+        repo_download_progress: Latest repository-level download reading.
+        include_files: Whether to include the nested per-file progress map.
+
+    Returns:
+        A progress snapshot with aggregate fields and optional file details.
+    """
+
     return DownloadProgressData(
         total=repo_download_progress.total,
         downloaded=repo_download_progress.downloaded,
@@ -101,21 +123,143 @@ def map_repo_download_progress_to_download_progress_data(
         total_files=repo_download_progress.total_files,
         speed=repo_download_progress.overall_speed,
         eta_ms=int(repo_download_progress.overall_eta.total_seconds() * 1000),
-        files={
-            file_path: map_repo_file_download_progress_to_download_progress_data(
-                file_progress
-            )
-            for file_path, file_progress in repo_download_progress.file_progress.items()
-        },
+        files=(
+            {
+                file_path: map_repo_file_download_progress_to_download_progress_data(
+                    file_progress
+                )
+                for file_path, file_progress in repo_download_progress.file_progress.items()
+            }
+            if include_files
+            else {}
+        ),
     )
 
 
-def resolve_model_in_path(model_id: ModelId) -> Path | None:
+def _source_revision_matches(path: Path, source_revision: str | None) -> bool:
+    """Return whether ``path`` is qualified for an optional source revision."""
+
+    marker = path / _SOURCE_REVISION_MARKER
+    staging_marker = path / _SOURCE_REVISION_STAGING_MARKER
+    try:
+        if staging_marker.exists():
+            return False
+        actual_revision = marker.read_text().strip() if marker.is_file() else None
+    except (OSError, UnicodeError):
+        return False
+    return actual_revision == source_revision
+
+
+def _source_revision_staging_matches(
+    path: Path, source_revision: str | None
+) -> bool:
+    """Return whether ``path`` is an interrupted download of the revision."""
+
+    if source_revision is None:
+        return False
+    staging_marker = path / _SOURCE_REVISION_STAGING_MARKER
+    try:
+        actual_revision = (
+            staging_marker.read_text().strip() if staging_marker.is_file() else None
+        )
+    except (OSError, UnicodeError):
+        return False
+    return actual_revision == source_revision
+
+
+def _write_source_revision_staging_marker(path: Path, source_revision: str) -> None:
+    """Mark ``path`` as non-loadable while a pinned download is in progress."""
+
+    marker = path / _SOURCE_REVISION_STAGING_MARKER
+    temporary_marker = marker.with_suffix(f"{marker.suffix}.partial")
+    temporary_marker.write_text(f"{source_revision}\n")
+    temporary_marker.replace(marker)
+
+
+def write_source_revision_marker(path: Path, source_revision: str | None) -> None:
+    """Persist the immutable revision used by a completed model download.
+
+    Args:
+        path: Completed model directory that owns the marker.
+        source_revision: Full immutable Hugging Face commit, or ``None`` to
+            clear a marker for a mutable-main artifact.
+    """
+
+    marker = path / _SOURCE_REVISION_MARKER
+    staging_marker = path / _SOURCE_REVISION_STAGING_MARKER
+    if source_revision is None:
+        marker.unlink(missing_ok=True)
+        staging_marker.unlink(missing_ok=True)
+        return
+    temporary_marker = marker.with_suffix(f"{marker.suffix}.partial")
+    temporary_marker.write_text(f"{source_revision}\n")
+    temporary_marker.replace(marker)
+    # Keep interrupted downloads non-loadable until the final marker is
+    # durable. A crash before this unlink leaves the conservative staging
+    # marker in place and the next attempt safely revalidates the files.
+    staging_marker.unlink(missing_ok=True)
+
+
+def _replacement_model_dir(target_dir: Path, source_revision: str | None) -> Path:
+    """Return the resumable sibling directory for a replacement revision."""
+
+    revision = source_revision or "main"
+    return target_dir.with_name(f".{target_dir.name}.revision-{revision}.partial")
+
+
+def _recover_interrupted_model_swap(target_dir: Path) -> None:
+    """Restore or clean the backup left by an interrupted directory swap."""
+
+    backup_dir = target_dir.with_name(f".{target_dir.name}{_MODEL_SWAP_BACKUP_SUFFIX}")
+    if not backup_dir.exists():
+        return
+    if target_dir.exists():
+        shutil.rmtree(backup_dir)
+        return
+    backup_dir.rename(target_dir)
+
+
+def _commit_replacement_model_dir(replacement_dir: Path, target_dir: Path) -> None:
+    """Install a complete replacement while retaining a recoverable old copy."""
+
+    _recover_interrupted_model_swap(target_dir)
+    backup_dir = target_dir.with_name(f".{target_dir.name}{_MODEL_SWAP_BACKUP_SUFFIX}")
+    if not target_dir.exists():
+        replacement_dir.rename(target_dir)
+        return
+
+    target_dir.rename(backup_dir)
+    try:
+        replacement_dir.rename(target_dir)
+    except BaseException:
+        backup_dir.rename(target_dir)
+        raise
+    try:
+        shutil.rmtree(backup_dir)
+    except Exception as error:
+        logger.warning(
+            f"Installed replacement model at {target_dir}, but could not remove "
+            f"the prior cache backup at {backup_dir}: {error}"
+        )
+
+
+def resolve_model_in_path(
+    model_id: ModelId, source_revision: str | None = None
+) -> Path | None:
     """Search SKULK_MODELS_PATH directories for a pre-existing model.
 
-    Checks each directory for the normalized name (org--model).  A candidate
-    is only returned if ``is_model_directory_complete`` confirms all weight
-    files are present.
+    Checks each directory for the normalized name (org--model) and, for pinned
+    artifacts, the store's revision-qualified sibling name. A candidate is only
+    returned if ``is_model_directory_complete`` confirms all weight files are
+    present and its revision marker matches.
+
+    Args:
+        model_id: Model repository identifier to resolve.
+        source_revision: Full immutable Hugging Face commit required by the
+            card. When set, the directory must carry a matching revision marker.
+
+    Returns:
+        The first complete matching model directory, or ``None``.
 
     Reads the search path dynamically from ``skulk.shared.constants`` so that
     paths added at runtime (e.g. by the model store) are picked up.
@@ -124,10 +268,18 @@ def resolve_model_in_path(model_id: ModelId) -> Path | None:
 
     search_path: tuple[Path, ...] = _constants.SKULK_MODELS_PATH or ()
     normalized = model_id.normalize()
+    candidate_names = [normalized]
+    if source_revision is not None:
+        candidate_names.append(f"{normalized}--revision-{source_revision}")
     for search_dir in search_path:
-        candidate = search_dir / normalized
-        if candidate.is_dir() and is_model_directory_complete(candidate):
-            return candidate
+        for candidate_name in candidate_names:
+            candidate = search_dir / candidate_name
+            if (
+                candidate.is_dir()
+                and is_model_directory_complete(candidate)
+                and _source_revision_matches(candidate, source_revision)
+            ):
+                return candidate
     return None
 
 
@@ -183,8 +335,9 @@ def companion_download_specs(
     """Build download shards for every companion repo a model card declares.
 
     Companions are the artifacts a model needs beyond its own repo: a
-    separate vision-weights repo, an MTP sidecar (``mtp_sidecar_repo``), or
-    a speculative-decoding assistant model (``assistant_model_repo``).
+    separate vision-weights repo, an MTP sidecar (``mtp_sidecar_repo``), a
+    speculative-decoding assistant model (``assistant_model_repo``), or a
+    served-engine draft model (``served_spec_draft_repo``).
     Every downloader path that resolves a base model MUST also ensure its
     companions — a base model present on disk without its companion is the
     "model loads, speculative decoding silently unavailable" failure mode
@@ -247,11 +400,17 @@ def companion_download_specs(
                 False,
             )
         )
-    # Served-engine draft GGUF (`--model-draft`): a separate small draft model
-    # (draft_simple / draft_eagle3) or a Gemma-4 assistant-as-MTP draft. Fetch only
-    # the pinned draft GGUF file (its shard group); it may live in the same repo as
-    # the base (then it lands in the base's dir) or a separate repo.
-    if runtime and runtime.served_spec_draft_repo and runtime.served_spec_draft_file:
+    # A same-repo served draft is part of the base repository transaction and
+    # is included by resolve_allow_patterns(). Treating it as a recursive bare
+    # companion loses the base card's revision identity and can replace a
+    # pinned cache with mutable-main bytes. Only separate repositories belong
+    # in the companion path.
+    if (
+        runtime
+        and runtime.served_spec_draft_repo
+        and runtime.served_spec_draft_repo != str(model_card.model_id)
+        and runtime.served_spec_draft_file
+    ):
         # Just the pinned draft file -- a draft GGUF is single-file and is not a
         # vision model, so do not pull mmproj projectors or sibling quants.
         specs.append(
@@ -262,6 +421,19 @@ def companion_download_specs(
             )
         )
     return specs
+
+
+def same_repo_served_draft_files(model_card: ModelCard) -> list[str]:
+    """Return served draft GGUFs that share the base model repository."""
+
+    runtime = model_card.runtime
+    if (
+        runtime is not None
+        and runtime.served_spec_draft_repo == str(model_card.model_id)
+        and runtime.served_spec_draft_file
+    ):
+        return [runtime.served_spec_draft_file]
+    return []
 
 
 def model_companions_present_on_disk(
@@ -324,7 +496,14 @@ def model_companions_present_on_disk(
     # base's directory or live in its own repo dir).
     if runtime.served_spec_draft_repo and runtime.served_spec_draft_file:
         try:
-            draft_dir = build_model_path(ModelId(runtime.served_spec_draft_repo))
+            draft_revision = (
+                model_card.source_revision
+                if runtime.served_spec_draft_repo == str(model_card.model_id)
+                else None
+            )
+            draft_dir = build_model_path(
+                ModelId(runtime.served_spec_draft_repo), draft_revision
+            )
         except FileNotFoundError:
             return False
         if not (draft_dir / runtime.served_spec_draft_file).is_file():
@@ -332,15 +511,28 @@ def model_companions_present_on_disk(
     return True
 
 
-def build_model_path(model_id: ModelId) -> Path:
+def build_model_path(
+    model_id: ModelId, source_revision: str | None = None
+) -> Path:
     """Resolve a local filesystem path for *model_id*.
 
     Checks ``SKULK_MODELS_PATH`` (staging, store, etc.) first, then falls
     back to the standard ``SKULK_MODELS_DIR`` and the default staging
-    directory.  Raises ``FileNotFoundError`` if no valid model directory
-    is found.
+    directory. Raises ``FileNotFoundError`` if no valid model directory
+    matching the requested source revision is found.
+
+    Args:
+        model_id: Model repository identifier to resolve.
+        source_revision: Immutable source revision required by the model card,
+            or ``None`` for an unpinned mutable-main cache.
+
+    Returns:
+        The complete local model directory.
+
+    Raises:
+        FileNotFoundError: If no complete revision-matching directory exists.
     """
-    found = resolve_model_in_path(model_id)
+    found = resolve_model_in_path(model_id, source_revision)
     if found is not None:
         return found
     # A safetensors/MLX repo is identified by its config.json; a bare GGUF repo
@@ -350,7 +542,7 @@ def build_model_path(model_id: ModelId) -> Path:
     default = SKULK_MODELS_DIR / model_id.normalize()
     if default.is_dir() and (
         (default / "config.json").exists() or directory_has_gguf_weights(default)
-    ):
+    ) and _source_revision_matches(default, source_revision):
         return default
     # Fallback: check the default staging directory directly.
     # This covers cases where the staging path wasn't registered in
@@ -359,7 +551,7 @@ def build_model_path(model_id: ModelId) -> Path:
     if staging_fallback.is_dir() and (
         (staging_fallback / "config.json").exists()
         or directory_has_gguf_weights(staging_fallback)
-    ):
+    ) and _source_revision_matches(staging_fallback, source_revision):
         return staging_fallback
     raise FileNotFoundError(
         f"Model {model_id} not found on disk. "
@@ -970,6 +1162,17 @@ async def _download_file(
             assert r.status in [200, 206], (
                 f"Failed to download {path} from {url}: {r.status}"
             )
+            if resume_byte_pos and r.status == 200:
+                # Some artifact hosts ignore Range and return the complete
+                # object. Appending that response would temporarily consume
+                # both the partial and full sizes, violate the capacity
+                # preflight's partial-byte credit, and fail integrity after
+                # the transfer. Restart this file in place instead.
+                logger.warning(
+                    f"Server ignored resume range for {path}; restarting download"
+                )
+                resume_byte_pos = None
+                n_read = 0
             async with aiofiles.open(
                 partial_path, "ab" if resume_byte_pos else "wb"
             ) as f:
@@ -1083,7 +1286,10 @@ async def resolve_allow_patterns(shard: ShardMetadata) -> list[str]:
     if gguf_file:
         from skulk.shared.models.model_cards import gguf_allow_patterns
 
-        return [*gguf_allow_patterns(gguf_file), "config.json"]
+        patterns = [*gguf_allow_patterns(gguf_file), "config.json"]
+        for draft_file in same_repo_served_draft_files(shard.model_card):
+            patterns.extend(gguf_allow_patterns(draft_file))
+        return list(dict.fromkeys(patterns))
     # Non-GGUF (safetensors/MLX): 'Smart' downloads stay disabled because
     #  (i) we don't handle all kinds of files; (ii) no sticky sessions;
     #  (iii) tensor parallel requires all files.
@@ -1119,16 +1325,47 @@ async def download_shard(
     skip_internet: bool = False,
     allow_patterns: list[str] | None = None,
     on_connection_lost: Callable[[], None] = lambda: None,
+    capacity_preflight: DownloadCapacityPreflight | None = None,
 ) -> tuple[Path, RepoDownloadProgress]:
     if not skip_download:
         logger.debug(f"Downloading {shard.model_card.model_id=}")
 
-    revision = "main"
-    target_dir = await ensure_models_dir() / str(shard.model_card.model_id).replace(
+    revision = shard.model_card.source_revision or "main"
+    canonical_target_dir = await ensure_models_dir() / str(
+        shard.model_card.model_id
+    ).replace(
         "/", "--"
     )
     if not skip_download:
+        await asyncio.to_thread(
+            _recover_interrupted_model_swap, canonical_target_dir
+        )
+    resuming_staged_revision = (
+        canonical_target_dir.exists()
+        and _source_revision_staging_matches(
+            canonical_target_dir, shard.model_card.source_revision
+        )
+    )
+    replacing_revision = canonical_target_dir.exists() and not (
+        _source_revision_matches(canonical_target_dir, shard.model_card.source_revision)
+        or resuming_staged_revision
+    )
+    target_dir = (
+        _replacement_model_dir(canonical_target_dir, shard.model_card.source_revision)
+        if replacing_revision
+        else canonical_target_dir
+    )
+    if not skip_download:
         await aios.makedirs(target_dir, exist_ok=True)
+        source_revision = shard.model_card.source_revision
+        if source_revision is not None and not _source_revision_matches(
+            target_dir, source_revision
+        ):
+            await asyncio.to_thread(
+                _write_source_revision_staging_marker,
+                target_dir,
+                source_revision,
+            )
 
     if not allow_patterns:
         allow_patterns = await resolve_allow_patterns(shard)
@@ -1160,7 +1397,7 @@ async def download_shard(
             status="not_started",
             file_progress={},
         )
-        return target_dir, not_started_progress
+        return canonical_target_dir, not_started_progress
     filtered_file_list = list(
         filter_repo_objects(
             file_list,
@@ -1178,9 +1415,15 @@ async def download_shard(
             for f in filtered_file_list
             if "/" in f.path or not f.path.endswith(".safetensors")
         ]
+    if (
+        not skip_download
+        and not skip_internet
+        and capacity_preflight is not None
+    ):
+        await capacity_preflight(target_dir, filtered_file_list)
     file_progress: dict[str, RepoFileDownloadProgress] = {}
 
-    async def on_progress_wrapper(
+    def update_file_progress(
         file: FileListEntry, curr_bytes: int, total_bytes: int, is_renamed: bool
     ) -> None:
         previous_progress = file_progress.get(file.path)
@@ -1227,16 +1470,6 @@ async def download_shard(
             else "in_progress",
             start_time=start_time,
         )
-        await on_progress(
-            shard,
-            calculate_repo_progress(
-                shard,
-                shard.model_card.model_id,
-                revision,
-                file_progress,
-                all_start_time,
-            ),
-        )
 
     for file in filtered_file_list:
         downloaded_bytes = await get_downloaded_size(target_dir / file.path)
@@ -1257,13 +1490,45 @@ async def download_shard(
         )
 
     semaphore = asyncio.Semaphore(max_parallel_downloads)
+    pending_progress: dict[str, tuple[FileListEntry, int, int, bool]] = {}
+    progress_ready = asyncio.Event()
+    progress_stopping = False
+
+    async def emit_progress() -> None:
+        """Serialize callbacks while coalescing each file to its latest value."""
+
+        while True:
+            await progress_ready.wait()
+            progress_ready.clear()
+            if pending_progress:
+                updates = tuple(pending_progress.values())
+                pending_progress.clear()
+                for file, curr_bytes, total_bytes, is_renamed in updates:
+                    update_file_progress(file, curr_bytes, total_bytes, is_renamed)
+                await on_progress(
+                    shard,
+                    calculate_repo_progress(
+                        shard,
+                        shard.model_card.model_id,
+                        revision,
+                        file_progress,
+                        all_start_time,
+                    ),
+                )
+            if progress_stopping and not pending_progress:
+                return
+
+    progress_task = asyncio.create_task(emit_progress())
 
     def schedule_progress(
         file: FileListEntry, curr_bytes: int, total_bytes: int, is_renamed: bool
     ) -> None:
-        asyncio.create_task(
-            on_progress_wrapper(file, curr_bytes, total_bytes, is_renamed)
-        )
+        # The downloader calls this once per 8 MB chunk and cannot await. Keep
+        # one latest update per file and one emitter task instead of spawning an
+        # unbounded task per chunk. The emitter is drained before the terminal
+        # repository snapshot, so stale callbacks cannot follow completion.
+        pending_progress[file.path] = (file, curr_bytes, total_bytes, is_renamed)
+        progress_ready.set()
 
     async def download_with_semaphore(file: FileListEntry) -> None:
         async with semaphore:
@@ -1279,13 +1544,62 @@ async def download_shard(
                 skip_internet=skip_internet,
             )
 
-    if not skip_download:
-        await asyncio.gather(
-            *[download_with_semaphore(file) for file in filtered_file_list]
-        )
+    download_cancelled = False
+    try:
+        if not skip_download:
+            await asyncio.gather(
+                *[download_with_semaphore(file) for file in filtered_file_list]
+            )
+    except asyncio.CancelledError:
+        download_cancelled = True
+        raise
+    finally:
+        if download_cancelled:
+            # Cancellation must not wait on a slow status consumer. Cancelling
+            # the one owned emitter also guarantees that no orphan callback can
+            # publish stale progress after the coordinator reports cancellation.
+            progress_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await progress_task
+        else:
+            progress_stopping = True
+            progress_ready.set()
+            try:
+                await progress_task
+            except asyncio.CancelledError:
+                # Cancelled while draining the emitter: cancel and await it so no
+                # orphaned emitter can publish stale progress after we unwind,
+                # preserving the same no-stale-callback guarantee as the
+                # cancelled branch above.
+                progress_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await progress_task
+                raise
     final_repo_progress = calculate_repo_progress(
         shard, shard.model_card.model_id, revision, file_progress, all_start_time
     )
+    if (
+        skip_download
+        and (replacing_revision or resuming_staged_revision)
+        and final_repo_progress.status == "complete"
+    ):
+        # All replacement bytes may have landed before a restart, but they are
+        # not loadable until the normal ensure path validates and atomically
+        # installs the replacement at the canonical cache path.
+        final_repo_progress = final_repo_progress.model_copy(
+            update={"status": "in_progress"}
+        )
+    if not skip_download:
+        await asyncio.to_thread(
+            write_source_revision_marker,
+            target_dir,
+            shard.model_card.source_revision,
+        )
+        if replacing_revision:
+            await asyncio.to_thread(
+                _commit_replacement_model_dir, target_dir, canonical_target_dir
+            )
+            target_dir = canonical_target_dir
     await on_progress(shard, final_repo_progress)
     if gguf := next((f for f in filtered_file_list if f.path.endswith(".gguf")), None):
         return target_dir / gguf.path, final_repo_progress

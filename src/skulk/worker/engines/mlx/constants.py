@@ -1,7 +1,13 @@
 import os
 from typing import Literal, cast
 
-from skulk.shared.constants import preferred_env_value
+from skulk.shared.constants import (
+    DEFAULT_MAX_OUTPUT_TOKENS as SHARED_DEFAULT_MAX_OUTPUT_TOKENS,
+)
+from skulk.shared.constants import (
+    MAX_OUTPUT_TOKENS,
+    preferred_env_value,
+)
 
 # TODO: Do we want so many constants?
 #  I think we want a lot of these as parameters?
@@ -9,19 +15,10 @@ from skulk.shared.constants import preferred_env_value
 KV_GROUP_SIZE: int | None = 32
 KV_BITS: int | None = None
 ATTENTION_KV_BITS: int | None = 4
-# Default generated-token budget when an API client omits max_tokens. This must
-# be an output cap, not a proxy for model context length: very large defaults can
-# push distributed decode into long-running native MLX/Metal waits before the
-# user has asked for that much output.
-DEFAULT_MAX_OUTPUT_TOKENS: int = 4096
-_max_tokens_value = preferred_env_value(
-    "SKULK_MAX_OUTPUT_TOKENS",
-    "SKULK_MAX_TOKENS",
-    default=str(DEFAULT_MAX_OUTPUT_TOKENS),
-)
-MAX_TOKENS: int = int(_max_tokens_value) if _max_tokens_value else DEFAULT_MAX_OUTPUT_TOKENS
-if MAX_TOKENS < 1:
-    raise ValueError("SKULK_MAX_OUTPUT_TOKENS must be greater than 0")
+# Backwards-compatible engine-local alias. The default is shared with served
+# engines because it is an API contract, not an MLX implementation detail.
+DEFAULT_MAX_OUTPUT_TOKENS: int = SHARED_DEFAULT_MAX_OUTPUT_TOKENS
+MAX_TOKENS: int = MAX_OUTPUT_TOKENS
 MAX_KV_SIZE: int | None = 3200
 KEEP_KV_SIZE: int | None = 1600
 QUANTIZE_MODEL_MODE: str | None = "affine"

@@ -1,5 +1,17 @@
 from .api import AddCustomModelParams as AddCustomModelParams
 from .api import AdvancedImageParams as AdvancedImageParams
+from .api import AudioCapabilitySection as AudioCapabilitySection
+from .api import AudioSpeechRequest as AudioSpeechRequest
+from .api import AudioTranscriptionCompletedEvent as AudioTranscriptionCompletedEvent
+from .api import AudioTranscriptionDeltaEvent as AudioTranscriptionDeltaEvent
+from .api import AudioTranscriptionErrorEvent as AudioTranscriptionErrorEvent
+from .api import (
+    AudioTranscriptionResponseFormat as AudioTranscriptionResponseFormat,
+)
+from .api import AudioTranscriptionStreamEvent as AudioTranscriptionStreamEvent
+from .api import AudioTranscriptionUsageEvent as AudioTranscriptionUsageEvent
+from .api import AudioVoice as AudioVoice
+from .api import AudioVoiceList as AudioVoiceList
 from .api import BenchChatCompletionRequest as BenchChatCompletionRequest
 from .api import BenchChatCompletionResponse as BenchChatCompletionResponse
 from .api import BenchImageGenerationResponse as BenchImageGenerationResponse
@@ -29,6 +41,9 @@ from .api import ExtractPageToolRequest as ExtractPageToolRequest
 from .api import ExtractPageToolResponse as ExtractPageToolResponse
 from .api import FinishReason as FinishReason
 from .api import GenerationStats as GenerationStats
+from .api import GgufQuantOption as GgufQuantOption
+from .api import GgufQuantOptions as GgufQuantOptions
+from .api import HuggingFaceCardSummary as HuggingFaceCardSummary
 from .api import HuggingFaceSearchResult as HuggingFaceSearchResult
 from .api import ImageData as ImageData
 from .api import ImageEditsTaskParams as ImageEditsTaskParams
@@ -59,6 +74,7 @@ from .api import ResolvedModelCapabilities as ResolvedModelCapabilities
 from .api import RuntimeCapabilitySection as RuntimeCapabilitySection
 from .api import StartDownloadParams as StartDownloadParams
 from .api import StartDownloadResponse as StartDownloadResponse
+from .api import StoreDownloadRequest as StoreDownloadRequest
 from .api import StreamingChoiceResponse as StreamingChoiceResponse
 from .api import ToolCall as ToolCall
 from .api import ToolCallItem as ToolCallItem

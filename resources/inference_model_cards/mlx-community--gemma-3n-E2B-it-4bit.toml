@@ -26,4 +26,9 @@ boi_token_id = 255999
 eoi_token_id = 262144
 
 [storage_size]
-in_bytes = 1800000000
+in_bytes = 4502729693
+
+[placement]
+# Layers 20-29 reuse KV from concrete producer layers 18 and 19. The final
+# pipeline rank must therefore begin no later than layer 18 so it owns both.
+max_pipeline_split_layer = 18

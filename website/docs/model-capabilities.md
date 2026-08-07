@@ -72,6 +72,7 @@ The decisions it drives today are:
 - reasoning/thinking defaults
 - prompt renderer selection
 - output parser selection
+- speech model discovery and TTS/STT dashboard affordances
 
 ## Thinking contract
 
@@ -88,6 +89,7 @@ If `resolved_capabilities.supports_thinking_toggle` is `true`:
 
 - `enable_thinking=true` enables thinking using the model profile's default effort unless an explicit non-disabled effort is provided
 - `enable_thinking=false` disables thinking using the profile's disabled effort
+- omitting both `enable_thinking` and `reasoning_effort` disables thinking using the profile's disabled effort
 - `reasoning_effort="none"` also disables thinking
 
 ### Non-toggleable reasoning models
@@ -100,6 +102,58 @@ If a model supports reasoning but does not support thinking toggle:
 - requests otherwise fall back to the model's supported default behavior
 
 This keeps the public API stable without pretending every reasoning-capable model can switch on and off cleanly.
+
+## Speech contract
+
+Speech models are represented as first-class model-card tasks instead of model
+name conventions:
+
+- `TextToSpeech`
+- `SpeechToText`
+- `SpeechTranslation`
+
+Cards can add an `[audio]` section to describe speech-specific behavior:
+
+```toml
+[audio]
+kind = "tts" # or "stt"
+default_response_format = "mp3"
+response_formats = ["mp3", "wav"]
+supports_streaming = true
+supports_realtime = false
+supports_voice_listing = true
+supports_reference_audio = false
+supports_translation = false
+sample_rates = [16000, 24000]
+```
+
+The resolver exposes that as `resolved_capabilities` fields:
+
+- `supports_speech_synthesis`
+- `supports_transcription`
+- `supports_speech_translation`
+- `supports_audio_output`
+- `supports_realtime_audio`
+- `default_audio_response_format`
+- `audio_response_formats`
+
+These fields are now runtime-facing metadata. They let placement route speech
+cards to the `mlx_audio` runner, let `/v1/models` identify mounted TTS/STT
+models, and let the dashboard expose voice controls without guessing from model
+names. Mounted `supports_speech_synthesis` models serve `/v1/audio/speech`.
+Cards with a fixed speaker inventory may declare `default_voice`; Skulk applies
+it only when the caller omits `voice`, and schema validation requires it to be
+one of the card's `voices`.
+When the card declares `audio.supports_streaming = true`, clients can pass
+`stream=true` for stable chunked HTTP MP3 output; bundled cards keep that flag
+off until a real MLX model has passed streaming validation. Mounted
+`supports_transcription` models serve
+non-streaming `/v1/audio/transcriptions`.
+Cards that additionally declare both streaming and realtime support can expose
+the stable `stt.realtime@1.0.0` bidirectional provider when the API can reach a
+ready single-host runner. The provider accepts mono PCM16, requires a true
+upstream incremental session, and does not infer realtime support from a batch
+transcription API.
 
 ## Fallback Behavior
 
@@ -136,7 +190,7 @@ Once the capability spine exists, Skulk can evolve cleanly toward:
 
 - model-aware thinking controls
 - reasoning budget support
-- audio modality support
+- speech serving controls for TTS, transcription, and translation
 - richer tool grammars
 - safer dashboard controls based on real support instead of guesswork
 

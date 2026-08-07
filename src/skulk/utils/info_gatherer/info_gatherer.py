@@ -2,9 +2,9 @@ import os
 import shutil
 import sys
 import tomllib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Self
+from typing import Self, cast
 
 import anyio
 from anyio import (
@@ -16,8 +16,9 @@ from anyio import (
 )
 from anyio.streams.buffered import BufferedByteReceiveStream
 from loguru import logger
-from pydantic import ValidationError
+from pydantic import ValidationError, field_serializer, field_validator
 
+from skulk.routing.zenoh_status import ZenohPeerSampler
 from skulk.shared.constants import SKULK_CONFIG_FILE, SKULK_MODELS_DIR
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
@@ -25,6 +26,7 @@ from skulk.shared.types.profiling import (
     MachMemoryCategories,
     MemoryUsage,
     NetworkInterfaceInfo,
+    NodeDataTransport,
     NodeResources,
     ThunderboltBridgeStatus,
     parse_vm_stat_output,
@@ -45,6 +47,12 @@ from .linux_gpu import (
     read_system_profile,
 )
 from .mactop import MacmonMetrics, MactopMetrics
+from .nvidia_gpu import (
+    has_nvidia_gpu,
+    load_nvml,
+    prefer_nvidia_telemetry,
+)
+from .nvidia_gpu import read_system_profile as read_nvidia_system_profile
 from .system_info import (
     get_friendly_name,
     get_model_and_chip,
@@ -453,6 +461,54 @@ class MiscData(TaggedModel):
         return cls(friendly_name=await get_friendly_name())
 
 
+class NodeCapabilities(TaggedModel):
+    """Extension-advertised capability tags a node publishes on the telemetry plane.
+
+    First-class fabric citizenship (see :mod:`skulk.extensions.telemetry`) means
+    a plugin can advertise what it offers (for example ``memory`` or
+    ``embeddings:bge-m3``) so peers discover it the same way native nodes
+    advertise ``backends`` (over the telemetry plane, last-write-wins). The tags
+    are opaque free-form strings owned by whichever extension sets them; Skulk
+    core neither interprets nor validates their meaning.
+
+    Unlike the other telemetry readings this has no ``gather`` classmethod: its
+    value is not probed from the OS but supplied by the extension surface via the
+    gatherer's ``capabilities_provider`` (the API mutates the outbound set on the
+    shared ``TelemetryView``; the worker's gatherer reads it here).
+    """
+
+    capabilities: frozenset[str]
+    """The capability tags this node currently advertises (serialized sorted)."""
+
+    @field_validator("capabilities", mode="before")
+    @classmethod
+    def _coerce_capabilities(cls, v: object) -> object:
+        # The wire path (model_dump(mode="json") -> array -> model_validate) and
+        # any list-shaped input arrive as a list, but strict mode rejects a list
+        # where a frozenset is declared. Coerce iterables to a frozenset before
+        # strict validation so the reading actually populates over gossip
+        # (mirrors NodeResources.backends, without which the feature is inert).
+        if isinstance(v, (list, tuple, set, frozenset)):
+            return frozenset(cast("Iterable[str]", v))
+        return v
+
+    @field_serializer("capabilities")
+    def _serialize_capabilities(self, value: frozenset[str]) -> list[str]:
+        # Emit a sorted list so JSON wire encoding is deterministic and a
+        # frozenset (which JSON/TOML cannot encode) round-trips.
+        return sorted(value)
+
+
+class NodeHeartbeat(TaggedModel):
+    """Small, explicit liveness reading published on the telemetry plane.
+
+    The reading intentionally has no payload: peers stamp their local receipt
+    time, which avoids trusting wall clocks from another node. Keeping liveness
+    as a named reading prevents collector cadence changes from silently changing
+    the master's node-timeout behavior.
+    """
+
+
 class NodeDiskUsage(TaggedModel):
     """Disk space information for the models directory."""
 
@@ -504,12 +560,16 @@ GatheredInfo = (
     | StaticNodeInformation
     | NodeResources
     | NodeDiskUsage
+    | NodeCapabilities
+    | NodeHeartbeat
 )
 
 
 @dataclass
 class InfoGatherer:
     info_sender: Sender[GatheredInfo]
+    data_transport: NodeDataTransport = "gossipsub"
+    heartbeat_poll_interval: float | None = 2
     interface_watcher_interval: float | None = 10
     misc_poll_interval: float | None = 60
     system_profiler_interval: float | None = 5 if IS_DARWIN else None
@@ -521,6 +581,15 @@ class InfoGatherer:
     rdma_ctl_poll_interval: float | None = 10 if IS_DARWIN else None
     disk_poll_interval: float | None = 30
     gpu_linux_poll_interval: float | None = 2 if IS_LINUX else None
+    # Extension-advertised capabilities (fabric-citizenship). Optional: without a
+    # provider (the common case: no capability-advertising extension installed)
+    # the monitor is inert and never publishes.
+    capabilities_provider: Callable[[], frozenset[str]] | None = None
+    capabilities_poll_interval: float | None = 30
+    # Data-plane Zenoh connectivity, sampled from the router that owns the
+    # session at each NodeResources advertisement. Optional so callers without
+    # a router (tests, tools) stay unchanged; absent means "unknown", never 0.
+    zenoh_peer_sampler: ZenohPeerSampler | None = None
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
 
     async def run(self):
@@ -549,10 +618,14 @@ class InfoGatherer:
                 tg.start_soon(self._monitor_static_info)
                 tg.start_soon(self._monitor_node_resources)
                 tg.start_soon(self._monitor_disk_usage)
-
-                nc = await NodeConfig.gather()
-                if nc is not None:
-                    await self.info_sender.send(nc)
+                tg.start_soon(self._monitor_capabilities)
+                tg.start_soon(self._monitor_heartbeat)
+                # NodeConfig is deliberately NOT sent: it is neither a
+                # telemetry-plane reading nor a durable control event, so the
+                # master rejects it before ordering and nothing consumes it
+                # (apply() no-ops it). Sending it only produced a guaranteed
+                # rejected-event warning at every startup (#633). The type
+                # stays in the GatheredInfo union for wire decode.
         except BaseExceptionGroup as exception_group:
             # A closed/broken info channel means our consumer is gone — the
             # worker is shutting down or being replaced on a master
@@ -583,6 +656,22 @@ class InfoGatherer:
     def shutdown(self):
         self._tg.cancel_tasks()
 
+    async def _monitor_heartbeat(self) -> None:
+        """Publish the node's explicit liveness reading at a fixed cadence."""
+        if self.heartbeat_poll_interval is None:
+            return
+        while True:
+            try:
+                with fail_after(5):
+                    await self.info_sender.send(NodeHeartbeat())
+            except (ClosedResourceError, BrokenResourceError):
+                # The worker owns the consumer. Its disappearance is the same
+                # clean shutdown signal handled by every other monitor.
+                raise
+            except Exception as error:
+                logger.warning(f"Error publishing node heartbeat: {error}")
+            await anyio.sleep(self.heartbeat_poll_interval)
+
     async def _monitor_static_info(self):
         if self.static_info_poll_interval is None:
             return
@@ -606,7 +695,17 @@ class InfoGatherer:
         while True:
             try:
                 with fail_after(30):
-                    await self.info_sender.send(await NodeResources.gather())
+                    zenoh_connected_peers = (
+                        await self.zenoh_peer_sampler.advertised_count()
+                        if self.zenoh_peer_sampler is not None
+                        else None
+                    )
+                    await self.info_sender.send(
+                        await NodeResources.gather(
+                            data_transport=self.data_transport,
+                            zenoh_connected_peers=zenoh_connected_peers,
+                        )
+                    )
             except (ClosedResourceError, BrokenResourceError):
                 # Consumer gone: stop signal, not a fault. Escape the
                 # per-iteration catch-all so the loop cannot spin on a dead
@@ -615,6 +714,42 @@ class InfoGatherer:
             except Exception as e:
                 logger.warning(f"Error gathering node resources: {e}")
             await anyio.sleep(self.node_resources_poll_interval)
+
+    async def _monitor_capabilities(self):
+        """Publish extension-advertised capability tags onto the telemetry plane.
+
+        The set is polled (not emitted once) so a node that joins after a
+        capability was advertised still learns it on the next tick (the
+        last-write-wins plane has no replay). Nothing is published while the set
+        stays empty: the overwhelming majority of nodes advertise nothing, and an
+        empty reading every poll would be pure gossip volume on a plane that
+        exists to stay quiet (#279). One exception: when the set transitions
+        non-empty -> empty (the provider withdrew its last capability), a single
+        empty reading is published so peers clear their last-write-wins entry
+        instead of keeping the stale value until the node leaves the cluster
+        (provider liveness, fabric-citizenship Phase 2a).
+        """
+        if self.capabilities_poll_interval is None or self.capabilities_provider is None:
+            return
+        published_nonempty = False
+        while True:
+            try:
+                capabilities = self.capabilities_provider()
+                if capabilities or published_nonempty:
+                    with fail_after(30):
+                        await self.info_sender.send(
+                            NodeCapabilities(capabilities=capabilities)
+                        )
+                    published_nonempty = bool(capabilities)
+            except (ClosedResourceError, BrokenResourceError):
+                # Consumer gone (worker shutdown/replacement): a stop signal,
+                # not a fault — escape the per-iteration catch-all so the loop
+                # cannot spin on a dead channel (#266); run() converts it into a
+                # clean stop.
+                raise
+            except Exception as e:
+                logger.warning(f"Error gathering node capabilities: {e}")
+            await anyio.sleep(self.capabilities_poll_interval)
 
     async def _monitor_misc(self):
         if self.misc_poll_interval is None:
@@ -779,30 +914,43 @@ class InfoGatherer:
             await anyio.sleep(self.disk_poll_interval)
 
     async def _monitor_gpu_linux(self):
-        """Publish normalized AMD/Linux GPU telemetry from passive sysfs reads.
+        """Publish normalized Linux GPU telemetry (AMD sysfs, then NVIDIA NVML).
 
-        Resolves the amdgpu device once; if none is present (no GPU, or a driver
-        that does not expose ``gpu_busy_percent``) the node simply reports no
-        accelerator, which the dashboard renders as "not reported". Reads are
-        passive sysfs, never a GPU-colliding poll (see ``linux_gpu.py`` and the
-        macmon crash mechanism it avoids).
+        Resolves the accelerator once: the amdgpu sysfs device when present,
+        otherwise NVML device 0 (rented CUDA nodes). If neither exists the
+        node simply reports no accelerator, which the dashboard renders as
+        "not reported". All reads are passive (sysfs files or NVML queries),
+        never a GPU-colliding poll (see ``linux_gpu.py`` and the macmon crash
+        mechanism it avoids).
         """
         if self.gpu_linux_poll_interval is None:
             return
-        device = find_amd_gpu_device()
+        # Mixed-GPU hosts: SKULK_GPU_TELEMETRY_VENDOR=nvidia skips the AMD
+        # sysfs adapter (e.g. an iGPU) so the NVIDIA dGPU reports instead.
+        device = None if prefer_nvidia_telemetry() else find_amd_gpu_device()
+        nvml = None
         if device is None:
-            logger.info(
-                "no AMD GPU sysfs device (gpu_busy_percent) found; skipping GPU "
-                "telemetry on this node"
-            )
-            return
-        logger.info(f"reporting GPU telemetry from {device}")
+            # No AMD sysfs device: try NVML for an NVIDIA accelerator (rented
+            # CUDA nodes). Same passive-reads-only rule, same profile shape.
+            nvml = load_nvml()
+            if nvml is None or not has_nvidia_gpu(nvml):
+                logger.info(
+                    "no AMD GPU sysfs device and no NVML device found; skipping "
+                    "GPU telemetry on this node"
+                )
+                return
+            logger.info("reporting GPU telemetry from NVML device 0")
+        else:
+            logger.info(f"reporting GPU telemetry from {device}")
         while True:
             try:
                 with fail_after(5):
-                    await self.info_sender.send(
-                        LinuxGpuMetrics(system_profile=read_system_profile(device))
-                    )
+                    if device is not None:
+                        profile = read_system_profile(device)
+                    else:
+                        assert nvml is not None  # guaranteed by the setup above
+                        profile = read_nvidia_system_profile(nvml)
+                    await self.info_sender.send(LinuxGpuMetrics(system_profile=profile))
             except (ClosedResourceError, BrokenResourceError):
                 # Consumer gone (worker shutdown/replacement): a stop signal,
                 # not a gathering fault; must escape this per-iteration

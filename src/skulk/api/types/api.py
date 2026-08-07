@@ -6,7 +6,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from skulk.shared.models.capabilities import ResolvedCapabilityProfile
-from skulk.shared.models.model_cards import ModelCard, ModelId
+from skulk.shared.models.model_cards import AudioResponseFormat, ModelCard, ModelId
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import ReasoningEffort
@@ -18,6 +18,77 @@ from skulk.utils.pydantic_ext import CamelCaseModel
 FinishReason = Literal[
     "stop", "length", "tool_calls", "content_filter", "function_call", "error"
 ]
+AudioTranscriptionResponseFormat = Literal[
+    "json", "text", "verbose_json", "srt", "vtt", "ndjson"
+]
+
+
+class AudioTranscriptionDeltaEvent(BaseModel):
+    """One progressive text delta from streaming speech transcription."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    type: Literal["transcription.delta"] = "transcription.delta"
+    model: str = Field(description="Mounted STT model serving the request.")
+    sequence: int = Field(ge=0, description="Zero-based stream event sequence.")
+    delta: str = Field(description="New transcript text not emitted previously.")
+    language: str | None = Field(
+        default=None, description="Detected or requested language when available."
+    )
+    segment_index: int | None = Field(
+        default=None, description="Model-provided segment index when available."
+    )
+
+
+class AudioTranscriptionCompletedEvent(BaseModel):
+    """Terminal successful transcript event for streaming STT."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    type: Literal["transcription.completed"] = "transcription.completed"
+    model: str = Field(description="Mounted STT model serving the request.")
+    sequence: int = Field(ge=0, description="Zero-based stream event sequence.")
+    text: str = Field(description="Complete transcript assembled from emitted deltas.")
+    language: str | None = Field(
+        default=None, description="Detected or requested language when available."
+    )
+    segments: tuple[dict[str, str | int | float | bool | None], ...] = Field(
+        default=(), description="Normalized model-provided segment metadata."
+    )
+
+
+class AudioTranscriptionUsageEvent(BaseModel):
+    """Terminal request-size usage event for streaming STT."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    type: Literal["transcription.usage"] = "transcription.usage"
+    model: str = Field(description="Mounted STT model serving the request.")
+    sequence: int = Field(ge=0, description="Zero-based stream event sequence.")
+    input_bytes: int = Field(ge=0, description="Accepted encoded upload byte count.")
+    output_characters: int = Field(
+        ge=0, description="Number of transcript characters emitted."
+    )
+
+
+class AudioTranscriptionErrorEvent(BaseModel):
+    """Terminal typed failure event after streaming response admission."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    type: Literal["transcription.error"] = "transcription.error"
+    model: str = Field(description="Mounted STT model serving the request.")
+    sequence: int = Field(ge=0, description="Zero-based stream event sequence.")
+    code: str = Field(description="Stable machine-readable stream failure code.")
+    message: str = Field(description="Human-readable failure detail.")
+
+
+AudioTranscriptionStreamEvent = (
+    AudioTranscriptionDeltaEvent
+    | AudioTranscriptionCompletedEvent
+    | AudioTranscriptionUsageEvent
+    | AudioTranscriptionErrorEvent
+)
 
 
 class ErrorInfo(BaseModel):
@@ -51,6 +122,14 @@ class ModelListModel(BaseModel):
     family: str = Field(default="")
     quantization: str = Field(default="")
     base_model: str = Field(default="")
+    source_revision: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{40}$",
+        description=(
+            "Immutable Hugging Face source commit used for this model's "
+            "qualified artifacts, or null when the card follows mutable main."
+        ),
+    )
     capabilities: list[str] = Field(
         default_factory=list,
         description="Coarse catalog capability labels such as text, vision, thinking, or embedding.",
@@ -62,6 +141,10 @@ class ModelListModel(BaseModel):
     modalities: "ModalitiesCapabilitySection | None" = Field(
         default=None,
         description="Optional declarative modality support details from the model card.",
+    )
+    audio: "AudioCapabilitySection | None" = Field(
+        default=None,
+        description="Optional declarative speech-serving metadata from the model card.",
     )
     tooling: "ToolingCapabilitySection | None" = Field(
         default=None,
@@ -117,6 +200,34 @@ class ResolvedModelCapabilities(BaseModel):
         default=False,
         description="Whether the runtime should treat the model as accepting audio inputs.",
     )
+    supports_speech_synthesis: bool = Field(
+        default=False,
+        description="Whether the runtime should treat the model as a text-to-speech model.",
+    )
+    supports_transcription: bool = Field(
+        default=False,
+        description="Whether the runtime should treat the model as a speech-to-text model.",
+    )
+    supports_speech_translation: bool = Field(
+        default=False,
+        description="Whether the runtime should treat the model as supporting speech translation.",
+    )
+    supports_audio_output: bool = Field(
+        default=False,
+        description="Whether the runtime should expect this model to produce audio output.",
+    )
+    supports_realtime_audio: bool = Field(
+        default=False,
+        description="Whether the runtime should expect this model to expose realtime audio sessions.",
+    )
+    default_audio_response_format: str | None = Field(
+        default=None,
+        description="Default encoded audio response format for speech synthesis, when declared.",
+    )
+    audio_response_formats: list[str] = Field(
+        default_factory=list,
+        description="Encoded audio response formats the model can produce.",
+    )
     supports_tool_calling: bool = Field(
         default=False,
         description="Whether the runtime expects the model to support structured tool calling.",
@@ -156,6 +267,20 @@ class ResolvedModelCapabilities(BaseModel):
             thinking_format=profile.thinking_format.value,
             supports_image_input=profile.supports_image_input,
             supports_audio_input=profile.supports_audio_input,
+            supports_speech_synthesis=profile.supports_speech_synthesis,
+            supports_transcription=profile.supports_transcription,
+            supports_speech_translation=profile.supports_speech_translation,
+            supports_audio_output=profile.supports_audio_output,
+            supports_realtime_audio=profile.supports_realtime_audio,
+            default_audio_response_format=(
+                profile.default_audio_response_format.value
+                if profile.default_audio_response_format is not None
+                else None
+            ),
+            audio_response_formats=[
+                response_format.value
+                for response_format in profile.audio_response_formats
+            ],
             supports_tool_calling=profile.supports_tool_calling,
             builtin_tools=[tool.value for tool in profile.builtin_tools],
             tool_call_format=profile.tool_call_format.value,
@@ -202,6 +327,81 @@ class ModalitiesCapabilitySection(BaseModel):
         return cls(
             supports_audio_input=config.supports_audio_input,
             supports_native_multimodal=config.supports_native_multimodal,
+        )
+
+
+class AudioCapabilitySection(BaseModel):
+    """Snake-case speech metadata exposed by the models API."""
+
+    kind: str | None = Field(
+        default=None,
+        description="Speech serving kind declared by the card: tts or stt.",
+    )
+    default_response_format: str | None = Field(
+        default=None,
+        description="Default encoded audio response format for TTS requests.",
+    )
+    response_formats: list[str] = Field(
+        default_factory=list,
+        description="Encoded audio response formats declared for TTS requests.",
+    )
+    supports_streaming: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the card declares streaming speech support after "
+            "runtime validation."
+        ),
+    )
+    supports_realtime: bool | None = Field(
+        default=None,
+        description="Whether the model declares realtime audio session support.",
+    )
+    supports_voice_listing: bool | None = Field(
+        default=None,
+        description="Whether the model declares voice-listing support.",
+    )
+    default_voice: str | None = Field(
+        default=None,
+        description="Stable voice used when a request omits an explicit voice.",
+    )
+    voices: list[str] = Field(
+        default_factory=list,
+        description="Stable built-in or bundled-reference voice identifiers.",
+    )
+    supports_reference_audio: bool | None = Field(
+        default=None,
+        description="Whether the model accepts managed reference audio.",
+    )
+    supports_translation: bool | None = Field(
+        default=None,
+        description="Whether the model declares speech translation support.",
+    )
+    sample_rates: list[int] = Field(
+        default_factory=list,
+        description="Declared input or output sample rates in hertz.",
+    )
+
+    @classmethod
+    def from_model_card(cls, model_card: ModelCard) -> "AudioCapabilitySection | None":
+        config = model_card.audio
+        if config is None:
+            return None
+        return cls(
+            kind=config.kind.value if config.kind is not None else None,
+            default_response_format=(
+                config.default_response_format.value
+                if config.default_response_format is not None
+                else None
+            ),
+            response_formats=[item.value for item in config.response_formats],
+            supports_streaming=config.supports_streaming,
+            supports_realtime=config.supports_realtime,
+            supports_voice_listing=config.supports_voice_listing,
+            default_voice=config.default_voice,
+            voices=list(config.voices),
+            supports_reference_audio=config.supports_reference_audio,
+            supports_translation=config.supports_translation,
+            sample_rates=list(config.sample_rates),
         )
 
 
@@ -503,6 +703,57 @@ class GenerationStats(BaseModel):
     prompt_tokens: int
     generation_tokens: int
     peak_memory_usage: Memory
+    # Runner-reported ground truth for the performance-envelope tap (#596). A
+    # served runner stamps these from its own state so the envelope is attributed
+    # to the serving instance with the true in-flight concurrency, immune to which
+    # API node dispatched the request. None for engines that do not report them
+    # (in-process MLX / llama.cpp), where the API falls back to its own
+    # outstanding-request count.
+    serving_node: str | None = None
+    """Node id of the node whose runner produced this generation (for the API to
+    resolve the hardware class from telemetry)."""
+    serving_backend: str | None = None
+    """The resolved engine+backend tag the runner actually ran (e.g. vllm-cuda);
+    can differ per node on a heterogeneous cluster, so it must come from the
+    serving instance, not the model."""
+    in_flight_at_admission: int | None = None
+    """Requests this instance's runner was serving when this one started (>= 1)."""
+    serving_batches: bool | None = None
+    """Whether the serving engine decodes concurrent requests together (its
+    configured max concurrency > 1), so aggregate throughput scales with
+    concurrency. Distinguishes a parallel llama-server from a serial one."""
+
+    def redacted_for_client(self) -> "GenerationStats":
+        """Return a copy with all internal runner-attribution fields cleared.
+
+        Ordinary generation APIs must not expose live runner topology or
+        admission state. Client-facing serializers call this method after the
+        API's internal performance-envelope tap has consumed the full runner
+        attribution.
+        """
+        return self.model_copy(
+            update={
+                "serving_node": None,
+                "serving_backend": None,
+                "in_flight_at_admission": None,
+                "serving_batches": None,
+            }
+        )
+
+    def redacted_for_benchmark_client(self) -> "GenerationStats":
+        """Return qualification statistics without identifying attribution.
+
+        The explicit benchmark API retains task-local batching mode and
+        admission width so a black-box qualification client can prove that
+        configured concurrency was exercised. Node identity and backend
+        selection remain private cluster topology.
+        """
+        return self.model_copy(
+            update={
+                "serving_node": None,
+                "serving_backend": None,
+            }
+        )
 
 
 class ImageGenerationStats(BaseModel):
@@ -586,10 +837,33 @@ class BenchChatCompletionRequest(ChatCompletionRequest):
 
 class AddCustomModelParams(BaseModel):
     model_config = ConfigDict(
-        json_schema_extra={"example": {"model_id": "mlx-community/my-custom-model"}}
+        json_schema_extra={
+            "example": {
+                "model_id": "bartowski/my-custom-model-GGUF",
+                "gguf_file": "my-custom-model-Q4_K_M.gguf",
+                "source_revision": "0123456789abcdef0123456789abcdef01234567",
+            }
+        }
     )
 
     model_id: ModelId
+    gguf_file: str | None = Field(
+        default=None,
+        description=(
+            "Exact repo-relative GGUF file identifying the quant to select when "
+            "adding a multi-quant repository. Split weights are normalized to "
+            "their first shard for backend loading. Omit for non-GGUF "
+            "repositories or default selection."
+        ),
+    )
+    source_revision: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{40}$",
+        description=(
+            "Immutable Hugging Face commit to inspect and persist on the custom "
+            "card. Omit to follow the repository's mutable main branch."
+        ),
+    )
 
 
 class HuggingFaceSearchResult(BaseModel):
@@ -599,6 +873,120 @@ class HuggingFaceSearchResult(BaseModel):
     likes: int = 0
     last_modified: str = ""
     tags: list[str] = Field(default_factory=list)
+    matched_file: str | None = Field(
+        default=None,
+        description=(
+            "Exact repo-relative GGUF path matched by a filename search, or null "
+            "for ordinary repository search results."
+        ),
+    )
+    pipeline_tag: str | None = Field(
+        default=None,
+        description="Hugging Face task tag (for example text-generation), when declared.",
+    )
+    library_name: str | None = Field(
+        default=None,
+        description="Framework the repository targets (transformers, diffusers, mlx, gguf).",
+    )
+    gated: bool = Field(
+        default=False,
+        description=(
+            "True when downloading requires accepting the repository's license "
+            "on Hugging Face and presenting an access token."
+        ),
+    )
+    license: str | None = Field(
+        default=None,
+        description="License identifier from the model card, when declared.",
+    )
+    param_count: int | None = Field(
+        default=None,
+        description=(
+            "Total parameter count reported by the repository's safetensors or "
+            "GGUF metadata, when available."
+        ),
+    )
+    total_file_size: int | None = Field(
+        default=None,
+        description="Exact total artifact bytes reported by GGUF metadata, when available.",
+    )
+    context_length: int | None = Field(
+        default=None,
+        description="Model context window reported by GGUF metadata, when available.",
+    )
+    base_model_repo: str | None = Field(
+        default=None,
+        description="Parent repository this model derives from, when tagged.",
+    )
+    base_model_relation: str | None = Field(
+        default=None,
+        description="How this model derives from its parent: finetune, quantized, merge, or adapter.",
+    )
+    arxiv_ids: list[str] = Field(
+        default_factory=list,
+        description="arXiv paper identifiers tagged on the repository.",
+    )
+    languages: list[str] = Field(
+        default_factory=list,
+        description="ISO 639-1 language tags declared on the repository.",
+    )
+    architecture: str | None = Field(
+        default=None,
+        description="Model architecture from repository config or GGUF metadata.",
+    )
+
+
+class GgufQuantOption(BaseModel):
+    """One downloadable quantization of a GGUF repository."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    gguf_file: str = Field(description="Repo-relative first shard of the quant's group; pin this to download it.")
+    label: str = Field(description="Human quant label, e.g. Q4_K_M or UD-Q2_K_XL.")
+    total_bytes: int = Field(description="Exact total bytes of the quant's shard group.")
+    shard_count: int = Field(description="Number of GGUF shards in the group.")
+
+
+class GgufQuantOptions(BaseModel):
+    """Quantization inventory for one GGUF repository."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    model_id: str
+    options: list[GgufQuantOption] = Field(default_factory=list)
+
+
+class HuggingFaceCardSummary(BaseModel):
+    """Prose summary extracted from a Hugging Face model card README."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    model_id: str
+    summary: str = Field(
+        description="First prose paragraphs of the model card, markup stripped; empty when the card has no usable prose.",
+    )
+
+
+class StoreDownloadRequest(BaseModel):
+    """Optional file selection for a shared-store model download."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    gguf_file: str | None = Field(
+        default=None,
+        description=(
+            "Exact repo-relative GGUF file whose shard group the store should "
+            "download. Omit to use the repository's default quant selection."
+        ),
+    )
+    source_revision: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{40}$",
+        description=(
+            "Immutable Hugging Face commit to download. Omit to resolve the "
+            "repository's mutable main branch."
+        ),
+    )
 
 
 class PlaceInstanceParams(BaseModel):
@@ -679,6 +1067,15 @@ class PlacementPreview(BaseModel):
     # Keys are NodeId strings, values are additional bytes that would be used on that node
     memory_delta_by_node: dict[str, int] | None = None
     error: str | None = None
+    alternative: bool = Field(
+        default=False,
+        description=(
+            "True for a per-host alternative to the planner's ranked pick: a "
+            "single-node placement on a host that passes admission but lost "
+            "the ranking. On heterogeneous fleets the ranked winner (often "
+            "the largest GPU) would otherwise hide every other valid host."
+        ),
+    )
 
 
 class PlacementPreviewResponse(BaseModel):
@@ -721,6 +1118,146 @@ class DeleteInstanceResponse(BaseModel):
 class CancelCommandResponse(BaseModel):
     message: str
     command_id: CommandId
+
+
+class AudioSpeechRequest(BaseModel):
+    """OpenAI-compatible text-to-speech request payload."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    model: str = Field(description="Mounted text-to-speech model id to serve.")
+    input: str = Field(
+        min_length=1,
+        description="Text to synthesize into speech.",
+    )
+    voice: str | None = Field(
+        default=None,
+        description=(
+            "Model-specific native voice or bundled-reference profile when "
+            "declared by the mounted card."
+        ),
+    )
+    speed: float | None = Field(
+        default=None,
+        gt=0,
+        description="Optional model-specific speaking speed multiplier.",
+    )
+    response_format: AudioResponseFormat | None = Field(
+        default=None,
+        description=(
+            "Audio format to return, including raw PCM when supported. When "
+            "omitted, Skulk uses the mounted model card default when declared "
+            "and otherwise falls back to mp3."
+        ),
+    )
+    stream: bool = Field(
+        default=False,
+        description=(
+            "Whether to stream MP3 or raw PCM bytes as they are produced by the "
+            "mounted text-to-speech model. The selected response_format must be "
+            "declared by the model card, and the card must declare "
+            "audio.supports_streaming=true."
+        ),
+    )
+    streaming_interval: float | None = Field(
+        default=None,
+        gt=0,
+        description="Requested streaming chunk interval in seconds for stream=true requests.",
+    )
+    instruct: str | None = Field(
+        default=None,
+        description="Optional model-specific style or instruction text.",
+    )
+    lang_code: str | None = Field(
+        default=None,
+        description="Optional language code passed to models that accept it.",
+    )
+    temperature: float | None = Field(
+        default=None,
+        description="Optional model-specific sampling temperature.",
+    )
+    top_p: float | None = Field(
+        default=None,
+        description="Optional nucleus sampling parameter.",
+    )
+    top_k: int | None = Field(
+        default=None,
+        ge=0,
+        description="Optional top-k sampling parameter.",
+    )
+    repetition_penalty: float | None = Field(
+        default=None,
+        gt=0,
+        description="Optional model-specific repetition penalty.",
+    )
+    max_tokens: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Optional model-specific maximum generation token budget. When omitted, "
+            "the speech runner supplies 4096 only to generators that explicitly "
+            "declare this control."
+        ),
+    )
+    seed: int | None = Field(
+        default=None,
+        ge=0,
+        le=2**32 - 1,
+        description=(
+            "Optional deterministic sampling seed applied immediately before "
+            "this speech generation."
+        ),
+    )
+    reference_audio: str | None = Field(
+        default=None,
+        description=(
+            "Managed reference-audio id for voice conditioning. Arbitrary server "
+            "filesystem paths are not accepted."
+        ),
+    )
+    reference_text: str | None = Field(
+        default=None,
+        description="Transcript for the managed reference audio when supported.",
+    )
+
+    @field_validator("response_format", mode="before")
+    @classmethod
+    def _validate_response_format(
+        cls, value: str | AudioResponseFormat | None
+    ) -> AudioResponseFormat | None:
+        if value is None:
+            return None
+        if isinstance(value, AudioResponseFormat):
+            return value
+        return AudioResponseFormat(value)
+
+
+class AudioVoice(BaseModel, frozen=True):
+    """One stable voice identifier exposed by a mounted TTS model."""
+
+    id: str = Field(description="Model-specific voice identifier.")
+    name: str = Field(description="Human-readable voice name.")
+    model: str = Field(description="Mounted text-to-speech model id.")
+    preferred_languages: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Ordered BCP 47 language tags for which the model card recommends "
+            "this voice."
+        ),
+    )
+    kind: Literal["builtin", "reference"] = Field(
+        default="builtin",
+        description=(
+            "Voice source: a model-native preset or a bundled reference profile."
+        ),
+    )
+
+
+class AudioVoiceList(BaseModel, frozen=True):
+    """Voice catalog for one mounted text-to-speech model."""
+
+    object: Literal["list"] = "list"
+    data: tuple[AudioVoice, ...] = ()
 
 
 ImageSize = Literal[
@@ -952,7 +1489,7 @@ class NodeStorageSummary(CamelCaseModel):
     (falls back to the models directory when staging is not configured)."""
 
 
-TraceTaskKind = Literal["image", "text", "embedding"]
+TraceTaskKind = Literal["image", "text", "embedding", "speech"]
 
 
 class TraceSourceNode(CamelCaseModel):

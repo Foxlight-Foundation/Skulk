@@ -40,20 +40,23 @@ How staging works
 Store host optimisation
 -----------------------
 When this node IS the store host (``local_store_path`` is set in the
-constructor), ``stage_shard()`` uses ``shutil.copy2()`` for a local
-filesystem copy instead of making an HTTP round-trip over loopback.  If
-``node_cache_path`` in ``skulk.yaml`` is set to the same path as ``store_path``
-for the store host, ``shutil.copy2()`` still runs but is effectively a no-op
-(same inode, copy skipped by size check).
+constructor), ``stage_shard()`` hardlinks immutable files on the same
+filesystem and falls back to ``shutil.copy2()`` when linking is unavailable,
+instead of making an HTTP round-trip over loopback. If ``node_cache_path`` in
+``skulk.yaml`` is the same path as ``store_path``, a pinned model is loaded
+directly from its revision-qualified canonical directory so pinned bytes never
+occupy mutable-main's normalized path.
 
 Eviction
 --------
-When an inference instance is deactivated (``Shutdown`` task received by the
-:class:`~skulk.worker.main.Worker`), the worker calls
-``ModelStoreClient.evict_shard()`` to remove the staged files from the
-node-local cache.  The canonical copy in the store is **never touched**.
-Eviction is skipped if ``cleanup_on_deactivate`` is ``False`` for the node
-(useful when staging is on fast local NVMe and warm cache is preferred).
+At instance deactivation and node startup, the worker holds idle staging to
+its configured recent-use budget. Before each new store-backed download, it
+also serializes exact artifact admission with transfer and evicts
+least-recently-used idle copies when needed to fit the additional physical
+bytes plus operating-system headroom. This capacity safety pass applies even
+when lifecycle cleanup is disabled; live runners, active base-plus-companion
+transactions, and incoming partial data remain protected. The canonical copy
+in the store is **never touched**.
 
 Resume protocol
 ---------------
@@ -67,24 +70,29 @@ file already exists (from a previous complete run), the file is skipped.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 from collections.abc import Awaitable
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, AsyncIterator, Callable, TypeVar, final
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import aiofiles
 import aiofiles.os as aios
 import aiohttp
 from loguru import logger
 
-from skulk.download.download_utils import companion_download_specs, create_http_session
+from skulk.download.download_utils import (
+    companion_download_specs,
+    create_http_session,
+    same_repo_served_draft_files,
+)
 from skulk.download.shard_downloader import ShardDownloader
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.downloads import RepoDownloadProgress
 from skulk.shared.types.worker.shards import ShardMetadata
-from skulk.store.config import StagingNodeConfig
+from skulk.store.config import DEFAULT_MODEL_STORE_PORT, StagingNodeConfig
 from skulk.store.staging_eviction import touch_last_used
 
 if TYPE_CHECKING:
@@ -94,9 +102,40 @@ _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB per read/write chunk
 _CONNECT_TIMEOUT = 10.0  # seconds — abort if store host unreachable
 _READ_TIMEOUT = 120.0  # seconds — abort if no data for 2 minutes
 _STORE_HTTP_RETRY_ATTEMPTS = 12
+# The availability probe is the reachability DECISION point: a
+# store-unreachable node should reach its HF-fallback answer in seconds, not
+# ride the full minute-long budget meant for transient route flaps mid
+# transfer (#657). Three attempts still absorb a one-off connect blip.
+_STORE_PROBE_RETRY_ATTEMPTS = 3
+# Download-status polls tolerate route flaps (the transfer budget's
+# rationale), but a store that stops ANSWERING for this many consecutive
+# polls (~1 minute at the default 5s interval) is unreachable, not stalled;
+# without this bound the stall clock would grind for its full multi-hour
+# budget before failing with a misleading "no progress" error (#657 review).
+_STORE_POLL_UNREACHABLE_THRESHOLD = 12
 _STORE_HTTP_RETRY_BASE_SECONDS = 0.5
 _STORE_HTTP_RETRY_MAX_DELAY_SECONDS = 8.0
+# The failure classes that mean the store never answered OR stopped
+# delivering: connect failures, timeouts, and mid-body transfer dropouts
+# (aiohttp.ClientPayloadError, a route that died while the body streamed —
+# the mid-transfer shape the fallback explicitly promises to cover).
+# aiohttp.ClientError is broader still: it also covers response-level
+# errors (ContentTypeError, status errors) where the store answered with a
+# bad reply — a store bug, not unreachability — and those must never divert
+# a node onto the direct-HF fallback, which exists solely for stores the
+# node cannot reach (#657 review).
+_STORE_CONNECTION_ERRORS = (
+    aiohttp.ClientConnectionError,
+    aiohttp.ClientPayloadError,
+    TimeoutError,
+    asyncio.TimeoutError,
+)
 _T = TypeVar("_T")
+StagingCapacityPreflight = Callable[[int], Awaitable[None]]
+"""Async check run with the exact physical bytes a staging transfer will add."""
+
+_SOURCE_REVISION_MARKER = ".skulk-source-revision"
+_SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
 
 
 class ModelNotInStoreError(Exception):
@@ -105,6 +144,19 @@ class ModelNotInStoreError(Exception):
     This is an expected, handleable error — callers should catch it and
     present a meaningful message to the user (e.g. "model not available
     in offline mode").
+    """
+
+
+class StoreUnreachableError(Exception):
+    """Raised when the store host cannot be reached at the transport level.
+
+    Deliberately distinct from :class:`ModelNotInStoreError`: "the store
+    answered and does not have it" and "the store cannot be reached"
+    (whether it never answered or dropped off mid-transfer) demand
+    different responses. A store-unreachable node with HF fallback enabled
+    downloads directly from Hugging Face instead of starving (#657) — the
+    exact shape of a remote fabric member whose route to the home store
+    does not exist while its public-internet path is fine.
     """
 
 
@@ -119,6 +171,73 @@ def _sanitize_model_id(model_id: str) -> str:
     return str(model_id).replace("/", "--")
 
 
+def _with_source_revision(url: str, source_revision: str | None) -> str:
+    """Attach an immutable source revision to a store read request."""
+
+    if source_revision is None:
+        return url
+    return f"{url}?{urlencode({'source_revision': source_revision})}"
+
+
+def _staged_source_revision_matches(
+    staged_path: Path, source_revision: str | None
+) -> bool:
+    """Return whether a staged directory represents the requested revision."""
+
+    marker = staged_path / _SOURCE_REVISION_MARKER
+    staging_marker = staged_path / _SOURCE_REVISION_STAGING_MARKER
+    if source_revision is None and staging_marker.exists():
+        return False
+    try:
+        actual_revision = marker.read_text().strip() if marker.is_file() else None
+    except (OSError, UnicodeError):
+        return False
+    return actual_revision == source_revision
+
+
+def _write_staged_source_revision(
+    staged_path: Path, source_revision: str | None
+) -> None:
+    """Persist or clear the source-revision marker after successful staging."""
+
+    marker = staged_path / _SOURCE_REVISION_MARKER
+    staging_marker = staged_path / _SOURCE_REVISION_STAGING_MARKER
+    if source_revision is None:
+        marker.unlink(missing_ok=True)
+        staging_marker.unlink(missing_ok=True)
+        return
+    temporary_marker = marker.with_suffix(f"{marker.suffix}.partial")
+    temporary_marker.write_text(f"{source_revision}\n")
+    temporary_marker.replace(marker)
+    staging_marker.unlink(missing_ok=True)
+
+
+def _staged_source_revision_staging_matches(
+    staged_path: Path, source_revision: str | None
+) -> bool:
+    """Return whether an interrupted staging attempt can resume safely."""
+
+    if source_revision is None:
+        return False
+    marker = staged_path / _SOURCE_REVISION_STAGING_MARKER
+    try:
+        actual_revision = marker.read_text().strip() if marker.is_file() else None
+    except (OSError, UnicodeError):
+        return False
+    return actual_revision == source_revision
+
+
+def _write_staged_source_revision_staging(
+    staged_path: Path, source_revision: str
+) -> None:
+    """Mark a directory as resumable only for one immutable revision."""
+
+    marker = staged_path / _SOURCE_REVISION_STAGING_MARKER
+    temporary_marker = marker.with_suffix(f"{marker.suffix}.partial")
+    temporary_marker.write_text(f"{source_revision}\n")
+    temporary_marker.replace(marker)
+
+
 def _staging_dir(node_cache_path: str, model_id: str) -> Path:
     """Resolve the staging directory for *model_id* on this node."""
     return Path(node_cache_path).expanduser() / _sanitize_model_id(model_id)
@@ -128,19 +247,41 @@ async def _retry_store_http(
     operation: Callable[[], Awaitable[_T]],
     *,
     description: str,
+    attempts: int = _STORE_HTTP_RETRY_ATTEMPTS,
 ) -> _T:
     """Retry transient store HTTP transport failures with capped backoff.
 
     The model store sits behind normal node networking, so route flaps can last
     longer than a single TCP connect timeout during cluster churn or macOS
     interface changes. Keep retrying for roughly a minute of no-route failures
-    before surfacing a terminal download failure.
+    before surfacing a terminal download failure. When retries are exhausted,
+    only connection-class failures (the store never answered) are wrapped in
+    :class:`StoreUnreachableError`; response-level errors such as
+    ``aiohttp.ContentTypeError`` mean the store answered badly and re-raise
+    as-is, so a reachable-but-buggy store surfaces as a store failure instead
+    of diverting the node onto the direct-HF fallback.
+
+    Args:
+        operation: Coroutine factory performing one store HTTP request.
+        description: Human-readable operation name for retry logging.
+        attempts: Retry budget. Callers whose next move depends on
+            reachability itself (the availability probe) pass a smaller
+            budget so a store-unreachable node reaches its fallback decision
+            in seconds rather than minutes (#657).
     """
-    for attempt in range(1, _STORE_HTTP_RETRY_ATTEMPTS + 1):
+    for attempt in range(1, attempts + 1):
         try:
             return await operation()
         except (aiohttp.ClientError, TimeoutError, asyncio.TimeoutError) as error:
-            if attempt == _STORE_HTTP_RETRY_ATTEMPTS:
+            if attempt == attempts:
+                # Retry treats the whole ClientError family as transient (a
+                # proxy 502 or truncated body can be a blip worth retrying),
+                # but the terminal classification is stricter: only failures
+                # where the store never answered may report unreachability.
+                if isinstance(error, _STORE_CONNECTION_ERRORS):
+                    raise StoreUnreachableError(
+                        f"store host unreachable during {description}: {error}"
+                    ) from error
                 raise
             delay = min(
                 _STORE_HTTP_RETRY_BASE_SECONDS * (2 ** (attempt - 1)),
@@ -148,7 +289,7 @@ async def _retry_store_http(
             )
             logger.warning(
                 f"ModelStoreClient: {description} failed on attempt "
-                f"{attempt}/{_STORE_HTTP_RETRY_ATTEMPTS}: {error}; "
+                f"{attempt}/{attempts}: {error}; "
                 f"retrying in {delay:.1f}s"
             )
             await asyncio.sleep(delay)
@@ -208,6 +349,55 @@ def _staged_vision_projector_missing(
     )
 
 
+def _staged_pinned_gguf_missing(shard: ShardMetadata, directory: Path) -> bool:
+    """Return whether a staged directory lacks the card-selected GGUF group.
+
+    The generic completeness probe accepts any complete GGUF quant in the
+    directory. A card can later select another quant from the same repository,
+    so staged-cache reuse must verify that exact file and, for split weights,
+    every sibling shard required by the backend entrypoint.
+
+    Args:
+        shard: Shard whose model card may pin a GGUF file.
+        directory: Canonical store or node-local staging directory to inspect.
+
+    Returns:
+        ``True`` when a selected GGUF path is unsafe, absent, or incomplete.
+    """
+    pinned = shard.model_card.gguf_file
+    if not pinned:
+        return False
+
+    relative_path = Path(pinned)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        return True
+    selected_path = directory.joinpath(*relative_path.parts)
+    if not selected_path.is_file():
+        return True
+
+    stem_parts = selected_path.stem.rsplit("-", 3)
+    if not (
+        len(stem_parts) == 4
+        and stem_parts[1].isdigit()
+        and stem_parts[2] == "of"
+        and stem_parts[3].isdigit()
+    ):
+        return False
+
+    base, index_token, _, total_token = stem_parts
+    total_shards = int(total_token)
+    return any(
+        not (
+            selected_path.parent
+            / (
+                f"{base}-{index:0{len(index_token)}d}-of-"
+                f"{total_token}.gguf"
+            )
+        ).is_file()
+        for index in range(1, total_shards + 1)
+    )
+
+
 def _same_repo_draft_files(card: "ModelCard") -> list[str]:
     """Repo-relative GGUFs that ride the base repo's store entry but aren't the base.
 
@@ -218,14 +408,7 @@ def _same_repo_draft_files(card: "ModelCard") -> list[str]:
     separate-repo draft has its own ``model_id`` / staging dir and is handled by
     the normal companion path, so it is not returned here.
     """
-    runtime = card.runtime
-    if (
-        runtime is not None
-        and runtime.served_spec_draft_repo == str(card.model_id)
-        and runtime.served_spec_draft_file
-    ):
-        return [runtime.served_spec_draft_file]
-    return []
+    return same_repo_served_draft_files(card)
 
 
 def _staged_same_repo_draft_missing(shard: ShardMetadata, directory: Path) -> bool:
@@ -270,8 +453,8 @@ class ModelStoreClient:
 
     Every non-store-host node holds one instance of this class.  The store
     host also holds one instance (with ``local_store_path`` set) so that the
-    staging path is unified — the store host just uses ``shutil.copy2()``
-    instead of HTTP.
+    staging path is unified — the store host hardlinks store files into
+    staging (falling back to ``shutil.copy2()``) instead of using HTTP.
 
     Args:
         store_host: Hostname or IP of the store host node.
@@ -284,7 +467,7 @@ class ModelStoreClient:
     def __init__(
         self,
         store_host: str,
-        store_port: int = 58080,
+        store_port: int = DEFAULT_MODEL_STORE_PORT,
         local_store_path: Path | None = None,
     ) -> None:
         self._store_host = store_host
@@ -327,20 +510,37 @@ class ModelStoreClient:
             logger.debug(f"ModelStoreClient: health_check failed: {exc}")
             return None
 
-    async def is_model_available(self, model_id: str) -> bool:
+    async def is_model_available(
+        self, model_id: str, source_revision: str | None = None
+    ) -> bool:
         """Return ``True`` if *model_id* is available in the store.
 
         Uses ``GET /models/{model_id}/files`` — a 200 response means the
-        model is present; 404 means it is not.  Any network error is treated
-        as unavailable (returns ``False``).
+        model is present; 404 means it is not. Transport-level failure raises
+        :class:`StoreUnreachableError` after a deliberately small retry
+        budget: "unreachable" and "not available" used to collapse into
+        ``False`` here, which sent store-unreachable nodes down the
+        store-host-download path to starve for minutes against a host they
+        cannot reach (#657). Non-transport surprises still degrade to
+        ``False`` (the store answered strangely; the store-host path can
+        investigate).
 
         Args:
             model_id: HuggingFace-style model ID.
+            source_revision: Full immutable Hugging Face commit required by the
+                caller, or ``None`` for the store's mutable-main entry.
+
+        Raises:
+            StoreUnreachableError: The store host never answered at the
+                transport level.
         """
-        url = _make_store_url(
-            self._store_host,
-            self._store_port,
-            f"/models/{quote(model_id, safe='')}/files",
+        url = _with_source_revision(
+            _make_store_url(
+                self._store_host,
+                self._store_port,
+                f"/models/{quote(model_id, safe='')}/files",
+            ),
+            source_revision,
         )
 
         async def _request() -> bool:
@@ -354,7 +554,10 @@ class ModelStoreClient:
             return await _retry_store_http(
                 _request,
                 description=f"availability probe for {model_id}",
+                attempts=_STORE_PROBE_RETRY_ATTEMPTS,
             )
+        except StoreUnreachableError:
+            raise
         except Exception as exc:
             logger.debug(f"ModelStoreClient: availability probe failed: {exc}")
             return False
@@ -362,33 +565,93 @@ class ModelStoreClient:
     async def stage_shard(
         self,
         model_id: str,
-        dest_path: Path,
+        staging_root: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+        source_revision: str | None = None,
+        capacity_preflight: StagingCapacityPreflight | None = None,
     ) -> Path:
-        """Copy all model files for *model_id* into *dest_path*.
+        """Copy all model files for *model_id* into its staging directory.
 
         Dispatches to :meth:`_stage_local` (``shutil.copy2``) on the store
         host, or :meth:`_stage_http` (HTTP with resume support) on workers.
+        The destination is derived from ``staging_root`` and ``model_id`` so
+        revision replacement can never recursively delete an arbitrary path.
 
         Args:
             model_id: HuggingFace-style model ID.
-            dest_path: Directory to write staged files into.  Created if it
-                does not exist.
+            staging_root: Root of the node-local model staging cache.
             on_progress: Optional async callback ``(bytes_done, total_bytes)``
                 called after each file is staged.
+            source_revision: Full immutable Hugging Face commit to stage, or
+                ``None`` for the mutable-main entry.
+            capacity_preflight: Optional async safety check invoked after the
+                exact artifact set and resumable bytes are known but before
+                any new model bytes are written.
 
         Returns:
-            *dest_path* (unchanged) after all files have been staged.
+            The local directory containing the requested model revision. On a
+            store host with a shared store/staging root, a pinned model returns
+            its revision-qualified canonical store directory directly.
 
         Raises:
             :class:`ModelNotInStoreError`: If the model is not found in the
                 store (should only happen if the store index is stale).
         """
+        if (
+            source_revision is not None
+            and self._local_store_path is not None
+            and staging_root.expanduser().resolve()
+            == self._local_store_path.expanduser().resolve()
+        ):
+            canonical_path = await self.local_model_path(model_id, source_revision)
+            if canonical_path is None or not canonical_path.is_dir():
+                raise ModelNotInStoreError(
+                    f"Model {model_id} is not registered at source revision "
+                    f"{source_revision}"
+                )
+            return canonical_path
+
+        dest_path = _staging_dir(str(staging_root), model_id)
+        if dest_path.exists():
+            final_revision_matches = _staged_source_revision_matches(
+                dest_path, source_revision
+            )
+            resumable_staging_matches = (
+                not (dest_path / _SOURCE_REVISION_MARKER).exists()
+                and _staged_source_revision_staging_matches(
+                    dest_path, source_revision
+                )
+            )
+            if not final_revision_matches and not resumable_staging_matches:
+                await asyncio.to_thread(shutil.rmtree, dest_path)
         await aios.makedirs(dest_path, exist_ok=True)
+        if source_revision is not None:
+            await asyncio.to_thread(
+                _write_staged_source_revision_staging,
+                dest_path,
+                source_revision,
+            )
 
         if self._local_store_path is not None:
-            return await self._stage_local(model_id, dest_path, on_progress)
-        return await self._stage_http(model_id, dest_path, on_progress)
+            staged_path = await self._stage_local(
+                model_id,
+                dest_path,
+                on_progress,
+                source_revision,
+                capacity_preflight,
+            )
+        else:
+            staged_path = await self._stage_http(
+                model_id,
+                dest_path,
+                on_progress,
+                source_revision,
+                capacity_preflight,
+            )
+        await asyncio.to_thread(
+            _write_staged_source_revision, staged_path, source_revision
+        )
+        return staged_path
 
     async def evict_shard(self, model_id: str, cache_path: Path) -> None:
         """Remove staged files for *model_id* from *cache_path*.
@@ -459,6 +722,73 @@ class ModelStoreClient:
             logger.debug(f"ModelStoreClient: fetch_registry failed: {exc}")
             return []
 
+    async def local_model_path(
+        self, model_id: str, source_revision: str | None
+    ) -> Path | None:
+        """Resolve a local canonical store path for one source revision."""
+
+        if self._local_store_path is None:
+            return None
+        from skulk.store.model_store import ModelStore
+
+        local_store = ModelStore(self._local_store_path)
+        entry = await asyncio.to_thread(local_store.get_entry, model_id)
+        if entry is None or entry.source_revision != source_revision:
+            return None
+        candidate = (self._local_store_path / entry.store_path).resolve()
+        if not candidate.is_relative_to(self._local_store_path.resolve()):
+            raise RuntimeError(f"Store registry path escaped its root for {model_id}")
+        return candidate
+
+    async def _fetch_model_total_bytes(
+        self, model_id: str, source_revision: str | None = None
+    ) -> int:
+        """Return the canonical registered byte total for one stored model."""
+
+        url = _make_store_url(self._store_host, self._store_port, "/registry")
+
+        async def _request() -> int:
+            async with (
+                create_http_session(timeout_profile="short") as session,
+                session.get(url) as resp,
+            ):
+                if resp.status != 200:
+                    raise RuntimeError(
+                        f"ModelStoreClient: /registry returned {resp.status}"
+                    )
+                data: object = await resp.json()
+                if not isinstance(data, list):
+                    raise RuntimeError(
+                        "ModelStoreClient: unexpected registry response type"
+                    )
+                for entry in data:
+                    if not isinstance(entry, dict) or entry.get("model_id") != model_id:
+                        continue
+                    if entry.get("source_revision") != source_revision:
+                        raise ModelNotInStoreError(
+                            f"Model {model_id} is not registered at source revision "
+                            f"{source_revision or 'main'}"
+                        )
+                    total_bytes = entry.get("total_bytes")
+                    if (
+                        not isinstance(total_bytes, int)
+                        or isinstance(total_bytes, bool)
+                        or total_bytes <= 0
+                    ):
+                        raise RuntimeError(
+                            "ModelStoreClient: invalid registered byte total for "
+                            f"{model_id}"
+                        )
+                    return total_bytes
+                raise ModelNotInStoreError(
+                    f"Model {model_id} not found in store registry"
+                )
+
+        return await _retry_store_http(
+            _request,
+            description=f"registry lookup for {model_id}",
+        )
+
     async def list_active_downloads(self) -> list[dict[str, object]]:
         """Fetch the list of active store-side downloads."""
         url = _make_store_url(self._store_host, self._store_port, "/downloads")
@@ -477,22 +807,31 @@ class ModelStoreClient:
             logger.debug(f"ModelStoreClient: list_active_downloads failed: {exc}")
             return []
 
-    async def request_store_download(self, model_id: str) -> dict[str, object]:
-        """Request the store host start downloading a model. Non-blocking."""
+    async def request_store_download(
+        self,
+        model_id: str,
+        gguf_file: str | None = None,
+        source_revision: str | None = None,
+    ) -> dict[str, object]:
+        """Request a store download with optional file and revision pins."""
         url = _make_store_url(
             self._store_host,
             self._store_port,
             f"/models/{quote(model_id, safe='')}/download",
         )
         try:
-            async with (
-                create_http_session(timeout_profile="short") as session,
-                session.post(url) as resp,
-            ):
-                if resp.status not in (200, 201):
-                    return {"status": "error", "error": f"HTTP {resp.status}"}
-                data: object = await resp.json()
-                return data if isinstance(data, dict) else {"status": "unknown"}
+            async with create_http_session(timeout_profile="short") as session:
+                body: dict[str, object] = {}
+                if gguf_file is not None:
+                    body["gguf_file"] = gguf_file
+                if source_revision is not None:
+                    body["source_revision"] = source_revision
+                request = session.post(url, json=body) if body else session.post(url)
+                async with request as resp:
+                    if resp.status not in (200, 201):
+                        return {"status": "error", "error": f"HTTP {resp.status}"}
+                    data: object = await resp.json()
+                    return data if isinstance(data, dict) else {"status": "unknown"}
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
@@ -543,6 +882,7 @@ class ModelStoreClient:
         poll_interval: float = 5.0,
         pinned_gguf: str | None = None,
         extra_pinned_gguf: list[str] | None = None,
+        source_revision: str | None = None,
     ) -> bool:
         """Request the store host download a model from HuggingFace, then wait.
 
@@ -555,8 +895,11 @@ class ModelStoreClient:
             timeout: Maximum time to wait WITHOUT download progress, in seconds
                 (a stall timeout, not a total cap). A download that keeps
                 advancing never times out, however large; only a genuine stall
-                does. The store host's file-body transfer is itself uncapped, so
-                a very large model can legitimately take hours.
+                after the store reports ``downloading`` does. Time reported as
+                ``pending`` is queue wait behind another serialized canonical
+                transfer and does not consume this budget. The store host's
+                file-body transfer is itself uncapped, so a very large model can
+                legitimately take hours.
             poll_interval: Seconds between status polls.
             pinned_gguf: The card's pinned GGUF file (``ModelCard.gguf_file``),
                 sent in the POST body so the store fetches that quant's shard
@@ -566,6 +909,8 @@ class ModelStoreClient:
                 bundled with the base) to co-fetch with the base quant, sent in
                 the POST body. ``None`` when the card declares no same-repo
                 companion. An older store host ignores the unknown field.
+            source_revision: Immutable Hugging Face commit required by the card,
+                or ``None`` to follow mutable ``main``.
 
         Returns:
             ``True`` if download completed successfully.
@@ -573,6 +918,15 @@ class ModelStoreClient:
         Raises:
             RuntimeError: If the download failed on the store host.
             TimeoutError: If the download made no progress for *timeout* seconds.
+            StoreUnreachableError: If the store host stopped answering at the
+                transport level (exhausted request retries, or
+                ``_STORE_POLL_UNREACHABLE_THRESHOLD`` consecutive failed
+                status polls).
+            aiohttp.ClientError: If a reachable store answered with a
+                response-level protocol error (for example
+                ``aiohttp.ContentTypeError`` on a malformed body) for the
+                whole retry budget; a store failure, deliberately not
+                unreachability.
         """
         import asyncio as _asyncio
 
@@ -589,7 +943,11 @@ class ModelStoreClient:
             download_body["gguf_file"] = pinned_gguf
         if extra_pinned_gguf:
             download_body["extra_gguf_files"] = extra_pinned_gguf
-        post_kwargs: dict[str, object] = {"json": download_body} if download_body else {}
+        if source_revision:
+            download_body["source_revision"] = source_revision
+        post_kwargs: dict[str, object] = (
+            {"json": download_body} if download_body else {}
+        )
         async def _post_download_request() -> bool:
             async with (
                 create_http_session(timeout_profile="short") as session,
@@ -600,7 +958,16 @@ class ModelStoreClient:
                         f"Store download request failed: HTTP {resp.status}"
                     )
                 data: object = await resp.json()
-                return isinstance(data, dict) and data.get("status") == "complete"
+                if not isinstance(data, dict) or data.get("status") != "complete":
+                    return False
+                completed_revision = data.get("sourceRevision")
+                if completed_revision != source_revision:
+                    raise RuntimeError(
+                        f"Store reported {model_id} complete at source revision "
+                        f"{completed_revision or 'main'}, but revision "
+                        f"{source_revision or 'main'} was requested"
+                    )
+                return True
 
         if await _retry_store_http(
             _post_download_request,
@@ -622,6 +989,7 @@ class ModelStoreClient:
         # advance) counts toward the stall.
         last_progress = -1.0
         stalled_for = 0.0
+        consecutive_transport_failures = 0
         while stalled_for < timeout:
             await _asyncio.sleep(poll_interval)
             advanced = False
@@ -630,6 +998,7 @@ class ModelStoreClient:
                     create_http_session(timeout_profile="short") as session,
                     session.get(status_url) as resp,
                 ):
+                    consecutive_transport_failures = 0
                     if resp.status == 200:
                         data = await resp.json()
                         if isinstance(data, dict):
@@ -638,16 +1007,57 @@ class ModelStoreClient:
                             if on_progress is not None:
                                 await on_progress(progress)
                             if status == "complete":
+                                completed_revision = data.get("sourceRevision")
+                                if completed_revision != source_revision:
+                                    raise RuntimeError(
+                                        f"Store reported {model_id} complete at "
+                                        f"source revision "
+                                        f"{completed_revision or 'main'}, but "
+                                        f"revision {source_revision or 'main'} "
+                                        "was requested"
+                                    )
                                 return True
                             if status == "failed":
                                 raise RuntimeError(
                                     f"Store download of {model_id} failed: {data.get('error', 'unknown')}"
                                 )
-                            if progress > last_progress:
+                            if status == "pending":
+                                # Canonical transfers serialize capacity
+                                # admission with all bytes. A healthy request
+                                # can therefore remain queued behind another
+                                # multi-hour model; queue time is not a stalled
+                                # transfer and must not consume the stall budget.
+                                advanced = True
+                            elif progress > last_progress:
                                 last_progress = progress
                                 advanced = True
             except RuntimeError:
                 raise
+            except _STORE_CONNECTION_ERRORS as exc:
+                logger.debug(f"ModelStoreClient: download status poll failed: {exc}")
+                # A store that stops ANSWERING is a different failure from a
+                # download that stops ADVANCING: the stall clock exists for
+                # the latter (a live store legitimately grinding through a
+                # huge file), while sustained transport failure would ride
+                # that clock for up to the full multi-hour stall budget
+                # before failing with a misleading "no progress" error.
+                # Bound it separately and surface unreachability so callers
+                # can engage the direct-HF fallback (#657 review). Only
+                # CONNECTION-level failures count: aiohttp.ClientError also
+                # covers response-level errors like ContentTypeError, where
+                # the store ANSWERED with a malformed body — a store bug,
+                # not unreachability — so those stay on the stall clock
+                # with the generic handler below (third review round).
+                consecutive_transport_failures += 1
+                if (
+                    consecutive_transport_failures
+                    >= _STORE_POLL_UNREACHABLE_THRESHOLD
+                ):
+                    raise StoreUnreachableError(
+                        f"store host stopped answering download status polls "
+                        f"for {model_id} ({consecutive_transport_failures} "
+                        f"consecutive failures): {exc}"
+                    ) from exc
             except Exception as exc:
                 logger.debug(f"ModelStoreClient: download status poll failed: {exc}")
             stalled_for = 0.0 if advanced else stalled_for + poll_interval
@@ -661,37 +1071,95 @@ class ModelStoreClient:
     # Local copy path (store host → same filesystem)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _replace_with_hardlink(src_file: Path, dst_file: Path) -> bool:
+        """Try to replace ``dst_file`` with a hardlink to ``src_file``.
+
+        Store files are immutable once registered and staged files are never
+        mutated in place (staging eviction deletes whole directories, and the
+        only post-staging write is the separate ``.last_used`` marker), so a
+        hardlink is safe. It avoids doubling disk usage when store and staging
+        share a filesystem: without it a 26GB GGUF needs 52GB to stage, which
+        is exactly what killed staging on a 50GB-disk store-host node. A stale
+        destination is removed first because ``os.link`` refuses to overwrite.
+        Filesystems that cannot link (EXDEV cross-device, EPERM on some network
+        mounts) return ``False`` so the async caller can run capacity admission
+        before falling back to a full copy.
+        """
+        if dst_file.exists():
+            dst_file.unlink()
+        try:
+            os.link(src_file, dst_file)
+        except OSError:
+            return False
+        return True
+
     async def _stage_local(
         self,
         model_id: str,
         dest_path: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None,
+        source_revision: str | None = None,
+        capacity_preflight: StagingCapacityPreflight | None = None,
     ) -> Path:
         """Stage by local file copy (store host only)."""
         assert self._local_store_path is not None
-        source_dir = self._local_store_path / _sanitize_model_id(model_id)
+        source_dir = await self.local_model_path(model_id, source_revision)
+        if source_dir is None and source_revision is None:
+            # Legacy unpinned stores always used the normalized directory and
+            # may be staged before the local HTTP registry is reachable.
+            source_dir = self._local_store_path / _sanitize_model_id(model_id)
+        if source_dir is None:
+            raise ModelNotInStoreError(
+                f"Model {model_id} is not registered at source revision "
+                f"{source_revision or 'main'}"
+            )
         if not source_dir.exists():
             raise ModelNotInStoreError(
                 f"Model {model_id} not found in local store at {source_dir}"
             )
 
         files = [p for p in source_dir.rglob("*") if p.is_file()]
-        total_bytes = sum(p.stat().st_size for p in files)
+        file_sizes = {src_file: src_file.stat().st_size for src_file in files}
+        total_bytes = sum(file_sizes.values())
+        same_filesystem = source_dir.stat().st_dev == dest_path.stat().st_dev
+        if capacity_preflight is not None:
+            additional_bytes = 0
+            if not same_filesystem:
+                for src_file, source_size in file_sizes.items():
+                    dst_file = dest_path / src_file.relative_to(source_dir)
+                    existing_size = (
+                        dst_file.stat().st_size if dst_file.exists() else 0
+                    )
+                    if existing_size != source_size:
+                        additional_bytes += max(0, source_size - existing_size)
+            # Same-filesystem hardlinks add no file data blocks. If an
+            # individual link unexpectedly fails, the fallback copy performs
+            # its own admission below before writing bytes.
+            await capacity_preflight(additional_bytes)
         staged_bytes = 0
 
         for src_file in files:
             rel = src_file.relative_to(source_dir)
             dst_file = dest_path / rel
             dst_file.parent.mkdir(parents=True, exist_ok=True)
+            source_size = file_sizes[src_file]
             # Skip copy if destination already matches source size.
             # Run on a thread to avoid blocking the async event loop
             # during multi-GB safetensor copies.
-            if (
-                not dst_file.exists()
-                or dst_file.stat().st_size != src_file.stat().st_size
-            ):
-                await asyncio.to_thread(shutil.copy2, src_file, dst_file)
-            staged_bytes += src_file.stat().st_size
+            if not dst_file.exists() or dst_file.stat().st_size != source_size:
+                linked = await asyncio.to_thread(
+                    self._replace_with_hardlink,
+                    src_file,
+                    dst_file,
+                )
+                if not linked:
+                    # The failed hardlink already removed any stale destination,
+                    # so reserve the full copy before writing replacement bytes.
+                    if same_filesystem and capacity_preflight is not None:
+                        await capacity_preflight(source_size)
+                    await asyncio.to_thread(shutil.copy2, src_file, dst_file)
+            staged_bytes += source_size
             if on_progress is not None:
                 await on_progress(staged_bytes, total_bytes)
 
@@ -705,12 +1173,17 @@ class ModelStoreClient:
     # HTTP staging path (worker → store host)
     # ------------------------------------------------------------------
 
-    async def _fetch_file_list(self, model_id: str) -> list[str]:
+    async def _fetch_file_list(
+        self, model_id: str, source_revision: str | None = None
+    ) -> list[str]:
         """Fetch the list of files for *model_id* from the store server."""
-        url = _make_store_url(
-            self._store_host,
-            self._store_port,
-            f"/models/{quote(model_id, safe='')}/files",
+        url = _with_source_revision(
+            _make_store_url(
+                self._store_host,
+                self._store_port,
+                f"/models/{quote(model_id, safe='')}/files",
+            ),
+            source_revision,
         )
 
         async def _request() -> list[str]:
@@ -744,6 +1217,7 @@ class ModelStoreClient:
         on_progress: Callable[[int, int], Awaitable[None]] | None,
         total_bytes_offset: int,
         grand_total: int,
+        source_revision: str | None = None,
     ) -> int:
         """Download a single file from the store to ``dest_path / file_path``.
 
@@ -774,10 +1248,13 @@ class ModelStoreClient:
                     f"ModelStoreClient: resuming {file_path} from byte {resume_from:,}"
                 )
 
-            url = _make_store_url(
-                self._store_host,
-                self._store_port,
-                f"/models/{quote(model_id, safe='')}/{file_path}",
+            url = _with_source_revision(
+                _make_store_url(
+                    self._store_host,
+                    self._store_port,
+                    f"/models/{quote(model_id, safe='')}/{file_path}",
+                ),
+                source_revision,
             )
             timeout = aiohttp.ClientTimeout(
                 total=3600,
@@ -833,18 +1310,31 @@ class ModelStoreClient:
         model_id: str,
         dest_path: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None,
+        source_revision: str | None = None,
+        capacity_preflight: StagingCapacityPreflight | None = None,
     ) -> Path:
         """Stage all files for *model_id* over HTTP."""
-        file_list = await self._fetch_file_list(model_id)
+        file_list, grand_total = await asyncio.gather(
+            self._fetch_file_list(model_id, source_revision),
+            self._fetch_model_total_bytes(model_id, source_revision),
+        )
+        if capacity_preflight is not None:
+            already_staged_bytes = 0
+            for file_path in file_list:
+                target = dest_path / file_path
+                partial = dest_path / f"{file_path}.partial"
+                if target.exists():
+                    already_staged_bytes += target.stat().st_size
+                elif partial.exists():
+                    already_staged_bytes += partial.stat().st_size
+            await capacity_preflight(max(0, grand_total - already_staged_bytes))
 
         # Compute progress baseline from already-staged files
-        grand_total = 0
         staged_offset = 0
         for file_path in file_list:
             target = dest_path / file_path
             if target.exists():
                 size = target.stat().st_size
-                grand_total += size
                 staged_offset += size
 
         bytes_done = staged_offset
@@ -857,7 +1347,8 @@ class ModelStoreClient:
                 dest_path,
                 on_progress,
                 total_bytes_offset=bytes_done,
-                grand_total=max(grand_total, 1),
+                grand_total=grand_total,
+                source_revision=source_revision,
             )
             bytes_done += file_bytes
 
@@ -870,6 +1361,12 @@ class ModelStoreClient:
 # ---------------------------------------------------------------------------
 # ModelStoreDownloader — ShardDownloader wrapper
 # ---------------------------------------------------------------------------
+
+StagingCapacityCallback = Callable[
+    [ShardMetadata, frozenset[str], int],
+    Awaitable[None],
+]
+"""Worker callback for one exact, serialized staging transfer."""
 
 
 @final
@@ -927,9 +1424,54 @@ class ModelStoreDownloader(ShardDownloader):
         self._store_client = store_client
         self._staging_config = staging_config
         self._allow_hf_fallback = allow_hf_fallback
+        self._staging_transfer_lock = asyncio.Lock()
+        self._staging_capacity_callback: StagingCapacityCallback | None = None
+        self._active_staging_model_ids: dict[str, int] = {}
         self._on_progress_callbacks: list[
             Callable[[ShardMetadata, RepoDownloadProgress], Awaitable[None]]
         ] = []
+
+    def set_staging_capacity_callback(
+        self,
+        callback: StagingCapacityCallback,
+    ) -> None:
+        """Attach the worker's live-runner-aware staging capacity check."""
+        self._staging_capacity_callback = callback
+
+    async def _stage_from_store(
+        self,
+        shard: ShardMetadata,
+        model_id: str,
+    ) -> Path:
+        """Serialize capacity admission and byte transfer for one repository.
+
+        A single downloader can service multiple concurrent model requests.
+        Holding this lock through both preflight and transfer prevents two
+        requests from independently spending the same free bytes.
+        """
+
+        async def _capacity_preflight(additional_bytes: int) -> None:
+            callback = self._staging_capacity_callback
+            if callback is not None:
+                await callback(
+                    shard,
+                    frozenset(self._active_staging_model_ids),
+                    additional_bytes,
+                )
+
+        async with self._staging_transfer_lock:
+            return await self._store_client.stage_shard(
+                model_id,
+                Path(self._staging_config.node_cache_path),
+                on_progress=lambda downloaded, total: self._emit_progress(
+                    shard,
+                    status="in_progress",
+                    downloaded_bytes=downloaded,
+                    total_bytes=total,
+                ),
+                source_revision=shard.model_card.source_revision,
+                capacity_preflight=_capacity_preflight,
+            )
 
     def on_progress(
         self,
@@ -958,17 +1500,49 @@ class ModelStoreDownloader(ShardDownloader):
         best-effort — the runner degrades to run-without-speculation, so
         their failures log loudly without failing a loadable base model.
         """
-        path = await self._ensure_base_shard(shard, config_only)
-        if not config_only:
-            await self._ensure_companion_shards(shard)
-        # Terminal progress is emitted HERE, after companions: the
-        # "complete" status becomes cluster-visible DownloadCompleted state
-        # the moment it fires, and the planner dispatches LoadModel off
-        # that state — emitting it from the base-resolution paths let a
-        # runner load while a companion was still staging and run without
-        # speculation (codex review on #213).
-        await self._emit_progress(shard, status="complete")
-        return path
+        protected_model_ids = {
+            str(shard.model_card.model_id),
+            *(
+                str(companion.model_card.model_id)
+                for companion, _allow_patterns, _required in companion_download_specs(
+                    shard.model_card
+                )
+            ),
+        }
+        # Registration and transfer use the same lock. A request cannot appear
+        # after another transfer snapshots its protected set but before that
+        # transfer's eviction pass finishes.
+        async with self._staging_transfer_lock:
+            for model_id in protected_model_ids:
+                self._active_staging_model_ids[model_id] = (
+                    self._active_staging_model_ids.get(model_id, 0) + 1
+                )
+        try:
+            path = await self._ensure_base_shard(shard, config_only)
+            if not config_only:
+                await self._ensure_companion_shards(shard)
+            # Terminal progress is emitted HERE, after companions: the
+            # "complete" status becomes cluster-visible DownloadCompleted state
+            # the moment it fires, and the planner dispatches LoadModel off
+            # that state — emitting it from the base-resolution paths let a
+            # runner load while a companion was still staging and run without
+            # speculation (codex review on #213).
+            await self._emit_progress(shard, status="complete")
+            return path
+        finally:
+            # Cleanup deliberately has no await: DownloadCoordinator cancels
+            # this coroutine through an AnyIO cancel scope, and awaiting the
+            # transfer lock here can be cancelled again before refcounts are
+            # removed. Deregistration need not hold the lock after this
+            # request has stopped writing. A transfer that already snapshotted
+            # the set keeps its immutable copy; a later preflight should no
+            # longer protect this inactive request.
+            for model_id in protected_model_ids:
+                remaining = self._active_staging_model_ids[model_id] - 1
+                if remaining == 0:
+                    del self._active_staging_model_ids[model_id]
+                else:
+                    self._active_staging_model_ids[model_id] = remaining
 
     async def _ensure_companion_shards(self, shard: ShardMetadata) -> None:
         """Ensure every companion repo declared by the shard's model card.
@@ -1026,12 +1600,13 @@ class ModelStoreDownloader(ShardDownloader):
             # path (i.e. this is the store host), serve directly from the
             # canonical store directory instead of re-downloading from HF.
             if self._store_client.local_store_path is not None:
-                direct_path = self._store_client.local_store_path / _sanitize_model_id(
-                    model_id
+                direct_path = await self._store_client.local_model_path(
+                    model_id, shard.model_card.source_revision
                 )
                 if (
-                    direct_path.exists()
+                    direct_path is not None
                     and _staged_directory_looks_complete(direct_path)
+                    and not _staged_pinned_gguf_missing(shard, direct_path)
                     and not _staged_vision_projector_missing(shard, direct_path)
                     and not _staged_same_repo_draft_missing(shard, direct_path)
                 ):
@@ -1053,8 +1628,12 @@ class ModelStoreDownloader(ShardDownloader):
         if (
             dest_path.exists()
             and _staged_directory_looks_complete(dest_path)
+            and not _staged_pinned_gguf_missing(shard, dest_path)
             and not _staged_vision_projector_missing(shard, dest_path)
             and not _staged_same_repo_draft_missing(shard, dest_path)
+            and _staged_source_revision_matches(
+                dest_path, shard.model_card.source_revision
+            )
         ):
             logger.info(
                 f"ModelStoreDownloader: {model_id} already staged at {dest_path} — skipping availability probe"
@@ -1062,38 +1641,46 @@ class ModelStoreDownloader(ShardDownloader):
             touch_last_used(dest_path)
             return dest_path
 
-        available = await self._store_client.is_model_available(model_id)
+        try:
+            available = await self._store_client.is_model_available(
+                model_id, shard.model_card.source_revision
+            )
+        except StoreUnreachableError as exc:
+            return await self._fallback_for_unreachable_store(
+                shard, config_only, cause=exc
+            )
         same_repo_drafts = _same_repo_draft_files(shard.model_card)
 
         if available:
-            if same_repo_drafts:
-                # A stale base-only store entry (registered before this card
-                # declared a same-repo draft) would stage without the draft and
-                # the served runner's --model-draft path would 404. Ensure the
-                # canonical entry carries the draft before staging; idempotent
-                # (a draft-complete entry returns immediately). The store host
-                # performs any needed HF fetch (workers never download directly).
-                await self._store_client.request_and_wait_for_download(
-                    model_id,
-                    pinned_gguf=shard.model_card.gguf_file,
-                    extra_pinned_gguf=same_repo_drafts,
-                )
-            logger.info(
-                f"ModelStoreDownloader: staging {model_id} from store → {dest_path}"
-            )
             try:
-                path = await self._store_client.stage_shard(
-                    model_id,
-                    dest_path,
-                    on_progress=lambda downloaded, total: self._emit_progress(
-                        shard,
-                        status="in_progress",
-                        downloaded_bytes=downloaded,
-                        total_bytes=total,
-                    ),
+                if (
+                    shard.model_card.gguf_file
+                    or same_repo_drafts
+                    or shard.model_card.source_revision
+                ):
+                    # A canonical entry may hold a different GGUF quant or predate a
+                    # same-repo draft declaration. Ensure the store has every file
+                    # selected by this card before staging; the request is idempotent
+                    # when the entry is already complete. Workers never fetch these
+                    # files directly from Hugging Face.
+                    await self._store_client.request_and_wait_for_download(
+                        model_id,
+                        pinned_gguf=shard.model_card.gguf_file,
+                        extra_pinned_gguf=same_repo_drafts,
+                        source_revision=shard.model_card.source_revision,
+                    )
+                logger.info(
+                    f"ModelStoreDownloader: staging {model_id} from store → {dest_path}"
                 )
+                path = await self._stage_from_store(shard, model_id)
                 touch_last_used(path)
                 return path
+            except StoreUnreachableError as exc:
+                # The store dropped off between the probe and the transfer:
+                # the node can still serve itself from Hugging Face.
+                return await self._fallback_for_unreachable_store(
+                    shard, config_only, cause=exc
+                )
             except ModelNotInStoreError:
                 # Store index was stale — the file was reported present but
                 # could not be staged.  Fall through to the HF path.
@@ -1122,28 +1709,70 @@ class ModelStoreDownloader(ShardDownloader):
                     # draft GGUF bundled with the base so it is co-fetched.
                     pinned_gguf=shard.model_card.gguf_file,
                     extra_pinned_gguf=same_repo_drafts,
+                    source_revision=shard.model_card.source_revision,
+                )
+            except StoreUnreachableError as exc:
+                # The store became unreachable between the probe and the
+                # download request (or a same-fleet route flapped out): the
+                # node can still serve itself from Hugging Face.
+                return await self._fallback_for_unreachable_store(
+                    shard, config_only, cause=exc
                 )
             except (RuntimeError, TimeoutError) as exc:
                 raise ModelNotInStoreError(
                     f"Store host failed to download {model_id}: {exc}"
                 ) from exc
             # Model now in store — stage it
-            path = await self._store_client.stage_shard(
-                model_id,
-                dest_path,
-                on_progress=lambda downloaded, total: self._emit_progress(
-                    shard,
-                    status="in_progress",
-                    downloaded_bytes=downloaded,
-                    total_bytes=total,
-                ),
-            )
+            try:
+                path = await self._stage_from_store(shard, model_id)
+            except StoreUnreachableError as exc:
+                return await self._fallback_for_unreachable_store(
+                    shard, config_only, cause=exc
+                )
             touch_last_used(path)
             return path
 
         raise ModelNotInStoreError(
             f"Model {model_id} is not in the store and HuggingFace fallback is disabled"
         )
+
+    async def _fallback_for_unreachable_store(
+        self, shard: ShardMetadata, config_only: bool, *, cause: Exception
+    ) -> Path:
+        """Stage directly from Hugging Face because the store is unreachable.
+
+        Store-first remains the discipline when the store is part of this
+        node's reachable world; a node that cannot reach the store at all (a
+        remote fabric member whose route home does not exist, #657) must not
+        starve with a working public-internet path to the artifact origin.
+        The inner downloader is the pre-store Hugging Face path, so the
+        card's ``source_revision`` pin and pinned-GGUF selection behave
+        exactly as they did before the store existed. Loud by design: every
+        engagement logs the cause so an operator sees the topology problem,
+        and fallback-disabled deployments get an error naming
+        unreachability rather than a false "not in store".
+        """
+        model_id = str(shard.model_card.model_id)
+        if not self._allow_hf_fallback:
+            raise ModelNotInStoreError(
+                f"Store host is unreachable for {model_id} and HuggingFace "
+                f"fallback is disabled: {cause}"
+            ) from cause
+        logger.warning(
+            f"ModelStoreDownloader: store host unreachable for {model_id} — "
+            f"downloading directly from Hugging Face instead ({cause}). If "
+            "this node should reach the store, check its route to the store "
+            "host; if it is a remote member, direct-origin staging is "
+            "expected."
+        )
+        # Store staging and direct fallback commonly write to separate
+        # directories on the same home filesystem. Share the outer staging
+        # lock across both paths so a route flap cannot let their independent
+        # preflights spend the same free bytes concurrently. The inner direct
+        # downloader retains its own lock for callers that use it without a
+        # model-store wrapper.
+        async with self._staging_transfer_lock:
+            return await self._inner.ensure_shard(shard, config_only)
 
     async def get_shard_download_status(
         self,
@@ -1183,7 +1812,7 @@ class ModelStoreDownloader(ShardDownloader):
         downloaded_memory = Memory.from_bytes(downloaded_bytes)
         progress = RepoDownloadProgress(
             repo_id=str(shard.model_card.model_id),
-            repo_revision="store",
+            repo_revision=shard.model_card.source_revision or "store-main",
             shard=shard,
             completed_files=1 if status == "complete" else 0,
             total_files=1,

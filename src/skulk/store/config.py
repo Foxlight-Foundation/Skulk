@@ -47,7 +47,7 @@ Example ``skulk.yaml``::
     model_store:
       enabled: true
       store_host: mac-studio-1    # hostname of the node with attached storage
-      store_port: 58080
+      store_port: 12415
       store_path: /Volumes/ModelStore/models
 
       download:
@@ -70,12 +70,18 @@ from __future__ import annotations
 
 import socket
 from pathlib import Path
-from typing import Literal, final
+from typing import Final, Literal, final
 
 import yaml
 from pydantic import Field
 
 from skulk.utils.pydantic_ext import FrozenModel
+
+# Keep the shipped listener outside the IANA dynamic/private range and the
+# lower ephemeral ranges commonly used by Linux. A fresh macOS install failed
+# to restart when mDNSResponder legitimately acquired the old 58080 default as
+# an outbound source port before Skulk could bind it.
+DEFAULT_MODEL_STORE_PORT: Final = 12415
 
 
 def _normalize_hostname(hostname: str) -> str:
@@ -154,13 +160,16 @@ class StagingNodeConfig(FrozenModel):
             nodes is the scarce resource — unbounded staging filled two
             nodes to 58-70 GB and killed one of them during the 2026-06-06
             launch smoke. Set ``False`` to keep every staged copy and
-            manage cleanup manually via the purge endpoints.
+            skip lifecycle cleanup. The independent pre-download capacity
+            safety pass may still reclaim idle copies to keep a new transfer
+            from filling the filesystem.
         staging_keep_recent_gb: Most-recently-used grace budget, in GiB.
             Eviction never reduces the staging cache below this much of
             recently used, not-in-use model data — so node crashes,
             restarts, and repeated place/delete cycles of the same model
-            do not re-pay the staging copy every time. Set to ``0`` for
-            strict evict-on-deactivate.
+            do not re-pay the staging copy every time. The pre-download
+            capacity guard may override this grace budget. Set to ``0`` for
+            strict lifecycle eviction.
     """
 
     enabled: bool = True
@@ -176,8 +185,11 @@ class DownloadStoreConfig(FrozenModel):
     Attributes:
         allow_hf_fallback: When ``True`` (the default), nodes fall back to
             downloading from HuggingFace if a requested model is not present
-            in the store.  Set to ``False`` for air-gapped clusters where all
-            models must be pre-staged in the store.
+            in the store, or if the store host is unreachable at the
+            transport level (a store-answered "not present" routes through
+            the store host; an unanswered store downloads directly, #657).
+            Set to ``False`` for air-gapped clusters where all models must
+            be pre-staged in the store.
     """
 
     allow_hf_fallback: bool = True
@@ -242,7 +254,7 @@ class ModelStoreConfig(FrozenModel):
     enabled: bool = True
     store_host: str
     store_http_host: str | None = None
-    store_port: int = 58080
+    store_port: int = DEFAULT_MODEL_STORE_PORT
     store_path: str
     download: DownloadStoreConfig = DownloadStoreConfig()
     staging: StagingNodeConfig = StagingNodeConfig()
@@ -287,6 +299,49 @@ class ConnectivityConfig(FrozenModel):
 
 
 @final
+class ExperimentsConfig(FrozenModel):
+    """Opt-in switches for in-development features.
+
+    This section is meaningful only on nodes running with
+    ``SKULK_ENABLE_EXPERIMENTAL_MODE``. Each flag defaults to ``False`` so
+    released builds can carry unfinished work without exposing it by accident.
+
+    Every speech flag has graduated: the whole section is currently
+    deprecated compatibility surface, retained because the strict config
+    (``extra="forbid"``) would otherwise refuse to start on an existing
+    ``skulk.yaml`` that still carries it. Future experiments add fresh fields
+    here rather than reusing the graduated names.
+
+    Attributes:
+        tts_streaming: Deprecated compatibility field. Stable TTS streaming is
+            controlled by mounted model capability metadata; this value is
+            accepted but ignored.
+        stt_realtime: Deprecated compatibility field. Realtime STT is a stable
+            capability selected from mounted model truth and runner readiness;
+            this value is accepted but ignored.
+        speech_translation: Deprecated compatibility field. Speech translation
+            is a standard capability gated only by the mounted card declaring
+            ``audio.supports_translation``; this value is accepted but ignored.
+    """
+
+    tts_streaming: bool = Field(
+        default=False,
+        description=(
+            "Deprecated compatibility field; stable TTS streaming is controlled "
+            "by mounted model capability metadata."
+        ),
+    )
+    stt_realtime: bool = False
+    speech_translation: bool = Field(
+        default=False,
+        description=(
+            "Deprecated compatibility field; speech translation is standard "
+            "and gated only by mounted model capability metadata."
+        ),
+    )
+
+
+@final
 class SkulkConfig(FrozenModel):
     """Root configuration model for ``skulk.yaml``.
 
@@ -304,6 +359,11 @@ class SkulkConfig(FrozenModel):
         connectivity: Cluster connectivity settings.  ``None`` means all
             connectivity options use their defaults (mDNS + CLI bootstrap peers
             only).
+        experiments: Opt-in toggles for in-development features. These are
+            inert unless ``SKULK_ENABLE_EXPERIMENTAL_MODE`` is also enabled on
+            the node.
+        telemetry: Field-telemetry consent and settings.  ``None`` means the
+            operator has never been asked (nothing is queued or sent).
         hf_token: HuggingFace API token.  Stripped from ``GET /config``
             responses for security.
     """
@@ -313,27 +373,9 @@ class SkulkConfig(FrozenModel):
     logging: "LoggingConfig | None" = None
     tracing: "TracingConfig | None" = None
     connectivity: ConnectivityConfig | None = None
-    experiments: "ExperimentsConfig | None" = None
+    experiments: ExperimentsConfig | None = None
+    telemetry: "TelemetryConfig | None" = None
     hf_token: str | None = None
-
-
-@final
-class ExperimentsConfig(FrozenModel):
-    """Toggles for experimental, opt-in features.
-
-    This section is only surfaced in the dashboard when a node runs with
-    ``SKULK_ENABLE_EXPERIMENTAL_MODE`` set (the master gate). Its toggles are
-    synced to every node via gossipsub like the rest of the config, but each
-    feature stays inert on a node that has not opted into experimental mode, so
-    the whole section is safe to leave in a shipped release.
-
-    Attributes:
-        memory_enabled: Enable the fabric-memory subsystem (cluster short-term
-            associative memory). Off by default; effective only when the node is
-            also in experimental mode.
-    """
-
-    memory_enabled: bool = False
 
 
 @final
@@ -357,6 +399,46 @@ class LoggingConfig(FrozenModel):
 
     enabled: bool = False
     ingest_url: str = ""
+
+
+@final
+class TelemetryConfig(FrozenModel):
+    """Opt-in field-telemetry consent and settings.
+
+    Consent is acquired through the dashboard's first-run modal and persists
+    here (in ``skulk.yaml``) so it survives restarts; cluster ``State`` is
+    rebuilt per session and would forget it. Nothing is ever queued or sent
+    while ``consent`` is ``unasked`` or ``disabled`` (the collector keeps
+    only an in-process node-set baseline for death diffing, which never
+    leaves the process), and the node-local
+    ``SKULK_TELEMETRY_DISABLE=1`` kill switch overrides everything.
+
+    Attributes:
+        consent: Tri-state performance/reliability telemetry consent.
+            ``unasked`` (default) shows the dashboard consent modal and
+            collects nothing; only ``enabled`` collects.
+        diagnostics_consent: SEPARATE tri-state consent for crash
+            diagnostics (scrubbed tracebacks to a private store; not yet
+            collected in this version). Enabling telemetry never enables
+            this.
+        install_id: Random UUID generated when either consent is first
+            enabled (client-side, or backfilled server-side on save).
+            The anonymous rate-limit/dedup key AND the deletion capability:
+            it never appears on the public site, so presenting it to the
+            ingest API proves ownership. Rotatable and clearable from the
+            dashboard.
+        consented_at: ISO-8601 stamp of the consent decision.
+        consented_version: Skulk version that acquired consent, so a future
+            material change to what is collected can deliberately re-ask.
+        ingest_url: Telemetry ingest API base URL.
+    """
+
+    consent: Literal["unasked", "enabled", "disabled"] = "unasked"
+    diagnostics_consent: Literal["unasked", "enabled", "disabled"] = "unasked"
+    install_id: str = ""
+    consented_at: str = ""
+    consented_version: str = ""
+    ingest_url: str = "https://skulk-ledger-ingest.thomastupper92618.workers.dev"
 
 
 @final

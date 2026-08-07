@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import styled, { css } from 'styled-components';
+import styled from 'styled-components';
 import type { TopologyData } from '../../types/topology';
 import { detectDeviceModel } from '../../types/topology';
-import type { RawDownloads, NodeDiskInfo, RawInstances, RawRunners } from '../../hooks/useClusterState';
+import type { RawDownloads, RawInstances, RawRunners } from '../../hooks/useClusterState';
+import type { RawNodeResources } from '../../store/endpoints/cluster';
+import type { FleetServingSummary } from '../models/burst';
 import { StoreRegistryTable, type StoreRegistryEntry, type StoreDownloadProgress, type ModelCardInfo, type CompanionInfo } from '../layout/StoreRegistryTable';
 import type { ClusterCardProps, ClusterCardNode } from '../cluster/ClusterCard';
 import { ModelSearchModal } from './ModelSearchModal';
@@ -14,44 +16,14 @@ import { useSkulkTranslation } from '../../i18n/tolgee';
 
 interface ModelStorePageProps {
   topology: TopologyData | null;
+  nodeResources?: Record<string, RawNodeResources>;
   downloads: RawDownloads;
-  nodeDisk: NodeDiskInfo;
   instances: RawInstances;
   runners: RawRunners;
   onChat?: (modelId: string) => void;
 }
 
 /* ── Data extraction helpers ──────────────────────────── */
-
-type CellKind = 'completed' | 'downloading' | 'pending' | 'failed' | 'not_present';
-
-interface CellStatus {
-  kind: CellKind;
-  totalBytes: number;
-  downloadedBytes?: number;
-  percentage?: number;
-  speed?: number;
-}
-
-interface ModelRow {
-  modelId: string;
-  cells: Record<string, CellStatus>;
-}
-
-interface NodeColumn {
-  nodeId: string;
-  label: string;
-  diskFreeBytes?: number;
-}
-
-function getBytes(v: unknown): number {
-  if (typeof v === 'number') return v;
-  if (v && typeof v === 'object') {
-    const obj = v as Record<string, unknown>;
-    if (typeof obj.inBytes === 'number') return obj.inBytes;
-  }
-  return 0;
-}
 
 function getTag(entry: unknown): [string, Record<string, unknown>] | null {
   if (!entry || typeof entry !== 'object') return null;
@@ -64,86 +36,13 @@ function getTag(entry: unknown): [string, Record<string, unknown>] | null {
   return null;
 }
 
-function extractModelId(payload: Record<string, unknown>): string | null {
-  const shard = (payload.shardMetadata ?? payload.shard_metadata) as Record<string, unknown> | undefined;
-  if (!shard) return null;
-  for (const key of Object.keys(shard)) {
-    const inner = shard[key] as Record<string, unknown> | undefined;
-    const card = inner?.modelCard ?? inner?.model_card;
-    if (card && typeof card === 'object') {
-      const c = card as Record<string, unknown>;
-      if (typeof c.modelId === 'string') return c.modelId;
-      if (typeof c.model_id === 'string') return c.model_id;
-    }
-  }
-  return null;
-}
-
-function buildGrid(
-  downloads: RawDownloads,
-  topology: TopologyData | null,
-  nodeDisk: NodeDiskInfo,
-): { rows: ModelRow[]; columns: NodeColumn[] } {
-  const allNodeIds = Object.keys(downloads);
-  if (allNodeIds.length === 0) return { rows: [], columns: [] };
-
-  const columns: NodeColumn[] = allNodeIds.map((nodeId) => ({
-    nodeId,
-    label: topology?.nodes[nodeId]?.friendly_name ?? nodeId.slice(0, 8),
-    diskFreeBytes: nodeDisk[nodeId]?.available?.inBytes,
-  }));
-
-  const rowMap = new Map<string, ModelRow>();
-
-  for (const [nodeId, entries] of Object.entries(downloads)) {
-    const list = Array.isArray(entries) ? entries : Object.values(entries);
-    for (const entry of list) {
-      const tagged = getTag(entry);
-      if (!tagged) continue;
-      const [tag, payload] = tagged;
-      const modelId = extractModelId(payload) ?? 'unknown';
-
-      if (!rowMap.has(modelId)) {
-        rowMap.set(modelId, { modelId, cells: {} });
-      }
-      const row = rowMap.get(modelId)!;
-
-      if (tag === 'DownloadCompleted') {
-        row.cells[nodeId] = { kind: 'completed', totalBytes: getBytes(payload.total) };
-      } else if (tag === 'DownloadOngoing') {
-        const prog = (payload.downloadProgress ?? payload.download_progress ?? {}) as Record<string, unknown>;
-        const total = getBytes(prog.total ?? payload.total);
-        const downloaded = getBytes(prog.downloaded);
-        row.cells[nodeId] = {
-          kind: 'downloading',
-          totalBytes: total,
-          downloadedBytes: downloaded,
-          percentage: total > 0 ? (downloaded / total) * 100 : 0,
-          speed: (prog.speed as number) ?? 0,
-        };
-      } else if (tag === 'DownloadPending') {
-        row.cells[nodeId] = {
-          kind: 'pending',
-          totalBytes: getBytes(payload.total),
-          downloadedBytes: getBytes(payload.downloaded),
-          percentage: 0,
-        };
-      } else if (tag === 'DownloadFailed') {
-        row.cells[nodeId] = { kind: 'failed', totalBytes: 0 };
-      }
-    }
-  }
-
-  return { rows: Array.from(rowMap.values()), columns };
-}
-
 const TrashIcon = () => <FiTrash2 size={14} />;
 const SearchIcon = () => <FiSearch size={14} />;
 // formatBytes / formatSpeed deleted along with dead CellContent.
 
 /* ── Component ────────────────────────────────────────── */
 
-export function ModelStorePage({ topology, downloads, nodeDisk, instances, runners, onChat }: ModelStorePageProps) {
+export function ModelStorePage({ topology, nodeResources = {}, downloads, instances, runners, onChat }: ModelStorePageProps) {
   const { t } = useSkulkTranslation();
   const [storeEntries, setStoreEntries] = useState<StoreRegistryEntry[]>([]);
   const [storeDownloads, setStoreDownloads] = useState<StoreDownloadProgress[]>([]);
@@ -154,7 +53,8 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
   // model_id. Derived from each parent card's runtime references so the store
   // can mark them as non-placeable instead of offering launch/placement/optiq.
   const [companionRoles, setCompanionRoles] = useState<Record<string, CompanionInfo>>({});
-  const pollRef = useRef<ReturnType<typeof setInterval>>(undefined);
+  const pollRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const storePollingDisposedRef = useRef(false);
   const optimizePollRef = useRef<ReturnType<typeof setInterval>>(undefined);
 
   // Fetch authoritative model card info from /models API
@@ -192,12 +92,20 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
             supportsTensor: m.supports_tensor ?? undefined,
             capabilities: m.capabilities ?? undefined,
             tags: m.tags ?? [],
+            tasks: m.tasks ?? [],
             resolvedCapabilities: m.resolved_capabilities ? {
               supportsThinking: m.resolved_capabilities.supports_thinking ?? false,
               supportsThinkingToggle: m.resolved_capabilities.supports_thinking_toggle ?? false,
               supportsThinkingBudget: m.resolved_capabilities.supports_thinking_budget ?? false,
               supportsImageInput: m.resolved_capabilities.supports_image_input ?? false,
               supportsAudioInput: m.resolved_capabilities.supports_audio_input ?? false,
+              supportsSpeechSynthesis: m.resolved_capabilities.supports_speech_synthesis ?? false,
+              supportsTranscription: m.resolved_capabilities.supports_transcription ?? false,
+              supportsSpeechTranslation: m.resolved_capabilities.supports_speech_translation ?? false,
+              supportsAudioOutput: m.resolved_capabilities.supports_audio_output ?? false,
+              supportsRealtimeAudio: m.resolved_capabilities.supports_realtime_audio ?? false,
+              defaultAudioResponseFormat: m.resolved_capabilities.default_audio_response_format ?? undefined,
+              audioResponseFormats: m.resolved_capabilities.audio_response_formats ?? [],
               supportsToolCalling: m.resolved_capabilities.supports_tool_calling ?? false,
               builtinTools: m.resolved_capabilities.builtin_tools ?? [],
               thinkingFormat: m.resolved_capabilities.thinking_format ?? 'none',
@@ -244,6 +152,8 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
           if ((raw.capabilities as string[] ?? []).includes('vision')) fallbackTags.push('vision');
           if ((raw.supportsTensor ?? raw.supports_tensor) as boolean) fallbackTags.push('tensor');
           if ((raw.capabilities as string[] ?? []).includes('embedding')) fallbackTags.push('embedding');
+          if ((raw.capabilities as string[] ?? []).includes('tts')) fallbackTags.push('tts');
+          if ((raw.capabilities as string[] ?? []).includes('stt')) fallbackTags.push('stt');
           cards[mid] = {
             family: raw.family as string | undefined,
             quantization: raw.quantization as string | undefined,
@@ -251,6 +161,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
             supportsTensor: (raw.supportsTensor ?? raw.supports_tensor) as boolean | undefined,
             capabilities: raw.capabilities as string[] | undefined,
             tags: fallbackTags,
+            tasks: raw.tasks as string[] | undefined,
           };
         }
       }
@@ -258,50 +169,65 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
     return cards;
   }, [downloads, apiModelCards]);
 
-  const fetchDownloads = useCallback(async () => {
+  const fetchDownloads = useCallback(async (): Promise<StoreDownloadProgress[] | null> => {
     try {
       const res = await fetch('/store/downloads');
-      if (!res.ok) return [];
+      if (!res.ok) return null;
       const data = await res.json();
       return (data.downloads ?? []) as StoreDownloadProgress[];
-    } catch { return []; }
+    } catch { return null; }
   }, []);
+
+  const fetchRegistry = useCallback(async (): Promise<StoreRegistryEntry[] | null> => {
+    try {
+      const response = await fetch('/store/registry');
+      if (!response.ok) return null;
+      const data = await response.json();
+      return (data.entries ?? []) as StoreRegistryEntry[];
+    } catch { return null; }
+  }, []);
+
+  const refreshStore = useCallback(async (): Promise<boolean> => {
+    const [registryEntries, downloadEntries] = await Promise.all([
+      fetchRegistry(),
+      fetchDownloads(),
+    ]);
+    if (storePollingDisposedRef.current) return true;
+    if (registryEntries !== null) setStoreEntries(registryEntries);
+    if (downloadEntries !== null) setStoreDownloads(downloadEntries);
+
+    // A transient failure must keep the convergence loop alive. In particular,
+    // the store can finish a download just as the dashboard reloads; stopping on
+    // an empty downloads response while the registry request failed leaves a new
+    // user permanently looking at "0 models in store" until a manual refresh.
+    return registryEntries !== null
+      && downloadEntries !== null
+      && downloadEntries.length === 0;
+  }, [fetchDownloads, fetchRegistry]);
+
+  const scheduleStoreRefresh = useCallback(() => {
+    if (storePollingDisposedRef.current || pollRef.current) return;
+
+    const poll = async () => {
+      const converged = await refreshStore();
+      if (storePollingDisposedRef.current || converged) {
+        pollRef.current = undefined;
+        return;
+      }
+      pollRef.current = setTimeout(poll, 2000);
+    };
+
+    pollRef.current = setTimeout(poll, 2000);
+  }, [refreshStore]);
 
   const loadRegistry = useCallback(async () => {
     setStoreLoading(true);
     try {
-      const [regRes, dls] = await Promise.all([
-        fetch('/store/registry'),
-        fetchDownloads(),
-      ]);
-      if (regRes.ok) {
-        const data = await regRes.json();
-        setStoreEntries(data.entries ?? []);
-      }
-      setStoreDownloads(dls);
-
-      // Start polling if active downloads
-      if (dls.length > 0 && !pollRef.current) {
-        pollRef.current = setInterval(async () => {
-          const [newDls, regRefresh] = await Promise.all([
-            fetchDownloads(),
-            fetch('/store/registry'),
-          ]);
-          setStoreDownloads(newDls);
-          if (regRefresh.ok) {
-            const d = await regRefresh.json();
-            setStoreEntries(d.entries ?? []);
-          }
-          // Stop polling when done
-          if (newDls.length === 0 && pollRef.current) {
-            clearInterval(pollRef.current);
-            pollRef.current = undefined;
-          }
-        }, 2000);
-      }
-    } catch { /* ignore */ }
-    finally { setStoreLoading(false); }
-  }, [fetchDownloads]);
+      if (!(await refreshStore())) scheduleStoreRefresh();
+    } finally {
+      if (!storePollingDisposedRef.current) setStoreLoading(false);
+    }
+  }, [refreshStore, scheduleStoreRefresh]);
 
   // Load store registry on mount
   useEffect(() => {
@@ -310,8 +236,10 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
 
   // Cleanup polling on unmount
   useEffect(() => {
+    storePollingDisposedRef.current = false;
     return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
+      storePollingDisposedRef.current = true;
+      if (pollRef.current) clearTimeout(pollRef.current);
       if (optimizePollRef.current) clearInterval(optimizePollRef.current);
     };
   }, []);
@@ -346,6 +274,27 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
     () => new Set(storeEntries.map((e) => e.model_id)),
     [storeEntries],
   );
+
+  // What the local fleet can serve: total memory (browse-time acquisition
+  // decisions judge against capacity, not currently-free RAM) plus which
+  // artifact formats some node's advertised engines can run. Drives the
+  // Find Models burst partition.
+  const fleet = useMemo<FleetServingSummary | null>(() => {
+    if (!topology?.nodes || Object.keys(topology.nodes).length === 0) return null;
+    const totalMemoryBytes = Object.values(topology.nodes).reduce(
+      (sum, node) => sum + (node.mactop_info?.memory?.ram_total ?? 0),
+      0,
+    );
+    if (totalMemoryBytes <= 0) return null;
+    const backends = Object.values(nodeResources).flatMap((r) => r.backends ?? []);
+    return {
+      totalMemoryBytes,
+      servesMlx: backends.includes('mlx'),
+      servesGguf: backends.some(
+        (b) => b.startsWith('llama_cpp') || b.startsWith('llama_server') || b.startsWith('vllm'),
+      ),
+    };
+  }, [topology, nodeResources]);
 
   // Total cluster available (free) RAM
   const totalClusterMemoryBytes = useMemo(() => {
@@ -417,7 +366,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
           nodeId: nid,
           name: nodeInfo?.friendly_name ?? nid.slice(0, 8),
           memoryUsedPercent: pct,
-          deviceModel: detectDeviceModel(nodeInfo?.system_info?.model_id, nodeInfo?.system_info?.chip),
+          deviceModel: detectDeviceModel(nodeInfo?.system_info?.model_id, nodeInfo?.system_info?.chip, nodeInfo?.system_info?.accelerator_vendor),
         };
       });
 
@@ -612,7 +561,12 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
               <Button variant="danger" size="sm" onClick={() => setPurgeConfirm(true)}>
                 <TrashIcon /> {t('downloads.actions.purgeNodeCaches', 'Purge Node Caches')}
               </Button>
-              <Button variant="primary" size="sm" onClick={() => setSearchOpen(true)}>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => setSearchOpen(true)}
+                aria-label={t('downloads.actions.findModels', 'Find Models')}
+              >
                 <SearchIcon /> {t('downloads.actions.findModels', 'Find Models')}
               </Button>
             </>
@@ -632,6 +586,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
         onClose={() => setSearchOpen(false)}
         existingModelIds={storeModelIds}
         onDownloadStarted={loadRegistry}
+        fleet={fleet}
       />
       {placementModelId && topology && (
         <PlacementManager
@@ -662,11 +617,6 @@ const Container = styled.div`
   overflow: hidden;
 `;
 
-const TopBar = styled.div`
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 20px;
-`;
 
 const PurgeModal = styled.div`
   position: fixed;
@@ -721,107 +671,15 @@ const ModalActions = styled.div`
   gap: 12px;
 `;
 
-const SegmentedToggle = styled.div`
-  display: flex;
-  gap: 0;
-  margin-bottom: 20px;
-`;
 
-const SegmentBtn = styled.button<{ $active: boolean }>`
-  all: unset;
-  cursor: pointer;
-  padding: 8px 20px;
-  font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.nav};
-  transition: all 0.15s;
 
-  ${({ $active, theme }) =>
-    $active
-      ? css`
-          background: ${theme.colors.gold};
-          color: ${theme.colors.surface};
-          font-weight: 600;
-        `
-      : css`
-          background: ${({ theme }) => theme.colors.surfaceSunken};
-          color: ${theme.colors.textSecondary};
-          &:hover {
-            color: ${theme.colors.text};
-          }
-        `}
 
-  &:first-child {
-    border-radius: 4px 0 0 4px;
-  }
-  &:last-child {
-    border-radius: 0 4px 4px 0;
-  }
-`;
 
-const EmptyState = styled.div`
-  text-align: center;
-  padding: 48px 24px;
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.md};
-  background: ${({ theme }) => theme.colors.surfaceSunken};
-  font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.tableBody};
-  color: ${({ theme }) => theme.colors.textMuted};
-`;
 
-const TableWrap = styled.div`
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.md};
-  background: ${({ theme }) => theme.colors.surfaceSunken};
-  overflow-x: auto;
-`;
 
-const Table = styled.table`
-  width: 100%;
-  border-collapse: collapse;
-  font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.tableBody};
-`;
 
-const ModelHeader = styled.th`
-  text-align: left;
-  padding: 16px 20px;
-  color: ${({ theme }) => theme.colors.gold};
-  font-size: ${({ theme }) => theme.fontSizes.tableHead};
-  font-weight: 600;
-  border-bottom: 1px solid ${({ theme }) => theme.colors.border};
-`;
 
-const NodeHeader = styled.th`
-  text-align: center;
-  padding: 12px 16px;
-  border-bottom: 1px solid ${({ theme }) => theme.colors.border};
-`;
 
-const NodeName = styled.div`
-  color: ${({ theme }) => theme.colors.text};
-  font-size: ${({ theme }) => theme.fontSizes.tableBody};
-  font-weight: 600;
-`;
 
-const DiskFree = styled.div`
-  color: ${({ theme }) => theme.colors.textMuted};
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  margin-top: 2px;
-`;
-
-const ModelCell = styled.td`
-  padding: 16px 20px;
-  color: ${({ theme }) => theme.colors.text};
-  font-size: ${({ theme }) => theme.fontSizes.tableBody};
-  border-bottom: 1px solid ${({ theme }) => theme.colors.surfaceSunken};
-  white-space: nowrap;
-`;
-
-const StatusCell = styled.td`
-  text-align: center;
-  padding: 12px 16px;
-  border-bottom: 1px solid ${({ theme }) => theme.colors.surfaceSunken};
-`;
 
 // Cell-status display styled-components removed alongside dead CellContent.

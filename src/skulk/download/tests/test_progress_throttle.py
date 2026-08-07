@@ -1,25 +1,34 @@
 # pyright: reportPrivateUsage=false
-"""Download-progress throttle bounds the in_progress event stream (#364).
+"""Download-progress throttle bounds the in-progress telemetry stream (#364).
 
 A large download fires a progress callback per 8MB chunk across parallel files,
-and each emitted ``NodeDownloadProgress`` is a full ordered event (master indexes
-it, appends the event log, persists a snapshot, and rebroadcasts to every node).
-So the in_progress stream must be bounded by total count, not by rate -- a pure
-time gate still scales event volume with download duration, which saturated the
-gossip send queue and dropped the terminal ``DownloadCompleted`` so placements
-wedged in RunnerLoading. The fraction-delta gate caps a download to roughly
-``1 / _PROGRESS_STEP`` in_progress events regardless of size or duration.
+so even lossy latest-value admission should avoid pointless serialization work.
+The fraction-delta gate caps a download to roughly ``1 / _PROGRESS_STEP`` useful
+readings regardless of size or duration; completion and failure still use the
+ordered event plane.
 """
 
+from pathlib import Path
 from typing import cast
 
 import pytest
+from anyio import WouldBlock
 
 from skulk.download import coordinator as coordinator_mod
 from skulk.download.coordinator import DownloadCoordinator
 from skulk.shared.models.model_cards import ModelId
+from skulk.shared.tests.conftest import get_pipeline_shard_metadata
 from skulk.shared.types.common import NodeId
+from skulk.shared.types.events import Event, NodeDownloadProgress
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.telemetry import NodeTelemetry
+from skulk.shared.types.worker.downloads import (
+    DownloadCompleted,
+    DownloadOngoing,
+    DownloadProgressData,
+)
 from skulk.utils.channels import channel
+from skulk.worker.tests.constants import MODEL_A_ID
 
 
 class _FakeDownloader:
@@ -30,12 +39,38 @@ class _FakeDownloader:
 def _make_coordinator() -> DownloadCoordinator:
     _, cmd_recv = channel[object]()
     event_send, _ = channel[object]()
+    telemetry_send, _ = channel[NodeTelemetry]()
     return DownloadCoordinator(
         node_id=NodeId("n1"),
         shard_downloader=cast("object", _FakeDownloader()),  # pyright: ignore[reportArgumentType]
         download_command_receiver=cast("object", cmd_recv),  # pyright: ignore[reportArgumentType]
         event_sender=cast("object", event_send),  # pyright: ignore[reportArgumentType]
+        telemetry_sender=telemetry_send,
     )
+
+
+@pytest.mark.asyncio
+async def test_synced_config_notifies_config_dependent_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Runtime config sync must refresh API capability advertisements."""
+
+    config_path = tmp_path / "skulk.yaml"
+    callbacks = 0
+
+    def applied() -> None:
+        nonlocal callbacks
+        callbacks += 1
+
+    coordinator = _make_coordinator()
+    coordinator.config_applied_callback = applied
+    monkeypatch.setattr(coordinator_mod, "resolve_config_path", lambda: config_path)
+
+    await coordinator._sync_config("experiments:\n  stt_realtime: true\n")
+
+    assert config_path.read_text() == "experiments:\n  stt_realtime: true\n"
+    assert callbacks == 1
 
 
 def test_in_progress_throttle_gates_by_fraction_rate_and_heartbeat(
@@ -70,13 +105,12 @@ def test_in_progress_throttle_gates_by_fraction_rate_and_heartbeat(
     assert co._should_emit_in_progress(mid, 0.24) is True
 
 
-def test_in_progress_throttle_resets_baseline_on_fraction_regression(
+def test_in_progress_throttle_ignores_fraction_regression_within_one_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A restarted/cancelled download whose fraction resets back toward 0 must
-    # re-seat the baseline and emit, not stay frozen against the old high
-    # baseline until it surpasses the prior attempt (download churn on
-    # placement re-tries). The heartbeat alone is too coarse for that case.
+    # Async file callbacks can arrive out of order. A stale lower fraction must
+    # not be mistaken for a fresh attempt because doing so defeats the bounded
+    # event-count guarantee and can overwrite a terminal status.
     co = _make_coordinator()
     mid = ModelId("org/model")
     clock = {"now": 1000.0}
@@ -91,15 +125,18 @@ def test_in_progress_throttle_resets_baseline_on_fraction_regression(
     clock["now"] = 1002.0
     assert co._should_emit_in_progress(mid, 0.80) is True
 
-    # A regression (new download started) emits immediately, even within the
-    # rate floor and far below the heartbeat interval.
+    # A regression in the same attempt is stale and stays suppressed.
     clock["now"] = 1002.2
-    assert co._should_emit_in_progress(mid, 0.01) is True
+    assert co._should_emit_in_progress(mid, 0.01) is False
 
-    # And the baseline is now the regressed value: a small further advance is
-    # gated again as usual (no longer measured against the stale 0.80).
-    clock["now"] = 1002.3
-    assert co._should_emit_in_progress(mid, 0.02) is False
+    # The high-water mark is retained, so another stale update cannot reopen it.
+    clock["now"] = 1004.0
+    assert co._should_emit_in_progress(mid, 0.10) is False
+
+    # A lifecycle reset starts a new attempt and allows its first observation.
+    co._reset_progress_throttle(mid)
+    clock["now"] = 1004.1
+    assert co._should_emit_in_progress(mid, 0.01) is True
 
 
 def test_in_progress_throttle_bounds_event_count_for_a_long_download(
@@ -129,3 +166,50 @@ def test_in_progress_throttle_bounds_event_count_for_a_long_download(
     # the callbacks and near the step/heartbeat budget.
     assert emitted <= 30, f"expected a small bounded count, got {emitted}"
     assert emitted >= 1
+
+
+async def test_transient_progress_bypasses_event_log_but_terminal_is_durable() -> None:
+    """Coordinator routing keeps progress lossy and completion ordered."""
+
+    _, command_receiver = channel[object]()
+    event_sender, event_receiver = channel[Event]()
+    telemetry_sender, telemetry_receiver = channel[NodeTelemetry]()
+    coordinator = DownloadCoordinator(
+        node_id=NodeId("node-a"),
+        shard_downloader=cast("object", _FakeDownloader()),  # pyright: ignore[reportArgumentType]
+        download_command_receiver=cast("object", command_receiver),  # pyright: ignore[reportArgumentType]
+        event_sender=event_sender,
+        telemetry_sender=telemetry_sender,
+    )
+    shard = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=1)
+    ongoing = DownloadOngoing(
+        node_id=NodeId("node-a"),
+        shard_metadata=shard,
+        download_progress=DownloadProgressData(
+            total=Memory.from_mb(10),
+            downloaded=Memory.from_mb(1),
+            downloaded_this_session=Memory.from_mb(1),
+            completed_files=0,
+            total_files=1,
+            speed=1.0,
+            eta_ms=1,
+            files={},
+        ),
+    )
+
+    emitted_ongoing = await coordinator._emit_status(ongoing)
+    telemetry = telemetry_receiver.receive_nowait()
+    assert telemetry.info == emitted_ongoing
+    with pytest.raises(WouldBlock):
+        event_receiver.receive_nowait()
+
+    completed = DownloadCompleted(
+        node_id=NodeId("node-a"),
+        shard_metadata=shard,
+        total=Memory.from_mb(10),
+    )
+    emitted_completed = await coordinator._emit_status(completed)
+    event = event_receiver.receive_nowait()
+    assert isinstance(event, NodeDownloadProgress)
+    assert event.download_progress == emitted_completed
+    assert emitted_completed.attempt_id == emitted_ongoing.attempt_id

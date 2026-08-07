@@ -5,7 +5,12 @@ from skulk.api.types import (
     ImageGenerationTaskParams,
 )
 from skulk.shared.models.model_cards import ModelCard, ModelId
-from skulk.shared.types.chunks import InputImageChunk
+from skulk.shared.types.audio import (
+    AudioTranscriptionTaskParams,
+    RealtimeAudioTranscriptionTaskParams,
+    SpeechSynthesisTaskParams,
+)
+from skulk.shared.types.chunks import InputChunk
 from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
 from skulk.shared.types.text_generation import TextGenerationTaskParams
@@ -45,6 +50,29 @@ class ImageEdits(BaseCommand):
 class TextEmbedding(BaseCommand):
     task_params: TextEmbeddingTaskParams
     owner_node: NodeId | None = None
+
+
+class SpeechSynthesis(BaseCommand):
+    """Command to synthesize speech from text on a mounted TTS model."""
+
+    task_params: SpeechSynthesisTaskParams
+    owner_node: NodeId | None = None
+    target_instance_id: InstanceId | None = None
+
+
+class AudioTranscription(BaseCommand):
+    """Command to transcribe uploaded audio on a mounted STT model."""
+
+    task_params: AudioTranscriptionTaskParams
+    owner_node: NodeId | None = None
+
+
+class RealtimeAudioTranscription(BaseCommand):
+    """Open a true incremental STT session on one mounted instance."""
+
+    task_params: RealtimeAudioTranscriptionTaskParams
+    target_instance_id: InstanceId
+    owner_node: NodeId
 
 
 class SetTracingEnabled(BaseCommand):
@@ -105,9 +133,9 @@ class TaskFinished(BaseCommand):
 
 
 class SendInputChunk(BaseCommand):
-    """Command to send an input image chunk (converted to event by master)."""
+    """Command to send input media chunks converted to events by the master."""
 
-    chunk: InputImageChunk
+    chunk: InputChunk
 
 
 class RequestEventLog(BaseCommand):
@@ -186,6 +214,9 @@ Command = (
     | ImageGeneration
     | ImageEdits
     | TextEmbedding
+    | SpeechSynthesis
+    | AudioTranscription
+    | RealtimeAudioTranscription
     | SetTracingEnabled
     | PlaceInstance
     | CreateInstance

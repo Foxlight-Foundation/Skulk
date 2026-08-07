@@ -80,6 +80,76 @@ def test_shard_footprint_zero_fraction_is_zero():
     assert estimate_shard_footprint(_card(8), 0.0).in_bytes == 0
 
 
+def test_shard_preallocates_kv_upfront_uses_resolved_backend():
+    from skulk.shared.models.memory_estimate import shard_preallocates_kv_upfront
+    from skulk.shared.models.model_cards import PlacementCardConfig
+
+    def _shard(card: ModelCard, backend: str | None) -> PipelineShardMetadata:
+        s = _pipeline_shard(card, start=0, end=4)
+        return s.model_copy(update={"resolved_backend": backend})
+
+    def _backends(*tags: str) -> PlacementCardConfig:
+        return PlacementCardConfig(compatible_backends=frozenset(tags))
+
+    hybrid = _card(1).model_copy(
+        update={"placement": _backends("mlx", "llama_cpp-cuda")}
+    )
+    # Resolved backend is the precise signal: a HYBRID card resolving to llama.cpp
+    # on a non-MLX node IS preallocating (the reviewer's bypass case); the same
+    # card resolving to mlx is NOT (grows KV lazily, no force-clamp).
+    assert shard_preallocates_kv_upfront(_shard(hybrid, "llama_cpp-cuda"))
+    assert not shard_preallocates_kv_upfront(_shard(hybrid, "mlx-metal"))
+    assert shard_preallocates_kv_upfront(_shard(_card(1), "llama_server-cuda"))
+    # vLLM also commits a fixed window at load (vllm serve --max-model-len from
+    # serving_n_ctx), so it IS window-committing.
+    assert shard_preallocates_kv_upfront(_shard(_card(1), "vllm-cuda"))
+    # Fallback when the backend is unresolved (node absent from telemetry): pinned
+    # gguf and unpinned llama.cpp-only cards are preallocating; mlx-capable is not.
+    assert shard_preallocates_kv_upfront(_shard(_card(1, gguf_file="m.gguf"), None))
+    assert shard_preallocates_kv_upfront(
+        _shard(_card(1).model_copy(update={"placement": _backends("llama_cpp-cuda")}), None)
+    )
+    assert not shard_preallocates_kv_upfront(_shard(_card(1), None))  # mlx-only
+    # Unresolved fallback is CONSERVATIVE: a hybrid card (mlx + llama.cpp) counts as
+    # preallocating when we can't prove it will run MLX (non-Darwin nodes won't
+    # advertise MLX and may dispatch it to llama.cpp -> OOM if unclamped).
+    assert shard_preallocates_kv_upfront(_shard(hybrid, None))
+
+
+def test_instance_limit_unpinned_gguf_non_vram_clamps_to_floor():
+    # An UNPINNED gguf card (no gguf_file, llama.cpp backends) on a non-VRAM node
+    # is still clamped to the floor -- the safety must not be bypassable by leaving
+    # the gguf pin unset. (P2 review, #585.)
+    from skulk.shared.models.model_cards import PlacementCardConfig
+
+    card = _card(1, kv_heads=8, n_layers=32).model_copy(
+        update={
+            "context_length": 131072,
+            "placement": PlacementCardConfig(
+                compatible_backends=frozenset({"llama_cpp-cuda"})
+            ),
+        }
+    )
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    assert (
+        instance_context_token_limit(assignments, {NodeId("n0"): Memory.from_gb(64)})
+        == KV_CONTEXT_BUDGET_TOKENS
+    )
+
+
+def test_shard_footprint_scales_with_context_budget():
+    # The worker's pre-load fit guard now sizes KV to the stamped served window
+    # (context_token_limit) for gguf instead of a fixed 8192, so a larger window
+    # yields a larger footprint -- the guard refuses if live memory cannot hold the
+    # window the runner will actually preallocate up front. (P1 review, #585.)
+    card = _card(4, kv_heads=8, n_layers=32, gguf_file="m.gguf")
+    small = estimate_shard_footprint(card, 1.0, context_budget=8192)
+    large = estimate_shard_footprint(card, 1.0, context_budget=32768)
+    assert large.in_bytes > small.in_bytes
+
+
 def test_shard_footprint_fraction_scales_weights_and_kv_not_floor():
     card = _card(8, kv_heads=8)
     half = estimate_shard_footprint(card, 0.5)
@@ -233,12 +303,133 @@ def test_instance_limit_none_when_nothing_enforceable():
     assert instance_context_token_limit(assignments, {}) is None
 
 
-def test_instance_limit_gguf_capped_to_kv_budget():
-    # #362: a GGUF/llama.cpp instance whose memory + card ceiling exceed the
-    # runner's loaded window (KV_CONTEXT_BUDGET_TOKENS, serving_n_ctx) must admit
-    # only up to that window, else a request beyond it is admitted then fails at
-    # the runner. Card advertises a large context, lots of memory -> would be huge.
+def test_instance_limit_gguf_not_capped_to_kv_budget_on_vram_node():
+    # The old fixed 8192 clamp on GGUF/llama.cpp instances is gone on a discrete-
+    # VRAM node: the model is sized to the memory/card fit (the runner serves that
+    # window via serving_n_ctx, and placement admits the node against the same VRAM
+    # the ceiling is derived from). Generous VRAM + a large advertised context ->
+    # well above the old budget, capped only by the card max. A fixed 8192 made
+    # served models unusable for real-context work.
     card = _card(1, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
+        update={"context_length": 131072}
+    )
+    # The shard must resolve to a GPU-offload backend for the lift: only then does
+    # the runner preallocate KV in VRAM (a -cpu/bare backend runs -ngl 0 in RAM).
+    gpu_shard = _pipeline_shard(card, start=0, end=32).model_copy(
+        update={"resolved_backend": "llama_server-cuda"}
+    )
+    assignments = _assignments(card, {"r0": (gpu_shard, "n0")})
+    limit = instance_context_token_limit(
+        assignments,
+        {NodeId("n0"): Memory.from_gb(64)},
+        node_vram={NodeId("n0"): Memory.from_gb(48)},
+    )
+    assert limit is not None and limit > KV_CONTEXT_BUDGET_TOKENS
+    assert limit <= 131072  # never above the card's advertised max
+
+
+def test_instance_limit_gguf_uma_node_clamps_to_floor():
+    """A combined UMA pool may place GGUF but cannot justify a fixed-window lift."""
+    node_id = NodeId("n0")
+    card = _card(17, kv_heads=4, n_layers=65, gguf_file="m.gguf").model_copy(
+        update={"context_length": 262144}
+    )
+    gpu_shard = _pipeline_shard(card, start=0, end=65).model_copy(
+        update={"resolved_backend": "llama_server-vulkan"}
+    )
+    assignments = _assignments(card, {"r0": (gpu_shard, str(node_id))})
+
+    discrete_limit = instance_context_token_limit(
+        assignments,
+        {node_id: Memory.from_gb(32)},
+        node_vram={node_id: Memory.from_gb(42)},
+    )
+    uma_limit = instance_context_token_limit(
+        assignments,
+        {node_id: Memory.from_gb(32)},
+        node_vram={node_id: Memory.from_gb(42)},
+        unified_memory_gpu_nodes=frozenset({node_id}),
+    )
+
+    assert discrete_limit is not None
+    assert discrete_limit > KV_CONTEXT_BUDGET_TOKENS
+    assert uma_limit == KV_CONTEXT_BUDGET_TOKENS
+
+
+def test_instance_limit_gguf_cpu_resolved_on_vram_node_clamps_to_floor():
+    # A gguf shard that resolves to a CPU/bare backend on a node WITH discrete VRAM
+    # runs -ngl 0 and preallocates KV in SYSTEM RAM, so the VRAM-sized lift is
+    # unsafe -- it clamps to the floor even though the node reports VRAM. (P2
+    # review, #585.)
+    card = _card(1, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
+        update={"context_length": 131072}
+    )
+    cpu_shard = _pipeline_shard(card, start=0, end=32).model_copy(
+        update={"resolved_backend": "llama_server-cpu"}
+    )
+    assignments = _assignments(card, {"r0": (cpu_shard, "n0")})
+    limit = instance_context_token_limit(
+        assignments,
+        {NodeId("n0"): Memory.from_gb(64)},
+        node_vram={NodeId("n0"): Memory.from_gb(48)},
+    )
+    assert limit == KV_CONTEXT_BUDGET_TOKENS
+
+
+def test_instance_limit_gguf_non_vram_node_clamps_to_floor():
+    # The gguf lift applies only to discrete-VRAM nodes. On a node WITHOUT discrete
+    # VRAM the fit is derived from static ram_total, but llama.cpp preallocates the
+    # window up front against live ram_available (which placement admits on and can
+    # be far lower under memory pressure) -- so preallocating a ram_total-sized
+    # window could OOM. gguf on a non-VRAM node stays at the budget floor. (P1
+    # review, #585.)
+    card = _card(1, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
+        update={"context_length": 131072}
+    )
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    # Plenty of system RAM but NO discrete VRAM reported for the node.
+    assert (
+        instance_context_token_limit(assignments, {NodeId("n0"): Memory.from_gb(64)})
+        == KV_CONTEXT_BUDGET_TOKENS
+    )
+
+
+def test_instance_limit_mlx_non_vram_node_keeps_memory_fit():
+    # The non-VRAM clamp is gguf-only: MLX grows KV lazily (no up-front
+    # preallocation), so an MLX card on a non-VRAM node keeps the full memory fit.
+    card = _card(1, kv_heads=8, n_layers=32).model_copy(
+        update={"context_length": 131072}
+    )
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    limit = instance_context_token_limit(
+        assignments, {NodeId("n0"): Memory.from_gb(64)}
+    )
+    assert limit is not None and limit > KV_CONTEXT_BUDGET_TOKENS
+
+
+def test_instance_limit_gguf_no_info_clamps_to_floor():
+    # A bare GGUF card with neither node memory nor an advertised context has an
+    # uncomputable memory fit. llama.cpp preallocates KV up front, so the stamp
+    # must be a SAFE preallocation size: it clamps to the KV_CONTEXT_BUDGET_TOKENS
+    # floor rather than None (which the runner would also floor) or the card max.
+    card = _card(4, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf")
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    assert instance_context_token_limit(assignments, {}) == KV_CONTEXT_BUDGET_TOKENS
+
+
+def test_instance_limit_gguf_uncomputable_kv_cost_clamps_to_floor():
+    # A GGUF card with no num_key_value_heads => per_token_kv_bytes is 0 => the
+    # memory fit is uncomputable (memory_limit None) even with plenty of node
+    # memory and a large advertised context. Without the clamp the stamp would be
+    # the card's 128k max and llama.cpp would preallocate a fictitious window and
+    # OOM on load; instead it clamps to the budget floor. (P1 review catch, #585.)
+    card = _card(1, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
         update={"context_length": 131072}
     )
     assignments = _assignments(
@@ -250,14 +441,18 @@ def test_instance_limit_gguf_capped_to_kv_budget():
     )
 
 
-def test_instance_limit_gguf_capped_even_without_memory_or_card_limit():
-    # A bare GGUF card (no advertised context, no node memory) still serves a
-    # bounded n_ctx, so admission is the budget, not None.
-    card = _card(4, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf")
+def test_instance_limit_non_gguf_uncomputable_kv_cost_keeps_card_limit():
+    # The uncomputable-fit clamp is gguf-only: MLX grows KV lazily (no up-front
+    # preallocation), so a non-gguf card with unknown KV cost keeps its advertised
+    # max rather than being floored.
+    card = _card(1, n_layers=32).model_copy(update={"context_length": 131072})
     assignments = _assignments(
         card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
     )
-    assert instance_context_token_limit(assignments, {}) == KV_CONTEXT_BUDGET_TOKENS
+    assert (
+        instance_context_token_limit(assignments, {NodeId("n0"): Memory.from_gb(64)})
+        == 131072
+    )
 
 
 def test_instance_limit_gguf_below_budget_unchanged():

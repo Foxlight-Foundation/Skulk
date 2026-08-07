@@ -7,7 +7,683 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- The dashboard voice loop now narrates code blocks: when a fenced code block
+  streams during live generation, the assistant voice speaks a short opener,
+  occasional fillers while the block streams, and a closer when it ends,
+  instead of leaving dead air where the unspoken code would be. Fillers fire
+  only when the voice has actually run out of queued speech, so narration can
+  never stack behind prose or chatter on a fast stream; adjacent blocks
+  continue without a false finish, replayed messages stay silent about code
+  by construction, and the Narrate code toggle beside Auto speech turns the
+  behavior off.
+
+## [1.5.0] - 2026-08-07
+
+### Changed
+
+- Redesigned the dashboard's dark mode around the Foxlight operator design
+  system's Den palette, replacing the previous high-contrast scheme: indigo
+  surfaces over a deep night canvas, a starlight accent for everyday
+  interaction, and amber reserved for work actually in flight (RAM a model is
+  holding, downloads in progress, attention badges). Light mode is unchanged.
+  Both palettes share one token vocabulary, so components never branch on the
+  theme name. Building the dashboard with `VITE_NIGHT_SKY=1` additionally
+  crowns dark mode with the brand valley's star field (occasional shooting
+  stars included, and the abstract mesh stands down); the default build ships
+  a CSS-only night gradient with the mesh.
+
+### Added
+
+- Bundled ten checksummed English reference voices (Angus, Ember, Hannah, Ian,
+  Jake, Kite, Rufus, Samson, Sydney, and Sylvie) for the validated Qwen Base,
+  LongCat, and Fish voice-cloning cards. They appear through the ordinary voice
+  catalog and resolve to local conditioning audio plus its exact transcript only
+  inside the selected worker, with Kite as the shipped default. Qwen Base now
+  ships the stable six-bit conversion; the unstable 0.6B CustomVoice and
+  four-bit Base cards are no longer offered.
+
 ### Fixed
+
+- Dashboard speech now prepares model turns for synthesis structurally rather
+  than sentence-by-sentence alone: an unpunctuated block such as a bold story
+  title gains terminal punctuation so it no longer bleeds into the following
+  sentence, Markdown block and heading boundaries end a spoken segment even
+  when the model omitted punctuation, emoji are stripped instead of being
+  read aloud, and a horizontal rule becomes a brief audible pause on the
+  streaming playback timeline instead of spoken dashes.
+
+- Dashboard speech now sends completed turns and replay requests to batch-only
+  TTS models as one synthesis call. Sentence-sized request queues remain
+  reserved for cards that truthfully advertise streaming PCM, avoiding the
+  repeated full-generation overhead that made LongCat and Fish playback
+  unnecessarily slow.
+
+- Supervised Linux updates now rebuild the dashboard with Skulk's bundled
+  Node.js runtime. The launchd/systemd startup wrapper previously used bare
+  `npm` even though the official installer uses the required pinned runtime.
+  Linux nodes without a system Node.js installation therefore kept serving an
+  old dashboard after successful code updates while logging non-fatal npm
+  failures. Boot-time prep now reserves headless mode for explicitly API-only
+  nodes and retains system npm only as a recovery fallback.
+
+- Dashboard speech now sends the same deterministic seed for every generated
+  sentence and replay segment. The public speech API and built-in TTS provider
+  also accept an optional unsigned 32-bit seed, which the speech runner applies
+  immediately before model generation; callers that omit it retain upstream
+  advancing-random-stream behavior.
+
+- Dashboard realtime STT Auto-send now submits final transcripts through the
+  same chat-completions path as typed prompts. Voice turns retain the complete
+  dashboard conversation, use normal generation limits, and share the same
+  streaming, cancellation, and sentence-paced TTS behavior instead of creating
+  a separate socket-local conversation capped at 256 output tokens.
+
+- Omitted TTS `max_tokens` no longer inherits undersized upstream model
+  defaults that hard-cut ordinary speech mid-word. Speech runners now apply a
+  4096-token serving budget only to models that explicitly declare the control,
+  while preserving caller-supplied limits and leaving unsupported models alone.
+
+- The dashboard model-store page now retries transient registry and download
+  request failures until it has both a successful registry snapshot and no
+  active downloads. A brief API connection reset during a fresh-install model
+  download can no longer leave the page stuck at "0 models in store" after the
+  model was registered successfully.
+
+- Disabled the Qwen3.5 2B MLX card's MTP sidecar after clean-install text and
+  vision journeys showed repetitive generation until the output limit. The
+  same shipped model now uses vanilla decoding, which completes both journeys
+  normally while retaining its text, thinking-toggle, and vision capabilities.
+
+- Fresh multi-node installs now converge their per-node bootstrap model stores
+  on the elected master's routable store endpoint. Followers retry
+  authoritative config sync through the startup window, stop superseded local
+  store servers, and update dashboard and worker clients together, preventing
+  dashboard download followed by placement on another node from downloading
+  the same multi-gigabyte model from Hugging Face twice.
+
+- Routed text-only requests on native MLX-VLM models through their language
+  model instead of the multimodal outer model. This prevents Qwen3-VL text
+  chats from producing long corrupted repetition while preserving the native
+  image-generation path.
+
+- Prevented a fresh node's startup download-progress scan from exhausting
+  Hugging Face API limits by fetching metadata for every shipped model card.
+  The scan now validates only models that have local files to resume or
+  recover, so a user's first selected model receives the available request
+  budget.
+
+- Realtime STT admission no longer reports a ready runner as overloaded while
+  cache-miss download lifecycle state is still converging across API nodes.
+
+- Prevented the dashboard Settings panel from crashing when it reads the
+  sparse `model_store` configuration generated by a fresh installation.
+
+- Stopped unreachable per-interface IPv6 link-local probe candidates from
+  flooding normal logs with misleading peer-down warnings.
+
+- Fixed fresh Apple installs returning HTTP 500 for MP3, FLAC, OGG, and Opus
+  speech output because `mlx-audio` expected an external `ffmpeg` executable.
+  Skulk now ships a platform encoder dependency and exposes its bundled binary
+  to speech runners when no system `ffmpeg` is installed.
+
+- Fixed store-backed model launches exhausting a worker's filesystem while
+  recently used staging data was still inside the 40 GiB warm-cache budget.
+  Store transfers now serialize exact capacity admission with the byte
+  transfer, include base and companion repositories, count resumable manifest
+  bytes, and treat same-filesystem hardlinks as zero allocation. Skulk protects
+  every active model transaction and live runner, evicts only idle copies in
+  least-recently-used order until the exact additional allocation fits, and
+  preserves 10 GiB of operating-system headroom. Canonical model-store
+  downloads use the same serialized exact-byte admission without ever evicting
+  authoritative artifacts, and direct Hugging Face fallback applies it to the
+  actual model-cache filesystem instead of the unrelated staging cache. If any
+  destination cannot meet its target, the placement receives an actionable
+  failure before any more bytes are written.
+
+- Kept fixed-window llama.cpp contexts at the safe 8192-token floor on
+  unified-memory AMD APUs. Placement still uses their combined VRAM/GTT pool,
+  but no longer misclassifies that pool as discrete VRAM and lets a large
+  startup KV allocation OOM the node and its co-hosted model store. The shipped
+  systemd unit also contains any future runner OOM to the child process instead
+  of stopping the entire Skulk service.
+
+- Fixed the documented launchd/systemd install step failing immediately after a
+  successful one-command install because `uv` lived under `~/.local/bin` but
+  the parent shell had not reloaded its PATH. Both service installers now
+  resolve the same user-space tool locations as the runtime wrapper.
+
+- Fixed fresh-install model-store startup failures caused by the old `58080`
+  listener racing normal outbound connections in operating-system dynamic
+  client-port ranges. The runtime, installer-generated config, dashboard, and
+  docs now use the explicit `12415` default; existing configurations that set
+  `store_port` remain unchanged.
+
+- Fixed Fish Audio S2 synthesis returning speech unrelated to the input by
+  pinning a minimal `mlx-audio 0.4.3.post1` maintenance carry of the upstream
+  hidden-state generation fix.
+
+- Fixed HTTP model-store staging progress to use the canonical registry byte total across fresh and resumed multi-file transfers, restoring the bounded fraction gate that prevents progress telemetry from flooding the ordered control plane (#520).
+
+### Changed
+
+- Redesigned the dashboard's Find Models dialog. Catalog rows now lead with the
+  card's human-readable model name over a family monogram tile, show capability
+  chips shared with the store table plus size and context metadata, and label
+  store state with an explicit "In store" chip instead of bare check and arrow
+  glyphs. Downloads start only from a labeled Download button (per quantization
+  in the expanded size list), so clicking a row can no longer silently kick off
+  a multi-hundred-gigabyte transfer. The family sidebar dropdown became a chip
+  rail, and Hugging Face results gained author and popularity metadata lines.
+  Rows carry the model's brand mark (or a monogram when no vector or bundled
+  raster mark exists), quantization and artifact-format tiles, and a
+  fleet-first ordering: models the local fleet can serve list first, and
+  models needing more capacity move to a "Needs burst capacity" section with
+  an amber Burst chip explaining whether size or artifact format exceeds the
+  fleet. Burst rows stay fully downloadable; Hugging Face size verdicts prefer
+  exact GGUF artifact sizes and metadata parameter counts, falling back to
+  name-derived estimates marked as such. The Hugging Face trending list now
+  sorts by Hugging Face's trending score instead of all-time downloads, gains
+  a "Show more" pager, and rows surface task chips, gated-license markers,
+  parameter counts, artifact sizes, and context lengths from the enriched
+  `/models/search` response. Results also carry derivation lineage
+  (finetune, quantized, merge, adapter, shown as a small classification
+  tile on the row), tagged papers, languages, and architecture, and every
+  discovery row links its exact Hugging Face repository. The row's info
+  popover became a real dossier: it lazily fetches the model card's own
+  description through the new `GET /models/card-summary` endpoint and shows
+  lineage with a link to the parent repository, architecture, languages,
+  license, and arXiv papers. A task chip rail on the search tab filters
+  trending and search results by Hugging Face task (text, vision, STT,
+  TTS, embedding, image generation) via the endpoint's `pipeline_tag`
+  parameter. GGUF results expand into a per-quantization download chooser
+  backed by the new `GET /models/gguf-quants` endpoint, and default GGUF
+  selection now ranks companion artifacts (speculative drafters such as
+  dspark/dflash files, imatrix calibration data) behind every real quant,
+  so adding a repository can no longer silently stage a 10 GB drafter
+  wearing the model's name.
+
+- **Concurrent slots on the served llama.cpp engine no longer shrink each
+  request's context window.** `SKULK_LLAMA_SERVER_PARALLEL` asks a node to serve
+  N generations at once. Until now that came with a hidden cost: llama.cpp gave
+  each slot only an equal share (`n_ctx / N`) of the model's context window,
+  while Skulk's API kept advertising and admitting against the full window, so a
+  prompt that fit could be truncated by the engine rather than refused. Skulk
+  compensated by silently capping the requested slot count, which meant an
+  operator asking for 8 slots could quietly get 2. The runner now launches the
+  server with a unified KV cache above one slot, which gives every slot the
+  whole window at no extra memory cost, and the declared slot count is honored
+  exactly with no cap. Fresh installs now use the release-qualified 16-slot
+  width instead of silently serving every request serially; an explicit
+  `SKULK_LLAMA_SERVER_PARALLEL=1` retains the prior serial behavior. Above one
+  slot, the slots share a single pool instead of holding private shares. Before
+  each generation Skulk asks llama-server for the exact rendered prompt length,
+  reserves that input plus the bounded maximum output, and queues until the sum
+  fits. Reservation waiters are admitted FIFO so sustained short traffic cannot
+  starve an earlier long request. A failed token-count probe reserves the whole
+  pool and runs alone. This preserves real concurrency for bounded requests
+  without allowing aggregate long-context traffic to terminate the server
+  (#689).
+
+- **The service template no longer pins a cluster namespace.** The installed
+  `skulk.env` template used to set `SKULK_LIBP2P_NAMESPACE=foxlight-main`,
+  which put every template-based install on one shared namespace while nodes
+  launched manually with `uv run skulk` landed on the default namespace, so a
+  serviced node and a manual node on the same network could silently fail to
+  form a cluster. The template now leaves the namespace unset (the shipped
+  default for every launch path) and documents it as the opt-in isolation
+  knob for running multiple Skulk clusters on one network. Existing installs
+  keep their env files; only fresh installs see the new template.
+
+- **Speech translation is now a standard capability.** `POST
+  /v1/audio/translations` no longer requires `SKULK_ENABLE_EXPERIMENTAL_MODE`
+  or the `experiments.speech_translation` config flag; like every other speech
+  endpoint, its only gates are model truth (a mounted card declaring
+  `audio.supports_translation = true`) and instance availability. With this
+  graduation no built-in experiment remains active: the entire `experiments`
+  config section (`tts_streaming`, `stt_realtime`, `speech_translation`) is
+  deprecated accepted-but-ignored compatibility surface, and the dashboard no
+  longer renders an Experiments settings section. The experimental-mode gate
+  machinery stays in place for future features.
+
+- **Fresh installs now use the same Zenoh data plane as the E2E qualification
+  fleet.** An unset `SKULK_ZENOH_DATA_PLANE` selects Zenoh instead of silently
+  falling back to gossipsub. Zero-config startup binds a specific
+  private-LAN or CGNAT fabric IPv4 (loopback when offline or public-only) and
+  enables local multicast scouting; public listeners require an explicit
+  `SKULK_ZENOH_LISTEN`. An explicit `SKULK_ZENOH_CONNECT` list retains the
+  multicast-off routed-fleet posture. `SKULK_ZENOH_DATA_PLANE=0` remains the
+  explicit compatibility fallback. The native bindings version advances so
+  service updates rebuild the new discovery-aware Zenoh constructor before
+  startup.
+
+### Added
+
+- **Stale machine-generated model cards no longer shadow bundled cards.**
+  Cards generated by `POST /models/add` now carry a `generator_revision`
+  stamp. At load, a stamped custom card older than the running generator is
+  superseded by the bundled card for the same model id with a loud warning
+  (a generated card is cached metadata plus generator logic, not operator
+  intent; a stale one silently pinned models to outdated engine selection).
+  Hand-authored cards, which carry no stamp, keep full override precedence,
+  and stale generated cards with no bundled counterpart still serve with a
+  regenerate suggestion.
+
+- **A Zenoh-isolated node is now named, not silently broken.** Every node
+  advertises `zenohConnectedPeers` on `nodeResources`: the live peer-transport
+  count of its Zenoh data-plane session, sampled at each advertisement behind
+  a startup grace window so normal mesh formation never trips it. A node
+  advertising Zenoh with a trustworthy count of 0 while other live nodes run
+  Zenoh receives the error-level `zenoh_isolated` health reason in `GET
+  /state` (dashboard badge included) and logs a recurring local warning with
+  the fix, closing the shape where a member that multicast scouting cannot
+  reach (for example one joined over a routed or overlay network) looks
+  healthy while every remote stream through it dies with transport errors.
+  The native bindings version advances so service updates rebuild the
+  peer-count introspection before startup.
+
+- **Laguna S 2.1 on the llama.cpp engines.** The managed llama-server pin
+  advances to b10092, whose window landed the Laguna 2 model family and the
+  native DFlash speculative arc upstream. The served engine gains the
+  `draft_dflash` speculative type for models upstream's DFlash drafter arch
+  supports. A bundled card serves Poolside's official Laguna S 2.1 Q4_K_M
+  (one 128 GB unified-memory node, or pooled across several llama-server
+  nodes via RPC); the card ships plain decode because upstream's DFlash
+  drafter arch does not yet implement Laguna's gated attention, so no
+  available drafter artifact can load (#676 tracks re-enabling).
+
+- **Custom GGUF cards use both llama.cpp engines.** Cards generated by
+  `POST /models/add` for a GGUF repo previously stamped only the in-process
+  `llama_cpp` backends, so they never used a node's llama-server (losing
+  its concurrency slots) and were silently ineligible for every multi-node
+  GGUF placement, since only the served engine pools nodes via RPC.
+  Generated cards now mirror the bundled GGUF cards: both engines
+  compatible, served tags preferred.
+
+- **Remote members join the fabric as first-class nodes.** A node whose
+  advertised addresses are unreachable from its peers (a NAT'd or proxied
+  cloud container reachable only through the connection it dialed in on) is
+  no longer a floating, unplaceable entry in the topology. Every node now
+  records its live, authenticated fabric connections as topology edges in
+  their own right, annotated `session: true` in `GET /state`; placement can
+  select such a member while host selection never mistakes the session's
+  observed endpoint for a dialable address. Advertised addresses that keep
+  failing their reachability probe drop to a slower retry cadence instead of
+  being probed every sweep, so a remote membership no longer floods logs
+  probing paths that can never work (#662).
+
+- **Nodes that cannot reach the model store download directly from Hugging
+  Face.** Store staging previously assumed every member could reach the
+  store host; a remote node outside the store's network starved with a
+  placement it could never fill. The availability probe now distinguishes a
+  store that answered from a store that is unreachable at the transport
+  level (including persistent mid-transfer dropouts), and an unreachable
+  store routes the download to the model's origin on Hugging Face with the
+  card's pinned revision preserved, logged loudly so a misrouted LAN node is
+  still noticed. A reachable store answering with an error remains a store
+  failure and never silently bypasses the store as the source of truth
+  (#657).
+
+- **Bare-install NVIDIA nodes complete the CUDA engine lane on demand.** A
+  GPU-cloud container or plain checkout that never ran the installer's
+  engine step previously degraded to a CPU-tagged engine while the hardware
+  probe plainly saw the GPU. Provisioning now installs the pinned Foxlight
+  CUDA engine wheel on demand (gated on the wheel's compiled compute-
+  capability floor, with resolution pinned to the Foxlight and PyPI indexes
+  and immune to host-level index overrides), verifies the installed wheel
+  before claiming success, and degrades to the Vulkan/tarball chain with a
+  copy-paste remediation when anything fails (#661).
+
+- **Wire-version discipline makes incompatible builds fail loudly at
+  connect.** The networking layer's private-network key now always derives
+  from a `NETWORK_VERSION` constant (with the optional cluster namespace
+  layered on top), so two builds whose wire protocols differ refuse to
+  connect instead of half-working as a node that syncs events yet never
+  appears in membership. Every wire-surface change must bump the version or
+  record a wire-neutral judgment in `rust/networking/WIRE_COMPAT.md`,
+  enforced by CI. The service startup script now rebuilds the Rust bindings
+  whenever a pulled commit touches the Rust tree or workspace manifests and
+  re-executes itself after a self-update, so an auto-updating node cannot
+  keep running stale wire code while reporting itself current (#659).
+
+- **Telemetry diagnostics count publishes that reached nobody.**
+  `GET /v1/diagnostics/telemetry` now reports `noPeerPublishes` (publishes
+  that found no peers subscribed on the telemetry protocol) separately from
+  transport-pressure failures, and a node with live fabric connections whose
+  telemetry has sustainedly reached nobody logs a rate-limited warning
+  naming the consequence: the node will not appear in membership. A lone
+  node, where no-peer outcomes are the normal state, stays quiet (#660).
+
+- **The speech fabric: text-to-speech, transcription, and realtime voice.**
+  Mounted TTS models serve OpenAI-compatible `POST /v1/audio/speech`
+  (including streamed MP3/PCM for cards with proven streaming support,
+  static voice catalogs via `GET /v1/audio/voices`, and bounded multipart
+  reference audio for supporting cards); mounted STT models serve
+  `POST /v1/audio/transcriptions` (with typed SSE or progressive NDJSON
+  streaming where a card proves it) and standard
+  `POST /v1/audio/translations`. A realtime transcription provider pins a
+  session to a mounted speech worker and feeds a true upstream streaming
+  session over bounded ingress; `WS /v1/realtime` is the OpenAI-compatible
+  multi-turn adapter over it (24 kHz PCM16, optional server VAD with
+  barge-in, and an optional response pipeline through a mounted chat model
+  and TTS voice), and `WS /v1/fabric/chains/speech` exposes the same bridge
+  as an explicit speech-to-chat-to-speech composition surface. A built-in
+  WebRTC VAD provider emits typed turn boundaries on every production API
+  node. The dashboard gains a full voice loop: assistant speech playback
+  and microphone capture that uses realtime transcription when the mounted
+  card supports it. Speech input and output ride dedicated node-addressed
+  data paths, never the event log.
+
+- **The vLLM served engine: the GPU concurrency fast path.** The worker can
+  launch an external `vllm serve` process and proxy its OpenAI HTTP API as
+  a second served-backend engine. Continuous batching and paged attention
+  hold latency flat under concurrent load where single-stream engines
+  collapse; the engine coexists with the llama.cpp engines and placement
+  picks per hardware and expected concurrency. Single-node text generation
+  in this first slice; enable per node with `SKULK_VLLM_BIN` or the
+  installer's `--with-vllm`.
+
+- **Concurrent serving on llama-server, with dynamic context.** The served
+  llama.cpp engine now dispatches requests concurrently (`--parallel`
+  slots behind a shared bounded-dispatch mixin), and the serving context is
+  sized dynamically from placement-time memory fit instead of a fixed
+  ceiling: discrete-VRAM nodes lift to the card's maximum where it fits,
+  while nodes without discrete VRAM keep the conservative floor. GGUF model
+  cards now prefer the served engine so concurrent serving is the default
+  GGUF path.
+
+- **Performance envelopes (observe-only).** The API node records one
+  observation per completed generation into a bounded in-memory registry
+  keyed by hardware, model, engine, and quantization, bucketed by in-flight
+  concurrency at admission: p50/p90 time-to-first-token, decode rate,
+  aggregate throughput, and a knee estimate. Exposed at
+  `GET /v1/diagnostics/performance-envelopes` (with a cluster fan-out) and
+  the dashboard Performance tab; deliberately off the event log and
+  telemetry gossip.
+
+- **Generated output rides an explicit stream lifecycle.** `DATA`-plane
+  frames now carry `started -> chunk* -> completed|failed|cancelled` with
+  per-command sequencing: the API orders and deduplicates frames, converts
+  unresolved gaps into terminal transport errors with producer
+  cancellation, and remote egress uses bounded independent per-command
+  workers so one slow consumer cannot stall another stream. Extension
+  provider media has the same contract on its own `PROVIDER_DATA` family,
+  including client-streaming and bidirectional providers with caller
+  half-close.
+
+- **Model search across Hugging Face from the dashboard.** The model-store
+  search can look up repositories and files directly on Hugging Face,
+  so adding a model no longer requires leaving the dashboard to find the
+  artifact.
+
+- **Node Facts, derived capability, doctor, engine provisioning, and a
+  one-command installer (the "skulk just works" program, #614).** Detection
+  now creates serving capability and configuration overrides it, with every
+  disagreement loud. One probe pass per process gathers a typed record of
+  observed hardware (all GPUs, all vendors), observed software (importable
+  dependencies, engine binaries and what they can drive via
+  `llama-server --list-devices`), and declared `SKULK_*` configuration;
+  backend derivation consumes it and advertises capability conflicts on node
+  telemetry, `nodeHealth`, and the dashboard. A GPU node without backend env
+  no longer serves silently on CPU (#609); an NVIDIA node missing
+  `nvidia-ml-py` is loudly degraded and the binding is now a hard Linux
+  dependency (#612); an invalid engine-binary override is named instead of
+  read as unset (#462). `skulk doctor` runs the environment contract on
+  demand with consequence-stating verdicts and `--fix` remediation, and its
+  documentation is generated from the check registry. On Linux, Skulk
+  provisions a pinned, checksum-verified upstream llama-server build on
+  demand (`SKULK_LLAMA_SERVER_BIN` still overrides;
+  `SKULK_NO_ENGINE_AUTOPROVISION=1` opts out), and `install.sh` takes a
+  fresh macOS or Linux box to a working node in one command. On NVIDIA
+  Linux GPU nodes, the preferred managed engine source is a pip-installable
+  wheel built from pinned upstream source in Skulk's own CI:
+  `skulk-llama-server-cuda` (NVIDIA; CUDA runtime from NVIDIA's official
+  PyPI packages) and `skulk-llama-server-vulkan` (AMD; Khronos loader
+  bundled), both carrying sigstore build provenance and published to the
+  Foxlight wheel index at `wheels.foxlight.ai` (the authoritative source;
+  the Vulkan wheel is additionally mirrored to PyPI), with a workflow guard
+  keeping the engine pin, wheel versions, and installer in lockstep.
+
+- **Explicit, auditable cluster heartbeat.** Nodes now publish a dedicated
+  telemetry heartbeat instead of making liveness an accidental side effect of
+  collector cadence. The master warns before the prune window, retains ordinary
+  telemetry and control events as fallbacks, and records every deciding signal
+  age in `NodeTimedOut` so a removal remains explainable after replay (#448).
+
+- **Telemetry can no longer congest correctness-critical control traffic.**
+  Local producers enter a bounded latest-value admission map and telemetry uses
+  its own Python egress loop plus a dedicated gossipsub protocol and per-peer
+  handler queues. Intermediate download progress now rides this lossy plane;
+  only completed and failed outcomes remain in event-sourced `State`, with
+  attempt identities preventing a late progress sample from overriding a
+  terminal or reset decision. `GET /v1/diagnostics/telemetry` reports aggregate
+  admission, coalescing, drop, queue, failure, byte, and age metrics (#565).
+
+- **Placement previews expose every valid host, not just the ranking
+  winner.** `GET /instance/previews` now includes per-host single-node
+  previews marked `alternative: true` for each host that passes admission
+  but lost the planner ranking, and the dashboard placement dialog derives
+  node eligibility from the planner's answers instead of a chip-family
+  heuristic. Previously a heterogeneous fleet showed only the ranked pick
+  (typically the largest free GPU) as placeable, and the heuristic rendered
+  a CUDA node's pill as unable to run GGUF while the planner was placing
+  GGUF on it (#557).
+
+- **Nodes can name themselves, and CUDA devices get their own topology tile.**
+  `SKULK_NODE_NAME` overrides the gossiped display name ahead of the
+  hostname/Computer Name fallback, so containers and rented GPU pods (whose
+  runtime-random hostnames cannot be changed without privileges) identify
+  themselves properly in the dashboard. Nodes whose telemetry reports an
+  NVIDIA accelerator now render as a spark-style CUDA device tile with the
+  NVIDIA wordmark, in the same visual family as the Mac and AMD tiles,
+  instead of the generic hexagon (#555).
+
+- Prebaked CUDA pod image (`deployment/cuda/Dockerfile`, published to GHCR as
+  `skulk-cuda-pod` by the `cuda-image` workflow): carries the CUDA
+  llama-cpp-python wheel, `llama-server` + `ggml-rpc-server` binaries, uv,
+  and the Rust toolchain, so a rented GPU pod goes from create to serving in
+  minutes (`/opt/skulk/pod-bootstrap.sh <ref>`) instead of the ~1 hour
+  install recipe. The recipe (`install-deps.sh`) remains the from-scratch
+  path for arbitrary driver-equipped machines.
+
+- NVIDIA / CUDA node support (platform plumbing): a passive NVML telemetry
+  collector (`utils/info_gatherer/nvidia_gpu.py`) fills the normalized
+  accelerator profile on NVIDIA nodes (the Linux GPU monitor tries AMD
+  sysfs first, then NVML), and `deployment/cuda/install-deps.sh` provisions
+  a driver-equipped machine (e.g. a rented GPU pod) into a serving node
+  with the CUDA llama-cpp-python build and optional CUDA `llama-server`.
+  Backend advertisement reuses the existing `SKULK_LLAMA_CPP_BACKENDS=cuda`
+  declaration with build cross-checking.
+
+- Opt-in field telemetry (off by default): a first-run dashboard consent
+  modal and permanent Settings toggles control anonymous performance and
+  reliability samples (model id, hardware class, timing, token counts,
+  failure classes; never prompts, outputs, or machine identity). Consent
+  persists in `skulk.yaml`; `GET /v1/telemetry/preview` shows the exact
+  pending batch; `SKULK_TELEMETRY_DISABLE=1` hard-disables per node.
+
+- **Extensions can call capabilities (the generic call verb).** The unary loop
+  of the provider surface is complete: a provider extension that implements
+  `handle_call` becomes callable, and any extension invokes a discovered
+  capability with `ExtensionContext.call_capability(node, id, version,
+  revision, payload)`. Calls are node-addressed and direct (the master is never
+  in the hot path; nothing is event-sourced), pin the exact `id@version` plus
+  the descriptor revision digest from discovery so a drifted contract is
+  rejected instead of misinterpreted, and are schema-validated in both
+  directions (bounded JSON Schema 2020-12 validation that never fetches remote
+  references). Every failure is a typed, machine-readable error code on the
+  result rather than an exception. Calls are bounded: a deadline (default
+  30s), 1 MiB payload and result caps, and a per-node concurrency bound that
+  rejects excess calls as `overloaded` instead of queueing them. Served over
+  the new `POST /v1/capabilities/call` endpoint; calling the local node is an
+  in-process fast path with identical guards. The reference echo provider now
+  serves calls end to end.
+
+- **Extensions can serve self-describing capabilities (the provider role).**
+  Skulk cannot enumerate future plugin capabilities, so it standardizes the
+  description instead: a provider extension publishes one `CapabilityDescriptor`
+  per capability it serves, carrying the capability id, a semantic version, a
+  human/LLM-readable description, JSON Schemas for input and output, the call's
+  I/O mode (`unary`, `server_streaming`, `client_streaming`, `bidirectional`),
+  and a content revision digest that detects any drift in the published shape.
+  Discovery is two-layered: the descriptor's id is auto-advertised as the node's
+  telemetry capability tag (cheap, gossiped), and the full descriptors travel on
+  demand via `ExtensionContext.describe_node(node_id)` or the new
+  `GET /v1/capabilities` endpoint (heavy, fetched). Providers get an `on_start`
+  startup hook (a pure provider has no chat hook through which to reach the
+  context), and `withdraw_capability(tag)` reverses an advertisement, with the
+  telemetry publisher emitting one final empty reading when a node's last tag is
+  withdrawn so peers clear their entry instead of holding a stale value. A
+  reference provider lives at `examples/extensions/echo-provider/`.
+
+- **Extensions get telemetry-plane access (read + advertise).** First-class
+  fabric citizenship expressed as plane access: a plugin can now both discover
+  the cluster it belongs to and announce what it offers.
+  - `ExtensionContext.read_cluster()` returns an immutable, per-node snapshot of
+    the telemetry plane: each node's backends, participation role, accelerator
+    vendor, Skulk version, RAM, liveness, and any capability tags peers
+    advertise. The call is a pure in-memory snapshot (no network I/O, no
+    mutation), and every field is `None`/empty until that reading has arrived.
+  - `ExtensionContext.advertise_capability(tag)` publishes an opaque capability
+    tag (for example `"memory"`) onto the telemetry plane so peers discover it
+    the same way native nodes advertise their backends. The tag surfaces in
+    every peer's `read_cluster()` snapshot under `ClusterNodeView.capabilities`.
+    Advertising is additive and idempotent; the tag keeps being gossiped
+    (last-write-wins) until the node leaves the cluster.
+
+### Fixed
+
+- **Topology nodes minted by an edge alone are reaped with their last
+  edge.** A fabric connection can be the first the cluster hears of a peer,
+  creating its topology entry before the peer publishes any node
+  information. A peer that disconnected without ever becoming a member left
+  that entry behind forever, because the membership timeout only reaps nodes
+  it has heard from; a crash-looping box could litter the graph with a new
+  phantom entry per restart attempt. Deleting the last edge pointing at a
+  never-a-member node now removes the node itself, cascading through any
+  dangling edges the dead peer emitted that nobody remains to delete; real
+  members are untouched. Session edges are additionally emitted only for
+  current members, and each node re-emits its live member edges if state
+  loses them, so a timed-out peer's lingering socket cannot re-mint a
+  phantom while a recovering peer's edge returns within one sweep of its
+  membership republication (#671).
+
+- **The dashboard node card shows VRAM for discrete-GPU nodes.** The card's
+  memory figure treated any reported VRAM as a unified-memory carve-out and
+  added it to system RAM, so a discrete-GPU node on a big-memory host
+  displayed host RAM plus VRAM (a 45GB A40 on a 512GB cloud host read
+  548.5GB) when VRAM governs what the node can serve. Discrete GPUs now show
+  their VRAM pool used/total with an explicit label, classified by the same
+  GTT-aperture signature placement uses, so discrete AMD cards are handled
+  correctly alongside NVIDIA; unified-memory nodes (Apple, AMD APU
+  carve-out) are unchanged. Placement admission was never affected (#669).
+
+- **Automatic repair re-placements honor the operator's node exclusions.** A
+  placement created with `excluded_nodes` stamps those exclusions onto the
+  instance, so when a node dies and the master re-places the instance, the
+  repair search still avoids the operator's excluded nodes instead of
+  silently forgetting them (#658).
+
+- **A served-MTP model with a missing speculative draft serves without
+  speculation instead of crashing.** When a served card declares a
+  cross-repo draft (`served_spec_draft_repo`/`served_spec_draft_file`) whose
+  GGUF is not on disk, the `llama_server` runner used to raise `FileNotFoundError`
+  at launch and crash the instance. The draft is a best-effort companion (a
+  failed cross-repo co-fetch is swallowed and the base is still marked
+  complete), so a declared-but-absent draft now degrades to plain decode: the
+  runner drops `--spec-type`/`--model-draft` and logs a warning rather than
+  failing a loadable model (#574, sharpens #554).
+
+- **The CUDA pod entrypoint wires an injected `HF_TOKEN`.** A Hugging Face
+  token passed as the `HF_TOKEN` pod environment variable (same pattern as
+  `PUBLIC_KEY`) is now persisted to the canonical Hugging Face token file so
+  skulk's downloader authenticates every model fetch. Without it, downloads
+  from gated or Xet-backed repos fail and a `--ensure-store-downloads` run
+  stalls on a download that never starts (#575). The prebaked image must be
+  rebuilt to pick up the new entrypoint.
+
+- **Multi-homed peers no longer churn connections on every weak ping or dead
+  link-local retry (#401).** mDNS still tries every advertised path once so a
+  reachable Thunderbolt link is retained, but once another path connects,
+  failed link-local addresses retry once per minute instead of every five
+  seconds. A socket now requires three consecutive five-second ping failures
+  before teardown. Routable paths, API reachability discovery, and real peer
+  loss retain their normal behavior.
+
+- **Retained event-log replay no longer arrives as an unpaced 10k-event
+  burst.** The master coalesces replay requests onto one background worker,
+  emits the retained tail in bounded paced chunks without blocking command
+  processing, and warns when the event log grows at an elevated rate while
+  the cluster has no active task or download. This removes the replay
+  amplifier that could turn slow periodic event growth into follower flaps
+  and repeated state-sync storms (#449).
+
+- **Realtime Fabric speech replies cannot generate indefinitely before TTS.**
+  Automatic chat responses now enforce a configurable 1-4096 output-token
+  ceiling (256 by default) and disable hidden reasoning unless explicitly
+  requested, so a model that does not emit EOS or spends its budget reasoning
+  cannot consume the entire WebSocket deadline or leave the selected speech
+  participant without visible text.
+
+- **Abandoned Zenoh DATA streams no longer retain admission forever.** Each
+  remote command queue has a renewed-on-frame 30-minute resource lease. An
+  omitted terminal now tombstones and closes the stream, releases owner and
+  process admission, best-effort emits a correctly sequenced typed failure, and
+  increments global/per-owner `idleStreamReclaims` diagnostics instead of
+  leaving an empty active queue until process restart (#567).
+
+- Control-plane saturation can no longer starve master election: election messages
+  use dedicated Python egress plus an isolated libp2p gossipsub protocol and
+  handler queue, while a deduplicated legacy copy preserves rolling upgrades.
+  Repository download callbacks are bounded, coalesced, terminal-ordered, and
+  aggregate-only on the event path; queue-pressure logs are rate-limited and
+  omit failed payloads.
+
+- **GPU llama.cpp nodes self-heal a pruned inference wheel at startup.** A node
+  that declares a GPU llama.cpp backend builds its `llama-cpp-python` wheel
+  from source; `uv sync --inexact` preserves a present wheel, but could not
+  restore one that a plain `uv sync` (run by hand or another tool) had pruned,
+  leaving the node silently unable to import `llama_cpp` and dropping it out of
+  all GGUF and served-MTP placement with no error. The startup script now
+  verifies the wheel after sync on a GPU node and rebuilds it from source once
+  (Vulkan for AMD, CUDA for NVIDIA) if it is missing or CPU-only. Non-fatal and
+  single-shot: the node still serves without the in-process GGUF engine if the
+  rebuild fails, and the common case (wheel present) skips it (#568).
+
+- **Cluster observability answers fast and accounts for every node.** The
+  diagnostics fan-out probed each peer address with a patient retry policy
+  meant for targeted lookups, so a single unroutable advertised address
+  (an overlay-joined node, a docker bridge, a dead interface) stalled the
+  whole observability surface for ~18 seconds; fleet-wide sweeps now use a
+  fail-fast single-attempt policy (measured 18.4s -> 3.3s on a six-node
+  fleet with unroutable candidates). Peers with no reachable API route now
+  appear in the response as explicit failures instead of silently vanishing,
+  so a node that joined over an overlay keeps an observability presence
+  (#558).
+
+- Text-generation compatibility endpoints now reject mounted TTS-only and
+  STT-only model cards before command dispatch, preventing modality mistakes
+  from reaching or restarting speech runners.
+
+- **llama.cpp engines now report generation statistics.** Chat completions
+  served by the in-process `llama_cpp` engine and the served `llama_server`
+  proxy attach real `generation_stats` (prompt/generation token counts and
+  tokens-per-second) to the terminal chunk, as the MLX engine always has.
+  `llama_server` uses the server's own engine-side timings when available
+  (requested via `timings_per_token`), falling back to proxy-side wall-clock
+  phases; the in-process engine measures prefill/decode phases around its
+  stream. Previously every request from these engines carried
+  `stats=None`, leaving the dashboard, field telemetry, and harness
+  `skulk_*_tps` metrics blind on GPU/Linux nodes (#532).
+
+- **Store-host staging no longer doubles disk usage.** Staging a model from a
+  local store into the worker staging directory hardlinks each file instead
+  of copying when both live on the same filesystem (store files are immutable
+  once registered and staged files are never mutated in place), falling back
+  to a copy across filesystems. Previously a 26GB GGUF needed 52GB of free
+  disk to stage on a store-host node, and the staging copy could fail with
+  ENOSPC after a successful store download (#533).
 
 - **Pooled (multi-node) GGUF placement no longer caps unified-memory nodes at
   their BIOS VRAM carve.** Admission for RPC placements previously sized each

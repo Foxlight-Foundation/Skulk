@@ -62,6 +62,9 @@ function capabilityLabel(capability: string, t: SkulkTranslate): string {
     vision: t('capability.vision', 'Vision'),
     image_gen: t('capability.imageGen', 'Image Gen'),
     image_edit: t('capability.imageEdit', 'Image Edit'),
+    embedding: t('capability.embedding', 'Embedding'),
+    tts: t('capability.tts', 'TTS'),
+    stt: t('capability.stt', 'STT'),
   };
   return labels[capability] ?? capability;
 }

@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -72,6 +73,49 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict
 
 from skulk.shared.types.worker.downloads import FileListEntry
+from skulk.store.staging_eviction import MINIMUM_STAGING_FREE_DISK_BYTES
+
+_SOURCE_REVISION_MARKER = ".skulk-source-revision"
+_SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
+
+
+def _remaining_store_download_bytes(
+    target_directory: Path,
+    file_list: list[FileListEntry],
+) -> int:
+    """Return physical file bytes still needed for one canonical transfer."""
+
+    remaining_bytes = 0
+    for file_entry in file_list:
+        if file_entry.size is None:
+            raise ModelStoreCapacityError(
+                "Cannot verify canonical model-store disk capacity because "
+                "the selected manifest contains a file with unknown size. "
+                "Retry after repository metadata is available."
+            )
+        expected_size = file_entry.size
+        target = target_directory / file_entry.path
+        partial = target_directory / f"{file_entry.path}.partial"
+        target_stat = target.stat() if target.is_file() else None
+        target_bytes = target_stat.st_size if target_stat is not None else 0
+        if target_bytes == expected_size:
+            continue
+        resumable_bytes = partial.stat().st_size if partial.is_file() else 0
+        # A mismatched single-link target is removed before download, returning
+        # its current blocks to this filesystem. When staging hardlinked the
+        # canonical file, unlinking only its store name leaves those blocks
+        # owned by the staged link, so none of its bytes can be credited.
+        reclaimable_target_bytes = (
+            target_bytes
+            if target_stat is not None and target_stat.st_nlink == 1
+            else 0
+        )
+        # A partial is grown in place, so its existing bytes remain reusable.
+        remaining_bytes += max(
+            0,
+            expected_size - reclaimable_target_bytes - resumable_bytes,
+        )
+    return remaining_bytes
 
 
 def select_store_gguf_download_files(
@@ -198,6 +242,16 @@ def has_gguf_projector(paths: Iterable[str]) -> bool:
     return False
 
 
+def _resolve_store_child_path(store_root: Path, registered_path: str) -> Path | None:
+    """Resolve a registry path only when it remains below the store root."""
+
+    resolved_root = store_root.resolve()
+    candidate = (resolved_root / registered_path).resolve()
+    if candidate == resolved_root or not candidate.is_relative_to(resolved_root):
+        return None
+    return candidate
+
+
 @final
 class StoreModelEntry(BaseModel):
     """Metadata for a single model in the store registry.
@@ -225,6 +279,8 @@ class StoreModelEntry(BaseModel):
     files: list[str]
     downloaded_at: str
     total_bytes: int
+    source_revision: str | None = None
+    """Immutable Hugging Face commit that produced this entry, when pinned."""
     # Whether the upstream repo ships a multimodal projector, recorded at
     # registration so the availability hot path can decide a vision GGUF's
     # completeness without an HF repo-list probe (#346). ``None`` on entries
@@ -238,9 +294,14 @@ class StoreDownloadStatus:
     """Tracks the progress of a store-side HuggingFace download."""
 
     model_id: str
+    source_revision: str | None = None
     status: Literal["pending", "downloading", "complete", "failed"] = "pending"
     progress: float = 0.0
     error: str | None = None
+
+
+class ModelStoreCapacityError(RuntimeError):
+    """Raised before a canonical store transfer that would consume headroom."""
 
 
 @final
@@ -276,6 +337,7 @@ class ModelStore:
         self._registry_path = store_path / "registry.json"
         self._active_downloads: dict[str, StoreDownloadStatus] = {}
         self._download_lock = asyncio.Lock()
+        self._download_transfer_lock = asyncio.Lock()
         self._download_tasks: set[asyncio.Task[None]] = set()
 
     @property
@@ -308,10 +370,35 @@ class ModelStore:
         entry = registry.get(model_id)
         if entry is None:
             return None
-        model_path = self._store_path / entry.store_path
+        model_path = _resolve_store_child_path(self._store_path, entry.store_path)
+        if model_path is None:
+            logger.warning(
+                f"ModelStore: ignoring unsafe registry path for {model_id}: "
+                f"{entry.store_path!r}"
+            )
+            return None
         if not model_path.exists():
             return None
         return model_path
+
+    def get_entry(self, model_id: str) -> StoreModelEntry | None:
+        """Return one registered model entry, or ``None`` when unavailable."""
+
+        entry = self._read_registry().get(model_id)
+        if entry is None:
+            return None
+        model_path = _resolve_store_child_path(self._store_path, entry.store_path)
+        if model_path is None or not model_path.exists():
+            return None
+        return entry
+
+    def entry_matches_revision(
+        self, model_id: str, source_revision: str | None
+    ) -> bool:
+        """Return whether the canonical entry matches the requested revision."""
+
+        entry = self.get_entry(model_id)
+        return entry is not None and entry.source_revision == source_revision
 
     def list_models(self) -> list[StoreModelEntry]:
         """Return all :class:`StoreModelEntry` objects currently in the registry
@@ -323,7 +410,13 @@ class ModelStore:
         return [
             entry
             for entry in registry.values()
-            if (self._store_path / entry.store_path).exists()
+            if (
+                (model_path := _resolve_store_child_path(
+                    self._store_path, entry.store_path
+                ))
+                is not None
+                and model_path.exists()
+            )
         ]
 
     def delete_model(self, model_id: str) -> bool:
@@ -339,8 +432,13 @@ class ModelStore:
         if entry is None:
             return False
         # Remove files from disk
-        model_path = self._store_path / entry.store_path
-        if model_path.exists():
+        model_path = _resolve_store_child_path(self._store_path, entry.store_path)
+        if model_path is None:
+            logger.warning(
+                f"ModelStore: removed unsafe registry entry for {model_id} "
+                f"without deleting {entry.store_path!r}"
+            )
+        elif model_path.exists():
             shutil.rmtree(model_path, ignore_errors=True)
             logger.info(f"ModelStore: deleted {model_id} from {model_path}")
         # Update registry
@@ -372,6 +470,7 @@ class ModelStore:
         files: list[str],
         total_bytes: int,
         repo_has_projector: bool | None = None,
+        source_revision: str | None = None,
     ) -> None:
         """Add or update *model_id* in the registry.
 
@@ -384,8 +483,22 @@ class ModelStore:
                 Must be inside ``store_path``.
             files: List of file paths relative to *model_path*.
             total_bytes: Sum of file sizes in bytes.
+            repo_has_projector: Whether the source repository contains a GGUF
+                vision projector, or ``None`` when not probed.
+            source_revision: Full immutable Hugging Face commit represented by
+                this entry, or ``None`` for mutable ``main``. Registration
+                writes the matching filesystem marker before publishing the
+                registry entry so revision-aware runners resolve the same path.
         """
-        relative_path = str(model_path.relative_to(self._store_path))
+        from skulk.download.download_utils import write_source_revision_marker
+
+        resolved_root = self._store_path.resolve()
+        resolved_model_path = model_path.resolve()
+        if resolved_model_path == resolved_root or not resolved_model_path.is_relative_to(
+            resolved_root
+        ):
+            raise ValueError(f"Model path must be contained by the store: {model_path}")
+        relative_path = str(resolved_model_path.relative_to(resolved_root))
         entry = StoreModelEntry(
             model_id=model_id,
             store_path=relative_path,
@@ -393,7 +506,9 @@ class ModelStore:
             downloaded_at=datetime.now(tz=timezone.utc).isoformat(),
             total_bytes=total_bytes,
             repo_has_projector=repo_has_projector,
+            source_revision=source_revision,
         )
+        write_source_revision_marker(resolved_model_path, source_revision)
         self._write_registry_entry(entry)
         logger.info(
             f"ModelStore: registered {model_id} at {relative_path} "
@@ -486,7 +601,7 @@ class ModelStore:
 
         try:
             repo_files = await fetch_file_list_with_cache(
-                ModelId(model_id), "main", recursive=True
+                ModelId(model_id), entry.source_revision or "main", recursive=True
             )
         except Exception as exc:
             logger.debug(
@@ -521,6 +636,7 @@ class ModelStore:
         model_id: str,
         pinned_gguf: str | None = None,
         extra_pinned_gguf: list[str] | None = None,
+        source_revision: str | None = None,
     ) -> StoreDownloadStatus:
         """Request that the store download a model from HuggingFace.
 
@@ -535,15 +651,31 @@ class ModelStore:
         GGUF repo fetches that quant's shard group rather than the default (#344).
         ``extra_pinned_gguf`` names same-repo companion GGUFs (a served-engine
         draft bundled with the base) to co-fetch with the base quant.
+        ``source_revision`` pins repository metadata and bytes to a full
+        immutable Hugging Face commit. A different registered revision is
+        replaced only after the requested revision has downloaded and
+        registered successfully.
         """
         # Checked outside the lock: it may do a (cached) repo file-list fetch, and
         # holding the download lock across network I/O would serialize unrelated
         # requests.
         missing_projector = await self.vision_entry_missing_projector(model_id)
+        missing_pinned_gguf = self.entry_missing_files(
+            model_id,
+            [pinned_gguf] if pinned_gguf is not None else [],
+        )
         missing_companion = self.entry_missing_files(model_id, extra_pinned_gguf or [])
         async with self._download_lock:
             existing = self._active_downloads.get(model_id)
             if existing is not None:
+                if (
+                    existing.status in ("pending", "downloading")
+                    and existing.source_revision != source_revision
+                ):
+                    raise ValueError(
+                        f"{model_id} is already downloading revision "
+                        f"{existing.source_revision or 'main'}"
+                    )
                 # A failed entry retries. A cached-complete entry is stale when:
                 #  - it is missing a newly-requested companion (or projector) --
                 #    a prior base-only download in this process left a "complete"
@@ -562,20 +694,30 @@ class ModelStore:
                 # concurrent requests.
                 stale_complete = existing.status == "complete" and (
                     missing_projector
+                    or missing_pinned_gguf
                     or missing_companion
+                    or existing.source_revision != source_revision
                     or not self.is_in_store(model_id)
                 )
                 if existing.status == "failed" or stale_complete:
                     del self._active_downloads[model_id]
                 else:
                     return existing
+            revision_mismatch = self.is_in_store(
+                model_id
+            ) and not self.entry_matches_revision(model_id, source_revision)
             if (
                 self.is_in_store(model_id)
                 and not missing_projector
+                and not missing_pinned_gguf
                 and not missing_companion
+                and not revision_mismatch
             ):
                 return StoreDownloadStatus(
-                    model_id=model_id, status="complete", progress=1.0
+                    model_id=model_id,
+                    source_revision=source_revision,
+                    status="complete",
+                    progress=1.0,
                 )
             if missing_projector:
                 logger.warning(
@@ -583,16 +725,37 @@ class ModelStore:
                     "missing the mmproj projector for a vision GGUF; "
                     "re-downloading to recover it (existing weights are reused)."
                 )
+            if missing_pinned_gguf:
+                logger.warning(
+                    f"ModelStore: {model_id} is in the store but its entry is "
+                    f"missing requested GGUF {pinned_gguf!r}; re-downloading to "
+                    "recover it (existing weights are reused)."
+                )
             if missing_companion:
                 logger.warning(
                     f"ModelStore: {model_id} is in the store but its entry is "
                     f"missing a requested companion GGUF ({extra_pinned_gguf}); "
                     "re-downloading to recover it (existing weights are reused)."
                 )
-            status = StoreDownloadStatus(model_id=model_id, status="pending")
+            if revision_mismatch:
+                logger.warning(
+                    f"ModelStore: {model_id} is pinned to revision "
+                    f"{source_revision or 'main'}, but the canonical entry has a "
+                    "different source revision; downloading a qualified replacement."
+                )
+            status = StoreDownloadStatus(
+                model_id=model_id,
+                source_revision=source_revision,
+                status="pending",
+            )
             self._active_downloads[model_id] = status
         task = asyncio.create_task(
-            self._do_download(model_id, pinned_gguf, extra_pinned_gguf)
+            self._do_download(
+                model_id,
+                pinned_gguf,
+                extra_pinned_gguf,
+                source_revision,
+            )
         )
         self._download_tasks.add(task)
         task.add_done_callback(self._download_tasks.discard)
@@ -602,9 +765,13 @@ class ModelStore:
         """Return the download status for *model_id*, or None."""
         if model_id in self._active_downloads:
             return self._active_downloads[model_id]
-        if self.is_in_store(model_id):
+        entry = self.get_entry(model_id)
+        if entry is not None:
             return StoreDownloadStatus(
-                model_id=model_id, status="complete", progress=1.0
+                model_id=model_id,
+                source_revision=entry.source_revision,
+                status="complete",
+                progress=1.0,
             )
         return None
 
@@ -621,6 +788,7 @@ class ModelStore:
         model_id: str,
         pinned_gguf: str | None = None,
         extra_pinned_gguf: list[str] | None = None,
+        source_revision: str | None = None,
     ) -> None:
         """Download a model from HuggingFace into the store and register it.
 
@@ -632,22 +800,39 @@ class ModelStore:
         from skulk.download.download_utils import (
             download_file_with_retry,
             fetch_file_list_with_cache,
+            write_source_revision_marker,
         )
         from skulk.shared.models.model_cards import ModelId
 
         status = self._active_downloads[model_id]
-        status.status = "downloading"
+        revision = source_revision or "main"
         sanitized = model_id.replace("/", "--")
+        if source_revision is not None:
+            sanitized = f"{sanitized}--revision-{source_revision}"
         target_dir = self._store_path / sanitized
+        previous_entry = self.get_entry(model_id)
+        transfer_lock_acquired = False
         logger.info(
             f"ModelStore: downloading {model_id} from HuggingFace to {target_dir}"
         )
 
         try:
+            if source_revision is None and (
+                (target_dir / _SOURCE_REVISION_MARKER).exists()
+                or (target_dir / _SOURCE_REVISION_STAGING_MARKER).exists()
+            ):
+                # Older shared-root staging placed pinned bytes in mutable-main's
+                # normalized directory. Never let size-based resume reuse those
+                # bytes after an operator removes the pin.
+                logger.warning(
+                    f"ModelStore: clearing revision-qualified staging residue "
+                    f"before downloading mutable main for {model_id}"
+                )
+                await asyncio.to_thread(shutil.rmtree, target_dir)
             await aios.makedirs(str(target_dir), exist_ok=True)
 
             repo_file_list = await fetch_file_list_with_cache(
-                ModelId(model_id), "main", recursive=True
+                ModelId(model_id), revision, recursive=True
             )
             # A vision GGUF (LLaVA/Qwen-VL/Gemma-VLM style) ships its multimodal
             # projector as a separate ``*mmproj*.gguf`` alongside the LM weights;
@@ -675,6 +860,37 @@ class ModelStore:
                 )
             file_list = selected_files
             total_bytes = sum(f.size or 0 for f in file_list)
+            # Store downloads share one canonical filesystem. Serialize exact
+            # admission with transfer so concurrent requests cannot each spend
+            # the same free bytes. The store is authoritative and therefore
+            # never evicted automatically; an unsafe transfer fails closed.
+            await self._download_transfer_lock.acquire()
+            transfer_lock_acquired = True
+            # Keep the public status pending while this request is queued
+            # behind another canonical transfer. Clients deliberately exclude
+            # pending time from their no-progress stall budget; switching only
+            # after lock acquisition makes that status truthful.
+            status.status = "downloading"
+            additional_bytes = await asyncio.to_thread(
+                _remaining_store_download_bytes,
+                target_dir,
+                file_list,
+            )
+            if additional_bytes > 0:
+                free_bytes = await asyncio.to_thread(
+                    lambda: shutil.disk_usage(target_dir).free
+                )
+                required_free_bytes = (
+                    additional_bytes + MINIMUM_STAGING_FREE_DISK_BYTES
+                )
+                if free_bytes < required_free_bytes:
+                    raise ModelStoreCapacityError(
+                        f"Insufficient canonical model-store disk capacity for "
+                        f"{model_id}: need {required_free_bytes / 2**30:.1f} GiB "
+                        "free for the remaining transfer and operating-system "
+                        f"reserve, but only {free_bytes / 2**30:.1f} GiB is "
+                        "available. Free disk space or move the model store."
+                    )
             downloaded_bytes = 0
 
             for f in file_list:
@@ -691,13 +907,17 @@ class ModelStore:
 
                 await download_file_with_retry(
                     ModelId(model_id),
-                    "main",
+                    revision,
                     f.path,
                     target_dir,
                     make_progress_cb(file_size),
                 )
                 downloaded_bytes += file_size
                 status.progress = downloaded_bytes / max(total_bytes, 1)
+
+            await asyncio.to_thread(
+                write_source_revision_marker, target_dir, source_revision
+            )
 
             # Register in the store
             files = [
@@ -741,8 +961,27 @@ class ModelStore:
                 )
             total = sum(p.stat().st_size for p in target_dir.rglob("*") if p.is_file())
             self.register_model(
-                model_id, target_dir, files, total, repo_has_projector=repo_ships_projector
+                model_id,
+                target_dir,
+                files,
+                total,
+                repo_has_projector=repo_ships_projector,
+                source_revision=source_revision,
             )
+            if (
+                previous_entry is not None
+                and previous_entry.store_path != sanitized
+            ):
+                previous_path = _resolve_store_child_path(
+                    self._store_path, previous_entry.store_path
+                )
+                if previous_path is None:
+                    logger.warning(
+                        f"ModelStore: refusing to delete unsafe previous registry "
+                        f"path for {model_id}: {previous_entry.store_path!r}"
+                    )
+                else:
+                    await asyncio.to_thread(shutil.rmtree, previous_path, True)
 
             status.status = "complete"
             status.progress = 1.0
@@ -760,3 +999,6 @@ class ModelStore:
             logger.exception(
                 f"ModelStore: download of {model_id} failed ({type(exc).__name__})"
             )
+        finally:
+            if transfer_lock_acquired:
+                self._download_transfer_lock.release()

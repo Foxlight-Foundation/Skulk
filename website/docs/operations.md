@@ -31,14 +31,20 @@ directly). Staged copies live under `node_cache_path` (default
 Staged copies are cheap to recreate from the LAN store but local disk on
 small-disk nodes is the scarce resource, so staging has a lifecycle.
 
-### The eviction lifecycle and its three triggers
+### The eviction lifecycle and capacity trigger
 
-There is one eviction mechanism with three trigger points:
+Staging space is reclaimed at four trigger points:
 
 1. **Instance deactivation**: when a model instance shuts down.
 2. **Node startup**, which reconciles staged copies orphaned by a crashed
    session (a node that died never got to clean up).
-3. **Operator tooling**: `POST /store/purge-staging` (see below).
+3. **During each store-backed staging transaction**, when disk capacity must
+   fit the exact additional registered artifact bytes plus 10 GiB of
+   operating-system headroom.
+4. **Operator tooling**: `POST /store/purge-staging` (see below).
+
+The first three use the least-recently-used policy below. The operator purge is
+an explicit unconditional reset of staged copies.
 
 A staged model becomes an **eviction candidate** when no live runner uses
 it. Candidates are kept newest-first by last use up to the
@@ -51,9 +57,11 @@ names it directly but also when it is the **companion** of an active model
 are never eviction candidates, so eviction can never pull weights out from
 under a live runner.
 
-This lifecycle only runs when `cleanup_on_deactivate` is `true` (the
-default). Set it to `false` to keep every staged copy and manage cleanup
-entirely by hand.
+The lifecycle recency passes only run when `cleanup_on_deactivate` is `true`
+(the default). Set it to `false` to keep every staged copy while disk is
+healthy. The pre-download capacity pass is an independent safety guard and
+still evicts idle data when necessary to prevent a new transfer from filling
+the filesystem.
 
 ### The grace budget and tuning it
 
@@ -62,6 +70,24 @@ budget. Eviction never reduces the staging cache below this much of
 recently-used, not-in-use model data. The budget exists so that node deaths,
 restarts, and repeated place/delete cycles of the same model do not re-pay
 the staging copy every time.
+
+Before a new download, disk safety may override this grace budget. The incoming
+partial model, live runners, active downloads, and companion repositories stay
+protected; base and companion transfers are admitted one at a time after the
+store reports their exact registered artifact total. Resumable manifest bytes
+reduce the additional allocation and same-filesystem hardlinks count as zero.
+Idle copies are removed oldest-first until that allocation fits with 10 GiB
+free after transfer. When no safe fit exists, the worker emits
+`DownloadFailed` without starting the transfer.
+
+The canonical store is never an eviction source. Store-side Hugging Face
+downloads instead serialize exact selected-manifest admission with transfer and
+fail before writing if the authoritative volume cannot retain the same 10 GiB
+reserve.
+
+When a node falls back to direct Hugging Face because the store is unreachable,
+it performs that same exact, serialized check against the actual model cache.
+It does not evict or reject based on the unrelated staging filesystem.
 
 Tune it in the `staging` section of `skulk.yaml`, or per node via
 `node_overrides`:
@@ -196,6 +222,13 @@ End-to-end, clients receive the error within **~4 to 6 seconds** of a node kill
 (master or worker rank). The correct client behavior in both cases is the
 same: **retry the request.**
 
+Node liveness itself is decided from a **dedicated telemetry heartbeat** each
+node publishes every two seconds; ordinary telemetry readings and the node's
+last indexed control event serve as fallback liveness signals if the heartbeat
+path degrades. `GET /v1/diagnostics/telemetry` on any node exposes that node's
+local telemetry-plane pressure (admission, coalescing, drop, queue, and publish
+metrics) when you need to see whether telemetry itself is under strain.
+
 Recovery timeline:
 
 - **Election** of a new master runs on a 3-second timeout
@@ -230,6 +263,31 @@ crash.
 process image in place (releasing Metal memory) and the node rejoins
 automatically.
 
+### Capability conflicts: a GPU node configured wrong
+
+A node whose engine configuration disagrees with its observed hardware does not
+fail silently. The disagreement is advertised as a **capability conflict** and
+surfaces in `/state`'s `nodeHealth` (and the dashboard) with a stable code, a
+message describing the observed-versus-declared mismatch, and the exact
+remediation:
+
+- `gpu_serving_disabled` (error): a serving-capable GPU is visible but a
+  configured engine would run CPU-only, so GPU work would silently crawl.
+- `gpu_detection_degraded` (warn): a GPU is present but the node cannot fully
+  detect it, so VRAM-derived behavior quietly degrades.
+- `invalid_engine_binary` (warn): an engine binary override (for example
+  `SKULK_LLAMA_SERVER_BIN`) is set but points at something unusable. Skulk
+  deliberately does not paper over this with a managed build; the config error
+  stays loud.
+- `backend_override_conflict` (warn): a declared backend claims hardware the
+  node cannot observe. The declaration is still honored (configuration
+  overrides detection) but the disagreement is reported.
+
+The audit tool for these is **`skulk doctor`**: run `uv run skulk doctor` on
+the affected node for the full verdict list (each with its consequence and
+fix), or `skulk doctor --fix` to apply the safe remediations first. See
+[Node doctor](node-doctor.md) for the full command reference.
+
 ## Logs and Disk
 
 ### Where logs go
@@ -243,8 +301,10 @@ forwards to VictoriaLogs + Grafana. The full stack setup is in the
 
 ### Event-log retention and the free-space floor
 
-The API-side **event log** records per-token chunk events and backs only the
-`GET /events` diagnostic. It now has retention so it cannot eat the disk:
+The API-side **event log** records the replicated durable control stream and
+backs only the `GET /events` diagnostic. Generated output, request media,
+telemetry, and trace payloads stay off this log. It has retention so a burst of
+control history still cannot eat the disk:
 
 - it **ring-compacts past 256 MiB**, keeping the most recent 20k events;
 - archive rotation is capped by total bytes (**1 GiB**) on top of the count

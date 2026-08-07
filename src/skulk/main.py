@@ -6,6 +6,8 @@ import os
 import resource
 import signal
 import socket
+import sys
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +15,7 @@ from typing import Final, Self
 
 import anyio
 import psutil
+from anyio import BrokenResourceError, ClosedResourceError
 from loguru import logger
 from pydantic import PositiveInt
 
@@ -28,7 +31,8 @@ from skulk.download.impl_shard_downloader import skulk_shard_downloader
 from skulk.extensions import load_extensions
 from skulk.master.main import Master
 from skulk.routing.event_router import EventRouter
-from skulk.routing.router import Router, get_node_id_keypair
+from skulk.routing.router import Router, TelemetrySender, get_node_id_keypair
+from skulk.routing.zenoh_status import ZenohPeerSampler
 from skulk.shared.constants import SKULK_LOG
 from skulk.shared.election import Election, ElectionResult
 from skulk.shared.logging import (
@@ -37,8 +41,10 @@ from skulk.shared.logging import (
     logger_setup,
 )
 from skulk.shared.session_carryover import seed_state_for_new_session
+from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.commands import ForwarderDownloadCommand, SyncConfig
 from skulk.shared.types.common import NodeId, SessionId, SystemId
+from skulk.shared.types.profiling import NodeDataTransport, NodeResources
 from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
 from skulk.startup_recovery import preflight_api_port
@@ -52,7 +58,7 @@ from skulk.store.config import (
 from skulk.store.model_store import ModelStore
 from skulk.store.model_store_client import ModelStoreClient, ModelStoreDownloader
 from skulk.store.model_store_server import ModelStoreServer
-from skulk.utils.channels import Receiver, channel
+from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.pydantic_ext import CamelCaseModel
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.main import Worker
@@ -79,10 +85,76 @@ def _derive_zenoh_namespace(raw: str) -> str:
     return "ns" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-# Keep in sync with rust/networking/src/swarm.rs: NETWORK_VERSION default and
-# the OVERRIDE_VERSION_ENV_VAR name used to build the libp2p private-network key.
-_LIBP2P_NETWORK_VERSION = "v0.0.1"
+# Keep in sync with rust/networking/src/swarm.rs: NETWORK_VERSION and the
+# OVERRIDE_VERSION_ENV_VAR name used to build the libp2p private-network key
+# (a lockstep test in tests/test_zenoh_namespace_lockstep.py parses the Rust
+# source and fails on drift).
+_LIBP2P_NETWORK_VERSION = "v0.0.2"
 _LIBP2P_NAMESPACE_ENV_VAR = "SKULK_LIBP2P_NAMESPACE"
+_NODE_RESOURCES_POLL_INTERVAL_SECONDS = 2.0
+_CLUSTER_CONFIG_SYNC_ATTEMPTS = 30
+_CLUSTER_CONFIG_SYNC_RESPONSE_TIMEOUT_SECONDS = 1.0
+_CLUSTER_CONFIG_SYNC_RETRY_INTERVAL_SECONDS = 0.2
+# Cadence of the local zenoh-isolation check, and the floor between repeated
+# operator warnings while the condition persists. The check is a cheap local
+# session introspection; the warning floor keeps a permanently isolated node
+# from flooding its log.
+_ZENOH_ISOLATION_CHECK_INTERVAL_SECONDS = 30.0
+_ZENOH_ISOLATION_WARNING_INTERVAL_SECONDS = 300.0
+
+
+async def _publish_management_node_resources(
+    node_id: NodeId,
+    data_transport: NodeDataTransport,
+    telemetry_sender: TelemetrySender | Sender[NodeTelemetry],
+    zenoh_peer_sampler: "ZenohPeerSampler | None" = None,
+    poll_interval: float = _NODE_RESOURCES_POLL_INTERVAL_SECONDS,
+) -> None:
+    """Advertise resource truth for a node started without a worker.
+
+    A management/API-only node still owns DATA receivers and must participate in
+    fleet transport consistency checks. It advertises no inference backends and
+    effective management-only participation so the same reading cannot make it
+    eligible for placement.
+
+    Args:
+        node_id: Stable identity attached to the telemetry reading.
+        data_transport: DATA transport already resolved during node startup.
+        telemetry_sender: Existing latest-value telemetry admission handle.
+        zenoh_peer_sampler: Live data-plane connectivity sampler; a
+            management node owns DATA receivers, so its isolation matters to
+            the fleet exactly like a worker's. ``None`` advertises unknown.
+        poll_interval: Seconds between repeated advertisements for late joiners
+            and fallback liveness. The default matches the worker heartbeat
+            cadence and stays below the node-health warning threshold.
+
+    Side effects:
+        Publishes one immediate and then periodic ``NodeResources`` reading until
+        the owning task is cancelled or telemetry admission closes.
+    """
+    while True:
+        try:
+            resources = NodeResources(
+                backends=frozenset(),
+                participation="management",
+                data_transport=data_transport,
+                zenoh_connected_peers=(
+                    await zenoh_peer_sampler.advertised_count()
+                    if zenoh_peer_sampler is not None
+                    else None
+                ),
+            )
+            await telemetry_sender.send(
+                NodeTelemetry(node_id=node_id, info=resources)
+            )
+        except (ClosedResourceError, BrokenResourceError):
+            return
+        except Exception as error:
+            logger.warning(
+                "Management-node resource advertisement failed: "
+                f"{type(error).__name__}: {error}"
+            )
+        await anyio.sleep(poll_interval)
 
 
 def _libp2p_namespace_token(environ: Mapping[str, str]) -> str:
@@ -91,16 +163,19 @@ def _libp2p_namespace_token(environ: Mapping[str, str]) -> str:
     The Zenoh namespace MUST derive from the identical token that builds the
     libp2p private-network key in ``swarm.rs`` (``PNET_PRESHARED_KEY``); otherwise
     two nodes in the same libp2p cluster can land in different Zenoh namespaces
-    and silently drop all cross-node generation output. ``swarm.rs`` uses
-    ``SKULK_LIBP2P_NAMESPACE`` when the var is *present* (Rust ``env::var``
-    returns ``Ok`` even for an empty value) and the ``NETWORK_VERSION`` default
-    (``v0.0.1``) otherwise.
-    We mirror that precisely: presence (not truthiness) selects the override, and
-    an unset var falls back to ``v0.0.1`` rather than a Skulk-only default.
+    and silently drop all cross-node generation output. Since #659, ``swarm.rs``
+    ALWAYS feeds ``NETWORK_VERSION`` into the key and layers
+    ``SKULK_LIBP2P_NAMESPACE`` on top when the var is *present* (Rust
+    ``env::var`` returns ``Ok`` even for an empty value). We mirror that
+    precisely: the token is the version alone when the var is unset, and the
+    version concatenated with the namespace when it is present, so a version
+    bump re-keys BOTH transports together on every deployment shape.
     """
     override = environ.get(_LIBP2P_NAMESPACE_ENV_VAR)
     if override is not None:
-        return override
+        # NUL-delimited to keep (version, namespace) pairs injective in the
+        # token, mirroring the Rust key derivation's delimiter (#659 review).
+        return _LIBP2P_NETWORK_VERSION + "\0" + override
     return _LIBP2P_NETWORK_VERSION
 
 
@@ -117,47 +192,69 @@ def _namespace_fingerprint(namespace: str) -> str:
     return hashlib.sha256(namespace.encode("utf-8")).hexdigest()[:12]
 
 
-def _require_zenoh_listen(env_value: str) -> str:
-    """Return the explicit Zenoh listen endpoint, or raise (#308 bind restriction).
+_DEFAULT_ZENOH_PORT: Final = 7447
+_PRIVATE_LAN_IPV4_NETWORKS: Final[tuple[ipaddress.IPv4Network, ...]] = (
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+)
+_CGNAT_IPV4_NETWORK: Final = ipaddress.IPv4Network("100.64.0.0/10")
 
-    When the Zenoh data plane is enabled, the listen endpoint must be set
-    explicitly; Skulk refuses to default it to ``tcp/0.0.0.0:7447`` (all
-    interfaces) so a shared-network deployment doesn't silently expose the plane.
+
+def _is_trusted_fabric_ipv4(address: str) -> bool:
+    """Return whether an IPv4 address belongs to an auto-bind-safe fabric.
+
+    Automatic Zenoh listeners may use conventional private LAN or CGNAT
+    overlay addresses. Public addresses require an explicit operator-supplied
+    listener because the default Zenoh session has no transport authentication
+    or TLS.
+    """
+    try:
+        ip = ipaddress.IPv4Address(address)
+    except ipaddress.AddressValueError:
+        return False
+    return (
+        any(ip in network for network in _PRIVATE_LAN_IPV4_NETWORKS)
+        or ip in _CGNAT_IPV4_NETWORK
+    )
+
+
+def _resolve_zenoh_listen(env_value: str) -> str:
+    """Return the configured Zenoh listener or a safe zero-config default.
+
+    Fresh installs use Zenoh just like the qualification fleet, but they must
+    not silently expose an unauthenticated listener on every interface. When no
+    override is present, bind the best private-LAN or CGNAT fabric address
+    selected by the model-store interface policy. An offline or public-only
+    single-node install falls back to loopback and remains functional; binding
+    a public address requires an explicit override.
     """
     listen = env_value.strip()
-    if not listen:
-        raise ValueError(
-            "SKULK_ZENOH_DATA_PLANE is enabled but SKULK_ZENOH_LISTEN is unset. "
-            "Set it explicitly (e.g. tcp/<this-node-ip>:7447); Skulk refuses to "
-            "default the Zenoh listen endpoint to 0.0.0.0 / all interfaces "
-            "(#308 bind restriction)."
-        )
-    return listen
+    if listen:
+        return listen
+    candidate = _routable_local_ipv4()
+    host = candidate if candidate and _is_trusted_fabric_ipv4(candidate) else "127.0.0.1"
+    return f"tcp/{host}:{_DEFAULT_ZENOH_PORT}"
 
 
 def _resolve_zenoh_enabled(data_plane_env: str, listen_env: str) -> bool:
-    """Resolve whether the Zenoh DATA plane is enabled (soft default-on, #315).
+    """Resolve whether the Zenoh DATA plane is enabled.
 
-    The DATA plane defaults to Zenoh when a node is configured for it, but never
-    crashes a bare node:
+    The shipping default is Zenoh, including on a zero-config fresh install:
 
-    - Explicit truthy (``1``/``true``/``yes``/``on``) -> enabled. The caller
-      still requires an explicit listen endpoint via :func:`_require_zenoh_listen`,
-      so an explicit opt-in with no listen is a loud error, not a silent default.
+    - Explicit truthy (``1``/``true``/``yes``/``on``) -> enabled.
     - Explicit falsy (``0``/``false``/``no``/``off``) -> disabled (gossipsub).
-    - Unset/blank -> soft default: enabled only when ``SKULK_ZENOH_LISTEN`` is
-      configured. A node with no Zenoh config at all (e.g. a fresh ``uv run
-      skulk``) stays on gossipsub instead of failing the #308 listen
-      requirement, so the listen endpoint is the opt-in signal under the default.
+    - Unset/blank -> enabled. The listener is selected safely by
+      :func:`_resolve_zenoh_listen`.
     - Any other non-empty value -> ``ValueError``. An unrecognized value
       (a typo, or a boolean spelling we don't accept) must NOT silently fall
-      through to the listen-based default, or an operator who wrote
-      ``SKULK_ZENOH_DATA_PLANE=disable`` could unexpectedly get Zenoh ON; we
-      refuse to guess the transport (#315 review).
+      through to the default; refuse to guess the transport.
 
-    ``listen_env`` is the raw ``SKULK_ZENOH_LISTEN`` value; only its presence
-    (after stripping) matters here.
+    ``listen_env`` remains in the internal signature for callers and tests
+    written against the former soft-default resolver. Listener presence no
+    longer controls transport selection.
     """
+    del listen_env
     value = data_plane_env.strip().lower()
     if value in ("1", "true", "yes", "on"):
         return True
@@ -166,11 +263,10 @@ def _resolve_zenoh_enabled(data_plane_env: str, listen_env: str) -> bool:
     if value:
         raise ValueError(
             f"SKULK_ZENOH_DATA_PLANE={data_plane_env!r} is not a recognized "
-            "boolean. Use 1/true/yes/on or 0/false/no/off, or leave it unset to "
-            "use the default (Zenoh when SKULK_ZENOH_LISTEN is set, else "
-            "gossipsub). Refusing to guess the DATA transport (#315)."
+            "boolean. Use 1/true/yes/on or 0/false/no/off, or leave it unset "
+            "to use the Zenoh default. Refusing to guess the DATA transport."
         )
-    return bool(listen_env.strip())
+    return True
 
 
 def _add_model_search_path(path: Path) -> None:
@@ -219,6 +315,42 @@ def _is_virtual_iface(name: str) -> bool:
     return lowered.startswith(_VIRTUAL_IFACE_PREFIXES)
 
 
+def _routable_local_ipv4() -> str | None:
+    """Return this node's best peer-reachable IPv4 address.
+
+    Virtual, loopback, link-local, and unspecified interfaces are excluded.
+    Prefer a conventional private LAN, then Tailscale's CGNAT range, then any
+    remaining routable IPv4. The policy is shared by zero-config Zenoh binding
+    and model-store advertisement so both planes choose the same kind of
+    peer-reachable interface.
+    """
+    routable: list[str] = []
+    for iface_name, addresses in psutil.net_if_addrs().items():
+        if _is_virtual_iface(iface_name):
+            continue
+        for address in addresses:
+            if address.family != socket.AF_INET:
+                continue
+            try:
+                ip = ipaddress.ip_address(address.address)
+            except ValueError:
+                continue
+            if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+                continue
+            routable.append(address.address)
+
+    def _rank(address: str) -> int:
+        ip = ipaddress.IPv4Address(address)
+        if any(ip in network for network in _PRIVATE_LAN_IPV4_NETWORKS):
+            return 0
+        if ip in _CGNAT_IPV4_NETWORK:
+            return 1
+        return 2
+
+    routable.sort(key=lambda address: (_rank(address), address))
+    return routable[0] if routable else None
+
+
 def _routable_store_advertise_host(configured: str | None, hostname_fallback: str) -> str:
     """Pick an address other nodes can actually reach the model store host at.
 
@@ -251,45 +383,7 @@ def _routable_store_advertise_host(configured: str | None, hostname_fallback: st
         ):
             return configured
 
-    routable: list[str] = []
-    for iface_name, addresses in psutil.net_if_addrs().items():
-        # Skip virtual bridge / container interfaces (docker0, br-*, virbr*,
-        # vmnet*, vboxnet*, veth*, k8s): they carry RFC1918 IPs that peers on the
-        # real LAN cannot route to and could otherwise outrank the LAN address.
-        if _is_virtual_iface(iface_name):
-            continue
-        for address in addresses:
-            if address.family != socket.AF_INET:
-                continue
-            try:
-                ip = ipaddress.ip_address(address.address)
-            except ValueError:
-                continue
-            if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
-                continue
-            routable.append(address.address)
-
-    # Prefer an RFC1918 LAN address (fast, reachable across the local switch)
-    # over a Tailscale/CGNAT (100.64.0.0/10) address over anything else; all beat
-    # the hostname fallback. CGNAT is also "private", so rank the ranges
-    # explicitly rather than relying on ``is_private``.
-    lan_nets = (
-        ipaddress.ip_network("10.0.0.0/8"),
-        ipaddress.ip_network("172.16.0.0/12"),
-        ipaddress.ip_network("192.168.0.0/16"),
-    )
-    cgnat_net = ipaddress.ip_network("100.64.0.0/10")
-
-    def _rank(address: str) -> int:
-        ip = ipaddress.ip_address(address)
-        if any(ip in net for net in lan_nets):
-            return 0
-        if ip in cgnat_net:
-            return 1
-        return 2
-
-    routable.sort(key=_rank)
-    return routable[0] if routable else hostname_fallback
+    return _routable_local_ipv4() or hostname_fallback
 
 
 def _configure_model_store_runtime(
@@ -345,6 +439,32 @@ def _configure_model_store_runtime(
     return store_client, store_server
 
 
+def _state_sync_store_http_host(
+    node_id: NodeId,
+    skulk_config: SkulkConfig | None,
+) -> str | None:
+    """Return this store host's routable address for cluster bootstrap."""
+
+    if (
+        skulk_config is None
+        or skulk_config.model_store is None
+        or not skulk_config.model_store.enabled
+    ):
+        return None
+    model_store = skulk_config.model_store
+    local_hostname = socket.gethostname()
+    if not node_matches_store_host(
+        model_store.store_host,
+        str(node_id),
+        hostname=local_hostname,
+    ):
+        return None
+    return _routable_store_advertise_host(
+        model_store.store_http_host,
+        local_hostname,
+    )
+
+
 @dataclass
 class Node:
     router: Router
@@ -365,6 +485,11 @@ class Node:
     # master re-election; the subscriber feeds it, the master/API read it.
     telemetry_view: TelemetryView
     telemetry_receiver: Receiver[NodeTelemetry]
+    data_plane_zenoh: bool = False
+    # Samples the router's live Zenoh peer-transport count for NodeResources
+    # advertisement and the local isolation warning. None only in tests that
+    # construct Node without create().
+    zenoh_peer_sampler: ZenohPeerSampler | None = None
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
 
     @classmethod
@@ -372,24 +497,17 @@ class Node:
         keypair = get_node_id_keypair()
         node_id = NodeId(keypair.to_node_id())
         session_id = SessionId(master_node_id=node_id, election_clock=0)
-        # Zenoh data plane (#279 follow-on). The DATA topic (per-token output)
-        # rides a Zenoh peer session instead of gossipsub; all other planes stay
-        # on libp2p. Endpoints are per-node (multicast off), so they come from
-        # the environment, not the gossip-synced config. Soft default-on (#315):
-        # Zenoh is the default WHEN configured (SKULK_ZENOH_LISTEN set) and a bare
-        # node with no Zenoh config falls back to gossipsub rather than crashing
-        # on the #308 listen requirement; SKULK_ZENOH_DATA_PLANE=1/0 forces it
-        # on/off explicitly. See _resolve_zenoh_enabled.
+        # Zenoh data plane (#279 follow-on). Node-addressed model output,
+        # provider media, and realtime PCM ingress ride a Zenoh peer session;
+        # all other planes stay on libp2p. Endpoint overrides are per-node, so
+        # they come from the environment rather than gossip-synced config.
+        # Zenoh is the shipping default, including for a fresh zero-config node.
+        # SKULK_ZENOH_DATA_PLANE can force it off; listen/connect overrides
+        # remain available for routed or locked-down deployments. See
+        # _resolve_zenoh_enabled.
         _zenoh_data_plane_env = os.environ.get("SKULK_ZENOH_DATA_PLANE", "")
         _zenoh_listen_env = os.environ.get("SKULK_ZENOH_LISTEN", "")
         _zenoh_on = _resolve_zenoh_enabled(_zenoh_data_plane_env, _zenoh_listen_env)
-        if not _zenoh_on and not _zenoh_data_plane_env.strip():
-            # Default path on a node with no listen configured: say why we're on
-            # gossipsub so the operator knows how to opt into Zenoh.
-            logger.info(
-                "DATA plane on gossipsub (default): SKULK_ZENOH_LISTEN unset. "
-                "Set it to use the Zenoh data plane."
-            )
         _zenoh_connect = [
             endpoint.strip()
             for endpoint in os.environ.get("SKULK_ZENOH_CONNECT", "").split(",")
@@ -398,14 +516,7 @@ class Node:
         _zenoh_listen_endpoints: list[str] | None = None
         _zenoh_namespace: str | None = None
         if _zenoh_on:
-            # Bind restriction (#308): require SKULK_ZENOH_LISTEN explicitly
-            # rather than silently defaulting to tcp/0.0.0.0:7447 (all
-            # interfaces). The operator picks the interface (a private IP on a
-            # shared network); an explicit 0.0.0.0 is still allowed but is then
-            # a deliberate choice, not a silent default.
-            _zenoh_listen = _require_zenoh_listen(
-                os.environ.get("SKULK_ZENOH_LISTEN", "")
-            )
+            _zenoh_listen = _resolve_zenoh_listen(_zenoh_listen_env)
             _zenoh_listen_endpoints = [_zenoh_listen]
             # Namespace isolation (#308): Zenoh transparently prefixes all keys
             # with this segment, so a peer on a different namespace cannot read
@@ -431,8 +542,8 @@ class Node:
                     f"prefer a specific private IP on a shared network (#308)."
                 )
             logger.warning(
-                f"Zenoh DATA plane ENABLED: generation "
-                f"output is served over Zenoh on {_zenoh_listen}, namespace"
+                f"Zenoh DATA plane ENABLED: model and provider media "
+                f"use Zenoh on {_zenoh_listen}, namespace"
                 f"-isolated (fingerprint {_namespace_fingerprint(_zenoh_namespace)}; "
                 f"{_LIBP2P_NAMESPACE_ENV_VAR} "
                 f"{'set' if _ns_override_set else 'unset, using default'}). There "
@@ -447,7 +558,13 @@ class Node:
             zenoh_connect_endpoints=_zenoh_connect,
             node_id=str(node_id),
             zenoh_namespace=_zenoh_namespace,
+            zenoh_multicast_scouting=not _zenoh_connect,
         )
+        # Data-plane connectivity ground truth (zenoh isolation visibility):
+        # sampled at every NodeResources advertisement and by the local
+        # isolation monitor. Created unconditionally; it reports None (unknown)
+        # when DATA rides gossipsub.
+        zenoh_peer_sampler = ZenohPeerSampler(router.zenoh_connected_peer_count)
         await router.register_topic(topics.GLOBAL_EVENTS)
         await router.register_topic(topics.LOCAL_EVENTS)
         await router.register_topic(topics.COMMANDS)
@@ -457,7 +574,15 @@ class Node:
         await router.register_topic(topics.STATE_SYNC_MESSAGES)
         await router.register_topic(topics.TELEMETRY)
         await router.register_topic(topics.DATA)
+        await router.register_topic(topics.PROVIDER_DATA)
+        await router.register_topic(topics.REALTIME_AUDIO)
+        await router.register_topic(topics.SPEECH_MEDIA)
+        await router.register_topic(topics.TRACE_DATA)
+        await router.register_topic(topics.VISION_MEDIA)
         telemetry_view = TelemetryView()
+        realtime_audio_sender, realtime_audio_receiver = channel[
+            RealtimeAudioInputFrame
+        ](64)
         event_router = EventRouter(
             node_id,
             session_id,
@@ -538,6 +663,7 @@ class Node:
                 node_id,
                 shard_downloader,
                 event_sender=event_router.sender(),
+                telemetry_sender=router.telemetry_sender(),
                 download_command_receiver=router.receiver(topics.DOWNLOAD_COMMANDS),
                 offline=args.offline,
                 staging_cache_path=coordinator_staging_path,
@@ -557,13 +683,39 @@ class Node:
                 store_client=store_client,
                 telemetry_view=telemetry_view,
                 data_receiver=router.receiver(topics.DATA),
+                provider_stream_sender=router.sender(topics.PROVIDER_DATA),
+                provider_stream_receiver=router.receiver(topics.PROVIDER_DATA),
+                realtime_audio_packet_sender=router.sender(topics.REALTIME_AUDIO),
+                realtime_audio_packet_receiver=router.receiver(
+                    topics.REALTIME_AUDIO
+                ),
+                speech_media_packet_sender=router.sender(topics.SPEECH_MEDIA),
+                speech_media_packet_receiver=router.receiver(topics.SPEECH_MEDIA),
+                trace_data_receiver=router.receiver(topics.TRACE_DATA),
+                vision_media_packet_sender=router.sender(topics.VISION_MEDIA),
+                vision_media_packet_receiver=router.receiver(topics.VISION_MEDIA),
+                realtime_audio_sender=(
+                    None if args.no_worker else realtime_audio_sender
+                ),
                 data_plane_zenoh=_zenoh_on,
+                data_plane_egress_provider=router.data_plane_egress_diagnostics,
+                vision_media_egress_provider=(
+                    router.vision_media_egress_diagnostics
+                ),
+                telemetry_plane_provider=router.telemetry_plane_diagnostics,
                 # Installed plugins (skulk.extensions entry points), discovered
-                # once per process; empty when none are installed.
+                # once per process. First-party provider facades are registered
+                # by the API and delegate to the existing core runtimes.
                 extensions=load_extensions(),
+                enable_builtin_providers=True,
             )
         else:
             api = None
+
+        if download_coordinator is not None and api is not None:
+            download_coordinator.config_applied_callback = (
+                api.refresh_config_dependent_capabilities
+            )
 
         if not args.no_worker:
             worker_store_client: ModelStoreClient | None = store_client
@@ -583,15 +735,42 @@ class Node:
                 event_sender=event_router.sender(),
                 command_sender=router.sender(topics.COMMANDS),
                 download_command_sender=router.sender(topics.DOWNLOAD_COMMANDS),
-                telemetry_sender=router.sender(topics.TELEMETRY),
+                telemetry_sender=router.telemetry_sender(),
                 telemetry_view=telemetry_view,
+                data_transport="zenoh" if _zenoh_on else "gossipsub",
+                zenoh_peer_sampler=zenoh_peer_sampler,
                 data_sender=router.sender(topics.DATA),
+                trace_data_sender=router.sender(topics.TRACE_DATA),
+                realtime_audio_receiver=realtime_audio_receiver,
+                realtime_audio_packet_receiver=router.receiver(
+                    topics.REALTIME_AUDIO
+                ),
+                speech_media_packet_receiver=router.receiver(topics.SPEECH_MEDIA),
+                vision_media_packet_sender=router.sender(topics.VISION_MEDIA),
+                vision_media_packet_receiver=router.receiver(topics.VISION_MEDIA),
+                connection_message_receiver=router.receiver(
+                    topics.CONNECTION_MESSAGES
+                ),
+                session_connection_snapshot=router.current_session_connections,
                 store_client=worker_store_client,
                 staging_config=worker_staging_cfg,
             )
+            if (
+                download_coordinator is not None
+                and isinstance(
+                    download_coordinator.shard_downloader,
+                    ModelStoreDownloader,
+                )
+            ):
+                download_coordinator.shard_downloader.set_staging_capacity_callback(
+                    worker.prepare_staging_transfer
+                )
             if api is not None:
                 api.set_runner_diagnostics_provider(worker.collect_runner_diagnostics)
                 api.set_runner_cancel_provider(worker.cancel_runner_task)
+                api.set_vision_media_ingress_provider(
+                    worker.collect_vision_media_ingress_diagnostics
+                )
         else:
             worker = None
 
@@ -607,6 +786,10 @@ class Node:
             state_sync_sender=router.sender(topics.STATE_SYNC_MESSAGES),
             download_command_sender=router.sender(topics.DOWNLOAD_COMMANDS),
             telemetry_view=telemetry_view,
+            state_sync_store_http_host=_state_sync_store_http_host(
+                node_id,
+                skulk_config,
+            ),
         )
 
         er_send, er_recv = channel[ElectionResult]()
@@ -639,6 +822,8 @@ class Node:
             store_server,
             telemetry_view,
             router.receiver(topics.TELEMETRY),
+            _zenoh_on,
+            zenoh_peer_sampler,
         )
 
     async def run(self):
@@ -649,6 +834,15 @@ class Node:
             tg.start_soon(self.event_router.run)
             tg.start_soon(self.election.run)
             tg.start_soon(self._run_telemetry)
+            if self.worker is None:
+                tg.start_soon(
+                    _publish_management_node_resources,
+                    self.node_id,
+                    "zenoh" if self.data_plane_zenoh else "gossipsub",
+                    self.router.telemetry_sender(),
+                    self.zenoh_peer_sampler,
+                )
+            tg.start_soon(self._monitor_zenoh_isolation)
             if self.store_server:
                 tg.start_soon(self.store_server.start)
             if self.download_coordinator:
@@ -672,6 +866,50 @@ class Node:
             async for message in messages:
                 self.telemetry_view.apply(message)
 
+    async def _monitor_zenoh_isolation(self) -> None:
+        """Warn loudly while this node's Zenoh data plane has zero peers.
+
+        The libp2p control plane keeps working when the Zenoh mesh never
+        forms (the canonical shape: a zero-config remote member that
+        multicast scouting cannot reach), so without this monitor the only
+        symptom is remote streams dying one at a time. Warns only when the
+        sampler reports a trustworthy 0 (post-grace) AND at least one other
+        node advertises Zenoh on telemetry, i.e. there is genuinely a mesh
+        this node should have joined. Cluster health raises the matching
+        ``zenoh_isolated`` reason from the advertised count; this local
+        warning is for the operator tailing THIS node's log.
+        """
+        if not self.data_plane_zenoh or self.zenoh_peer_sampler is None:
+            return
+        last_warning = 0.0
+        while True:
+            await anyio.sleep(_ZENOH_ISOLATION_CHECK_INTERVAL_SECONDS)
+            count = await self.zenoh_peer_sampler.advertised_count()
+            if count != 0:
+                continue
+            zenoh_peers = [
+                node_id
+                for node_id, resources in self.telemetry_view.node_resources.items()
+                if node_id != self.node_id and resources.data_transport == "zenoh"
+            ]
+            if not zenoh_peers:
+                continue
+            now = time.monotonic()
+            if now - last_warning < _ZENOH_ISOLATION_WARNING_INTERVAL_SECONDS:
+                continue
+            last_warning = now
+            logger.warning(
+                f"Zenoh data plane ISOLATED: this node has 0 Zenoh peer "
+                f"transports while {len(zenoh_peers)} other node(s) advertise "
+                f"the Zenoh data plane. Remote model/provider streams to and "
+                f"from this node WILL fail even though cluster membership "
+                f"looks healthy. If this node cannot reach peers via local "
+                f"multicast (e.g. it joined over a routed/overlay network), "
+                f"set SKULK_ZENOH_CONNECT to a reachable peer's Zenoh "
+                f"endpoint (tcp/<peer-ip>:7447) and ensure SKULK_ZENOH_LISTEN "
+                f"binds an address peers can dial."
+            )
+
     def shutdown(self):
         # if this is our second call to shutdown, just sys.exit
         if self._tg.cancel_called():
@@ -689,7 +927,7 @@ class Node:
             topics.STATE_SYNC_MESSAGES
         )
         with state_sync_receiver as messages:
-            for attempt in range(3):
+            for attempt in range(_CLUSTER_CONFIG_SYNC_ATTEMPTS):
                 await state_sync_sender.send(
                     StateSyncMessage(
                         kind="request",
@@ -697,7 +935,9 @@ class Node:
                         session_id=session_id,
                     )
                 )
-                with anyio.move_on_after(1.0):
+                with anyio.move_on_after(
+                    _CLUSTER_CONFIG_SYNC_RESPONSE_TIMEOUT_SECONDS
+                ):
                     async for origin, message in messages:
                         if message.kind != "response":
                             continue
@@ -708,8 +948,13 @@ class Node:
                         if origin != str(session_id.master_node_id):
                             continue
                         return message.config_yaml
-                if attempt < 2:
-                    await anyio.sleep(0.2)
+                if attempt < _CLUSTER_CONFIG_SYNC_ATTEMPTS - 1:
+                    await anyio.sleep(_CLUSTER_CONFIG_SYNC_RETRY_INTERVAL_SECONDS)
+        logger.warning(
+            "Authoritative cluster config was unavailable after "
+            f"{_CLUSTER_CONFIG_SYNC_ATTEMPTS} bootstrap attempts; retaining "
+            "the local config"
+        )
         return None
 
     def _apply_cluster_config_yaml(self, config_yaml: str) -> None:
@@ -718,6 +963,32 @@ class Node:
         config_path = resolve_config_path()
         config_path.write_text(config_yaml)
         self.skulk_config = load_skulk_config(config_path)
+
+    async def _apply_authoritative_cluster_config(self, config_yaml: str) -> None:
+        """Converge config plus every live model-store consumer atomically."""
+
+        previous_store_server = self.store_server
+        self._apply_cluster_config_yaml(config_yaml)
+        new_store_client, new_store_server = _configure_model_store_runtime(
+            self.node_id,
+            self.skulk_config,
+        )
+        self.store_client = new_store_client
+        if new_store_server is None:
+            if previous_store_server is not None:
+                await previous_store_server.stop()
+            self.store_server = None
+        else:
+            self.store_server = (
+                previous_store_server
+                if previous_store_server is not None
+                else new_store_server
+            )
+        if self.api is not None:
+            self.api.set_model_store_runtime(
+                self.skulk_config,
+                self.store_client,
+            )
 
     async def _broadcast_config_if_store_host(self) -> None:
         """If this node is the store host, broadcast a valid config to all nodes.
@@ -799,6 +1070,7 @@ class Node:
                 # - Shut down and re-create the API
 
                 start_replacement_event_router = False
+                start_replacement_download_coordinator = False
                 previous_store_server = self.store_server
                 if result.is_new_master:
                     await anyio.sleep(0)
@@ -865,6 +1137,10 @@ class Node:
                             topics.DOWNLOAD_COMMANDS
                         ),
                         telemetry_view=self.telemetry_view,
+                        state_sync_store_http_host=_state_sync_store_http_host(
+                            self.node_id,
+                            self.skulk_config,
+                        ),
                     )
                     self._tg.start_soon(self.master.run)
                 elif (
@@ -888,17 +1164,8 @@ class Node:
                         result.session_id
                     )
                     if authoritative_config_yaml is not None:
-                        self._apply_cluster_config_yaml(authoritative_config_yaml)
-                        new_store_client, new_store_server = (
-                            _configure_model_store_runtime(
-                                self.node_id, self.skulk_config
-                            )
-                        )
-                        self.store_client = new_store_client
-                        self.store_server = (
-                            previous_store_server
-                            if previous_store_server is not None
-                            else new_store_server
+                        await self._apply_authoritative_cluster_config(
+                            authoritative_config_yaml
                         )
                 if result.is_new_master:
                     if self.download_coordinator:
@@ -936,13 +1203,24 @@ class Node:
                             self.node_id,
                             elect_downloader,
                             event_sender=self.event_router.sender(),
+                            telemetry_sender=self.router.telemetry_sender(),
                             download_command_receiver=self.router.receiver(
                                 topics.DOWNLOAD_COMMANDS
                             ),
                             offline=self.offline,
                             staging_cache_path=elect_staging_path,
+                            config_applied_callback=(
+                                self.api.refresh_config_dependent_capabilities
+                                if self.api is not None
+                                else None
+                            ),
                         )
-                        self._tg.start_soon(self.download_coordinator.run)
+                        # Do not start receiving StartDownload commands until
+                        # the replacement worker below has attached the
+                        # staging-capacity callback. Worker shutdown yields,
+                        # so starting here creates a window where store-backed
+                        # transfers bypass disk admission entirely.
+                        start_replacement_download_coordinator = True
                     if self.worker:
                         await self.worker.shutdown()
                         ms2 = (
@@ -972,15 +1250,48 @@ class Node:
                             # telemetry_view) the node never reappears in
                             # node_resources, so placement silently treats a
                             # management/edge node as eligible (#279 review).
-                            telemetry_sender=self.router.sender(topics.TELEMETRY),
+                            telemetry_sender=self.router.telemetry_sender(),
                             telemetry_view=self.telemetry_view,
+                            data_transport=(
+                                "zenoh" if self.data_plane_zenoh else "gossipsub"
+                            ),
+                            zenoh_peer_sampler=self.zenoh_peer_sampler,
                             # Must ALSO match Node.create's wiring: without this
                             # the recreated worker has no data sender, so every
                             # generation output chunk falls back to the event
                             # plane — which the API no longer routes (#279 Phase
                             # 2a) — and every completion stream hangs forever.
                             data_sender=self.router.sender(topics.DATA),
+                            trace_data_sender=self.router.sender(topics.TRACE_DATA),
+                            realtime_audio_packet_receiver=self.router.receiver(
+                                topics.REALTIME_AUDIO
+                            ),
+                            speech_media_packet_receiver=self.router.receiver(
+                                topics.SPEECH_MEDIA
+                            ),
+                            connection_message_receiver=self.router.receiver(
+                                topics.CONNECTION_MESSAGES
+                            ),
+                            session_connection_snapshot=(
+                                self.router.current_session_connections
+                            ),
+                            vision_media_packet_sender=self.router.sender(
+                                topics.VISION_MEDIA
+                            ),
+                            vision_media_packet_receiver=self.router.receiver(
+                                topics.VISION_MEDIA
+                            ),
                         )
+                        if (
+                            self.download_coordinator is not None
+                            and isinstance(
+                                self.download_coordinator.shard_downloader,
+                                ModelStoreDownloader,
+                            )
+                        ):
+                            self.download_coordinator.shard_downloader.set_staging_capacity_callback(
+                                self.worker.prepare_staging_transfer
+                            )
                         self._tg.start_soon(self.worker.run)
                         if self.api is not None:
                             self.api.set_runner_diagnostics_provider(
@@ -989,6 +1300,12 @@ class Node:
                             self.api.set_runner_cancel_provider(
                                 self.worker.cancel_runner_task
                             )
+                            self.api.set_vision_media_ingress_provider(
+                                self.worker.collect_vision_media_ingress_diagnostics
+                            )
+                    if start_replacement_download_coordinator:
+                        assert self.download_coordinator is not None
+                        self._tg.start_soon(self.download_coordinator.run)
                     if self.api:
                         self.api.reset(
                             result.won_clock,
@@ -1008,6 +1325,12 @@ class Node:
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "doctor":
+        # `skulk doctor` is a standalone audit, not a node launch: dispatch
+        # before Args.parse() so the node argument parser never sees it.
+        from skulk.doctor.cli import main as doctor_main
+
+        sys.exit(doctor_main(sys.argv[2:]))
     args = Args.parse()
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     target = min(max(soft, 65535), hard)
@@ -1056,6 +1379,32 @@ def main():
         )
     else:
         logger.info(f"{_LIBP2P_NAMESPACE_ENV_VAR} unset, using default")
+
+    # Engine auto-provisioning (#614 Phase 3): before any serving decision,
+    # ensure a Linux node without an explicit llama-server override has the
+    # pinned managed build (fetch + checksum-verify on first run), then
+    # re-derive capability facts so the advertised backends include it. macOS
+    # and opted-out nodes return immediately. --offline nodes never reach for
+    # the network (the air-gapped contract covers engine artifacts exactly
+    # like model downloads) but still wire an already-provisioned managed
+    # install from disk, so an offline restart keeps its served capability.
+    # Management-only launches skip entirely (whether via --no-worker or the
+    # declared SKULK_NODE_PARTICIPATION=management): they are never placement
+    # candidates and must stay side-effect free.
+    declared_participation = (
+        os.environ.get("SKULK_NODE_PARTICIPATION", "").strip().lower()
+    )
+    if not args.no_worker and declared_participation != "management":
+        from skulk.facts import current_node_facts, refresh_node_facts
+        from skulk.provisioning import ensure_llama_server
+
+        if (
+            ensure_llama_server(
+                current_node_facts(), allow_download=not args.offline
+            )
+            is not None
+        ):
+            refresh_node_facts()
 
     if args.spawn_api:
         preflight_api_port(args.api_port)

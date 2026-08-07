@@ -15,6 +15,34 @@ export interface ChatUploadedFile {
   preview?: string;
 }
 
+/** Audio container formats the dashboard can request from Skulk TTS models. */
+export type AudioResponseFormat = 'mp3' | 'wav' | 'flac' | 'ogg' | 'opus' | 'pcm';
+
+/** Mounted speech model option shown by the chat voice controls. */
+export interface ChatSpeechModelOption {
+  modelId: string;
+  label: string;
+  defaultResponseFormat?: AudioResponseFormat | null;
+  responseFormats: AudioResponseFormat[];
+  supportsVoiceListing?: boolean;
+  /** Validated card default used when automatic language matching has no match. */
+  defaultVoice?: string | null;
+  /** Whether the mounted model supports progressive audio generation. */
+  supportsStreaming?: boolean;
+  /** Whether the model truthfully supports progressive realtime transcription. */
+  supportsRealtime?: boolean;
+  /** Whether the model accepts request-scoped reference audio for voice conditioning. */
+  supportsReferenceAudio?: boolean;
+}
+
+/** One stable voice returned by the mounted model's discovery endpoint. */
+export interface ChatVoiceOption {
+  id: string;
+  name: string;
+  /** Ordered BCP 47 language tags for which the model recommends this voice. */
+  preferredLanguages: string[];
+}
+
 /** Attachment persisted on an individual chat message. */
 export interface MessageAttachment {
   id: string;

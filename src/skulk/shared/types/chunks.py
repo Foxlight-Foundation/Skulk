@@ -1,7 +1,7 @@
 from collections.abc import Generator
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from skulk.api.types import (
     FinishReason,
@@ -11,10 +11,11 @@ from skulk.api.types import (
     TopLogprobItem,
     Usage,
 )
-from skulk.shared.models.model_cards import ModelId
+from skulk.shared.models.model_cards import AudioResponseFormat, ModelId
 from skulk.utils.pydantic_ext import CamelCaseModel, TaggedModel
 
 from .common import CommandId, NodeId
+from .streaming import StreamFrameKind, is_terminal_stream_frame_kind
 
 
 class BaseChunk(TaggedModel):
@@ -80,11 +81,82 @@ class InputImageChunk(BaseChunk):
                 yield name, value
 
 
+class AudioInputChunk(BaseChunk):
+    """Base64-encoded input audio chunk for speech-to-text requests."""
+
+    command_id: CommandId
+    data: str
+    chunk_index: int
+    total_chunks: int
+    filename: str | None = None
+    content_type: str | None = None
+    audio_sha256: str
+
+    def __repr_args__(self) -> Generator[tuple[str, Any], None, None]:
+        for name, value in super().__repr_args__():  # pyright: ignore[reportAny]
+            if name == "data" and hasattr(value, "__len__"):  # pyright: ignore[reportAny]
+                yield name, f"<{len(self.data)} chars>"
+            elif name is not None:
+                yield name, value
+
+
+InputChunk = InputImageChunk | AudioInputChunk
+
+
 class EmbeddingChunk(BaseChunk):
     """Response chunk for embedding inference — single batch response, no streaming."""
 
     embeddings: list[list[float]]
     token_count: int
+
+
+class AudioChunk(BaseChunk):
+    """Encoded audio output chunk for speech-synthesis responses."""
+
+    data: str
+    """Base64-encoded audio bytes for this chunk."""
+    chunk_index: int
+    """Zero-based chunk index within the response."""
+    total_chunks: int | None = None
+    """Total number of chunks when known for non-streaming responses."""
+    format: AudioResponseFormat
+    """Encoded audio format for ``data``."""
+    sample_rate: int | None = None
+    """Audio sample rate in hertz when the runner reports it."""
+    is_partial: bool = False
+    """Whether this chunk is a partial streaming result."""
+    finish_reason: FinishReason | None = None
+    """Terminal reason when this is the last output chunk."""
+    error_message: str | None = None
+    """Error text when a speech runner fails after beginning output."""
+
+    def __repr_args__(self) -> Generator[tuple[str, Any], None, None]:
+        for name, value in super().__repr_args__():  # pyright: ignore[reportAny]
+            if name == "data" and hasattr(value, "__len__"):  # pyright: ignore[reportAny]
+                yield name, f"<{len(self.data)} chars>"
+            elif name is not None:
+                yield name, value
+
+
+class TranscriptionChunk(BaseChunk):
+    """Text output chunk for speech-to-text and speech-translation responses."""
+
+    text: str
+    """Transcript or translated text carried by this chunk."""
+    segment_index: int | None = None
+    """Model-provided segment index when the runner reports segmented output."""
+    is_partial: bool = False
+    """Whether this chunk is an interim streaming transcript."""
+    language: str | None = None
+    """Detected or requested language code when available."""
+    segments: list[dict[str, str | int | float | bool | None]] = Field(
+        default_factory=list
+    )
+    """Model-provided segment metadata normalized for verbose transcript formats."""
+    finish_reason: FinishReason | None = None
+    """Terminal reason when this is the last output chunk."""
+    error_message: str | None = None
+    """Error text when a speech runner fails after beginning output."""
 
 
 class PrefillProgressChunk(BaseChunk):
@@ -100,33 +172,42 @@ GenerationChunk = (
     | ToolCallChunk
     | ErrorChunk
     | EmbeddingChunk
+    | AudioChunk
+    | TranscriptionChunk
     | PrefillProgressChunk
 )
 
 
 class DataChunk(CamelCaseModel):
-    """A generation output chunk on the data plane (#279 Phase 2).
+    """One ordered lifecycle frame on the serving data plane.
 
-    Carries the same ``{command_id, chunk}`` payload as the ``ChunkGenerated``
-    event, but travels the ``DATA`` topic directly from the serving rank-0
-    worker to the owning API node: it is never indexed by the master, written to
-    the event log, or rebroadcast cluster-wide. The owning API node demuxes by
-    ``command_id`` into its per-command stream queue, exactly as it did for the
-    event. Output chunks never mutate ``State`` (apply was a no-op), so removing
-    them from the ordered log is loss-free for correctness while eliminating the
-    per-token master hop + disk write that dominated event-log volume (#278).
+    Frames travel directly from the serving rank-0 worker to the owning API
+    node: they are never indexed by the master, written to the event log, or
+    rebroadcast cluster-wide. ``kind`` makes stream start and termination
+    explicit while payload-bearing frames retain the existing
+    ``GenerationChunk`` contract used by endpoint queues.
 
-    ``sequence`` is a per-command monotonic counter stamped by the producing
-    rank-0 supervisor (0, 1, 2, ...). The control plane this replaced gave every
-    chunk a total order via the master's event ``idx``; the ``DATA`` gossip topic
-    has no such order, and when the producing worker and the owning API node are
-    different nodes the mesh can deliver a command's chunks out of order, which
-    silently transposed multi-node generation output. The API reorders by
-    ``sequence`` before yielding (see ``API._reorder_and_dispatch``).
+    ``sequence`` is monotonic across every lifecycle and payload frame for one
+    command. The API reorders whole frames before observing or dispatching them,
+    so lifecycle state and output remain coherent on transports that can reorder.
     """
 
     command_id: CommandId
-    chunk: GenerationChunk
+    kind: StreamFrameKind = Field(
+        default="chunk",
+        description=(
+            "Explicit stream lifecycle kind. Producers emit started first, then "
+            "zero or more chunk frames, and exactly one completed, failed, or "
+            "cancelled terminal frame."
+        ),
+    )
+    chunk: GenerationChunk | None = Field(
+        default=None,
+        description=(
+            "Endpoint payload for chunk frames and terminal frames that carry a "
+            "final result or ErrorChunk. Lifecycle-only frames omit it."
+        ),
+    )
     sequence: int
     owner_node: NodeId | None = Field(
         default=None,
@@ -140,3 +221,25 @@ class DataChunk(CamelCaseModel):
             "and it is None only for output with no recorded owner."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_lifecycle_payload(self) -> "DataChunk":
+        """Reject lifecycle frames that cannot be interpreted consistently."""
+
+        if self.kind == "started" and self.chunk is not None:
+            raise ValueError("started data-plane frames must not carry a chunk")
+        if self.kind == "chunk" and self.chunk is None:
+            raise ValueError("chunk data-plane frames must carry a chunk")
+        if self.kind in ("failed", "cancelled") and not isinstance(
+            self.chunk, ErrorChunk
+        ):
+            raise ValueError(
+                f"{self.kind} data-plane frames must carry an ErrorChunk"
+            )
+        return self
+
+    @property
+    def is_terminal(self) -> bool:
+        """Whether this frame closes its command stream."""
+
+        return is_terminal_stream_frame_kind(self.kind)

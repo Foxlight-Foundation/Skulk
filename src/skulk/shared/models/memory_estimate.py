@@ -16,6 +16,8 @@ on real loads.
 """
 
 from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
+from typing import Final
 
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.types.common import NodeId
@@ -90,6 +92,18 @@ persist ``head_dim``). 128 dominates current MLX families (Llama/Qwen/GLM)."""
 KV_DTYPE_BYTES: int = 2
 """Bytes per KV-cache element. MLX keeps the KV cache in fp16 even for 4-bit
 weights unless quantized-KV is explicitly enabled, which Skulk does not."""
+
+LLAMA_CPP_FULL_SWA_CACHE: Final = False
+"""Whether the in-process llama.cpp runner expands sliding-window attention.
+
+This is part of the memory-admission contract, not a performance preference.
+The generic GGUF estimate conservatively charges every layer for the full
+context using the card's scalar KV geometry. That safely overestimates a
+bounded sliding-window cache, but it can underestimate ``swa_full=True`` for
+architectures whose sliding layers use wider K/V tensors than their global
+layers. Keep the runner tied to this constant so a dependency default cannot
+silently invalidate the context window Skulk admitted.
+"""
 
 
 def memory_overhead_factor(model_card: ModelCard) -> float:
@@ -167,6 +181,78 @@ def gpu_working_set_ceiling(ram_total: Memory) -> Memory:
     return ram_total * GPU_WORKING_SET_FRACTION
 
 
+# The served engines that size a fixed context WINDOW at load from
+# ``serving_n_ctx``: in-process llama.cpp and llama-server allocate ``n_ctx`` of KV
+# up front (OOM-kill on overflow); vLLM passes it as ``vllm serve --max-model-len``
+# (the max sequence length the loaded server accepts). All three need the served-context
+# clamps and the worker fit-guard sized to the real window. MLX is NOT here: it
+# grows KV lazily per request, so it must not be force-clamped (that would regress
+# MLX context).
+_UPFRONT_WINDOW_ENGINE_PREFIXES: Final = ("llama_cpp", "llama_server", "vllm")
+
+#: Ceiling on the context window stamped (and therefore served and
+#: admitted-against) for vLLM-resolved placements, until vLLM-aware admission
+#: models engine-start cost. vLLM pre-allocates and CUDA-graph-captures its
+#: FULL ``--max-model-len`` at startup: a 262k-context card turned a
+#: ~3-minute bring-up into ~90 minutes on an A100-80GB even though the window
+#: fit in memory. Applied at the stamp so placement admission and the served
+#: window can never disagree (PR #649 review, both reviewers); the runner
+#: min()s against the same constant as defense in depth.
+VLLM_MAX_MODEL_LEN: Final = 32768
+
+
+def shard_preallocates_kv_upfront(shard: ShardMetadata) -> bool:
+    """Whether the runner for THIS shard commits a fixed context window at load.
+
+    True for the served engines that size their load-time context from
+    ``serving_n_ctx`` (llama.cpp, llama-server, vLLM); false for MLX (lazy KV).
+    Those engines must have the served-context clamps and the worker fit-guard
+    sized to the real window, or a stamped 32k/64k context could exceed what loads.
+
+    Keys off the placement-RESOLVED backend (``shard.resolved_backend``, the engine
+    this shard actually runs on) when available, which is the precise per-placement
+    signal: a hybrid card that also allows MLX but resolves to a served engine on a
+    non-MLX node is correctly treated as committing a window, and the same card
+    resolving to ``mlx`` is not -- no MLX regression in the common (resolved) case.
+
+    When the backend is UNRESOLVED (an exact ``CreateInstance`` payload, or a
+    placement made before ``NodeResources`` gossiped, where the worker later falls
+    back to its own local backend probe) it is CONSERVATIVE: any gguf pin OR any
+    served-engine compatible-backend tag makes it window-committing, even for a card
+    that ALSO lists MLX. We cannot prove such a shard will run MLX, and on a
+    non-Darwin node the local probe won't advertise MLX and may dispatch it to a
+    served engine -- so a load-time OOM / spawn failure from an unclamped window is
+    the worse outcome than a conservatively floored context in that transient, rare
+    window. MLX-only cards (no served tag) still grow KV lazily and are not clamped.
+    """
+    resolved = shard.resolved_backend
+    if resolved is not None:
+        return resolved.startswith(_UPFRONT_WINDOW_ENGINE_PREFIXES)
+    card = shard.model_card
+    if card.gguf_file:
+        return True
+    return any(
+        tag.startswith(_UPFRONT_WINDOW_ENGINE_PREFIXES)
+        for tag in card.placement.compatible_backends
+    )
+
+
+def backend_offloads_to_vram(resolved_backend: str | None) -> bool:
+    """Whether a resolved backend allocates weights + KV from DISCRETE GPU VRAM.
+
+    A GPU compute tag (``llama_cpp-cuda`` / ``-rocm``, ``llama_server-cuda`` /
+    ``-rocm``, ``vllm-cuda`` / ``-rocm``) offloads to VRAM. A ``-cpu`` tag OR a
+    bare engine tag (no compute suffix) does not offload to the GPU and allocates
+    from system RAM, so it does NOT. ``None`` (unresolved) is treated as not-VRAM:
+    we cannot confirm VRAM offload, so the caller stays conservative.
+    """
+    if resolved_backend is None:
+        return False
+    return resolved_backend.startswith(
+        ("llama_cpp-", "llama_server-", "vllm-")
+    ) and not resolved_backend.endswith("-cpu")
+
+
 def per_token_kv_bytes(model_card: ModelCard) -> int:
     """Whole-model KV-cache bytes consumed by ONE token of context.
 
@@ -211,6 +297,7 @@ def instance_context_token_limit(
     shard_assignments: ShardAssignments,
     node_ram_totals: Mapping[NodeId, Memory],
     node_vram: Mapping[NodeId, Memory] | None = None,
+    unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
 ) -> int | None:
     """Deterministic context-token ceiling for one placed instance.
 
@@ -227,16 +314,22 @@ def instance_context_token_limit(
     master has indexed memory for every hosting node, so every worker computes
     the identical value. Time-varying ``ram_available`` must NOT be used here.
 
-    ``node_vram`` (a node's usable discrete-GPU VRAM, see ``usable_vram_by_node``)
-    is the working-set ceiling for a GPU-offload node, mirroring the memory-fit
+    ``node_vram`` (a node's usable GPU memory, see ``usable_vram_by_node``) is
+    the working-set ceiling for a GPU-offload node, mirroring the memory-fit
     admission: without it a model whose weights exceed ``0.75 * ram_total`` but
-    fit in VRAM would get a negative KV budget and a 0-token ceiling (every
-    request rejected), even though placement admitted it against VRAM.
+    fit in GPU memory would get a negative KV budget and a 0-token ceiling
+    (every request rejected), even though placement admitted it against that
+    pool. ``unified_memory_gpu_nodes`` distinguishes APUs whose usable pool
+    includes host RAM from true discrete VRAM. Fixed-window served engines may
+    lift above the conservative context floor only on the latter: on an APU,
+    llama.cpp's load-time GPU allocation also consumes host pages and a
+    combined-pool steady-state fit does not bound that transient allocation.
 
     Returns ``None`` when no ceiling is enforceable (unknown KV cost or
     missing node memory, falling back to the card limit when that exists).
     """
     node_vram = node_vram or {}
+    unified_memory_gpu_nodes = unified_memory_gpu_nodes or frozenset()
     model_card: ModelCard | None = None
     memory_limit: int | None = None
     for shard in shard_assignments.runner_to_shard.values():
@@ -244,6 +337,15 @@ def instance_context_token_limit(
         break
     if model_card is None:
         return None
+    # Whether this placement is served by a window-committing engine (llama.cpp /
+    # llama-server / vLLM, per shard_preallocates_kv_upfront), keyed off the resolved
+    # backend per shard. Gates the load-time OOM/spawn-failure clamps below. All
+    # shards of an instance share the engine, so any window-committing shard makes
+    # the instance window-committing.
+    served_preallocates = any(
+        shard_preallocates_kv_upfront(shard)
+        for shard in shard_assignments.runner_to_shard.values()
+    )
 
     whole_model_token_bytes = per_token_kv_bytes(model_card)
     if whole_model_token_bytes > 0:
@@ -268,6 +370,40 @@ def instance_context_token_limit(
                 node_tokens if memory_limit is None else min(memory_limit, node_tokens)
             )
 
+    # A window-committing served engine commits this context at load (serving_n_ctx),
+    # so it must fit the memory actually available then. On a discrete-VRAM node the
+    # fit above is derived from VRAM -- the same pool placement admits against -- so
+    # the lift is safe (and validated on GPU hardware). On a node WITHOUT discrete
+    # VRAM the fit is derived from static ``ram_total`` (for cross-rank determinism),
+    # but the load-time window competes with live ``ram_available`` (which placement
+    # admits against and which can be far lower under memory pressure), so a
+    # ram_total-sized window could OOM the node on load. Keep such placements at the
+    # budget floor; the memory-fit lift applies to discrete-VRAM (GPU) nodes.
+    # ``node_vram`` membership is static per node, so this stays deterministic.
+    if served_preallocates and memory_limit is not None:
+        # Keep the lift only where the served window lands in DISCRETE VRAM (the
+        # pool placement admitted against): every hosting shard must both resolve
+        # to a GPU-offload backend (``-cuda`` / ``-rocm``; a ``-cpu`` / bare tag
+        # does not offload to the GPU and commits the window in SYSTEM RAM, which
+        # competes with live ram_available) AND run on a node reporting discrete
+        # VRAM. A unified-memory APU remains in ``node_vram`` for placement because
+        # its GPU can use the combined carve-out + GTT pool, but it is explicitly
+        # excluded here: llama.cpp's load-time amdgpu allocations consume host
+        # pages too, so a steady-state combined-pool fit can still globally OOM the
+        # node while committing a large fixed KV window. Anything else -- UMA,
+        # CPU-resolved on a GPU node, a non-VRAM node, or an unresolved backend --
+        # clamps to the floor to avoid a load-time OOM.
+        lift_in_vram = all(
+            node_vram.get(node_id) is not None
+            and node_id not in unified_memory_gpu_nodes
+            and backend_offloads_to_vram(
+                shard_assignments.runner_to_shard[runner_id].resolved_backend
+            )
+            for node_id, runner_id in shard_assignments.node_to_runner.items()
+        )
+        if not lift_in_vram:
+            memory_limit = min(memory_limit, KV_CONTEXT_BUDGET_TOKENS)
+
     card_limit = model_card.context_length if model_card.context_length > 0 else None
     if memory_limit is None:
         limit = card_limit
@@ -276,19 +412,60 @@ def instance_context_token_limit(
     else:
         limit = min(memory_limit, card_limit)
 
-    # The llama.cpp runner allocates its KV cache up front and caps the loaded
-    # context to KV_CONTEXT_BUDGET_TOKENS (the same budget placement reserves; see
-    # the runner's serving_n_ctx). The memory/card ceiling above can be far
-    # larger (tens of thousands of tokens), so without this a request between the
-    # budget and that ceiling is ADMITTED by the API but exceeds the runner's
-    # loaded window and fails/truncates at generation instead of being cleanly
-    # rejected (#362; logprobs lowers the runner window further, the original
-    # report). Cap a GGUF/llama.cpp instance's admission ceiling to the budget so
-    # admission matches what the runner actually serves. (Serving beyond the
-    # budget needs placement to reserve the larger KV footprint first, tracked
-    # with VRAM-aware admission; when that lands both this cap and serving_n_ctx
-    # move together off the shared constant.)
-    if model_card.gguf_file:
+    # vLLM startup-cost cap (see VLLM_MAX_MODEL_LEN): applies when the
+    # placement resolves to the vllm engine (every shard's resolved_backend),
+    # falling back to the card declaring ONLY vllm backends when resolution
+    # has not happened yet. Deterministic: resolved backends and card
+    # backends are both static placement inputs.
+    resolved = [
+        shard.resolved_backend
+        for shard in shard_assignments.runner_to_shard.values()
+    ]
+    if any(r is not None for r in resolved):
+        placement_is_vllm = all(
+            r is not None and r.startswith("vllm") for r in resolved
+        )
+    else:
+        declared = model_card.placement.compatible_backends
+        placement_is_vllm = bool(declared) and all(
+            tag.startswith("vllm") for tag in declared
+        )
+    if placement_is_vllm:
+        limit = (
+            VLLM_MAX_MODEL_LEN if limit is None else min(limit, VLLM_MAX_MODEL_LEN)
+        )
+
+    # This ceiling is now the value the runner actually serves: the window-committing
+    # served engines (llama_cpp / llama_server / vllm, the runners that call
+    # ``serving_n_ctx``) commit their load-time context window at
+    # ``serving_n_ctx(context_token_limit)``, i.e. this memory-fit window, not a
+    # fixed 8192. The ceiling and the runner
+    # window moved off the shared constant together, as the previous fixed-clamp
+    # comment anticipated: placement's per-node fit is derived from the same working
+    # set as this ceiling, so a node admitted at the KV_CONTEXT_BUDGET_TOKENS floor
+    # can hold the KV for this larger window (see filter_cycles_by_memory and
+    # serving_n_ctx). The old fixed 8192 clamp made served models unusable for
+    # real-context work (a codebase does not fit in 8192 tokens). On an admitted
+    # node the memory fit is >= the floor, so the window is too -- EXCEPT when the
+    # model's own advertised max context is smaller, in which case it serves that
+    # smaller max (a 4k-context model serves 4k, not 8k).
+    #
+    # SAFETY (served engine, load-time OOM): a window-committing served engine
+    # (llama.cpp / llama-server / vLLM, per shard_preallocates_kv_upfront) commits a
+    # fixed context window at load, so it MUST be a real memory-fit value. When the
+    # fit is uncomputable (the card has no ``num_key_value_heads`` so
+    # ``per_token_kv_bytes`` is 0, node memory is missing, or an RPC-donor / CFG
+    # shard has no ``shard_fraction``), ``memory_limit`` is None and the branch above
+    # would fall back to the card's advertised max -- which for a 128k model would
+    # commit a fictitious window and OOM / fail to load. In that uncomputable case
+    # only, clamp the ceiling back to the budget floor (the old safety the fixed
+    # clamp used to provide). This does not affect MLX, which grows its KV cache
+    # lazily per request (no up-front window) and keeps the full memory/card fit.
+    #
+    # KV dtype (#584): the fit assumes fp16 KV (KV_DTYPE_BYTES); enabling KV-cache
+    # quantization must feed the estimate the quantized bytes-per-token or this
+    # ceiling would be sized against the wrong footprint.
+    if served_preallocates and memory_limit is None:
         limit = (
             KV_CONTEXT_BUDGET_TOKENS
             if limit is None

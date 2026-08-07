@@ -16,10 +16,14 @@ from skulk.utils.info_gatherer.info_gatherer import GatheredInfo, InfoGatherer
 
 
 def _quiet_gatherer(info_send: Sender[GatheredInfo]) -> InfoGatherer:
-    """A gatherer whose periodic monitors are all disabled, so the only
-    send is the startup NodeConfig — the exact line that crashed in #266."""
+    """A gatherer whose periodic monitors are all disabled.
+
+    Each test enables exactly the monitor it needs (the startup NodeConfig
+    send that originally crashed in #266, and that these tests first drove
+    their sends through, was removed in #633: it had no consumer)."""
     return InfoGatherer(
         info_sender=info_send,
+        heartbeat_poll_interval=None,
         interface_watcher_interval=None,
         misc_poll_interval=None,
         system_profiler_interval=None,
@@ -27,8 +31,11 @@ def _quiet_gatherer(info_send: Sender[GatheredInfo]) -> InfoGatherer:
         mactop_interval=None,
         thunderbolt_bridge_poll_interval=None,
         static_info_poll_interval=None,
+        node_resources_poll_interval=None,
         rdma_ctl_poll_interval=None,
         disk_poll_interval=None,
+        gpu_linux_poll_interval=None,
+        capabilities_poll_interval=None,
     )
 
 
@@ -61,13 +68,18 @@ async def test_consumer_closing_mid_run_stops_cleanly():
 
 
 async def test_real_errors_still_propagate(monkeypatch: pytest.MonkeyPatch):
-    # The consumer-gone handling must not swallow genuine faults.
+    # The consumer-gone handling must not swallow genuine faults. Monitor
+    # LOOPS deliberately catch per-iteration gather errors, so the fault is
+    # injected at the task level: a monitor coroutine that dies outright,
+    # which is exactly what run()'s group handling must re-raise (the
+    # one-shot NodeConfig send this test originally rode was removed in
+    # #633).
     from skulk.utils.info_gatherer import info_gatherer as module
 
-    async def explode():
+    async def explode(self: InfoGatherer) -> None:
         raise ValueError("genuine gatherer fault")
 
-    monkeypatch.setattr(module.NodeConfig, "gather", explode)
+    monkeypatch.setattr(module.InfoGatherer, "_monitor_static_info", explode)
     info_send, _info_recv = channel[GatheredInfo]()
     gatherer = _quiet_gatherer(info_send)
     with pytest.raises(BaseExceptionGroup) as exc_info:

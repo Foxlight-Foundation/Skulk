@@ -11,14 +11,24 @@ Phase 1 slice 1 carried only ``NodeResources`` (single reader: the planner).
 Slice 2 adds node memory and the system performance profile — the highest-volume
 ``NodeGatheredInfo`` readings — and the placement memory-fit check, dashboard,
 and power sampler now read them here instead of off the event log.
+``NodeHeartbeat`` names the primary liveness reading; ordinary telemetry
+receipt remains a separately tracked fallback.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from collections import OrderedDict
+from collections.abc import Mapping, Sequence
+from datetime import datetime, timedelta, timezone
 
 from skulk.shared.types.common import NodeId
-from skulk.shared.types.events import Event, NodeTimedOut
+from skulk.shared.types.events import (
+    Event,
+    NodeDownloadProgress,
+    NodeTimedOut,
+    StagedModelEvicted,
+    StateSnapshotHydrated,
+)
 from skulk.shared.types.profiling import (
     DiskUsage,
     MemoryUsage,
@@ -27,17 +37,33 @@ from skulk.shared.types.profiling import (
     NodeResources,
     SystemPerformanceProfile,
 )
+from skulk.shared.types.worker.downloads import (
+    DownloadAttemptId,
+    DownloadCompleted,
+    DownloadFailed,
+    DownloadOngoing,
+    DownloadPending,
+    DownloadProgress,
+    LiveDownloadProgress,
+)
 from skulk.utils.info_gatherer.info_gatherer import (
     GatheredInfo,
     LinuxGpuMetrics,
     MacmonMetrics,
     MactopMetrics,
     MiscData,
+    NodeCapabilities,
     NodeDiskUsage,
+    NodeHeartbeat,
     RdmaCtlStatus,
     StaticNodeInformation,
 )
 from skulk.utils.pydantic_ext import CamelCaseModel
+
+_DOWNLOAD_EVICTION_TOMBSTONE_CAPACITY = 4_096
+
+NODE_LIVENESS_TIMEOUT = timedelta(seconds=30)
+"""Maximum age for telemetry-only membership evidence."""
 
 # GatheredInfo variants that live on the telemetry plane (#279): gossiped
 # last-write-wins, never indexed or persisted. NodeResources (slice 1); memory +
@@ -57,10 +83,15 @@ TELEMETRY_PLANE_INFO = (
     MactopMetrics,
     MacmonMetrics,
     LinuxGpuMetrics,
+    NodeCapabilities,
     NodeDiskUsage,
     MiscData,
     StaticNodeInformation,
     RdmaCtlStatus,
+    NodeHeartbeat,
+    # Extension-advertised capability tags (fabric-citizenship): a plugin
+    # advertises what it offers so peers discover it, off the event log.
+    NodeCapabilities,
 )
 
 
@@ -70,7 +101,23 @@ class NodeTelemetry(CamelCaseModel):
     event: it is gossiped node -> all and never enters the event log."""
 
     node_id: NodeId
-    info: GatheredInfo
+    info: GatheredInfo | LiveDownloadProgress
+
+    def coalescing_key(self) -> str:
+        """Return the bounded latest-value identity used before network egress.
+
+        Ordinary telemetry has one latest value per node and reading class.
+        Concurrent downloads additionally key by model so progress for one model
+        cannot replace another model's progress on the same node.
+
+        Returns:
+            Stable process-local key used only by bounded admission.
+        """
+
+        if isinstance(self.info, (DownloadPending, DownloadOngoing)):
+            model_id = self.info.shard_metadata.model_card.model_id
+            return f"{self.node_id}:LiveDownloadProgress:{model_id}"
+        return f"{self.node_id}:{type(self.info).__name__}"
 
 
 class TelemetryView:
@@ -91,14 +138,69 @@ class TelemetryView:
         self.node_disk: dict[NodeId, DiskUsage] = {}
         self.node_identities: dict[NodeId, NodeIdentity] = {}
         self.node_rdma_ctl: dict[NodeId, NodeRdmaCtlStatus] = {}
-        # When this node last RECEIVED any telemetry from each peer. Telemetry
-        # gossips last-write-wins every ~1s to every node, so this is a live,
-        # cluster-wide liveness signal that (unlike State.last_seen) does not
-        # depend on connectivity events being logged/broadcast. nodeHealth reads it
-        # so the connectivity change-gate/de-dup (which stops the AMD gossip storm
-        # but leaves followers' State.last_seen stale) does not produce a false
-        # "heartbeats are late" warning on healthy nodes.
+        # Extension-advertised capability tags per node (fabric-citizenship).
+        # An extension on any node publishes what it offers (via the outbound
+        # `local_advertised_capabilities` set below); every node coalesces the
+        # readings here so a plugin can discover which peers offer which
+        # capability. Opaque free-form strings; Skulk core does not interpret them.
+        self.node_capabilities: dict[NodeId, frozenset[str]] = {}
+        # Non-terminal download status is observational and last-write-wins.
+        # Durable State retains only completed/failed terminal outcomes.
+        self.node_downloads: dict[NodeId, dict[str, LiveDownloadProgress]] = {}
+        self._node_download_attempts: dict[tuple[NodeId, str], DownloadAttemptId] = {}
+        self._node_download_terminal_attempts: dict[
+            tuple[NodeId, str], DownloadAttemptId | None
+        ] = {}
+        # A bounded model-wide tombstone prevents delayed telemetry from
+        # resurrecting a staged model after fleet-wide eviction. Its per-node
+        # mapping records only restart attempts proven by an ordered Pending
+        # event; telemetry alone can never create that proof.
+        self._download_eviction_tombstones: OrderedDict[
+            str, dict[NodeId, DownloadAttemptId | None]
+        ] = OrderedDict()
+        # This node's OWN outbound capability set: the write half of the plane.
+        # It lives on the shared view (not in State) so the API-side extension
+        # surface can add to it and the worker-side gatherer can read it, without
+        # threading a new channel through Node construction. Mutated by
+        # `ExtensionContext.advertise_capability`; polled by the InfoGatherer's
+        # `_monitor_capabilities` and gossiped as `NodeCapabilities`.
+        self.local_advertised_capabilities: set[str] = set()
+        # Receipt time of the explicit, payload-free liveness reading. The
+        # master treats this as its primary liveness signal.
+        self.node_last_heartbeat: dict[NodeId, datetime] = {}
+        # Receipt time of any NON-heartbeat telemetry. This remains a fallback
+        # liveness signal so a heartbeat collector defect cannot prune a node
+        # that is demonstrably still publishing ordinary telemetry.
         self.node_last_telemetry: dict[NodeId, datetime] = {}
+
+    def last_liveness_receipt(self, node_id: NodeId) -> datetime | None:
+        """Return the freshest heartbeat or fallback telemetry receipt.
+
+        Args:
+            node_id: Node whose local receipt timestamp should be selected.
+
+        Returns:
+            The freshest known receipt, or ``None`` before any telemetry from
+            the node has arrived.
+        """
+        receipts = [
+            receipt
+            for receipt in (
+                self.node_last_heartbeat.get(node_id),
+                self.node_last_telemetry.get(node_id),
+            )
+            if receipt is not None
+        ]
+        if not receipts:
+            return None
+        return max(
+            receipts,
+            key=lambda receipt: (
+                receipt
+                if receipt.tzinfo is not None
+                else receipt.replace(tzinfo=timezone.utc)
+            ).timestamp(),
+        )
 
     def prune(self, node_id: NodeId) -> None:
         """Drop all telemetry for a node that left the cluster.
@@ -116,14 +218,45 @@ class TelemetryView:
         self.node_disk.pop(node_id, None)
         self.node_identities.pop(node_id, None)
         self.node_rdma_ctl.pop(node_id, None)
+        self.node_capabilities.pop(node_id, None)
+        self.node_downloads.pop(node_id, None)
+        for attempts in (
+            self._node_download_attempts,
+            self._node_download_terminal_attempts,
+        ):
+            for key in [key for key in attempts if key[0] == node_id]:
+                attempts.pop(key, None)
+        for restart_attempts in self._download_eviction_tombstones.values():
+            restart_attempts.pop(node_id, None)
+        self.node_last_heartbeat.pop(node_id, None)
         self.node_last_telemetry.pop(node_id, None)
+        # local_advertised_capabilities is deliberately NOT pruned: it is this
+        # node's own outbound advertisement, not a peer reading, so a peer
+        # timing out must never clear what this node offers.
 
-    def apply(self, message: NodeTelemetry) -> None:
-        """Coalesce one telemetry message into the latest-value view."""
+    def apply(
+        self,
+        message: NodeTelemetry,
+        *,
+        received_at: datetime | None = None,
+    ) -> None:
+        """Coalesce one telemetry message into the latest-value view.
+
+        Args:
+            message: Reading received from the telemetry topic.
+            received_at: Local receipt time, injectable for deterministic tests.
+                Defaults to the current UTC time; sender clocks are never used.
+        """
         info = message.info
         node_id = message.node_id
-        # Receipt time = liveness signal (see node_last_telemetry above).
-        self.node_last_telemetry[node_id] = datetime.now(tz=timezone.utc)
+        receipt_time = received_at or datetime.now(tz=timezone.utc)
+        if isinstance(info, NodeHeartbeat):
+            self.node_last_heartbeat[node_id] = receipt_time
+        else:
+            self.node_last_telemetry[node_id] = receipt_time
+
+        if isinstance(info, NodeHeartbeat):
+            return
         if isinstance(info, NodeResources):
             self.node_resources[node_id] = info
         elif isinstance(info, MemoryUsage):
@@ -137,6 +270,55 @@ class TelemetryView:
             # AMD/Linux GPU collector: carries only the system profile (with its
             # accelerator block); node memory arrives separately via MemoryUsage.
             self.node_system[node_id] = info.system_profile
+        elif isinstance(info, NodeCapabilities):
+            self.node_capabilities[node_id] = info.capabilities
+        elif isinstance(info, (DownloadPending, DownloadOngoing)):
+            model_id = str(info.shard_metadata.model_card.model_id)
+            key = (node_id, model_id)
+            terminal_recorded = key in self._node_download_terminal_attempts
+            terminal_attempt = self._node_download_terminal_attempts.get(key)
+            eviction_restarts = self._download_eviction_tombstones.get(model_id)
+            evicted = eviction_restarts is not None and node_id not in eviction_restarts
+            if eviction_restarts is not None and not evicted:
+                restart_attempt = eviction_restarts[node_id]
+                if info.attempt_id != restart_attempt:
+                    # Once the ordered restart names an attempt, delayed
+                    # telemetry from every other attempt remains pre-eviction.
+                    return
+            if isinstance(info, DownloadOngoing) and (terminal_recorded or evicted):
+                # A new attempt always starts with Pending. Until that boundary
+                # arrives, every ongoing sample is stale relative to the
+                # terminal/eviction decision, including legacy samples without
+                # an ID.
+                return
+
+            current_attempt = self._node_download_attempts.get(key)
+            if isinstance(info, DownloadOngoing) and current_attempt is not None:
+                if info.attempt_id != current_attempt:
+                    # A cancel/reset establishes a fresh attempt before the old
+                    # producer necessarily stops. Never let that producer's tail
+                    # overwrite the reset on the independent telemetry protocol.
+                    return
+            elif isinstance(info, DownloadPending):
+                if evicted:
+                    # Only the ordered Pending event proves that an operator
+                    # started a new attempt after eviction. A delayed telemetry
+                    # sample can carry an ID too, but must not resurrect state.
+                    return
+                if terminal_recorded:
+                    if info.attempt_id is None or info.attempt_id == terminal_attempt:
+                        return
+                    self._node_download_terminal_attempts.pop(key, None)
+                elif current_attempt is not None and info.attempt_id != current_attempt:
+                    # A distinct Pending may begin a new attempt after a
+                    # terminal outcome even if telemetry wins the protocol race.
+                    # Without that terminal boundary, only ordered Pending may
+                    # advance the identity; delayed telemetry cannot roll it back.
+                    return
+
+            if info.attempt_id is not None:
+                self._node_download_attempts[key] = info.attempt_id
+            self.node_downloads.setdefault(node_id, {})[model_id] = info
         elif isinstance(info, NodeDiskUsage):
             self.node_disk[node_id] = info.disk_usage
         elif isinstance(info, RdmaCtlStatus):
@@ -168,6 +350,154 @@ class TelemetryView:
         # deliberately stay on the control plane — they define the topology
         # graph (see TELEMETRY_PLANE_INFO note above).
 
+    def effective_downloads(
+        self,
+        terminal_downloads: Mapping[NodeId, Sequence[DownloadProgress]],
+    ) -> dict[NodeId, list[DownloadProgress]]:
+        """Overlay live progress onto durable terminal download outcomes.
+
+        Args:
+            terminal_downloads: Event-sourced completed/failed outcomes.
+
+        Returns:
+            Per-node statuses for placement, worker planning, and operator views.
+            The returned mapping is detached from both source stores.
+        """
+
+        effective: dict[NodeId, list[DownloadProgress]] = {
+            node_id: list(progresses)
+            for node_id, progresses in terminal_downloads.items()
+        }
+        for node_id, live_by_model in self.node_downloads.items():
+            current = effective.setdefault(node_id, [])
+            for model_id, live_progress in live_by_model.items():
+                current[:] = [
+                    progress
+                    for progress in current
+                    if str(progress.shard_metadata.model_card.model_id) != model_id
+                ]
+                current.append(live_progress)
+        return effective
+
+    def record_download_event(self, event: NodeDownloadProgress) -> None:
+        """Apply terminal ordering metadata from one durable download event."""
+
+        progress = event.download_progress
+        model_id = str(progress.shard_metadata.model_card.model_id)
+        key = (progress.node_id, model_id)
+        live_by_model = self.node_downloads.get(progress.node_id)
+
+        if isinstance(progress, DownloadPending):
+            # A rare Pending event is a durable reset/start decision, not progress
+            # sampling. It clears an older terminal outcome and establishes the
+            # attempt that subsequent telemetry belongs to.
+            if progress.attempt_id is not None:
+                self._node_download_attempts[key] = progress.attempt_id
+            else:
+                self._node_download_attempts.pop(key, None)
+            self._node_download_terminal_attempts.pop(key, None)
+            eviction_restarts = self._download_eviction_tombstones.get(model_id)
+            if eviction_restarts is not None:
+                eviction_restarts[progress.node_id] = progress.attempt_id
+            if live_by_model is not None:
+                current = live_by_model.get(model_id)
+                if (
+                    current is not None
+                    and (
+                        progress.attempt_id is None
+                        or current.attempt_id != progress.attempt_id
+                    )
+                ):
+                    live_by_model.pop(model_id, None)
+            return
+
+        if not isinstance(progress, (DownloadCompleted, DownloadFailed)):
+            # Legacy event logs may contain DownloadOngoing. New producers never
+            # emit it on the ordered event plane.
+            return
+        current_attempt = self._node_download_attempts.get(key)
+        if progress.attempt_id is None and current_attempt is not None:
+            # Legacy terminal events cannot be ordered against an identified
+            # live attempt. Preserve the explicit attempt rather than letting
+            # an ambiguous replay hide current progress.
+            return
+        if (
+            progress.attempt_id is not None
+            and current_attempt is not None
+            and progress.attempt_id != current_attempt
+        ):
+            # A terminal event from an older attempt can race with the next
+            # attempt's Pending telemetry. The ordered Pending control event
+            # will clear its durable outcome; do not disturb the newer view.
+            return
+        if progress.attempt_id is not None:
+            self._node_download_attempts[key] = progress.attempt_id
+        self._node_download_terminal_attempts[key] = progress.attempt_id
+        if live_by_model is not None:
+            current = live_by_model.get(model_id)
+            if (
+                current is not None
+                and (
+                    progress.attempt_id is None
+                    or current.attempt_id is None
+                    or current.attempt_id == progress.attempt_id
+                )
+            ):
+                live_by_model.pop(model_id, None)
+
+    def remove_download_model(self, model_id: str) -> None:
+        """Drop live and ordering metadata for one globally evicted model."""
+
+        keys = {
+            key
+            for key in (
+                *self._node_download_attempts,
+                *self._node_download_terminal_attempts,
+            )
+            if key[1] == model_id
+        }
+        for node_id, downloads in list(self.node_downloads.items()):
+            if model_id in downloads:
+                keys.add((node_id, model_id))
+            downloads.pop(model_id, None)
+            if not downloads:
+                self.node_downloads.pop(node_id, None)
+        for key in keys:
+            self._node_download_attempts.pop(key, None)
+            self._node_download_terminal_attempts.pop(key, None)
+        self._download_eviction_tombstones.pop(model_id, None)
+        self._download_eviction_tombstones[model_id] = {}
+        while len(self._download_eviction_tombstones) > _DOWNLOAD_EVICTION_TOMBSTONE_CAPACITY:
+            self._download_eviction_tombstones.popitem(last=False)
+
+    def record_download_snapshot(
+        self,
+        downloads: Mapping[NodeId, Sequence[DownloadProgress]],
+    ) -> None:
+        """Seed terminal ordering from an authoritative hydrated state.
+
+        Args:
+            downloads: Download outcomes carried by the state snapshot.
+        """
+
+        # Hydration is authoritative for durable outcomes. Live progress and
+        # attempt identities belong to the prior in-memory view and must not
+        # survive a failover seed or component bootstrap.
+        self.node_downloads.clear()
+        self._node_download_attempts.clear()
+        self._node_download_terminal_attempts.clear()
+        for restart_attempts in self._download_eviction_tombstones.values():
+            restart_attempts.clear()
+        for progresses in downloads.values():
+            for progress in progresses:
+                if not isinstance(progress, (DownloadCompleted, DownloadFailed)):
+                    # Older snapshots can still decode transient variants; they
+                    # are replay-compatible input, not durable snapshot state.
+                    continue
+                self.record_download_event(
+                    NodeDownloadProgress(download_progress=progress)
+                )
+
 
 def record_membership_from_event(view: TelemetryView, event: Event) -> None:
     """Prune a node's telemetry when it leaves the cluster.
@@ -186,3 +516,9 @@ def record_membership_from_event(view: TelemetryView, event: Event) -> None:
     """
     if isinstance(event, NodeTimedOut):
         view.prune(event.node_id)
+    elif isinstance(event, NodeDownloadProgress):
+        view.record_download_event(event)
+    elif isinstance(event, StagedModelEvicted):
+        view.remove_download_model(str(event.model_id))
+    elif isinstance(event, StateSnapshotHydrated):
+        view.record_download_snapshot(event.state.downloads)

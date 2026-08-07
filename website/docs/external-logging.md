@@ -206,6 +206,12 @@ All knobs live in `~/.skulk/skulk.env` and are picked up by both the Skulk and V
 | `SKULK_VECTOR_DATA_DIR` | Where Vector keeps its disk buffer and file checkpoints | `~/.skulk/vector` |
 | `SKULK_LOG_FILE` | Override the source file Vector tails | `~/.skulk/logs/skulk.stdout.log` |
 
+The supervised-service wrapper resolves the default data and log paths to
+absolute paths before starting Vector. This matters because Vector does not
+recursively expand nested environment-variable defaults; leaving `${HOME}` for
+Vector to resolve can otherwise create a literal `${HOME}` directory under the
+service working directory.
+
 After editing, restart the relevant agents (the table in the [service guide](./run-skulk-as-a-service.md#day-to-day-operations) has the commands).
 
 ## Things that go wrong

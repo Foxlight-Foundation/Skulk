@@ -20,16 +20,24 @@ from typing import Literal, final
 
 from pydantic import ConfigDict
 
+from skulk.api.build_identity import (
+    git_commit_identifiers_disagree,
+    known_build_identifier,
+)
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.profiling import DiskUsage
+from skulk.shared.types.node_facts import CONFLICT_ERROR_CODES
+from skulk.shared.types.profiling import (
+    DiskUsage,
+    NodeDataTransport,
+    NodeIdentity,
+    NodeResources,
+)
 from skulk.shared.types.worker.downloads import DownloadFailed, DownloadProgress
 from skulk.utils.pydantic_ext import CamelCaseModel
 
-# A node is pruned from the cluster once its heartbeat is ~30s stale (the
-# master's NodeTimedOut threshold), so a still-present node whose last_seen is
-# already this stale is missing heartbeats and about to drop -- warn before it
-# vanishes so the operator sees "this node is going" rather than a silent
+# A node is pruned once every liveness signal is ~30s stale. Warn while it is
+# still present so the operator sees "this node is going" rather than a silent
 # disappearance.
 UNREACHABLE_WARN_AFTER = timedelta(seconds=15)
 
@@ -42,10 +50,20 @@ DISK_FULL_THRESHOLD = Memory.from_gb(2.0)
 
 HealthLevel = Literal["ok", "warn", "error"]
 HealthCode = Literal[
+    "data_transport_mismatch",
+    "zenoh_isolated",
+    "version_mismatch",
     "download_failed",
     "disk_low",
     "disk_full",
     "unreachable",
+    # Capability conflicts from backend derivation (#614): observation vs
+    # declaration disagreements advertised on NodeResources. The codes are the
+    # CapabilityConflictCode vocabulary, mapped one-to-one.
+    "gpu_serving_disabled",
+    "gpu_detection_degraded",
+    "invalid_engine_binary",
+    "backend_override_conflict",
 ]
 
 # Severity rank so an aggregate level is the worst of a node's reasons.
@@ -89,10 +107,203 @@ def _aggregate_level(reasons: Sequence[NodeHealthReason]) -> HealthLevel:
     """Return the worst severity across *reasons* (``ok`` when empty)."""
     worst: HealthLevel = "ok"
     for reason in reasons:
-        level: HealthLevel = "error" if reason.code in ("download_failed", "disk_full") else "warn"
+        level: HealthLevel = (
+            "error"
+            if reason.code
+            in (
+                "data_transport_mismatch",
+                "zenoh_isolated",
+                "download_failed",
+                "disk_full",
+            )
+            or reason.code in CONFLICT_ERROR_CODES
+            else "warn"
+        )
         if _LEVEL_RANK[level] > _LEVEL_RANK[worst]:
             worst = level
     return worst
+
+
+def _capability_conflict_reasons(
+    resources: NodeResources | None,
+) -> list[NodeHealthReason]:
+    """Reasons for every capability conflict a node advertises (#614).
+
+    The conflict's message and remediation were composed on the node that owns
+    the facts (it knows its own paths and env), so this is a pure one-to-one
+    mapping: the conflict code is a ``HealthCode`` by construction and its
+    severity comes from the shared ``CONFLICT_ERROR_CODES`` source of truth.
+    """
+    if resources is None:
+        return []
+    return [
+        NodeHealthReason(
+            code=conflict.code,
+            message=conflict.message,
+            remediation=conflict.remediation,
+        )
+        for conflict in resources.capability_conflicts
+    ]
+
+
+def live_data_transports(
+    *,
+    live_nodes: Mapping[NodeId, datetime],
+    node_resources: Mapping[NodeId, NodeResources],
+) -> frozenset[NodeDataTransport]:
+    """Return transports advertised by live nodes with resource telemetry.
+
+    Nodes whose first ``NodeResources`` reading has not arrived are omitted. A
+    mismatch is reported only from positive evidence of both transports, never
+    from a transient telemetry gap during startup.
+
+    Args:
+        live_nodes: Nodes currently present in replicated cluster membership.
+        node_resources: Latest per-node resource advertisements.
+
+    Returns:
+        The distinct resolved DATA transports advertised by live nodes.
+    """
+    return frozenset(
+        resources.data_transport
+        for node_id, resources in node_resources.items()
+        if node_id in live_nodes
+    )
+
+
+def live_skulk_build_mismatch(
+    *,
+    live_nodes: Mapping[NodeId, datetime],
+    node_identities: Mapping[NodeId, NodeIdentity],
+) -> bool:
+    """Return whether live telemetry positively identifies multiple builds.
+
+    Unknown version or commit sentinels are omitted so startup telemetry gaps do
+    not create false warnings. Either multiple package versions or multiple Git
+    commits is sufficient evidence of a mixed deployment.
+
+    Args:
+        live_nodes: Nodes currently present in replicated cluster membership.
+        node_identities: Latest per-node package and source identity telemetry.
+
+    Returns:
+        True when at least one known build identifier disagrees across live nodes.
+    """
+
+    identities = (
+        identity
+        for node_id, identity in node_identities.items()
+        if node_id in live_nodes
+    )
+    versions: set[str] = set()
+    commits: list[str] = []
+    for identity in identities:
+        version = known_build_identifier(identity.skulk_version)
+        commit = known_build_identifier(identity.skulk_commit)
+        if version is not None:
+            versions.add(version)
+        if commit is not None:
+            commits.append(commit)
+    return len(versions) > 1 or git_commit_identifiers_disagree(commits)
+
+
+def _data_transport_mismatch_reason(
+    *,
+    node_id: NodeId,
+    node_resources: Mapping[NodeId, NodeResources],
+    transports: frozenset[NodeDataTransport],
+) -> NodeHealthReason:
+    """Build the fail-loud health reason for one node in a split DATA fleet."""
+    resources = node_resources.get(node_id)
+    local_transport = (
+        resources.data_transport if resources is not None else "not yet advertised"
+    )
+    fleet_transports = ", ".join(sorted(transports))
+    return NodeHealthReason(
+        code="data_transport_mismatch",
+        message=(
+            "Cluster DATA transports disagree "
+            f"({fleet_transports}); this node uses {local_transport}. "
+            "Cross-transport inference output cannot be delivered."
+        ),
+        remediation=(
+            "Configure every node to use the same DATA transport, restart the "
+            "fleet, and confirm nodeResources reports one transport before "
+            "serving inference."
+        ),
+    )
+
+
+def _zenoh_isolated_reason(
+    *,
+    node_id: NodeId,
+    live_nodes: Mapping[NodeId, datetime],
+    node_resources: Mapping[NodeId, NodeResources],
+) -> NodeHealthReason | None:
+    """A reason when a node's Zenoh data plane has no peers it should have.
+
+    Fires only on positive evidence: the node advertises ``data_transport``
+    ``zenoh`` with a trustworthy peer count of exactly 0 (its sampler shields
+    the startup window by advertising ``None``), and at least one OTHER live
+    node also advertises Zenoh, so a mesh exists that this node failed to
+    join. The canonical shape is a zero-config remote member that multicast
+    scouting cannot reach: its control plane stays healthy while every remote
+    stream dies with transport errors, so without this reason the dashboard
+    looks green while inference through the node is broken.
+    """
+    resources = node_resources.get(node_id)
+    if resources is None or resources.data_transport != "zenoh":
+        return None
+    if resources.zenoh_connected_peers != 0:
+        return None
+    other_zenoh_nodes = sum(
+        1
+        for other_id, other in node_resources.items()
+        if other_id != node_id
+        and other_id in live_nodes
+        and other.data_transport == "zenoh"
+    )
+    if other_zenoh_nodes == 0:
+        return None
+    return NodeHealthReason(
+        code="zenoh_isolated",
+        message=(
+            "This node's Zenoh data plane has 0 peer transports while "
+            f"{other_zenoh_nodes} other live node(s) advertise Zenoh. Remote "
+            "model and provider streams to and from this node will fail even "
+            "though cluster membership looks healthy."
+        ),
+        remediation=(
+            "If the node cannot reach peers via local multicast (for example "
+            "it joined over a routed or overlay network), set "
+            "SKULK_ZENOH_CONNECT to a reachable peer's Zenoh endpoint "
+            "(tcp/<peer-ip>:7447) and ensure SKULK_ZENOH_LISTEN binds an "
+            "address peers can dial, then restart skulk on the node."
+        ),
+    )
+
+
+def _version_mismatch_reason(
+    *, node_id: NodeId, node_identities: Mapping[NodeId, NodeIdentity]
+) -> NodeHealthReason:
+    """Build the degraded-health reason for one node in a mixed-build fleet."""
+
+    identity = node_identities.get(node_id)
+    version = identity.skulk_version if identity is not None else "not yet advertised"
+    commit = identity.skulk_commit if identity is not None else "not yet advertised"
+    return NodeHealthReason(
+        code="version_mismatch",
+        message=(
+            "Cluster nodes report different Skulk builds; this node reports "
+            f"version {version} at commit {commit}. Correctness-bearing wire "
+            "compatibility is not guaranteed until deployment converges."
+        ),
+        remediation=(
+            "Complete the deployment so every node runs the same version and "
+            "commit, then confirm the version warning clears before starting "
+            "new inference work."
+        ),
+    )
 
 
 def _download_failure_reasons(
@@ -179,6 +390,9 @@ def compute_node_health(
     downloads: Mapping[NodeId, Sequence[DownloadProgress]],
     node_disk: Mapping[NodeId, DiskUsage],
     now: datetime,
+    node_resources: Mapping[NodeId, NodeResources] | None = None,
+    node_identities: Mapping[NodeId, NodeIdentity] | None = None,
+    heartbeat_last_seen: Mapping[NodeId, datetime] | None = None,
     telemetry_last_seen: Mapping[NodeId, datetime] | None = None,
     unreachable_warn_after: timedelta = UNREACHABLE_WARN_AFTER,
 ) -> dict[str, NodeHealth]:
@@ -186,21 +400,23 @@ def compute_node_health(
 
     Args:
         live_nodes: ``State.last_seen`` -- the nodes currently in the cluster,
-            mapped to their last heartbeat. Health is computed for exactly these
-            (a node already pruned for timeout is absent here and from ``/state``).
-        downloads: ``State.downloads`` -- per-node download progress, scanned for
-            terminal ``DownloadFailed`` entries.
+            mapped to their last indexed control-plane event. This timestamp is
+            not a heartbeat. Health is computed for exactly these nodes (a node
+            already pruned for timeout is absent here and from ``/state``).
+        downloads: Effective per-node download status, scanned for terminal
+            ``DownloadFailed`` entries.
         node_disk: ``TelemetryView.node_disk`` -- per-node models-volume usage.
         now: The wall clock used for heartbeat-staleness; injected for testing.
-        telemetry_last_seen: ``TelemetryView.node_last_telemetry`` -- when this node
-            last received telemetry from each peer. Telemetry gossips every ~1s
-            cluster-wide, so it is a live liveness signal independent of whether
-            connectivity events are logged. The heartbeat check uses the fresher of
-            this and ``last_seen``, so the connectivity change-gate/de-dup that
-            stops the AMD gossip storm (and leaves followers' ``last_seen`` stale)
-            does not raise a false "heartbeats are late" warning on healthy nodes.
-            A genuinely departing node stops both, so the warning still fires in the
-            window before it is pruned.
+        node_resources: ``TelemetryView.node_resources`` -- resolved DATA
+            transport and placement capability facts for split-fleet detection.
+        node_identities: ``TelemetryView.node_identities`` -- package version and
+            source commit facts for mixed-build detection.
+        heartbeat_last_seen: ``TelemetryView.node_last_heartbeat`` -- local
+            receipt time of each peer's dedicated heartbeat, the primary
+            liveness signal.
+        telemetry_last_seen: ``TelemetryView.node_last_telemetry`` -- local
+            receipt time of each peer's ordinary telemetry, retained as a
+            fallback liveness signal if the dedicated heartbeat path degrades.
         unreachable_warn_after: Heartbeat-staleness past which a node is flagged
             as at-risk of pruning.
 
@@ -209,27 +425,72 @@ def compute_node_health(
         live node (``level`` is ``ok`` with no reasons for a healthy node), so
         the dashboard can render an indicator (or none) per topology node.
     """
+    heartbeat_last_seen = heartbeat_last_seen or {}
     telemetry_last_seen = telemetry_last_seen or {}
+    node_resources = node_resources or {}
+    node_identities = node_identities or {}
+    transports = live_data_transports(
+        live_nodes=live_nodes,
+        node_resources=node_resources,
+    )
+    build_mismatch = live_skulk_build_mismatch(
+        live_nodes=live_nodes,
+        node_identities=node_identities,
+    )
     health: dict[str, NodeHealth] = {}
     for node_id, last_seen in live_nodes.items():
         reasons: list[NodeHealthReason] = []
+        if len(transports) > 1:
+            reasons.append(
+                _data_transport_mismatch_reason(
+                    node_id=node_id,
+                    node_resources=node_resources,
+                    transports=transports,
+                )
+            )
+        zenoh_isolated = _zenoh_isolated_reason(
+            node_id=node_id,
+            live_nodes=live_nodes,
+            node_resources=node_resources,
+        )
+        if zenoh_isolated is not None:
+            reasons.append(zenoh_isolated)
+        if build_mismatch:
+            reasons.append(
+                _version_mismatch_reason(
+                    node_id=node_id,
+                    node_identities=node_identities,
+                )
+            )
+        reasons.extend(_capability_conflict_reasons(node_resources.get(node_id)))
         reasons.extend(_download_failure_reasons(downloads.get(node_id, ())))
         disk = node_disk.get(node_id)
         if disk is not None:
             disk_reason = _disk_reason(disk)
             if disk_reason is not None:
                 reasons.append(disk_reason)
-        # Heartbeat = the fresher of the event-log last_seen and the last telemetry
-        # receipt; connectivity readings (which bump last_seen) are now change-gated
-        # so telemetry, gossiped every ~1s, is the live signal on non-master nodes.
-        # last_seen is stamped tz-aware by the master, but a tz-naive snapshot value
-        # compared with the tz-aware telemetry stamp would raise and 500 /state, so
-        # normalize before the comparison (mirrors _unreachable_reason's guard).
-        heartbeat = last_seen if last_seen.tzinfo is not None else last_seen.replace(tzinfo=timezone.utc)
-        telemetry_seen = telemetry_last_seen.get(node_id)
-        if telemetry_seen is not None and telemetry_seen > heartbeat:
-            heartbeat = telemetry_seen
-        unreachable = _unreachable_reason(heartbeat, now, unreachable_warn_after)
+        # Use the freshest of the control event, dedicated heartbeat, and
+        # ordinary telemetry fallback. Normalize a tz-naive snapshot timestamp
+        # defensively so /state cannot fail on an aware-vs-naive comparison.
+        liveness_signals = [
+            last_seen
+            if last_seen.tzinfo is not None
+            else last_seen.replace(tzinfo=timezone.utc)
+        ]
+        for signal in (
+            heartbeat_last_seen.get(node_id),
+            telemetry_last_seen.get(node_id),
+        ):
+            if signal is not None:
+                liveness_signals.append(
+                    signal
+                    if signal.tzinfo is not None
+                    else signal.replace(tzinfo=timezone.utc)
+                )
+        liveness_seen = max(liveness_signals)
+        unreachable = _unreachable_reason(
+            liveness_seen, now, unreachable_warn_after
+        )
         if unreachable is not None:
             reasons.append(unreachable)
         health[str(node_id)] = NodeHealth(

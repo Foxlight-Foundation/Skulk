@@ -158,6 +158,40 @@ async def test_peer_with_higher_seniority_wins_and_we_switch_master() -> None:
 
 
 @pytest.mark.anyio
+async def test_duplicate_protocol_copies_count_as_one_candidate() -> None:
+    """Legacy and isolated copies of one status cannot inflate an election."""
+
+    em_out_tx, _em_out_rx = channel[ElectionMessage]()
+    em_in_tx, em_in_rx = channel[ElectionMessage]()
+    er_tx, _er_rx = channel[ElectionResult]()
+    cm_tx, cm_rx = channel[ConnectionMessage]()
+    co_tx, co_rx = channel[ForwarderCommand]()
+    election = Election(
+        node_id=NodeId("ME"),
+        election_message_receiver=em_in_rx,
+        election_message_sender=em_out_tx,
+        election_result_sender=er_tx,
+        connection_message_receiver=cm_rx,
+        command_receiver=co_rx,
+    )
+    peer_status = em(clock=1, seniority=3, node_id="PEER")
+
+    async with create_task_group() as task_group:
+        with fail_after(2):
+            task_group.start_soon(election.run)
+            await em_in_tx.send(peer_status)
+            await em_in_tx.send(peer_status)
+            while peer_status not in election._candidates:  # pyright: ignore[reportPrivateUsage]
+                await anyio.sleep(0.01)
+            await anyio.sleep(0.02)
+            assert election._candidates.count(peer_status) == 1  # pyright: ignore[reportPrivateUsage]
+
+            em_in_tx.close()
+            cm_tx.close()
+            co_tx.close()
+
+
+@pytest.mark.anyio
 async def test_ignores_older_messages() -> None:
     """
     Messages with a lower clock than the current round are ignored by the receiver.

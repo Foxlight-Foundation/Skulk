@@ -1,9 +1,11 @@
 import copy
 import time
+from collections import deque
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import cast
+from typing import cast, final
 
 import anyio
 import yaml
@@ -21,15 +23,20 @@ from skulk.master.placement import (
     replacement_command_for_download_failed_instance,
     replacement_command_for_refused_instance,
 )
-from skulk.master.placement_utils import usable_vram_by_node
+from skulk.master.placement_utils import (
+    unified_memory_gpu_node_ids,
+    usable_vram_by_node,
+)
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_EVENT_LOG_DIR, SKULK_TRACING_ENABLED
+from skulk.shared.log_summaries import summarize_command_for_log
 from skulk.shared.models.memory_estimate import (
     estimate_shard_footprint,
     shard_fraction_of_model,
 )
 from skulk.shared.types.commands import (
     AddCustomModelCard,
+    AudioTranscription,
     CreateInstance,
     DeleteCustomModelCard,
     DeleteInstance,
@@ -39,10 +46,12 @@ from skulk.shared.types.commands import (
     ImageEdits,
     ImageGeneration,
     PlaceInstance,
+    RealtimeAudioTranscription,
     RefuseInstancePlacement,
     RequestEventLog,
     SendInputChunk,
     SetTracingEnabled,
+    SpeechSynthesis,
     TaskCancelled,
     TaskFinished,
     TestCommand,
@@ -56,32 +65,39 @@ from skulk.shared.types.events import (
     Event,
     GlobalForwarderEvent,
     IndexedEvent,
-    InputChunkReceived,
     InstanceDeleted,
     LocalForwarderEvent,
     NodeDownloadProgress,
     NodeGatheredInfo,
     NodeTimedOut,
+    NodeTimeoutEvidence,
     StagedModelEvicted,
     StateSnapshotHydrated,
     TaskCreated,
     TaskDeleted,
     TaskFailed,
     TaskStatusUpdated,
-    TraceEventData,
-    TracesCollected,
-    TracesMerged,
     TracingStateChanged,
+    is_persistable_control_event,
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import MemoryUsage
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSnapshot, StateSyncMessage
 from skulk.shared.types.tasks import (
+    AudioTranscription as AudioTranscriptionTask,
+)
+from skulk.shared.types.tasks import (
     ImageEdits as ImageEditsTask,
 )
 from skulk.shared.types.tasks import (
     ImageGeneration as ImageGenerationTask,
+)
+from skulk.shared.types.tasks import (
+    RealtimeAudioTranscription as RealtimeAudioTranscriptionTask,
+)
+from skulk.shared.types.tasks import (
+    SpeechSynthesis as SpeechSynthesisTask,
 )
 from skulk.shared.types.tasks import (
     TaskId,
@@ -93,8 +109,18 @@ from skulk.shared.types.tasks import (
 from skulk.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
 )
-from skulk.shared.types.telemetry import TelemetryView
-from skulk.shared.types.worker.downloads import DownloadFailed, DownloadPending
+from skulk.shared.types.telemetry import (
+    NODE_LIVENESS_TIMEOUT,
+    TelemetryView,
+    record_membership_from_event,
+)
+from skulk.shared.types.worker.downloads import (
+    DownloadAttemptId,
+    DownloadFailed,
+    DownloadOngoing,
+    DownloadPending,
+    DownloadProgress,
+)
 from skulk.shared.types.worker.instances import Instance, InstanceId
 from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
 from skulk.shared.types.worker.shards import RpcDonorShardMetadata
@@ -106,8 +132,64 @@ from skulk.utils.state_snapshot_store import StateSnapshotStore
 from skulk.utils.task_group import TaskGroup
 
 EVENT_LOG_REPLAY_BATCH_SIZE = 10_000
+EVENT_LOG_REPLAY_CHUNK_SIZE = 32
+EVENT_LOG_REPLAY_CHUNK_INTERVAL_SECONDS = 0.25
 SNAPSHOT_EVENT_CADENCE = 10_000
 REPLAY_TAIL_RETENTION_EVENTS = SNAPSHOT_EVENT_CADENCE
+EVENT_LOG_GROWTH_WINDOW_SECONDS = 60.0
+EVENT_LOG_IDLE_GROWTH_WARNING_EVENTS_PER_MINUTE = 60.0
+EVENT_LOG_GROWTH_WARNING_COOLDOWN_SECONDS = 300.0
+NON_CONTROL_EVENT_WARNING_COOLDOWN_SECONDS = 60.0
+NON_CONTROL_EVENT_WARNING_KEY_LIMIT = 256
+
+
+@final
+@dataclass(slots=True)
+class EventLogGrowthMonitor:
+    """Detect sustained event-log growth while the master has no active work."""
+
+    window_seconds: float = EVENT_LOG_GROWTH_WINDOW_SECONDS
+    warning_rate_per_minute: float = EVENT_LOG_IDLE_GROWTH_WARNING_EVENTS_PER_MINUTE
+    warning_cooldown_seconds: float = EVENT_LOG_GROWTH_WARNING_COOLDOWN_SECONDS
+    _idle_event_times: deque[float] = field(default_factory=deque)
+    _idle_since: float | None = None
+    _last_warning_at: float | None = None
+
+    def observe(self, *, now: float, idle: bool) -> float | None:
+        """Record one indexed event and return its warning rate when elevated.
+
+        Active placement, download, and inference work resets the idle window so
+        legitimate lifecycle bursts cannot prime a later warning. The returned
+        rate is limited by ``warning_cooldown_seconds``; callers may log it or
+        expose it through operator diagnostics without retaining event payloads.
+        """
+
+        if not idle:
+            self._idle_event_times.clear()
+            self._idle_since = None
+            return None
+
+        if self._idle_since is None:
+            self._idle_since = now
+        self._idle_event_times.append(now)
+        cutoff = now - self.window_seconds
+        while self._idle_event_times and self._idle_event_times[0] < cutoff:
+            self._idle_event_times.popleft()
+
+        observed_seconds = now - self._idle_since
+        if observed_seconds < self.window_seconds:
+            return None
+        if (
+            self._last_warning_at is not None
+            and now - self._last_warning_at < self.warning_cooldown_seconds
+        ):
+            return None
+
+        rate = len(self._idle_event_times) * 60.0 / self.window_seconds
+        if rate < self.warning_rate_per_minute:
+            return None
+        self._last_warning_at = now
+        return rate
 
 TOPOLOGY_SETTLE_GRACE_SECONDS = 60.0
 """How long after master start the plan loop trusts topology for pruning.
@@ -143,57 +225,143 @@ _COMMAND_TASK_TYPES = (
     ImageGenerationTask,
     ImageEditsTask,
     TextEmbeddingTask,
+    SpeechSynthesisTask,
+    AudioTranscriptionTask,
+    RealtimeAudioTranscriptionTask,
 )
 
 
-NODE_LIVENESS_TIMEOUT = timedelta(seconds=30)
+NODE_HEARTBEAT_GAP_WARNING = timedelta(seconds=10)
+
+
+def _aware_timestamp(when: datetime) -> datetime:
+    """Return a timestamp that is safe to compare with UTC receipt times."""
+    return when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+
+
+def _signal_age_seconds(*, now: datetime, seen_at: datetime) -> float:
+    """Return a non-negative signal age, defensively tolerating clock drift."""
+    return max(
+        0.0,
+        (_aware_timestamp(now) - _aware_timestamp(seen_at)).total_seconds(),
+    )
+
+
+def compute_node_timeout_evidence(
+    last_seen: Mapping[NodeId, datetime],
+    heartbeat_last_seen: Mapping[NodeId, datetime],
+    telemetry_last_seen: Mapping[NodeId, datetime],
+    *,
+    now: datetime,
+    timeout: timedelta = NODE_LIVENESS_TIMEOUT,
+) -> dict[NodeId, NodeTimeoutEvidence]:
+    """Build reproducible liveness evidence for every event-known node.
+
+    Args:
+        last_seen: Last indexed control-plane event per node.
+        heartbeat_last_seen: Local receipt time of each dedicated heartbeat.
+        telemetry_last_seen: Local receipt time of ordinary fallback telemetry.
+        now: Decision wall clock, injected for deterministic tests.
+        timeout: Configured node-prune timeout.
+
+    Returns:
+        Evidence keyed by every node represented in ``last_seen``.
+    """
+    evidence: dict[NodeId, NodeTimeoutEvidence] = {}
+    for node_id, last_logged_event_at in last_seen.items():
+        last_logged_event_age = _signal_age_seconds(
+            now=now, seen_at=last_logged_event_at
+        )
+        heartbeat_at = heartbeat_last_seen.get(node_id)
+        heartbeat_age = (
+            _signal_age_seconds(now=now, seen_at=heartbeat_at)
+            if heartbeat_at is not None
+            else None
+        )
+        fallback_telemetry_at = telemetry_last_seen.get(node_id)
+        fallback_telemetry_age = (
+            _signal_age_seconds(now=now, seen_at=fallback_telemetry_at)
+            if fallback_telemetry_at is not None
+            else None
+        )
+        available_ages = [last_logged_event_age]
+        if heartbeat_age is not None:
+            available_ages.append(heartbeat_age)
+        if fallback_telemetry_age is not None:
+            available_ages.append(fallback_telemetry_age)
+        evidence[node_id] = NodeTimeoutEvidence(
+            last_logged_event_age_seconds=last_logged_event_age,
+            heartbeat_age_seconds=heartbeat_age,
+            fallback_telemetry_age_seconds=fallback_telemetry_age,
+            effective_age_seconds=min(available_ages),
+            timeout_seconds=timeout.total_seconds(),
+        )
+    return evidence
+
+
+def _timed_out_nodes_from_evidence(
+    evidence: Mapping[NodeId, NodeTimeoutEvidence],
+) -> set[NodeId]:
+    """Select nodes whose freshest liveness signal exceeds the timeout."""
+    return {
+        node_id
+        for node_id, observation in evidence.items()
+        if observation.effective_age_seconds > observation.timeout_seconds
+    }
 
 
 def compute_timed_out_nodes(
     last_seen: Mapping[NodeId, datetime],
+    heartbeat_last_seen: Mapping[NodeId, datetime],
     telemetry_last_seen: Mapping[NodeId, datetime],
     *,
     now: datetime,
     timeout: timedelta = NODE_LIVENESS_TIMEOUT,
 ) -> set[NodeId]:
-    """Nodes whose liveness signals have BOTH gone stale past ``timeout``.
-
-    Liveness is the fresher of the event-log ``State.last_seen`` and the last
-    telemetry receipt (``TelemetryView.node_last_telemetry``). Connectivity
-    readings (which bump ``last_seen``) are only emitted on change (the AMD
-    gossip-storm fix), so a stable node's ``last_seen`` goes cold by design;
-    telemetry gossips every ~1s, so it is the live signal. A node with no
-    telemetry yet (just appeared, or telemetry not gossiped) falls back to its
-    ``last_seen`` so the timeout window still applies.
-
-    ``last_seen`` is stamped tz-aware by the master, but a tz-naive value (an
-    odd snapshot) compared against the tz-aware telemetry stamp would raise
-    and crash the plan loop, so both are normalized defensively (mirrors the
-    nodeHealth guard).
+    """Return nodes whose event, heartbeat, and telemetry signals are stale.
 
     Args:
         last_seen: ``State.last_seen`` (last logged event per node).
-        telemetry_last_seen: local receipt time of each node's last telemetry.
+        heartbeat_last_seen: Local receipt time of each dedicated heartbeat.
+        telemetry_last_seen: Local receipt time of ordinary fallback telemetry.
         now: The wall clock (tz-aware); injected for testing.
         timeout: Staleness past which a node is considered gone.
 
     Returns:
-        Node ids to time out (drives ``NodeTimedOut``: membership prune plus
-        instance/task cleanup).
+        Node ids to time out.
     """
+    return _timed_out_nodes_from_evidence(
+        compute_node_timeout_evidence(
+            last_seen,
+            heartbeat_last_seen,
+            telemetry_last_seen,
+            now=now,
+            timeout=timeout,
+        )
+    )
 
-    def _aware(when: datetime) -> datetime:
-        return when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
 
+def compute_heartbeat_gap_nodes(
+    last_seen: Mapping[NodeId, datetime],
+    heartbeat_last_seen: Mapping[NodeId, datetime],
+    *,
+    now: datetime,
+    warning_after: timedelta = NODE_HEARTBEAT_GAP_WARNING,
+) -> set[NodeId]:
+    """Return live members whose dedicated heartbeat is late or absent.
+
+    Before a node's first heartbeat, its last indexed event anchors the warning
+    window so a new member gets a full grace period without making a missing
+    heartbeat invisible forever.
+    """
     return {
         node_id
-        for node_id, last_seen_at in last_seen.items()
-        if now
-        - max(
-            _aware(last_seen_at),
-            _aware(telemetry_last_seen.get(node_id, last_seen_at)),
+        for node_id, last_logged_event_at in last_seen.items()
+        if _signal_age_seconds(
+            now=now,
+            seen_at=heartbeat_last_seen.get(node_id, last_logged_event_at),
         )
-        > timeout
+        >= warning_after.total_seconds()
     }
 
 
@@ -256,6 +424,81 @@ def orphaned_task_failure_events(
                 ),
             )
         )
+    return events
+
+
+#: A lifecycle task whose instance no longer exists can only ever be
+#: completed by the worker that was executing it. Healthy teardown completes
+#: in seconds; past this grace the executor is presumed gone for good (a
+#: killed node returns with a NEW ephemeral identity that knows nothing of
+#: the old tasks, #647) and the master declares the task dead.
+ORPHANED_LIFECYCLE_TASK_GRACE_SECONDS = 60.0
+
+
+def stale_lifecycle_task_failures(
+    state: State,
+    first_seen_orphaned: dict[TaskId, float],
+    *,
+    now: float,
+    grace_seconds: float = ORPHANED_LIFECYCLE_TASK_GRACE_SECONDS,
+) -> list[TaskFailed]:
+    """Fail lifecycle tasks orphaned past the grace by a vanished executor.
+
+    The #223 pass covers API-facing command tasks via their instance. The
+    complementary gap (#647): worker LIFECYCLE tasks (Shutdown, CreateRunner,
+    LoadModel, ...) belonging to an already-deleted instance are normally
+    reconciled by the executing worker's own plan loop, but when that worker
+    died ungracefully its restarted process carries a new node identity and
+    can never report; the task sits Pending/Running in state forever, and
+    anything waiting on task convergence hangs. Instance deletion also
+    removed the task-to-node attribution, so the reap is grace-based rather
+    than membership-based: a lifecycle task that stays non-terminal with no
+    instance for longer than a healthy teardown could possibly take has no
+    living executor.
+
+    Mutates ``first_seen_orphaned`` (master-local tracking, not state):
+    stamps newly orphaned tasks, drops tasks that left the orphaned
+    condition, and drops tasks it emits for (TaskFailed flips the status on
+    apply, so each task is emitted at most once; if the emit were ever lost
+    the task re-stamps and gets another full grace, which is self-healing).
+
+    Args:
+        state: The master's current applied state.
+        first_seen_orphaned: Monotonic first-observation stamps, owned by
+            the caller across ticks.
+        now: Current monotonic time.
+        grace_seconds: How long a task may stay orphaned before it is
+            declared dead.
+
+    Returns:
+        Terminal ``TaskFailed`` events to index through the ordered path.
+    """
+    events: list[TaskFailed] = []
+    orphaned_now: set[TaskId] = set()
+    for task_id, task in state.tasks.items():
+        if isinstance(task, _COMMAND_TASK_TYPES):
+            continue  # the #223 pass owns API-facing tasks
+        if task.task_status not in (TaskStatus.Pending, TaskStatus.Running):
+            continue
+        if task.instance_id in state.instances:
+            continue
+        orphaned_now.add(task_id)
+        first_seen = first_seen_orphaned.setdefault(task_id, now)
+        if now - first_seen >= grace_seconds:
+            events.append(
+                TaskFailed(
+                    task_id=task_id,
+                    error_type="executor_lost",
+                    error_message=(
+                        "Lifecycle task outlived its instance with no "
+                        "surviving executor"
+                    ),
+                )
+            )
+    emitted = {event.task_id for event in events}
+    for task_id in list(first_seen_orphaned):
+        if task_id not in orphaned_now or task_id in emitted:
+            del first_seen_orphaned[task_id]
     return events
 
 
@@ -327,6 +570,7 @@ class Master:
         snapshot_event_cadence: int = SNAPSHOT_EVENT_CADENCE,
         initial_state: State | None = None,
         telemetry_view: TelemetryView | None = None,
+        state_sync_store_http_host: str | None = None,
     ):
         self.node_id = node_id
         self.session_id = session_id
@@ -358,6 +602,7 @@ class Master:
         self._started_monotonic = time.monotonic()
         self._tg: TaskGroup = TaskGroup()
         self.command_task_mapping: dict[CommandId, TaskId] = {}
+        self._realtime_instance_by_command: dict[CommandId, InstanceId] = {}
         self.command_receiver = command_receiver
         self.local_event_receiver = local_event_receiver
         self.global_event_sender = global_event_sender
@@ -365,6 +610,7 @@ class Master:
         self.state_sync_sender = state_sync_sender
         self.download_command_sender = download_command_sender
         self.event_sender = event_sender
+        self._state_sync_store_http_host = state_sync_store_http_host
         self._system_id = SystemId()
         self._multi_buffer = MultiSourceBuffer[SystemId, Event]()
         self._event_log = DiskEventLog(SKULK_EVENT_LOG_DIR / "master")
@@ -373,8 +619,21 @@ class Master:
         )
         self._snapshot_event_cadence = snapshot_event_cadence
         self._last_snapshot_idx = -1
-        self._pending_traces: dict[TaskId, dict[int, list[TraceEventData]]] = {}
-        self._expected_ranks: dict[TaskId, set[int]] = {}
+        self._pending_replay_start_idx: int | None = None
+        self._replay_worker_running = False
+        self._active_replay_next_idx: int | None = None
+        self._active_replay_end_idx: int | None = None
+        self._event_log_growth_monitor = EventLogGrowthMonitor()
+        self._non_control_event_warning_times: dict[
+            tuple[SystemId, type[Event]], float
+        ] = {}
+        # Nodes with an active dedicated-heartbeat gap warning. Tracking the
+        # transition makes a 10-second planning loop emit one warning and one
+        # recovery message instead of repeating the same warning indefinitely.
+        self._heartbeat_gap_warned_nodes: set[NodeId] = set()
+        # First-observation stamps for lifecycle tasks orphaned by a deleted
+        # instance (#647); master-local, feeds stale_lifecycle_task_failures.
+        self._orphaned_lifecycle_first_seen: dict[TaskId, float] = {}
         # Instance ids whose memory-refusal re-placement has already been
         # initiated (#290). The command processor generates events but does not
         # apply them — self.state only updates when they round-trip through
@@ -406,6 +665,47 @@ class Master:
         # applied; keeping the structure preserves one place to revisit this if
         # we later have a shutdown-complete signal that proves memory recovered.
         self._recently_freed_bytes: dict[NodeId, list[tuple[int, float]]] = {}
+
+    def _effective_downloads(self) -> dict[NodeId, list[DownloadProgress]]:
+        """Return durable outcomes overlaid with live download telemetry."""
+
+        return self._telemetry_view.effective_downloads(self.state.downloads)
+
+    def _should_warn_for_non_control_event(
+        self,
+        origin: SystemId,
+        event_type: type[Event],
+        *,
+        now: float,
+    ) -> bool:
+        """Rate-limit rejected-event warnings without weakening fail-closed ingest."""
+
+        key = (origin, event_type)
+        last_warning_at = self._non_control_event_warning_times.get(key)
+        if (
+            last_warning_at is not None
+            and now - last_warning_at < NON_CONTROL_EVENT_WARNING_COOLDOWN_SECONDS
+        ):
+            return False
+
+        if (
+            key not in self._non_control_event_warning_times
+            and len(self._non_control_event_warning_times)
+            >= NON_CONTROL_EVENT_WARNING_KEY_LIMIT
+        ):
+            oldest_key = min(
+                self._non_control_event_warning_times,
+                key=self._non_control_event_warning_times.__getitem__,
+            )
+            self._non_control_event_warning_times.pop(oldest_key)
+        self._non_control_event_warning_times[key] = now
+        return True
+
+    def _apply_indexed_event(self, indexed: IndexedEvent) -> None:
+        """Apply one durable event and synchronize the master's telemetry view."""
+
+        self.state = apply(self.state, indexed)
+        record_membership_from_event(self._telemetry_view, indexed.event)
 
     def _record_freed_instance(self, instance: Instance) -> None:
         """Record a deleted instance's per-node footprint for the grace window.
@@ -502,26 +802,6 @@ class Master:
         )
         return memory, vram
 
-    def _configure_expected_trace_ranks(
-        self, task_id: TaskId, instance_id: InstanceId, *, trace_enabled: bool
-    ) -> None:
-        """Track which device ranks must report traces for a newly traced task."""
-
-        if not trace_enabled:
-            return
-
-        selected_instance = self.state.instances.get(instance_id)
-        if selected_instance is None:
-            logger.warning(
-                f"Unable to configure trace ranks for task {task_id}; instance {instance_id} not found"
-            )
-            return
-
-        self._expected_ranks[task_id] = {
-            shard.device_rank
-            for shard in selected_instance.shard_assignments.runner_to_shard.values()
-        }
-
     async def _index_seed_event(self) -> None:
         """Index the failover seed as the first event of this session (#273).
 
@@ -544,8 +824,8 @@ class Master:
         # collected as state evolves past it.
         self._seed_state = None
         indexed = IndexedEvent(event=StateSnapshotHydrated(state=seed), idx=idx)
-        self.state = apply(self.state, indexed)
-        self._event_log.append(indexed.event)
+        self._apply_indexed_event(indexed)
+        self._append_event_log(indexed.event)
         await self._send_event(indexed)
         logger.info(
             f"Indexed failover seed as event {idx}: "
@@ -578,7 +858,10 @@ class Master:
         with self.command_receiver as commands:
             async for forwarder_command in commands:
                 try:
-                    logger.info(f"Executing command: {forwarder_command.command}")
+                    logger.info(
+                        "Executing command: "
+                        f"{summarize_command_for_log(forwarder_command.command)}"
+                    )
 
                     generated_events: list[Event] = []
                     command = forwarder_command.command
@@ -636,11 +919,6 @@ class Master:
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
-                            self._configure_expected_trace_ranks(
-                                task_id,
-                                selected_instance_id,
-                                trace_enabled=trace_enabled,
-                            )
                         case ImageGeneration():
                             for instance in self.state.instances.values():
                                 if (
@@ -687,11 +965,6 @@ class Master:
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
-                            self._configure_expected_trace_ranks(
-                                task_id,
-                                selected_instance_id,
-                                trace_enabled=trace_enabled,
-                            )
                         case ImageEdits():
                             for instance in self.state.instances.values():
                                 if (
@@ -738,11 +1011,6 @@ class Master:
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
-                            self._configure_expected_trace_ranks(
-                                task_id,
-                                selected_instance_id,
-                                trace_enabled=trace_enabled,
-                            )
                         case TextEmbedding():
                             for instance in self.state.instances.values():
                                 if (
@@ -789,11 +1057,204 @@ class Master:
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
-                            self._configure_expected_trace_ranks(
-                                task_id,
-                                selected_instance_id,
-                                trace_enabled=trace_enabled,
+                        case SpeechSynthesis():
+                            if command.task_params.reference_audio_data is not None:
+                                raise ValueError(
+                                    "Reference audio bytes must not enter commands or State"
+                                )
+                            for instance in self.state.instances.values():
+                                if (
+                                    instance.shard_assignments.model_id
+                                    == command.task_params.model
+                                ):
+                                    task_count = sum(
+                                        1
+                                        for task in self.state.tasks.values()
+                                        if task.instance_id == instance.instance_id
+                                    )
+                                    instance_task_counts[instance.instance_id] = (
+                                        task_count
+                                    )
+
+                            if (
+                                not instance_task_counts
+                                and command.target_instance_id is None
+                            ):
+                                raise ValueError(
+                                    f"No instance found for model {command.task_params.model}"
+                                )
+
+                            task_id = TaskId()
+                            target_unavailable = False
+                            if command.target_instance_id is not None:
+                                if command.target_instance_id not in instance_task_counts:
+                                    target_unavailable = True
+                                selected_instance_id = command.target_instance_id
+                            else:
+                                available_instance_ids = sorted(
+                                    instance_task_counts.keys(),
+                                    key=lambda instance_id: instance_task_counts[
+                                        instance_id
+                                    ],
+                                )
+                                selected_instance_id = available_instance_ids[0]
+                            trace_enabled = self.state.tracing_enabled
+                            generated_events.append(
+                                TaskCreated(
+                                    task_id=task_id,
+                                    task=SpeechSynthesisTask(
+                                        task_id=task_id,
+                                        command_id=command.command_id,
+                                        owner_node=command.owner_node,  # #279 Phase 2
+                                        instance_id=selected_instance_id,
+                                        task_status=(
+                                            TaskStatus.Failed
+                                            if target_unavailable
+                                            else TaskStatus.Pending
+                                        ),
+                                        task_params=command.task_params,
+                                        trace_enabled=trace_enabled,
+                                    ),
+                                )
                             )
+
+                            self.command_task_mapping[command.command_id] = task_id
+                            if target_unavailable:
+                                generated_events.append(
+                                    TaskFailed(
+                                        task_id=task_id,
+                                        error_type="instance_unavailable",
+                                        error_message=(
+                                            "Requested TTS instance is unavailable or "
+                                            "does not serve the requested model"
+                                        ),
+                                    )
+                                )
+                        case AudioTranscription():
+                            for instance in self.state.instances.values():
+                                if (
+                                    instance.shard_assignments.model_id
+                                    == command.task_params.model
+                                ):
+                                    task_count = sum(
+                                        1
+                                        for task in self.state.tasks.values()
+                                        if task.instance_id == instance.instance_id
+                                    )
+                                    instance_task_counts[instance.instance_id] = (
+                                        task_count
+                                    )
+
+                            if not instance_task_counts:
+                                raise ValueError(
+                                    f"No instance found for model {command.task_params.model}"
+                                )
+
+                            available_instance_ids = sorted(
+                                instance_task_counts.keys(),
+                                key=lambda instance_id: instance_task_counts[
+                                    instance_id
+                                ],
+                            )
+
+                            task_id = TaskId()
+                            selected_instance_id = available_instance_ids[0]
+                            trace_enabled = self.state.tracing_enabled
+                            generated_events.append(
+                                TaskCreated(
+                                    task_id=task_id,
+                                    task=AudioTranscriptionTask(
+                                        task_id=task_id,
+                                        command_id=command.command_id,
+                                        owner_node=command.owner_node,  # #279 Phase 2
+                                        instance_id=selected_instance_id,
+                                        task_status=TaskStatus.Pending,
+                                        task_params=command.task_params,
+                                        trace_enabled=trace_enabled,
+                                    ),
+                                )
+                            )
+
+                            self.command_task_mapping[command.command_id] = task_id
+                        case RealtimeAudioTranscription():
+                            instance = self.state.instances.get(
+                                command.target_instance_id
+                            )
+                            if instance is None:
+                                raise ValueError(
+                                    "No target instance found for realtime STT "
+                                    f"command {command.command_id}"
+                                )
+                            if (
+                                instance.shard_assignments.model_id
+                                != command.task_params.model
+                            ):
+                                raise ValueError(
+                                    "Realtime STT target instance model does not "
+                                    f"match {command.task_params.model}"
+                                )
+                            if len(instance.shard_assignments.node_to_runner) != 1:
+                                raise ValueError(
+                                    "Realtime STT requires a single-host target "
+                                    f"instance, got {command.target_instance_id}"
+                                )
+                            instance_busy = command.target_instance_id in (
+                                self._realtime_instance_by_command.values()
+                            ) or any(
+                                # Runner readiness can precede lifecycle-task
+                                # convergence. Only transcription inference
+                                # consumes mounted STT capacity once ready.
+                                isinstance(
+                                    task,
+                                    (
+                                        AudioTranscriptionTask,
+                                        RealtimeAudioTranscriptionTask,
+                                    ),
+                                )
+                                and task.instance_id == command.target_instance_id
+                                and task.task_status
+                                in (TaskStatus.Pending, TaskStatus.Running)
+                                for task in self.state.tasks.values()
+                            )
+
+                            task_id = TaskId()
+                            generated_events.append(
+                                TaskCreated(
+                                    task_id=task_id,
+                                    task=RealtimeAudioTranscriptionTask(
+                                        task_id=task_id,
+                                        command_id=command.command_id,
+                                        owner_node=command.owner_node,
+                                        instance_id=command.target_instance_id,
+                                        task_status=(
+                                            TaskStatus.Failed
+                                            if instance_busy
+                                            else TaskStatus.Pending
+                                        ),
+                                        task_params=command.task_params,
+                                        # Realtime STT does not emit trace
+                                        # sessions yet. Do not register ranks
+                                        # that can never report completion.
+                                        trace_enabled=False,
+                                    ),
+                                )
+                            )
+                            self.command_task_mapping[command.command_id] = task_id
+                            if instance_busy:
+                                generated_events.append(
+                                    TaskFailed(
+                                        task_id=task_id,
+                                        error_type="instance_busy",
+                                        error_message=(
+                                            "Realtime STT target instance is already "
+                                            "reserved"
+                                        ),
+                                    )
+                                )
+                            else:
+                                self._realtime_instance_by_command[
+                                    command.command_id
+                                ] = command.target_instance_id
                         case SetTracingEnabled():
                             generated_events.append(
                                 TracingStateChanged(enabled=command.enabled)
@@ -812,7 +1273,7 @@ class Master:
                                 self.state.instances, placement, self.state.tasks
                             )
                             for cmd in cancel_unnecessary_downloads(
-                                placement, self.state.downloads
+                                placement, self._effective_downloads()
                             ):
                                 await self.download_command_sender.send(
                                     ForwarderDownloadCommand(
@@ -856,7 +1317,7 @@ class Master:
                                 # wastes bandwidth/disk and can re-trigger
                                 # wedged-download recovery later.
                                 for cancel_cmd in cancel_unnecessary_downloads(
-                                    after_delete, self.state.downloads
+                                    after_delete, self._effective_downloads()
                                 ):
                                     await self.download_command_sender.send(
                                         ForwarderDownloadCommand(
@@ -902,9 +1363,20 @@ class Master:
                                         after_delete,
                                         self._telemetry_view.node_memory,
                                         self.state.node_network,
-                                        download_status=self.state.downloads,
+                                        download_status=self._effective_downloads(),
+                                        excluded_nodes=set(
+                                            replace_command.excluded_nodes
+                                        ),
+                                        stamped_exclusions=set(
+                                            refused.excluded_nodes
+                                        ),
                                         node_resources=self._telemetry_view.node_resources,
                                         node_vram=usable_vram_by_node(
+                                            self._telemetry_view.node_system,
+                                            self._telemetry_view.node_resources,
+                                            node_memory=self._telemetry_view.node_memory,
+                                        ),
+                                        unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                                             self._telemetry_view.node_system,
                                             self._telemetry_view.node_resources,
                                             node_memory=self._telemetry_view.node_memory,
@@ -951,10 +1423,20 @@ class Master:
                                             after_delete,
                                             self._telemetry_view.node_memory,
                                             self.state.node_network,
-                                            download_status=self.state.downloads,
-                                            excluded_nodes={command.node_id},
+                                            download_status=self._effective_downloads(),
+                                            excluded_nodes=set(
+                                                fallback.excluded_nodes
+                                            ),
+                                            stamped_exclusions=set(
+                                                refused.excluded_nodes
+                                            ),
                                             node_resources=self._telemetry_view.node_resources,
                                             node_vram=usable_vram_by_node(
+                                                self._telemetry_view.node_system,
+                                                self._telemetry_view.node_resources,
+                                                node_memory=self._telemetry_view.node_memory,
+                                            ),
+                                            unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                                                 self._telemetry_view.node_system,
                                                 self._telemetry_view.node_resources,
                                                 node_memory=self._telemetry_view.node_memory,
@@ -992,7 +1474,7 @@ class Master:
                                     self.state.tasks,
                                 )
                                 for cmd in cancel_unnecessary_downloads(
-                                    final_placement, self.state.downloads
+                                    final_placement, self._effective_downloads()
                                 ):
                                     await self.download_command_sender.send(
                                         ForwarderDownloadCommand(
@@ -1015,10 +1497,15 @@ class Master:
                                 self.state.instances,
                                 credited_memory,
                                 self.state.node_network,
-                                download_status=self.state.downloads,
+                                download_status=self._effective_downloads(),
                                 excluded_nodes=set(command.excluded_nodes),
                                 node_resources=self._telemetry_view.node_resources,
                                 node_vram=credited_vram,
+                                unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                                    self._telemetry_view.node_system,
+                                    self._telemetry_view.node_resources,
+                                    node_memory=credited_memory,
+                                ),
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
@@ -1037,19 +1524,25 @@ class Master:
                                 self.state.instances,
                                 credited_memory,
                                 node_vram=credited_vram,
+                                unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                                    self._telemetry_view.node_system,
+                                    self._telemetry_view.node_resources,
+                                    node_memory=credited_memory,
+                                ),
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
                             )
                             generated_events.extend(transition_events)
-                        case SendInputChunk(chunk=chunk):
-                            generated_events.append(
-                                InputChunkReceived(
-                                    command_id=chunk.command_id,
-                                    chunk=chunk,
-                                )
+                        case SendInputChunk():
+                            logger.warning(
+                                "Rejected legacy payload input command; media must "
+                                "use a node-addressed data transport"
                             )
                         case TaskCancelled():
+                            self._realtime_instance_by_command.pop(
+                                command.cancelled_command_id, None
+                            )
                             if (
                                 task_id := self.command_task_mapping.get(
                                     command.cancelled_command_id
@@ -1066,6 +1559,9 @@ class Master:
                                     f"Nonexistent command {command.cancelled_command_id} cancelled"
                                 )
                         case TaskFinished():
+                            self._realtime_instance_by_command.pop(
+                                command.finished_command_id, None
+                            )
                             if (
                                 task_id := self.command_task_mapping.pop(
                                     command.finished_command_id, None
@@ -1093,37 +1589,72 @@ class Master:
                                 StagedModelEvicted(model_id=command.model_id)
                             )
                         case RequestEventLog():
-                            # We should just be able to send everything, since other buffers will ignore old messages
-                            # Large sessions can take many minutes to replay at 1k events per request,
-                            # which leaves freshly joined nodes with an incomplete topology view.
-                            replay_start = max(
-                                command.since_idx,
-                                self._event_log.start_idx,
-                            )
-                            if replay_start != command.since_idx:
-                                logger.warning(
-                                    "Requested replay index predates retained master tail; "
-                                    f"serving from {replay_start} instead of {command.since_idx}"
-                                )
-                            end = min(
-                                replay_start + EVENT_LOG_REPLAY_BATCH_SIZE,
-                                len(self._event_log),
-                            )
-                            for i, event in enumerate(
-                                self._event_log.read_range(replay_start, end),
-                                start=replay_start,
-                            ):
-                                await self._send_event(IndexedEvent(idx=i, event=event))
+                            self._schedule_event_log_replay(command.since_idx)
                     for event in generated_events:
                         await self.event_sender.send(event)
                 except ValueError as e:
                     logger.opt(exception=e).warning("Error in command processor")
+
+    def _report_heartbeat_gap_changes(self, *, now: datetime) -> None:
+        """Log dedicated-heartbeat degradation and recovery once per transition."""
+        current_nodes = set(self.state.last_seen)
+        gap_nodes = compute_heartbeat_gap_nodes(
+            self.state.last_seen,
+            self._telemetry_view.node_last_heartbeat,
+            now=now,
+        )
+        # Once absence has produced a warning, only an actual heartbeat receipt
+        # clears it. A later control event grants initial grace to a new node but
+        # must not masquerade as heartbeat recovery.
+        gap_nodes |= {
+            node_id
+            for node_id in self._heartbeat_gap_warned_nodes & current_nodes
+            if node_id not in self._telemetry_view.node_last_heartbeat
+        }
+        observations = compute_node_timeout_evidence(
+            self.state.last_seen,
+            self._telemetry_view.node_last_heartbeat,
+            self._telemetry_view.node_last_telemetry,
+            now=now,
+        )
+        for node_id in sorted(
+            gap_nodes - self._heartbeat_gap_warned_nodes, key=str
+        ):
+            evidence = observations[node_id]
+            logger.bind(
+                liveness_event="heartbeat_gap",
+                node_id=str(node_id),
+                heartbeat_age_seconds=evidence.heartbeat_age_seconds,
+                fallback_telemetry_age_seconds=(
+                    evidence.fallback_telemetry_age_seconds
+                ),
+                last_logged_event_age_seconds=(
+                    evidence.last_logged_event_age_seconds
+                ),
+            ).warning(
+                f"Dedicated heartbeat from node {node_id} is late or absent; "
+                "ordinary telemetry and logged events remain liveness fallbacks"
+            )
+        recovered_nodes = (
+            self._heartbeat_gap_warned_nodes - gap_nodes
+        ) & current_nodes
+        for node_id in sorted(recovered_nodes, key=str):
+            heartbeat_at = self._telemetry_view.node_last_heartbeat[node_id]
+            logger.bind(
+                liveness_event="heartbeat_recovered",
+                node_id=str(node_id),
+                heartbeat_age_seconds=_signal_age_seconds(
+                    now=now, seen_at=heartbeat_at
+                ),
+            ).info(f"Dedicated heartbeat from node {node_id} recovered")
+        self._heartbeat_gap_warned_nodes = gap_nodes
 
     # These plan loops are the cracks showing in our event sourcing architecture - more things could be commands
     async def _plan(self) -> None:
         while True:
             connected_node_ids = set(self.state.topology.list_nodes())
             now = datetime.now(tz=timezone.utc)
+            self._report_heartbeat_gap_changes(now=now)
             # ALL liveness-based action is suppressed while this session's
             # topology is still settling (#273): a failover-seeded master
             # carries instances but rebuilds topology and last_seen from
@@ -1142,15 +1673,17 @@ class Master:
                 time.monotonic() - self._started_monotonic
                 >= TOPOLOGY_SETTLE_GRACE_SECONDS
             )
-            timed_out_node_ids: set[NodeId] = (
-                compute_timed_out_nodes(
+            timeout_evidence = (
+                compute_node_timeout_evidence(
                     self.state.last_seen,
+                    self._telemetry_view.node_last_heartbeat,
                     self._telemetry_view.node_last_telemetry,
                     now=now,
                 )
                 if topology_settled
-                else set()
+                else {}
             )
+            timed_out_node_ids = _timed_out_nodes_from_evidence(timeout_evidence)
             dying_instance_ids: set[InstanceId] = (
                 instances_on_dead_nodes(
                     self.state, connected_node_ids, timed_out_node_ids
@@ -1175,6 +1708,22 @@ class Master:
                 )
                 await self.event_sender.send(task_failed)
 
+            # Reap lifecycle tasks whose executor died with its old node
+            # identity (#647): grace-based because instance deletion already
+            # removed the task-to-node attribution. Suppressed during the
+            # topology-settle grace like every liveness-derived action.
+            if topology_settled:
+                for task_failed in stale_lifecycle_task_failures(
+                    self.state,
+                    self._orphaned_lifecycle_first_seen,
+                    now=time.monotonic(),
+                ):
+                    logger.warning(
+                        f"Failing stale lifecycle task {task_failed.task_id}: "
+                        f"{task_failed.error_message}"
+                    )
+                    await self.event_sender.send(task_failed)
+
             # kill broken instances (suppressed during the topology-settle
             # grace, same rationale as dying_instance_ids above)
             if topology_settled:
@@ -1188,8 +1737,26 @@ class Master:
 
             # time out dead nodes
             for node_id in timed_out_node_ids:
-                logger.info(f"Manually removing node {node_id} due to inactivity")
-                await self.event_sender.send(NodeTimedOut(node_id=node_id))
+                evidence = timeout_evidence[node_id]
+                logger.bind(
+                    liveness_event="node_timed_out",
+                    node_id=str(node_id),
+                    last_logged_event_age_seconds=(
+                        evidence.last_logged_event_age_seconds
+                    ),
+                    heartbeat_age_seconds=evidence.heartbeat_age_seconds,
+                    fallback_telemetry_age_seconds=(
+                        evidence.fallback_telemetry_age_seconds
+                    ),
+                    effective_age_seconds=evidence.effective_age_seconds,
+                    timeout_seconds=evidence.timeout_seconds,
+                ).warning(
+                    f"Removing node {node_id}: all liveness signals exceeded "
+                    f"the {evidence.timeout_seconds:.0f}s timeout"
+                )
+                await self.event_sender.send(
+                    NodeTimedOut(node_id=node_id, evidence=evidence)
+                )
 
             # Recover instances wedged because a rank's download failed (#381).
             # Suppressed during the settle grace for the same reason as the
@@ -1249,10 +1816,16 @@ class Master:
                     after_delete,
                     self._telemetry_view.node_memory,
                     self.state.node_network,
-                    download_status=self.state.downloads,
-                    excluded_nodes=set(failed_nodes),
+                    download_status=self._effective_downloads(),
+                    excluded_nodes=set(replace_command.excluded_nodes),
+                    stamped_exclusions=set(instance.excluded_nodes),
                     node_resources=self._telemetry_view.node_resources,
                     node_vram=usable_vram_by_node(
+                        self._telemetry_view.node_system,
+                        self._telemetry_view.node_resources,
+                        node_memory=self._telemetry_view.node_memory,
+                    ),
+                    unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                         self._telemetry_view.node_system,
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
@@ -1272,7 +1845,7 @@ class Master:
                 self.state.instances, final_placement, self.state.tasks
             )
             for cmd in cancel_unnecessary_downloads(
-                final_placement, self.state.downloads
+                final_placement, self._effective_downloads()
             ):
                 await self.download_command_sender.send(
                     ForwarderDownloadCommand(origin=self._system_id, command=cmd)
@@ -1306,6 +1879,7 @@ class Master:
                             node_id=node_id,
                             shard_metadata=shard,
                             model_directory="",
+                            attempt_id=DownloadAttemptId(),
                         )
                     )
                 )
@@ -1321,22 +1895,65 @@ class Master:
                 # Discard all events not from our session
                 if local_event.session != self.session_id:
                     continue
-                self._multi_buffer.ingest(
-                    local_event.origin_idx,
-                    local_event.event,
-                    local_event.origin,
-                )
+                if not is_persistable_control_event(local_event.event):
+                    if self._should_warn_for_non_control_event(
+                        local_event.origin,
+                        type(local_event.event),
+                        now=time.monotonic(),
+                    ):
+                        # Envelope events (NodeGatheredInfo and friends) all
+                        # share one event name; without the payload type the
+                        # warning cannot identify WHICH reading keeps landing
+                        # on the wrong plane (#633).
+                        rejected = local_event.event
+                        payload: object | None = None
+                        if isinstance(rejected, NodeGatheredInfo):
+                            payload = rejected.info
+                        elif isinstance(rejected, NodeDownloadProgress):
+                            payload = rejected.download_progress
+                        payload_note = (
+                            f" carrying {type(payload).__name__}"
+                            if payload is not None
+                            else ""
+                        )
+                        logger.warning(
+                            "Rejected non-control event before ordering/indexing: "
+                            f"{type(local_event.event).__name__}{payload_note} "
+                            f"from {local_event.origin}"
+                        )
+                    self._multi_buffer.skip(
+                        local_event.origin_idx, local_event.origin
+                    )
+                else:
+                    self._multi_buffer.ingest(
+                        local_event.origin_idx,
+                        local_event.event,
+                        local_event.origin,
+                    )
                 for event in self._multi_buffer.drain():
-                    if isinstance(event, TracesCollected):
-                        await self._handle_traces_collected(event)
-                        continue
-
                     if isinstance(event, TaskDeleted):
                         for command_id, task_id in list(
                             self.command_task_mapping.items()
                         ):
                             if task_id == event.task_id:
                                 self.command_task_mapping.pop(command_id, None)
+                                self._realtime_instance_by_command.pop(
+                                    command_id, None
+                                )
+
+                    if isinstance(event, TaskFailed) or (
+                        isinstance(event, TaskStatusUpdated)
+                        and event.task_status
+                        not in (TaskStatus.Pending, TaskStatus.Running)
+                    ):
+                        for command_id, task_id in self.command_task_mapping.items():
+                            if task_id == event.task_id:
+                                # Terminal task state is authoritative even if
+                                # the owning API disappears before TaskFinished.
+                                # Preserve command mapping for eventual deletion.
+                                self._realtime_instance_by_command.pop(
+                                    command_id, None
+                                )
 
                     # Refuse to index task-lifecycle events that are state
                     # no-ops (the task is already gone). Without this cap a
@@ -1362,15 +1979,113 @@ class Master:
 
                     logger.debug(f"Master indexing event: {str(event)[:100]}")
                     indexed = IndexedEvent(event=event, idx=len(self._event_log))
-                    self.state = apply(self.state, indexed)
+                    self._apply_indexed_event(indexed)
 
                     event._master_time_stamp = datetime.now(tz=timezone.utc)  # pyright: ignore[reportPrivateUsage]
                     if isinstance(event, NodeGatheredInfo):
                         event.when = str(datetime.now(tz=timezone.utc))
 
-                    self._event_log.append(event)
+                    self._append_event_log(event)
                     await self._send_event(indexed)
                     await self._persist_snapshot()
+
+    def _schedule_event_log_replay(self, since_idx: int) -> None:
+        """Coalesce replay requests onto one paced background worker."""
+
+        active_next = self._active_replay_next_idx
+        active_end = self._active_replay_end_idx
+        if (
+            active_next is not None
+            and active_end is not None
+            and active_next <= since_idx < active_end
+        ):
+            # The active replay has not sent this index yet, so its existing pass
+            # will satisfy the request without another broadcast of the same tail.
+            return
+        if self._pending_replay_start_idx is None:
+            self._pending_replay_start_idx = since_idx
+        else:
+            self._pending_replay_start_idx = min(
+                self._pending_replay_start_idx, since_idx
+            )
+        if self._replay_worker_running:
+            return
+        self._replay_worker_running = True
+        self._tg.start_soon(self._drain_event_log_replays)
+
+    async def _drain_event_log_replays(self) -> None:
+        """Serve coalesced replay requests without blocking command processing."""
+
+        try:
+            while self._pending_replay_start_idx is not None:
+                requested_start = self._pending_replay_start_idx
+                self._pending_replay_start_idx = None
+                await self._serve_event_log_replay(requested_start)
+        finally:
+            self._active_replay_next_idx = None
+            self._active_replay_end_idx = None
+            self._replay_worker_running = False
+
+    async def _serve_event_log_replay(self, requested_start: int) -> None:
+        """Broadcast one retained replay tail in bounded, paced chunks."""
+
+        retained_start = max(requested_start, self._event_log.start_idx)
+        replay_start = min(retained_start, len(self._event_log))
+        if requested_start < self._event_log.start_idx:
+            logger.warning(
+                "Requested replay index predates retained master tail; "
+                f"serving from {replay_start} instead of {requested_start}"
+            )
+        elif requested_start > len(self._event_log):
+            logger.debug(
+                "Requested replay index is beyond the current master tail; "
+                f"serving an empty range at {replay_start}"
+            )
+        replay_end = min(
+            replay_start + EVENT_LOG_REPLAY_BATCH_SIZE,
+            len(self._event_log),
+        )
+        self._active_replay_next_idx = replay_start
+        self._active_replay_end_idx = replay_end
+        replayed = 0
+        for idx, event in enumerate(
+            self._event_log.read_range(replay_start, replay_end),
+            start=replay_start,
+        ):
+            await self._send_event(IndexedEvent(idx=idx, event=event))
+            replayed += 1
+            self._active_replay_next_idx = idx + 1
+            if (
+                replayed % EVENT_LOG_REPLAY_CHUNK_SIZE == 0
+                and idx + 1 < replay_end
+            ):
+                await anyio.sleep(EVENT_LOG_REPLAY_CHUNK_INTERVAL_SECONDS)
+        logger.info(
+            "Served paced event-log replay "
+            f"(start={replay_start}, end={replay_end}, events={replayed})"
+        )
+
+    def _append_event_log(self, event: Event) -> None:
+        """Append one decision and warn on sustained idle-state log growth."""
+
+        self._event_log.append(event)
+        active_download = any(
+            isinstance(progress, DownloadOngoing)
+            for progress_values in self._effective_downloads().values()
+            for progress in progress_values
+        )
+        idle = not self.state.tasks and not active_download
+        rate = self._event_log_growth_monitor.observe(
+            now=time.monotonic(),
+            idle=idle,
+        )
+        if rate is not None:
+            logger.warning(
+                "Event log is growing during an idle cluster state "
+                f"({rate:.1f} events/min over "
+                f"{self._event_log_growth_monitor.window_seconds:.0f}s); "
+                "inspect periodic control-plane event sources before replay pressure accumulates"
+            )
 
     # This function is re-entrant, take care!
     async def _send_event(self, event: IndexedEvent):
@@ -1383,32 +2098,6 @@ class Master:
                 event=event.event,
             )
         )
-
-    async def _handle_traces_collected(self, event: TracesCollected) -> None:
-        task_id = event.task_id
-        if task_id not in self._pending_traces:
-            self._pending_traces[task_id] = {}
-        self._pending_traces[task_id][event.rank] = event.traces
-
-        if (
-            task_id in self._expected_ranks
-            and set(self._pending_traces[task_id].keys())
-            >= self._expected_ranks[task_id]
-        ):
-            await self._merge_and_save_traces(task_id)
-
-    async def _merge_and_save_traces(self, task_id: TaskId) -> None:
-        all_trace_data: list[TraceEventData] = []
-        for trace_data in self._pending_traces[task_id].values():
-            all_trace_data.extend(trace_data)
-
-        await self.event_sender.send(
-            TracesMerged(task_id=task_id, traces=all_trace_data)
-        )
-
-        del self._pending_traces[task_id]
-        if task_id in self._expected_ranks:
-            del self._expected_ranks[task_id]
 
     async def _state_sync_processor(self) -> None:
         with self.state_sync_receiver as messages:
@@ -1472,6 +2161,12 @@ class Master:
             str(key): copy.deepcopy(value) for key, value in raw_config.items()
         }
         sanitized_config.pop("hf_token", None)
+        model_store = sanitized_config.get("model_store")
+        if (
+            self._state_sync_store_http_host is not None
+            and isinstance(model_store, dict)
+        ):
+            model_store["store_http_host"] = self._state_sync_store_http_host
         return yaml.safe_dump(
             sanitized_config,
             default_flow_style=False,

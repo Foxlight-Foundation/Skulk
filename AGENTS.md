@@ -98,11 +98,73 @@ If `nix fmt` changes any files, stage them before committing. The CI runs `nix f
 
 ### Node Composition
 A single Skulk `Node` (src/skulk/main.py) runs multiple components:
-- **Router**: libp2p-based pub/sub messaging via Rust bindings (skulk_pyo3_bindings)
+- **Router**: libp2p-based pub/sub messaging via Rust bindings (`skulk_pyo3_bindings`). `TELEMETRY` uses bounded latest-value admission, a one-packet Python egress queue, and its own gossipsub protocol/handler queues; `ELECTION_MESSAGES` has a separate Python egress queue and isolated protocol/handler queues. Neither can be starved by ordinary control fan-out, and telemetry pressure cannot consume election capacity. Election alone carries a temporary legacy-protocol copy. Peer discovery tries all mDNS addresses once, then slows link-local retries to one minute after another path connects; socket liveness requires three consecutive five-second ping failures.
 - **Worker**: Handles inference tasks, downloads models, manages runner processes
-- **Master**: Coordinates cluster state, places model instances across nodes
-- **Election**: Bully algorithm for master election
+- **Master**: Coordinates cluster state, places model instances across nodes; retained event-log replay is coalesced onto one asynchronously paced worker, and sustained idle-state event-log growth emits an operator warning
+- **Election**: Bully algorithm for master election, carried on the isolated election gossipsub behavior with duplicate candidate suppression during protocol migration
 - **API**: FastAPI server for OpenAI-compatible chat completions
+
+### Inference engines
+A model card's `placement.compatible_backends` selects which engine serves it
+(`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):
+- **`mlx`**: in-process MLX on Apple Silicon; owns the generation loop,
+  multi-node ring, and MTP/speculative decoding.
+- **`mlx_audio`**: single-node speech backend vocabulary for upstream
+  `mlx-audio` TTS/STT models. Skulk probes and advertises `mlx_audio` /
+  `mlx_audio-metal` when `mlx_audio` imports on macOS. Mounted TTS models serve
+  `/v1/audio/speech` through the speech runner; stable MP3/raw-PCM `stream=true` requires
+  card-level streaming support. Mounted STT models serve batch transcription;
+  cards with proven streaming support additionally expose typed SSE or
+  progressive NDJSON from their actual model deltas. Production nodes also expose the built-in `tts@1.0.0` provider
+  facade over that same core command/runner path, with raw MP3 media on
+  `PROVIDER_DATA` and dynamic telemetry/admission tied to mounted capacity.
+  The provider topic also carries negotiated caller media for client-streaming
+  and bidirectional capabilities, isolated by owner/call/direction; caller
+  `complete()` half-closes input without ending provider output.
+  `NodeDiagnostics.provider` exposes bounded per-capability admission,
+  caller-input queue, media-volume, first-output, terminal, and cancellation
+  metrics without retaining payloads or completed call IDs.
+  Mounted STT models serve non-streaming `/v1/audio/transcriptions`. Ready
+  mounted capacity also advertises the built-in `stt@1.0.0` batch transform:
+  callers send bounded encoded audio as binary provider frames, half-close
+  input, and receive one final transcript. Its core command path is shared
+  with the REST endpoint. The
+  stable `stt.realtime@1.0.0` bidirectional provider accepts mono PCM16
+  frames on any API node with reachable mounted capacity, pins a
+  `RealtimeAudioTranscription` task to one single-host instance, and feeds a
+  true upstream streaming session through bounded ingress. Same-node input
+  short-circuits locally; remote input uses node-addressed binary
+  `REALTIME_AUDIO` packets over Zenoh and is not advertised when Zenoh is
+  unavailable. PCM never enters State or the event log. It advertises only with
+  reachable ready capacity and a card declaring both streaming and realtime
+  support. `WS /v1/realtime` is a multi-turn OpenAI-compatible adapter over
+  this provider: base64 24 kHz
+  PCM16 at the API edge becomes raw Fabric media, and disconnect cancels the
+  provider. Dashboard chat uses this path only when card truth and the local
+  live provider tag agree, resampling AudioWorklet microphone frames to 24 kHz
+  PCM16; batch cards keep MediaRecorder upload. Every production API also
+  advertises `vad@1.0.0`, a stable bidirectional WebRTC VAD provider for
+  8/16/32/48 kHz mono PCM16. It emits typed turn boundaries with bounded
+  minimum speech, silence hangover, preroll, and maximum utterance duration;
+  media is processed per call and never retained. Translation-capable STT cards
+  serve experimental `/v1/audio/translations` only with global experimental
+  mode and `experiments.speech_translation`; TTS cards may expose model-native
+  voices or checksummed bundled reference profiles through the Skulk
+  `/v1/audio/voices` extension. Bundled profiles resolve to local audio and exact
+  transcripts only inside the worker. The realtime transcription
+  WebSocket accepts bounded server VAD and serializes utterances as distinct
+  provider calls. Optional response configuration routes final transcripts
+  through a mounted chat model and mounted `tts@1.0.0` provider; explicit
+  cancellation and VAD barge-in cancel underlying model/TTS commands.
+  Managed reference audio is accepted only as a
+  bounded multipart upload for supporting TTS cards. Its bytes use the
+  node-addressed `SPEECH_MEDIA` Zenoh data path, never State or the event log;
+  the worker assembles them in bounded process-local memory and the runner
+  removes its request-scoped temporary file after generation.
+- **`llama_cpp`**: in-process `llama-cpp-python` for GGUF on GPU/Linux nodes.
+  Single-node.
+- **`llama_server`**: served-backend engine; the worker launches an external
+  `llama-server` subprocess and proxies its OpenAI HTTP API.
 
 ### Message Flow
 Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
@@ -111,6 +173,12 @@ Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `COMMANDS`: Workers/API send commands to master
 - `ELECTION_MESSAGES`: Election protocol messages
 - `CONNECTION_MESSAGES`: libp2p connection updates
+- `DATA`: Generated model output sent directly to the owning API node
+- `VISION_MEDIA`: Bounded VLM/image-edit input sent directly from the owning API
+  to the worker ranks selected by authoritative task placement; payloads never
+  enter the master event log or replicated `State`, and every selected rank must
+  acknowledge verified input before the transfer deadline
+- `SPEECH_MEDIA`: node-addressed ephemeral TTS reference audio over Zenoh
 
 ### Event Sourcing
 The system uses event sourcing for state management:
@@ -135,14 +203,26 @@ Rust code in `rust/` provides:
 - `system_custodian`: System-level operations
 
 ### Dashboard
-React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API.
+React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API. Styling is theme-token-driven (`dashboard-react/src/theme/theme.ts`, dark = the operator design system's Den palette); components never branch on the theme name. Building with `VITE_NIGHT_SKY=1` sets the dark palette's `scene` token to the brand valley star field (scene crown + shooting stars, mesh retired); default builds ship a CSS-only night gradient with the mesh.
 
 ### Model Capability System
 Skulk now treats model capability handling as two layers:
-- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `tooling`, and `runtime` sections for refined model support
+- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `audio`, `tooling`, and `runtime` sections for refined model support
 - **Resolved capability profiles**: normalized runtime behavior contracts derived from the card plus conservative family defaults
 
-This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, and additive `/v1/models` metadata consumed by the dashboard.
+This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, speech/TTS/STT metadata, and additive `/v1/models` metadata consumed by the dashboard.
+TTS cards may declare `audio.voices`, optional bundled `reference_profile`
+identifiers, plus a validated `audio.default_voice`, which the API applies only
+when callers omit `voice`.
+
+**Model truth vs platform truth:** a card's `compatible_backends` declares which
+engines the model's artifacts run on (MODEL truth) and must never encode a gap
+in Skulk's own runners (PLATFORM truth). Platform limitations live in code:
+`platform_compatible_backends` in `src/skulk/shared/backends.py` (currently:
+served `llama_server` vision cards are gated off served engines; TTS/STT cards
+are gated to `mlx_audio`). Placement (`_card_platform_backends`) and the
+worker's fallback probe both apply the filter. When a runner gains a
+capability, flip the code table; do not sweep cards.
 
 ### Logging & Observability
 Centralized logging uses a three-layer stack:
@@ -158,7 +238,7 @@ These rules apply to every change. No exceptions.
 
 - **Every API endpoint must be documented** in `website/docs/api-guide.md` with method, path, parameters, and behavior. If you add or modify an endpoint, update the docs in the same commit or PR.
 - **Every release cut must update release notes** in both `CHANGELOG.md` and the public docs under `website/docs/`. One exception: the post-promotion bump of dev's `pyproject.toml` to the next version is not a release. Dev always carries the next version after a promotion merges to main, and that version's release notes are written at its actual cut, when `[Unreleased]` rolls over.
-- **Every API endpoint must appear in the OpenAPI spec.** FastAPI auto-generates this from route decorators — ensure every route has `tags`, `summary`, and `description` set. Verify with `uv run python scripts/export_openapi.py` (output is gitignored but CI regenerates it). The Docusaurus build runs `gen-api-docs` to produce interactive per-endpoint pages from that spec.
+- **Every HTTP API endpoint must appear in the OpenAPI spec.** FastAPI auto-generates this from route decorators — ensure every HTTP route has `tags`, `summary`, and `description` set. Verify with `uv run python scripts/export_openapi.py` (output is gitignored but CI regenerates it). The Docusaurus build runs `gen-api-docs` to produce interactive per-endpoint pages from that spec. OpenAPI 3.x cannot describe WebSocket operations; every WebSocket endpoint must instead have a normative manual contract in `website/docs/api-guide.md` covering its path, handshake, client and server events, limits, close codes, and authentication or origin policy.
 - **All public Python functions, classes, and methods must have docstrings** that are clear enough for generative documentation tools (docusaurus, pdoc, sphinx) to produce useful output. Describe what it does, parameters, return value, and any side effects.
 - **All Pydantic models and their fields must have descriptions** via docstrings or `Field(description=...)` for anything non-obvious. These flow into the OpenAPI spec.
 - **TypeScript components and hooks must have JSDoc comments** on exported interfaces, props, and non-trivial functions.
@@ -224,17 +304,21 @@ Map the final score to the review severity:
   or a narrower edge case. Note it for follow-up, but do not fix it in the
   current PR unless explicitly requested.
 - **2 — Low**: `2.5 >= score > 1.7`. Nice-to-have improvement, minor refactor,
-  cosmetic inconsistency, or speculative concern. Ignore for the current PR.
+  cosmetic inconsistency, or speculative concern. Do not fix in the current PR.
 - **1 — Informational / Nitpick**: `score <= 1.7`. Style preference, wording,
-  or clearly non-blocking observation. Ignore.
+  or clearly non-blocking observation. Do not fix in the current PR.
 
-Only fix comments rated 4 or 5. Do not iterate on minor wording, style, or speculative improvements from automated reviewers (e.g., Copilot). Time spent on low-severity feedback is time not spent on real work.
+Only fix comments rated 4 or 5. Do not iterate on minor wording, style, or
+speculative improvements from automated reviewers (e.g., Copilot). For every
+comment rated 1–3, reply with the severity-based rationale for not changing the
+current PR, note any follow-up when appropriate, and resolve the thread. Time
+spent implementing low-severity feedback is time not spent on real work.
 
 ### PR Review Loop
 
 Foxlight PRs are never opened as drafts. After opening or updating a PR, keep it
 ready for review, check for merge conflicts and failing checks, and continue
-watching review/check state until no unresolved severity 4 or 5 comments remain.
+watching review/check state until no unresolved review threads remain.
 If a branch is not ready for review, do not open the PR yet.
 
 PR descriptions, review replies, and validation notes must not include private
@@ -246,18 +330,24 @@ and behavior exercised) and keep raw environment details in private logs or
 notes.
 
 When working an open pull request, use this review loop until no unresolved
-severity 4 or 5 comments remain:
+review threads remain:
 
 1. Inspect the PR for new review comments, unresolved threads, and failing checks.
 2. Evaluate each comment using the severity rubric above.
-3. Ignore severity 1–2 comments.
-4. Note severity 3 comments for future work, but do not fix them in the current PR.
+3. For severity 1–2 comments, do not change code; reply with the severity and
+   concise rationale, then resolve the thread.
+4. For severity 3 comments, note any appropriate follow-up, reply with the
+   severity and rationale for deferring it, then resolve the thread.
 5. Fix severity 4–5 comments with the smallest correct change.
 6. Add or update focused tests for every correctness fix on a critical path.
 7. Run focused validation before replying on the PR.
-8. Reply on each addressed thread with the concrete fix or rationale.
-9. Resolve only threads that are actually addressed by code and validation.
-10. Repeat until there are no unresolved severity 4–5 comments, or stop and escalate if the fix becomes ambiguous, validation fails, or the required change would sprawl beyond the PR scope.
+8. For every fixed comment, reply with the concrete fix and validation, then
+   resolve the thread.
+9. Never merge with unresolved review threads, including comments intentionally
+   declined because of severity.
+10. Repeat until there are no unresolved review threads, or stop and escalate if
+    a severity 4–5 fix becomes ambiguous, validation fails, or the required
+    change would sprawl beyond the PR scope.
 
 ### Before Every Commit
 
@@ -265,7 +355,8 @@ severity 4 or 5 comments remain:
 2. Verify that all new or modified API endpoints are documented in `website/docs/api-guide.md`.
 3. Verify that all new or modified API endpoints have proper FastAPI decorators (`tags`, `summary`, `description`).
 4. Verify that all new or modified public functions have docstrings.
-5. If the dashboard was changed, run `npm run build` in `dashboard-react/` to confirm it builds.
+5. If the dashboard was changed, run `npm run test` and `npm run build` in
+   `dashboard-react/` to confirm its Chromium suite and production build pass.
 6. Stage any files changed by formatters before committing.
 
 ## Testing

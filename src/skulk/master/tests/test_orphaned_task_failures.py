@@ -9,14 +9,24 @@ instance is gone (or being torn down in the same plan pass).
 
 from skulk.master.main import instances_on_dead_nodes, orphaned_task_failure_events
 from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.types.audio import (
+    AudioTranscriptionTaskParams,
+    SpeechSynthesisTaskParams,
+)
 from skulk.shared.types.common import CommandId, ModelId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
+from skulk.shared.types.tasks import (
+    AudioTranscription as AudioTranscriptionTask,
+)
 from skulk.shared.types.tasks import (
     LoadModel,
     Task,
     TaskId,
     TaskStatus,
+)
+from skulk.shared.types.tasks import (
+    SpeechSynthesis as SpeechSynthesisTask,
 )
 from skulk.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
@@ -81,6 +91,41 @@ def _text_task(
     )
 
 
+def _speech_task(
+    task_id: TaskId,
+    instance_id: InstanceId,
+    status: TaskStatus = TaskStatus.Running,
+) -> SpeechSynthesisTask:
+    return SpeechSynthesisTask(
+        task_id=task_id,
+        instance_id=instance_id,
+        task_status=status,
+        command_id=CommandId(),
+        task_params=SpeechSynthesisTaskParams(
+            model=ModelId("test-model"),
+            input_text="hi",
+        ),
+    )
+
+
+def _transcription_task(
+    task_id: TaskId,
+    instance_id: InstanceId,
+    status: TaskStatus = TaskStatus.Running,
+) -> AudioTranscriptionTask:
+    return AudioTranscriptionTask(
+        task_id=task_id,
+        instance_id=instance_id,
+        task_status=status,
+        command_id=CommandId(),
+        task_params=AudioTranscriptionTaskParams(
+            model=ModelId("test-model"),
+            total_input_chunks=1,
+            audio_sha256="abc123",
+        ),
+    )
+
+
 def _state(
     tasks: dict[TaskId, Task],
     instances: dict[InstanceId, Instance],
@@ -102,6 +147,30 @@ def test_task_with_missing_instance_is_failed() -> None:
     instance_id = InstanceId()
     task_id = TaskId()
     state = _state({task_id: _text_task(task_id, instance_id)}, {})
+    events = orphaned_task_failure_events(state, frozenset())
+    assert len(events) == 1
+    assert events[0].task_id == task_id
+    assert events[0].error_type == "instance_lost"
+
+
+def test_speech_task_with_missing_instance_is_failed() -> None:
+    """A lost TTS instance must unblock the waiting speech HTTP request."""
+
+    instance_id = InstanceId()
+    task_id = TaskId()
+    state = _state({task_id: _speech_task(task_id, instance_id)}, {})
+    events = orphaned_task_failure_events(state, frozenset())
+    assert len(events) == 1
+    assert events[0].task_id == task_id
+    assert events[0].error_type == "instance_lost"
+
+
+def test_audio_transcription_task_with_missing_instance_is_failed() -> None:
+    """A lost STT instance must unblock the waiting transcription HTTP request."""
+
+    instance_id = InstanceId()
+    task_id = TaskId()
+    state = _state({task_id: _transcription_task(task_id, instance_id)}, {})
     events = orphaned_task_failure_events(state, frozenset())
     assert len(events) == 1
     assert events[0].task_id == task_id
@@ -198,3 +267,91 @@ def test_worker_lifecycle_task_not_failed() -> None:
         {},
     )
     assert orphaned_task_failure_events(state, frozenset()) == []
+
+
+# --- #647: stale lifecycle tasks orphaned by a vanished executor -----------
+
+
+def _shutdown_task(
+    task_id: TaskId,
+    instance_id: InstanceId,
+    status: TaskStatus = TaskStatus.Pending,
+) -> Task:
+    from skulk.shared.types.tasks import Shutdown
+    from skulk.shared.types.worker.instances import RunnerId
+
+    return Shutdown(
+        task_id=task_id,
+        instance_id=instance_id,
+        task_status=status,
+        runner_id=RunnerId(),
+    )
+
+
+def _state_647(
+    tasks: dict[TaskId, Task],
+    instances: dict[InstanceId, Instance] | None = None,
+) -> State:
+    return State(tasks=tasks, instances=instances or {})
+
+
+def test_stale_lifecycle_task_fails_only_after_grace() -> None:
+    from skulk.master.main import stale_lifecycle_task_failures
+
+    task_id = TaskId()
+    state = _state_647({task_id: _shutdown_task(task_id, InstanceId("gone"))})
+    tracking: dict[TaskId, float] = {}
+    # First observation: stamped, not yet failed.
+    assert stale_lifecycle_task_failures(state, tracking, now=100.0) == []
+    assert task_id in tracking
+    # Still inside the grace.
+    assert stale_lifecycle_task_failures(state, tracking, now=150.0) == []
+    # Past the grace: one terminal event, tracking entry consumed.
+    events = stale_lifecycle_task_failures(state, tracking, now=161.0)
+    assert [e.task_id for e in events] == [task_id]
+    assert events[0].error_type == "executor_lost"
+    assert "node died" not in events[0].error_message
+    assert task_id not in tracking
+
+
+def test_lifecycle_task_with_live_instance_is_never_reaped() -> None:
+    from skulk.master.main import stale_lifecycle_task_failures
+
+    task_id = TaskId()
+    instance_id = InstanceId("alive")
+    state = _state_647(
+        {task_id: _shutdown_task(task_id, instance_id)},
+        {instance_id: _instance(instance_id)},
+    )
+    tracking: dict[TaskId, float] = {}
+    assert stale_lifecycle_task_failures(state, tracking, now=0.0) == []
+    assert stale_lifecycle_task_failures(state, tracking, now=10_000.0) == []
+    assert tracking == {}
+
+
+def test_command_tasks_are_left_to_the_223_pass() -> None:
+    from skulk.master.main import stale_lifecycle_task_failures
+
+    task_id = TaskId()
+    state = _state_647({task_id: _text_task(task_id, InstanceId("gone"))})
+    tracking: dict[TaskId, float] = {}
+    assert stale_lifecycle_task_failures(state, tracking, now=0.0) == []
+    assert stale_lifecycle_task_failures(state, tracking, now=10_000.0) == []
+    assert tracking == {}
+
+
+def test_terminal_lifecycle_task_clears_tracking() -> None:
+    from skulk.master.main import stale_lifecycle_task_failures
+
+    task_id = TaskId()
+    pending = _state_647({task_id: _shutdown_task(task_id, InstanceId("gone"))})
+    tracking: dict[TaskId, float] = {}
+    assert stale_lifecycle_task_failures(pending, tracking, now=0.0) == []
+    assert task_id in tracking
+    # The worker reported after all (e.g. a slow but healthy teardown):
+    # terminal status leaves the orphan set and the stamp is dropped.
+    completed = _state_647(
+        {task_id: _shutdown_task(task_id, InstanceId("gone"), TaskStatus.Complete)}
+    )
+    assert stale_lifecycle_task_failures(completed, tracking, now=30.0) == []
+    assert tracking == {}

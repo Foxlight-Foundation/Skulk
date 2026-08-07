@@ -243,7 +243,7 @@ const TagBadge = styled.span<{ $variant: 'green' | 'purple' }>`
   border-radius: ${({ theme }) => theme.radii.sm};
   ${({ $variant }) =>
     $variant === 'green'
-      ? css`background: rgba(34,197,94,0.2); color: ${({ theme }) => theme.colors.healthy}; border: 1px solid rgba(34,197,94,0.3);`
+      ? css`background: ${({ theme }) => theme.colors.accentBg}; color: ${({ theme }) => theme.colors.healthy}; border: 1px solid ${({ theme }) => theme.colors.accentBg};`
       : css`background: rgba(168,85,247,0.2); color: #c084fc; border: 1px solid rgba(168,85,247,0.3);`}
 `;
 
@@ -293,7 +293,7 @@ const PreviewBox = styled.div`
     content: '';
     position: absolute;
     inset: 0;
-    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(255,215,0,0.02) 2px, rgba(255,215,0,0.02) 4px);
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(147,174,223,0.03) 2px, rgba(147,174,223,0.03) 4px);
     pointer-events: none;
   }
 `;
@@ -363,7 +363,7 @@ export function ModelCard({
   const theme = useTheme() as Theme;
   // Drop the SVG glow filter in light mode — looks like a hard drop-shadow against
   // the soft blue background.
-  const useGlow = theme.colors.bg === '#000000';
+  const useGlow = theme.colors.svgGlow === 'on';
   const placement = computePlacement(nodes, apiPreview, excludedNodeIds);
   const canFit = apiPreview ? apiPreview.error === null : placement.canFit;
   const perNode = downloadStatus?.perNode ?? [];
@@ -451,7 +451,7 @@ export function ModelCard({
               </ProgressTrack>
               <span style={{
                 textAlign: 'right',
-                color: nd.status === 'completed' ? theme.colors.goldDim : nd.status === 'downloading' ? theme.colors.info : theme.colors.textMuted,
+                color: nd.status === 'completed' ? theme.colors.goldTextDim : nd.status === 'downloading' ? theme.colors.info : theme.colors.textMuted,
               }}>
                 {nd.status === 'downloading' && nd.progress
                   ? `${Math.round(nd.percentage)}% ${formatSpeed(nd.progress.speed, t)}`
@@ -501,7 +501,7 @@ export function ModelCard({
               <g
                 key={node.id}
                 transform={`translate(${node.x}, ${node.y})`}
-                opacity={node.isUsed ? 1 : (theme.colors.bg === '#000000' ? 0.7 : 0.9)}
+                opacity={node.isUsed ? 1 : (theme.colors.svgGlow === 'on' ? 0.7 : 0.9)}
                 filter={node.isUsed && useGlow ? `url(#nodeGlow-${filterId})` : undefined}
               >
                 <PlacementDeviceIcon node={node} filterId={filterId} />
@@ -550,7 +550,7 @@ export function ModelCard({
 
 function PlacementDeviceIcon({ node, filterId }: { node: PlacementNode; filterId: string }) {
   const theme = useTheme() as Theme;
-  const useGlow = theme.colors.bg === '#000000';
+  const useGlow = theme.colors.svgGlow === 'on';
   const s = node.iconSize;
   const half = s / 2;
   const stroke = node.isUsed ? theme.colors.gold : theme.colors.border;

@@ -83,11 +83,19 @@ async def get_os_build_version() -> str:
 
 
 async def get_friendly_name() -> str:
+    """Return this node's display name for identity gossip and the dashboard.
+
+    Resolution order: the ``SKULK_NODE_NAME`` environment variable when set
+    (node-local launch config: containers and rented pods carry runtime-random
+    hostnames like ``a21147cd1ae7`` and an unprivileged container cannot call
+    sethostname, so an override is the only way such a node can identify
+    itself, #555); then macOS's Computer Name (e.g. "John's MacBook Pro");
+    then the plain hostname.
     """
-    Asynchronously gets the 'Computer Name' (friendly name) of a Mac.
-    e.g., "John's MacBook Pro"
-    Returns the name as a string, or None if an error occurs or not on macOS.
-    """
+    override = os.environ.get("SKULK_NODE_NAME", "").strip()
+    if override:
+        return override
+
     hostname = socket.gethostname()
 
     if sys.platform != "darwin":

@@ -42,9 +42,22 @@ class State(CamelCaseModel):
     )
     instances: Mapping[InstanceId, Instance] = {}
     runners: Mapping[RunnerId, RunnerStatus] = {}
-    downloads: Mapping[NodeId, Sequence[DownloadProgress]] = {}
+    downloads: Mapping[NodeId, Sequence[DownloadProgress]] = Field(
+        default={},
+        description=(
+            "Durable per-node download outcomes. Current state retains completed "
+            "and failed outcomes only; pending and ongoing progress is live telemetry."
+        ),
+    )
     tasks: Mapping[TaskId, Task] = {}
-    last_seen: Mapping[NodeId, datetime] = {}
+    last_seen: Mapping[NodeId, datetime] = Field(
+        default={},
+        description=(
+            "Last indexed control-plane event timestamp per node. This is not a "
+            "heartbeat or proof of current liveness and is stale by design for "
+            "healthy nodes that have no changing control-plane state."
+        ),
+    )
     topology: Topology = Field(default_factory=Topology)
     tracing_enabled: bool = False
     last_event_applied_idx: int = Field(default=-1, ge=-1)

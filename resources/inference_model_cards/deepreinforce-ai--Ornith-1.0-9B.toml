@@ -1,0 +1,37 @@
+# Ornith 1.0 9B for the vllm served engine (the "wowsers" slate: current-generation
+# models serving out of the box). DeepReinforce's agentic-coding model (MIT license), dense 9B on
+# the qwen3_5 architecture; bf16 (~19 GB) serves on 24 GB-class GPUs.
+# # Model truth vs platform truth notes, mirroring the #635 starter-set
+# precedent:
+# - The repo is an image-text-to-text architecture; the MODEL supports vision.
+#   The vllm runner is text-only in this slice and the vision platform gate
+#   ({mlx, llama_cpp} in shared/backends.py) would make a vision-declaring
+#   vllm-only card unplaceable, so this card claims text serving only.
+#   Restore the vision declaration when the vllm runner gains image input.
+# - Tool calling is declared off: the vllm runner does not implement tool
+#   dispatch yet (#638); flip to the family default when it lands.
+# Architecture facts from the repo's config.json; context_length is the
+# config max_position_embeddings. storage_size is the full staging set.
+# `supports_tensor = false`: vLLM runs single-node in Skulk.
+model_id = "deepreinforce-ai/Ornith-1.0-9B"
+n_layers = 32
+hidden_size = 4096
+num_key_value_heads = 4
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "qwen"
+quantization = "bf16"
+base_model = "Ornith 1.0 9B"
+capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 262144
+trust_remote_code = false
+
+[tooling]
+supports_tool_calling = false
+
+[placement]
+compatible_backends = ["vllm-cuda", "vllm-rocm"]
+backend_preference = ["vllm-cuda", "vllm-rocm"]
+
+[storage_size]
+in_bytes = 18846516247

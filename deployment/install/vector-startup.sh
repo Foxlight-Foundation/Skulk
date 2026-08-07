@@ -24,6 +24,14 @@ if [[ -f "$ENV_FILE" ]]; then
     set +a
 fi
 
+# Vector does not recursively expand environment-variable defaults. Leaving
+# these unset makes `${VAR:-${HOME}/...}` resolve to a literal `${HOME}` path,
+# and launchd's repository working directory then becomes a dirty checkout.
+# Resolve the user-relative defaults in the shell before Vector reads YAML.
+SKULK_VECTOR_DATA_DIR="${SKULK_VECTOR_DATA_DIR:-$HOME/.skulk/vector}"
+SKULK_LOG_FILE="${SKULK_LOG_FILE:-$HOME/.skulk/logs/skulk.stdout.log}"
+export SKULK_VECTOR_DATA_DIR SKULK_LOG_FILE
+
 if ! command -v vector >/dev/null 2>&1; then
     echo "error: 'vector' not found on PATH. Install Vector (https://vector.dev/docs/setup/installation/) and re-run." >&2
     exit 1
