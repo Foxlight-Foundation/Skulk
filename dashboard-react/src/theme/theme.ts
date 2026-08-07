@@ -215,8 +215,10 @@ const darkColors: ColorTokens = {
   warning: '#F2A03D',
   warningBg: 'rgba(242, 160, 61, 0.13)',
   warningText: '#FFD79A',
-  warningFill: '#ffcc33',
-  warningOnFill: '#000000',
+  // Solid attention badging is one of the few places amber earns a fill:
+  // it marks something the operator must act on, not decoration.
+  warningFill: '#F2A03D',
+  warningOnFill: '#1C1206',
   warningOnSurface: '#F2A03D',
   info: '#93AEDF',
   infoBg: 'rgba(147, 174, 223, 0.14)',
@@ -308,9 +310,8 @@ const lightColors: ColorTokens = {
   warning: '#475569',                       // slate-600 (border/accent)
   warningBg: 'rgba(71, 85, 105, 0.08)',     // slate-600 at 8%
   warningText: '#1e293b',                   // slate-800
-  // Solid-callout pair stays palette-independent — same yellow + black in
-  // both modes — because the intent is high-attention badging, not subtle
-  // tinting. Mirrors the dark-mode values verbatim.
+  // Solid-callout pair: high-attention badging, not subtle tinting. Light
+  // mode keeps the legacy yellow; the night palette badges in its amber.
   warningFill: '#ffcc33',
   warningOnFill: '#000000',
   warningOnSurface: '#b45309',               // amber-700, readable on white
