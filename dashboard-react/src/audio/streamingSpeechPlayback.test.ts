@@ -403,6 +403,13 @@ describe('splitCompleteSpeechSentences structural boundaries', () => {
       .toBe('Before. After.');
   });
 
+  it('separates unpunctuated prose from a thematic break with no blank line', () => {
+    expect(splitCompleteSpeechSentences('Before the break\n---\nAfter the break. Tail')).toEqual({
+      sentences: ['Before the break', '---', 'After the break.'],
+      remainder: 'Tail',
+    });
+  });
+
   it('handles Windows newlines around a title block', () => {
     expect(speechTextFromMarkdown('**A Title**\r\n\r\nBody text.')).toBe('A Title. Body text.');
   });

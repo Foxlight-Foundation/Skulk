@@ -387,15 +387,18 @@ export function splitCompleteSpeechSentences(text: string): {
     if (newline === -1) break;
     const lineStart = text.lastIndexOf('\n', newline - 1) + 1;
     const line = text.slice(lineStart, newline);
-    if (
-      !insideFence(newline)
-      && (
-        !line.trim()
-        || STRUCTURAL_SPEECH_LINE.test(line)
-        || HORIZONTAL_RULE_LINE.test(line)
-      )
-    ) {
-      boundaries.push(newline + 1);
+    if (!insideFence(newline)) {
+      const structural = STRUCTURAL_SPEECH_LINE.test(line) || HORIZONTAL_RULE_LINE.test(line);
+      if (!line.trim() || structural) {
+        boundaries.push(newline + 1);
+      }
+      // A structural line also ends whatever preceded it: without this,
+      // unpunctuated prose directly above a thematic break glues to the
+      // rule and the queue never sees an exact horizontal-rule segment to
+      // turn into its audible pause.
+      if (structural && lineStart > 0) {
+        boundaries.push(lineStart);
+      }
     }
     searchFrom = newline + 1;
   }
