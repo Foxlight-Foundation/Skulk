@@ -10,7 +10,7 @@ This project records release notes here and mirrors public-facing notes in
 ### Changed
 
 - Redesigned the dashboard's dark mode around the Foxlight operator design
-  system's Den palette, replacing the inherited high-contrast scheme: indigo
+  system's Den palette, replacing the previous high-contrast scheme: indigo
   surfaces over a deep night canvas, a starlight accent for everyday
   interaction, and amber reserved for work actually in flight (RAM a model is
   holding, downloads in progress, attention badges). Light mode is unchanged.
