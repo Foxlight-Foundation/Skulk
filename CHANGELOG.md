@@ -32,6 +32,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Dashboard speech now prepares model turns for synthesis structurally rather
+  than sentence-by-sentence alone: an unpunctuated block such as a bold story
+  title gains terminal punctuation so it no longer bleeds into the following
+  sentence, Markdown block and heading boundaries end a spoken segment even
+  when the model omitted punctuation, emoji are stripped instead of being
+  read aloud, and a horizontal rule becomes a brief audible pause on the
+  streaming playback timeline instead of spoken dashes.
+
 - Dashboard speech now sends completed turns and replay requests to batch-only
   TTS models as one synthesis call. Sentence-sized request queues remain
   reserved for cards that truthfully advertise streaming PCM, avoiding the

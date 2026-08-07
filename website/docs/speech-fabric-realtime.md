@@ -222,6 +222,11 @@ model and local node advertise the required capabilities.
   matching catalog voice, then pins that voice for every sentence request in
   the response. An explicit user selection overrides automatic matching but
   remains pinned for the same response.
+- Spoken text is prepared structurally from the rendered Markdown: code
+  fences, markup, and emoji are stripped; blocks that end without terminal
+  punctuation (a bold title, an unpunctuated heading) gain a period so they
+  do not bleed into the next sentence; and a horizontal rule becomes a brief
+  pause on the streaming playback timeline.
 - Batch-only TTS models retain complete-response encoded playback.
 
 The dashboard falls back to batch transcription when realtime model or node

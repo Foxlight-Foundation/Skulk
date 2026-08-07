@@ -192,53 +192,123 @@ class PlaybackFrameAccumulator {
   }
 }
 
-/** Convert rendered Markdown prose into stable text suitable for speech synthesis. */
+/**
+ * Marker segment understood by the speech pipeline as "insert an audible
+ * pause here" rather than text to synthesize. Uses invisible-separator
+ * characters so it can never collide with model prose.
+ */
+export const SPEECH_PAUSE_MARKER = '\u2063skulk-pause\u2063';
+
+/** Length of the audible pause inserted for structural breaks. */
+export const SPEECH_PAUSE_SECONDS = 0.6;
+
+/** A Markdown thematic break: three or more -, * or _ alone on a line. */
+const HORIZONTAL_RULE_LINE = /^\s*(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$/;
+
+/** A line whose Markdown role ends at the newline (heading, quote, list, table). */
+const STRUCTURAL_SPEECH_LINE = /^\s{0,3}(?:#{1,6}\s+|>\s?|[-+*]\s+|\d+[.)]\s+|\|)/;
+
+/** Text already carrying an end-of-thought mark that gives TTS its pause. */
+const TERMINAL_SPEECH_PUNCTUATION = /[.!?\u2026:;,]["')\]]*$/;
+
+/* Pictographs, variation selectors, joiners, skin tones, flags, keycaps:
+ * none of them have a spoken reading, and engines that try produce noise. */
+const EMOJI_CHARACTERS = /\p{Extended_Pictographic}|\u{FE0F}|\u{200D}|\u{20E3}|[\u{1F3FB}-\u{1F3FF}]|[\u{1F1E6}-\u{1F1FF}]|[\u{E0020}-\u{E007F}]/gu;
+
+/**
+ * Convert rendered Markdown prose into stable text suitable for speech
+ * synthesis. Works block-by-block (blank lines separate blocks) so that any
+ * block ending without terminal punctuation, such as a bold story title,
+ * gains a period: without one the synthesized title bleeds straight into
+ * the following sentence. Emoji are stripped rather than read, and
+ * horizontal rules contribute nothing here (the sentence pipeline turns
+ * them into an audible pause).
+ */
 export function speechTextFromMarkdown(text: string): string {
-  const normalizedLines = text
+  const spokenBlocks = text
     .replace(/```[\s\S]*?```/g, ' ')
-    .split(/\r?\n/)
-    .map((line) => {
-      const structuralLine = /^\s*(?:#{1,6}\s+|>\s*|[-+*]\s+|\d+[.)]\s+)/.test(line);
-      let spoken = line
-        .replace(/^\s{0,3}(?:#{1,6}\s+|>\s*)/, '')
-        .replace(/^\s*(?:[-+*]|\d+[.)])\s+/, '')
-        .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-        .replace(/\[([^\]]+)]\([^)]*\)/g, '$1')
-        .replace(/<https?:\/\/[^>]+>/g, '')
-        .replace(/`([^`]+)`/g, '$1')
-        .replace(/(\*\*|__)(.*?)\1/g, '$2')
-        .replace(/(\*|_)(.*?)\1/g, '$2')
-        .replace(/~~(.*?)~~/g, '$1')
-        .replace(/<[^>]+>/g, '')
-        .replace(/[\\*_~]/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (structuralLine && spoken && !/[.!?]["')\]]*$/.test(spoken)) spoken += '.';
+    .split(/\n\s*\n/)
+    .map((block) => {
+      const lines = block
+        .split(/\r?\n/)
+        .map((line) => {
+          if (HORIZONTAL_RULE_LINE.test(line)) return '';
+          const structuralLine = /^\s*(?:#{1,6}\s+|>\s*|[-+*]\s+|\d+[.)]\s+)/.test(line);
+          let spoken = line
+            .replace(/^\s{0,3}(?:#{1,6}\s+|>\s*)/, '')
+            .replace(/^\s*(?:[-+*]|\d+[.)])\s+/, '')
+            .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+            .replace(/\[([^\]]+)]\([^)]*\)/g, '$1')
+            .replace(/<https?:\/\/[^>]+>/g, '')
+            .replace(/`([^`]+)`/g, '$1')
+            .replace(/(\*\*|__)(.*?)\1/g, '$2')
+            .replace(/(\*|_)(.*?)\1/g, '$2')
+            .replace(/~~(.*?)~~/g, '$1')
+            .replace(/<[^>]+>/g, '')
+            .replace(/[\\*_~]/g, '')
+            .replace(EMOJI_CHARACTERS, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (structuralLine && spoken && !TERMINAL_SPEECH_PUNCTUATION.test(spoken)) spoken += '.';
+          return spoken;
+        })
+        .filter(Boolean);
+      let spoken = lines.join(' ').replace(/\s+/g, ' ').trim();
+      if (spoken && !TERMINAL_SPEECH_PUNCTUATION.test(spoken)) spoken += '.';
       return spoken;
     })
     .filter(Boolean);
-  return normalizedLines.join(' ').replace(/\s+/g, ' ').trim();
+  return spokenBlocks.join(' ').replace(/\s+/g, ' ').trim();
 }
 
-/** Split visible text into complete synthesis sentences and one retained tail. */
+/**
+ * Split visible text into complete synthesis sentences and one retained tail.
+ *
+ * Boundaries come from three signals, merged in order: terminal punctuation
+ * followed by whitespace (the classic case), a completed blank line (the end
+ * of a Markdown block, which is how an unpunctuated bold title stops
+ * bleeding into the story's first sentence), and a completed structural line
+ * (heading, quote, list item, table row, or horizontal rule), whose Markdown
+ * role ends at its newline.
+ */
 export function splitCompleteSpeechSentences(text: string): {
   sentences: string[];
   remainder: string;
 } {
-  const sentences: string[] = [];
-  let boundary = 0;
+  const boundaries: number[] = [];
   const matcher = /[.!?](?:["')\]*_~]*)\s+/g;
   for (const match of text.matchAll(matcher)) {
     const punctuation = match.index ?? 0;
     const lineStart = text.lastIndexOf('\n', punctuation) + 1;
     const linePrefix = text.slice(lineStart, punctuation + 1).trim();
     if (/^(?:\d+|[A-Za-z])[.)]$/.test(linePrefix)) continue;
-    const end = (match.index ?? 0) + match[0].length;
-    const sentence = text.slice(boundary, end).trim();
-    if (sentence) sentences.push(sentence);
-    boundary = end;
+    boundaries.push((match.index ?? 0) + match[0].length);
   }
-  return { sentences, remainder: text.slice(boundary) };
+  let searchFrom = 0;
+  for (;;) {
+    const newline = text.indexOf('\n', searchFrom);
+    if (newline === -1) break;
+    const lineStart = text.lastIndexOf('\n', newline - 1) + 1;
+    const line = text.slice(lineStart, newline);
+    if (
+      !line.trim()
+      || STRUCTURAL_SPEECH_LINE.test(line)
+      || HORIZONTAL_RULE_LINE.test(line)
+    ) {
+      boundaries.push(newline + 1);
+    }
+    searchFrom = newline + 1;
+  }
+  boundaries.sort((a, b) => a - b);
+  const sentences: string[] = [];
+  let previous = 0;
+  for (const boundary of boundaries) {
+    if (boundary <= previous) continue;
+    const sentence = text.slice(previous, boundary).trim();
+    if (sentence) sentences.push(sentence);
+    previous = boundary;
+  }
+  return { sentences, remainder: text.slice(previous) };
 }
 
 /** Re-split visible speech after a reasoning parser rewrites earlier text. */
@@ -368,6 +438,31 @@ export class StreamingSpeechPlayback {
     } finally {
       if (stopOnAbort) signal?.removeEventListener('abort', stopOnAbort);
       await reader?.cancel().catch(() => undefined);
+    }
+  }
+
+  /**
+   * Schedule a bounded run of silence between appended responses: the
+   * audible pause for structural breaks such as horizontal rules. A no-op
+   * until the first appended response has created the audio session, since
+   * a pause before any audio is indistinguishable from latency.
+   */
+  async appendSilence(seconds: number, signal?: AbortSignal): Promise<void> {
+    if (this.stopped || this.finished) return;
+    const context = this.context;
+    if (!context) return;
+    const total = Math.round(Math.max(0, Math.min(seconds, 2)) * context.sampleRate);
+    if (total === 0) return;
+    const maximumFrameSamples = Math.max(
+      1,
+      Math.floor(context.sampleRate * this.maximumBufferedSeconds),
+    );
+    for (const frame of splitPlaybackSamples(new Float32Array(total), maximumFrameSamples)) {
+      if (this.node) {
+        await this.enqueueWorkletFrame(frame, context.sampleRate, signal);
+      } else {
+        await this.enqueueScheduledFrame(context, frame, context.sampleRate, signal);
+      }
     }
   }
 
@@ -592,7 +687,9 @@ export class SpeechSentenceQueue {
   enqueue(sentences: readonly string[]): void {
     if (this.stopped || this.inputFinished) return;
     this.pending.push(...sentences
-      .map(speechTextFromMarkdown)
+      .map((raw) => (
+        HORIZONTAL_RULE_LINE.test(raw.trim()) ? SPEECH_PAUSE_MARKER : speechTextFromMarkdown(raw)
+      ))
       .filter((sentence) => sentence.length > 0));
     void this.drain();
   }

@@ -275,7 +275,7 @@ describe('ChatView completed-message speech', () => {
     expect(requestedInputs).toEqual([
       'First sentence.',
       'Second sentence!',
-      'Final tail',
+      'Final tail.',
     ]);
     expect(requestedSeeds).toEqual([
       DASHBOARD_SPEECH_SEED,
@@ -392,9 +392,12 @@ describe('ChatView completed-message speech', () => {
       () => requestedInputs.length === 1,
       'batch-only completed message was not synthesized once',
     );
-    expect(requestedInputs).toEqual([completeTurn]);
+    // Speech text preparation appends terminal punctuation to the
+    // unpunctuated final block before synthesis.
+    const spokenTurn = `${completeTurn}.`;
+    expect(requestedInputs).toEqual([spokenTurn]);
     expect(requestedSeeds).toEqual([DASHBOARD_SPEECH_SEED]);
-    expect(requestedMaxTokens).toEqual([batchSpeechMaxTokens(completeTurn)]);
+    expect(requestedMaxTokens).toEqual([batchSpeechMaxTokens(spokenTurn)]);
     expect(requestedMaxTokens[0]).toBeGreaterThan(4096);
   });
 });

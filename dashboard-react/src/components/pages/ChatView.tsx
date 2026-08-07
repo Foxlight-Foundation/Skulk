@@ -20,6 +20,8 @@ import { tolgee, useSkulkTranslation } from '../../i18n/tolgee';
 import {
   canUseStreamingSpeechPlayback,
   resyncVisibleSpeech,
+  SPEECH_PAUSE_MARKER,
+  SPEECH_PAUSE_SECONDS,
   SpeechSentenceQueue,
   splitCompleteSpeechSentences,
   StreamingSpeechPlayback,
@@ -886,6 +888,16 @@ export function ChatView({
   ) => {
     const input = text.trim();
     if (!input || !selectedSpeechModelId) return;
+    if (input === SPEECH_PAUSE_MARKER) {
+      // Structural break (a horizontal rule): schedule silence on the shared
+      // streaming timeline instead of synthesizing text. Encoded-fallback
+      // playback has no shared timeline, so the pause is skipped there and
+      // the surrounding sentence boundaries still provide separation.
+      if (responseSession && !responseSession.useEncodedFallback) {
+        await responseSession.playback.appendSilence(SPEECH_PAUSE_SECONDS, signal);
+      }
+      return;
+    }
     if (selectedSpeechOption?.supportsVoiceListing && !voice) {
       throw new Error(t(
         'chat.view.errors.noDiscoveredVoice',

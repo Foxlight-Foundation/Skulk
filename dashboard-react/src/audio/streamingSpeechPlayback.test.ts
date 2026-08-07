@@ -7,6 +7,7 @@ import {
   SpeechSentenceQueue,
   resyncVisibleSpeech,
   speechTextFromMarkdown,
+  SPEECH_PAUSE_MARKER,
   splitPlaybackSamples,
   splitCompleteSpeechSentences,
   streamingSpeechPlaybackMode,
@@ -335,6 +336,56 @@ describe('splitCompleteSpeechSentences', () => {
   });
 });
 
+describe('splitCompleteSpeechSentences structural boundaries', () => {
+  it('finalizes an unpunctuated title once its blank line completes', () => {
+    expect(splitCompleteSpeechSentences('**The Fox and the Ember**\n\nOnce upon a time. More')).toEqual({
+      sentences: ['**The Fox and the Ember**', 'Once upon a time.'],
+      remainder: 'More',
+    });
+  });
+
+  it('finalizes a heading at its own newline without waiting for a blank line', () => {
+    expect(splitCompleteSpeechSentences('### Chapter One\nThe valley slept. Next')).toEqual({
+      sentences: ['### Chapter One', 'The valley slept.'],
+      remainder: 'Next',
+    });
+  });
+
+  it('does not split a soft-wrapped prose line', () => {
+    expect(splitCompleteSpeechSentences('the quick brown fox\njumps over the lazy dog')).toEqual({
+      sentences: [],
+      remainder: 'the quick brown fox\njumps over the lazy dog',
+    });
+  });
+
+  it('emits a horizontal rule as its own segment', () => {
+    expect(splitCompleteSpeechSentences('Before the break.\n\n---\n\nAfter')).toEqual({
+      sentences: ['Before the break.', '---'],
+      remainder: 'After',
+    });
+  });
+});
+
+describe('speechTextFromMarkdown', () => {
+  it('appends terminal punctuation to an unpunctuated title block', () => {
+    expect(speechTextFromMarkdown('**The Fox and the Ember**')).toBe('The Fox and the Ember.');
+  });
+
+  it('does not double-punctuate blocks that already end a thought', () => {
+    expect(speechTextFromMarkdown('A story about foxes:')).toBe('A story about foxes:');
+    expect(speechTextFromMarkdown('It ended well!')).toBe('It ended well!');
+  });
+
+  it('strips emoji instead of letting the engine read them', () => {
+    expect(speechTextFromMarkdown('Great work! \u{1F389}\u{1F525}')).toBe('Great work!');
+    expect(speechTextFromMarkdown('Family: \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} together.')).toBe('Family: together.');
+  });
+
+  it('drops horizontal rules rather than reading dashes aloud', () => {
+    expect(speechTextFromMarkdown('Before.\n\n---\n\nAfter.')).toBe('Before. After.');
+  });
+});
+
 describe('speechTextFromMarkdown', () => {
   it('removes presentation markup while preserving readable prose and pauses', () => {
     expect(speechTextFromMarkdown([
@@ -369,6 +420,16 @@ describe('resyncVisibleSpeech', () => {
 });
 
 describe('SpeechSentenceQueue', () => {
+  it('maps a horizontal-rule segment to the pause marker', async () => {
+    const calls: string[] = [];
+    let idle = false;
+    const queue = new SpeechSentenceQueue(async (text) => { calls.push(text); }, () => undefined, () => { idle = true; });
+    queue.enqueue(['Before the break.', '---', 'After the break.']);
+    queue.finish();
+    await vi.waitFor(() => { if (!idle) throw new Error('queue not idle'); });
+    expect(calls).toEqual(['Before the break.', SPEECH_PAUSE_MARKER, 'After the break.']);
+  });
+
   it('plays sentences serially in insertion order', async () => {
     const calls: string[] = [];
     let idle = false;
