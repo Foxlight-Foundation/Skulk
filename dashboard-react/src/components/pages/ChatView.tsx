@@ -23,9 +23,11 @@ import {
   SPEECH_PAUSE_MARKER,
   SPEECH_PAUSE_SECONDS,
   SpeechSentenceQueue,
+  speechTextFromMarkdown,
   splitCompleteSpeechSentences,
   StreamingSpeechPlayback,
 } from '../../audio/streamingSpeechPlayback';
+import { CodeNarrator, FenceProbe } from '../../audio/codeNarration';
 import {
   createPinnedSpeechVoiceSelector,
   fetchSpeechVoiceCatalog,
@@ -592,6 +594,9 @@ export function ChatView({
     dispatch(chatActions.setSelectedVoice(voice));
   const setAutoSpeakAssistant = (enabled: boolean) =>
     dispatch(chatActions.setAutoSpeakAssistant(enabled));
+  const narrateCodeBlocks = useAppSelector((s) => s.chat.narrateCodeBlocks);
+  const setNarrateCodeBlocks = (enabled: boolean) =>
+    dispatch(chatActions.setNarrateCodeBlocks(enabled));
   const setRealtimeVoiceEnabled = (enabled: boolean) =>
     dispatch(chatActions.setRealtimeVoiceEnabled(enabled));
   const setAutoSubmitVoice = (enabled: boolean) =>
@@ -1234,6 +1239,56 @@ export function ChatView({
         })()
       : null;
     speechSentenceQueueRef.current = sentenceQueue;
+    // Code narration (#769): short spoken interjections while a fenced code
+    // block streams. Live generation only (replays never build a narrator),
+    // and fillers fire only when the voice has run out of things to say.
+    const codeNarrator = sentenceQueue && narrateCodeBlocks
+      ? new CodeNarrator({
+          openers: [
+            t('chat.narration.opener1', "Let's write this out."),
+            t('chat.narration.opener2', 'Time for some code.'),
+            t('chat.narration.opener3', 'Writing it up now.'),
+          ],
+          fillers: [
+            t('chat.narration.filler1', 'Okay, next part.'),
+            t('chat.narration.filler2', 'Very good, now this.'),
+            t('chat.narration.filler3', 'Still writing.'),
+            t('chat.narration.filler4', 'Almost there.'),
+            t('chat.narration.filler5', 'And a little more.'),
+          ],
+          closers: [
+            t('chat.narration.closer1', 'Done!'),
+            t('chat.narration.closer2', 'And that does it.'),
+          ],
+        })
+      : null;
+    const fenceProbe = codeNarrator ? new FenceProbe() : null;
+    // Two-phase narration around each delta's enqueue: a finished block's
+    // closer settles BEFORE the prose that follows it, while an opener for
+    // a fence the delta introduces plays AFTER the introductory sentence.
+    // Only sentences that will actually be spoken count as prose (completed
+    // fences and rules produce no speech and must not defeat the debounce).
+    const narrateAround = (sentences: readonly string[]) => {
+      if (!codeNarrator || !sentenceQueue || !fenceProbe) {
+        sentenceQueue?.enqueue(sentences);
+        return;
+      }
+      const proseFollowing = sentences.some(
+        (sentence) => speechTextFromMarkdown(sentence).length > 0,
+      );
+      const closer = codeNarrator.settlePendingClose({
+        fenceNowOpen: fenceProbe.isOpen(),
+        proseFollowing,
+      });
+      if (closer) sentenceQueue.enqueue([closer]);
+      sentenceQueue.enqueue(sentences);
+      const utterance = codeNarrator.observe({
+        fenceOpen: fenceProbe.isOpen(),
+        queueStarved: sentenceQueue.isStarved(),
+        bufferedSeconds: streamingPlaybackRef.current?.bufferedSeconds() ?? 0,
+      });
+      if (utterance) sentenceQueue.enqueue([utterance]);
+    };
 
     try {
       const apiMessages: ApiMessagePayload[] = buildApiMessages(allMessages);
@@ -1342,7 +1397,8 @@ export function ChatView({
                   if (requestTools) {
                     roundSpeechSentences.push(...split.sentences);
                   } else {
-                    sentenceQueue.enqueue(split.sentences);
+                    fenceProbe?.feed(visibleDelta);
+                    narrateAround(split.sentences);
                   }
                 } else if (sentenceQueue) {
                   const split = resyncVisibleSpeech(
@@ -1355,7 +1411,9 @@ export function ChatView({
                   if (requestTools) {
                     roundSpeechSentences.push(...split.sentences);
                   } else {
-                    sentenceQueue.enqueue(split.sentences);
+                    fenceProbe?.reset();
+                    fenceProbe?.feed(separated.content);
+                    narrateAround(split.sentences);
                   }
                 }
               }
@@ -1489,11 +1547,24 @@ export function ChatView({
 
       addMessage(assistantMsg);
       if (sentenceQueue) {
+        // Settle any pending code closer ahead of the trailing prose so the
+        // acknowledgement precedes the final explanation.
+        if (codeNarrator && speechTail.trim()) {
+          const closer = codeNarrator.settlePendingClose({
+            fenceNowOpen: fenceProbe?.isOpen() ?? false,
+            proseFollowing: speechTextFromMarkdown(speechTail).length > 0,
+          });
+          if (closer) sentenceQueue.enqueue([closer]);
+        }
         if (speechTail.trim()) sentenceQueue.enqueue([speechTail.trim()]);
         speechTail = '';
       } else if (autoSpeakAssistant && selectedSpeechModelId && finalAssistantContent) {
         void speakText(finalAssistantContent, assistantMsg.id);
       }
+    }
+    if (codeNarrator && sentenceQueue) {
+      const closer = codeNarrator.finish();
+      if (closer) sentenceQueue.enqueue([closer]);
     }
     sentenceQueue?.finish();
     setStreamingContent(null);
@@ -1666,6 +1737,8 @@ export function ChatView({
           onReferenceAudioChange={setReferenceAudioFile}
           onReferenceAudioTextChange={setReferenceAudioText}
           onAutoSpeakAssistantChange={setAutoSpeakAssistant}
+          narrateCodeBlocks={narrateCodeBlocks}
+          onNarrateCodeBlocksChange={setNarrateCodeBlocks}
           onRealtimeVoiceEnabledChange={setRealtimeVoiceEnabled}
           onAutoSubmitVoiceChange={setAutoSubmitVoice}
           onRealtimeTranscript={handleRealtimeTranscript}

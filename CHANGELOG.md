@@ -7,6 +7,18 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- The dashboard voice loop now narrates code blocks: when a fenced code block
+  streams during live generation, the assistant voice speaks a short opener,
+  occasional fillers while the block streams, and a closer when it ends,
+  instead of leaving dead air where the unspoken code would be. Fillers fire
+  only when the voice has actually run out of queued speech, so narration can
+  never stack behind prose or chatter on a fast stream; adjacent blocks
+  continue without a false finish, replayed messages stay silent about code
+  by construction, and the Narrate code toggle beside Auto speech turns the
+  behavior off.
+
 ## [1.5.0] - 2026-08-07
 
 ### Changed

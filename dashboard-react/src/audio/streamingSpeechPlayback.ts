@@ -317,6 +317,35 @@ export function speechTextFromMarkdown(text: string): string {
 }
 
 /**
+ * Whether the text currently ends inside an unclosed fenced code block,
+ * honoring the same container-prefix and delimiter rules as the sentence
+ * splitter. The chat streaming loop uses this on the retained speech tail
+ * to drive code narration.
+ */
+export function hasUnterminatedFence(text: string): boolean {
+  let fenceCharacter = '';
+  let fenceLength = 0;
+  let insideFence = false;
+  for (const line of text.split('\n')) {
+    const delimiterMatch = FENCE_DELIMITER_LINE.exec(line);
+    if (!delimiterMatch) continue;
+    const run = delimiterMatch[1];
+    if (!insideFence) {
+      insideFence = true;
+      fenceCharacter = run[0];
+      fenceLength = run.length;
+    } else if (
+      run[0] === fenceCharacter
+      && run.length >= fenceLength
+      && delimiterMatch[2].trim() === ''
+    ) {
+      insideFence = false;
+    }
+  }
+  return insideFence;
+}
+
+/**
  * Split visible text into complete synthesis sentences and one retained tail.
  *
  * Boundaries come from three signals, merged in order: terminal punctuation
@@ -577,6 +606,13 @@ export class StreamingSpeechPlayback {
     }
   }
 
+  /** Seconds of decoded audio still queued for playback (narration gate). */
+  bufferedSeconds(): number {
+    const context = this.context;
+    if (!context || this.stopped || this.finished) return 0;
+    return this.bufferedSamples / context.sampleRate;
+  }
+
   /** Mark the session complete, wait for queued audio, and close the audio context. */
   async finish(): Promise<void> {
     if (this.finished || this.stopped) return;
@@ -803,6 +839,11 @@ export class SpeechSentenceQueue {
       ))
       .filter((sentence) => sentence.length > 0));
     void this.drain();
+  }
+
+  /** Whether nothing is pending or synthesizing (narration filler gate). */
+  isStarved(): boolean {
+    return this.pending.length === 0 && this.activeController === null;
   }
 
   /** Declare that no more sentences will arrive and drain queued browser audio. */
