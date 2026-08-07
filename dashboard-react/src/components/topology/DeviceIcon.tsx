@@ -61,7 +61,7 @@ export function DeviceIcon({
   if (model === 'mac-mini') return <MacMini {...common} bodyColor={bodyColor} />;
   if (model === 'macbook-pro') return <MacBookPro {...common} bodyColor={bodyColor} />;
   if (model === 'amd-strix') return <AmdStrix {...common} bodyColor={bodyColor} labelColor={labelColor} />;
-  if (model === 'nvidia-gpu') return <NvidiaGpu {...common} bodyColor={bodyColor} labelColor={labelColor} />;
+  if (model === 'nvidia-gpu') return <NvidiaGpu {...common} bodyColor={bodyColor} />;
   return <HexagonDefault {...common} fillColor={fillColor} />;
 }
 
@@ -163,7 +163,7 @@ function MacMini({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, cl
 interface NvidiaGpuProps {
   cx: number; cy: number; width: number; height: number;
   ramPercent: number; wireColor: string; strokeWidth: number; clipId: string;
-  bodyColor: string; ramColor: string; labelColor: string;
+  bodyColor: string; ramColor: string;
 }
 
 /**
@@ -221,7 +221,7 @@ function NvidiaGpu({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, 
       {/* NVIDIA wordmark in brand green, centred above the flutes */}
       <text x={cx} y={y + boxH * 0.26} textAnchor="middle" dominantBaseline="central"
         fontFamily="Arial, Helvetica, sans-serif" fontWeight={700}
-        fontSize={boxH * 0.24} letterSpacing={boxH * 0.02}
+        fontSize={Math.max(9, boxH * 0.24)} letterSpacing={boxH * 0.02}
         fill="#76B900">NVIDIA</text>
       {/* Feet */}
       {[x + boxW * 0.12, x + boxW * 0.88 - footW].map((fx, i) => (
