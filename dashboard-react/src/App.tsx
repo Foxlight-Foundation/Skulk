@@ -23,6 +23,7 @@ import { ConnectionBanner } from './components/status/ConnectionBanner';
 import { ToastContainer } from './components/status/ToastContainer';
 import { NetworkMesh } from './components/common/NetworkMesh';
 import { SceneBackdrop } from './components/common/SceneBackdrop';
+import { ShootingStars } from './components/common/ShootingStars';
 import { ObservabilityPanel } from './components/observability/ObservabilityPanel';
 import { SettingsPanel } from './components/layout/SettingsPanel';
 import { TelemetryConsentModal } from './components/layout/TelemetryConsentModal';
@@ -604,6 +605,7 @@ export function App() {
           screen opens under the brand sky without a painting competing
           with content. Palettes without a scene keep the mesh. */}
       <SceneBackdrop />
+      <ShootingStars />
       {activeTheme.colors.scene === 'none' && (
         <NetworkMesh key={isMobile ? 'mesh-mobile' : 'mesh-desktop'} radius={2.5} count={isMobile ? 14 : 43} linkDistance={430} />
       )}
