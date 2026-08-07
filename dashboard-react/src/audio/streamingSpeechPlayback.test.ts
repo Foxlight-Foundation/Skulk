@@ -374,6 +374,14 @@ describe('splitCompleteSpeechSentences structural boundaries', () => {
     });
   });
 
+  it('does not close a backtick fence on a tilde delimiter inside it', () => {
+    const streamed = 'Start.\n```text\n~~~\n# still code\n```\nEnd. Tail';
+    expect(splitCompleteSpeechSentences(streamed)).toEqual({
+      sentences: ['Start.', '```text\n~~~\n# still code\n```', 'End.'],
+      remainder: 'Tail',
+    });
+  });
+
   it('handles Windows newlines around a title block', () => {
     expect(speechTextFromMarkdown('**A Title**\r\n\r\nBody text.')).toBe('A Title. Body text.');
   });

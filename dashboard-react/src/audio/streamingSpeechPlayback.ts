@@ -240,7 +240,7 @@ function stripHtmlTags(value: string): string {
 export function speechTextFromMarkdown(text: string): string {
   const spokenBlocks = text
     .replace(/\r\n/g, '\n')
-    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, ' ')
     .split(/\n\s*\n/)
     .map((block) => {
       const lines = block
@@ -297,15 +297,20 @@ export function splitCompleteSpeechSentences(text: string): {
   const fenceRanges: Array<{ start: number; end: number }> = [];
   {
     let fenceStart = -1;
+    let fenceDelimiter = '';
     let scanFrom = 0;
     for (;;) {
       const newline = text.indexOf('\n', scanFrom);
       const lineEnd = newline === -1 ? text.length : newline;
       const line = text.slice(scanFrom, lineEnd);
-      if (/^\s{0,3}(?:```|~~~)/.test(line)) {
+      const delimiterMatch = /^\s{0,3}(```|~~~)/.exec(line);
+      if (delimiterMatch) {
         if (fenceStart === -1) {
           fenceStart = scanFrom;
-        } else {
+          fenceDelimiter = delimiterMatch[1];
+        } else if (delimiterMatch[1] === fenceDelimiter) {
+          // Only the opening delimiter's own character closes the fence: a
+          // line starting with the other delimiter inside the fence is code.
           fenceRanges.push({ start: fenceStart, end: lineEnd + 1 });
           fenceStart = -1;
         }
