@@ -40,6 +40,10 @@ export interface CodeNarrationObserveSignals {
   bufferedSeconds: number;
 }
 
+/**
+ * Tuning knobs for the narrator's cadence and gating. Every option has a
+ * production default; tests inject deterministic clocks and randomness.
+ */
 export interface CodeNarratorOptions {
   /** Minimum spacing between narration utterances. */
   minimumGapMs?: number;
