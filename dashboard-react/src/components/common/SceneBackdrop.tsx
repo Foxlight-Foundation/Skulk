@@ -11,7 +11,7 @@ import type { Theme } from '../../theme';
  * Renders only when the active palette declares a scene, so it is a token
  * decision, not a theme branch.
  */
-const SkyLayer = styled.div<{ $image: string; $fade: string }>`
+const SkyLayer = styled.div<{ $image: string }>`
   position: fixed;
   top: 0;
   left: 0;
@@ -22,7 +22,7 @@ const SkyLayer = styled.div<{ $image: string; $fade: string }>`
   background-image: ${({ $image }) => $image};
   background-size: cover;
   background-position: center top;
-  mask-image: ${({ $fade }) => $fade};
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.61) 0%, rgba(0, 0, 0, 0.29) 55%, transparent 100%);
 `;
 
 const Scrim = styled.div<{ $gradient: string }>`
@@ -36,7 +36,7 @@ export function SceneBackdrop() {
   const theme = useTheme() as Theme;
   if (theme.colors.scene === 'none') return null;
   return (
-    <SkyLayer aria-hidden $image={theme.colors.scene} $fade={theme.colors.sceneFade}>
+    <SkyLayer aria-hidden $image={theme.colors.scene}>
       {theme.colors.sceneScrim !== 'none' && <Scrim $gradient={theme.colors.sceneScrim} />}
     </SkyLayer>
   );

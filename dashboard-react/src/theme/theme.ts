@@ -7,7 +7,6 @@
  */
 
 import valleyNight from '../assets/scene/valley-night.webp';
-import valleyDay from '../assets/scene/valley-day.webp';
 
 const sharedFonts = {
   body: "'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
@@ -153,14 +152,6 @@ interface ColorTokens {
    * on the theme name.
    */
   scene: string;
-  /** Mask over the scene layer (a CSS mask-image value): sets how strongly
-   * the sky starts at the top and where it dissolves to nothing. Unused
-   * when `scene` is 'none'. */
-  sceneFade: string;
-  /** 'on' to let the scene shoot occasional meteors through its crown;
-   * 'none' otherwise. Meteors belong to the night sky, so the day scene
-   * declines them. */
-  sceneMeteors: string;
   /** Structural scrim over the scene: sinks the top for the header and
    * buries the base so dense content keeps its ground. */
   sceneScrim: string;
@@ -260,8 +251,6 @@ const darkColors: ColorTokens = {
   // The star field crowns the viewport and dissolves on the way down; the
   // CSS night gradient beneath it carries the rest of the atmosphere.
   scene: `url(${valleyNight})`,
-  sceneFade: 'linear-gradient(180deg, rgba(0, 0, 0, 0.61) 0%, rgba(0, 0, 0, 0.29) 55%, transparent 100%)',
-  sceneMeteors: 'on',
   sceneScrim: 'none',
 
   healthy: '#54C79A',
@@ -360,11 +349,8 @@ const lightColors: ColorTokens = {
   bgMeshLine: 'rgba(69, 111, 176, 0.14)',
   bgMeshNode: 'rgba(69, 111, 176, 0.10)',
 
-  // The day sky crowns the viewport exactly as the night one does: same
-  // 61% start, same dissolve by half the viewport.
-  scene: `url(${valleyDay})`,
-  sceneFade: 'linear-gradient(180deg, rgba(0, 0, 0, 0.5) 0%, rgba(0, 0, 0, 0.24) 55%, transparent 100%)',
-  sceneMeteors: 'none',
+  // Noon has no star field; the mesh carries the daylight atmosphere.
+  scene: 'none',
   sceneScrim: 'none',
 
   healthy: '#1C7A54',
