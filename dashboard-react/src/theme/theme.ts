@@ -173,6 +173,15 @@ interface ColorTokens {
    */
   svgGlow: string;
 
+  /**
+   * Vision capability-chip tint. Palette-aware because the chip renders
+   * 10px text over its own faint tint: the night palette can afford a
+   * pastel cyan, while daylight needs a deep cyan to stay readable on
+   * white. Deliberately not the warning token (amber must never repeat
+   * down a list as decoration).
+   */
+  tagVision: string;
+
   // Status (always-on, palette-independent severity colors are ok inside semantic.*)
   healthy: string;
   unhealthy: string;
@@ -271,6 +280,7 @@ const darkColors: ColorTokens = {
   scene: nightSkyEnabled ? `url(${valleyNight})` : 'none',
   sceneScrim: 'none',
   svgGlow: 'on',
+  tagVision: '#22d3ee',
 
   healthy: '#54C79A',
   unhealthy: '#F2707E',
@@ -365,6 +375,7 @@ const lightColors: ColorTokens = {
   scene: 'none',
   sceneScrim: 'none',
   svgGlow: 'none',
+  tagVision: '#0E7490',
 
   healthy: '#0ea5e9',
   unhealthy: '#dc2626',
