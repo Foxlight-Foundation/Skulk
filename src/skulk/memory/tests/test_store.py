@@ -173,14 +173,66 @@ def test_enospc_during_rotation_degrades(
     store = ContentStore(root=tmp_path / "memory")
     keys = random_vectors(1, DIM, seed=13)
     values = random_vectors(1, DIM, seed=14)
+    real_open = Path.open
 
-    def failing_write_text(_self: Path, *_args: object, **_kwargs: object) -> int:
-        raise OSError(28, "No space left on device")
+    def failing_open(self: Path, *args: object, **kwargs: object) -> object:
+        if self.name == "MANIFEST.tmp":
+            raise OSError(28, "No space left on device")
+        return real_open(self, *args, **kwargs)  # pyright: ignore[reportCallIssue, reportUnknownVariableType, reportArgumentType] - passthrough shim
 
-    monkeypatch.setattr(Path, "write_text", failing_write_text)
+    monkeypatch.setattr(Path, "open", failing_open)
     with pytest.raises(StoreFullError):
         store.append(_record("s-rotate", keys[0], values[0]))
     assert store.degraded
+
+
+def test_rotation_preserves_fsync_cadence(tmp_path: Path) -> None:
+    """The at-most-fsync_every loss window holds across segment boundaries."""
+    store = ContentStore(root=tmp_path / "memory", rotation_bytes=1024, fsync_every=100)
+    keys = random_vectors(3, DIM, seed=19)
+    values = random_vectors(3, DIM, seed=20)
+    store.append(_record("f0", keys[0], values[0]))
+    assert store._appends_since_sync == 1  # pyright: ignore[reportPrivateUsage]
+    # Records exceed rotation_bytes, so this append rotates; the outgoing
+    # segment's unsynced tail must be fsynced and the counter reset, leaving
+    # only the new segment's single append pending.
+    store.append(_record("f1", keys[1], values[1]))
+    assert store._appends_since_sync == 1  # pyright: ignore[reportPrivateUsage]
+
+
+def test_compact_enospc_cleans_scratch_and_degrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os as os_module
+
+    store, records = _seeded_store(tmp_path, 3)
+    store.tombstone("s1", deleted_at=1_700_000_100.0)
+    real_replace = os_module.replace
+
+    def failing_replace(*_args: object, **_kwargs: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os_module, "replace", failing_replace)
+    with pytest.raises(StoreFullError):
+        store.compact()
+    monkeypatch.setattr(os_module, "replace", real_replace)
+    assert store.degraded
+    assert not list((tmp_path / "memory").glob("*.tmp"))
+    # The old view is fully intact: reads still work and hide the tombstone.
+    assert [r.span_id for r in store.scan()] == ["s0", "s2"]
+    assert records[1].span_id == "s1"
+
+
+def test_compact_refuses_while_degraded(tmp_path: Path) -> None:
+    store, _records = _seeded_store(tmp_path, 2)
+    keys = random_vectors(1, DIM, seed=21)
+    values = random_vectors(1, DIM, seed=22)
+    store.free_space_floor_bytes = 1 << 60
+    with pytest.raises(StoreFullError):
+        store.append(_record("s-floor", keys[0], values[0]))
+    assert store.degraded
+    with pytest.raises(StoreFullError):
+        store.compact()
 
 
 def test_free_space_floor_degrades_before_enospc(tmp_path: Path) -> None:

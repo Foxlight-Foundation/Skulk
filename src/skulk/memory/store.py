@@ -137,10 +137,35 @@ class ContentStore:
         return {str(key): value for key, value in data.items()}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
 
     def _write_manifest(self, manifest: dict[str, object]) -> None:
-        # Atomic replace so a crash mid-write cannot lose the manifest.
+        # Atomic replace so a crash mid-write cannot lose the manifest. The
+        # scratch is fsynced before the rename and the directory after it, so
+        # a power loss cannot persist later operations (segment unlinks) while
+        # dropping the manifest swap they depend on.
         scratch = self._manifest_path().with_suffix(".tmp")
-        scratch.write_text(json.dumps(manifest, indent=2) + "\n")
+        with scratch.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(manifest, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(scratch, self._manifest_path())
+        self._fsync_directory()
+
+    def _fsync_directory(self) -> None:
+        """Make renames and unlinks in the store directory durable.
+
+        POSIX requires a directory fsync for metadata durability; platforms
+        that refuse fsync on a directory descriptor simply skip it, which is
+        no worse than the pre-fsync behavior there.
+        """
+        try:
+            descriptor = os.open(self.root, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            pass
+        finally:
+            os.close(descriptor)
 
     # --- segments -----------------------------------------------------------
 
@@ -171,6 +196,13 @@ class ContentStore:
             segments[-1].stat().st_size < self.rotation_bytes
         ):
             return segments[-1]
+        # Rotating away: fsync the outgoing segment's unsynced tail first, so
+        # the documented at-most-``fsync_every`` loss window holds across
+        # segment boundaries instead of quietly resetting on rotation.
+        if segments and segments[-1].exists() and self._appends_since_sync > 0:
+            with segments[-1].open("rb+") as handle:
+                os.fsync(handle.fileno())
+            self._appends_since_sync = 0
         segment = self.root / f"spans-{self._next_sequence():06d}.jsonl"
         # A crashed compaction can leave a stray file at a name no manifest
         # references; never let rotation silently adopt its contents.
@@ -349,6 +381,7 @@ class ContentStore:
         retire. A crash anywhere leaves either the complete old view or the
         complete new view, never records visible twice.
         """
+        self._refuse_writes_if_degraded()
         dead = self._tombstoned()
         old_segments = self._segments()
         final = self.root / f"spans-{self._next_sequence():06d}.jsonl"
@@ -366,11 +399,15 @@ class ContentStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(scratch, final)
+            self._fsync_directory()
             manifest = self._read_manifest()
             manifest["segments"] = [final.name]
             manifest["compacted_through"] = survivors
             self._write_manifest(manifest)
         except OSError as error:
+            # A failed rewrite must not squat on the disk's last bytes: free
+            # the partial scratch before entering degraded mode.
+            scratch.unlink(missing_ok=True)
             self._translate_out_of_space(error)
             raise
         # Past the commit point: cleanup failures cost disk, never records.
