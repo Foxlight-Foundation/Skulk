@@ -50,6 +50,22 @@ class Whitener:
     version: str = "v1"
     _extra: dict[str, str] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        """Defensively copy and freeze the array state.
+
+        ``frozen=True`` stops attribute rebinding but not array mutation, and a
+        directly constructed instance would otherwise retain the caller's
+        arrays by reference; either path could silently change future
+        transforms without changing ``version``. Copies severed from the
+        caller are marked read-only so mutation attempts raise instead.
+        """
+        mu = np.array(self.mu, dtype=DTYPE, copy=True)
+        matrix = np.array(self.matrix, dtype=DTYPE, copy=True)
+        mu.setflags(write=False)
+        matrix.setflags(write=False)
+        object.__setattr__(self, "mu", mu)
+        object.__setattr__(self, "matrix", matrix)
+
     @property
     def input_dim(self) -> int:
         """Embedding dimension this whitener maps from/to."""

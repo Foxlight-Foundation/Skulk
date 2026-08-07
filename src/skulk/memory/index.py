@@ -140,9 +140,12 @@ class HolographicField:
     """HRR holographic field: one fixed-size vector holding all bindings.
 
     The field is the superposition of ``amplitude * bind(key, value)`` over every
-    live trace. A probe unbinds the cue and projects the noisy result onto the
-    unit value codebook; the projection magnitude carries both direction match
-    and current strength, so decay and exact subtraction both act through it.
+    live trace. A probe unbinds the cue and scores each codebook value with
+    ``min(direction cosine, raw projection)``: the cosine bounds cross-episode
+    noise independent of density (the Phase 0 zero-false-confabulation
+    invariant) while the raw projection is an unbiased estimate of current
+    amplitude, so decay gates traces out whether they sit alone in the field
+    or beside fresh writes.
     """
 
     dim: int
@@ -197,16 +200,26 @@ class HolographicField:
         # Normalized cosine of the recovered direction to each unit value: this
         # is exactly the score the Phase 0 experiments gated at 0.15 and measured
         # zero cross-episode false-confidence for, so the invariant transfers.
-        recalled = normalize(unbind(self._field, cue_u))
+        # Confidence is min(direction cosine, raw strength), because each
+        # term is the tight bound in a different regime and both must clear
+        # the gate:
+        #  - The NORMALIZED cosine bounds cross-episode noise independent of
+        #    field density (the Phase 0 zero-false-confabulation invariant;
+        #    raw projection noise grows with sqrt(N/D) and would confabulate
+        #    near capacity).
+        #  - The RAW projection is an unbiased estimate of the trace's
+        #    current amplitude, so decay gates an ISOLATED trace out (where
+        #    normalization cancels it) and mixed-age fields count decay
+        #    exactly once (where cosine-times-amplitude double-counted it).
+        recalled_raw = unbind(self._field, cue_u)
+        recalled_direction = normalize(recalled_raw)
         best_id: str | None = None
         best_score = -np.inf
         best_key_match = -np.inf
         for trace_id, value_n in self._codebook.items():
-            # Amplitude folds into the score exactly as in ExactIndex, so both
-            # MemoryIndex implementations agree that decayed traces gate out;
-            # fresh traces carry amplitude 1.0, preserving the Phase 0 gate
-            # calibration unchanged.
-            score = float(np.dot(recalled, value_n)) * self._amplitude[trace_id]  # pyright: ignore[reportAny] - np.dot stub gap
+            direction = float(np.dot(recalled_direction, value_n))  # pyright: ignore[reportAny] - np.dot stub gap
+            strength = float(np.dot(recalled_raw, value_n))  # pyright: ignore[reportAny] - np.dot stub gap
+            score = min(direction, strength)
             # Traces sharing one value code score identically on projection;
             # the cue's match against each trace's own stored key breaks the
             # tie so a confident hit names the right trace.
@@ -224,11 +237,13 @@ class HolographicField:
 
     def decay(self, retention: float) -> None:
         """Multiply every trace's amplitude by ``retention`` (0..1)."""
-        # The tracked per-trace amplitude folds into probe confidence (matching
-        # ExactIndex), so decayed traces gate out identically in both index
-        # implementations; interference from newer full-amplitude writes
-        # remains the second forgetting force. Absolute idle-trace expiry and
-        # rehearsal refresh are later operator controls.
+        # Scaling the field scales every binding's contribution to the raw
+        # projection the probe scores, so decayed traces gate out in both
+        # index implementations; interference from newer full-amplitude
+        # writes remains the second forgetting force. The per-trace amplitude
+        # dict mirrors the field's bookkeeping for exact rewrite/subtract.
+        # Absolute idle-trace expiry and rehearsal refresh are later operator
+        # controls.
         self._field = (self._field * retention).astype(DTYPE)
         for trace_id in list(self._amplitude):
             self._amplitude[trace_id] *= retention

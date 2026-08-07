@@ -91,3 +91,27 @@ def test_whitener_shape_and_identity() -> None:
     # Identity travels with the whitener so a mismatched cue space is detectable.
     assert whitener.embedding_model_id == "bge-small-en-v1.5"
     assert whitener.version == "test-v1"
+
+def test_whitener_state_is_copied_and_immutable() -> None:
+    """Neither caller aliasing nor in-place writes can change the cue space."""
+    import pytest
+
+    from skulk.memory.separation import Whitener
+
+    corpus = np.random.default_rng(5).normal(size=(32, 8)).astype(np.float32)
+    whitener = Whitener.fit(corpus)
+    probe = corpus[0]
+    before = whitener.transform(probe).copy()
+    with pytest.raises((ValueError, RuntimeError)):
+        whitener.matrix[0, 0] = 99.0
+    source_mu = np.ones(8, dtype=np.float32)
+    source_matrix = np.eye(8, dtype=np.float32)
+    aliased = Whitener(
+        mu=source_mu, matrix=source_matrix, alpha=0.5, shrinkage=0.05,
+        embedding_model_id="m", version="v",
+    )
+    aliased_before = aliased.transform(probe).copy()
+    source_matrix[0, 0] = 99.0
+    source_mu[0] = 99.0
+    assert np.allclose(aliased.transform(probe), aliased_before)
+    assert np.allclose(whitener.transform(probe), before)

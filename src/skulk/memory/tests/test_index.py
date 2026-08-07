@@ -233,3 +233,31 @@ def test_holographic_probe_disambiguates_shared_value_codes() -> None:
     field.write("t2", keys[1], values[0])
     assert field.probe(keys[0]).trace_id == "t1"
     assert field.probe(keys[1]).trace_id == "t2"
+
+
+def test_holographic_mixed_age_decay_counts_once() -> None:
+    """A decayed trace beside a fresh one keeps its true (single) attenuation.
+
+    Regression test for the review finding on #782: scoring a NORMALIZED
+    projection and multiplying tracked amplitude double-counted decay once
+    the field held mixed ages, so a 0.3-amplitude trace scored ~0.09 and
+    missed the gate it should clear.
+    """
+    from skulk.memory.hrr import random_vectors
+    from skulk.memory.index import HolographicField
+
+    dim = 8192
+    keys = random_vectors(2, dim, seed=41)
+    values = random_vectors(2, dim, seed=42)
+    field = HolographicField(dim=dim)
+    field.write("old", keys[0], values[0])
+    field.decay(0.3)
+    field.write("fresh", keys[1], values[1])
+    old_probe = field.probe(keys[0])
+    fresh_probe = field.probe(keys[1])
+    assert fresh_probe.trace_id == "fresh" and fresh_probe.hit
+    assert old_probe.trace_id == "old"
+    # Single-counted decay: confidence near 0.3, comfortably above the gate;
+    # the old double-count landed near 0.09 and missed.
+    assert old_probe.hit
+    assert 0.2 < old_probe.confidence < 0.45
