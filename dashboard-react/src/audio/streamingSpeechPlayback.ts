@@ -224,6 +224,41 @@ const EMOJI_CHARACTERS = /\p{Extended_Pictographic}|\u{FE0F}|\u{200D}|\u{20E3}|[
  * horizontal rules contribute nothing here (the sentence pipeline turns
  * them into an audible pause).
  */
+/**
+ * Remove fenced code blocks with the same CommonMark delimiter matching the
+ * sentence splitter uses (same character, equal-or-longer run, bare closer),
+ * so a four-backtick fence containing a three-backtick line drops whole. An
+ * unclosed fence drops through the end of the text.
+ */
+function stripFencedCode(text: string): string {
+  const kept: string[] = [];
+  let fenceCharacter = '';
+  let fenceLength = 0;
+  let insideFence = false;
+  for (const line of text.split('\n')) {
+    const delimiterMatch = /^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (delimiterMatch) {
+      const run = delimiterMatch[1];
+      if (!insideFence) {
+        insideFence = true;
+        fenceCharacter = run[0];
+        fenceLength = run.length;
+        continue;
+      }
+      if (
+        run[0] === fenceCharacter
+        && run.length >= fenceLength
+        && delimiterMatch[2].trim() === ''
+      ) {
+        insideFence = false;
+        continue;
+      }
+    }
+    if (!insideFence) kept.push(line);
+  }
+  return kept.join('\n');
+}
+
 /** Remove HTML tags to a fixed point so nested fragments cannot survive. */
 function stripHtmlTags(value: string): string {
   let previous = value;
@@ -238,9 +273,7 @@ function stripHtmlTags(value: string): string {
 }
 
 export function speechTextFromMarkdown(text: string): string {
-  const spokenBlocks = text
-    .replace(/\r\n/g, '\n')
-    .replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, ' ')
+  const spokenBlocks = stripFencedCode(text.replace(/\r\n/g, '\n'))
     .split(/\n\s*\n/)
     .map((block) => {
       const lines = block
@@ -297,20 +330,28 @@ export function splitCompleteSpeechSentences(text: string): {
   const fenceRanges: Array<{ start: number; end: number }> = [];
   {
     let fenceStart = -1;
-    let fenceDelimiter = '';
+    let fenceCharacter = '';
+    let fenceLength = 0;
     let scanFrom = 0;
     for (;;) {
       const newline = text.indexOf('\n', scanFrom);
       const lineEnd = newline === -1 ? text.length : newline;
       const line = text.slice(scanFrom, lineEnd);
-      const delimiterMatch = /^\s{0,3}(```|~~~)/.exec(line);
+      const delimiterMatch = /^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
       if (delimiterMatch) {
+        const run = delimiterMatch[1];
         if (fenceStart === -1) {
           fenceStart = scanFrom;
-          fenceDelimiter = delimiterMatch[1];
-        } else if (delimiterMatch[1] === fenceDelimiter) {
-          // Only the opening delimiter's own character closes the fence: a
-          // line starting with the other delimiter inside the fence is code.
+          fenceCharacter = run[0];
+          fenceLength = run.length;
+        } else if (
+          // CommonMark close rule: same character, a run at least as long as
+          // the opener, and nothing after it but whitespace (info strings
+          // belong to openers, so a suffixed line inside the fence is code).
+          run[0] === fenceCharacter
+          && run.length >= fenceLength
+          && delimiterMatch[2].trim() === ''
+        ) {
           fenceRanges.push({ start: fenceStart, end: lineEnd + 1 });
           fenceStart = -1;
         }

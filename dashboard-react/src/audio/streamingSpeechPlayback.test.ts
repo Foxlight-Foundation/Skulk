@@ -382,6 +382,27 @@ describe('splitCompleteSpeechSentences structural boundaries', () => {
     });
   });
 
+  it('keeps a longer-run fence open across an inner three-backtick line', () => {
+    const streamed = 'Start.\n````markdown\n```\n# code\n```\n````\nEnd. Tail';
+    expect(splitCompleteSpeechSentences(streamed)).toEqual({
+      sentences: ['Start.', '````markdown\n```\n# code\n```\n````', 'End.'],
+      remainder: 'Tail',
+    });
+  });
+
+  it('does not close a fence on a delimiter line carrying an info string', () => {
+    const streamed = 'Start.\n```text\n```not-a-closer\n# code\n```\nEnd. Tail';
+    expect(splitCompleteSpeechSentences(streamed)).toEqual({
+      sentences: ['Start.', '```text\n```not-a-closer\n# code\n```', 'End.'],
+      remainder: 'Tail',
+    });
+  });
+
+  it('drops a nested-fence block whole from spoken text', () => {
+    expect(speechTextFromMarkdown('Before.\n\n````markdown\n```\n# inner\n```\n````\n\nAfter.'))
+      .toBe('Before. After.');
+  });
+
   it('handles Windows newlines around a title block', () => {
     expect(speechTextFromMarkdown('**A Title**\r\n\r\nBody text.')).toBe('A Title. Body text.');
   });
