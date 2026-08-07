@@ -1,5 +1,6 @@
 """Tests for read-only node and cluster diagnostics endpoints."""
 
+from datetime import datetime, timezone
 from typing import cast
 
 import httpx
@@ -24,11 +25,14 @@ from skulk.shared.types.diagnostics import (
     RunnerSupervisorDiagnostics,
     RunnerTaskCancelResponse,
     RunnerTaskDiagnostics,
+    TelemetryPlaneDiagnostics,
 )
 from skulk.shared.types.events import IndexedEvent
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.profiling import NodeIdentity, NodeResources
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import StartWarmup, TaskId, TaskStatus
+from skulk.shared.types.telemetry import NodeTelemetry
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
 from skulk.shared.types.worker.runners import (
     RunnerId,
@@ -131,6 +135,76 @@ def _running_state_without_master_placement() -> State:
     )
 
 
+def test_telemetry_diagnostics_are_exposed_without_changing_node_bundle() -> None:
+    """Telemetry pressure uses a separate endpoint safe for older node schemas."""
+
+    api = _build_api("local-node")
+    api._telemetry_plane_provider = lambda: TelemetryPlaneDiagnostics(  # pyright: ignore[reportPrivateUsage]
+        transport="isolated_gossipsub",
+        admission_capacity=256,
+        pending_readings=3,
+        network_queue_capacity=1,
+        network_queue_depth=1,
+        max_queue_depth=4,
+        readings_offered=20,
+        readings_coalesced=15,
+        readings_dropped=1,
+        readings_published=3,
+        publish_failures=1,
+        bytes_published=512,
+        oldest_pending_age_seconds=0.25,
+        last_successful_publish_age_seconds=0.1,
+    )
+    client = TestClient(api.app)
+
+    telemetry_response = client.get("/v1/diagnostics/telemetry")
+    node_response = client.get("/v1/diagnostics/node")
+
+    assert telemetry_response.status_code == 200
+    assert telemetry_response.json()["readingsCoalesced"] == 15
+    assert telemetry_response.json()["networkQueueDepth"] == 1
+    assert node_response.status_code == 200
+    assert "telemetryPlane" not in node_response.json()
+
+
+def test_node_diagnostics_warns_about_split_data_transports() -> None:
+    """Diagnostics should fail loudly when live nodes advertise both transports."""
+    api = _build_api("local-node")
+    management_node = NodeId("remote-management-node")
+    worker_node = NodeId("worker-node")
+    now = datetime.now(tz=timezone.utc)
+    api.state = api.state.model_copy(update={"last_seen": {worker_node: now}})
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=management_node,
+            info=NodeResources(
+                backends=frozenset(),
+                participation="management",
+                data_transport="zenoh",
+            ),
+        ),
+        received_at=now,
+    )
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=worker_node,
+            info=NodeResources(data_transport="gossipsub"),
+        ),
+        received_at=now,
+    )
+    client = TestClient(api.app)
+
+    response = client.get("/v1/diagnostics/node")
+
+    assert response.status_code == 200
+    warnings = _json_list(_json_object(response)["warnings"])
+    assert any(
+        "Fleet DATA transport mismatch" in cast(str, warning)
+        and "gossipsub, zenoh" in cast(str, warning)
+        for warning in warnings
+    )
+
+
 def test_node_diagnostics_marks_master_outside_placement() -> None:
     """Local diagnostics should expose master-vs-placement mismatch warnings."""
 
@@ -146,6 +220,13 @@ def test_node_diagnostics_marks_master_outside_placement() -> None:
     runtime = _json_mapping(body["runtime"])
     assert runtime["masterNodeId"] == "master-node"
     assert runtime["isMaster"] is False
+    provider = _json_mapping(body["provider"])
+    assert provider["activeStreams"] == 0
+    assert provider["activeUnaryCalls"] == 0
+    assert provider["streamSlotsInUse"] == 0
+    assert provider["unaryConcurrencyLimit"] == 8
+    assert provider["streamConcurrencyLimit"] == 8
+    assert provider["capabilities"] == {}
     placements = _json_list(body["placements"])
     placement = _json_mapping(placements[0])
     assert placement["masterIsPlacementNode"] is False
@@ -413,7 +494,8 @@ def test_cluster_diagnostics_returns_local_and_peer_results(
     api = _build_api("local-node")
     client = TestClient(api.app)
 
-    async def _reachable_peer_api_urls() -> dict[str, str]:
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
         return {"peer-node": "http://peer-node:52415"}
 
     class _FakeAsyncClient:
@@ -441,14 +523,35 @@ def test_cluster_diagnostics_returns_local_and_peer_results(
             update={"node_id": "peer-node", "hostname": "peer-node.local"}
         ),
         resources=api._resource_diagnostics(),  # pyright: ignore[reportPrivateUsage]
+        data_plane=api._data_plane_observer.snapshot(),  # pyright: ignore[reportPrivateUsage]
     )
+
+    peer_payload = peer_diagnostics.model_dump(mode="json", by_alias=True)
+    peer_payload["futureNodeCounter"] = 7
+    data_plane = _json_mapping(cast(object, peer_payload["dataPlane"]))
+    data_plane["futureLifecycleCounter"] = 11
+    egress = _json_mapping(data_plane["egress"])
+    egress.pop("idleStreamReclaims")
+    egress["futureEgressCounter"] = 13
+    egress["owners"] = {
+        "owner-a": {
+            "queueDepth": 0,
+            "activeStreams": 0,
+            "maxQueueDepth": 0,
+            "framesEnqueued": 0,
+            "framesPublished": 0,
+            "framesDropped": 0,
+            "publishFailures": 0,
+            "futureOwnerCounter": 17,
+        }
+    }
 
     def _build_async_client(*_args: object, **_kwargs: object) -> _FakeAsyncClient:
         return _FakeAsyncClient(
             responses={
                 "http://peer-node:52415/v1/diagnostics/node": httpx.Response(
                     200,
-                    json=peer_diagnostics.model_dump(mode="json", by_alias=True),
+                    json=peer_payload,
                     request=httpx.Request(
                         "GET",
                         "http://peer-node:52415/v1/diagnostics/node",
@@ -463,11 +566,217 @@ def test_cluster_diagnostics_returns_local_and_peer_results(
     response = client.get("/v1/diagnostics/cluster")
 
     assert response.status_code == 200
+    body = _json_object(response)
+    assert body["versionStatus"] == "consistent"
     nodes = [
-        _json_mapping(node) for node in _json_list(_json_object(response)["nodes"])
+        _json_mapping(node) for node in _json_list(body["nodes"])
     ]
     assert {node["nodeId"] for node in nodes} == {"local-node", "peer-node"}
     assert all(node["ok"] is True for node in nodes)
+    assert all(node["versionStatus"] == "current" for node in nodes)
+
+    peer = next(node for node in nodes if node["nodeId"] == "peer-node")
+    parsed = _json_mapping(peer["diagnostics"])
+    assert "futureNodeCounter" not in parsed
+    parsed_data_plane = _json_mapping(parsed["dataPlane"])
+    assert "futureLifecycleCounter" not in parsed_data_plane
+    parsed_egress = _json_mapping(parsed_data_plane["egress"])
+    assert parsed_egress["idleStreamReclaims"] == 0
+    assert "futureEgressCounter" not in parsed_egress
+    owner = _json_mapping(_json_mapping(parsed_egress["owners"])["owner-a"])
+    assert owner["idleStreamReclaims"] == 0
+    assert "futureOwnerCounter" not in owner
+
+
+def test_cluster_diagnostics_marks_mixed_source_builds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A staged same-version/different-commit window stays visible and degraded."""
+
+    api = _build_api("local-node")
+    api._telemetry_view.node_identities[api.node_id] = NodeIdentity(  # pyright: ignore[reportPrivateUsage]
+        skulk_version="1.4.3",
+        skulk_commit="aaaaaaaa",
+    )
+    client = TestClient(api.app)
+
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
+        return {"peer-node": "http://peer-node:52415"}
+
+    class _FakeAsyncClient:
+        async def __aenter__(self) -> "_FakeAsyncClient":
+            return self
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            return None
+
+        async def get(self, url: str) -> httpx.Response:
+            runtime = api._runtime_diagnostics().model_copy(  # pyright: ignore[reportPrivateUsage]
+                update={
+                    "node_id": "peer-node",
+                    "hostname": "peer-node.local",
+                    "skulk_commit": "bbbbbbbb",
+                }
+            )
+            diagnostics = NodeDiagnostics(
+                generated_at="2026-07-15T00:00:00+00:00",
+                runtime=runtime,
+                resources=api._resource_diagnostics(),  # pyright: ignore[reportPrivateUsage]
+                data_plane=api._data_plane_observer.snapshot(),  # pyright: ignore[reportPrivateUsage]
+            )
+            return httpx.Response(
+                200,
+                json=diagnostics.model_dump(mode="json", by_alias=True),
+                request=httpx.Request("GET", url),
+            )
+
+    def _build_async_client(*_args: object, **_kwargs: object) -> _FakeAsyncClient:
+        return _FakeAsyncClient()
+
+    monkeypatch.setattr(api, "_reachable_peer_api_urls", _reachable_peer_api_urls)
+    monkeypatch.setattr(api_main.httpx, "AsyncClient", _build_async_client)
+
+    response = client.get("/v1/diagnostics/cluster")
+
+    assert response.status_code == 200
+    body = _json_object(response)
+    assert body["versionStatus"] == "mixed"
+    nodes = {
+        str(node["nodeId"]): node
+        for node in (
+            _json_mapping(item) for item in _json_list(body["nodes"])
+        )
+    }
+    assert nodes["local-node"]["versionStatus"] == "current"
+    assert nodes["peer-node"]["versionStatus"] == "version_mismatch"
+    assert nodes["peer-node"]["ok"] is True
+
+
+def test_cluster_diagnostics_accepts_prefix_equivalent_source_commits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Different Git abbreviation lengths still identify one deployed build."""
+
+    api = _build_api("local-node")
+    api._telemetry_view.node_identities[api.node_id] = NodeIdentity(  # pyright: ignore[reportPrivateUsage]
+        skulk_version="1.4.3",
+        skulk_commit="abcdef1",
+    )
+    client = TestClient(api.app)
+
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
+        return {"peer-node": "http://peer-node:52415"}
+
+    class _FakeAsyncClient:
+        async def __aenter__(self) -> "_FakeAsyncClient":
+            return self
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            return None
+
+        async def get(self, url: str) -> httpx.Response:
+            runtime = api._runtime_diagnostics().model_copy(  # pyright: ignore[reportPrivateUsage]
+                update={
+                    "node_id": "peer-node",
+                    "hostname": "peer-node.local",
+                    "skulk_commit": "abcdef123456",
+                }
+            )
+            diagnostics = NodeDiagnostics(
+                generated_at="2026-07-15T00:00:00+00:00",
+                runtime=runtime,
+                resources=api._resource_diagnostics(),  # pyright: ignore[reportPrivateUsage]
+                data_plane=api._data_plane_observer.snapshot(),  # pyright: ignore[reportPrivateUsage]
+            )
+            return httpx.Response(
+                200,
+                json=diagnostics.model_dump(mode="json", by_alias=True),
+                request=httpx.Request("GET", url),
+            )
+
+    def _build_async_client(*_args: object, **_kwargs: object) -> _FakeAsyncClient:
+        return _FakeAsyncClient()
+
+    monkeypatch.setattr(api, "_reachable_peer_api_urls", _reachable_peer_api_urls)
+    monkeypatch.setattr(api_main.httpx, "AsyncClient", _build_async_client)
+
+    response = client.get("/v1/diagnostics/cluster")
+
+    assert response.status_code == 200
+    body = _json_object(response)
+    assert body["versionStatus"] == "consistent"
+    nodes = {
+        str(node["nodeId"]): node
+        for node in (
+            _json_mapping(item) for item in _json_list(body["nodes"])
+        )
+    }
+    assert nodes["peer-node"]["versionStatus"] == "current"
+
+
+def test_cluster_diagnostics_marks_failed_routed_peer_version_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A known route that fails collection must make build status uncertain."""
+
+    api = _build_api("local-node")
+    client = TestClient(api.app)
+
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
+        return {"peer-node": "http://peer-node:52415"}
+
+    class _FakeAsyncClient:
+        async def __aenter__(self) -> "_FakeAsyncClient":
+            return self
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            return None
+
+        async def get(self, url: str) -> httpx.Response:
+            return httpx.Response(
+                503,
+                request=httpx.Request("GET", url),
+            )
+
+    def _build_async_client(*_args: object, **_kwargs: object) -> _FakeAsyncClient:
+        return _FakeAsyncClient()
+
+    monkeypatch.setattr(api, "_reachable_peer_api_urls", _reachable_peer_api_urls)
+    monkeypatch.setattr(api_main.httpx, "AsyncClient", _build_async_client)
+
+    response = client.get("/v1/diagnostics/cluster")
+
+    assert response.status_code == 200
+    body = _json_object(response)
+    assert body["versionStatus"] == "unknown"
+    nodes = {
+        str(node["nodeId"]): node
+        for node in (
+            _json_mapping(item) for item in _json_list(body["nodes"])
+        )
+    }
+    peer = nodes["peer-node"]
+    assert peer["ok"] is False
+    assert peer["url"] == "http://peer-node:52415"
+    assert peer["versionStatus"] == "unknown"
 
 
 def _build_supervisor_runner(
@@ -585,10 +894,12 @@ def test_cluster_timeline_merges_flight_recorders_by_wall_clock(
             update={"node_id": "peer-node", "hostname": "peer-node.local"}
         ),
         resources=api._resource_diagnostics(),  # pyright: ignore[reportPrivateUsage]
+        data_plane=api._data_plane_observer.snapshot(),  # pyright: ignore[reportPrivateUsage]
         supervisor_runners=[peer_runner],
     )
 
-    async def _reachable_peer_api_urls() -> dict[str, str]:
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
         return {"peer-node": "http://peer-node:52415"}
 
     class _FakeAsyncClient:
@@ -664,7 +975,8 @@ def test_cluster_timeline_records_unreachable_peers(
 
     api.set_runner_diagnostics_provider(list)
 
-    async def _reachable_peer_api_urls() -> dict[str, str]:
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
         return {"peer-node": "http://peer-node:52415"}
 
     class _FakeAsyncClient:
@@ -742,7 +1054,8 @@ def test_cancel_cluster_runner_task_proxies_to_peer(
     api = _build_api("local-node")
     client = TestClient(api.app)
 
-    async def _reachable_peer_api_urls() -> dict[str, str]:
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
         return {"peer-node": "http://peer-node:52415"}
 
     class _FakeAsyncClient:
@@ -803,7 +1116,8 @@ def test_capture_cluster_node_diagnostics_proxies_to_peer(
     api = _build_api("local-node")
     client = TestClient(api.app)
 
-    async def _reachable_peer_api_urls() -> dict[str, str]:
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
         return {"peer-node": "http://peer-node:52415"}
 
     capture = DiagnosticCaptureResponse(
@@ -815,6 +1129,7 @@ def test_capture_cluster_node_diagnostics_proxies_to_peer(
                 update={"node_id": "peer-node", "hostname": "peer-node.local"}
             ),
             resources=api._resource_diagnostics(),  # pyright: ignore[reportPrivateUsage]
+            data_plane=api._data_plane_observer.snapshot(),  # pyright: ignore[reportPrivateUsage]
         ),
         flight_recorder=[],
         process_samples=[],
@@ -907,3 +1222,40 @@ async def test_node_diagnostics_tailscale_probe_exception_is_null(
     response = client.get("/v1/diagnostics/node")
     assert response.status_code == 200
     assert _json_object(response)["tailscale"] is None
+
+
+def test_cluster_diagnostics_reports_unreachable_topology_members(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A topology member with no reachable API route must appear as an
+    explicit ok=false entry, not vanish: an overlay-joined node otherwise has
+    no observability presence at all (#558)."""
+
+    api = _build_api("local-node")
+    client = TestClient(api.app)
+
+    api.state.topology.add_node(NodeId("local-node"))
+    api.state.topology.add_node(NodeId("unroutable-node"))
+
+    async def _reachable_peer_api_urls(fail_fast: bool = False) -> dict[str, str]:
+        del fail_fast
+        return {}
+
+    monkeypatch.setattr(api, "_reachable_peer_api_urls", _reachable_peer_api_urls)
+
+    response = client.get("/v1/diagnostics/cluster")
+
+    assert response.status_code == 200
+    body = _json_object(response)
+    assert body["versionStatus"] == "consistent"
+    nodes = {
+        str(node["nodeId"]): node
+        for node in (
+            _json_mapping(item) for item in _json_list(body["nodes"])
+        )
+    }
+    assert nodes["local-node"]["ok"] is True
+    unreachable = nodes["unroutable-node"]
+    assert unreachable["ok"] is False
+    assert unreachable["url"] is None
+    assert "no reachable API route" in str(unreachable["error"])

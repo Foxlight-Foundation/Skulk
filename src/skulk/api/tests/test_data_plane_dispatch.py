@@ -5,6 +5,8 @@ exercises `_dispatch_generation_chunk` directly (the shared routing used by the
 DATA-plane consumer) without standing up the full gossip path.
 """
 
+from datetime import datetime, timedelta, timezone
+from typing import cast
 from unittest.mock import AsyncMock
 
 import anyio
@@ -13,17 +15,22 @@ import pytest
 import skulk.api.main as api_main
 from skulk.api.main import API
 from skulk.shared.election import ElectionMessage
-from skulk.shared.models.model_cards import ModelId
+from skulk.shared.models.model_cards import AudioResponseFormat, ModelId
 from skulk.shared.types.chunks import (
+    AudioChunk,
+    DataChunk,
     EmbeddingChunk,
     ErrorChunk,
     PrefillProgressChunk,
     TokenChunk,
     ToolCallChunk,
+    TranscriptionChunk,
 )
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import IndexedEvent
+from skulk.shared.types.profiling import NodeResources
+from skulk.shared.types.telemetry import NODE_LIVENESS_TIMEOUT, NodeTelemetry
 from skulk.utils.channels import channel
 
 
@@ -45,6 +52,16 @@ def _build_api(*, data_plane_zenoh: bool = False) -> API:
     )
 
 
+def _data_frame(
+    command_id: CommandId,
+    sequence: int,
+    chunk: TokenChunk,
+) -> DataChunk:
+    """Build one legacy-compatible payload frame for reorder tests."""
+
+    return DataChunk(command_id=command_id, sequence=sequence, chunk=chunk)
+
+
 def test_reorder_buffer_default_follows_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -58,6 +75,90 @@ def test_reorder_buffer_default_follows_transport(
     assert _build_api(data_plane_zenoh=True)._reorder_buffer_enabled is True  # pyright: ignore[reportPrivateUsage]
     monkeypatch.setenv("SKULK_DATA_REORDER_BUFFER", "0")
     assert _build_api()._reorder_buffer_enabled is False  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_state_surfaces_split_data_transport_health() -> None:
+    api = _build_api(data_plane_zenoh=True)
+    management_node = NodeId("remote-management-node")
+    worker_node = NodeId("worker-node")
+    now = datetime.now(tz=timezone.utc)
+    # Replicated membership tracks the worker but can omit a remote API-only
+    # participant whose resource reading arrives exclusively on telemetry.
+    api.state = api.state.model_copy(update={"last_seen": {worker_node: now}})
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=management_node,
+            info=NodeResources(
+                backends=frozenset(),
+                participation="management",
+                data_transport="zenoh",
+            ),
+        ),
+        received_at=now,
+    )
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=worker_node,
+            info=NodeResources(data_transport="gossipsub"),
+        ),
+        received_at=now,
+    )
+
+    payload = await api.get_cluster_state()
+
+    assert payload["nodeResources"] == {
+        "remote-management-node": {
+            "backends": [],
+            "participation": "management",
+            "dataTransport": "zenoh",
+            "zenohConnectedPeers": None,
+            "capabilityConflicts": [],
+        },
+        "worker-node": {
+            "backends": ["mlx"],
+            "participation": "full",
+            "dataTransport": "gossipsub",
+            "zenohConnectedPeers": None,
+            "capabilityConflicts": [],
+        },
+    }
+    health = cast("dict[str, object]", payload["nodeHealth"])
+    assert isinstance(health, dict)
+    for node_id in ("remote-management-node", "worker-node"):
+        summary = cast("dict[str, object]", health[node_id])
+        assert isinstance(summary, dict)
+        assert summary["level"] == "error"
+        reasons = cast("list[dict[str, object]]", summary["reasons"])
+        assert isinstance(reasons, list)
+        assert any(
+            reason.get("code") == "data_transport_mismatch"
+            for reason in reasons
+        )
+
+
+async def test_state_omits_stale_telemetry_only_participant() -> None:
+    api = _build_api()
+    stale_node = NodeId("stale-management-node")
+    stale_at = (
+        datetime.now(tz=timezone.utc)
+        - NODE_LIVENESS_TIMEOUT
+        - timedelta(seconds=1)
+    )
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=stale_node,
+            info=NodeResources(
+                backends=frozenset(),
+                participation="management",
+            ),
+        ),
+        received_at=stale_at,
+    )
+
+    payload = await api.get_cluster_state()
+
+    assert payload["nodeResources"] == {}
+    assert payload["nodeHealth"] == {}
 
 
 @pytest.mark.asyncio
@@ -82,7 +183,9 @@ async def test_reorder_buffer_delivers_chunks_in_sequence_order() -> None:
         )
 
     for seq in (1, 0, 3, 2):
-        await api._reorder_and_dispatch(cmd, seq, tok(seq))  # pyright: ignore[reportPrivateUsage]
+        await api._reorder_and_dispatch(  # pyright: ignore[reportPrivateUsage]
+            _data_frame(cmd, seq, tok(seq))
+        )
 
     got: list[int] = []
     with recv as stream:
@@ -113,9 +216,15 @@ async def test_reorder_buffer_drops_duplicate_and_late_sequences() -> None:
             finish_reason=None,
         )
 
-    await api._reorder_and_dispatch(cmd, 0, tok(0))  # pyright: ignore[reportPrivateUsage]
-    await api._reorder_and_dispatch(cmd, 1, tok(1))  # pyright: ignore[reportPrivateUsage]
-    await api._reorder_and_dispatch(cmd, 0, tok(99))  # pyright: ignore[reportPrivateUsage]  # duplicate of 0
+    await api._reorder_and_dispatch(  # pyright: ignore[reportPrivateUsage]
+        _data_frame(cmd, 0, tok(0))
+    )
+    await api._reorder_and_dispatch(  # pyright: ignore[reportPrivateUsage]
+        _data_frame(cmd, 1, tok(1))
+    )
+    await api._reorder_and_dispatch(  # pyright: ignore[reportPrivateUsage]
+        _data_frame(cmd, 0, tok(99))
+    )
 
     got: list[int] = []
     with recv as stream:
@@ -130,13 +239,10 @@ async def test_reorder_buffer_drops_duplicate_and_late_sequences() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reorder_gap_flush_releases_chunks_after_a_dropped_sequence() -> None:
-    # #301 review (Codex P2 + Copilot): if a sequence is dropped on the
-    # best-effort topic (especially seq 0), the size cap may never trigger and
-    # nothing is dispatched, so the stream hangs (its idle backstop never arms
-    # because no chunk was yielded). The periodic gap sweep must release the
-    # chunks behind a stale gap. Here seq 0 is "dropped"; 1,2 buffer; the sweep
-    # then skips the gap and delivers 1,2.
+async def test_reorder_gap_flush_fails_stream_after_a_dropped_sequence() -> None:
+    # A gap that outlives the bounded repair window is a transport failure, not
+    # permission to return incomplete or transposed output. Here seq 0 is lost;
+    # seq 1 and 2 buffer until the sweep synthesizes one terminal ErrorChunk.
     api = _build_api()
     cmd = CommandId("cmd-gap")
     send, recv = channel[
@@ -154,8 +260,12 @@ async def test_reorder_gap_flush_releases_chunks_after_a_dropped_sequence() -> N
         )
 
     # seq 0 never arrives; 1 and 2 buffer behind the gap -> nothing dispatched
-    await api._reorder_and_dispatch(cmd, 1, tok(1))  # pyright: ignore[reportPrivateUsage]
-    await api._reorder_and_dispatch(cmd, 2, tok(2))  # pyright: ignore[reportPrivateUsage]
+    await api._reorder_and_dispatch(  # pyright: ignore[reportPrivateUsage]
+        _data_frame(cmd, 1, tok(1))
+    )
+    await api._reorder_and_dispatch(  # pyright: ignore[reportPrivateUsage]
+        _data_frame(cmd, 2, tok(2))
+    )
     with recv as stream:
         with pytest.raises(anyio.WouldBlock):
             stream.receive_nowait()  # confirm the gap holds everything
@@ -168,12 +278,12 @@ async def test_reorder_gap_flush_releases_chunks_after_a_dropped_sequence() -> N
             state.gap_since + flush_window + 1.0
         )
 
-        got: list[int] = []
-        for _ in range(2):
-            c = stream.receive_nowait()
-            assert isinstance(c, TokenChunk)
-            got.append(c.token_id)
-        assert got == [1, 2]
+        terminal = stream.receive_nowait()
+        assert isinstance(terminal, ErrorChunk)
+        assert "Data-plane transport failure" in terminal.error_message
+        assert cmd not in api._chunk_reorder  # pyright: ignore[reportPrivateUsage]
+        diagnostics = api._data_plane_observer.snapshot()  # pyright: ignore[reportPrivateUsage]
+        assert diagnostics.transport_failures == 1
 
 
 @pytest.mark.asyncio
@@ -199,12 +309,16 @@ async def test_reorder_gap_timer_not_refreshed_by_later_chunks() -> None:
             finish_reason=None,
         )
 
-    await api._reorder_and_dispatch(cmd, 1, tok(1))  # pyright: ignore[reportPrivateUsage]
+    await api._reorder_and_dispatch(  # pyright: ignore[reportPrivateUsage]
+        _data_frame(cmd, 1, tok(1))
+    )
     first_gap_since = api._chunk_reorder[cmd].gap_since  # pyright: ignore[reportPrivateUsage]
     assert first_gap_since is not None
     assert api._chunk_reorder[cmd].gap_at == 0  # pyright: ignore[reportPrivateUsage]
 
-    await api._reorder_and_dispatch(cmd, 2, tok(2))  # pyright: ignore[reportPrivateUsage]
+    await api._reorder_and_dispatch(  # pyright: ignore[reportPrivateUsage]
+        _data_frame(cmd, 2, tok(2))
+    )
     # same head-of-line gap (still waiting on seq 0): timer preserved, not reset
     assert api._chunk_reorder[cmd].gap_since == first_gap_since  # pyright: ignore[reportPrivateUsage]
 
@@ -222,7 +336,9 @@ async def test_reorder_state_dropped_when_no_queue() -> None:
         usage=None,
         finish_reason="stop",
     )
-    await api._reorder_and_dispatch(cmd, 3, chunk)  # pyright: ignore[reportPrivateUsage]
+    await api._reorder_and_dispatch(  # pyright: ignore[reportPrivateUsage]
+        _data_frame(cmd, 3, chunk)
+    )
     assert cmd not in api._chunk_reorder  # pyright: ignore[reportPrivateUsage]
 
 
@@ -241,6 +357,66 @@ async def test_dispatch_routes_token_chunk_to_text_queue() -> None:
         token_id=1,
         usage=None,
         finish_reason=None,
+    )
+    await api._dispatch_generation_chunk(cmd, chunk)  # pyright: ignore[reportPrivateUsage]
+    with recv as stream:
+        assert stream.receive_nowait() is chunk
+
+
+@pytest.mark.asyncio
+async def test_dispatch_drops_speech_chunk_for_text_queue() -> None:
+    api = _build_api()
+    cmd = CommandId("cmd-text-speech")
+    send, recv = channel[
+        TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk
+    ]()
+    api._text_generation_queues[cmd] = send  # pyright: ignore[reportPrivateUsage]
+
+    chunk = AudioChunk(
+        model=ModelId("mlx-community/kokoro-test"),
+        data="UklGRg==",
+        chunk_index=0,
+        total_chunks=1,
+        format=AudioResponseFormat.Wav,
+        finish_reason="stop",
+    )
+    await api._dispatch_generation_chunk(cmd, chunk)  # pyright: ignore[reportPrivateUsage]
+    with recv as stream, pytest.raises(anyio.WouldBlock):
+        stream.receive_nowait()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_routes_audio_chunk_to_speech_queue() -> None:
+    api = _build_api()
+    cmd = CommandId("cmd-speech")
+    send, recv = channel[AudioChunk | ErrorChunk]()
+    api._audio_speech_queues[cmd] = send  # pyright: ignore[reportPrivateUsage]
+
+    chunk = AudioChunk(
+        model=ModelId("mlx-community/kokoro-test"),
+        data="UklGRg==",
+        chunk_index=0,
+        total_chunks=1,
+        format=AudioResponseFormat.Wav,
+        finish_reason="stop",
+    )
+    await api._dispatch_generation_chunk(cmd, chunk)  # pyright: ignore[reportPrivateUsage]
+    with recv as stream:
+        assert stream.receive_nowait() is chunk
+
+
+@pytest.mark.asyncio
+async def test_dispatch_routes_transcription_chunk_to_transcription_queue() -> None:
+    api = _build_api()
+    cmd = CommandId("cmd-transcription")
+    send, recv = channel[TranscriptionChunk | ErrorChunk]()
+    api._audio_transcription_queues[cmd] = send  # pyright: ignore[reportPrivateUsage]
+
+    chunk = TranscriptionChunk(
+        model=ModelId("mlx-community/whisper-test"),
+        text="hello",
+        language="en",
+        finish_reason="stop",
     )
     await api._dispatch_generation_chunk(cmd, chunk)  # pyright: ignore[reportPrivateUsage]
     with recv as stream:
@@ -592,6 +768,57 @@ async def test_reorder_buffer_disabled_dispatches_in_arrival_order() -> None:
             assert isinstance(c, TokenChunk)
             got.append(c.token_id)
     assert got == [0, 1, 2]  # passed straight through, no buffering
+
+
+@pytest.mark.asyncio
+async def test_reorder_buffer_disabled_fails_on_sequence_gap() -> None:
+    """Zenoh arrival mode must not return output after a dropped frame."""
+
+    from skulk.shared.types.chunks import DataChunk
+
+    data_send, data_recv = channel[DataChunk]()
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    _, event_receiver = channel[IndexedEvent]()
+    _, election_receiver = channel[ElectionMessage]()
+    api = API(
+        NodeId("api-node"),
+        port=52415,
+        event_receiver=event_receiver,
+        command_sender=command_sender,
+        download_command_sender=download_sender,
+        election_receiver=election_receiver,
+        enable_event_log=False,
+        mount_dashboard=False,
+        data_receiver=data_recv,
+        data_plane_zenoh=True,
+    )
+    cmd = CommandId("cmd-zenoh-gap")
+    qsend, qrecv = channel[
+        TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk
+    ]()
+    api._text_generation_queues[cmd] = qsend  # pyright: ignore[reportPrivateUsage]
+
+    def tok(sequence: int) -> TokenChunk:
+        return TokenChunk(
+            model=ModelId("mlx-community/test"),
+            text=f"t{sequence}",
+            token_id=sequence,
+            usage=None,
+        )
+
+    await data_send.send(DataChunk(command_id=cmd, sequence=0, chunk=tok(0)))
+    await data_send.send(DataChunk(command_id=cmd, sequence=2, chunk=tok(2)))
+    data_send.close()
+    await api._apply_data()  # pyright: ignore[reportPrivateUsage]
+
+    with qrecv as stream:
+        first = stream.receive_nowait()
+        terminal = stream.receive_nowait()
+    assert isinstance(first, TokenChunk)
+    assert first.token_id == 0
+    assert isinstance(terminal, ErrorChunk)
+    assert "expected 1, received 2" in terminal.error_message
 
 
 @pytest.mark.asyncio

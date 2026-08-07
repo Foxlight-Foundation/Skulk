@@ -3,14 +3,26 @@ from pathlib import Path
 import pytest
 
 from skulk.store.config import (
+    DEFAULT_MODEL_STORE_PORT,
+    ExperimentsConfig,
     ModelStoreConfig,
     NodeOverrideConfig,
+    SkulkConfig,
     StagingNodeConfig,
     hostname_aliases,
     load_skulk_config,
     node_matches_store_host,
     resolve_node_staging,
 )
+
+
+def test_model_store_default_port_avoids_dynamic_client_range() -> None:
+    """Fresh listeners must not race ordinary outbound client connections."""
+
+    config = ModelStoreConfig(store_host="store.local", store_path="/models")
+
+    assert DEFAULT_MODEL_STORE_PORT == 12415
+    assert config.store_port == DEFAULT_MODEL_STORE_PORT
 
 
 def test_hostname_aliases_include_short_and_local_variants() -> None:
@@ -113,3 +125,34 @@ def test_load_skulk_config_fails_loud_on_legacy_exo_yaml(tmp_path: Path) -> None
     target = tmp_path / "skulk.yaml"
     with pytest.raises(FileNotFoundError, match="exo.yaml is no longer read"):
         load_skulk_config(target)
+
+
+def test_experiments_config_defaults_speech_streaming_off() -> None:
+    """Experimental feature toggles default off until explicitly opted in."""
+
+    config = SkulkConfig(experiments=ExperimentsConfig())
+
+    assert config.experiments is not None
+    assert config.experiments.tts_streaming is False
+    assert config.experiments.stt_realtime is False
+    assert config.experiments.speech_translation is False
+
+
+def test_load_skulk_config_parses_speech_streaming_experiments(
+    tmp_path: Path,
+) -> None:
+    """The config file can opt into each experimental speech transport."""
+
+    target = tmp_path / "skulk.yaml"
+    target.write_text(
+        "experiments:\n  tts_streaming: true\n  stt_realtime: true\n"
+        "  speech_translation: true\n"
+    )
+
+    config = load_skulk_config(target)
+
+    assert config is not None
+    assert config.experiments is not None
+    assert config.experiments.tts_streaming is True
+    assert config.experiments.stt_realtime is True
+    assert config.experiments.speech_translation is True

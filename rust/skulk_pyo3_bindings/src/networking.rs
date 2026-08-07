@@ -144,6 +144,10 @@ enum PyFromSwarm {
     Connection {
         peer_id: String,
         connected: bool,
+        // Observed remote endpoint of the established connection; empty
+        // string / 0 on the disconnect event (#662).
+        remote_ip: String,
+        remote_tcp_port: u16,
     },
     Message {
         origin: String,
@@ -154,13 +158,21 @@ enum PyFromSwarm {
 impl From<FromSwarm> for PyFromSwarm {
     fn from(value: FromSwarm) -> Self {
         match value {
-            FromSwarm::Discovered { peer_id } => Self::Connection {
+            FromSwarm::Discovered {
+                peer_id,
+                remote_ip,
+                remote_tcp_port,
+            } => Self::Connection {
                 peer_id: peer_id.to_base58(),
                 connected: true,
+                remote_ip,
+                remote_tcp_port,
             },
             FromSwarm::Expired { peer_id } => Self::Connection {
                 peer_id: peer_id.to_base58(),
                 connected: false,
+                remote_ip: String::new(),
+                remote_tcp_port: 0,
             },
             FromSwarm::Message { from, topic, data } => Self::Message {
                 origin: from.to_base58(),
@@ -331,15 +343,22 @@ struct PyZenohHandle {
 #[pymethods]
 impl PyZenohHandle {
     #[new]
-    #[pyo3(signature = (listen_endpoints=None, connect_endpoints=None, namespace=None))]
+    #[pyo3(signature = (
+        listen_endpoints=None,
+        connect_endpoints=None,
+        namespace=None,
+        multicast_scouting=false
+    ))]
     fn py_new(
         listen_endpoints: Option<Vec<String>>,
         connect_endpoints: Option<Vec<String>>,
         namespace: Option<String>,
+        multicast_scouting: bool,
     ) -> PyResult<Self> {
         let config = ZenohConfig {
             listen_endpoints: listen_endpoints.unwrap_or_default(),
             connect_endpoints: connect_endpoints.unwrap_or_default(),
+            multicast_scouting,
             // #308 namespace isolation; the Python caller passes an
             // already-validated key-expr segment (or None for the legacy
             // unprefixed behavior).
@@ -371,6 +390,17 @@ impl PyZenohHandle {
             .allow_threads_py()
             .await
             .pyerr()
+    }
+
+    /// Count the Zenoh peers this session currently holds a live transport to.
+    ///
+    /// Zero while cluster peers advertise Zenoh means this node's data plane
+    /// is isolated (its remote streams will fail) even though the libp2p
+    /// control plane is healthy; Python advertises the count so cluster
+    /// health can say so instead of streams dying silently.
+    async fn zenoh_connected_peer_count(&self) -> PyResult<usize> {
+        let session = Arc::clone(&self.session);
+        Ok(session.connected_peer_count().allow_threads_py().await)
     }
 
     /// Await the next inbound `(topic, data)` sample.

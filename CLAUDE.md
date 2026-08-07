@@ -95,32 +95,165 @@ Run all checks in sequence:
 uv run basedpyright && uv run ruff check && nix fmt && uv run pytest
 ```
 
-If `nix fmt` changes any files, stage them before committing. The CI runs `nix flake check` which verifies formatting, linting, and runs Rust tests.
+If `nix fmt` changes any files, stage them before committing. The CI runs `nix flake check` which verifies formatting, linting, and runs Rust tests. A PR touching the networking crate's wire surfaces (swarm.rs, discovery.rs, zenoh_session.rs, its Cargo.toml, or the root workspace Cargo.toml/Cargo.lock) must update `rust/networking/WIRE_COMPAT.md`: bump `NETWORK_VERSION` and record it for wire-behavior changes, or record the wire-neutrality judgment (CI enforces via the wire-compat-guard job). The service startup script rebuilds the Rust bindings whenever the last commit touching rust/ or the root Cargo inputs moves.
 
 ## Architecture
 
 ### Node Composition
 A single Skulk `Node` (src/skulk/main.py) runs multiple components:
-- **Router**: libp2p-based pub/sub messaging via Rust bindings (skulk_pyo3_bindings)
+- **Router**: libp2p-based pub/sub messaging via Rust bindings (`skulk_pyo3_bindings`). `TELEMETRY` uses bounded latest-value admission, a one-packet Python egress queue, and its own gossipsub protocol/handler queues; `ELECTION_MESSAGES` has a separate Python egress queue and isolated protocol/handler queues. Neither can be starved by ordinary control fan-out, and telemetry pressure cannot consume election capacity. Election alone carries a temporary legacy-protocol copy. Peer discovery tries all mDNS addresses once, then slows link-local retries to one minute after another path connects; socket liveness requires three consecutive five-second ping failures. Live authenticated libp2p sessions are also recorded as `session=True` topology edges (refcounted per peer, seeded across worker recreation), keeping NAT'd/proxied remote members visible and placeable; placement host selection skips session edges, and advertised addresses that fail three consecutive probe sweeps back off to every sixth sweep while no-longer-advertised addresses still delete their edges (#662). Telemetry publishes that reach no subscribed peers are counted (`noPeerPublishes` in `GET /v1/diagnostics/telemetry`) and, sustained on a connected node, warn that the node will be invisible to membership (#660).
 - **Worker**: Handles inference tasks, downloads models, manages runner processes
-- **Master**: Coordinates cluster state, places model instances across nodes
-- **Election**: Bully algorithm for master election
+- **Master**: Coordinates cluster state, places model instances across nodes; retained event-log replay is coalesced onto one asynchronously paced worker, and sustained idle-state event-log growth emits an operator warning
+- **Election**: Bully algorithm for master election, carried on the isolated election gossipsub behavior with duplicate candidate suppression during protocol migration
 - **API**: FastAPI server for OpenAI-compatible chat completions
+
+### Node Facts & capability derivation (#614)
+Detection creates capability; configuration overrides it; disagreement is
+always loud. One probe pass per process (`src/skulk/facts/`) gathers a typed
+`NodeFacts` record (all observed GPUs across vendors, importable deps, engine
+binaries plus their `--list-devices` report, raw `SKULK_*` declarations); a
+pure derivation turns it into the advertised backend tags plus
+`CapabilityConflict` entries (`gpu_serving_disabled`, `gpu_detection_degraded`,
+`invalid_engine_binary`, `backend_override_conflict`) that ride
+`NodeResources.capability_conflicts` into `nodeHealth` and the dashboard.
+`probe_node_backends()` is a thin delegate over the cached snapshot; nobody
+probes ad hoc. `skulk doctor [--fix|--json]` (`src/skulk/doctor/`) runs the
+check registry on demand; `website/docs/node-doctor.md` is GENERATED from the
+registry by `scripts/generate_doctor_docs.py` (rerun after registry changes).
+On Linux, `src/skulk/provisioning/` fetches the pinned, checksum-verified
+upstream llama-server build on demand (Vulkan for visible GPUs, CPU
+otherwise; no upstream Linux CUDA prebuilt exists; the CUDA lane is the
+Foxlight wheel, auto-installed on demand for NVIDIA nodes, #661);
+`SKULK_LLAMA_SERVER_BIN` overrides, `SKULK_NO_ENGINE_AUTOPROVISION=1` opts
+out. The CUDA engine also ships as the pip wheel `skulk-llama-server-cuda`
+(packaging/, built by `.github/workflows/engine-wheel.yml`), which outranks
+tarball provisioning on NVIDIA nodes. Engine wheels publish to the Foxlight
+PEP 503 index on Cloudflare R2 (`wheels.foxlight.ai`, source of
+truth; `scripts/publish_wheel_index.py`; CUDA wheel exceeds PyPI's size
+limit) with the Vulkan wheel mirrored to PyPI. The CUDA wheel builds with
+`GGML_CUDA_NO_VMM=ON`: GPU-less CI cannot satisfy the driver API's transitive
+libcuda.so.1 link (stubs ship only libcuda.so), so never reintroduce
+driver-API-dependent flags to that build. ADVANCING THE ENGINE PIN IS A
+CHECKLIST (architecture-reference.md "Engine pin advancement"): bump pin +
+re-record checksums + bump wheel version + republish + fresh-box gauntlet;
+never advance casually. `install.sh` is the one-command fresh-box installer
+(thin; intelligence lives in doctor); it builds the dashboard with the required
+`nodejs-wheel-binaries` runtime (compatible system Node.js fallback), and only
+`--headless` may intentionally omit it. nvidia-ml-py is a HARD Linux
+dependency: nothing optional may be load-bearing.
 
 ### Inference engines
 A model card's `placement.compatible_backends` selects which engine serves it
 (`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):
 - **`mlx`** (`worker/engines/mlx/`): in-process MLX on Apple Silicon; owns the
-  generation loop, the multi-node ring, and MTP/speculative decoding.
+  generation loop, the multi-node ring, and MTP/speculative decoding. Single-node
+  bundled vision models load through their native `mlx-vlm` family implementation
+  so processor-specific image grids and multimodal positional encoding are
+  preserved without routing supported native processors through PyTorch or
+  `torchvision`; macOS still installs pinned `torchvision` for supported families
+  that require Transformers' `AutoImageProcessor` fallback. Vision
+  processor/preprocessing failures are terminal rather than falling back to
+  text-only generation. Vision-capable instances use request-aware dual-mode
+  scheduling: text-only cohorts use `BatchGenerator`, image-bearing requests
+  use `SequentialGenerator`, and the two paths are mutually exclusive with
+  FIFO mode boundaries. Terminal generation provenance is task-local.
+- **`mlx_audio`**: single-node speech backend vocabulary for upstream
+  `mlx-audio` TTS/STT models. Skulk probes and advertises `mlx_audio` /
+  `mlx_audio-metal` when `mlx_audio` imports on macOS. Mounted TTS models serve
+  `/v1/audio/speech` through the speech runner; stable MP3/raw-PCM `stream=true` requires
+  card-level streaming support. Mounted STT models serve batch transcription;
+  cards with proven streaming support additionally expose typed SSE or
+  progressive NDJSON from their actual model deltas. Production nodes also expose the built-in `tts@1.0.0` provider
+  facade over that same core command/runner path, with raw MP3 media on
+  `PROVIDER_DATA` and dynamic telemetry/admission tied to mounted capacity.
+  Mounted STT models serve non-streaming `/v1/audio/transcriptions`. Ready
+  mounted capacity also advertises the built-in `stt@1.0.0` batch transform:
+  callers send bounded encoded audio as binary provider frames, half-close
+  input, and receive one final transcript. Its core command path is shared
+  with the REST endpoint. The
+  stable `stt.realtime@1.0.0` bidirectional provider accepts mono PCM16
+  frames on any API node with reachable mounted capacity, pins a
+  `RealtimeAudioTranscription` task to one single-host instance, and feeds a
+  true upstream streaming session through bounded ingress. Same-node input
+  short-circuits locally; remote input uses node-addressed binary
+  `REALTIME_AUDIO` packets over Zenoh and is not advertised when Zenoh is
+  unavailable. PCM never enters State or the event log. It advertises only with
+  reachable ready capacity and a card declaring both streaming and realtime
+  support. `WS /v1/realtime` is a multi-turn OpenAI-compatible adapter over
+  this provider: base64 24 kHz
+  PCM16 at the API edge becomes raw Fabric media, and disconnect cancels the
+  provider. `WS /v1/fabric/chains/speech` exposes the same hardened bridge as
+  an explicit typed STT-to-chat-to-TTS composition surface; its session update
+  selects optional mounted chat, TTS, and voice participants. Dashboard chat
+  uses this path only when card truth and the local
+  live provider tag agree, resampling AudioWorklet microphone frames to 24 kHz
+  PCM16; batch cards keep MediaRecorder upload. Every production API also
+  advertises `vad@1.0.0`, a stable bidirectional WebRTC VAD provider for
+  8/16/32/48 kHz mono PCM16. It emits typed turn boundaries with bounded
+  minimum speech, silence hangover, preroll, and maximum utterance duration;
+  media is processed per call and never retained. Translation-capable STT cards
+  serve `/v1/audio/translations` as a standard capability (card
+  `audio.supports_translation` is the only gate; the whole `experiments`
+  config section is now deprecated compatibility surface, accepted but
+  ignored); TTS cards may expose model-native voices or checksummed bundled
+  reference profiles plus preferred-language metadata through the Skulk
+  `/v1/audio/voices` extension. Bundled profile IDs resolve to local audio and
+  exact transcripts only inside the worker. Dashboard Auto selection pins the first language match across all
+  sentence-sized requests in one response. The realtime transcription
+  WebSocket accepts bounded server VAD and serializes utterances as distinct
+  provider calls. Optional response configuration routes final transcripts
+  through a mounted chat model and mounted `tts@1.0.0` provider; explicit
+  cancellation and VAD barge-in cancel underlying model/TTS commands.
+  Managed reference audio is accepted only as a
+  bounded multipart upload for supporting TTS cards. Its bytes use the
+  node-addressed `SPEECH_MEDIA` Zenoh data path, never State or the event log;
+  the worker assembles them in bounded process-local memory and the runner
+  removes its request-scoped temporary file after generation.
 - **`llama_cpp`** (`worker/runner/llama_cpp/`): in-process `llama-cpp-python` for
-  GGUF on GPU/Linux nodes (Vulkan/ROCm/CUDA). Single-node.
+  GGUF on GPU/Linux nodes (Vulkan/ROCm/CUDA). Single-node. Dispatches through
+  `ServedConcurrentDispatch` at width 1 (#692): generations stay strictly
+  serial (the `Llama` object requires it) but admission is bounded, the
+  supervisor task channel is bounded at 256, and every generation stamps
+  serving node/backend and admission concurrency so the performance-envelope
+  registry can observe this path.
 - **`llama_server`** (`worker/runner/llama_server/`): served-backend engine; the
   worker launches an external `llama-server` subprocess and proxies its OpenAI
   HTTP API. The only path to llama.cpp's **native MTP** (`--spec-type draft-mtp`),
   whose orchestration lives in the server app, not `libllama` / the Python binding.
   Enabled per node via `SKULK_LLAMA_SERVER_BIN`; configured per model via the card
-  `served_spec_type` / `served_spec_n_max` runtime fields. Single-node; coexists
-  with `llama_cpp`; the managed-server-plus-proxy shape is the vLLM on-ramp.
+  `served_spec_type` / `served_spec_n_max` runtime fields. The node's
+  `SKULK_LLAMA_SERVER_PARALLEL` slot count (default 16) is honored exactly, with
+  `--kv-unified` above one slot so every slot keeps the full stamped window
+  rather than `n_ctx / N` (#689). Exact prompt-plus-output reservations queue
+  FIFO against that shared pool before generation, and an unavailable
+  token-count probe reserves the whole pool as a fail-safe. Single-node;
+  coexists with `llama_cpp`; the managed-server-plus-proxy shape is shared with
+  `vllm`.
+- **`vllm`** (`worker/runner/vllm/`): second served-backend engine; the worker
+  launches an external `vllm serve` process and proxies its OpenAI HTTP API. The
+  GPU-serving fast path: continuous batching + paged attention hold latency flat
+  and grow aggregate throughput under concurrent load where the single-stream
+  engines collapse (Phase 0 spike, A100 gpt-oss-120B, 64-way concurrency:
+  llama.cpp TTFT ~31s vs vLLM ~0.5s), while single-stream on non-FP4 GPUs the
+  in-process engines can win. **Coexists** (not replaces): the planner picks by
+  hardware + expected concurrency. Enabled per node via `SKULK_VLLM_BIN`
+  (advertises `vllm-cuda`/`vllm-rocm`, GPU-only). Validated matrix: vllm
+  0.25.1+cu129 (variant wheel from wheels.vllm.ai; the PyPI default links
+  libcudart.so.13; 0.25.1 is the floor for the Laguna DFlash drafter) +
+  ninja in the venv (FlashInfer JIT; the runner prepends the venv bin dir
+  to the server PATH). Card `runtime.vllm_spec_method`/
+  `vllm_spec_num_tokens`/`vllm_spec_draft_repo` map to
+  `--speculative-config` (method `mtp` = native prediction heads,
+  Qwen3.6-27B-FP8 measured 2.01x; method `dflash` = separate block-parallel
+  speculator repo, the Laguna cards). Single-node
+  text in v1; tool calling / logprobs / multi-node / vLLM-aware admission
+  are follow-ups. Lifecycle (#653): teardown signals the server's whole
+  process group (vLLM's EngineCore is a grandchild) with an orphan-sweep
+  mop after graceful leader exit, and worker startup reaps init-reparented
+  `VLLM::EngineCore` processes (argv[0]/comm marker match, per-pid
+  re-verified before SIGKILL) before advertising capacity.
+  `AcceleratorMetrics.compute_capability` (+ `native_fp4`/`native_fp8`, via NVML)
+  is the capability signal for keying placement on GPU generation, not vendor.
 
 ### Message Flow
 Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
@@ -128,27 +261,38 @@ Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `LOCAL_EVENTS`: Workers send events to master for indexing
 - `COMMANDS`: Workers/API send commands to master
 - `STATE_SYNC_MESSAGES`: Followers request the current session snapshot before replaying the retained tail
-- `DATA`: Data plane (#279 Phase 2). The serving rank-0 worker streams per-token generation output (`DataChunk` = `{command_id, chunk}`) directly to the owning API node, off the event log entirely. The master never sees these (no index, no disk, no cluster-wide rebroadcast); only API nodes drain them, demuxing by `command_id` into the per-command stream queues. Output chunks never mutate `State`, so removing them from the ordered log is loss-free for correctness while eliminating the per-token master hop + disk write that dominated event-log volume (#278). Produced in `RunnerSupervisor._emit` (diverts `ChunkGenerated` to the data sender); consumed in `API._apply_data`. Inbound vision chunks (`InputChunkReceived`) stay on the control plane for now. The `DATA` topic can ride an **Eclipse Zenoh** peer session instead of gossipsub (soft default-on as of #315 via `_resolve_zenoh_enabled`: Zenoh when `SKULK_ZENOH_LISTEN` is configured, gossipsub for a bare node with no Zenoh config, `SKULK_ZENOH_DATA_PLANE=1/0` forces on/off; control/telemetry/election stay on libp2p): the `Router` routes only `DATA` to a `ZenohHandle` (`rust/networking/src/zenoh_session.rs`) via `Router.uses_zenoh`. On Zenoh the plane is **key-addressed per owner** (#279 Phase 2): the owning API node stamps `owner_node` on the serving command, the master carries it onto the task, and `_emit` stamps it onto each `DataChunk`; the `Router` publishes to the key `data/<owner_node>` (`DATA.routing_key` / `_data_owner_key`, 3-tuple `(topic, routing_key, data)` on the networking channel) and each node subscribes only to `data/<own_node_id>`, so output reaches just the owner instead of fanning out. `_zenoh_recv` strips the suffix back to the bare `data` topic. On gossipsub `owner_node` is ignored (bare-topic broadcast), so the transports stay interchangeable. Phase 3 (#311) made the reorder buffer transport-conditional (kept on gossipsub, skipped under Zenoh's per-publisher FIFO; `sequence` retained until Zenoh is default). Hardening toward default-on (#308/#309): the Zenoh session is **namespace-isolated** (`ZenohConfig.namespace` = a SHA-256 hash of the libp2p namespace token, `_libp2p_namespace_token` mirroring `swarm.rs`: `SKULK_LIBP2P_NAMESPACE` when set, else the `NETWORK_VERSION` default `v0.0.1`; this is isolation between distinct clusters, NOT confidentiality vs an adversary already on the Zenoh network, since the seed is non-secret operator config also surfaced in `/v1/diagnostics/node`, so use Zenoh TLS/firewall on untrusted networks), `SKULK_ZENOH_LISTEN` is **required explicitly** (no `0.0.0.0` default), the DATA plane egresses on its own loop (`Router._zenoh_networking_publish`) whose channel is **bounded** (`_ZENOH_DATA_OUTBOUND_BUFFER`) so `Block` can't stall control and a stalled subscriber backpressures the producer instead of OOMing the node, and `ZenohSession` publish/subscribe don't hold their mutex across the await. See `website/docs/architecture-reference.md` for the env vars and the data-plane evolution plan.
+- `DATA`: Generated token/image/embedding/transcription/audio output, off the event log and master hot path. `DataChunk` carries `{command_id, kind, chunk?, sequence, owner_node}` with an explicit `started -> chunk* -> completed|failed|cancelled` lifecycle. `RunnerSupervisor` emits start and exactly one terminal; `API._apply_data` orders/deduplicates frames and converts unresolved gaps into terminal transport errors plus producer cancellation. Zenoh is the shipping default, including for zero-config installs: startup auto-binds only a private-LAN or CGNAT fabric IPv4 (loopback on offline or public-only hosts) and uses multicast scouting when no explicit connect list is supplied; public listeners require an explicit override, while routed/Tailscale fleets provide explicit endpoints and retain multicast-off behavior. Zenoh keys by `data/<owner_node>` and short-circuits same-node output. Remote egress uses bounded independent per-command workers with owner/process admission caps and a five-second publish deadline, so a slow or missing owner cannot stall another local or remote stream; saturation fails only the affected stream rather than silently returning incomplete output. Every node advertises its startup-resolved `gossipsub`/`zenoh` choice in `NodeResources.data_transport`; worker nodes use the resource gatherer, while `--no-worker` nodes publish no backends and effective management-only participation from the node lifecycle. `/state` exposes `nodeResources` and marks a split live fleet with error-level `data_transport_mismatch` health reasons. `NodeResources.zenoh_connected_peers` (sampled via `ZenohPeerSampler` behind a 90s startup grace) additionally raises error-level `zenoh_isolated` when a Zenoh node holds 0 peer transports while other live nodes advertise Zenoh (the multicast-unreachable remote-member shape), plus a recurring local warning. Mixed transports remain unsupported and unbridged. `NodeDiagnostics.data_plane` and the dashboard expose lifecycle, first-byte/span, ordering, queue, drop, and publish metrics. Existing OpenAI audio edges retain base64/JSON; provider streaming uses `extensions/streams.py` JSON headers plus raw inline media or staged blob references. This is a wire change: deploy same-version fleets only.
+- `PROVIDER_DATA`: Extension-provider media in its own type family, off the event log/master/State. `ProviderStreamPacket` routes each direction to its receiving node; wire framing is a bounded length-prefixed JSON lifecycle header plus optional raw media bytes (1 MiB inline cap) or a staged blob reference. It shares DATA's same-node short circuit and dedicated Zenoh loop, with bounded queues keyed by owner/call/direction, admission caps, publish deadline, rejection behavior, and egress diagnostics. `ExtensionContext.stream_capability` opens through a control-sized peer API request and returns output frames plus a caller input sink for client-streaming/bidirectional modes. Both directions enforce `started -> chunk* -> terminal`; caller `complete()` half-closes input without ending provider output. `NodeDiagnostics.provider` exposes bounded per-capability admission, input-queue, media-volume, first-output, terminal, and cancellation metrics without retaining payloads or completed call IDs. Same-version fleet required.
+- `REALTIME_AUDIO`: Built-in realtime STT PCM ingress, off the event log/master/State. `RealtimeAudioPacket` carries a bounded JSON lifecycle header plus raw PCM bytes from the owning API node to the selected single-host speech worker. It shares the Zenoh scheduler's bounded independent command queues and same-node short circuit; transport rejection is source-routed so only the affected provider call fails. Remote capability is unavailable without Zenoh. Same-version fleet required.
+- `SPEECH_MEDIA`: Bounded speech input, off the event log/master/State. TTS reference audio requires node-addressed Zenoh. Batch STT audio is retained at the owning API until authoritative `TaskCreated` placement, then sent as raw frames to each selected speech worker; workers gate runner dispatch on exact sequence, task owner, count, and SHA-256 verification. Batch STT retains a target-filtered gossipsub fallback on the trusted fabric. Same-version fleet required.
+- `TRACE_DATA`: Best-effort diagnostic trace payloads, off the event log/master/State. Each runner supervisor sends one terminal packet per traced task rank to the owning API; that API assembles the expected rank set under fixed task-count and age bounds before writing the Chrome trace. Same-version fleet required.
+- `VISION_MEDIA`: VLM and image-edit input, off the event log/master/State. The API waits for authoritative `TaskCreated` placement, then sends an `opened -> chunk* -> completed` binary-framed stream directly to every selected worker rank. Workers apply stream/frame/byte/age bounds and expose input to planning only after exact sequence, metadata, task-owner, and SHA-256 verification plus successful acknowledgement admission; timed-out acknowledgement sends retry while the task remains gated. Each rank returns `accepted`, and a bounded missing-ack deadline fails the source request. Vision ingress has separate bounded network-receive lanes and a separate remote dispatcher; `NodeDiagnostics.visionMediaEgress` reports router pressure and `visionMediaIngress` reports worker retention and outcomes, so uploads cannot delay control receive, consume generated-output capacity, or fail invisibly. Same-version fleet required.
 - `ELECTION_MESSAGES`: Election protocol messages
 - `CONNECTION_MESSAGES`: libp2p connection updates
-- `TELEMETRY`: Workers gossip `NodeTelemetry` (last-write-wins node readings — `NodeResources`: participation role + backends; `node_memory` + `node_system` since slice 2; `node_identities` + `node_disk` + `node_rdma_ctl` since slice 3) into an in-memory `TelemetryView`, NOT the event log. Control/telemetry/data plane separation (#279); read by the planner for placement and merged into `GET /state` for the dashboard. Those maps live here, not in `State`. The context-admission ceiling is stamped onto the instance at placement time (`context_token_limit`) since telemetry is unordered. NOTE: the **connectivity** readings (`node_network`, `node_thunderbolt`, `node_thunderbolt_bridge`, and the derived `thunderbolt_bridge_cycles`) deliberately STAY on the control plane: `apply()` builds the RDMA topology graph and TB-bridge cycles from them and the planner reads `node_network` for host selection, so they must be ordered, not LWW telemetry (#279 slice 3 scoping). `TELEMETRY_PLANE_INFO` in `telemetry.py` is the source of truth for which `GatheredInfo` variants ride telemetry. `node_system` (`SystemPerformanceProfile`) carries a collector-agnostic `accelerator` block (`AcceleratorMetrics`: vendor/name/utilization_ratio/vram/power/temp/clock, `None` when unmeasured) filled at the collector boundary: mactop on Apple, and a new AMD/Linux passive-sysfs collector (`LinuxGpuMetrics`, `utils/info_gatherer/linux_gpu.py`) so non-Mac GPU nodes are not a telemetry blind spot.
+- `TELEMETRY`: Workers offer `NodeTelemetry` without blocking into a bounded 256-key latest-value map, drained through a one-packet queue and dedicated gossipsub protocol/handler queues. The in-memory `TelemetryView` holds node resources/memory/system/identity/disk/rdma-ctl, extension capability tags, the payload-free `NodeHeartbeat`, and non-terminal `DownloadPending`/`DownloadOngoing`; none enters the event log. Only download completed/failed outcomes remain in `State`, with opaque attempt IDs preventing delayed telemetry from overriding terminal/reset decisions; `effective_downloads()` restores the existing planner/worker/`GET /state` view. `GET /v1/diagnostics/telemetry` exposes aggregate local pressure. Heartbeat publishes every two seconds; ordinary telemetry and the last indexed control event remain liveness fallbacks, and `NodeTimedOut.evidence` persists the deciding ages. Connectivity readings (`node_network`, thunderbolt maps/cycles) deliberately remain ordered control state because they define the topology graph. Topology edges come from HTTP identity probes of advertised addresses PLUS authenticated libp2p sessions recorded as first-class edges (#662, refcounted per peer; the session edge is what keeps a NAT'd remote member out of floating-node limbo), with failing advertised addresses probed at a backed-off cadence. Same-version fleets remain required.
+
 
 ### Event Sourcing
 The system uses event sourcing for state management:
 - `State` (src/skulk/shared/types/state.py): Immutable state object
 - `apply()` (src/skulk/shared/apply.py): Pure function that applies events to state
-- Master indexes events and broadcasts; workers apply indexed events
+- Master admits only the explicit durable control-event allowlist, indexes and
+  broadcasts those events, and payload-free skips any decodable non-control
+  event before ordering; workers apply indexed control events
 
-**Versioning: all nodes in a cluster MUST run the same Skulk version.** Mixed-version clusters are an unsupported anti-pattern — wire types are strict (`extra="forbid"`), so a stale node rejects newer fields, causing state divergence/churn. Upgrade the whole fleet together; do NOT engineer cross-version compatibility (no dual-publish/legacy-event bridges, no snapshot-hydration shims). A node never reloads its own persisted State across restart (identity is ephemeral; State is rebuilt from the event log / state-sync), so a stale snapshot is simply rejected by `extra="forbid"`, which is the intended behavior. (A `State` before-validator that stripped removed keys was removed in #294: it broke state-sync by forcing strict Python-mode validation, which rejected ISO datetime strings like `lastSeen`.) See `website/docs/architecture.md` "Deployment & versioning" and #293.
+**Versioning: all nodes in a cluster MUST run the same Skulk version and source build before serving workloads.** Mixed-build clusters are a degraded deployment window, not an interoperability mode: correctness-bearing events, commands, state, telemetry envelopes, and DATA types remain strict (`extra="forbid"`), with no dual-publish, legacy-event bridge, or snapshot-hydration shim. Operational diagnostics are the only tolerant boundary: peer node/capture responses ignore unknown additive fields recursively, additive counters require compatibility defaults, `/v1/diagnostics/cluster` reports aggregate/per-node `versionStatus`, and `/state.nodeHealth` warns with `version_mismatch` until identity telemetry converges. This preserves rollout observability without claiming cross-version inference compatibility. See `website/docs/architecture.md` "Deployment & versioning" and #293.
 
 ### Key Type Hierarchy
 - `src/skulk/shared/types/`: Pydantic models for all shared types
   - `events.py`: Event types (discriminated union)
   - `commands.py`: Command types
   - `tasks.py`: Task types for worker execution
-  - `state.py`: Cluster state model
+  - `state.py`: Cluster state model. `BaseInstance.excluded_nodes` persists
+    the caller's per-placement exclusions so repair re-placements keep
+    honoring them (searching with intent-plus-failed-nodes but stamping
+    only the original intent, #658)
 - `src/skulk/shared/models/`: persisted model metadata and capability resolution
-  - `model_cards.py`: declarative model cards, including optional advanced capability sections
+  - `model_cards.py`: declarative model cards, including optional advanced capability sections; machine-generated custom cards carry `generator_revision`, and a stamped card older than `CARD_GENERATOR_REVISION` loses override power against the bundled card for the same id (unstamped = hand-authored, keeps #652 override)
   - `capabilities.py`: normalized runtime capability profiles derived from model cards plus conservative family defaults
 
 ### Rust Components
@@ -172,7 +316,9 @@ and no extension installed = Skulk unchanged. Kill switch:
 `SKULK_EXTENSIONS_DISABLE=1`.
 
 ### Dashboard
-React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API when present. A node without the built assets (a headless/non-Mac worker, or with no `SKULK_DASHBOARD_DIR`) sets `DASHBOARD_DIR=None`, skips the mount, and serves the API without the UI.
+React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API when present. The installer and supervised launchd/systemd startup wrapper build these assets with Skulk's pinned bundled Node.js runtime, retaining compatible system Node/npm only as a recovery fallback. Only an explicitly headless node (or one with no `SKULK_DASHBOARD_DIR`) sets `DASHBOARD_DIR=None`, skips the mount, and serves the API without the UI.
+
+Styling is theme-token-driven (`dashboard-react/src/theme/theme.ts`): dark mode is the Foxlight operator design system's Den palette, and components must never branch on the theme name; all variation lives in tokens. Building with `VITE_NIGHT_SKY=1` sets the dark palette's `scene` token to the brand valley star field, which enables the `SceneBackdrop` crown layer plus the `ShootingStars` animation and retires the abstract background mesh for that palette; the default build ships a CSS-only night gradient with the mesh.
 
 Dashboard localization uses Tolgee in `dashboard-react/src/i18n/tolgee.ts`.
 All dashboard strings must use the `skulk` namespace through Tolgee's `t()`
@@ -184,12 +330,43 @@ language list; English is always included.
 
 ### Model Capability System
 Skulk now treats model capability handling as two layers:
-- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `tooling`, and `runtime` sections for refined model support
+- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `audio`, `tooling`, and `runtime` sections for refined model support
 - **Resolved capability profiles**: normalized runtime behavior contracts derived from the card plus conservative family defaults
 
-This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, and additive `/v1/models` metadata consumed by the dashboard.
+This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, speech/TTS/STT metadata, and additive `/v1/models` metadata consumed by the dashboard.
 
-**Model truth vs platform truth:** a card's `compatible_backends` declares which engines the model's artifacts run on (MODEL truth) and must never encode a gap in Skulk's own runners (PLATFORM truth). Platform limitations live in code: `platform_compatible_backends` in `src/skulk/shared/backends.py` (currently: the served `llama_server` runner cannot load a vision card's mmproj projector, so vision cards are gated off served engines there). Placement (`_card_platform_backends`) and the worker's fallback probe both apply the filter. When a runner gains a capability, flip the code table; do NOT sweep cards.
+Store staging is reachability-aware (#657): "model not in store" (the
+store answered) fetches via the store host, keeping the store the source
+of truth; a store that cannot be reached at the transport level
+(`StoreUnreachableError`, small probe budget, bounded poll-dropout
+detection) falls back to DIRECT Hugging Face download on the node when
+`allow_hf_fallback` is on, preserving revision/GGUF pinning. The expected
+shape for store-unreachable remote members; a loud log cue elsewhere.
+Installer-generated configs begin as local bootstrap stores. On cluster
+formation, followers retry state-sync config bootstrap, receive the elected
+master's routable store address, stop superseded local store servers, and
+replace both API and worker store clients together. Do not let a fresh fleet
+retain one independent store per node: that makes dashboard download and
+placement perform repeated external downloads.
+
+Model cards may pin qualified Hugging Face artifacts with `source_revision`, a
+full commit hash. Metadata probes, direct downloads, model-store registry
+entries, and worker staging must preserve that revision. Never collapse a
+pinned artifact back onto mutable `main`, and never treat a staged directory
+from another revision as a cache hit.
+TTS cards may declare `audio.voices`, optional ordered `audio.voice_catalog`
+display/preferred-language metadata, optional checksummed bundled
+`reference_profile` identifiers, and a validated `audio.default_voice`, which
+the API applies only when callers omit `voice`.
+
+**Model truth vs platform truth:** a card's `compatible_backends` declares which engines the model's artifacts run on (MODEL truth) and must never encode a gap in Skulk's own runners (PLATFORM truth). Platform limitations live in code: `platform_compatible_backends` in `src/skulk/shared/backends.py` (currently: the served `llama_server` runner cannot load a vision card's mmproj projector, so vision cards are gated off served engines there; TTS/STT cards are gated to `mlx_audio`). Placement (`_card_platform_backends`) and the worker's fallback probe both apply the filter. When a runner gains a capability, flip the code table; do NOT sweep cards.
+
+Model-specific sharding truth also lives on the card:
+`placement.max_pipeline_split_layer` caps pipeline boundaries for architectures
+whose tail layers reuse KV from earlier concrete layers. The planner adjusts
+its proportional split before the ordinary per-node memory validation; the
+worker rejection remains a final invariant guard rather than the first place
+an invalid shard is discovered.
 
 ### Logging & Observability
 Centralized logging uses a three-layer stack:
@@ -197,14 +374,19 @@ Centralized logging uses a three-layer stack:
 - **Vector**: A local log shipper on each node reads Skulk's stdout and forwards to VictoriaLogs. Config at `deployment/logging/vector.yaml`.
 - **VictoriaLogs + Grafana**: Central log storage and dashboards on the R720. Stack definition at `deployment/logging/docker-compose.yml`.
 
+**Performance envelopes (adaptive concurrency, Phase 0):** the API node records one observation per completed generation into a bounded in-memory `PerformanceEnvelopeRegistry` (`src/skulk/api/performance_envelope.py`), keyed by `(hardware class x model x engine+backend x quant)` and bucketed by in-flight concurrency at admission, computing per-bucket p50/p90 TTFT, decode tok/s, aggregate throughput, and a knee estimate. A guarded stream tap (`API._tap_performance_envelope`) feeds it; aggregate views are exposed via `GET /v1/diagnostics/performance-envelopes` (+ `/cluster` fan-out) and the dashboard Performance tab. The explicit benchmark API retains non-identifying `serving_batches` and `in_flight_at_admission` truth for black-box qualification while ordinary generation streams redact all runner-attribution fields. Node ids and backend tags are always redacted. Observe-only (no behavior change), off State/event-log/telemetry gossip plane. It records only when the serving node's hardware is fully known and exactly one instance serves the model (conservative skips keep the data trustworthy). Later phases (static caps -> online refinement -> closed-loop) are gated.
+
 ### Tracing
 Runtime tracing is a cluster-scoped debugging feature controlled by command and
 event flow rather than a required env-var-only launch mode:
 - `SetTracingEnabled` toggles tracing for new requests across the live cluster session
 - `TracingStateChanged` updates `State.tracing_enabled` through the normal event-sourced apply path
 - workers collect task-scoped trace sessions and emit `TracesCollected`
-- the master waits for expected ranks, merges trace payloads, and emits `TracesMerged`
-- the API persists Chrome trace JSON locally and exposes both local `/v1/traces*`
+- each runner supervisor diverts `TracesCollected` into a terminal `TRACE_DATA`
+  packet addressed to the API node that owns the task; trace payloads never
+  enter the master's ordered event log
+- the owning API waits for the instance's expected ranks, merges their payloads,
+  persists Chrome trace JSON locally, and exposes both local `/v1/traces*`
   and cluster-browsed `/v1/traces/cluster*` endpoints
 
 Cluster browsing is read-only in v1 and works by fan-out/proxy against reachable
@@ -218,7 +400,7 @@ These rules apply to every change. No exceptions.
 
 - **Every API endpoint must be documented** in `website/docs/api-guide.md` with method, path, parameters, and behavior. If you add or modify an endpoint, update the docs in the same commit or PR.
 - **Every release cut must update release notes** in both `CHANGELOG.md` and the public docs under `website/docs/`. One exception: the post-promotion bump of dev's `pyproject.toml` to the next version is not a release. Dev always carries the next version after a promotion merges to main, and that version's release notes are written at its actual cut, when `[Unreleased]` rolls over.
-- **Every API endpoint must appear in the OpenAPI spec.** FastAPI auto-generates this from route decorators — ensure every route has `tags`, `summary`, and `description` set. Verify with `uv run python scripts/export_openapi.py` (output is gitignored but CI regenerates it). The Docusaurus build runs `gen-api-docs` to produce interactive per-endpoint pages from that spec.
+- **Every HTTP API endpoint must appear in the OpenAPI spec.** FastAPI auto-generates this from route decorators — ensure every HTTP route has `tags`, `summary`, and `description` set. Verify with `uv run python scripts/export_openapi.py` (output is gitignored but CI regenerates it). The Docusaurus build runs `gen-api-docs` to produce interactive per-endpoint pages from that spec. OpenAPI 3.x cannot describe WebSocket operations; every WebSocket endpoint must instead have a normative manual contract in `website/docs/api-guide.md` covering its path, handshake, client and server events, limits, close codes, and authentication or origin policy.
 - **All public Python functions, classes, and methods must have docstrings** that are clear enough for generative documentation tools (docusaurus, pdoc, sphinx) to produce useful output. Describe what it does, parameters, return value, and any side effects.
 - **All Pydantic models and their fields must have descriptions** via docstrings or `Field(description=...)` for anything non-obvious. These flow into the OpenAPI spec.
 - **TypeScript components and hooks must have JSDoc comments** on exported interfaces, props, and non-trivial functions.
@@ -284,27 +466,50 @@ Map the final score to the review severity:
   or a narrower edge case. Note it for follow-up, but do not fix it in the
   current PR unless explicitly requested.
 - **2 — Low**: `2.5 >= score > 1.7`. Nice-to-have improvement, minor refactor,
-  cosmetic inconsistency, or speculative concern. Ignore for the current PR.
+  cosmetic inconsistency, or speculative concern. Do not fix in the current PR.
 - **1 — Informational / Nitpick**: `score <= 1.7`. Style preference, wording,
-  or clearly non-blocking observation. Ignore.
+  or clearly non-blocking observation. Do not fix in the current PR.
 
-Only fix comments rated 4 or 5. Do not iterate on minor wording, style, or speculative improvements from automated reviewers (e.g., Copilot). Time spent on low-severity feedback is time not spent on real work.
+Only fix comments rated 4 or 5. Do not iterate on minor wording, style, or
+speculative improvements from automated reviewers (e.g., Copilot). For every
+comment rated 1–3, reply with the severity-based rationale for not changing the
+current PR, note any follow-up when appropriate, and resolve the thread. Time
+spent implementing low-severity feedback is time not spent on real work.
 
 ### PR Review Loop
 
+Foxlight PRs are never opened as drafts. After opening or updating a PR, keep it
+ready for review, check for merge conflicts and failing checks, and continue
+watching review/check state until no unresolved review threads remain.
+If a branch is not ready for review, do not open the PR yet.
+
+PR descriptions, review replies, and validation notes must not include private
+environment details such as IP addresses, internal hostnames or node names,
+VPN/tailnet identifiers, local config keys or values, route workarounds, file
+system paths outside the repo, credentials, or secrets. Summarize live-cluster
+validation generically (for example, cluster size, test suite, pass/fail counts,
+and behavior exercised) and keep raw environment details in private logs or
+notes.
+
 When working an open pull request, use this review loop until no unresolved
-severity 4 or 5 comments remain:
+review threads remain:
 
 1. Inspect the PR for new review comments, unresolved threads, and failing checks.
 2. Evaluate each comment using the severity rubric above.
-3. Ignore severity 1–2 comments.
-4. Note severity 3 comments for future work, but do not fix them in the current PR.
+3. For severity 1–2 comments, do not change code; reply with the severity and
+   concise rationale, then resolve the thread.
+4. For severity 3 comments, note any appropriate follow-up, reply with the
+   severity and rationale for deferring it, then resolve the thread.
 5. Fix severity 4–5 comments with the smallest correct change.
 6. Add or update focused tests for every correctness fix on a critical path.
 7. Run focused validation before replying on the PR.
-8. Reply on each addressed thread with the concrete fix or rationale.
-9. Resolve only threads that are actually addressed by code and validation.
-10. Repeat until there are no unresolved severity 4–5 comments, or stop and escalate if the fix becomes ambiguous, validation fails, or the required change would sprawl beyond the PR scope.
+8. For every fixed comment, reply with the concrete fix and validation, then
+   resolve the thread.
+9. Never merge with unresolved review threads, including comments intentionally
+   declined because of severity.
+10. Repeat until there are no unresolved review threads, or stop and escalate if
+    a severity 4–5 fix becomes ambiguous, validation fails, or the required
+    change would sprawl beyond the PR scope.
 
 ### Before Every Commit
 
@@ -312,7 +517,8 @@ severity 4 or 5 comments remain:
 2. Verify that all new or modified API endpoints are documented in `website/docs/api-guide.md`.
 3. Verify that all new or modified API endpoints have proper FastAPI decorators (`tags`, `summary`, `description`).
 4. Verify that all new or modified public functions have docstrings.
-5. If the dashboard was changed, run `npm run build` in `dashboard-react/` to confirm it builds.
+5. If the dashboard was changed, run `npm run test` and `npm run build` in
+   `dashboard-react/` to confirm its Chromium suite and production build pass.
 6. Stage any files changed by formatters before committing.
 
 ## Testing

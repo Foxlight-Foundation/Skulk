@@ -1,6 +1,7 @@
 import ipaddress
 from collections import defaultdict
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping
+from contextlib import suppress
 
 import anyio
 import httpx
@@ -13,6 +14,18 @@ from skulk.shared.types.profiling import NodeNetworkInfo
 from skulk.utils.channels import Sender, channel
 
 REACHABILITY_ATTEMPTS = 3
+# Full-fleet sweeps (dashboard observability fan-out) probe every advertised
+# interface of every peer; a dead address must fail fast, not retry on the
+# targeted-lookup policy above (3 attempts x (5s timeout + 1s sleep) = ~18s of
+# stall per unroutable address, which read as "observability is broken", #558).
+SWEEP_ATTEMPTS = 1
+SWEEP_TIMEOUT_SECONDS = 2.0
+# Max reachability probes in flight at once. Bounds file-descriptor and
+# connection pressure on a wide fan-out (a large fleet, or peers advertising
+# many Docker/VPN/link-local interfaces) while staying well above a normal
+# fleet's address count, so the semaphore is inert in the common case and only
+# engages as a safety ceiling (#558).
+MAX_CONCURRENT_PROBES = 64
 
 
 def _should_probe_remote_ip(target_ip: str) -> bool:
@@ -20,7 +33,11 @@ def _should_probe_remote_ip(target_ip: str) -> bool:
 
     Remote-node probing should ignore loopback and unspecified addresses such as
     ``127.0.0.1`` or ``::1`` because they resolve back to the local node on the
-    probing machine and create misleading identity-mismatch logs.
+    probing machine and create misleading identity-mismatch logs. IPv6
+    link-local addresses are also excluded: their scope identifiers name an
+    interface on the advertising node and are not portable to a different
+    machine. IPv4 link-local addresses remain eligible because Skulk uses them
+    for directly connected Thunderbolt paths.
     """
 
     candidate = target_ip.strip()
@@ -36,7 +53,11 @@ def _should_probe_remote_ip(target_ip: str) -> bool:
     except ValueError:
         return candidate not in {"localhost"}
 
-    return not (parsed.is_loopback or parsed.is_unspecified)
+    return not (
+        parsed.is_loopback
+        or parsed.is_unspecified
+        or (parsed.version == 6 and parsed.is_link_local)
+    )
 
 
 async def check_reachability(
@@ -44,8 +65,14 @@ async def check_reachability(
     expected_node_id: NodeId,
     out: dict[NodeId, set[str]],
     client: httpx.AsyncClient,
+    attempts: int = REACHABILITY_ATTEMPTS,
 ) -> None:
-    """Check if a node is reachable at the given IP and verify its identity."""
+    """Check if a node is reachable at the given IP and verify its identity.
+
+    ``attempts`` selects the retry budget: targeted lookups keep the patient
+    default, fleet-wide sweeps pass ``SWEEP_ATTEMPTS`` so one dead address
+    cannot stall an interactive caller.
+    """
     if ":" in target_ip:
         # TODO: use real IpAddress types
         url = f"http://[{target_ip}]:52415/node_id"
@@ -55,39 +82,56 @@ async def check_reachability(
     remote_node_id = None
     last_error = None
 
-    for _ in range(REACHABILITY_ATTEMPTS):
+    # Same contract as check_reachable: a zero/negative budget is a caller
+    # bug and degrades to one probe rather than silently probing nothing.
+    attempts = max(1, attempts)
+    for attempt_index in range(attempts):
+        # Backoff only BETWEEN retries: sleeping after the final attempt
+        # (always, for attempts=1 sweeps) would defeat the fail-fast budget.
+        is_last_attempt = attempt_index == attempts - 1
         try:
             r = await client.get(url)
             if r.status_code != 200:
-                await anyio.sleep(1)
+                if not is_last_attempt:
+                    await anyio.sleep(1)
                 continue
 
             body = r.text.strip().strip('"')
             if not body:
-                await anyio.sleep(1)
+                if not is_last_attempt:
+                    await anyio.sleep(1)
                 continue
 
             remote_node_id = NodeId(body)
+            last_error = None
             break
 
         # expected failure cases
         except (
             httpx.TimeoutException,
             httpx.NetworkError,
-        ):
-            await anyio.sleep(1)
+        ) as e:
+            last_error = e
+            if not is_last_attempt:
+                await anyio.sleep(1)
 
         # other failures should be logged on last attempt
         except httpx.HTTPError as e:
             last_error = e
-            await anyio.sleep(1)
-
-    if last_error is not None:
-        logger.warning(
-            f"connect error {type(last_error).__name__} from {target_ip} after {REACHABILITY_ATTEMPTS} attempts; treating as down"
-        )
+            if not is_last_attempt:
+                await anyio.sleep(1)
 
     if remote_node_id is None:
+        if last_error is not None:
+            # One peer advertises many address candidates. Failure of a single
+            # candidate says nothing about peer liveness, and the worker
+            # already backs repeatedly failing candidates off. Keep this
+            # diagnostic available at debug level without flooding ordinary
+            # operator logs with one warning per VPN/interface address.
+            logger.debug(
+                f"address probe failed with {type(last_error).__name__} for "
+                f"{target_ip} after {attempts} attempts"
+            )
         return
 
     if remote_node_id != expected_node_id:
@@ -107,18 +151,36 @@ async def check_reachable(
     topology: Topology,
     self_node_id: NodeId,
     node_network: Mapping[NodeId, NodeNetworkInfo],
+    attempts: int = REACHABILITY_ATTEMPTS,
+    timeout_seconds: float = 5.0,
+    should_probe: Callable[[str], bool] | None = None,
 ) -> AsyncGenerator[tuple[str, NodeId], None]:
-    """Yield (ip, node_id) pairs as reachability probes complete."""
+    """Yield (ip, node_id) pairs as reachability probes complete.
+
+    The default budget stays patient: the worker's connection maintenance
+    tolerates slow links and deliberately retries. Interactive callers (the
+    dashboard diagnostics fan-out) pass ``SWEEP_ATTEMPTS`` /
+    ``SWEEP_TIMEOUT_SECONDS`` so one dead advertised address cannot stall
+    them (#558). ``should_probe`` lets the caller skip addresses this
+    sweep (the worker's unreachable-address backoff, #662) on top of the
+    built-in loopback filtering.
+    """
 
     send, recv = channel[tuple[str, NodeId]]()
 
-    # these are intentionally httpx's defaults so we can tune them later
-    timeout = httpx.Timeout(timeout=5.0)
+    # A zero or negative budget is a caller bug; probing at least once keeps
+    # the contract explicit instead of silently probing nothing.
+    attempts = max(1, attempts)
+    timeout = httpx.Timeout(timeout=timeout_seconds)
+    # A semaphore bounds probes in flight so a wide fan-out cannot exhaust file
+    # descriptors, while a probe's bounded timeout only starts once it holds a
+    # slot (unlike a connection-pool cap, which lets a queued request's timeout
+    # run down while it waits, the failure mode of the original keepalive-bound
+    # pool, #558). Keepalive is off: each probe connection is used exactly once.
     limits = httpx.Limits(
-        max_connections=100,
-        max_keepalive_connections=20,
-        keepalive_expiry=5,
+        max_connections=MAX_CONCURRENT_PROBES, max_keepalive_connections=0
     )
+    probe_slots = anyio.Semaphore(MAX_CONCURRENT_PROBES)
 
     async def _probe(
         target_ip: str,
@@ -126,9 +188,11 @@ async def check_reachable(
         client: httpx.AsyncClient,
         send: Sender[tuple[str, NodeId]],
     ) -> None:
-        async with send:
+        async with send, probe_slots:
             out: defaultdict[NodeId, set[str]] = defaultdict(set)
-            await check_reachability(target_ip, expected_node_id, out, client)
+            await check_reachability(
+                target_ip, expected_node_id, out, client, attempts=attempts
+            )
             if expected_node_id in out:
                 await send.send((target_ip, expected_node_id))
 
@@ -144,9 +208,75 @@ async def check_reachable(
             for iface in node_network[node_id].interfaces:
                 if not _should_probe_remote_ip(iface.ip_address):
                     continue
+                if should_probe is not None and not should_probe(iface.ip_address):
+                    continue
                 tg.start_soon(_probe, iface.ip_address, node_id, client, send.clone())
         send.close()
 
         with recv:
             async for item in recv:
                 yield item
+
+
+async def first_reachable_ip(
+    topology: Topology,
+    self_node_id: NodeId,
+    node_network: Mapping[NodeId, NodeNetworkInfo],
+    target_node_id: NodeId,
+) -> str | None:
+    """Return the first verified API address for one target node.
+
+    Unlike :func:`check_reachable`, this helper owns and closes its probe task
+    group before returning. Callers can therefore stop at the first hit without
+    finalizing an async generator whose AnyIO cancel scope is still active.
+    """
+
+    if (
+        target_node_id == self_node_id
+        or target_node_id not in topology.list_nodes()
+        or target_node_id not in node_network
+    ):
+        return None
+    target_ips = [
+        interface.ip_address
+        for interface in node_network[target_node_id].interfaces
+        if _should_probe_remote_ip(interface.ip_address)
+    ]
+    if not target_ips:
+        return None
+
+    send, recv = channel[str]()
+    timeout = httpx.Timeout(timeout=5.0)
+    limits = httpx.Limits(
+        max_connections=100,
+        max_keepalive_connections=20,
+        keepalive_expiry=5,
+    )
+
+    async def _probe_first(
+        target_ip: str,
+        client: httpx.AsyncClient,
+        probe_sender: Sender[str],
+    ) -> None:
+        async with probe_sender:
+            out: defaultdict[NodeId, set[str]] = defaultdict(set)
+            await check_reachability(target_ip, target_node_id, out, client)
+            if target_node_id in out:
+                # Another interface may win and close the receiver before this
+                # probe publishes. That late result is intentionally disposable.
+                with suppress(anyio.BrokenResourceError, anyio.ClosedResourceError):
+                    await probe_sender.send(target_ip)
+
+    result: str | None = None
+    async with (
+        httpx.AsyncClient(timeout=timeout, limits=limits, verify=False) as client,
+        create_task_group() as task_group,
+    ):
+        for target_ip in target_ips:
+            task_group.start_soon(_probe_first, target_ip, client, send.clone())
+        send.close()
+        with recv, suppress(anyio.EndOfStream):
+            result = await recv.receive()
+        if result is not None:
+            task_group.cancel_scope.cancel()
+    return result

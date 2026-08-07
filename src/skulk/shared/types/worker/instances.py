@@ -1,7 +1,11 @@
 from enum import Enum
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
+from skulk.shared.models.memory_estimate import (
+    KV_CONTEXT_BUDGET_TOKENS,
+    shard_preallocates_kv_upfront,
+)
 from skulk.shared.models.model_cards import ModelTask
 from skulk.shared.types.common import Host, Id, NodeId
 from skulk.shared.types.worker.runners import RunnerId, ShardAssignments, ShardMetadata
@@ -34,6 +38,17 @@ class BaseInstance(TaggedModel):
     # than the ordered event log, where divergent per-rank ceilings would
     # deadlock the collectives. ``None`` means no enforceable ceiling.
     context_token_limit: int | None = None
+    excluded_nodes: list[NodeId] = Field(
+        default_factory=list,
+        description=(
+            "The caller's per-placement node exclusions, stamped at "
+            "placement time: repair re-placements (memory refusal, download "
+            "failure) reconstruct their intent from the instance and keep "
+            "honoring these instead of widening eligibility back to the "
+            "full topology. Sorted for deterministic replicated events; "
+            "empty for instances replayed from older event logs."
+        ),
+    )
 
     def shard(self, runner_id: RunnerId) -> ShardMetadata | None:
         return self.shard_assignments.runner_to_shard.get(runner_id, None)
@@ -53,13 +68,37 @@ class BaseInstance(TaggedModel):
         instances are already stamped by the master (placement's
         ``instance_context_token_limit`` itself returns the card limit when no
         memory-derived ceiling applies), so this only fills the legacy gap.
+
+        For a window-committing served engine (llama.cpp / llama-server / vLLM, per
+        ``shard_preallocates_kv_upfront``) the fallback is bounded to
+        ``KV_CONTEXT_BUDGET_TOKENS``: the engine commits its load-time context
+        window from this value (``serving_n_ctx``), so backfilling a large
+        advertised context (e.g. 128k) would commit a fictitious window and OOM /
+        fail to load. The budget floor is the safe legacy default; a freshly placed
+        instance gets the real memory-fit ceiling instead. MLX (lazy KV) keeps the
+        full advertised context.
         """
         if self.context_token_limit is None:
             # All shards of an instance share one model card, so any shard's
             # context_length is authoritative; take the first.
             shard = next(iter(self.shard_assignments.runner_to_shard.values()), None)
-            if shard is not None and shard.model_card.context_length > 0:
-                self.context_token_limit = shard.model_card.context_length
+            if shard is not None:
+                card = shard.model_card
+                if shard_preallocates_kv_upfront(shard):
+                    # A legacy served-engine instance ALWAYS needs a ceiling, even
+                    # when the card's context_length is unknown (0): the engine still
+                    # commits a window at KV_CONTEXT_BUDGET_TOKENS (serving_n_ctx
+                    # falls back to the floor for a None ceiling), so leaving
+                    # context_token_limit=None would let the API admit requests
+                    # larger than the runner serves. Fall back to the floor (a known
+                    # context_length is additionally bounded by it).
+                    self.context_token_limit = (
+                        min(card.context_length, KV_CONTEXT_BUDGET_TOKENS)
+                        if card.context_length > 0
+                        else KV_CONTEXT_BUDGET_TOKENS
+                    )
+                elif card.context_length > 0:
+                    self.context_token_limit = card.context_length
         return self
 
 
@@ -138,6 +177,14 @@ class BoundInstance(CamelCaseModel):
     @property
     def is_embedding_model(self) -> bool:
         return ModelTask.TextEmbedding in self.bound_shard.model_card.tasks
+
+    @property
+    def is_speech_model(self) -> bool:
+        return (
+            ModelTask.TextToSpeech in self.bound_shard.model_card.tasks
+            or ModelTask.SpeechToText in self.bound_shard.model_card.tasks
+            or ModelTask.SpeechTranslation in self.bound_shard.model_card.tasks
+        )
 
     @model_validator(mode="after")
     def validate_shard_exists(self) -> "BoundInstance":

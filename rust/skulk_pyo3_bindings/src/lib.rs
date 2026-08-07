@@ -10,6 +10,7 @@ mod networking;
 
 use crate::ident::PyKeypair;
 use crate::networking::networking_submodule;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::PyModule;
 use pyo3::types::PyModuleMethods;
 use pyo3::{Bound, PyResult, pyclass, pymodule};
@@ -153,8 +154,19 @@ pub(crate) mod ext {
 /// import the module.
 #[pymodule(name = "skulk_pyo3_bindings")]
 fn main_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // install logger
-    pyo3_log::init();
+    // libp2p-gossipsub logs a full Debug rendering of every failed RPC when a
+    // peer handler queue fills. A large payload storm can therefore turn one
+    // transport incident into gigabytes of duplicate logs and sustained CPU
+    // pressure. Python reports aggregate queue drops without payloads, so keep
+    // errors from this target but suppress its warning-level raw RPC dumps.
+    pyo3_log::Logger::new(m.py(), pyo3_log::Caching::LoggersAndLevels)?
+        .filter(log::LevelFilter::Debug)
+        .filter_target(
+            "libp2p_gossipsub::behaviour".to_owned(),
+            log::LevelFilter::Error,
+        )
+        .install()
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
     pyo3_async_runtimes::tokio::init(builder);

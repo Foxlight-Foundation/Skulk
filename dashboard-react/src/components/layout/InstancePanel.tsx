@@ -8,7 +8,7 @@ export interface InstanceCardData {
   instanceId: string;
   modelId: string;
   sharding: 'Pipeline' | 'Tensor';
-  instanceType: 'MlxRing' | 'MlxJaccl';
+  instanceType: 'MlxRing' | 'MlxJaccl' | 'LlamaRpc';
   /** Serving engine, derived from the card's placement backends. Drives the
    *  type label (MLX vs served llama.cpp) since the wire wraps every instance
    *  as an MLX instance. */
@@ -18,6 +18,8 @@ export interface InstanceCardData {
   statusMessage?: string;
   loadProgress?: number;
   isEmbedding?: boolean;
+  /** Whether this model may be selected as a direct dashboard text-chat target. */
+  supportsTextChat?: boolean;
   /** Speculative-decoding status derived from the model card's runtime
    *  section: present when the card declares an MTP sidecar or assistant
    *  drafter and the placement allows it (#254). */

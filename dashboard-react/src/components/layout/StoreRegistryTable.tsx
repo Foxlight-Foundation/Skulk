@@ -8,8 +8,10 @@ import { BsChatDotsFill } from 'react-icons/bs';
 import { formatBytes } from '../../utils/format';
 import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
+import { buildTagColors, CapabilityTagBadge } from '../common/capabilityTags';
 import { ClusterCard, type ClusterCardProps } from '../cluster/ClusterCard';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
+import { modelSupportsTextChat } from '../../types/models';
 
 /* ================================================================
    Types
@@ -35,13 +37,22 @@ export interface ModelCardInfo {
   supportsTensor?: boolean;
   capabilities?: string[];
   tags?: string[];
+  tasks?: string[];
   resolvedCapabilities?: {
     supportsThinking?: boolean;
     supportsThinkingToggle?: boolean;
     supportsThinkingBudget?: boolean;
     supportsImageInput?: boolean;
     supportsAudioInput?: boolean;
+    supportsSpeechSynthesis?: boolean;
+    supportsTranscription?: boolean;
+    supportsSpeechTranslation?: boolean;
+    supportsAudioOutput?: boolean;
+    supportsRealtimeAudio?: boolean;
+    defaultAudioResponseFormat?: string;
+    audioResponseFormats?: string[];
     supportsToolCalling?: boolean;
+    builtinTools?: string[];
     thinkingFormat?: string;
     promptRenderer?: string;
     outputParser?: string;
@@ -196,6 +207,10 @@ const EmptyBox = styled.div`
 const Table = styled.div`
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md};
+  /* Dense content keeps its ground: near-opaque so the scene backdrop
+   * cannot compete with a column of identifiers (atmosphere yields to
+   * density). */
+  background: ${({ theme }) => theme.colors.surfaceElevated};
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -250,7 +265,7 @@ const TRow = styled.div<{ $highlight?: boolean }>`
 
   ${({ $highlight }) =>
     $highlight &&
-    css`background: ${({ theme }) => theme.colors.goldBg};`}
+    css`background: ${({ theme }) => theme.colors.liveBg};`}
 `;
 
 const ModelCell = styled.div<{ $area?: MobileGridArea }>`
@@ -279,8 +294,8 @@ const ReadyBadge = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.healthy};
-  background: rgba(34, 197, 94, 0.1);
-  border: 1px solid rgba(34, 197, 94, 0.2);
+  background: ${({ theme }) => theme.colors.accentBg};
+  border: 1px solid ${({ theme }) => theme.colors.accentBg};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 1px 6px;
 `;
@@ -292,9 +307,9 @@ const ActiveBadge = styled.span`
   flex-shrink: 0;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.gold};
-  background: ${({ theme }) => theme.colors.goldBg};
-  border: 1px solid ${({ theme }) => theme.colors.goldDim};
+  color: ${({ theme }) => theme.colors.live};
+  background: ${({ theme }) => theme.colors.liveBg};
+  border: 1px solid ${({ theme }) => theme.colors.liveBg};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 1px 6px;
 `;
@@ -311,33 +326,13 @@ const ActiveDot = styled.span`
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: ${({ theme }) => theme.colors.gold};
+  background: ${({ theme }) => theme.colors.live};
   animation: ${pulse} 1.5s ease-in-out infinite;
 `;
 
-function buildTagColors(theme: Theme): Record<string, { color: string; bg: string; border: string }> {
-  return {
-    optiq: { color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.1)', border: 'rgba(167, 139, 250, 0.3)' },
-    thinking: { color: theme.colors.info, bg: theme.colors.infoBg, border: theme.colors.infoBg },
-    vision: { color: theme.colors.warning, bg: theme.colors.warningBg, border: theme.colors.warningBg },
-    tensor: { color: theme.colors.healthy, bg: theme.colors.accentBg, border: theme.colors.accentBg },
-    embedding: { color: '#f472b6', bg: 'rgba(244, 114, 182, 0.1)', border: 'rgba(244, 114, 182, 0.3)' },
-  };
-}
-
-const TagBadge = styled.span<{ $color: string; $bg: string; $border: string }>`
-  flex-shrink: 0;
-  font-size: 10px;
-  font-family: ${({ theme }) => theme.fonts.body};
-  font-weight: 500;
-  color: ${({ $color }) => $color};
-  background: ${({ $bg }) => $bg};
-  border: 1px solid ${({ $border }) => $border};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  padding: 0 5px;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
-`;
+// Capability chips share one dialect with the Find Models modal — see
+// common/capabilityTags. TagBadge keeps its local name for the JSX below.
+const TagBadge = CapabilityTagBadge;
 
 /** Badge marking a store entry as a speculative-decoding companion (a drafter
  *  or an MTP-head sidecar) rather than a launchable model. Muted so it reads as
@@ -370,8 +365,8 @@ const ChatBubble = styled.button`
   transition: all 0.15s;
 
   &:hover {
-    color: #86efac;
-    filter: drop-shadow(0 0 4px rgba(74, 222, 128, 0.4));
+    color: ${({ theme }) => theme.colors.accentHover};
+    filter: drop-shadow(0 0 4px ${({ theme }) => theme.colors.accentBg});
   }
 `;
 
@@ -398,7 +393,7 @@ const ProgressTrack = styled.div`
 const ProgressFill = styled.div<{ $pct: number }>`
   width: ${({ $pct }) => $pct}%;
   height: 100%;
-  background: ${({ theme }) => theme.colors.gold};
+  background: ${({ theme }) => theme.colors.live};
   border-radius: 3px;
   transition: width 0.3s ease-out;
 `;
@@ -406,7 +401,7 @@ const ProgressFill = styled.div<{ $pct: number }>`
 const ProgressText = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.live};
 `;
 
 const spin = keyframes`
@@ -604,6 +599,14 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
             <span>{resolved.supportsImageInput ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
             <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.audioInput', 'Audio input')}</span>
             <span>{resolved.supportsAudioInput ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.speechSynthesis', 'Speech synthesis')}</span>
+            <span>{resolved.supportsSpeechSynthesis ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.transcription', 'Transcription')}</span>
+            <span>{resolved.supportsTranscription ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.audioOutput', 'Audio output')}</span>
+            <span>{resolved.supportsAudioOutput ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.realtimeAudio', 'Realtime audio')}</span>
+            <span>{resolved.supportsRealtimeAudio ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
             <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.reasoningFormat', 'Reasoning format')}</span>
             <span>{resolved.thinkingFormat ?? t('common.none', 'none')}</span>
           </>
@@ -737,6 +740,7 @@ export function StoreRegistryTable({
             // MLX (safetensors) weights. GGUF models carry llama.cpp's own quant
             // format, so OptiQ doesn't apply — hide the optimize action for them.
             const isGguf = /gguf/i.test(entry.model_id);
+            const supportsTextChat = modelSupportsTextChat(modelCards[entry.model_id]);
             return (
               <TRow key={entry.model_id}>
                 <PlayCell $area="play">
@@ -752,7 +756,15 @@ export function StoreRegistryTable({
                         </DisabledBtn>
                       </InfoTooltip>
                     ) : (
-                      <PlayBtn onClick={() => onLaunch(entry.model_id)} title={t('storeRegistry.launchModel', 'Launch model')}>
+                      <PlayBtn
+                        onClick={() => onLaunch(entry.model_id)}
+                        title={t('storeRegistry.launchModel', 'Launch model')}
+                        aria-label={t(
+                          'storeRegistry.launchNamedModel',
+                          'Launch {modelId}',
+                          { modelId: entry.model_id },
+                        )}
+                      >
                         <MdPlayArrow size={20} />
                       </PlayBtn>
                     )
@@ -815,8 +827,16 @@ export function StoreRegistryTable({
                           {badge}
                         </InfoTooltip>
                       ) : badge}
-                      {ready && onChat && !modelCards?.[entry.model_id]?.tags?.includes('embedding') && (
-                        <ChatBubble onClick={() => onChat(entry.model_id)} title={t('storeRegistry.chatWithModel', 'Chat with model')}>
+                      {ready && onChat && supportsTextChat && (
+                        <ChatBubble
+                          onClick={() => onChat(entry.model_id)}
+                          title={t('storeRegistry.chatWithModel', 'Chat with model')}
+                          aria-label={t(
+                            'storeRegistry.chatWithNamedModel',
+                            'Chat with {modelId}',
+                            { modelId: entry.model_id },
+                          )}
+                        >
                           <BsChatDotsFill size={14} />
                         </ChatBubble>
                       )}

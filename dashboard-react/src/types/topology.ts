@@ -2,6 +2,13 @@
 export interface MactopMemory {
   ram_usage: number;
   ram_total: number;
+  /**
+   * True when the figures describe a discrete GPU's VRAM pool rather than
+   * system/unified RAM. Discrete-GPU nodes serve models out of VRAM, so the
+   * node card shows that pool (labeled) instead of host RAM, which on
+   * big-host GPU clouds overstates useful capacity by an order of magnitude.
+   */
+  is_vram?: boolean;
 }
 
 /** Temperature sample returned by the topology polling layer. */
@@ -22,6 +29,10 @@ export interface SystemInfo {
   model_id?: string;
   chip?: string;
   memory?: number;
+  /** Accelerator vendor from telemetry (`nvidia`, `amd`, ...), when measured. */
+  accelerator_vendor?: string;
+  /** Accelerator marketing name (e.g. `NVIDIA A100 80GB PCIe`), when measured. */
+  accelerator_name?: string;
 }
 
 /** One network interface known for a node. */
@@ -82,7 +93,7 @@ export interface TopologyData {
   edges: TopologyEdge[];
 }
 
-export type DeviceModel = 'macbook-pro' | 'mac-studio' | 'mac-mini' | 'amd-strix' | 'unknown';
+export type DeviceModel = 'macbook-pro' | 'mac-studio' | 'mac-mini' | 'amd-strix' | 'nvidia-gpu' | 'unknown';
 
 /**
  * Best-effort device-family classifier used for dashboard hardware icons.
@@ -95,12 +106,26 @@ export type DeviceModel = 'macbook-pro' | 'mac-studio' | 'mac-mini' | 'amd-strix
  *
  * @param modelId machine model string (Apple's "Mac mini", or a barebones name)
  * @param chipId  SoC/chip string; the reliable signal for AMD AI Max hardware
+ * @param acceleratorVendor accelerator vendor from telemetry (`nvidia`, ...);
+ *   the reliable signal for discrete-GPU nodes whose modelId is a container
+ *   hostname. Omitting it skips NVIDIA classification, so pass it wherever
+ *   node telemetry is available.
  */
-export function detectDeviceModel(modelId?: string, chipId?: string): DeviceModel {
+export function detectDeviceModel(
+  modelId?: string,
+  chipId?: string,
+  acceleratorVendor?: string,
+): DeviceModel {
   const chip = chipId?.toLowerCase() ?? '';
   // AMD Ryzen AI Max / Strix Halo: match on the chip, not the barebones modelId.
   if (chip.includes('ryzen ai max') || chip.includes('strix halo') || chip.includes('ai max')) {
     return 'amd-strix';
+  }
+  // Discrete NVIDIA nodes (rented pods, CUDA boxes) rarely carry a meaningful
+  // machine modelId (containers report a runtime hostname); the accelerator
+  // vendor from NVML telemetry is the reliable signal (#555).
+  if (acceleratorVendor?.toLowerCase() === 'nvidia') {
+    return 'nvidia-gpu';
   }
   if (!modelId) return 'unknown';
   const lower = modelId.toLowerCase();

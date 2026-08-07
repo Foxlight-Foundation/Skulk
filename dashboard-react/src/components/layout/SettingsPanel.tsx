@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
 import styled, { keyframes } from 'styled-components';
-import { useConfig, type StoreConfig, type FullConfig, type LoggingConfig } from '../../hooks/useConfig';
+import { generateInstallId } from './TelemetryConsentModal';
+import {
+  useConfig,
+  type StoreConfig,
+  type FullConfig,
+  type LoggingConfig,
+  type TelemetryConfig,
+} from '../../hooks/useConfig';
+import {
+  DEFAULT_MODEL_STORE_PORT,
+  normalizeStoreConfig,
+} from './modelStoreConfig';
 import { Button } from '../common/Button';
 import { Field } from '../common/Field';
 import { InfoTooltip } from '../common/InfoTooltip';
@@ -14,22 +25,6 @@ export interface SettingsPanelProps {
   open: boolean;
   onClose: () => void;
 }
-
-const defaultStoreConfig = (): StoreConfig => ({
-  enabled: false,
-  store_host: '',
-  store_http_host: '',
-  store_port: 58080,
-  store_path: '',
-  download: {
-    allow_hf_fallback: true,
-  },
-  staging: {
-    enabled: true,
-    node_cache_path: '~/.skulk/staging',
-    cleanup_on_deactivate: true,
-  },
-});
 
 /* ---- animations ---- */
 
@@ -133,6 +128,20 @@ const FieldLabel = styled.span`
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.textSecondary};
   white-space: nowrap;
+`;
+
+const SecondaryButton = styled.button`
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  background: transparent;
+  color: inherit;
+
+  &:hover {
+    border-color: ${({ theme }) => theme.colors.borderStrong};
+  }
 `;
 
 const Toggle = styled.button<{ $on: boolean }>`
@@ -242,10 +251,10 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const [draft, setDraft] = useState<StoreConfig | null>(null);
   const [kvBackend, setKvBackend] = useState('default');
   const [hfToken, setHfToken] = useState('');
+  const [telemetryDraft, setTelemetryDraft] = useState<TelemetryConfig | null>(null);
   const [loggingDraft, setLoggingDraft] = useState<LoggingConfig>({
     enabled: false, ingest_url: '',
   });
-
   // Fetch config when panel opens
   useEffect(() => {
     if (open) fetchConfig();
@@ -256,31 +265,45 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     && effective.kv_cache_backend !== 'default'
     && effective.kv_cache_backend !== (fullConfig?.inference?.kv_cache_backend ?? 'default');
   useEffect(() => {
-    setDraft(fullConfig?.model_store ? { ...fullConfig.model_store } : null);
+    setDraft(
+      fullConfig?.model_store
+        ? normalizeStoreConfig(fullConfig.model_store)
+        : null,
+    );
     setKvBackend(effective?.kv_cache_backend ?? fullConfig?.inference?.kv_cache_backend ?? 'default');
     setHfToken(fullConfig?.hf_token ?? '');
     setLoggingDraft({
       enabled: fullConfig?.logging?.enabled ?? false,
       ingest_url: fullConfig?.logging?.ingest_url ?? '',
     });
+    setTelemetryDraft(
+      fullConfig?.telemetry ?? {
+        consent: 'unasked',
+        diagnostics_consent: 'unasked',
+        install_id: '',
+        consented_at: '',
+        consented_version: '',
+        ingest_url: 'https://skulk-ledger-ingest.thomastupper92618.workers.dev',
+      },
+    );
   }, [fullConfig, effective]);
 
-  const modelStoreDraft = draft ?? defaultStoreConfig();
+  const modelStoreDraft = normalizeStoreConfig(draft);
 
   const update = useCallback((patch: Partial<StoreConfig>) => {
-    setDraft((prev) => ({ ...(prev ?? defaultStoreConfig()), ...patch }));
+    setDraft((prev) => ({ ...normalizeStoreConfig(prev), ...patch }));
   }, []);
 
   const updateDownload = useCallback((patch: Partial<StoreConfig['download']>) => {
     setDraft((prev) => {
-      const base = prev ?? defaultStoreConfig();
+      const base = normalizeStoreConfig(prev);
       return { ...base, download: { ...base.download, ...patch } };
     });
   }, []);
 
   const updateStaging = useCallback((patch: Partial<StoreConfig['staging']>) => {
     setDraft((prev) => {
-      const base = prev ?? defaultStoreConfig();
+      const base = normalizeStoreConfig(prev);
       return { ...base, staging: { ...base.staging, ...patch } };
     });
   }, []);
@@ -292,6 +315,17 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     updated.inference = { kv_cache_backend: kvBackend };
     // Include logging config
     updated.logging = { ...loggingDraft };
+    // Persist only once the operator has interacted (an untouched unasked
+    // draft must not overwrite the "never asked" state that gates the modal).
+    if (telemetryDraft && (telemetryDraft.consent !== 'unasked' || telemetryDraft.diagnostics_consent !== 'unasked')) {
+      updated.telemetry = {
+        ...telemetryDraft,
+        consent: telemetryDraft.consent === 'unasked' ? 'disabled' : telemetryDraft.consent,
+        diagnostics_consent:
+          telemetryDraft.diagnostics_consent === 'unasked' ? 'disabled' : telemetryDraft.diagnostics_consent,
+        consented_at: telemetryDraft.consented_at || new Date().toISOString(),
+      };
+    }
     // Only send hf_token when user entered a new one
     if (hfToken && hfToken !== '') updated.hf_token = hfToken;
     const ok = await saveFullConfig(updated);
@@ -307,7 +341,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     } else {
       addToast({ type: 'error', message: t('settings.toasts.saveFailed', 'Failed to save settings') });
     }
-  }, [draft, fullConfig, hfToken, kvBackend, loggingDraft, onClose, saveFullConfig, t]);
+  }, [draft, fullConfig, hfToken, kvBackend, loggingDraft, telemetryDraft, onClose, saveFullConfig, t]);
 
   // ESC to close
   useEffect(() => {
@@ -408,7 +442,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                       size="sm"
                       type="number"
                       value={String(modelStoreDraft.store_port)}
-                      onChange={(e) => update({ store_port: parseInt((e.target as HTMLInputElement).value) || 58080 })}
+                      onChange={(e) => update({ store_port: parseInt((e.target as HTMLInputElement).value) || DEFAULT_MODEL_STORE_PORT })}
                       style={{ maxWidth: 80 }}
                     />
                   </Row>
@@ -610,6 +644,102 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               </>
             )}
           </Fieldset>
+
+          {/* Field telemetry: consent lives in skulk.yaml (survives restarts,
+              synced like other settings). Both switches stay permanently
+              available here; the first-run modal only acquires the initial
+              choice. */}
+          {telemetryDraft && (
+            <Fieldset>
+              <Legend>{t('settings.telemetry.legend', 'Telemetry')}</Legend>
+              <Row>
+                <FieldLabel>
+                  {t('settings.telemetry.perf', 'Performance telemetry')}
+                  <InfoTooltip
+                    filled
+                    content={t(
+                      'settings.telemetry.perfTooltip',
+                      'Anonymous performance and reliability samples (model id, hardware class, timing, token counts, failure classes). Never prompts, outputs, or machine identity. Public only as aggregates.',
+                    )}
+                  />
+                </FieldLabel>
+                <Toggle
+                  $on={telemetryDraft.consent === 'enabled'}
+                  onClick={() =>
+                    setTelemetryDraft(prev =>
+                      prev && {
+                        ...prev,
+                        consent: prev.consent === 'enabled' ? 'disabled' : 'enabled',
+                        install_id: prev.install_id || generateInstallId(),
+                      },
+                    )
+                  }
+                />
+              </Row>
+              <Row>
+                <FieldLabel>
+                  {t('settings.telemetry.diagnostics', 'Crash diagnostics')}
+                  <InfoTooltip
+                    filled
+                    content={t(
+                      'settings.telemetry.diagnosticsTooltip',
+                      'Separate consent for scrubbed crash reports, kept privately for 90 days. Enabling telemetry never enables this.',
+                    )}
+                  />
+                </FieldLabel>
+                <Toggle
+                  $on={telemetryDraft.diagnostics_consent === 'enabled'}
+                  onClick={() =>
+                    setTelemetryDraft(prev =>
+                      prev && {
+                        ...prev,
+                        diagnostics_consent:
+                          prev.diagnostics_consent === 'enabled' ? 'disabled' : 'enabled',
+                        install_id: prev.install_id || generateInstallId(),
+                      },
+                    )
+                  }
+                />
+              </Row>
+              {telemetryDraft.install_id && (
+                <>
+                  <HintText>
+                    {t('settings.telemetry.installId', 'Install id (your deletion key): ')}
+                    {telemetryDraft.install_id}
+                  </HintText>
+                  <Row>
+                    <SecondaryButton
+                      type="button"
+                      onClick={() =>
+                        setTelemetryDraft(prev => prev && { ...prev, install_id: generateInstallId() })
+                      }
+                    >
+                      {t('settings.telemetry.rotate', 'Rotate id')}
+                    </SecondaryButton>
+                    <SecondaryButton
+                      type="button"
+                      onClick={() => setTelemetryDraft(prev => prev && { ...prev, install_id: '' })}
+                    >
+                      {t('settings.telemetry.clear', 'Clear id')}
+                    </SecondaryButton>
+                  </Row>
+                  <HintText>
+                    {t(
+                      'settings.telemetry.rotateHint',
+                      'Rotating or clearing disowns previously sent samples; a cleared id regenerates on save while consent is enabled.',
+                    )}
+                  </HintText>
+                </>
+              )}
+              <HintText>
+                {t(
+                  'settings.telemetry.previewHint',
+                  'Inspect exactly what would be sent at GET /v1/telemetry/preview.',
+                )}
+              </HintText>
+            </Fieldset>
+          )}
+
         </Body>
 
         <Footer>

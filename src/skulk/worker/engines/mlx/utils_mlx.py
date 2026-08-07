@@ -4,10 +4,12 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
+from collections.abc import Mapping
 from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Callable, Protocol, cast
 
 if TYPE_CHECKING:
     from skulk.worker.engines.mlx.vision import VisionProcessor
@@ -49,6 +51,7 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx_lm.utils import load_model as _mlx_lm_load_model
 from pydantic import RootModel
+from safetensors import safe_open
 
 from skulk.download.download_utils import (
     build_companion_model_path,
@@ -167,7 +170,117 @@ class _VlmModelLoader(Protocol):
 class _MlxLmLoadModel(Protocol):
     """Typed callable surface for mlx-lm's model loader."""
 
-    def __call__(self, model_path: Path, **kwargs: object) -> tuple[nn.Module, object]: ...
+    def __call__(
+        self, model_path: Path, **kwargs: object
+    ) -> tuple[nn.Module, object]: ...
+
+
+class _SafeTensorMetadataHandle(Protocol):
+    """Typed metadata surface used from safetensors' dynamic extension type."""
+
+    def metadata(self) -> dict[str, str] | None: ...
+
+
+_QWEN_CONVERTED_NORM_SUFFIXES = (
+    ".input_layernorm.weight",
+    ".post_attention_layernorm.weight",
+    "model.norm.weight",
+    ".q_norm.weight",
+    ".k_norm.weight",
+)
+_VLM_LOAD_PATCH_LOCK = threading.Lock()
+def _has_mlx_safetensors(model_path: Path) -> bool:
+    """Return whether a local model bundle contains converted MLX weights."""
+    for weight_path in sorted(model_path.glob("*.safetensors")):
+        try:
+            with safe_open(str(weight_path), framework="numpy") as raw_handle:
+                handle = cast(
+                    _SafeTensorMetadataHandle,
+                    cast(object, raw_handle),
+                )
+                metadata = handle.metadata() or {}
+        except (OSError, ValueError):
+            continue
+        if metadata.get("format") == "mlx":
+            return True
+    return False
+
+
+def _guard_converted_qwen_norm_sanitizer(
+    sanitizer: Callable[
+        [object, dict[str, mx.array]],
+        dict[str, mx.array],
+    ],
+    sanitize_key: Callable[[str], str],
+) -> Callable[[object, dict[str, mx.array]], dict[str, mx.array]]:
+    """Backport mlx-vlm's converted-Qwen RMSNorm guard from v0.6.5.
+
+    mlx-vlm 0.6.4 adds one to every Qwen3.5-family RMSNorm weight during
+    loading. That conversion is correct for source Hugging Face weights but
+    corrupts MLX checkpoints whose ``language_model.*`` keys were already
+    converted. Preserve those exact arrays while leaving all other upstream
+    sanitization intact.
+    """
+
+    def guarded(
+        model: object,
+        weights: dict[str, mx.array],
+    ) -> dict[str, mx.array]:
+        converted_norm_weights = {
+            # mlx-vlm 0.6.4 uses ``value += 1``; MLX mutates that array, so
+            # retaining the original object would retain the corruption too.
+            sanitize_key(key): mx.array(value)
+            for key, value in weights.items()
+            if key.startswith("language_model.")
+            and value.ndim == 1
+            and any(key.endswith(suffix) for suffix in _QWEN_CONVERTED_NORM_SUFFIXES)
+        }
+        sanitized = sanitizer(model, weights)
+        sanitized.update(converted_norm_weights)
+        return sanitized
+
+    return guarded
+
+
+def _install_converted_qwen_norm_guard(
+    model_path: Path,
+) -> tuple[type[object], object] | None:
+    """Install the v0.6.5 Qwen sanitizer fix for one v0.6.4 model load."""
+    if not _has_mlx_safetensors(model_path):
+        return None
+    try:
+        raw_config = cast(
+            object,
+            json.loads((model_path / "config.json").read_text()),
+        )
+    except (json.JSONDecodeError, OSError):
+        return None
+    config = _object_dict(raw_config)
+    model_type = config.get("model_type")
+    if model_type not in {"qwen3_5", "qwen3_5_moe"}:
+        return None
+
+    model_module = import_module(f"mlx_vlm.models.{model_type}")
+    model_class = cast(type[object], vars(model_module)["Model"])
+    model_class_dict = cast(Mapping[str, object], vars(model_class))
+    original = model_class_dict["sanitize"]
+    sanitize_key_module = import_module("mlx_vlm.models.qwen3_5.qwen3_5")
+    sanitize_key = cast(
+        Callable[[str], str],
+        vars(sanitize_key_module)["sanitize_key"],
+    )
+    guarded = _guard_converted_qwen_norm_sanitizer(
+        cast(
+            Callable[[object, dict[str, mx.array]], dict[str, mx.array]],
+            original,
+        ),
+        sanitize_key,
+    )
+    type.__setattr__(model_class, "sanitize", guarded)
+    logger.info(
+        "Applying the mlx-vlm 0.6.5 converted-Qwen norm sanitizer guard"
+    )
+    return model_class, original
 
 
 def _apply_nemotron_reasoning_controls(
@@ -252,8 +365,7 @@ def log_request_shape(
         payload.update(extra)
 
     logger.info(
-        "[request-shape] "
-        f"{json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
+        f"[request-shape] {json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
     )
     logger.info(f"[request-shape] prompt label={label}\n{prompt}")
 
@@ -425,7 +537,9 @@ class _Gemma4DynamicVisionTower(nn.Module):
 
         config = self._inner.config
         if config is not None and config.standardize:
-            hidden_states = (hidden_states - self._inner.std_bias) * self._inner.std_scale
+            hidden_states = (
+                hidden_states - self._inner.std_bias
+            ) * self._inner.std_scale
 
         return hidden_states
 
@@ -437,12 +551,18 @@ class _Gemma4DynamicVisionTower(nn.Module):
                 encoded = self._encode_one(batched)
                 features.append(encoded[0] if encoded.ndim == 3 else encoded)
             return mx.concatenate(features, axis=0)[None]
-        return self._encode_one(pixel_values)
+        return self._encode_one(_batch_gemma4_pixel_values(pixel_values))
 
     def __getattr__(self, name: str) -> object:
         if name == "_inner":
             return cast(object, object.__getattribute__(self, name))
         return cast(object, getattr(self._inner, name))
+
+
+def _batch_gemma4_pixel_values(pixel_values: mx.array) -> mx.array:
+    """Add the image batch dimension omitted by single-image processors."""
+
+    return pixel_values[None] if pixel_values.ndim == 3 else pixel_values
 
 
 def _patch_gemma4_native_vision(model: nn.Module) -> nn.Module:
@@ -481,10 +601,53 @@ class _VlmModelWrapper(nn.Module):
         # Set by the vision pipeline before prefill for native-vision models
         # like Gemma 4, then cleared once prefill has populated the KV cache.
         object.__setattr__(self, "_pixel_values", None)
+        object.__setattr__(self, "_image_grid_thw", None)
 
     def set_pixel_values(self, pixel_values: mx.array | list[mx.array] | None) -> None:
-        """Cache native vision pixel values for the next prefill call only."""
+        """Cache native vision pixels without family-specific grid metadata."""
         object.__setattr__(self, "_pixel_values", pixel_values)
+        object.__setattr__(self, "_image_grid_thw", None)
+
+    def set_vision_inputs(
+        self,
+        pixel_values: mx.array | list[mx.array] | None,
+        image_grid_thw: mx.array | None,
+    ) -> None:
+        """Cache native vision tensors for the next prefill call only."""
+        object.__setattr__(self, "_pixel_values", pixel_values)
+        object.__setattr__(self, "_image_grid_thw", image_grid_thw)
+
+    def make_cache(self) -> list[object]:
+        """Create the native language model's cache, including hybrid SSM state."""
+        inner = cast(object, self._inner)
+        language_model = getattr(inner, "language_model", None)
+        cache_owner = language_model if language_model is not None else inner
+        if hasattr(cache_owner, "make_cache"):
+            factory = cast(
+                Callable[[], list[object]],
+                object.__getattribute__(cache_owner, "make_cache"),
+            )
+            return factory()
+        layers = cast(Model, inner).layers
+        return [KVCache() for _ in layers]
+
+    def tensor_parallel_target(self) -> nn.Module:
+        """Return the nested language model whose weights tensor sharding owns.
+
+        The wrapper itself owns generation compatibility and the native VLM
+        owns the vision tower, but tensor parallelism shards only the language
+        trunk. Keeping those roles separate also ensures the distributed
+        generation synchronization patch continues to observe plain logits
+        rather than an upstream ``LanguageModelOutput``.
+        """
+        inner = cast(object, self._inner)
+        language_model = getattr(inner, "language_model", None)
+        if not isinstance(language_model, nn.Module):
+            raise ValueError(
+                "Native vision model does not expose a tensor-shardable "
+                "language model"
+            )
+        return language_model
 
     def __call__(self, *args: object, **kwargs: object) -> mx.array:
         pixel_values = cast(
@@ -495,7 +658,29 @@ class _VlmModelWrapper(nn.Module):
         )
         if pixel_values is not None:
             kwargs["pixel_values"] = pixel_values
-        result = cast(object, self._inner(*args, **kwargs))
+            image_grid_thw = cast(
+                mx.array | None,
+                _object_dict(
+                    cast(object, object.__getattribute__(self, "__dict__"))
+                ).get("_image_grid_thw"),
+            )
+            if image_grid_thw is not None:
+                kwargs["image_grid_thw"] = image_grid_thw
+            # Pixels belong only to the prompt forward that contains their
+            # image-token span. mlx-lm's prefill helper performs an additional
+            # one-token forward before returning, so retaining them here would
+            # inject image features into a decode token with no image markers.
+            object.__setattr__(self, "_pixel_values", None)
+            object.__setattr__(self, "_image_grid_thw", None)
+        inner = cast(object, self._inner)
+        language_model = getattr(inner, "language_model", None)
+        call_target = (
+            inner
+            if pixel_values is not None or language_model is None
+            else language_model
+        )
+        call = cast(Callable[..., object], call_target)
+        result = call(*args, **kwargs)
         if hasattr(result, "logits"):
             return cast(_HasLogits, result).logits
         return cast(mx.array, result)
@@ -503,41 +688,88 @@ class _VlmModelWrapper(nn.Module):
     def __getattr__(self, name: str) -> object:
         # Delegate attribute access to the inner model so layer iteration,
         # parameter access, etc. all work transparently.
-        if name == "_pixel_values":
-            return _object_dict(cast(object, object.__getattribute__(self, "__dict__"))).get(
-                "_pixel_values"
-            )
+        if name in {"_pixel_values", "_image_grid_thw"}:
+            return _object_dict(
+                cast(object, object.__getattribute__(self, "__dict__"))
+            ).get(name)
         if name == "_inner":
             return cast(object, object.__getattribute__(self, name))
         return cast(object, getattr(self._inner, name))
 
 
-def load_model(model_path: Path, **kwargs: object) -> tuple[nn.Module, object]:
-    """Load a model, trying mlx-lm first then falling back to mlx-vlm for vision models."""
-    model_kwargs = kwargs
+def _load_vlm_model(model_path: Path, **kwargs: object) -> tuple[nn.Module, object]:
+    """Load and wrap one native multimodal model through MLX-VLM."""
+    mlx_vlm_utils = import_module("mlx_vlm.utils")
+    mlx_vlm_utils_dict = cast(dict[str, object], vars(mlx_vlm_utils))
+    mlx_vlm_load_model = cast(
+        _VlmModelLoader,
+        mlx_vlm_utils_dict["load_model"],
+    )
+    with _VLM_LOAD_PATCH_LOCK:
+        patch = _install_converted_qwen_norm_guard(model_path)
+        try:
+            model = mlx_vlm_load_model(model_path, **kwargs)
+        finally:
+            if patch is not None:
+                model_class, original = patch
+                type.__setattr__(model_class, "sanitize", original)
+    model = _patch_gemma4_native_vision(model)
+    return _VlmModelWrapper(model), None
+
+
+def load_model(
+    model_path: Path,
+    *,
+    prefer_vlm: bool = False,
+    **kwargs: object,
+) -> tuple[nn.Module, object]:
+    """Load a text or native multimodal model.
+
+    Args:
+        model_path: Local model bundle.
+        prefer_vlm: Load through MLX-VLM even when MLX-LM recognizes the model
+            type. MLX-LM intentionally strips vision towers from Qwen VLM
+            checkpoints, so vision placements must opt into the native model to
+            preserve their image-grid-aware embeddings and RoPE.
+        **kwargs: Loader options forwarded to the selected upstream loader.
+
+    Returns:
+        The loaded model and the optional upstream tokenizer placeholder.
+    """
+    if prefer_vlm:
+        logger.info("Loading vision model through native mlx-vlm path")
+        try:
+            return _load_vlm_model(model_path, **kwargs)
+        except ImportError as exc:
+            raise ValueError("Native vision model loading requires mlx-vlm") from exc
+
     mlx_lm_load_model = cast(_MlxLmLoadModel, _mlx_lm_load_model)
     try:
-        return mlx_lm_load_model(model_path, **model_kwargs)
-    except ValueError as e:
-        if "not supported" not in str(e):
+        return mlx_lm_load_model(model_path, **kwargs)
+    except ValueError as exc:
+        if "not supported" not in str(exc):
             raise
-        # Model type not in mlx-lm (e.g. gemma4 vision model) — try mlx-vlm
-        logger.info(f"Model type not supported by mlx-lm, trying mlx-vlm: {e}")
+        logger.info(f"Model type not supported by mlx-lm, trying mlx-vlm: {exc}")
         try:
-            mlx_vlm_utils = import_module("mlx_vlm.utils")
-            mlx_vlm_utils_dict = cast(dict[str, object], vars(mlx_vlm_utils))
-            mlx_vlm_load_model = cast(
-                _VlmModelLoader,
-                mlx_vlm_utils_dict["load_model"],
-            )
-            model = mlx_vlm_load_model(model_path, **model_kwargs)
-            model = _patch_gemma4_native_vision(model)
-            # Wrap so mlx-lm's generation pipeline sees plain arrays
-            return _VlmModelWrapper(model), None
+            return _load_vlm_model(model_path, **kwargs)
         except ImportError:
             raise ValueError(
-                f"{e}. Install mlx-vlm for vision model support: pip install -U mlx-vlm"
-            ) from e
+                f"{exc}. Install mlx-vlm for vision model support: pip install -U mlx-vlm"
+            ) from exc
+
+
+def _prefers_native_vlm(model_card: ModelCard) -> bool:
+    """Return whether a card's primary weights require the native VLM loader.
+
+    MLX-LM recognizes some multimodal checkpoints as text models and strips
+    their vision towers. When the card points vision at the same checkpoint as
+    its language weights, every placement shape must load through MLX-VLM so
+    family-specific image-grid positions and embeddings remain available.
+    """
+    vision_config = model_card.vision
+    return vision_config is not None and vision_config.weights_repo == str(
+        model_card.model_id
+    )
 
 
 def sidecar_load_eligible(
@@ -689,9 +921,15 @@ def load_mlx_items(
 ) -> "tuple[Model, TokenizerWrapper, VisionProcessor | None, dict[str, mx.array] | None, object | None]":
     if group is None:
         logger.info(f"Single device used for {bound_instance.instance}")
-        model_path = build_model_path(bound_instance.bound_shard.model_card.model_id)
+        card = bound_instance.bound_shard.model_card
+        model_path = build_model_path(card.model_id, card.source_revision)
         start_time = time.perf_counter()
-        model, _ = load_model(model_path, lazy=True, strict=False)
+        model, _ = load_model(
+            model_path,
+            lazy=True,
+            strict=False,
+            prefer_vlm=_prefers_native_vlm(card),
+        )
         # Eval layers one by one for progress reporting
         try:
             import skulk.worker.runner.bootstrap as bootstrap
@@ -739,7 +977,9 @@ def load_mlx_items(
         from skulk.worker.engines.mlx.vision import VisionProcessor
 
         vision_processor: VisionProcessor | None = VisionProcessor(
-            vision_config, bound_instance.bound_shard.model_card.model_id
+            vision_config,
+            bound_instance.bound_shard.model_card.model_id,
+            bound_instance.bound_shard.model_card.source_revision,
         )
     else:
         vision_processor = None
@@ -854,9 +1094,17 @@ def shard_and_load(
     on_timeout: TimeoutCallback | None,
     on_layer_loaded: LayerLoadedCallback | None,
 ) -> tuple[nn.Module, TokenizerWrapper]:
-    model_path = build_model_path(shard_metadata.model_card.model_id)
+    model_path = build_model_path(
+        shard_metadata.model_card.model_id,
+        shard_metadata.model_card.source_revision,
+    )
 
-    model, _ = load_model(model_path, lazy=True, strict=False)
+    model, _ = load_model(
+        model_path,
+        lazy=True,
+        strict=False,
+        prefer_vlm=_prefers_native_vlm(shard_metadata.model_card),
+    )
     logger.debug(model)
     if hasattr(model, "model") and isinstance(model.model, DeepseekV3Model):  # type: ignore
         pass
@@ -893,8 +1141,19 @@ def shard_and_load(
     match shard_metadata:
         case TensorShardMetadata():
             logger.info(f"loading model from {model_path} with tensor parallelism")
+            generation_model = model
+            sharding_model = (
+                model.tensor_parallel_target()
+                if isinstance(model, _VlmModelWrapper)
+                else model
+            )
             model = tensor_auto_parallel(
-                model, group, timeout_seconds, on_timeout, on_layer_loaded
+                sharding_model,
+                group,
+                timeout_seconds,
+                on_timeout,
+                on_layer_loaded,
+                generation_model=generation_model,
             )
         case PipelineShardMetadata():
             logger.info(f"loading model from {model_path} with pipeline parallelism")
@@ -1153,6 +1412,18 @@ def _patch_lossy_chat_template(template: str) -> str | None:
     return patched if n > 0 else None
 
 
+def _log_rendered_prompt_shape(
+    renderer: PromptRendererType,
+    prompt: str,
+    message_count: int,
+) -> None:
+    """Log prompt construction metadata without retaining user content."""
+    logger.info(
+        "Rendered model prompt "
+        f"(renderer={renderer.value}, messages={message_count}, chars={len(prompt)})"
+    )
+
+
 def apply_chat_template(
     tokenizer: TokenizerWrapper,
     task_params: TextGenerationTaskParams,
@@ -1217,7 +1488,11 @@ def apply_chat_template(
         )
         if partial_assistant_content:
             prompt += partial_assistant_content
-        logger.info(prompt)
+        _log_rendered_prompt_shape(
+            capability_profile.prompt_renderer,
+            prompt,
+            len(formatted_messages),
+        )
         return prompt
 
     if capability_profile.prompt_renderer == PromptRendererType.Gemma4:
@@ -1229,7 +1504,11 @@ def apply_chat_template(
         )
         if partial_assistant_content:
             prompt += partial_assistant_content
-        logger.info(prompt)
+        _log_rendered_prompt_shape(
+            capability_profile.prompt_renderer,
+            prompt,
+            len(formatted_messages),
+        )
         return prompt
 
     for msg in formatted_messages:
@@ -1269,7 +1548,11 @@ def apply_chat_template(
     if partial_assistant_content:
         prompt += partial_assistant_content
 
-    logger.info(prompt)
+    _log_rendered_prompt_shape(
+        capability_profile.prompt_renderer,
+        prompt,
+        len(formatted_messages),
+    )
 
     return prompt
 
@@ -1497,12 +1780,17 @@ def _parse_gemma4_tool_calls(text: str) -> list[dict[str, Any]]:
         try:
             args_dict = cast(dict[str, object], json.loads(args_json))
         except json.JSONDecodeError:
-            logger.warning(f"Failed to parse Gemma 4 tool call args: {args_json}")
+            logger.warning(
+                "Failed to parse Gemma 4 tool call arguments "
+                f"(argument_chars={len(args_json)})"
+            )
             args_dict = {}
         results.append(dict(name=func_name, arguments=args_dict))
 
     if not results:
-        raise ValueError(f"No Gemma 4 tool calls found in: {text}")
+        raise ValueError(
+            f"No Gemma 4 tool calls found in generated text ({len(text)} chars)"
+        )
     return results
 
 
@@ -1544,7 +1832,22 @@ def _parse_kimi_tool_calls(text: str):
 def mx_all_gather_tasks(
     tasks: list[TextGeneration],
     group: mx.distributed.Group | None,
+    *,
+    preserve_rank_zero_order: bool = False,
 ) -> tuple[list[TextGeneration], list[TextGeneration]]:
+    """Agree on tasks present on every rank.
+
+    Args:
+        tasks: Locally observed candidate tasks.
+        group: MLX distributed group, or ``None`` for one rank.
+        preserve_rank_zero_order: Use rank zero's arrival order as the canonical
+            order for agreed tasks. The default retains the historical
+            task-ID-sorted behavior.
+
+    Returns:
+        Agreed local task objects in canonical order and candidates not yet
+        observed on every rank.
+    """
     def encode_task_id(task_id: TaskId) -> list[int]:
         utf8_task_id = task_id.encode()
         return [
@@ -1589,6 +1892,11 @@ def mx_all_gather_tasks(
     agreed_ids = set[TaskId].intersection(*(set(tids) for tids in all_task_ids))
 
     local_tasks = {task.task_id: task for task in tasks}
-    agreed = [local_tasks[tid] for tid in sorted(agreed_ids)]
+    canonical_ids = (
+        [task_id for task_id in all_task_ids[0] if task_id in agreed_ids]
+        if preserve_rank_zero_order
+        else sorted(agreed_ids)
+    )
+    agreed = [local_tasks[tid] for tid in canonical_ids]
     different = [task for task in tasks if task.task_id not in agreed_ids]
     return agreed, different

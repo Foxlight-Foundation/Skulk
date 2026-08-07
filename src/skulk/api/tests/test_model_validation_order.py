@@ -22,14 +22,19 @@ from skulk.api.types.ollama_api import (
     OllamaMessage,
 )
 from skulk.api.types.openai_responses import ResponsesRequest
-from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.models.model_cards import (
+    AudioCardConfig,
+    AudioCardKind,
+    ModelCard,
+    ModelTask,
+)
 from skulk.shared.types.commands import TextGeneration
 from skulk.shared.types.common import CommandId, ModelId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
-from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
+from skulk.shared.types.worker.runners import RunnerId, RunnerReady, ShardAssignments
 from skulk.shared.types.worker.shards import PipelineShardMetadata
 
 
@@ -66,7 +71,23 @@ def _build_running_state(running_card: ModelCard) -> State:
                 hosts_by_node={node_id: []},
                 ephemeral_port=52415,
             )
-        }
+        },
+        runners={runner_id: RunnerReady()},
+    )
+
+
+def _speech_card(task: ModelTask, kind: AudioCardKind) -> ModelCard:
+    """Build a mounted speech-only card for text-admission tests."""
+
+    return ModelCard(
+        model_id=ModelId(f"test/{kind.value}-only"),
+        storage_size=Memory.from_mb(100),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[task],
+        capabilities=[kind.value],
+        audio=AudioCardConfig(kind=kind),
     )
 
 
@@ -174,6 +195,46 @@ async def test_running_text_requests_use_in_memory_model_card(monkeypatch: pytes
     resolved = await _get_running_model_card_fn(api)(running_card.model_id)
 
     assert resolved == running_card
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("task", "kind"),
+    [
+        (ModelTask.TextToSpeech, AudioCardKind.TextToSpeech),
+        (ModelTask.SpeechToText, AudioCardKind.SpeechToText),
+    ],
+)
+async def test_chat_rejects_speech_only_models_before_dispatch(
+    task: ModelTask,
+    kind: AudioCardKind,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A modality mismatch must not emit text work or disturb the speech runner."""
+
+    card = _speech_card(task, kind)
+    api = object.__new__(API)
+    api.state = _build_running_state(card)
+
+    async def _fail_if_called(*_args: object, **_kwargs: object) -> Never:
+        raise AssertionError("speech-only models must fail before text dispatch")
+
+    monkeypatch.setattr("skulk.api.main.chat_request_to_text_generation", _fail_if_called)
+    monkeypatch.setattr(api, "_send_text_generation_with_images", _fail_if_called)
+
+    payload = ChatCompletionRequest(
+        model=card.model_id,
+        messages=[ChatCompletionMessage(role="user", content="hello")],
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.chat_completions(payload)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == (
+        f"Model {card.model_id} is not a text-generation model"
+    )
+    assert all(isinstance(runner, RunnerReady) for runner in api.state.runners.values())
 
 
 @pytest.mark.anyio
@@ -287,8 +348,11 @@ async def test_bench_chat_completions_uses_running_model_card(monkeypatch: pytes
             task_params=task_params,
         )
 
-    async def _collect_stats(command_id: CommandId) -> BenchChatCompletionResponse:
+    async def _collect_stats(
+        command_id: CommandId, model_id: ModelId
+    ) -> BenchChatCompletionResponse:
         captured["command_id"] = command_id
+        captured["collect_model"] = model_id
         return BenchChatCompletionResponse(
             id=str(command_id),
             created=0,
@@ -316,4 +380,6 @@ async def test_bench_chat_completions_uses_running_model_card(monkeypatch: pytes
     assert captured["request_model"] == running_card.model_id
     assert captured["model_card"] == running_card
     assert captured["command_id"] == CommandId("cmd-1")
+    # The resolved model is threaded to the collector for the envelope tap (#596).
+    assert captured["collect_model"] == running_card.model_id
     assert response.model == str(running_card.model_id)

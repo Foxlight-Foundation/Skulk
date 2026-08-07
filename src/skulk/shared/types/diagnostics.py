@@ -47,6 +47,10 @@ RunnerTaskCancelStatus = Literal[
     "already_cancelled",
     "already_completed",
 ]
+DataPlaneTransport = Literal["disabled", "gossipsub", "zenoh"]
+TelemetryPlaneTransport = Literal["isolated_gossipsub"]
+NodeDiagnosticsVersionStatus = Literal["current", "version_mismatch", "unknown"]
+ClusterDiagnosticsVersionStatus = Literal["consistent", "mixed", "unknown"]
 
 
 class MlxMemorySnapshot(CamelCaseModel):
@@ -563,6 +567,490 @@ class NodeTailscaleDiagnostics(CamelCaseModel):
     dns_name: str | None = Field(default=None, description="MagicDNS name when available.")
 
 
+class DataPlaneDiagnostics(CamelCaseModel):
+    """Bounded local metrics for serving-stream delivery and lifecycle health."""
+
+    transport: DataPlaneTransport = Field(
+        description="Configured DATA transport on this API node."
+    )
+    reorder_buffer_enabled: bool = Field(
+        description="Whether this API reorders DATA frames before dispatch."
+    )
+    active_streams: int = Field(
+        description="Streams accepted without a terminal frame yet."
+    )
+    frames_received: int = Field(
+        description="All DATA frames observed before deduplication."
+    )
+    frames_dispatched: int = Field(
+        description="Ordered, unique DATA frames accepted for live commands."
+    )
+    started_frames: int = Field(description="Accepted started lifecycle frames.")
+    chunk_frames: int = Field(description="Accepted non-terminal payload frames.")
+    completed_frames: int = Field(description="Accepted completed terminal frames.")
+    failed_frames: int = Field(description="Accepted failed terminal frames.")
+    cancelled_frames: int = Field(description="Accepted cancelled terminal frames.")
+    duplicate_frames: int = Field(
+        description="Frames dropped because their sequence was already observed."
+    )
+    out_of_order_frames: int = Field(
+        description="Frames received above the next expected sequence."
+    )
+    skipped_sequences: int = Field(
+        description="Missing sequence numbers skipped after a bounded reorder wait."
+    )
+    late_frames: int = Field(
+        description="Frames dropped because no live command queue remained."
+    )
+    missing_started_streams: int = Field(
+        description="Streams whose first accepted frame was not started."
+    )
+    missing_terminal_streams: int = Field(
+        description="Streams finalized locally without an accepted terminal frame."
+    )
+    idle_timeouts: int = Field(
+        description="API stream receives that exceeded the DATA idle deadline."
+    )
+    transport_failures: int = Field(
+        description="Streams failed locally after a DATA ordering or delivery gap."
+    )
+    first_byte_samples: int = Field(
+        description="Streams with a measured started-to-first-payload interval."
+    )
+    first_byte_seconds_last: float | None = Field(
+        default=None,
+        description="Most recently measured started-to-first-payload latency.",
+    )
+    first_byte_seconds_average: float | None = Field(
+        default=None,
+        description="Average started-to-first-payload latency for this process.",
+    )
+    first_byte_seconds_max: float | None = Field(
+        default=None,
+        description="Maximum started-to-first-payload latency for this process.",
+    )
+    stream_span_samples: int = Field(
+        description="Terminal streams with a measured first-payload-to-terminal span."
+    )
+    stream_span_seconds_last: float | None = Field(
+        default=None,
+        description="Most recently measured first-payload-to-terminal span.",
+    )
+    stream_span_seconds_average: float | None = Field(
+        default=None,
+        description="Average first-payload-to-terminal span for this process.",
+    )
+    stream_span_seconds_max: float | None = Field(
+        default=None,
+        description="Maximum first-payload-to-terminal span for this process.",
+    )
+    egress: "DataPlaneEgressDiagnostics" = Field(
+        description="Router-side DATA queue, publish, and isolation metrics."
+    )
+
+
+class DataPlaneOwnerDiagnostics(CamelCaseModel):
+    """Bounded egress pressure metrics for one remote DATA owner."""
+
+    queue_depth: int = Field(description="Frames currently queued for this owner.")
+    active_streams: int = Field(
+        description="Independent command egress queues active for this owner."
+    )
+    max_queue_depth: int = Field(
+        description="Highest aggregate queue depth observed for this owner."
+    )
+    frames_enqueued: int = Field(
+        description="Frames accepted into this owner's command queues."
+    )
+    frames_published: int = Field(
+        description="Frames successfully published for this owner."
+    )
+    frames_dropped: int = Field(
+        description="Frames rejected by this owner's bounded queues."
+    )
+    publish_failures: int = Field(
+        description="Publish exceptions or deadline expirations for this owner."
+    )
+    idle_stream_reclaims: int = Field(
+        default=0,
+        description="Command queues reclaimed after their egress idle lease expired."
+    )
+
+
+class DataPlaneEgressDiagnostics(CamelCaseModel):
+    """Router-side DATA egress isolation and pressure metrics."""
+
+    active_stream_queues: int = Field(
+        description="Independent remote command queues currently active."
+    )
+    queue_depth: int = Field(
+        description="Frames currently queued across remote command streams."
+    )
+    max_queue_depth: int = Field(
+        description="Highest aggregate remote DATA queue depth observed."
+    )
+    local_short_circuits: int = Field(
+        description="Frames delivered locally without remote Zenoh egress."
+    )
+    remote_frames_enqueued: int = Field(
+        description="Remote frames accepted into bounded command queues."
+    )
+    remote_frames_published: int = Field(
+        description="Remote frames successfully published over Zenoh."
+    )
+    remote_frames_dropped: int = Field(
+        description="Remote frames dropped by queue or stream admission bounds."
+    )
+    remote_publish_failures: int = Field(
+        description="Remote publishes that raised or exceeded their deadline."
+    )
+    remote_bytes_published: int = Field(
+        description="Serialized DATA bytes successfully published over Zenoh."
+    )
+    inbound_payload_queue_depth: int = Field(
+        default=0,
+        description="Payload frames waiting in an isolated network-ingress lane.",
+    )
+    inbound_payload_queue_capacity: int = Field(
+        default=0,
+        description="Hard capacity of the isolated payload ingress lane.",
+    )
+    inbound_terminal_queue_depth: int = Field(
+        default=0,
+        description="Terminal frames waiting in an isolated network-ingress lane.",
+    )
+    inbound_terminal_queue_capacity: int = Field(
+        default=0,
+        description="Hard capacity of the isolated terminal ingress lane.",
+    )
+    inbound_frames_dropped: int = Field(
+        default=0,
+        description="Network-ingress frames rejected by isolated lane bounds.",
+    )
+    idle_stream_reclaims: int = Field(
+        default=0,
+        description="Remote command queues reclaimed after their idle lease expired."
+    )
+    enqueue_latency_samples: int = Field(
+        description="Remote frames with measured TopicRouter enqueue latency."
+    )
+    enqueue_latency_seconds_average: float | None = Field(
+        default=None,
+        description="Average TopicRouter-to-egress enqueue latency.",
+    )
+    enqueue_latency_seconds_max: float | None = Field(
+        default=None,
+        description="Maximum TopicRouter-to-egress enqueue latency.",
+    )
+    publish_latency_samples: int = Field(
+        description="Remote frames with measured Zenoh publish latency."
+    )
+    publish_latency_seconds_average: float | None = Field(
+        default=None,
+        description="Average successful or failed Zenoh publish latency.",
+    )
+    publish_latency_seconds_max: float | None = Field(
+        default=None,
+        description="Maximum successful or failed Zenoh publish latency.",
+    )
+    owners: dict[str, DataPlaneOwnerDiagnostics] = Field(
+        default_factory=dict,
+        description="Per-owner pressure counters keyed by opaque node id.",
+    )
+
+    @classmethod
+    def empty(cls) -> "DataPlaneEgressDiagnostics":
+        """Return a zeroed snapshot when no router metrics provider is wired."""
+
+        return cls(
+            active_stream_queues=0,
+            queue_depth=0,
+            max_queue_depth=0,
+            local_short_circuits=0,
+            remote_frames_enqueued=0,
+            remote_frames_published=0,
+            remote_frames_dropped=0,
+            remote_publish_failures=0,
+            remote_bytes_published=0,
+            idle_stream_reclaims=0,
+            enqueue_latency_samples=0,
+            enqueue_latency_seconds_average=None,
+            enqueue_latency_seconds_max=None,
+            publish_latency_samples=0,
+            publish_latency_seconds_average=None,
+            publish_latency_seconds_max=None,
+        )
+
+
+class VisionMediaIngressDiagnostics(CamelCaseModel):
+    """API and worker bounded vision upload occupancy and lifecycle counters."""
+
+    pending_api_commands: int = Field(
+        description="Image commands retained by the API while awaiting placement."
+    )
+    pending_api_bytes: int = Field(
+        description="Image bytes retained by the API while awaiting placement."
+    )
+    active_api_commands: int = Field(
+        description="Image transfers sent and still awaiting worker verification."
+    )
+    active_api_bytes: int = Field(
+        description="Source image bytes charged to active transfer admission."
+    )
+    pending_worker_acknowledgements: int = Field(
+        description="Selected worker verifications still owed to the API."
+    )
+
+    active_streams: int = Field(
+        description="Incomplete or verified image streams retained by this worker."
+    )
+    pending_frames: int = Field(
+        description="Unverified image frames currently retained."
+    )
+    retained_bytes: int = Field(
+        description="Image bytes retained across pending and verified streams."
+    )
+    verified_streams: int = Field(
+        description="Verified streams waiting for runner dispatch."
+    )
+    pending_failures: int = Field(
+        description="Bounded rejected-stream failures awaiting task correlation."
+    )
+    completed_streams: int = Field(
+        description="Streams that passed integrity verification since process start."
+    )
+    rejected_streams: int = Field(
+        description="Streams rejected for bounds, metadata, or integrity failures."
+    )
+    expired_streams: int = Field(
+        description="Streams rejected after exceeding the ingress age limit."
+    )
+
+    @classmethod
+    def empty(cls) -> "VisionMediaIngressDiagnostics":
+        """Return a zeroed snapshot when no local worker is attached."""
+
+        return cls(
+            pending_api_commands=0,
+            pending_api_bytes=0,
+            active_api_commands=0,
+            active_api_bytes=0,
+            pending_worker_acknowledgements=0,
+            active_streams=0,
+            pending_frames=0,
+            retained_bytes=0,
+            verified_streams=0,
+            pending_failures=0,
+            completed_streams=0,
+            rejected_streams=0,
+            expired_streams=0,
+        )
+
+
+DataPlaneDiagnostics.model_rebuild()
+
+
+class TelemetryPlaneDiagnostics(CamelCaseModel):
+    """Bounded telemetry admission and isolated egress diagnostics."""
+
+    transport: TelemetryPlaneTransport = Field(
+        description="Transport used for telemetry independently of control traffic."
+    )
+    admission_capacity: int = Field(
+        description="Maximum distinct latest-value readings awaiting admission."
+    )
+    pending_readings: int = Field(
+        description="Distinct latest-value readings currently awaiting egress."
+    )
+    network_queue_capacity: int = Field(
+        description="Maximum serialized telemetry packets queued for network publish."
+    )
+    network_queue_depth: int = Field(
+        description="Serialized telemetry packets currently queued for network publish."
+    )
+    max_queue_depth: int = Field(
+        description="Highest combined pending and network queue depth observed."
+    )
+    readings_offered: int = Field(
+        description="Telemetry readings offered by local producers."
+    )
+    readings_coalesced: int = Field(
+        description="Stale pending readings replaced by a newer value for the same key."
+    )
+    readings_dropped: int = Field(
+        description="Pending readings evicted to preserve the fixed admission bound."
+    )
+    readings_published: int = Field(
+        description="Telemetry packets successfully handed to isolated gossipsub."
+    )
+    publish_failures: int = Field(
+        description="Telemetry publishes rejected by transport pressure or size limits."
+    )
+    no_peer_publishes: int = Field(
+        # Additive counter with a compatibility default so THIS model still
+        # parses an OLDER peer's response that lacks the field; the reverse
+        # direction (newer payload on older code) is covered by the peer
+        # diagnostics boundary's recursive unknown-field tolerance (#293).
+        default=0,
+        description=(
+            "Telemetry publishes that found no peers subscribed on the isolated "
+            "telemetry protocol. Sustained growth on a node with live "
+            "connections means its telemetry is reaching nobody: the node "
+            "stays invisible to cluster membership while otherwise healthy "
+            "(the failure shape of a wire-protocol mismatch)."
+        ),
+    )
+    bytes_published: int = Field(
+        description="Serialized telemetry bytes successfully published."
+    )
+    oldest_pending_age_seconds: float | None = Field(
+        default=None,
+        description="Age of the oldest latest-value reading still awaiting egress.",
+    )
+    last_successful_publish_age_seconds: float | None = Field(
+        default=None,
+        description="Age of the most recent successful telemetry publish.",
+    )
+
+    @classmethod
+    def empty(cls) -> "TelemetryPlaneDiagnostics":
+        """Return zeroed diagnostics when no router provider is wired."""
+
+        return cls(
+            transport="isolated_gossipsub",
+            admission_capacity=0,
+            pending_readings=0,
+            network_queue_capacity=0,
+            network_queue_depth=0,
+            max_queue_depth=0,
+            readings_offered=0,
+            readings_coalesced=0,
+            readings_dropped=0,
+            readings_published=0,
+            publish_failures=0,
+            bytes_published=0,
+        )
+
+
+class ProviderCapabilityDiagnostics(CamelCaseModel):
+    """Bounded lifecycle and media metrics for one served capability."""
+
+    active_streams: int = Field(description="Currently admitted provider streams.")
+    max_active_streams: int = Field(
+        description="Highest concurrent admitted stream count observed."
+    )
+    admitted_streams: int = Field(description="Provider streams admitted for execution.")
+    rejected_streams: int = Field(
+        description="Provider stream opens rejected after capability resolution."
+    )
+    overloaded_rejections: int = Field(
+        description="Rejected opens caused by the provider concurrency bound."
+    )
+    input_queue_depth: int = Field(
+        description="Caller input frames currently buffered before provider handling."
+    )
+    max_input_queue_depth: int = Field(
+        description="Highest caller input queue depth observed."
+    )
+    input_frames: int = Field(
+        description="Caller-to-provider lifecycle frames delivered to the handler."
+    )
+    input_media_bytes: int = Field(
+        description="Inline media bytes delivered from callers to the handler."
+    )
+    output_frames: int = Field(
+        description="Provider-to-caller lifecycle frames accepted for DATA egress."
+    )
+    output_media_bytes: int = Field(
+        description="Inline media bytes accepted from the provider for DATA egress."
+    )
+    completed_streams: int = Field(description="Streams ending with completed.")
+    failed_streams: int = Field(description="Streams ending with failed.")
+    cancelled_streams: int = Field(description="Streams ending with cancelled.")
+    missing_terminal_streams: int = Field(
+        description="Admitted streams removed without an observable terminal frame."
+    )
+    cancellation_requests: int = Field(
+        description="Valid cancellation requests received for active streams."
+    )
+    first_output_samples: int = Field(
+        description="Streams with a measured admission-to-first-output interval."
+    )
+    first_output_seconds_average: float | None = Field(
+        default=None,
+        description="Average admission-to-first-output latency.",
+    )
+    first_output_seconds_max: float | None = Field(
+        default=None,
+        description="Maximum admission-to-first-output latency.",
+    )
+    duration_samples: int = Field(
+        description="Terminal streams with a measured admitted lifetime."
+    )
+    duration_seconds_average: float | None = Field(
+        default=None,
+        description="Average admitted stream lifetime.",
+    )
+    duration_seconds_max: float | None = Field(
+        default=None,
+        description="Maximum admitted stream lifetime.",
+    )
+
+
+class ProviderDiagnostics(ProviderCapabilityDiagnostics):
+    """Process-local provider pressure metrics and per-capability evidence."""
+
+    active_unary_calls: int = Field(
+        description="Generic unary provider calls currently executing."
+    )
+    stream_slots_in_use: int = Field(
+        description="Provider stream slots reserved by admission or execution."
+    )
+    unary_concurrency_limit: int = Field(
+        description="Configured process-wide unary provider concurrency bound."
+    )
+    stream_concurrency_limit: int = Field(
+        description="Configured process-wide streaming provider concurrency bound."
+    )
+    capabilities: dict[str, ProviderCapabilityDiagnostics] = Field(
+        default_factory=dict,
+        description="Metrics keyed by stable qualified capability id.",
+    )
+
+    @classmethod
+    def empty(cls) -> "ProviderDiagnostics":
+        """Return a zeroed snapshot for older or unwired diagnostics producers."""
+
+        return cls(
+            active_streams=0,
+            max_active_streams=0,
+            admitted_streams=0,
+            rejected_streams=0,
+            overloaded_rejections=0,
+            input_queue_depth=0,
+            max_input_queue_depth=0,
+            input_frames=0,
+            input_media_bytes=0,
+            output_frames=0,
+            output_media_bytes=0,
+            completed_streams=0,
+            failed_streams=0,
+            cancelled_streams=0,
+            missing_terminal_streams=0,
+            cancellation_requests=0,
+            first_output_samples=0,
+            first_output_seconds_average=None,
+            first_output_seconds_max=None,
+            duration_samples=0,
+            duration_seconds_average=None,
+            duration_seconds_max=None,
+            active_unary_calls=0,
+            stream_slots_in_use=0,
+            unary_concurrency_limit=0,
+            stream_concurrency_limit=0,
+        )
+
+
 class NodeDiagnostics(CamelCaseModel):
     """Read-only diagnostic bundle for one Skulk node."""
 
@@ -584,6 +1072,23 @@ class NodeDiagnostics(CamelCaseModel):
     placements: list[InstancePlacementDiagnostics] = Field(
         default_factory=list,
         description="Event-sourced placement analysis for current instances.",
+    )
+    data_plane: DataPlaneDiagnostics = Field(
+        description="Local DATA stream lifecycle, ordering, and timing metrics."
+    )
+    vision_media_egress: DataPlaneEgressDiagnostics = Field(
+        default_factory=DataPlaneEgressDiagnostics.empty,
+        description=(
+            "Isolated router egress pressure for inbound VLM and image-edit media."
+        ),
+    )
+    vision_media_ingress: VisionMediaIngressDiagnostics = Field(
+        default_factory=VisionMediaIngressDiagnostics.empty,
+        description="Bounded worker-side image upload occupancy and outcomes.",
+    )
+    provider: ProviderDiagnostics = Field(
+        default_factory=ProviderDiagnostics.empty,
+        description="Local provider admission, lifecycle, media, and pressure metrics."
     )
     warnings: list[str] = Field(
         default_factory=list,
@@ -608,6 +1113,13 @@ class ClusterNodeDiagnostics(CamelCaseModel):
         description="Peer API URL used to collect diagnostics, if remote.",
     )
     ok: bool = Field(description="Whether diagnostics were collected successfully.")
+    version_status: NodeDiagnosticsVersionStatus = Field(
+        default="unknown",
+        description=(
+            "Whether this node reports the same known Skulk version and build as "
+            "the API collecting the cluster response."
+        ),
+    )
     diagnostics: NodeDiagnostics | None = Field(
         default=None,
         description="Collected node diagnostics when ok is true.",
@@ -619,7 +1131,12 @@ class ClusterNodeDiagnostics(CamelCaseModel):
 
 
 class ClusterDiagnostics(CamelCaseModel):
-    """Read-only diagnostic bundle collected from reachable cluster nodes."""
+    """Read-only diagnostic bundle covering every topology member.
+
+    Reachable peers carry their collected diagnostics; topology members with
+    no reachable API route appear as explicit ``ok=false`` entries so an
+    overlay-joined node always has an observability presence (#558).
+    """
 
     generated_at: str = Field(description="UTC timestamp when collection finished.")
     local_node_id: str = Field(description="Node ID of the API serving this response.")
@@ -627,9 +1144,16 @@ class ClusterDiagnostics(CamelCaseModel):
         default=None,
         description="Current master node ID, when known.",
     )
+    version_status: ClusterDiagnosticsVersionStatus = Field(
+        default="unknown",
+        description=(
+            "Aggregate build state: consistent, mixed, or unknown when build "
+            "identity cannot be compared for every reachable participant."
+        ),
+    )
     nodes: list[ClusterNodeDiagnostics] = Field(
         default_factory=list,
-        description="Local and reachable peer diagnostic results.",
+        description="One entry per topology member: local, reachable peers, and explicit failures for unreachable peers.",
     )
 
 

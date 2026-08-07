@@ -1,4 +1,4 @@
-# pyright: reportAny=false
+# pyright: reportAny=false, reportPrivateUsage=false
 """Companion-repo handling in ModelStoreDownloader.
 
 The launch smoke (2026-06-06) found that three of the store downloader's
@@ -10,10 +10,12 @@ ensures the declared companions, and a companion failure never fails the
 base load.
 """
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import cast
 
+import anyio
 import pytest
 
 from skulk.download.download_utils import RepoDownloadProgress
@@ -69,18 +71,27 @@ class _RecordingStoreClient:
         self.fail_staging = fail_staging or set()
         self.staged: list[str] = []
 
-    async def is_model_available(self, model_id: str) -> bool:
+    async def is_model_available(
+        self, model_id: str, source_revision: str | None = None
+    ) -> bool:
+        assert source_revision is None
         return model_id in self.available
 
     async def stage_shard(
         self,
         model_id: str,
-        dest_path: Path,
+        staging_root: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+        source_revision: str | None = None,
+        capacity_preflight: Callable[[int], Awaitable[None]] | None = None,
     ) -> Path:
+        assert source_revision is None
         if model_id in self.fail_staging:
             raise RuntimeError(f"simulated staging failure for {model_id}")
+        if capacity_preflight is not None:
+            await capacity_preflight(4)
         self.staged.append(model_id)
+        dest_path = staging_root / model_id.replace("/", "--")
         dest_path.mkdir(parents=True, exist_ok=True)
         (dest_path / "weights.safetensors").write_bytes(b"fake")
         return dest_path
@@ -155,6 +166,115 @@ async def test_store_staged_base_also_stages_companion(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_capacity_callback_receives_base_and_companion_transactions(
+    tmp_path: Path,
+) -> None:
+    store = _RecordingStoreClient(available={_BASE_MODEL, _SIDECAR_REPO})
+    downloader = _downloader(store, tmp_path)
+    observed: list[tuple[str, int]] = []
+
+    async def _capacity(
+        shard: ShardMetadata,
+        protected_model_ids: frozenset[str],
+        additional_bytes: int,
+    ) -> None:
+        assert protected_model_ids == {_BASE_MODEL, _SIDECAR_REPO}
+        observed.append((str(shard.model_card.model_id), additional_bytes))
+
+    downloader.set_staging_capacity_callback(_capacity)
+
+    await downloader.ensure_shard(_shard_with_sidecar())
+
+    assert observed == [(_BASE_MODEL, 4), (_SIDECAR_REPO, 4)]
+
+
+@pytest.mark.anyio
+async def test_concurrent_staging_transfers_are_serialized(tmp_path: Path) -> None:
+    first = _shard_with_sidecar().model_copy(
+        update={
+            "model_card": _shard_with_sidecar().model_card.model_copy(
+                update={"runtime": None}
+            )
+        }
+    )
+    second_model = "mlx-community/other-test-9B-4bit"
+    second = first.model_copy(
+        update={
+            "model_card": first.model_card.model_copy(
+                update={"model_id": ModelId(second_model)}
+            )
+        }
+    )
+    store = _RecordingStoreClient(available={_BASE_MODEL, second_model})
+    downloader = _downloader(store, tmp_path)
+    active_preflights = 0
+    maximum_active_preflights = 0
+
+    async def _capacity(
+        _shard: ShardMetadata,
+        _protected_model_ids: frozenset[str],
+        _additional_bytes: int,
+    ) -> None:
+        nonlocal active_preflights, maximum_active_preflights
+        active_preflights += 1
+        maximum_active_preflights = max(
+            maximum_active_preflights,
+            active_preflights,
+        )
+        await asyncio.sleep(0.01)
+        active_preflights -= 1
+
+    downloader.set_staging_capacity_callback(_capacity)
+
+    await asyncio.gather(
+        downloader.ensure_shard(first),
+        downloader.ensure_shard(second),
+    )
+
+    assert maximum_active_preflights == 1
+    assert set(store.staged) == {_BASE_MODEL, second_model}
+
+
+@pytest.mark.anyio
+async def test_cancellation_clears_active_staging_protection(tmp_path: Path) -> None:
+    """Cancellation cannot strand model IDs in the staging protection set."""
+    transfer_started = anyio.Event()
+
+    class _BlockingStoreClient(_RecordingStoreClient):
+        async def stage_shard(
+            self,
+            model_id: str,
+            staging_root: Path,
+            on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+            source_revision: str | None = None,
+            capacity_preflight: Callable[[int], Awaitable[None]] | None = None,
+        ) -> Path:
+            del model_id, staging_root, on_progress, source_revision
+            if capacity_preflight is not None:
+                await capacity_preflight(4)
+            transfer_started.set()
+            await anyio.sleep_forever()
+            raise AssertionError("cancelled transfer unexpectedly resumed")
+
+    store = _BlockingStoreClient(available={_BASE_MODEL})
+    downloader = _downloader(store, tmp_path)
+    base_without_sidecar = _shard_with_sidecar().model_copy(
+        update={
+            "model_card": _shard_with_sidecar().model_card.model_copy(
+                update={"runtime": None}
+            )
+        }
+    )
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(downloader.ensure_shard, base_without_sidecar)
+        await transfer_started.wait()
+        task_group.cancel_scope.cancel()
+
+    assert downloader._active_staging_model_ids == {}
+
+
+@pytest.mark.anyio
 async def test_companion_failure_does_not_fail_base_load(tmp_path: Path) -> None:
     """A sidecar that cannot be fetched logs loudly but the base still loads.
 
@@ -216,11 +336,19 @@ async def test_terminal_progress_waits_for_companions(tmp_path: Path) -> None:
 
     async def _recording_stage(
         model_id: str,
-        dest_path: Path,
+        staging_root: Path,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+        source_revision: str | None = None,
+        capacity_preflight: Callable[[int], Awaitable[None]] | None = None,
     ) -> Path:
         ordering.append(f"staged:{model_id}")
-        return await original_stage(model_id, dest_path, on_progress=on_progress)
+        return await original_stage(
+            model_id,
+            staging_root,
+            on_progress=on_progress,
+            source_revision=source_revision,
+            capacity_preflight=capacity_preflight,
+        )
 
     store.stage_shard = _recording_stage
     downloader.on_progress(_on_progress)

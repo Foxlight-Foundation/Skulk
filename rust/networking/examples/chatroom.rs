@@ -71,7 +71,7 @@ async fn main() {
         // on gossipsub outgoing
         match swarm.next().await {
             // on gossipsub incoming
-            Some(FromSwarm::Discovered { peer_id }) => {
+            Some(FromSwarm::Discovered { peer_id, .. }) => {
                 println!("\n\nconnected to {peer_id}\n\n")
             }
             Some(FromSwarm::Expired { peer_id }) => {

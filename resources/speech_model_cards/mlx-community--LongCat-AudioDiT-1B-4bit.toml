@@ -1,0 +1,89 @@
+model_id = "mlx-community/LongCat-AudioDiT-1B-4bit"
+n_layers = 24
+hidden_size = 1536
+supports_tensor = false
+tasks = ["TextToSpeech"]
+family = "longcat_audiodit"
+quantization = "4bit"
+base_model = "meituan-longcat/LongCat-AudioDiT-1B"
+capabilities = ["tts"]
+context_length = 0
+
+[audio]
+kind = "tts"
+default_response_format = "wav"
+response_formats = ["wav"]
+supports_streaming = false
+supports_realtime = false
+supports_voice_listing = true
+voices = ["angus", "ember", "hannah", "ian", "jake", "kite", "rufus", "samson", "sydney", "sylvie"]
+default_voice = "kite"
+supports_reference_audio = true
+sample_rates = [24000]
+
+[[audio.voice_catalog]]
+id = "angus"
+name = "Angus"
+preferred_languages = ["en"]
+reference_profile = "angus"
+
+[[audio.voice_catalog]]
+id = "ember"
+name = "Ember"
+preferred_languages = ["en"]
+reference_profile = "ember"
+
+[[audio.voice_catalog]]
+id = "hannah"
+name = "Hannah"
+preferred_languages = ["en"]
+reference_profile = "hannah"
+
+[[audio.voice_catalog]]
+id = "ian"
+name = "Ian"
+preferred_languages = ["en"]
+reference_profile = "ian"
+
+[[audio.voice_catalog]]
+id = "jake"
+name = "Jake"
+preferred_languages = ["en"]
+reference_profile = "jake"
+
+[[audio.voice_catalog]]
+id = "kite"
+name = "Kite"
+preferred_languages = ["en"]
+reference_profile = "kite"
+
+[[audio.voice_catalog]]
+id = "rufus"
+name = "Rufus"
+preferred_languages = ["en"]
+reference_profile = "rufus"
+
+[[audio.voice_catalog]]
+id = "samson"
+name = "Samson"
+preferred_languages = ["en"]
+reference_profile = "samson"
+
+[[audio.voice_catalog]]
+id = "sydney"
+name = "Sydney"
+preferred_languages = ["en"]
+reference_profile = "sydney"
+
+[[audio.voice_catalog]]
+id = "sylvie"
+name = "Sylvie"
+preferred_languages = ["en"]
+reference_profile = "sylvie"
+
+[placement]
+compatible_backends = ["mlx_audio", "mlx_audio-metal"]
+backend_preference = ["mlx_audio-metal", "mlx_audio"]
+
+[storage_size]
+in_bytes = 1417906487

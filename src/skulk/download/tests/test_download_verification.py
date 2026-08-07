@@ -1,5 +1,6 @@
 """Tests for download verification and cache behavior."""
 
+import hashlib
 import time
 from collections.abc import AsyncIterator
 from datetime import timedelta
@@ -171,6 +172,56 @@ class TestFileVerification:
             # Should return local file without attempting download
             assert result == local_file
             mock_session_factory.assert_not_called()
+
+    async def test_full_response_restarts_partial_download(
+        self, model_id: ModelId, tmp_path: Path
+    ) -> None:
+        """Truncate a partial when a server ignores the resume Range header."""
+        from skulk.download.download_utils import (
+            _download_file,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        target_dir = tmp_path / "downloads"
+        await aios.makedirs(target_dir, exist_ok=True)
+        partial_path = target_dir / "test.safetensors.partial"
+        partial_path.write_bytes(b"old-partial")
+        remote_content = b"complete-remote-object"
+        remote_hash = hashlib.sha256(remote_content).hexdigest()
+
+        with (
+            patch(
+                "skulk.download.download_utils.file_meta",
+                new_callable=AsyncMock,
+                return_value=(len(remote_content), remote_hash),
+            ),
+            patch(
+                "skulk.download.download_utils.create_http_session"
+            ) as mock_session_factory,
+        ):
+            mock_response = MagicMock()
+            mock_response.status = 200
+            mock_response.content.read = AsyncMock(  # pyright: ignore[reportAny]
+                side_effect=[remote_content, b""]
+            )
+            mock_session = MagicMock()
+            mock_session.get.return_value.__aenter__ = AsyncMock(  # pyright: ignore[reportAny]
+                return_value=mock_response
+            )
+            mock_session.get.return_value.__aexit__ = AsyncMock(  # pyright: ignore[reportAny]
+                return_value=None
+            )
+            mock_session_factory.return_value.__aenter__ = AsyncMock(  # pyright: ignore[reportAny]
+                return_value=mock_session
+            )
+            mock_session_factory.return_value.__aexit__ = AsyncMock(  # pyright: ignore[reportAny]
+                return_value=None
+            )
+
+            result = await _download_file(
+                model_id, "main", "test.safetensors", target_dir
+            )
+
+        assert result.read_bytes() == remote_content
 
 
 class TestFileListCache:

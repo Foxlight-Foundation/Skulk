@@ -10,7 +10,11 @@ from collections.abc import Callable, Iterator
 import loguru
 
 from skulk.shared.constants import preferred_env_value
-from skulk.shared.models.model_cards import RuntimeCapabilityCardConfig
+from skulk.shared.models.model_cards import (
+    RuntimeCapabilityCardConfig,
+    card_serves_speech,
+)
+from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.diagnostics import (
     RunnerDiagnosticContext,
     RunnerDiagnosticUpdate,
@@ -403,7 +407,6 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
         probe_node_backends,
         resolve_node_engine,
     )
-
     shard = bound_instance.bound_shard
     if shard.resolved_backend is not None:
         return engine_of(shard.resolved_backend)
@@ -417,6 +420,7 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
         platform_compatible_backends(
             placement.compatible_backends,
             card_serves_vision=shard.model_card.vision is not None,
+            card_serves_speech=card_serves_speech(shard.model_card),
         ),
         placement.backend_preference,
         probe_node_backends(),
@@ -429,6 +433,7 @@ def entrypoint(
     diagnostic_sender: MpSender[RunnerDiagnosticUpdate],
     task_receiver: MpReceiver[Task],
     cancel_receiver: MpReceiver[TaskId],
+    realtime_audio_receiver: MpReceiver[RealtimeAudioInputFrame],
     _logger: "loguru.Logger",
     context_token_limit: int | None = None,
 ) -> None:
@@ -489,6 +494,24 @@ def entrypoint(
                 bound_instance, event_sender, task_receiver, cancel_receiver
             )
             runner.main()
+        elif card_serves_speech(bound_instance.bound_shard.model_card):
+            resolved_text_engine = _resolve_text_engine(bound_instance)
+            if resolved_text_engine != "mlx_audio":
+                raise RuntimeError(
+                    "Speech model cards require an mlx_audio-capable serving "
+                    "node, but this node did not resolve the mlx_audio backend "
+                    f"for {bound_instance.bound_shard.model_card.model_id}."
+                )
+            from skulk.worker.runner.speech.runner import Runner as SpeechRunner
+
+            runner = SpeechRunner(
+                bound_instance,
+                event_sender,
+                task_receiver,
+                cancel_receiver,
+                realtime_audio_receiver,
+            )
+            runner.main()
         elif isinstance(bound_instance.bound_shard, RpcDonorShardMetadata):
             # RPC memory donor of a multi-node GGUF placement (#328): serves
             # ggml-rpc-server on the placement-stamped endpoint and lends GPU
@@ -505,56 +528,79 @@ def entrypoint(
                 context_token_limit=context_token_limit,
             )
             runner.main()
-        elif _resolve_text_engine(bound_instance) == "llama_cpp":
-            # Heterogeneous (non-MLX) text generation via in-process llama.cpp.
-            # Selected when the model card's compatible backends resolve to the
-            # llama_cpp engine on this node (e.g. a GGUF model on a GPU node that
-            # advertises llama_cpp-vulkan / llama_cpp-rocm). Single-node only.
-            from skulk.worker.runner.llama_cpp.runner import Runner as LlamaCppRunner
-
-            runner = LlamaCppRunner(
-                bound_instance,
-                event_sender,
-                task_receiver,
-                cancel_receiver,
-                context_token_limit=context_token_limit,
-            )
-            runner.main()
-        elif _resolve_text_engine(bound_instance) == "llama_server":
-            # Served-backend text generation: the worker launches an external
-            # llama-server subprocess and proxies its OpenAI API. Selected when the
-            # card's compatible backends resolve to the llama_server engine on this
-            # node (SKULK_LLAMA_SERVER_BIN set). The only path to native MTP
-            # (--spec-type draft-mtp). Single-node only.
-            from skulk.worker.runner.llama_server.runner import (
-                Runner as LlamaServerRunner,
-            )
-
-            runner = LlamaServerRunner(
-                bound_instance,
-                event_sender,
-                task_receiver,
-                cancel_receiver,
-                context_token_limit=context_token_limit,
-            )
-            runner.main()
         else:
-            from skulk.worker.engines.mlx.patches import apply_mlx_patches
-            from skulk.worker.runner.llm_inference.runner import Runner
+            resolved_text_engine = _resolve_text_engine(bound_instance)
+            if resolved_text_engine == "llama_cpp":
+                # Heterogeneous (non-MLX) text generation via in-process llama.cpp.
+                # Selected when the model card's compatible backends resolve to the
+                # llama_cpp engine on this node (e.g. a GGUF model on a GPU node that
+                # advertises llama_cpp-vulkan / llama_cpp-rocm). Single-node only.
+                from skulk.worker.runner.llama_cpp.runner import (
+                    Runner as LlamaCppRunner,
+                )
 
-            apply_mlx_patches()
+                runner = LlamaCppRunner(
+                    bound_instance,
+                    event_sender,
+                    task_receiver,
+                    cancel_receiver,
+                    context_token_limit=context_token_limit,
+                )
+                runner.main()
+            elif resolved_text_engine == "llama_server":
+                # Served-backend text generation: the worker launches an external
+                # llama-server subprocess and proxies its OpenAI API. Selected when
+                # the card's compatible backends resolve to the llama_server engine
+                # on this node (SKULK_LLAMA_SERVER_BIN set). The only path to native
+                # MTP (--spec-type draft-mtp). Single-node only.
+                from skulk.worker.runner.llama_server.runner import (
+                    Runner as LlamaServerRunner,
+                )
 
-            runner = Runner(
-                bound_instance,
-                event_sender,
-                task_receiver,
-                cancel_receiver,
-                context_token_limit=context_token_limit,
-            )
-            runner.main()
+                runner = LlamaServerRunner(
+                    bound_instance,
+                    event_sender,
+                    task_receiver,
+                    cancel_receiver,
+                    context_token_limit=context_token_limit,
+                )
+                runner.main()
+            elif resolved_text_engine == "vllm":
+                # Served-backend text generation via vLLM: the worker launches an
+                # external `vllm serve` subprocess and proxies its OpenAI API.
+                # Selected when the card's compatible backends resolve to the vllm
+                # engine on this node (SKULK_VLLM_BIN set). The GPU-serving fast
+                # path (continuous batching); single-node only in this slice.
+                from skulk.worker.runner.vllm.runner import Runner as VllmRunner
+
+                runner = VllmRunner(
+                    bound_instance,
+                    event_sender,
+                    task_receiver,
+                    cancel_receiver,
+                    context_token_limit=context_token_limit,
+                )
+                runner.main()
+            else:
+                from skulk.worker.engines.mlx.patches import apply_mlx_patches
+                from skulk.worker.runner.llm_inference.runner import Runner
+
+                apply_mlx_patches()
+
+                runner = Runner(
+                    bound_instance,
+                    event_sender,
+                    task_receiver,
+                    cancel_receiver,
+                    context_token_limit=context_token_limit,
+                )
+                runner.main()
 
     except ClosedResourceError:
-        logger.warning("Runner communication closed unexpectedly")
+        # The parent intentionally closes IPC during bounded teardown. Actual
+        # runner failures take the exception path below and retain warning-level
+        # diagnostics, while a closed parent channel is normal shutdown noise.
+        logger.info("Runner communication closed during shutdown")
     except Exception as e:
         record_runner_phase(
             "error",

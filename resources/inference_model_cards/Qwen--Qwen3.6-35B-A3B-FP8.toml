@@ -1,0 +1,49 @@
+# Qwen3.6 35B A3B for the vllm served engine (the "wowsers" slate: current-generation
+# models serving out of the box). Official Qwen FP8 release of the 35B-A3B MoE; ~37 GB of weights
+# fits 48 GB-class GPUs with modest KV headroom.
+# # MoE with ~3B active parameters: high decode speed for its quality
+# class. Ships native MTP heads like its dense sibling.
+# Model truth vs platform truth notes, mirroring the #635 starter-set
+# precedent:
+# - The repo is an image-text-to-text architecture; the MODEL supports vision.
+#   The vllm runner is text-only in this slice and the vision platform gate
+#   ({mlx, llama_cpp} in shared/backends.py) would make a vision-declaring
+#   vllm-only card unplaceable, so this card claims text serving only.
+#   Restore the vision declaration when the vllm runner gains image input.
+# - Tool calling is declared off: the vllm runner does not implement tool
+#   dispatch yet (#638); flip to the family default when it lands.
+# Architecture facts from the repo's config.json; context_length is the
+# config max_position_embeddings. storage_size is the full staging set.
+# `supports_tensor = false`: vLLM runs single-node in Skulk.
+model_id = "Qwen/Qwen3.6-35B-A3B-FP8"
+n_layers = 40
+hidden_size = 2048
+num_key_value_heads = 2
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "qwen"
+quantization = "fp8"
+base_model = "Qwen3.6 35B A3B"
+capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 262144
+trust_remote_code = false
+
+[runtime]
+# Native MTP through vLLM's unified "mtp" method: the checkpoint's own
+# prediction head (mtp_num_hidden_layers=1) drafts, no separate model.
+# Probe-measured on A100-80GB, 512-token greedy decode: 27B-FP8 2.01x
+# (48->97 tok/s, 77% acceptance), 35B-A3B-FP8 1.51x. Depth 2 because
+# per-position acceptance falls (86% pos0, 69% pos1) as the single MTP
+# layer re-runs for deeper positions.
+vllm_spec_method = "mtp"
+vllm_spec_num_tokens = 2
+
+[tooling]
+supports_tool_calling = false
+
+[placement]
+compatible_backends = ["vllm-cuda", "vllm-rocm"]
+backend_preference = ["vllm-cuda", "vllm-rocm"]
+
+[storage_size]
+in_bytes = 37492937900

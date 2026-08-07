@@ -1,0 +1,73 @@
+# Laguna XS 2.1 FP8 for the vllm served engine: Poolside's 33B-A3B-class MoE
+# coding/agentic model (40 layers, 256-expert sparse MLP, sliding-window +
+# full-attention mix), official FP8 release. ~35 GB of weights fits 48 GB-class
+# GPUs with KV headroom.
+# The demonstration card for card-absorbed vendor speculation schemes: Poolside
+# ships a separate block-parallel DFlash speculator, engaged below through the
+# same [runtime] vllm speculative fields as native MTP. vLLM >= 0.25.1 serves
+# both the target (native LagunaForCausalLM) and the DFlash drafter
+# (DFlashLagunaForCausalLM) natively; no vendor fork required.
+# Model truth vs platform truth notes, mirroring the #635/#649 precedent:
+# - Tool calling is declared off: the vllm runner does not implement tool
+#   dispatch yet (#638); the model itself is tool-trained (Poolside ships a
+#   poolside_v1 tool parser upstream). Flip when #638 lands.
+# - Thinking: <think>-delimited with a template enable_thinking toggle that
+#   DEFAULTS OFF, so unprompted requests get direct answers. Like the other
+#   vllm-slice reasoning cards, enabled thinking arrives inline (raw markers)
+#   until the runner maps cards to --reasoning-parser.
+# Architecture facts from the repo's config.json; context_length is the
+# config max_position_embeddings. storage_size is the full staging set.
+# `supports_tensor = false`: vLLM runs single-node in Skulk.
+# License: OpenMDW-1.1 (permissive; retain notices on redistribution).
+model_id = "poolside/Laguna-XS-2.1-FP8"
+n_layers = 40
+hidden_size = 2048
+num_key_value_heads = 8
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "laguna"
+quantization = "fp8"
+base_model = "Laguna XS 2.1"
+capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 262144
+trust_remote_code = false
+
+[reasoning]
+# Laguna is not a family the capability resolver knows, so without this the
+# resolved profile would advertise thinking with thinking_format "none".
+# Model truth: <think>-token-delimited with a template enable_thinking
+# toggle (matching the resolved shape of the Qwen3.6 vllm cards).
+supports_toggle = true
+format = "token_delimited"
+
+[runtime]
+# Poolside's DFlash block-parallel speculator, the vendor-published FP8-target
+# pairing (poolside/Laguna-XS-2.1-DFlash-FP8: a 5-layer sliding-window draft
+# reading target hidden states, block_size 16, BF16, ~0.9 GB). Depth 15 is the
+# vendor-recommended setting for the 16-token block (their measured 1.67-2.64x
+# on GSM8K/HumanEval, acceptance length 3.5-4.6). Fresh-box measured through
+# Skulk on A100-80GB (vLLM 0.25.1, temp 0, 300-token completions): 1.35x
+# single-stream (129 -> 174 tok/s median of 3), acceptance length 3.44; the
+# A100 lacks native FP8 (target runs the Marlin W8A16 path), so newer GPUs
+# should land closer to the vendor numbers. The draft repo resolves via
+# vLLM's own HF cache at engine start; store-staged drafts are a follow-up.
+# The speculator JIT-compiles its kernels through nvrtc and needs a
+# CUDA >= 12.8 toolchain on the node (12.4 headers lack __nv_fp8_e8m0).
+vllm_spec_method = "dflash"
+vllm_spec_num_tokens = 15
+vllm_spec_draft_repo = "poolside/Laguna-XS-2.1-DFlash-FP8"
+
+[tooling]
+supports_tool_calling = false
+
+[placement]
+# CUDA-only, unlike the rest of the vllm slate: the card's DFlash runtime
+# JIT-compiles its speculator through NVRTC (CUDA 12.8+), which has no ROCm
+# path in vLLM 0.25.1, so a vllm-rocm node would accept placement and then
+# fail at engine start. Add vllm-rocm back only after a ROCm validation
+# pass (with the DFlash runtime proven or carded off for that backend).
+compatible_backends = ["vllm-cuda"]
+backend_preference = ["vllm-cuda"]
+
+[storage_size]
+in_bytes = 35329658390

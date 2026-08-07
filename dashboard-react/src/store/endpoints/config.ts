@@ -17,6 +17,19 @@ export interface StoreConfig {
   };
 }
 
+/**
+ * Persisted model-store configuration returned by `GET /config`.
+ *
+ * Skulk returns the YAML mapping exactly as written, so fields with Pydantic
+ * defaults can be absent even though the running server has effective values
+ * for them. Consumers must normalize this shape before rendering it.
+ */
+export interface PersistedStoreConfig
+  extends Partial<Omit<StoreConfig, 'download' | 'staging'>> {
+  download?: Partial<StoreConfig['download']>;
+  staging?: Partial<StoreConfig['staging']>;
+}
+
 export interface InferenceConfig {
   kv_cache_backend: string;
 }
@@ -26,16 +39,48 @@ export interface LoggingConfig {
   ingest_url: string;
 }
 
+export interface ExperimentsConfig {
+  tts_streaming: boolean;
+  /** Deprecated compatibility field; realtime STT is capability-gated. */
+  stt_realtime: boolean;
+  speech_translation: boolean;
+}
+
+/** Consent state for opt-in field telemetry (persisted in skulk.yaml). */
+export type TelemetryConsent = 'unasked' | 'enabled' | 'disabled';
+
+/**
+ * Field-telemetry settings. `consent` gates anonymous performance +
+ * reliability samples; `diagnostics_consent` is the SEPARATE gate for
+ * future crash diagnostics. `install_id` is the anonymous rate-limit key
+ * and the deletion capability (rotatable).
+ */
+export interface TelemetryConfig {
+  consent: TelemetryConsent;
+  diagnostics_consent: TelemetryConsent;
+  install_id: string;
+  consented_at: string;
+  consented_version: string;
+  ingest_url: string;
+}
+
 export interface FullConfig {
-  model_store?: StoreConfig;
+  model_store?: PersistedStoreConfig;
   inference?: InferenceConfig;
   logging?: LoggingConfig;
+  experiments?: ExperimentsConfig;
+  telemetry?: TelemetryConfig;
   hf_token?: string;
 }
 
 export interface EffectiveConfig {
   kv_cache_backend: string;
   has_hf_token?: boolean;
+  /**
+   * True when the node runs with SKULK_ENABLE_EXPERIMENTAL_MODE. Gates the
+   * dashboard's Experiments settings section; memory-agnostic.
+   */
+  experimental_mode_enabled?: boolean;
 }
 
 export interface ConfigResponse {

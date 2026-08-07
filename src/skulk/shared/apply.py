@@ -41,7 +41,13 @@ from skulk.shared.types.profiling import (
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import Task, TaskId, TaskStatus
 from skulk.shared.types.topology import Connection, RDMAConnection
-from skulk.shared.types.worker.downloads import DownloadProgress
+from skulk.shared.types.worker.downloads import (
+    DownloadCompleted,
+    DownloadFailed,
+    DownloadOngoing,
+    DownloadPending,
+    DownloadProgress,
+)
 from skulk.shared.types.worker.instances import Instance, InstanceId
 from skulk.shared.types.worker.runners import RunnerId, RunnerShutdown, RunnerStatus
 from skulk.utils.info_gatherer.info_gatherer import (
@@ -52,8 +58,10 @@ from skulk.utils.info_gatherer.info_gatherer import (
     MactopMetrics,
     MemoryUsage,
     MiscData,
+    NodeCapabilities,
     NodeConfig,
     NodeDiskUsage,
+    NodeHeartbeat,
     NodeNetworkInterfaces,
     RdmaCtlStatus,
     StaticNodeInformation,
@@ -104,13 +112,30 @@ def event_apply(event: Event, state: State) -> State:
         case TracingStateChanged():
             return state.model_copy(update={"tracing_enabled": event.enabled})
         case StateSnapshotHydrated():
-            return event.state
+            return _sanitize_snapshot_downloads(event.state)
+
+
+def _sanitize_snapshot_downloads(snapshot: State) -> State:
+    """Remove legacy transient download progress from one durable snapshot."""
+
+    downloads = {
+        node_id: [
+            progress
+            for progress in progresses
+            if isinstance(progress, (DownloadCompleted, DownloadFailed))
+        ]
+        for node_id, progresses in snapshot.downloads.items()
+    }
+    downloads = {
+        node_id: progresses for node_id, progresses in downloads.items() if progresses
+    }
+    return snapshot.model_copy(update={"downloads": downloads})
 
 
 def apply(state: State, event: IndexedEvent) -> State:
     if isinstance(event.event, StateSnapshotHydrated):
         assert event.event.state.last_event_applied_idx == event.idx
-        return event.event.state
+        return _sanitize_snapshot_downloads(event.event.state)
 
     # Just to test that events are only applied in correct order
     if state.last_event_applied_idx != event.idx - 1:
@@ -123,13 +148,36 @@ def apply(state: State, event: IndexedEvent) -> State:
 
 
 def apply_node_download_progress(event: NodeDownloadProgress, state: State) -> State:
-    """
-    Update or add a node download progress to state.
+    """Apply only durable download outcomes to event-sourced state.
+
+    ``DownloadOngoing`` is accepted solely for replay compatibility with older
+    logs and has no state effect. ``DownloadPending`` represents a rare durable
+    reset/start decision and removes an older terminal outcome. Current progress
+    itself lives in ``TelemetryView``.
     """
     dp = event.download_progress
     node_id = dp.node_id
 
     current = list(state.downloads.get(node_id, ()))
+
+    if isinstance(dp, DownloadOngoing):
+        return state
+    if isinstance(dp, DownloadPending):
+        retained = [
+            existing_dp
+            for existing_dp in current
+            if existing_dp.shard_metadata.model_card.model_id
+            != dp.shard_metadata.model_card.model_id
+        ]
+        if len(retained) == len(current):
+            return state
+        new_downloads = dict(state.downloads)
+        if retained:
+            new_downloads[node_id] = retained
+        else:
+            new_downloads.pop(node_id, None)
+        return state.model_copy(update={"downloads": new_downloads})
+    assert isinstance(dp, (DownloadCompleted, DownloadFailed))
 
     replaced = False
     for i, existing_dp in enumerate(current):
@@ -411,6 +459,16 @@ def apply_node_gathered_info(event: NodeGatheredInfo, state: State) -> State:
             pass
         case NodeConfig():
             pass
+        case NodeCapabilities():
+            # Telemetry-plane only (fabric-citizenship): extension-advertised
+            # capability tags ride the TELEMETRY topic into the TelemetryView,
+            # never the event log. No-op here so the GatheredInfo match stays
+            # exhaustive; a stray log-path delivery is harmless.
+            pass
+        case NodeHeartbeat():
+            # Dedicated liveness belongs only in TelemetryView. This legacy
+            # event path remains a no-op so the GatheredInfo union is exhaustive.
+            pass
         case MiscData():
             # Telemetry plane since #279 slice 3 (identity friendly-name).
             pass
@@ -487,4 +545,37 @@ def apply_topology_edge_deleted(event: TopologyEdgeDeleted, state: State) -> Sta
     topology = copy.deepcopy(state.topology)
     topology.remove_connection(event.conn)
     # TODO: Clean up removing the reverse connection
+    # An edge can be the first state event mentioning a peer (a session edge
+    # for a connection that authenticated before the peer ever published
+    # NodeGatheredInfo), and add_connection mints a topology node for it. If
+    # that peer dies before its first publish it never stamps last_seen, so
+    # the master's timeout loop can never reap it and it would linger as a
+    # floating phantom member. When the last edge POINTING AT such a
+    # never-a-member node is deleted, drop the node itself: in-edges are
+    # what live observers maintain toward the peer, while any out-edges are
+    # the dead peer's own emissions that nobody remains to delete (they
+    # would otherwise pin the phantom forever) and removal clears them.
+    # Real members always carry last_seen and are reaped by NodeTimedOut
+    # instead (#671).
+    # Reap seeds with both endpoints and cascades: removing a phantom
+    # clears its dangling out-edges, which can orphan further never-member
+    # nodes those edges pointed at, including nodes that are not endpoints
+    # of this event at all. Reaping a node here is safe even if it is
+    # actually alive: session-edge EMISSION is membership-gated on the
+    # worker side, so a node without last_seen has no legitimate live edges
+    # in state to lose, and a live node whose entry was removed wrongly is
+    # re-added by its NodeGatheredInfo and re-edged by its peers' self-heal
+    # sweeps within seconds (PR #674 review rounds).
+    candidates: list[NodeId] = [event.conn.sink, event.conn.source]
+    while candidates:
+        candidate = candidates.pop()
+        if (
+            candidate in state.last_seen
+            or not topology.contains_node(candidate)
+            or not topology.node_has_no_incoming_edges(candidate)
+        ):
+            continue
+        unblocked = [conn.sink for conn in topology.out_edges(candidate)]
+        topology.remove_node(candidate)
+        candidates.extend(unblocked)
     return state.model_copy(update={"topology": topology})

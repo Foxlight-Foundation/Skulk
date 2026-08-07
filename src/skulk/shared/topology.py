@@ -89,6 +89,22 @@ class Topology:
     def contains_node(self, node_id: NodeId) -> bool:
         return node_id in self._vertex_indices
 
+    def node_has_no_incoming_edges(self, node_id: NodeId) -> bool:
+        """Whether no other node's edge points at this node.
+
+        An absent node counts as having none. Used by the edge-deletion
+        apply path to reap topology nodes that were minted by an edge alone
+        and never became members (#671): every live observer maintains an
+        edge TOWARD such a peer, so zero in-edges means no observer still
+        claims a connection. The peer's own OUT-edges are deliberately not
+        counted: a peer that emitted its own session edge and then died
+        leaves them dangling with nobody alive to delete them, and
+        ``remove_node`` clears them along with the node.
+        """
+        if node_id not in self._vertex_indices:
+            return True
+        return self._graph.in_degree(self._vertex_indices[node_id]) == 0
+
     def add_connection(self, conn: Connection) -> None:
         source, sink, edge = conn.source, conn.sink, conn.edge
         del conn

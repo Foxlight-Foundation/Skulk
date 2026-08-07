@@ -6,14 +6,15 @@ sidebar_position: 30
 
 <!-- Copyright 2025 Foxlight Foundation -->
 
-A Skulk cluster moves three very different kinds of traffic: the raw tensors that
-flow between the pieces of a model, the decisions that keep the cluster coherent,
-and the generated output on its way back to whoever asked. Skulk carries each on
-its own **plane**, so the high-volume traffic never clogs the low-volume traffic
-that the cluster's correctness depends on. This separation is what lets Skulk be
-a general fabric for multi-node compute rather than a single-purpose server.
+A Skulk cluster moves four different kinds of traffic: raw tensors between the
+pieces of a model, durable decisions that keep the cluster coherent, live
+observations about nodes, and request-scoped payloads on their way to or from a
+model. Skulk carries each on its own **plane**, so high-volume or replaceable
+traffic never clogs the ordered decisions that cluster correctness depends on.
+This separation is what lets Skulk be a general fabric for multi-node compute
+rather than a single-purpose server.
 
-## The three planes
+## The four planes
 
 ### Compute plane
 
@@ -32,21 +33,52 @@ exactly the same tokens. None of that touches the other planes.
 ### Control plane
 
 The control plane is how the cluster stays coherent: which node is the master,
-where each model is placed, the lifecycle of each request, and the health of every
-node. It runs over libp2p gossip. This traffic is low-volume but order-sensitive,
-because cluster decisions have to be applied the same way everywhere, so it is
-kept deliberately separate from the firehose of generated tokens.
+where each model is placed, request lifecycle transitions, membership decisions,
+and cluster settings. It runs over libp2p gossip. This traffic is low-volume but
+order-sensitive because durable decisions have to be applied the same way
+everywhere. The master indexes and persists only an explicit allowlist of these
+control facts; payload and observational event types are rejected before
+ordering, retention, replay, or global broadcast.
+
+### Telemetry plane
+
+The telemetry plane carries replaceable live observations such as heartbeat,
+memory, disk, accelerator, download progress, and capability readings. Each
+replica keeps only the newest value for a node and reading type in a separate
+`TelemetryView`. Telemetry is gossiped last-write-wins, never indexed by the
+master, and never written to the event log. Drops and duplicates therefore
+affect freshness rather than cluster history.
+
+The plane is isolated from control traffic end to end. On the wire, telemetry
+rides its own gossipsub behavior with its own protocol identifier, so it has
+separate protocol and handler queues from control and election messages:
+control fan-out cannot starve telemetry, and telemetry pressure cannot consume
+control or election capacity. On the sending side, admission is a bounded
+latest-value map (256 keys, one per node and reading type) where a newer
+reading replaces the stale pending one, drained through a one-packet egress
+queue: at most one serialized telemetry packet ever waits on the network.
+
+That design is **lossy by design**. When the plane is under pressure, older
+pending readings are coalesced or dropped and the next reading supersedes them;
+nothing is retried, and a drop costs freshness only. The one telemetry-adjacent
+fact that does enter durable cluster state is the terminal outcome of a model
+download (completed or failed), because placement and the operator view depend
+on it being an ordered decision rather than a freshness-best-effort reading;
+download *progress* and every other reading stay on this plane and in
+`TelemetryView` only.
 
 ### Data plane
 
-The data plane carries generated output (the tokens, and other per-request
-chunks) from the node running the model back to the node that received the API
-request. It always goes straight to the node that needs it: it never passes
-through the master or gets written to the cluster's decision log. (On Zenoh it is
-addressed point-to-point to that one node; on the gossip transport it is published
-on a shared topic that only the owning node consumes, see below.) Keeping output
-off the control plane is what stops a busy model from drowning out the cluster's
-own coordination.
+The data plane carries request-scoped model output, provider streams, image and
+speech input, realtime audio, and completed diagnostic trace payloads. It never
+passes through the master or gets written to the cluster's decision log. On
+Zenoh, packets are addressed to the owning API or selected worker. On the gossip
+fallback, permitted data topics are broadcast over the trusted fabric with a
+target tag and receiving components discard packets not addressed to their node
+before assembly or persistence; private reference audio and remote realtime
+audio require Zenoh and are unavailable on that fallback. Keeping payloads off
+the control plane is what stops a busy model or large upload from drowning out
+cluster coordination.
 
 ## Where the planes run, and the trust model
 
@@ -70,20 +102,30 @@ The data plane can run over either of two transports:
 - **libp2p gossip** (the same stack as the control plane), or
 - **Eclipse Zenoh**, a transport built specifically for streaming data.
 
-On Zenoh, each generating node publishes a request's output to a key addressed to
-the one node that asked for it, and every node listens only for its own key, so
-output is delivered directly instead of broadcast. Zenoh also preserves the order
-of a single producer's messages, which matters for the next section. When Zenoh
-is configured (a listen endpoint is set), Skulk uses it for the data plane; a node
-with no Zenoh configuration falls back to gossip, and `SKULK_ZENOH_DATA_PLANE`
-forces the choice either way.
+On Zenoh, each producer publishes to a key addressed to the API or worker that
+owns the stream, and every node listens only for its own key, so packets are
+delivered directly instead of broadcast. This includes generated `DATA`, generic
+`PROVIDER_DATA`, `REALTIME_AUDIO`, `SPEECH_MEDIA`, `VISION_MEDIA`, and diagnostic
+`TRACE_DATA`. Zenoh also preserves the order of a single producer's messages,
+which matters for the next section. Zenoh is the shipping default, including on
+a fresh install. With no transport settings, Skulk binds Zenoh to its preferred
+private-LAN or CGNAT fabric IPv4 address (or loopback when offline or
+public-only) and uses local multicast scouting to discover other zero-config
+nodes. Supplying `SKULK_ZENOH_CONNECT` switches to explicit peer endpoints for
+routed or Tailscale deployments; `SKULK_ZENOH_LISTEN` overrides the selected
+local listener and is required to bind a public address. Set
+`SKULK_ZENOH_DATA_PLANE=0` only to force the legacy gossip fallback.
 
 **Every node in a cluster must use the same data-plane transport.** Skulk does not
 bridge the two, so a partially configured fleet (Zenoh on some nodes, gossip on
-others) silently drops output for any request whose serving node and requesting
-node land on opposite transports, and that stream ends only by timeout. Configure
-the whole fleet the same way (the simplest rule: either set a Zenoh listen
-endpoint on every node, or on none).
+others) cannot deliver output for a request whose serving node and requesting
+node land on opposite transports. Each node advertises its resolved transport in
+`nodeResources`; `/state` marks every live node with the error-level
+`data_transport_mismatch` health reason when both transports are present, and the
+dashboard and node diagnostics show the same condition. This detection does not
+bridge the transports or make mixed operation safe. Configure any legacy
+gossipsub override consistently across the whole fleet, restart it, and confirm
+that `nodeResources` reports one transport.
 
 Zenoh sessions are kept isolated per cluster: each cluster prefixes its keys with
 a segment derived from its libp2p network namespace (`SKULK_LIBP2P_NAMESPACE`), so

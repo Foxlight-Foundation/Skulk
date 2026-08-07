@@ -1,11 +1,12 @@
 # pyright: reportUnusedImport = false
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 
 from skulk.shared.models.capabilities import is_gemma4_family
 from skulk.shared.types.chunks import InputImageChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.tasks import (
+    AudioTranscription,
     CancelTask,
     ConnectToGroup,
     CreateRunner,
@@ -13,7 +14,9 @@ from skulk.shared.types.tasks import (
     ImageEdits,
     ImageGeneration,
     LoadModel,
+    RealtimeAudioTranscription,
     Shutdown,
+    SpeechSynthesis,
     StartWarmup,
     Task,
     TaskId,
@@ -66,6 +69,7 @@ def plan(
     all_runners: Mapping[RunnerId, RunnerStatus],  # all global
     tasks: Mapping[TaskId, Task],
     input_chunk_buffer: Mapping[CommandId, Mapping[int, InputImageChunk]] | None = None,
+    speech_media_ready: Set[CommandId] | None = None,
 ) -> Task | None:
     # Python short circuiting OR logic should evaluate these sequentially.
     return (
@@ -80,7 +84,13 @@ def plan(
         or _init_distributed_backend(runners, all_runners)
         or _load_model(runners, all_runners, global_download_status)
         or _ready_to_warmup(runners, all_runners)
-        or _pending_tasks(runners, tasks, all_runners, input_chunk_buffer or {})
+        or _pending_tasks(
+            runners,
+            tasks,
+            all_runners,
+            input_chunk_buffer or {},
+            speech_media_ready or set(),
+        )
     )
 
 
@@ -361,11 +371,21 @@ def _pending_tasks(
     tasks: Mapping[TaskId, Task],
     all_runners: Mapping[RunnerId, RunnerStatus],
     input_chunk_buffer: Mapping[CommandId, Mapping[int, InputImageChunk]] | None,
+    speech_media_ready: Set[CommandId],
 ) -> Task | None:
     for task in tasks.values():
         # Forward inference tasks to runners
         if not isinstance(
-            task, (TextGeneration, ImageGeneration, ImageEdits, TextEmbedding)
+            task,
+            (
+                TextGeneration,
+                ImageGeneration,
+                ImageEdits,
+                TextEmbedding,
+                SpeechSynthesis,
+                AudioTranscription,
+                RealtimeAudioTranscription,
+            ),
         ):
             continue
         if task.task_status not in (TaskStatus.Pending, TaskStatus.Running):
@@ -381,6 +401,18 @@ def _pending_tasks(
             received = len(input_chunk_buffer.get(cmd_id, {}))
             if received < expected_image_chunks:
                 continue  # Wait for all chunks to arrive
+
+        if (
+            (
+                isinstance(task, SpeechSynthesis)
+                and task.task_params.reference_audio_present
+            )
+            or (
+                isinstance(task, AudioTranscription)
+                and task.task_params.total_input_chunks > 0
+            )
+        ) and task.command_id not in speech_media_ready:
+            continue
 
         for runner in runners.values():
             if task.instance_id != runner.bound_instance.instance.instance_id:

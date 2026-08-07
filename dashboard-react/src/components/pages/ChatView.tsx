@@ -3,21 +3,48 @@ import { v4 as uuidv4 } from 'uuid';
 import styled from 'styled-components';
 import { ChatMessages } from '../chat/ChatMessages';
 import { ChatForm } from '../chat/ChatForm';
-import type { ChatMessage } from '../../types/chat';
-import type { ChatUploadedFile } from '../../types/chat';
-import type { ModelInfo } from '../../types/models';
+import type {
+  AudioResponseFormat,
+  ChatMessage,
+  ChatSpeechModelOption,
+  ChatUploadedFile,
+  ChatVoiceOption,
+} from '../../types/chat';
+import { modelSupportsTextChat, type ModelInfo } from '../../types/models';
 import type { InstanceCardData } from '../layout/InstancePanel';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import { chatActions } from '../../store/slices/chatSlice';
 import { store } from '../../store';
-import { useSkulkTranslation } from '../../i18n/tolgee';
+import { tolgee, useSkulkTranslation } from '../../i18n/tolgee';
+import {
+  canUseStreamingSpeechPlayback,
+  resyncVisibleSpeech,
+  SPEECH_PAUSE_MARKER,
+  SPEECH_PAUSE_SECONDS,
+  SpeechSentenceQueue,
+  splitCompleteSpeechSentences,
+  StreamingSpeechPlayback,
+} from '../../audio/streamingSpeechPlayback';
+import {
+  createPinnedSpeechVoiceSelector,
+  fetchSpeechVoiceCatalog,
+} from '../../audio/speechVoiceSelection';
+import {
+  batchSpeechMaxTokens,
+  buildSpeechSynthesisRequest,
+  DASHBOARD_SPEECH_SEED,
+  speechLanguageForDashboardLocale,
+} from '../../audio/speechSynthesisRequest';
+import { buildApiMessages, type ApiMessagePayload } from './chatApiPayload';
 
 /* ── Types ────────────────────────────────────────────── */
 
 export interface ChatViewProps {
   /** Ready instances the user can chat with. */
   readyInstances: InstanceCardData[];
+  /** Whether this API node currently advertises the realtime STT provider. */
+  realtimeTranscriptionAvailable?: boolean;
   className?: string;
 }
 
@@ -92,6 +119,19 @@ const HARMONY_CONTROL_TOKENS = [
   '<|constrain|>',
 ];
 const MAX_TOOL_ROUNDS = 4;
+const AUDIO_RESPONSE_FORMATS: readonly AudioResponseFormat[] = [
+  'mp3',
+  'wav',
+  'flac',
+  'ogg',
+  'opus',
+  'pcm',
+];
+
+type StreamingSpeechResponseSession = {
+  playback: StreamingSpeechPlayback;
+  useEncodedFallback: boolean;
+};
 const GPT_OSS_BROWSER_TOOLS = {
   web_search: {
     type: 'function',
@@ -163,7 +203,59 @@ const GPT_OSS_BROWSER_TOOLS = {
 
 type BuiltinBrowserToolName = keyof typeof GPT_OSS_BROWSER_TOOLS;
 
-type ApiMessagePayload = Record<string, unknown>;
+function isAudioResponseFormat(value: string | null | undefined): value is AudioResponseFormat {
+  return AUDIO_RESPONSE_FORMATS.includes(value as AudioResponseFormat);
+}
+
+function shortModelLabel(modelId: string): string {
+  const parts = modelId.split('/');
+  return parts[parts.length - 1] || modelId;
+}
+
+function speechModelOption(modelId: string, model: ModelInfo | undefined): ChatSpeechModelOption {
+  const resolved = model?.resolved_capabilities;
+  const responseFormats = (
+    resolved?.audio_response_formats
+      ?? model?.audio?.response_formats
+      ?? []
+  ).filter(isAudioResponseFormat);
+  const resolvedDefault = resolved?.default_audio_response_format ?? null;
+  const cardDefault = model?.audio?.default_response_format ?? null;
+  const defaultResponseFormat: AudioResponseFormat = isAudioResponseFormat(resolvedDefault)
+    ? resolvedDefault
+    : isAudioResponseFormat(cardDefault)
+      ? cardDefault
+      : responseFormats[0] ?? 'mp3';
+  const formats = responseFormats.length > 0 ? responseFormats : [defaultResponseFormat];
+  return {
+    modelId,
+    label: shortModelLabel(modelId),
+    defaultResponseFormat,
+    responseFormats: formats,
+    supportsVoiceListing: model?.audio?.supports_voice_listing ?? false,
+    defaultVoice: model?.audio?.default_voice ?? null,
+    supportsStreaming: model?.audio?.supports_streaming ?? false,
+    supportsReferenceAudio: model?.audio?.supports_reference_audio ?? false,
+    supportsRealtime: Boolean(
+      resolved?.supports_realtime_audio
+        && model?.audio?.supports_streaming
+        && model.audio.supports_realtime,
+    ),
+  };
+}
+
+async function responseErrorMessage(response: Response): Promise<string> {
+  const body = await response.text().catch(() => '');
+  if (!body) return `HTTP ${response.status}`;
+  try {
+    const parsed = JSON.parse(body) as { detail?: unknown; error?: { message?: unknown } };
+    if (typeof parsed.detail === 'string') return parsed.detail;
+    if (typeof parsed.error?.message === 'string') return parsed.error.message;
+  } catch {
+    // Fall through to the raw response body.
+  }
+  return body;
+}
 
 interface StreamToolCall {
   id: string;
@@ -310,24 +402,6 @@ function mergeThinkingContent(existing: string, incoming: string): string {
     return existing;
   }
   return existing + incoming;
-}
-
-function buildApiMessages(messages: ChatMessage[]): ApiMessagePayload[] {
-  return messages.map((message) => {
-    if (message.attachments?.some((attachment) => attachment.type.startsWith('image/') && attachment.preview)) {
-      const parts: Array<{ type: string; text?: string; image_url?: { url: string } }> = [];
-      for (const attachment of message.attachments) {
-        if (attachment.type.startsWith('image/') && attachment.preview) {
-          parts.push({ type: 'image_url', image_url: { url: attachment.preview } });
-        }
-      }
-      if (message.content) {
-        parts.push({ type: 'text', text: message.content });
-      }
-      return { role: message.role, content: parts };
-    }
-    return { role: message.role, content: message.content };
-  });
 }
 
 function normalizeToolArguments(rawArguments: string | undefined): { query: string; top_k?: number } {
@@ -488,10 +562,21 @@ async function readUploadedImageAsDataUrl(file: ChatUploadedFile): Promise<strin
 
 /* ── Component ────────────────────────────────────────── */
 
-export function ChatView({ readyInstances, className }: ChatViewProps) {
+export function ChatView({
+  readyInstances,
+  realtimeTranscriptionAvailable = false,
+  className,
+}: ChatViewProps) {
   const { t } = useSkulkTranslation();
+  const speechLanguage = speechLanguageForDashboardLocale(tolgee.getLanguage());
   // Store state
   const selectedModelId = useAppSelector((s) => s.chat.selectedModelId);
+  const selectedTranscriptionModelId = useAppSelector((s) => s.chat.selectedTranscriptionModelId);
+  const selectedSpeechModelId = useAppSelector((s) => s.chat.selectedSpeechModelId);
+  const selectedVoice = useAppSelector((s) => s.chat.selectedVoice);
+  const autoSpeakAssistant = useAppSelector((s) => s.chat.autoSpeakAssistant);
+  const realtimeVoiceEnabled = useAppSelector((s) => s.chat.realtimeVoiceEnabled);
+  const autoSubmitVoice = useAppSelector((s) => s.chat.autoSubmitVoice);
   const activeConversationId = useAppSelector((s) => s.chat.activeConversationId);
   const messages = useAppSelector((s) =>
     s.chat.activeConversationId
@@ -499,6 +584,18 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
       : EMPTY_MESSAGES,
   );
   const selectModel = (modelId: string) => dispatch(chatActions.selectModel(modelId));
+  const selectTranscriptionModel = (modelId: string | null) =>
+    dispatch(chatActions.selectTranscriptionModel(modelId));
+  const selectSpeechModel = (modelId: string | null) =>
+    dispatch(chatActions.selectSpeechModel(modelId));
+  const setSelectedVoice = (voice: string | null) =>
+    dispatch(chatActions.setSelectedVoice(voice));
+  const setAutoSpeakAssistant = (enabled: boolean) =>
+    dispatch(chatActions.setAutoSpeakAssistant(enabled));
+  const setRealtimeVoiceEnabled = (enabled: boolean) =>
+    dispatch(chatActions.setRealtimeVoiceEnabled(enabled));
+  const setAutoSubmitVoice = (enabled: boolean) =>
+    dispatch(chatActions.setAutoSubmitVoice(enabled));
   const addMessage = (msg: ChatMessage) => dispatch(chatActions.addMessage(msg));
   const deleteMessageAction = (id: string) => dispatch(chatActions.deleteMessage(id));
   const editMessageAction = (messageId: string, content: string) =>
@@ -519,6 +616,19 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const [modelImageInputSupport, setModelImageInputSupport] = useState<Record<string, boolean>>({});
   const [modelBuiltinTools, setModelBuiltinTools] = useState<Record<string, string[]>>({});
   const [modelContextLengths, setModelContextLengths] = useState<Record<string, number>>({});
+  const [modelCatalogById, setModelCatalogById] = useState<Record<string, ModelInfo>>({});
+  const [speechError, setSpeechError] = useState<string | null>(null);
+  const [voiceCatalogError, setVoiceCatalogError] = useState<string | null>(null);
+  const [voiceOptions, setVoiceOptions] = useState<ChatVoiceOption[]>([]);
+  const [isVoiceCatalogLoading, setIsVoiceCatalogLoading] = useState(false);
+  const [referenceAudioFile, setReferenceAudioFile] = useState<File | null>(null);
+  const [referenceAudioText, setReferenceAudioText] = useState('');
+  const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
+  const [isAutoSpeaking, setIsAutoSpeaking] = useState(false);
+  const audioPlaybackRef = useRef<HTMLAudioElement | null>(null);
+  const audioObjectUrlRef = useRef<string | null>(null);
+  const streamingPlaybackRef = useRef<StreamingSpeechPlayback | null>(null);
+  const speechSentenceQueueRef = useRef<SpeechSentenceQueue | null>(null);
 
   // Restore scroll position after store hydration + DOM render
   const dispatch = useAppDispatch();
@@ -577,8 +687,10 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
         const imageSupport: Record<string, boolean> = {};
         const builtinTools: Record<string, string[]> = {};
         const ctxLens: Record<string, number> = {};
+        const catalogById: Record<string, ModelInfo> = {};
         for (const m of data.data ?? []) {
           if (m.id) {
+            catalogById[m.id] = m;
             toggleSupport[m.id] = m.resolved_capabilities?.supports_thinking_toggle ?? false;
             imageSupport[m.id] = m.resolved_capabilities?.supports_image_input ?? false;
             builtinTools[m.id] = m.tooling?.builtin_tools
@@ -591,6 +703,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
         setModelImageInputSupport(imageSupport);
         setModelBuiltinTools(builtinTools);
         setModelContextLengths(ctxLens);
+        setModelCatalogById(catalogById);
       } catch { /* ignore */ }
     })();
   }, []);
@@ -613,18 +726,85 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     }
   }, [supportsThinking, thinkingEnabled]);
 
-  // Ready models
-  const readyModels = useMemo(
-    () => readyInstances.filter((i) => (i.status === 'ready' || i.status === 'running') && !i.isEmbedding),
+  const readyRunnableInstances = useMemo(
+    () => readyInstances.filter((i) => i.status === 'ready' || i.status === 'running'),
     [readyInstances],
   );
 
+  // Ready models
+  const readyModels = useMemo(
+    () => readyRunnableInstances.filter((i) => !i.isEmbedding && modelSupportsTextChat(modelCatalogById[i.modelId])),
+    [modelCatalogById, readyRunnableInstances],
+  );
+
+  const readyTranscriptionModels = useMemo(() => {
+    const seen = new Set<string>();
+    const options: ChatSpeechModelOption[] = [];
+    for (const instance of readyRunnableInstances) {
+      const model = modelCatalogById[instance.modelId];
+      if (
+        !model?.resolved_capabilities?.supports_transcription
+        && !model?.resolved_capabilities?.supports_speech_translation
+      ) {
+        continue;
+      }
+      if (seen.has(instance.modelId)) continue;
+      seen.add(instance.modelId);
+      options.push(speechModelOption(instance.modelId, model));
+    }
+    return options;
+  }, [modelCatalogById, readyRunnableInstances]);
+
+  const readySpeechModels = useMemo(() => {
+    const seen = new Set<string>();
+    const options: ChatSpeechModelOption[] = [];
+    for (const instance of readyRunnableInstances) {
+      const model = modelCatalogById[instance.modelId];
+      if (!model?.resolved_capabilities?.supports_speech_synthesis) {
+        continue;
+      }
+      if (seen.has(instance.modelId)) continue;
+      seen.add(instance.modelId);
+      options.push(speechModelOption(instance.modelId, model));
+    }
+    return options;
+  }, [modelCatalogById, readyRunnableInstances]);
+
   // Auto-select first ready model if none selected
   useEffect(() => {
-    if (!selectedModelId && readyModels.length > 0) {
+    if (
+      readyModels.length > 0
+      && (!selectedModelId || !readyModels.some((model) => model.modelId === selectedModelId))
+    ) {
       selectModel(readyModels[0].modelId);
     }
   }, [selectedModelId, readyModels, selectModel]);
+
+  useEffect(() => {
+    if (readyTranscriptionModels.length === 0) {
+      if (selectedTranscriptionModelId) selectTranscriptionModel(null);
+      return;
+    }
+    if (
+      !selectedTranscriptionModelId
+      || !readyTranscriptionModels.some((model) => model.modelId === selectedTranscriptionModelId)
+    ) {
+      selectTranscriptionModel(readyTranscriptionModels[0].modelId);
+    }
+  }, [readyTranscriptionModels, selectedTranscriptionModelId, selectTranscriptionModel]);
+
+  useEffect(() => {
+    if (readySpeechModels.length === 0) {
+      if (selectedSpeechModelId) selectSpeechModel(null);
+      return;
+    }
+    if (
+      !selectedSpeechModelId
+      || !readySpeechModels.some((model) => model.modelId === selectedSpeechModelId)
+    ) {
+      selectSpeechModel(readySpeechModels[0].modelId);
+    }
+  }, [readySpeechModels, selectedSpeechModelId, selectSpeechModel]);
 
   const selectedLabel = useMemo(() => {
     if (!selectedModelId) return undefined;
@@ -632,8 +812,336 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     return parts[parts.length - 1];
   }, [selectedModelId]);
 
+  const selectedSpeechOption = useMemo(
+    () => readySpeechModels.find((model) => model.modelId === selectedSpeechModelId) ?? null,
+    [readySpeechModels, selectedSpeechModelId],
+  );
+
+  useEffect(() => {
+    setReferenceAudioFile(null);
+    setReferenceAudioText('');
+  }, [selectedSpeechModelId, selectedSpeechOption?.supportsReferenceAudio]);
+
+  useEffect(() => {
+    setVoiceOptions([]);
+    setVoiceCatalogError(null);
+    if (!selectedSpeechModelId || !selectedSpeechOption?.supportsVoiceListing) {
+      setIsVoiceCatalogLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setIsVoiceCatalogLoading(true);
+    void fetchSpeechVoiceCatalog(selectedSpeechModelId, controller.signal)
+      .then((voices) => {
+        if (!controller.signal.aborted) setVoiceOptions(voices);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setVoiceCatalogError(error instanceof Error
+          ? error.message
+          : t('chat.view.errors.voiceDiscoveryFailed', 'Voice discovery failed.'));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setIsVoiceCatalogLoading(false);
+      });
+    return () => controller.abort();
+  }, [selectedSpeechModelId, selectedSpeechOption?.supportsVoiceListing, t]);
+
+  const effectiveSelectedVoice = selectedSpeechOption?.supportsVoiceListing
+    && selectedVoice
+    && voiceOptions.some((voice) => voice.id === selectedVoice)
+    ? selectedVoice
+    : null;
+  const voiceCatalogReady = !selectedSpeechOption?.supportsVoiceListing
+    || voiceOptions.length > 0;
+
+  const canSendMessages = Boolean(
+    selectedModelId && readyModels.some((model) => model.modelId === selectedModelId),
+  );
+
+  const stopSpeechPlayback = useCallback(() => {
+    speechSentenceQueueRef.current?.stop();
+    speechSentenceQueueRef.current = null;
+    streamingPlaybackRef.current?.stop();
+    streamingPlaybackRef.current = null;
+    audioPlaybackRef.current?.pause();
+    audioPlaybackRef.current = null;
+    if (audioObjectUrlRef.current) {
+      URL.revokeObjectURL(audioObjectUrlRef.current);
+      audioObjectUrlRef.current = null;
+    }
+    setSpeakingMessageId(null);
+    setIsAutoSpeaking(false);
+  }, []);
+
+  useEffect(() => {
+    if (!autoSpeakAssistant) stopSpeechPlayback();
+  }, [autoSpeakAssistant, stopSpeechPlayback]);
+
+  const playSpeechSegment = useCallback(async (
+    text: string,
+    messageId: string | null,
+    signal: AbortSignal,
+    voice: string | null,
+    responseSession: StreamingSpeechResponseSession | null = null,
+  ) => {
+    const input = text.trim();
+    if (!input || !selectedSpeechModelId) return;
+    if (input === SPEECH_PAUSE_MARKER) {
+      // Structural break (a horizontal rule): schedule silence on the shared
+      // streaming timeline instead of synthesizing text. Encoded-fallback
+      // playback has no shared timeline, so the pause is skipped there and
+      // the surrounding sentence boundaries still provide separation.
+      if (responseSession && !responseSession.useEncodedFallback) {
+        await responseSession.playback.appendSilence(SPEECH_PAUSE_SECONDS, signal);
+      }
+      return;
+    }
+    if (selectedSpeechOption?.supportsVoiceListing && !voice) {
+      throw new Error(t(
+        'chat.view.errors.noDiscoveredVoice',
+        'No discovered voice is available for this speech model.',
+      ));
+    }
+    const responseFormat = selectedSpeechOption?.defaultResponseFormat ?? 'mp3';
+    const useStreamingPcm = Boolean(
+      selectedSpeechOption?.supportsStreaming
+      && selectedSpeechOption.responseFormats.includes('pcm')
+      && canUseStreamingSpeechPlayback()
+      && !responseSession?.useEncodedFallback
+    );
+    const encodedFallbackFormat = responseFormat !== 'pcm'
+      ? responseFormat
+      : (
+          selectedSpeechOption?.responseFormats.includes('mp3')
+            ? 'mp3'
+            : selectedSpeechOption?.responseFormats.find((format) => format !== 'pcm')
+        );
+    if (!useStreamingPcm && !encodedFallbackFormat) {
+      throw new Error(t(
+        'chat.view.errors.pcmStreamingRequired',
+        'This speech model requires Web Audio streaming playback in this browser.',
+      ));
+    }
+    const speechRequest = (format: AudioResponseFormat, stream: boolean) => fetch(
+      '/v1/audio/speech',
+      buildSpeechSynthesisRequest({
+        model: selectedSpeechModelId,
+        input,
+        language: speechLanguage,
+        responseFormat: format,
+        stream,
+        maxTokens: stream ? null : batchSpeechMaxTokens(input),
+        seed: DASHBOARD_SPEECH_SEED,
+        voice,
+        referenceAudio: referenceAudioFile,
+        referenceText: referenceAudioText,
+        signal,
+      }),
+    );
+    const initialFormat: AudioResponseFormat = useStreamingPcm
+      ? 'pcm'
+      : encodedFallbackFormat!;
+    let response = await speechRequest(initialFormat, useStreamingPcm);
+    let streamingResponse = useStreamingPcm;
+    if (response.status === 503 && useStreamingPcm && encodedFallbackFormat) {
+      if (responseSession) {
+        // Once a response-scoped timeline has PCM queued, drain it before
+        // changing playback mechanisms so encoded audio cannot overlap it.
+        await responseSession.playback.finish();
+        responseSession.useEncodedFallback = true;
+      }
+      response = await speechRequest(encodedFallbackFormat, false);
+      streamingResponse = false;
+    }
+    if (!response.ok) throw new Error(await responseErrorMessage(response));
+
+    setSpeakingMessageId(messageId);
+    setIsAutoSpeaking(messageId === null);
+    if (streamingResponse) {
+      const playback = responseSession?.playback ?? new StreamingSpeechPlayback();
+      streamingPlaybackRef.current = playback;
+      try {
+        if (responseSession) {
+          await playback.append(response, signal);
+        } else {
+          await playback.play(response, signal);
+        }
+      } finally {
+        if (!responseSession && streamingPlaybackRef.current === playback) {
+          streamingPlaybackRef.current = null;
+        }
+      }
+      return;
+    }
+
+    const audioBlob = await response.blob();
+    const objectUrl = URL.createObjectURL(audioBlob);
+    const audio = new Audio(objectUrl);
+    audioPlaybackRef.current = audio;
+    audioObjectUrlRef.current = objectUrl;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = () => signal.removeEventListener('abort', onAbort);
+        const onAbort = () => {
+          cleanup();
+          reject(new DOMException('cancelled', 'AbortError'));
+        };
+        audio.onended = () => {
+          cleanup();
+          resolve();
+        };
+        audio.onerror = () => {
+          cleanup();
+          reject(new Error(
+            t('chat.view.errors.speechPlaybackFailed', 'Speech playback failed.'),
+          ));
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+        void audio.play().catch((error: unknown) => {
+          cleanup();
+          reject(error);
+        });
+      });
+    } finally {
+      audio.pause();
+      if (audioPlaybackRef.current === audio) audioPlaybackRef.current = null;
+      if (audioObjectUrlRef.current === objectUrl) audioObjectUrlRef.current = null;
+      URL.revokeObjectURL(objectUrl);
+    }
+  }, [
+    referenceAudioFile,
+    referenceAudioText,
+    selectedSpeechModelId,
+    selectedSpeechOption,
+    speechLanguage,
+    t,
+  ]);
+
+  const createSpeechSentenceQueue = useCallback((
+    messageId: string | null,
+    selectVoice: (text: string) => string | null,
+  ): SpeechSentenceQueue => {
+    const useContinuousStreaming = Boolean(
+      selectedSpeechOption?.supportsStreaming
+      && selectedSpeechOption.responseFormats.includes('pcm')
+      && canUseStreamingSpeechPlayback()
+    );
+    const responseSession: StreamingSpeechResponseSession | null = useContinuousStreaming
+      ? {
+          playback: new StreamingSpeechPlayback(),
+          useEncodedFallback: false,
+        }
+      : null;
+    if (responseSession) streamingPlaybackRef.current = responseSession.playback;
+
+    const queue = new SpeechSentenceQueue(
+      (sentence, signal) => playSpeechSegment(
+        sentence,
+        messageId,
+        signal,
+        // The pause sentinel is not prose: keep it away from response-scoped
+        // automatic voice selection so its Latin token cannot pin a voice.
+        sentence === SPEECH_PAUSE_MARKER ? null : selectVoice(sentence),
+        responseSession,
+      ),
+      (error) => {
+        const message = error instanceof Error
+          ? error.message
+          : t('chat.view.errors.speechSynthesisFailed', 'Speech synthesis failed.');
+        setSpeechError(message);
+      },
+      () => {
+        const isCurrentQueue = speechSentenceQueueRef.current === queue;
+        if (isCurrentQueue) {
+          speechSentenceQueueRef.current = null;
+          setSpeakingMessageId(null);
+          setIsAutoSpeaking(false);
+        }
+        if (
+          responseSession
+          && streamingPlaybackRef.current === responseSession.playback
+        ) {
+          streamingPlaybackRef.current = null;
+        }
+      },
+      responseSession ? () => responseSession.playback.finish() : undefined,
+      responseSession ? () => responseSession.playback.stop() : undefined,
+    );
+    speechSentenceQueueRef.current = queue;
+    setSpeakingMessageId(messageId);
+    setIsAutoSpeaking(messageId === null);
+    return queue;
+  }, [playSpeechSegment, selectedSpeechOption, t]);
+
+  const speakText = useCallback((text: string, messageId: string | null = 'draft') => {
+    const input = text.trim();
+    if (!input || !selectedSpeechModelId) return;
+    setSpeechError(null);
+    stopSpeechPlayback();
+    const selectVoice = createPinnedSpeechVoiceSelector(
+      voiceOptions,
+      effectiveSelectedVoice,
+      selectedSpeechOption?.defaultVoice ?? null,
+    );
+    const useSentenceStreaming = Boolean(
+      selectedSpeechOption?.supportsStreaming
+      && selectedSpeechOption.responseFormats.includes('pcm')
+      && canUseStreamingSpeechPlayback()
+    );
+    let segments = [input];
+    if (useSentenceStreaming) {
+      const split = splitCompleteSpeechSentences(input);
+      segments = [...split.sentences];
+      if (split.remainder.trim()) segments.push(split.remainder.trim());
+    }
+    const queue = createSpeechSentenceQueue(messageId, selectVoice);
+    queue.enqueue(segments);
+    queue.finish();
+  }, [
+    createSpeechSentenceQueue,
+    effectiveSelectedVoice,
+    selectedSpeechModelId,
+    selectedSpeechOption?.defaultVoice,
+    selectedSpeechOption?.responseFormats,
+    selectedSpeechOption?.supportsStreaming,
+    stopSpeechPlayback,
+    voiceOptions,
+  ]);
+
+  const transcribeAudio = useCallback(async (audio: Blob): Promise<string> => {
+    if (!selectedTranscriptionModelId) {
+      throw new Error(t('chat.view.errors.noTranscriptionModel', 'No transcription model is ready.'));
+    }
+
+    setSpeechError(null);
+    const formData = new FormData();
+    const extension = audio.type.includes('mp4')
+      ? 'mp4'
+      : audio.type.includes('ogg')
+        ? 'ogg'
+        : 'webm';
+    formData.append('file', audio, `recording.${extension}`);
+    formData.append('model', selectedTranscriptionModelId);
+    formData.append('response_format', 'json');
+
+    const response = await fetch('/v1/audio/transcriptions', {
+      method: 'POST',
+      body: formData,
+    });
+    if (!response.ok) {
+      throw new Error(await responseErrorMessage(response));
+    }
+    const body = await response.json() as { text?: unknown };
+    return typeof body.text === 'string' ? body.text : '';
+  }, [selectedTranscriptionModelId, t]);
+
+  useEffect(() => stopSpeechPlayback, [stopSpeechPlayback]);
+
   const handleSend = useCallback(async (text: string, files: ChatUploadedFile[]) => {
-    if (!selectedModelId || isLoading) return;
+    if (!selectedModelId || !canSendMessages || isLoading) return;
+    stopSpeechPlayback();
 
     // Convert image files to base64 data URLs for the API and message history
     const imageAttachments: { dataUrl: string; file: ChatUploadedFile }[] = [];
@@ -706,6 +1214,26 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     let fullThinking = '';
     let lastTps: number | undefined;
     let toolLoopLimitHit = false;
+    let speechTail = '';
+    let speechVisibleContent = '';
+    const selectResponseVoice = createPinnedSpeechVoiceSelector(
+      voiceOptions,
+      effectiveSelectedVoice,
+      selectedSpeechOption?.defaultVoice ?? null,
+    );
+    const sentenceQueue = (
+      autoSpeakAssistant
+      && selectedSpeechModelId
+      && voiceCatalogReady
+      && selectedSpeechOption?.supportsStreaming
+      && selectedSpeechOption.responseFormats.includes('pcm')
+      && canUseStreamingSpeechPlayback()
+    )
+      ? (() => {
+          return createSpeechSentenceQueue(null, selectResponseVoice);
+        })()
+      : null;
+    speechSentenceQueueRef.current = sentenceQueue;
 
     try {
       const apiMessages: ApiMessagePayload[] = buildApiMessages(allMessages);
@@ -715,6 +1243,9 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
 
       for (let toolRound = 0; toolRound < MAX_TOOL_ROUNDS; toolRound++) {
         resetStallTimer();
+        speechVisibleContent = '';
+        speechTail = '';
+        const roundSpeechSentences: string[] = [];
 
         let iterationRawContent = '';
         let iterationThinking = '';
@@ -803,6 +1334,30 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
                   setStreamingThinking(combinedThinking);
                 }
                 setStreamingContent(separated.content || null);
+                if (sentenceQueue && separated.content.startsWith(speechVisibleContent)) {
+                  const visibleDelta = separated.content.slice(speechVisibleContent.length);
+                  speechVisibleContent = separated.content;
+                  const split = splitCompleteSpeechSentences(speechTail + visibleDelta);
+                  speechTail = split.remainder;
+                  if (requestTools) {
+                    roundSpeechSentences.push(...split.sentences);
+                  } else {
+                    sentenceQueue.enqueue(split.sentences);
+                  }
+                } else if (sentenceQueue) {
+                  const split = resyncVisibleSpeech(
+                    speechVisibleContent,
+                    speechTail,
+                    separated.content,
+                  );
+                  speechVisibleContent = separated.content;
+                  speechTail = split.remainder;
+                  if (requestTools) {
+                    roundSpeechSentences.push(...split.sentences);
+                  } else {
+                    sentenceQueue.enqueue(split.sentences);
+                  }
+                }
               }
 
               if (delta?.tool_calls?.length) {
@@ -831,6 +1386,9 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
         }
 
         if (iterationToolCalls.length === 0) {
+          if (sentenceQueue && requestTools) {
+            sentenceQueue.enqueue(roundSpeechSentences);
+          }
           fullThinking = mergeThinkingContent(fullThinking, iterationThinking);
           finalRawContent = separatedContent.content;
           break;
@@ -884,6 +1442,11 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
         );
       }
     } catch (err) {
+      sentenceQueue?.stop();
+      if (speechSentenceQueueRef.current === sentenceQueue) {
+        speechSentenceQueueRef.current = null;
+      }
+      setIsAutoSpeaking(false);
       if ((err as Error).name === 'AbortError') {
         // User cancelled
         if (requestTimedOut) {
@@ -925,20 +1488,46 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
       };
 
       addMessage(assistantMsg);
+      if (sentenceQueue) {
+        if (speechTail.trim()) sentenceQueue.enqueue([speechTail.trim()]);
+        speechTail = '';
+      } else if (autoSpeakAssistant && selectedSpeechModelId && finalAssistantContent) {
+        void speakText(finalAssistantContent, assistantMsg.id);
+      }
     }
+    sentenceQueue?.finish();
     setStreamingContent(null);
     setStreamingThinking(null);
     setIsLoading(false);
     abortRef.current = null;
     activeCommandIdRef.current = null;
 
-  }, [selectedModelId, isLoading, thinkingEnabled, supportsThinking, selectedBuiltinTools, addMessage, t]);
+  }, [
+    addMessage,
+    autoSpeakAssistant,
+    canSendMessages,
+    createSpeechSentenceQueue,
+    effectiveSelectedVoice,
+    isLoading,
+    selectedBuiltinTools,
+    selectedModelId,
+    selectedSpeechModelId,
+    selectedSpeechOption,
+    speakText,
+    stopSpeechPlayback,
+    supportsThinking,
+    thinkingEnabled,
+    t,
+    voiceCatalogReady,
+    voiceOptions,
+  ]);
 
   const handleCancel = useCallback(async () => {
     const commandId = activeCommandIdRef.current;
     activeCommandIdRef.current = null;
 
     abortRef.current?.abort();
+    stopSpeechPlayback();
 
     if (!commandId) return;
 
@@ -949,7 +1538,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     } catch {
       // The UI should still stop immediately even if the cancel request races with teardown.
     }
-  }, []);
+  }, [stopSpeechPlayback]);
 
   const handleDelete = useCallback((id: string) => {
     deleteMessageAction(id);
@@ -992,7 +1581,12 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     setExpandedThinking(activeConversationId, next);
   }, [activeConversationId, expandedThinkingMap, setExpandedThinking]);
 
-  if (readyModels.length === 0) {
+  const handleRealtimeTranscript = useCallback((text: string, final: boolean) => {
+    if (!final || !autoSubmitVoice || !canSendMessages || !text.trim()) return;
+    void handleSend(text.trim(), []);
+  }, [autoSubmitVoice, canSendMessages, handleSend]);
+
+  if (readyModels.length === 0 && readyTranscriptionModels.length === 0 && readySpeechModels.length === 0) {
     return (
       <NoModels>
         {t(
@@ -1004,7 +1598,11 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   }
 
   const modelSelector = readyModels.length > 1 ? (
-    <ModelSelect value={selectedModelId ?? ''} onChange={(e) => selectModel(e.target.value)}>
+    <ModelSelect
+      value={selectedModelId ?? ''}
+      onChange={(e) => selectModel(e.target.value)}
+      aria-label={t('chat.view.selectModel', 'Select chat model')}
+    >
       {readyModels.map((m) => (
         <option key={m.instanceId} value={m.modelId}>
           {m.modelId.split('/').pop()}
@@ -1024,6 +1622,10 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
           onDelete={handleDelete}
           onEdit={handleEdit}
           onRegenerate={handleRegenerate}
+          isSpeechPlaybackAvailable={readySpeechModels.length > 0}
+          speakingMessageId={speakingMessageId}
+          onSpeakMessage={(messageId, content) => { void speakText(content, messageId); }}
+          onStopSpeaking={stopSpeechPlayback}
           expandedThinkingIds={expandedThinkingIds}
           onToggleThinking={handleToggleThinking}
         />
@@ -1033,20 +1635,48 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
           onSend={handleSend}
           onCancel={handleCancel}
           isLoading={isLoading}
-          modelLabel={selectedLabel}
+          modelLabel={canSendMessages ? selectedLabel : undefined}
           modelSelector={modelSelector}
           ttftMs={ttftMs}
           tps={tps}
-          contextLength={contextLength}
-          showThinkingToggle={supportsThinking}
+          contextLength={canSendMessages ? contextLength : 0}
+          showThinkingToggle={canSendMessages && supportsThinking}
           thinkingEnabled={thinkingEnabled}
           onToggleThinking={() => setThinkingEnabled((v) => !v)}
-          supportsImageAttachments={supportsImageAttachments}
-          placeholder={selectedModelId
+          supportsImageAttachments={canSendMessages && supportsImageAttachments}
+          canSendMessages={canSendMessages}
+          transcriptionModels={readyTranscriptionModels}
+          realtimeTranscriptionAvailable={realtimeTranscriptionAvailable}
+          speechModels={readySpeechModels}
+          selectedTranscriptionModelId={selectedTranscriptionModelId}
+          selectedSpeechModelId={selectedSpeechModelId}
+          selectedVoice={selectedVoice}
+          voiceOptions={voiceOptions}
+          isVoiceCatalogLoading={isVoiceCatalogLoading}
+          referenceAudioFile={referenceAudioFile}
+          referenceAudioText={referenceAudioText}
+          autoSpeakAssistant={autoSpeakAssistant}
+          realtimeVoiceEnabled={realtimeVoiceEnabled}
+          autoSubmitVoice={autoSubmitVoice}
+          isSpeaking={speakingMessageId !== null || isAutoSpeaking}
+          voiceError={voiceCatalogError ?? speechError}
+          onSelectTranscriptionModel={selectTranscriptionModel}
+          onSelectSpeechModel={selectSpeechModel}
+          onSelectedVoiceChange={setSelectedVoice}
+          onReferenceAudioChange={setReferenceAudioFile}
+          onReferenceAudioTextChange={setReferenceAudioText}
+          onAutoSpeakAssistantChange={setAutoSpeakAssistant}
+          onRealtimeVoiceEnabledChange={setRealtimeVoiceEnabled}
+          onAutoSubmitVoiceChange={setAutoSubmitVoice}
+          onRealtimeTranscript={handleRealtimeTranscript}
+          onTranscribeAudio={transcribeAudio}
+          onSpeakText={(text) => { void speakText(text, 'draft'); }}
+          onStopSpeaking={stopSpeechPlayback}
+          placeholder={canSendMessages && selectedModelId
             ? t('chat.view.messagePlaceholder', 'Message {model}...', {
                 model: selectedLabel ?? t('chat.view.selectedModel', 'selected model'),
               })
-            : t('chat.view.selectModelPlaceholder', 'Select a model to chat')}
+            : t('chat.view.voiceDraftPlaceholder', 'Type text for speech or transcription')}
         />
       </InputArea>
     </Container>

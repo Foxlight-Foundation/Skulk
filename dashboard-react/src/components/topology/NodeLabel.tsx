@@ -10,6 +10,12 @@ export interface NodeLabelProps {
   name: string;
   ramUsed: number;
   ramTotal: number;
+  /**
+   * When true, the memory figures describe a discrete GPU's VRAM pool and
+   * the summary line is prefixed with a VRAM label so the smaller figure is
+   * not mistaken for system RAM (#669).
+   */
+  memoryIsVram?: boolean;
   /** font size for the name label */
   fontSize?: number;
   /** horizontal center for text alignment */
@@ -32,6 +38,7 @@ export function NodeLabel({
   name,
   ramUsed,
   ramTotal,
+  memoryIsVram = false,
   fontSize = 13,
   cx = 0,
   nameY = 0,
@@ -176,6 +183,11 @@ export function NodeLabel({
       ) : (
         <text x={cx} y={memoryY} textAnchor="middle" dominantBaseline="middle"
           fontFamily="SF Mono, Monaco, monospace" fontSize={13}>
+          {memoryIsVram && (
+            <tspan fill={theme.colors.textSecondary}>
+              {t('nodeLabel.vramPrefix', 'VRAM')}{' '}
+            </tspan>
+          )}
           <tspan fill={theme.colors.textSecondary}>{usedStr}</tspan>
           <tspan fill={theme.colors.gold}>/{totalStr}</tspan>
           <tspan fill={theme.colors.textSecondary}>{' '}({ramPercent}%)</tspan>

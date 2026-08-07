@@ -44,6 +44,25 @@ for a vision model, rather than every quant in the repository. This keeps a
 single-quant download to roughly the size of that one file instead of the whole
 repo.
 
+### Qualified cards can pin immutable artifacts
+
+A model card may set `source_revision` to a full Hugging Face commit hash. The
+store records that revision with its registry entry and treats a different
+revision as a different artifact generation. If a card's pin changes, Skulk
+downloads and registers the replacement before removing the previous canonical
+copy.
+
+Worker staging enforces the same discipline: each staged directory records the
+revision it was staged from, and a staging request checks that record before
+reusing anything. A staged directory recorded at a different revision is
+deleted and re-staged from the pinned artifact; it is **never treated as a
+cache hit**, so a pin change can never silently serve the previous commit's
+weights. On a store host whose staging path is the store itself, a pinned model
+resolves directly to its revision-qualified canonical store directory.
+
+Cards without `source_revision` retain the historical behavior and follow the
+repository's mutable `main` branch.
+
 ### The store host advertises a routable address
 
 The store host broadcasts the address other nodes use to reach it. Even when you
@@ -66,25 +85,43 @@ An operator-supplied routable IP in `store_http_host` is still honored as-is.
 Make sure:
 
 - all nodes are running the same Skulk build
-- you know which machine should be the store host
-- that machine has enough storage for the models you want to share
-- the chosen `store_path` is mounted and writable
+- for an explicit store deployment, you know which machine should be the
+  store host and its chosen `store_path` is mounted, writable, and large enough
+- for a default fresh cluster, the elected master's normal user-home
+  filesystem has enough space for the models you want to share
 
-The store server uses port `58080` by default.
+The store server uses port `12415` by default. This listener is deliberately
+outside the dynamic client-port ranges used by supported operating systems, so
+an unrelated outbound connection cannot claim it before Skulk starts.
+
+:::note Fresh installs
+`install.sh` writes bootstrap store defaults (this host under
+`~/.skulk/model-store`) when no config exists, so a single node works
+immediately. When several independently installed nodes form a cluster, the
+elected master advertises a routable store address through bootstrap state
+sync. Followers adopt that authoritative config, stop their temporary local
+store servers, and point both dashboard and worker traffic at the same store.
+If you need a specific machine or attached volume, configure the same explicit
+`store_host` on every node instead.
+:::
 
 ## Recommended Setup: Dashboard First
 
 This is the simplest path for most people.
 
-1. Start Skulk on all nodes with `uv run skulk`.
-2. Open the dashboard on the node you want to become the store host.
+1. Start Skulk on all nodes with `uv run skulk`. Fresh defaults already
+   converge on one store.
+2. Open the dashboard on the node you want to use for administration.
 3. Go to **Settings**.
-4. Enable the store host toggle.
-5. Choose the store path.
+4. To override the elected default, enable the store host toggle for the
+   machine that should own the canonical store.
+5. Choose its store path.
 6. Save the config.
 7. Restart Skulk on all nodes if the dashboard tells you a restart is required.
 
-After that, use the dashboard or API normally. When models are available in the store, worker nodes stage from the store host instead of downloading independently.
+After that, use the dashboard or API normally. When models are available in
+the store, worker nodes stage from the store host instead of downloading
+independently.
 
 ## Manual Setup with `skulk.yaml`
 
@@ -110,7 +147,7 @@ For most users:
 model_store:
   enabled: true
   store_host: mac-studio-1
-  store_port: 58080
+  store_port: 12415
   store_path: /Volumes/ModelStore/models
 
   download:
@@ -144,6 +181,23 @@ For worker nodes, `node_cache_path` is usually a fast local path such as `~/.sku
 
 For the store host, you often point `node_cache_path` at the same directory as `store_path` so the store host can load directly from the shared volume without making another copy.
 
+### Staging on the store host uses hardlinks
+
+When the store host stages into a separate local staging directory (rather than
+pointing `node_cache_path` at the store), it **hardlinks** store files into
+place instead of copying them, falling back to a full copy only on filesystems
+that cannot link (a cross-device staging path, or some network mounts). This is
+safe because store files are immutable once registered and staged files are
+never modified in place.
+
+The disk-usage consequence: when store and staging share a filesystem, a staged
+copy on the store host costs **no additional disk**; without the hardlink, a
+26 GB GGUF would need 52 GB to stage. Note that naive per-directory size tools
+(`du` on each directory separately) double-count hardlinked files, so the store
+host's staging directory can look larger than the disk space it actually
+consumes. Worker nodes stage over HTTP from the store host, so their staged
+copies are always real bytes on their own disk.
+
 ## Staging Cache and Disk Management
 
 When a worker needs a model it does not host, it copies that model's files from
@@ -151,8 +205,8 @@ the store host into its local staging directory (`node_cache_path`, default
 `~/.skulk/staging`) and loads from there. Staged copies are independent per
 node: the store host keeps the canonical copy, and each worker keeps its own
 staged copy of whatever it has run. Left unmanaged, staging grows without bound,
-so Skulk keeps it in check with a single recency policy plus an explicit delete
-path.
+so Skulk combines a warm-cache recency policy with a pre-download free-space
+safety check and an explicit delete path.
 
 ### What counts as "in use"
 
@@ -165,10 +219,8 @@ never evicted automatically.
 
 Idle (not-in-use) staged copies are kept newest-first up to
 `staging_keep_recent_gb` (default 40 GiB); anything beyond that budget is
-deleted. The budget is a floor for recently used data, not a disk-pressure
-threshold. Nothing watches free space and triggers eviction when the disk fills:
-the check runs at two specific moments, and only when `cleanup_on_deactivate` is
-`true`:
+deleted. This warm-cache check runs at two specific moments, and only when
+`cleanup_on_deactivate` is `true`:
 
 - when a model instance is shut down, and
 - at node startup, which reconciles copies orphaned by a crash or kill.
@@ -178,7 +230,7 @@ the check runs at two specific moments, and only when `cleanup_on_deactivate` is
 | Setting | Behavior |
 |---------|----------|
 | `true` (default, recommended) | Keep the newest ~40 GiB of idle copies warm; delete older idle copies when an instance shuts down and at node startup. The in-use set is always kept and does not count against the budget. Warm and bounded. |
-| `false` | Never evict automatically. Every staged copy is kept until you reclaim space manually. Warm, but unbounded: a busy node can fill its disk. |
+| `false` | Skip lifecycle cleanup. Copies stay warm until reclaimed manually or a future download needs their space. |
 
 Set `staging_keep_recent_gb` to `0` for strict evict-on-deactivate (keep only
 what is in use). Raise it on nodes with large disks to keep more models warm.
@@ -187,19 +239,49 @@ The in-use set rides on top of the budget rather than inside it: a node always
 keeps everything its live runners need, plus up to 40 GiB of the most recently
 used idle copies.
 
+### Pre-download capacity safety
+
+For each base or companion repository, the store client resolves the exact
+registered artifact set and computes only the physical bytes the staging
+transaction will add. Manifest files and partial files already present reduce
+the HTTP allocation; same-filesystem local-store hardlinks add zero file data.
+Capacity admission and transfer are serialized per node so concurrent launches
+cannot spend the same free bytes. The worker retains 10 GiB of
+operating-system headroom and, if necessary, evicts idle copies oldest-first
+even when they are inside the 40 GiB warm-cache budget.
+
+This safety pass protects live runners, every active base-plus-companion
+transaction, the incoming partial model, and its companion repositories. It
+also applies when
+`cleanup_on_deactivate` is `false`: that setting disables lifecycle cleanup,
+not the guard that prevents a new transfer from filling the host filesystem.
+If removing every idle staged model still cannot meet the target, Skulk reports
+`DownloadFailed` before writing more model bytes.
+
+If the configured store is unreachable and Hugging Face fallback is enabled,
+the staging check does not run against the wrong filesystem. The direct
+downloader resolves the exact filtered artifact set, serializes admission with
+transfer, and applies the same reserve to the actual model-cache filesystem.
+
 > The store host is a special case. When a node points `node_cache_path` at the
 > same directory as `store_path` (so it loads directly from the store without a
 > second copy), the recency budget is skipped on that node whatever the toggle
-> says. The store's canonical copies are never auto-evicted.
+> says. The store's canonical copies are never auto-evicted by either the
+> lifecycle or capacity path. New canonical downloads are themselves serialized
+> and admitted from their exact selected manifest, including resumable bytes,
+> and fail before transfer if they cannot preserve the same 10 GiB reserve.
 
 ### Deleting a model from the store
 
 `DELETE /store/models/{model_id}` removes the canonical copy from the store host
 **and** evicts that model's staged copy from every node in the cluster at once.
-This path is unconditional: it ignores both `cleanup_on_deactivate` and the
-recency budget, because once the canonical copy is gone the staged copies are
-orphans. Use it to remove a model everywhere and reclaim its disk fleet-wide in
-one call.
+The eviction is a broadcast through the cluster's control plane: the delete
+issues a command, the master turns it into a fleet-wide event, and every worker
+that applies it removes its staged copy on disk while the model's download
+records are dropped from cluster state. This path is unconditional: it ignores
+both `cleanup_on_deactivate` and the recency budget, because once the canonical
+copy is gone the staged copies are orphans. Use it to remove a model everywhere
+and reclaim its disk fleet-wide in one call.
 
 ### Reclaiming disk manually
 
@@ -225,7 +307,7 @@ For most users, hostname is the easiest and most reliable choice.
 
 HTTP port used for store transfers.
 
-Default: `58080`
+Default: `12415`
 
 ### `model_store.store_path`
 
@@ -233,7 +315,8 @@ Absolute path on the store host where shared models live.
 
 ### `model_store.download.allow_hf_fallback`
 
-Controls what happens if a requested model is not already in the store.
+Controls what happens if a requested model is not already in the store, or
+the store cannot be reached at all.
 
 | Value | Behavior |
 |-------|----------|
@@ -241,6 +324,22 @@ Controls what happens if a requested model is not already in the store.
 | `false` | Fail instead of downloading from Hugging Face |
 
 Use `false` if you want stricter offline or air-gapped behavior.
+
+The fallback covers two distinct situations, and the node logs which one it
+is in:
+
+- **Model not in the store** (the store answered): the node asks the *store
+  host* to download it from Hugging Face, then stages from the store. The
+  store stays the single source of truth for model files.
+- **Store unreachable** (the store could not be reached, whether it never
+  answered or dropped off mid-transfer): the node downloads
+  *directly* from Hugging Face, preserving the card's pinned source
+  revision. This is the expected shape for a remote fabric member whose
+  route to the store does not exist while its public-internet path works;
+  on a node that should be able to reach the store, treat the logged
+  warning as a network problem to fix. With the fallback disabled, an
+  unreachable store fails with an error naming unreachability rather than
+  claiming the model is missing.
 
 ### `model_store.staging.node_cache_path`
 
@@ -251,8 +350,9 @@ Where a node stages files before loading them.
 Controls automatic eviction of idle staged copies. Default `true` (recommended):
 when a model is shut down, or at node startup, idle staged copies beyond the
 `staging_keep_recent_gb` budget are deleted, keeping the cache warm but bounded.
-Set to `false` to keep every staged copy and reclaim disk only via
-`POST /store/purge-staging`. See
+Set to `false` to skip those lifecycle passes. Pre-download capacity safety
+still reclaims idle copies when required to fit a new model without filling the
+filesystem. See
 [Staging Cache and Disk Management](#staging-cache-and-disk-management).
 
 ### `model_store.staging.staging_keep_recent_gb`
@@ -260,7 +360,8 @@ Set to `false` to keep every staged copy and reclaim disk only via
 Recency budget in GiB for idle staged copies (default `40`). Eviction keeps the
 newest idle copies up to this size and deletes the rest; `0` evicts everything
 not in use, and larger values keep more models warm on big-disk nodes. Applies
-only when `cleanup_on_deactivate` is `true`.
+to lifecycle cleanup when `cleanup_on_deactivate` is `true`; the pre-download
+capacity guard may override this grace budget.
 
 ## Typical Flow
 
@@ -314,12 +415,12 @@ Check:
 
 - that the store host is running
 - that `store_host` matches the real hostname
-- that port `58080` is reachable on your LAN
+- that port `12415` is reachable on your LAN
 
 Useful check:
 
 ```bash
-curl http://STORE_HOST:58080/health
+curl http://STORE_HOST:12415/health
 ```
 
 ### The model is on disk but does not appear in the store registry
@@ -364,16 +465,20 @@ newest ~40 GiB of idle copies stay warm, but a model larger than the budget, or
 one pushed out by other recently used models, is evicted and re-staged on its
 next placement. Raise `staging_keep_recent_gb` to keep more models warm, or set
 it large enough to hold the models you cycle between. Setting
-`cleanup_on_deactivate: false` keeps every copy warm but lets staging grow
-without bound (reclaim disk with `POST /store/purge-staging`).
+`cleanup_on_deactivate: false` keeps every copy warm until a future launch
+needs that space; the pre-download safety pass can still evict idle copies to
+protect the filesystem (reclaim disk immediately with
+`POST /store/purge-staging`).
 
 ### Staged files are not being cleaned up
 
-With `cleanup_on_deactivate: false`, nothing is evicted automatically, so
-staging keeps growing. Either leave it at the `true` default (which keeps the
-newest ~40 GiB warm and evicts the rest on deactivation/startup) or reclaim
-space on demand with `POST /store/purge-staging`. Note that the store host never
-auto-evicts its own canonical copies when `node_cache_path` equals `store_path`.
+With `cleanup_on_deactivate: false`, lifecycle cleanup does not run, so staging
+keeps growing until a new transfer needs the space. Either leave it at the
+`true` default (which keeps the newest ~40 GiB warm and evicts the rest on
+deactivation/startup) or reclaim space on demand with
+`POST /store/purge-staging`. The pre-download capacity guard still protects the
+filesystem. Note that the store host never auto-evicts its own canonical copies
+when `node_cache_path` equals `store_path`.
 
 ## Good Defaults for Most Clusters
 

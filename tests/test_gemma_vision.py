@@ -355,6 +355,55 @@ class TestGemma4ReferencePromptRenderer:
             == "<bos><|turn>user\n<|image><|image|><|image|><|image|><image|>what do you see?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
         )
 
+    def test_build_vision_prompt_passes_thinking_controls_to_generic_templates(self):
+        from skulk.worker.engines.mlx.vision import build_vision_prompt
+
+        class _Tokenizer:
+            captured_kwargs: dict[str, object] = {}
+
+            def apply_chat_template(self, messages, **kwargs):
+                self.captured_kwargs = dict(kwargs)
+                assert messages == [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image"},
+                            {"type": "text", "text": "read it"},
+                        ],
+                    }
+                ]
+                return "<image>read it"
+
+            def decode(self, token_ids):
+                raise AssertionError("generic prompt test should not decode tokens")
+
+        tokenizer = _Tokenizer()
+
+        prompt = build_vision_prompt(
+            tokenizer=tokenizer,  # type: ignore[arg-type]
+            chat_template_messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": "read it"},
+                    ],
+                }
+            ],
+            n_tokens_per_image=[2],
+            image_token="<image>",
+            model_type="qwen3_5",
+            enable_thinking=False,
+            reasoning_effort="none",
+        )
+
+        assert prompt == "<image><image>read it"
+        assert tokenizer.captured_kwargs["tokenize"] is False
+        assert tokenizer.captured_kwargs["add_generation_prompt"] is True
+        assert tokenizer.captured_kwargs["enable_thinking"] is False
+        assert tokenizer.captured_kwargs["thinking"] is False
+        assert tokenizer.captured_kwargs["reasoning_effort"] == "none"
+
     def test_process_native_forwards_gemma4_model_type_to_prompt_builder(
         self, monkeypatch, tmp_path
     ):
@@ -364,7 +413,7 @@ class TestGemma4ReferencePromptRenderer:
         (tmp_path / "config.json").write_text("{}", encoding="utf-8")
         monkeypatch.setattr(
             "skulk.worker.engines.mlx.vision.build_model_path",
-            lambda _model_id: tmp_path,
+            lambda _model_id, _source_revision=None: tmp_path,
         )
 
         config = VisionCardConfig(
@@ -393,8 +442,12 @@ class TestGemma4ReferencePromptRenderer:
             model_type=None,
             boi_token_id=None,
             eoi_token_id=None,
+            enable_thinking=None,
+            reasoning_effort=None,
         ):
             captured["model_type"] = model_type
+            captured["enable_thinking"] = enable_thinking
+            captured["reasoning_effort"] = reasoning_effort
             return vision_module._VisionPromptBuild(  # pyright: ignore[reportPrivateUsage]
                 prompt="<|image|>",
                 raw_prompt="<|image|>",
@@ -430,9 +483,13 @@ class TestGemma4ReferencePromptRenderer:
             chat_template_messages=[{"role": "user", "content": [{"type": "image"}]}],
             tokenizer=_Tokenizer(),  # type: ignore[arg-type]
             model=SimpleNamespace(),  # type: ignore[arg-type]
+            enable_thinking=False,
+            reasoning_effort="none",
         )
 
         assert captured["model_type"] == "gemma4"
+        assert captured["enable_thinking"] is False
+        assert captured["reasoning_effort"] == "none"
         assert result.prompt_tokens.shape == (1,)
 
 

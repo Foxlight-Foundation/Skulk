@@ -11,6 +11,8 @@ from typing import NamedTuple
 import pytest
 
 import skulk.main as main
+from skulk.shared.types.common import NodeId
+from skulk.store.config import ModelStoreConfig, SkulkConfig
 
 
 class _FakeAddr(NamedTuple):
@@ -124,4 +126,44 @@ def test_docker_bridge_interface_is_skipped(monkeypatch: pytest.MonkeyPatch) -> 
     )
     assert (
         main._routable_store_advertise_host(None, "kite4") == "192.168.0.122"  # pyright: ignore[reportPrivateUsage]
+    )
+
+
+def test_state_sync_advertises_routable_address_for_local_store_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main.socket, "gethostname", lambda: "fresh-node.local")
+    monkeypatch.setattr(
+        main.psutil,
+        "net_if_addrs",
+        lambda: _ifaddrs("127.0.0.1", "192.168.0.122"),
+    )
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="fresh-node",
+            store_http_host="127.0.0.1",
+            store_path="/models",
+        )
+    )
+
+    assert (
+        main._state_sync_store_http_host(NodeId("node-id"), config)  # pyright: ignore[reportPrivateUsage]
+        == "192.168.0.122"
+    )
+
+
+def test_state_sync_does_not_override_another_node_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main.socket, "gethostname", lambda: "worker.local")
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="dedicated-store",
+            store_http_host="10.0.0.8",
+            store_path="/models",
+        )
+    )
+
+    assert (
+        main._state_sync_store_http_host(NodeId("worker-id"), config) is None  # pyright: ignore[reportPrivateUsage]
     )

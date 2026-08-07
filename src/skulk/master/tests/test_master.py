@@ -16,25 +16,31 @@ from skulk.master.tests.conftest import (
 from skulk.routing.router import get_node_id_keypair
 from skulk.shared.models.model_cards import ModelCard, ModelTask
 from skulk.shared.topology import Topology
+from skulk.shared.types.chunks import AudioInputChunk, InputImageChunk, TokenChunk
 from skulk.shared.types.commands import (
     CommandId,
     ForwarderCommand,
     ForwarderDownloadCommand,
     PlaceInstance,
     RefuseInstancePlacement,
+    SendInputChunk,
     TextGeneration,
 )
 from skulk.shared.types.common import ModelId, NodeId, SessionId, SystemId
 from skulk.shared.types.events import (
+    ChunkGenerated,
     Event,
     GlobalForwarderEvent,
     IndexedEvent,
+    InputChunkReceived,
     InstanceCreated,
     LocalForwarderEvent,
     NodeGatheredInfo,
     TaskCreated,
     TaskDeleted,
+    TaskFailed,
     TaskStatusUpdated,
+    TestEvent,
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
@@ -55,6 +61,144 @@ from skulk.shared.types.worker.instances import (
 )
 from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
 from skulk.utils.channels import channel
+from skulk.utils.info_gatherer.info_gatherer import NodeNetworkInterfaces
+
+
+@pytest.mark.asyncio
+async def test_master_never_emits_or_retains_vision_input_payloads() -> None:
+    """Legacy payload commands and events are rejected before persistence."""
+
+    node_id = NodeId(get_node_id_keypair().to_node_id())
+    session_id = SessionId(master_node_id=node_id, election_clock=0)
+    global_sender, global_receiver = channel[GlobalForwarderEvent]()
+    command_sender, command_receiver = channel[ForwarderCommand]()
+    local_event_sender, local_event_receiver = channel[LocalForwarderEvent]()
+    _, state_sync_receiver = channel[StateSyncMessage]()
+    state_sync_sender, _ = channel[StateSyncMessage]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    event_sender, event_receiver = channel[Event]()
+    master = Master(
+        node_id,
+        session_id,
+        event_sender=event_sender,
+        global_event_sender=global_sender,
+        local_event_receiver=local_event_receiver,
+        command_receiver=command_receiver,
+        state_sync_receiver=state_sync_receiver,
+        state_sync_sender=state_sync_sender,
+        download_command_sender=download_sender,
+    )
+    should_warn = master._should_warn_for_non_control_event  # pyright: ignore[reportPrivateUsage]
+    warning_origin = SystemId("warning-source")
+    assert should_warn(warning_origin, InputChunkReceived, now=100.0)
+    assert not should_warn(warning_origin, InputChunkReceived, now=101.0)
+    assert should_warn(warning_origin, ChunkGenerated, now=101.0)
+    assert should_warn(warning_origin, InputChunkReceived, now=160.0)
+    command_id = CommandId("media-census")
+    image_payload = "aW1hZ2UtcGF5bG9hZA=="
+    indexed_after_legacy: GlobalForwarderEvent | None = None
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(master.run)
+        await command_sender.send(
+            ForwarderCommand(
+                origin=SystemId("API"),
+                command=SendInputChunk(
+                    chunk=InputImageChunk(
+                        model=ModelId("org/vlm"),
+                        command_id=command_id,
+                        data=image_payload,
+                        chunk_index=0,
+                        total_chunks=1,
+                    )
+                )
+            )
+        )
+        await command_sender.send(
+            ForwarderCommand(
+                origin=SystemId("API"),
+                command=SendInputChunk(
+                    chunk=AudioInputChunk(
+                        model=ModelId("org/stt"),
+                        command_id=command_id,
+                        data="YXVkaW8=",
+                        chunk_index=0,
+                        total_chunks=1,
+                        audio_sha256="0" * 64,
+                    )
+                )
+            )
+        )
+        await local_event_sender.send(
+            LocalForwarderEvent(
+                origin=SystemId("legacy-worker"),
+                origin_idx=0,
+                session=session_id,
+                event=InputChunkReceived(
+                    command_id=command_id,
+                    chunk=InputImageChunk(
+                        model=ModelId("org/vlm"),
+                        command_id=command_id,
+                        data=image_payload,
+                        chunk_index=0,
+                        total_chunks=1,
+                    ),
+                ),
+            )
+        )
+        await local_event_sender.send(
+            LocalForwarderEvent(
+                origin=SystemId("legacy-worker"),
+                origin_idx=1,
+                session=session_id,
+                event=InputChunkReceived(
+                    command_id=command_id,
+                    chunk=AudioInputChunk(
+                        model=ModelId("org/stt"),
+                        command_id=command_id,
+                        data="YXVkaW8=",
+                        chunk_index=0,
+                        total_chunks=1,
+                        audio_sha256="0" * 64,
+                    ),
+                ),
+            )
+        )
+        await local_event_sender.send(
+            LocalForwarderEvent(
+                origin=SystemId("legacy-worker"),
+                origin_idx=2,
+                session=session_id,
+                event=ChunkGenerated(
+                    command_id=command_id,
+                    chunk=TokenChunk(
+                        model=ModelId("org/text"),
+                        text="payload-token",
+                        token_id=1,
+                        usage=None,
+                    ),
+                ),
+            )
+        )
+        await local_event_sender.send(
+            LocalForwarderEvent(
+                origin=SystemId("legacy-worker"),
+                origin_idx=3,
+                session=session_id,
+                event=TestEvent(),
+            )
+        )
+        indexed_after_legacy = await global_receiver.receive()
+        task_group.cancel_scope.cancel()
+
+    assert event_receiver.collect() == []
+    assert indexed_after_legacy is not None
+    assert isinstance(indexed_after_legacy.event, TestEvent)
+    assert len(master._event_log) == 1  # pyright: ignore[reportPrivateUsage]
+    assert image_payload not in indexed_after_legacy.model_dump_json()
+    assert image_payload not in master.state.model_dump_json()
+    assert "YXVkaW8=" not in master.state.model_dump_json()
+    assert "payload-token" not in master.state.model_dump_json()
 
 
 @pytest.mark.asyncio
@@ -114,7 +258,7 @@ async def test_master():
         tg.start_soon(master.run)
         tg.start_soon(mock_event_router)
 
-        # inject a NodeGatheredInfo event
+        # inject a control-plane topology reading
         logger.info("inject a NodeGatheredInfo event")
         await local_event_sender.send(
             LocalForwarderEvent(
@@ -125,19 +269,15 @@ async def test_master():
                     NodeGatheredInfo(
                         when=str(datetime.now(tz=timezone.utc)),
                         node_id=node_id,
-                        info=MemoryUsage(
-                            ram_total=Memory.from_bytes(678948 * 1024),
-                            ram_available=Memory.from_bytes(678948 * 1024),
-                            swap_total=Memory.from_bytes(0),
-                            swap_available=Memory.from_bytes(0),
+                        info=NodeNetworkInterfaces(
+                            ifaces=create_node_network().interfaces
                         ),
                     )
                 ),
             )
         )
 
-        # wait for initial topology event (the NodeGatheredInfo above still
-        # builds topology + last_seen even though its memory now rides telemetry)
+        # wait for the indexed topology reading
         logger.info("wait for initial topology event")
         while len(list(master.state.topology.list_nodes())) == 0:
             await anyio.sleep(0.001)
@@ -312,6 +452,68 @@ async def test_state_sync_response_includes_config_yaml(
 
 
 @pytest.mark.asyncio
+async def test_state_sync_response_advertises_routable_store_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keypair = get_node_id_keypair()
+    node_id = NodeId(keypair.to_node_id())
+    session_id = SessionId(master_node_id=node_id, election_clock=0)
+
+    config_path = tmp_path / "skulk.yaml"
+    config_path.write_text(
+        "model_store:\n"
+        "  enabled: true\n"
+        "  store_host: store-node.local\n"
+        "  store_http_host: 127.0.0.1\n"
+        "  store_path: /models\n"
+    )
+    monkeypatch.setattr("skulk.master.main.resolve_config_path", lambda: config_path)
+
+    global_sender, _global_receiver = channel[GlobalForwarderEvent]()
+    _command_sender, command_receiver = channel[ForwarderCommand]()
+    _local_event_sender, local_event_receiver = channel[LocalForwarderEvent]()
+    request_sender, state_sync_receiver = channel[StateSyncMessage]()
+    state_sync_sender, response_receiver = channel[StateSyncMessage]()
+    download_sender, _download_receiver = channel[ForwarderDownloadCommand]()
+    event_sender, _event_receiver = channel[Event]()
+
+    master = Master(
+        node_id,
+        session_id,
+        event_sender=event_sender,
+        global_event_sender=global_sender,
+        local_event_receiver=local_event_receiver,
+        command_receiver=command_receiver,
+        state_sync_receiver=state_sync_receiver,
+        state_sync_sender=state_sync_sender,
+        download_command_sender=download_sender,
+        state_sync_store_http_host="192.0.2.44",
+    )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(master.run)
+        await request_sender.send(
+            StateSyncMessage(
+                kind="request",
+                requester=SystemId("requester"),
+                session_id=session_id,
+            )
+        )
+
+        response: StateSyncMessage | None = None
+        while response is None:
+            candidate = await response_receiver.receive()
+            if candidate.kind == "response":
+                response = candidate
+
+        assert response.config_yaml is not None
+        assert "store_host: store-node.local" in response.config_yaml
+        assert "store_http_host: 192.0.2.44" in response.config_yaml
+
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.asyncio
 async def test_state_sync_response_survives_invalid_config_yaml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -456,6 +658,69 @@ async def test_task_deleted_event_clears_command_mapping() -> None:
         tg.cancel_scope.cancel()
 
     assert command_id not in master.command_task_mapping
+
+
+@pytest.mark.asyncio
+async def test_terminal_task_event_releases_realtime_reservation() -> None:
+    """Runner terminal state releases capacity without API cleanup."""
+
+    keypair = get_node_id_keypair()
+    node_id = NodeId(keypair.to_node_id())
+    session_id = SessionId(master_node_id=node_id, election_clock=0)
+    global_sender, _global_receiver = channel[GlobalForwarderEvent]()
+    _command_sender, command_receiver = channel[ForwarderCommand]()
+    local_event_sender, local_event_receiver = channel[LocalForwarderEvent]()
+    _request_sender, state_sync_receiver = channel[StateSyncMessage]()
+    state_sync_sender, _response_receiver = channel[StateSyncMessage]()
+    download_sender, _download_receiver = channel[ForwarderDownloadCommand]()
+    event_sender, _event_receiver = channel[Event]()
+    master = Master(
+        node_id,
+        session_id,
+        event_sender=event_sender,
+        global_event_sender=global_sender,
+        local_event_receiver=local_event_receiver,
+        command_receiver=command_receiver,
+        state_sync_receiver=state_sync_receiver,
+        state_sync_sender=state_sync_sender,
+        download_command_sender=download_sender,
+    )
+
+    command_id = CommandId("realtime-terminal-command")
+    task = TextGenerationTask(
+        task_id=TaskId("realtime-terminal-task"),
+        instance_id=InstanceId("realtime-terminal-instance"),
+        command_id=command_id,
+        task_params=TextGenerationTaskParams(
+            model=ModelId("test-model"),
+            input=[InputMessage(role="user", content="hi")],
+        ),
+    )
+    master.state = master.state.model_copy(update={"tasks": {task.task_id: task}})
+    master.command_task_mapping[command_id] = task.task_id
+    master._realtime_instance_by_command[command_id] = task.instance_id  # pyright: ignore[reportPrivateUsage]
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(master._event_processor)  # pyright: ignore[reportPrivateUsage]
+        await local_event_sender.send(
+            LocalForwarderEvent(
+                origin=SystemId("Worker"),
+                origin_idx=0,
+                session=session_id,
+                event=TaskFailed(
+                    task_id=task.task_id,
+                    error_type="runner_failed",
+                    error_message="runner stopped",
+                ),
+            )
+        )
+        with anyio.fail_after(2):
+            while command_id in master._realtime_instance_by_command:  # pyright: ignore[reportPrivateUsage]
+                await anyio.sleep(0.01)
+        task_group.cancel_scope.cancel()
+
+    assert command_id in master.command_task_mapping
+    assert command_id not in master._realtime_instance_by_command  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.asyncio

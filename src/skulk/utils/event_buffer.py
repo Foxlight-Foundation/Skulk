@@ -24,12 +24,15 @@ class OrderedBuffer[T]:
 
     def __init__(self):
         self.store: dict[int, T] = {}
+        self.skipped: set[int] = set()
         self.next_idx_to_release: int = 0
 
     def ingest(self, idx: int, t: T):
         """Ingest a sequence into the buffer"""
         logger.trace(f"Ingested event {t}")
         if idx < self.next_idx_to_release:
+            return
+        if idx in self.skipped:
             return
         if idx in self.store:
             if self._messages_match(self.store[idx], t):
@@ -44,15 +47,29 @@ class OrderedBuffer[T]:
             for stored_idx, event in self.store.items()
             if stored_idx < idx
         }
+        self.skipped = {skipped_idx for skipped_idx in self.skipped if skipped_idx < idx}
         self.next_idx_to_release = min(self.next_idx_to_release, idx)
+
+    def skip(self, idx: int) -> None:
+        """Advance past one rejected sequence without retaining its payload."""
+
+        if idx < self.next_idx_to_release or idx in self.store:
+            return
+        self.skipped.add(idx)
 
     def drain(self) -> list[T]:
         """Drain all available events from the buffer"""
         ret: list[T] = []
-        while self.next_idx_to_release in self.store:
+        while (
+            self.next_idx_to_release in self.store
+            or self.next_idx_to_release in self.skipped
+        ):
             idx = self.next_idx_to_release
-            event = self.store.pop(idx)
-            ret.append(event)
+            if idx in self.skipped:
+                self.skipped.remove(idx)
+            else:
+                event = self.store.pop(idx)
+                ret.append(event)
             self.next_idx_to_release += 1
         logger.trace(f"Releasing event {ret}")
         return ret
@@ -60,10 +77,16 @@ class OrderedBuffer[T]:
     def drain_indexed(self) -> list[tuple[int, T]]:
         """Drain all available events from the buffer"""
         ret: list[tuple[int, T]] = []
-        while self.next_idx_to_release in self.store:
+        while (
+            self.next_idx_to_release in self.store
+            or self.next_idx_to_release in self.skipped
+        ):
             idx = self.next_idx_to_release
-            event = self.store.pop(idx)
-            ret.append((idx, event))
+            if idx in self.skipped:
+                self.skipped.remove(idx)
+            else:
+                event = self.store.pop(idx)
+                ret.append((idx, event))
             self.next_idx_to_release += 1
         logger.trace(f"Releasing event {ret}")
         return ret
@@ -96,6 +119,13 @@ class MultiSourceBuffer[SourceId, T]:
             self.stores[source] = OrderedBuffer()
         buffer = self.stores[source]
         buffer.ingest(idx, t)
+
+    def skip(self, idx: int, source: SourceId) -> None:
+        """Reject one source sequence while preserving later ordering progress."""
+
+        if source not in self.stores:
+            self.stores[source] = OrderedBuffer()
+        self.stores[source].skip(idx)
 
     def drain(self) -> list[T]:
         ret: list[T] = []

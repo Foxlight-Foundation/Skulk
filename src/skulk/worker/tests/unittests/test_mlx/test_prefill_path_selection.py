@@ -48,10 +48,17 @@ class _FakeStateCache:
 class _VisionChunkModel:
     def __init__(self) -> None:
         self.pixel_values: list[mx.array] | mx.array | None = None
+        self.image_grid_thw: mx.array | None = None
         self.pixel_value_calls: list[list[float]] = []
+        self.image_grid_thw_calls: list[list[list[int]]] = []
 
-    def set_pixel_values(self, pixel_values: list[mx.array] | mx.array | None) -> None:
+    def set_vision_inputs(
+        self,
+        pixel_values: list[mx.array] | mx.array | None,
+        image_grid_thw: mx.array | None,
+    ) -> None:
         self.pixel_values = pixel_values
+        self.image_grid_thw = image_grid_thw
 
     def __call__(self, *_args: object, **_kwargs: object) -> mx.array:
         pixel_values = self.pixel_values
@@ -65,6 +72,11 @@ class _VisionChunkModel:
             self.pixel_value_calls.append(
                 [float(value.item()) for value in pixel_values]
             )
+        self.image_grid_thw_calls.append(
+            []
+            if self.image_grid_thw is None
+            else cast(list[list[int]], self.image_grid_thw.tolist())
+        )
         return mx.zeros((1, 1))
 
 
@@ -315,6 +327,14 @@ def test_pipeline_prefill_slices_native_pixel_values_per_chunk(
         distributed_prompt_progress_callback=None,
         group=_fake_group(),
         native_pixel_values=pixel_values,
+        native_image_grid_thw=mx.array(
+            [
+                [1, 10, 10],
+                [1, 20, 20],
+                [1, 30, 30],
+                [1, 40, 40],
+            ]
+        ),
         native_media_regions=[
             MediaRegion("first", 9, 281),
             MediaRegion("second", 633, 907),
@@ -328,6 +348,11 @@ def test_pipeline_prefill_slices_native_pixel_values_per_chunk(
         [40.0],
     ]
     assert model.pixel_value_calls[-2:] == [[], []]
+    assert model.image_grid_thw_calls[:2] == [
+        [[1, 10, 10], [1, 20, 20], [1, 30, 30]],
+        [[1, 40, 40]],
+    ]
+    assert model.image_grid_thw_calls[-2:] == [[], []]
 
 
 def test_pipeline_decode_without_lookahead_yields_before_second_decode_step() -> None:

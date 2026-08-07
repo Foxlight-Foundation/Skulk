@@ -12,6 +12,8 @@ re-checks ``is_in_store`` as a backstop for any other cause of files-gone.
 
 from pathlib import Path
 
+import pytest
+
 from skulk.store.model_store import ModelStore, StoreDownloadStatus
 
 
@@ -58,6 +60,26 @@ def test_delete_model_leaves_in_flight_download_status(tmp_path: Path) -> None:
     assert "org/bundle" in store._active_downloads  # pyright: ignore[reportPrivateUsage]
 
 
+def test_get_download_status_does_not_report_disappeared_entry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A concurrent directory removal must not produce a false complete state."""
+
+    store = ModelStore(tmp_path)
+
+    def present_before_removal(_model_id: str) -> bool:
+        return True
+
+    def missing_after_removal(_model_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(store, "is_in_store", present_before_removal)
+    monkeypatch.setattr(store, "get_entry", missing_after_removal)
+
+    assert store.get_download_status("org/gone") is None
+
+
 async def test_request_download_redownloads_stale_complete_when_files_gone(
     tmp_path: Path,
 ) -> None:
@@ -85,3 +107,19 @@ async def test_request_download_keeps_cached_complete_when_still_in_store(
     status = await store.request_download("org/present", "base-Q4_K_M.gguf", None)
 
     assert status.status == "complete"
+
+
+async def test_request_download_recovers_missing_requested_quant(
+    tmp_path: Path,
+) -> None:
+    store = ModelStore(tmp_path)
+    _register(store, "org/present", ["base-Q4_K_M.gguf", "config.json"])
+    _seed_complete(store, "org/present")
+
+    status = await store.request_download(
+        "org/present",
+        "base-IQ3_XXS.gguf",
+        None,
+    )
+
+    assert status.status in ("pending", "downloading")

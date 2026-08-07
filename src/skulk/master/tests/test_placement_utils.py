@@ -2,18 +2,25 @@ import pytest
 
 from skulk.master.placement_utils import (
     allocate_layers_proportionally,
+    allocate_pipeline_layers,
     filter_cycles_by_memory,
     get_mlx_jaccl_coordinators,
     get_shard_assignments,
     get_shard_assignments_for_pipeline_parallel,
     get_smallest_cycles,
+    unified_memory_gpu_node_ids,
     usable_vram_by_node,
 )
 from skulk.master.tests.conftest import (
     create_node_memory,
     create_socket_connection,
 )
-from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    PlacementCardConfig,
+)
 from skulk.shared.topology import Topology
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
@@ -37,9 +44,10 @@ def _card(
     storage_gb: float,
     *,
     kv_heads: int | None = None,
-    n_layers: int = 1,
+    n_layers: int = 32,
     context_length: int = 0,
     gguf_file: str | None = None,
+    uses_cfg: bool = False,
 ) -> ModelCard:
     """Minimal ModelCard for memory-filter tests.
 
@@ -57,8 +65,47 @@ def _card(
         num_key_value_heads=kv_heads,
         context_length=context_length,
         gguf_file=gguf_file,
-        tasks=[ModelTask.TextGeneration],
+        uses_cfg=uses_cfg,
+        tasks=[ModelTask.TextToImage if uses_cfg else ModelTask.TextGeneration],
     )
+
+
+def test_pipeline_allocation_moves_tail_behind_safe_split_boundary() -> None:
+    """A shared-KV tail must remain with both of its concrete producers."""
+    card = _card(storage_gb=2, n_layers=30).model_copy(
+        update={
+            "placement": PlacementCardConfig(max_pipeline_split_layer=18),
+        }
+    )
+
+    allocations = allocate_pipeline_layers(card, [0.63, 0.37])
+
+    assert allocations == [18, 12]
+
+
+def test_pipeline_allocation_preserves_earlier_safe_boundaries() -> None:
+    """Only boundaries beyond the shared-tail limit should move."""
+    card = _card(storage_gb=2, n_layers=30).model_copy(
+        update={
+            "placement": PlacementCardConfig(max_pipeline_split_layer=18),
+        }
+    )
+
+    allocations = allocate_pipeline_layers(card, [0.34, 0.33, 0.33])
+
+    assert allocations == [10, 8, 12]
+
+
+def test_pipeline_allocation_rejects_too_many_constrained_ranks() -> None:
+    """Every pipeline rank still requires at least one owned layer."""
+    card = _card(storage_gb=2, n_layers=30).model_copy(
+        update={
+            "placement": PlacementCardConfig(max_pipeline_split_layer=1),
+        }
+    )
+
+    with pytest.raises(ValueError, match="before safe split boundary 1"):
+        allocate_pipeline_layers(card, [0.34, 0.33, 0.33])
 
 
 def test_filter_cycles_by_memory():
@@ -178,6 +225,157 @@ def test_heterogeneous_pipeline_split_weighs_by_usable_not_raw_available():
     )
 
     assert len(filtered_cycles) == 1, diagnostics.rejection_reasons
+    assert diagnostics.rejection_reasons == []
+
+
+def test_pipeline_memory_filter_uses_integer_layer_allocation():
+    """A fractional fit estimate must not admit a rounded-up shard.
+
+    With three layers on two equal nodes, the continuous estimate gives each
+    node 1.5 layers and fits. The actual placement must assign 2 layers to one
+    node and 1 to the other, so the 2-layer shard's padded footprint is what the
+    worker will load and what the master must admit against.
+    """
+    node_a = NodeId()
+    node_b = NodeId()
+    topology = Topology()
+    topology.add_node(node_a)
+    topology.add_node(node_b)
+    topology.add_connection(
+        Connection(source=node_a, sink=node_b, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_b, sink=node_a, edge=create_socket_connection(2))
+    )
+    node_memory = {
+        node_a: create_node_memory(
+            Memory.from_gb(7).in_bytes, ram_total=Memory.from_gb(32).in_bytes
+        ),
+        node_b: create_node_memory(
+            Memory.from_gb(7).in_bytes, ram_total=Memory.from_gb(32).in_bytes
+        ),
+    }
+    cycles = [cycle for cycle in topology.get_cycles() if len(cycle) == 2]
+
+    filtered_cycles, diagnostics = filter_cycles_by_memory(
+        cycles, node_memory, _card(9, n_layers=3), sharding=Sharding.Pipeline
+    )
+
+    assert filtered_cycles == []
+    assert "needs ~8.0GB" in diagnostics.rejection_reasons[0]
+
+
+def test_pipeline_memory_filter_rejects_more_nodes_than_layers():
+    node_a = NodeId()
+    node_b = NodeId()
+    node_c = NodeId()
+    topology = Topology()
+    for node_id in (node_a, node_b, node_c):
+        topology.add_node(node_id)
+    topology.add_connection(
+        Connection(source=node_a, sink=node_b, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_b, sink=node_c, edge=create_socket_connection(2))
+    )
+    topology.add_connection(
+        Connection(source=node_c, sink=node_a, edge=create_socket_connection(3))
+    )
+    node_memory = {
+        node_a: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+        node_b: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+        node_c: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+    }
+
+    filtered_cycles, diagnostics = filter_cycles_by_memory(
+        topology.get_cycles(),
+        node_memory,
+        _card(1, n_layers=2),
+        sharding=Sharding.Pipeline,
+    )
+
+    assert all(len(cycle.node_ids) <= 2 for cycle in filtered_cycles)
+    assert any(
+        "3 pipeline stages exceed 2 model layers" in reason
+        for reason in diagnostics.rejection_reasons
+    )
+
+
+def test_pipeline_memory_filter_counts_cfg_pipeline_stages_before_rejecting():
+    nodes = [NodeId() for _ in range(4)]
+    topology = Topology()
+    for node_id in nodes:
+        topology.add_node(node_id)
+    for index, node_id in enumerate(nodes):
+        topology.add_connection(
+            Connection(
+                source=node_id,
+                sink=nodes[(index + 1) % len(nodes)],
+                edge=create_socket_connection(index + 1),
+            )
+        )
+    node_memory = {
+        node_id: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        )
+        for node_id in nodes
+    }
+    cycles = [cycle for cycle in topology.get_cycles() if len(cycle.node_ids) == 4]
+
+    filtered_cycles, diagnostics = filter_cycles_by_memory(
+        cycles,
+        node_memory,
+        _card(1, n_layers=2, uses_cfg=True),
+        sharding=Sharding.Pipeline,
+    )
+
+    assert filtered_cycles == cycles
+    assert diagnostics.rejection_reasons == []
+
+
+def test_pipeline_memory_filter_can_keep_rpc_proportional_sizing():
+    node_a = NodeId()
+    node_b = NodeId()
+    node_c = NodeId()
+    topology = Topology()
+    for node_id in (node_a, node_b, node_c):
+        topology.add_node(node_id)
+    topology.add_connection(
+        Connection(source=node_a, sink=node_b, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_b, sink=node_c, edge=create_socket_connection(2))
+    )
+    topology.add_connection(
+        Connection(source=node_c, sink=node_a, edge=create_socket_connection(3))
+    )
+    node_memory = {
+        node_a: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+        node_b: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+        node_c: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+    }
+
+    filtered_cycles, diagnostics = filter_cycles_by_memory(
+        topology.get_cycles(),
+        node_memory,
+        _card(1, n_layers=2),
+        sharding=Sharding.Pipeline,
+        exact_pipeline_layers=False,
+    )
+
+    assert any(len(cycle.node_ids) == 3 for cycle in filtered_cycles)
     assert diagnostics.rejection_reasons == []
 
 
@@ -473,6 +671,51 @@ def test_usable_vram_by_node_uma_counts_gtt():
         node_vram=usable,
     )
     assert len(fitting) == 1, diagnostics.rejection_reasons
+
+
+def test_unified_memory_gpu_node_ids_requires_uma_and_gpu_backend():
+    """Only an AMD APU with host-spanning GTT and GPU offload is classified UMA."""
+    uma = NodeId()
+    discrete = NodeId()
+    cpu_only_uma = NodeId()
+    memory = {
+        node_id: create_node_memory(
+            Memory.from_gb(30).in_bytes, ram_total=Memory.from_gb(32).in_bytes
+        )
+        for node_id in (uma, discrete, cpu_only_uma)
+    }
+    node_system = {
+        uma: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=Memory.from_gb(32).in_bytes,
+                gtt_total_bytes=Memory.from_gb(60).in_bytes,
+            )
+        ),
+        discrete: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=Memory.from_gb(32).in_bytes,
+                gtt_total_bytes=Memory.from_gb(16).in_bytes,
+            )
+        ),
+        cpu_only_uma: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=Memory.from_gb(32).in_bytes,
+                gtt_total_bytes=Memory.from_gb(60).in_bytes,
+            )
+        ),
+    }
+    resources = {
+        uma: NodeResources(backends=frozenset({"llama_server-vulkan"})),
+        discrete: NodeResources(backends=frozenset({"llama_server-vulkan"})),
+        cpu_only_uma: NodeResources(backends=frozenset({"llama_server-cpu"})),
+    }
+
+    assert unified_memory_gpu_node_ids(
+        node_system, resources, node_memory=memory
+    ) == frozenset({uma})
 
 
 def test_usable_vram_by_node_discrete_without_gtt_uses_vram_only():

@@ -70,6 +70,8 @@ node in a cluster must run the same Skulk version.
   - optional KV head count for tensor compatibility decisions
 - `gguf_file`
   - for GGUF (llama.cpp) models only: the repo-relative weights file the runner loads (the selected quant's first shard), resolved once at card creation; `null` for safetensors/MLX cards
+- `source_revision`
+  - optional full Hugging Face commit hash for the qualified model artifacts; when set, metadata, store downloads, direct downloads, and worker staging all use that immutable revision instead of the repository's mutable `main` branch
 - `components`
   - for multi-component models (such as a diffusion stack): the per-component weight layout; `null` for a single-weights model
 
@@ -78,7 +80,7 @@ node in a cluster must run the same Skulk version.
 - `supports_tensor`
   - whether tensor-style placement is allowed (GGUF/llama.cpp cards set this `false`)
 - `tasks`
-  - supported task families such as `TextGeneration`, `TextEmbedding`, or image tasks
+  - supported task families such as `TextGeneration`, `TextEmbedding`, image tasks, `TextToSpeech`, `SpeechToText`, or `SpeechTranslation`
 - `trust_remote_code`
   - whether the loader may enable remote-code behavior for this model
 - `uses_cfg`
@@ -95,7 +97,7 @@ node in a cluster must run the same Skulk version.
 - `context_length`
   - advertised context length if known
 - `capabilities`
-  - coarse capability list such as `text`, `vision`, `thinking`, `embedding`
+  - coarse capability list such as `text`, `vision`, `thinking`, `embedding`, `tts`, or `stt`
 
 These coarse capabilities remain useful for browsing, badges, and basic compatibility, but they are not expressive enough for model-specific runtime behavior on their own.
 
@@ -140,6 +142,8 @@ card written against the original `{"mlx"}` set keeps matching.
   - optional minimum accelerator memory a node must have to be eligible.
 - `max_context_tokens`
   - optional cap on the admission context for this model, independent of the model's trained context length.
+- `max_pipeline_split_layer`
+  - optional largest layer boundary where a later pipeline rank may begin. Use it when a model's tail reuses KV from earlier concrete layers; the planner shifts proportional boundaries left as needed and reruns normal per-node memory checks so the final rank owns every producer it consumes.
 
 ## Extended Capability Sections
 
@@ -170,6 +174,55 @@ Declares refined modality support:
   - whether the model supports audio input
 - `supports_native_multimodal`
   - whether the model uses a native multimodal path rather than generic text-only prompting
+
+### `[audio]`
+
+Declares speech serving metadata for TTS and STT models:
+
+- `kind`
+  - `tts` for text-to-speech or `stt` for speech-to-text
+- `default_response_format`
+  - default encoded audio format for TTS, such as `mp3`
+- `response_formats`
+  - encoded audio formats the model can produce, such as `mp3`, `wav`, `flac`, `ogg`, or `opus`
+- `supports_streaming`
+  - whether the model can stream partial speech or transcription output; keep
+    this false until the Skulk runtime has validated the model/backend path
+- `supports_realtime`
+  - whether the model exposes a realtime audio session interface
+- `supports_voice_listing`
+  - whether voices can be enumerated by the serving API
+- `voices`
+  - stable model-native or bundled-reference identifiers returned by
+    `GET /v1/audio/voices`; this
+    requires `kind = "tts"` and `supports_voice_listing = true`
+- `voice_catalog`
+  - optional ordered metadata for every identifier in `voices`; each entry
+    carries the same `id`, a display `name`, and ordered BCP 47
+    `preferred_languages` used by clients for deterministic language matching;
+    `reference_profile` names a checksummed profile under
+    `resources/speech_reference_voices/` when the voice is reference-conditioned
+- `default_voice`
+  - stable voice used when a TTS request omits `voice`; it must appear in
+    `voices`
+- `supports_reference_audio`
+  - whether managed reference audio can condition the voice
+- `supports_translation`
+  - whether speech-to-English translation is supported through the
+    standard `/v1/audio/translations` route
+- `sample_rates`
+  - supported input or output sample rates in hertz
+
+For stable TTS streaming, `audio.supports_streaming = true` is the model-side
+eligibility gate; the model must also be mounted and ready.
+
+For realtime STT, both `supports_streaming = true` and
+`supports_realtime = true` are necessary but not sufficient. The API must have
+reachable ready single-host capacity and use a model whose upstream runtime
+exposes a true incremental streaming session. The bundled
+`mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit` card is the first validated
+contract candidate. Batch Parakeet and Whisper cards deliberately keep both
+flags false.
 
 ### `[tooling]`
 
@@ -317,6 +370,64 @@ output_parser = "gemma4"
 
 The card stays declarative. Skulk still resolves it into a normalized runtime
 profile before execution code consumes it.
+
+Speech cards use the same pattern:
+
+```toml
+model_id = "custom/kokoro-tts"
+n_layers = 1
+hidden_size = 1
+supports_tensor = false
+tasks = ["TextToSpeech"]
+family = "kokoro"
+capabilities = ["tts"]
+
+[storage_size]
+in_bytes = 1073741824
+
+[placement]
+compatible_backends = ["mlx_audio", "mlx_audio-metal"]
+backend_preference = ["mlx_audio-metal", "mlx_audio"]
+
+[audio]
+kind = "tts"
+default_response_format = "mp3"
+response_formats = ["mp3", "wav"]
+# Set true only after the Skulk runtime validates this model/backend streaming path.
+supports_streaming = true
+supports_realtime = false
+supports_voice_listing = true
+voices = ["serena", "ryan"]
+default_voice = "ryan"
+supports_reference_audio = false
+sample_rates = [24000]
+
+[[audio.voice_catalog]]
+id = "serena"
+name = "Serena"
+preferred_languages = ["zh"]
+
+[[audio.voice_catalog]]
+id = "ryan"
+name = "Ryan"
+preferred_languages = ["en"]
+```
+
+For a reference-conditioned voice, the catalog ID and `reference_profile` must
+match and the card must declare `supports_reference_audio = true`:
+
+```toml
+[[audio.voice_catalog]]
+id = "angus"
+name = "Angus"
+preferred_languages = ["en"]
+reference_profile = "angus"
+```
+
+The central profile manifest pins the local MP3 digest and exact transcript.
+Model cards intentionally repeat the public voice order so API and dashboard
+behavior remain explicit model truth; CI verifies every bundled cloning card
+against the central manifest.
 
 ## When to Extend a Card
 

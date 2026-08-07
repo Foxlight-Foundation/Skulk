@@ -72,12 +72,16 @@ class NoPeersSubscribedToTopicError(builtins.Exception):
 class PyFromSwarm:
     @typing.final
     class Connection(PyFromSwarm):
-        __match_args__ = ("peer_id", "connected",)
+        __match_args__ = ("peer_id", "connected", "remote_ip", "remote_tcp_port",)
         @property
         def peer_id(self) -> builtins.str: ...
         @property
         def connected(self) -> builtins.bool: ...
-        def __new__(cls, peer_id: builtins.str, connected: builtins.bool) -> PyFromSwarm.Connection: ...
+        @property
+        def remote_ip(self) -> builtins.str: ...
+        @property
+        def remote_tcp_port(self) -> builtins.int: ...
+        def __new__(cls, peer_id: builtins.str, connected: builtins.bool, remote_ip: builtins.str, remote_tcp_port: builtins.int) -> PyFromSwarm.Connection: ...
     
     @typing.final
     class Message(PyFromSwarm):
@@ -102,7 +106,7 @@ class ZenohHandle:
     surface (subscribe / publish / recv) so the Python `Router` can treat it as
     an alternate transport backend.
     """
-    def __new__(cls, listen_endpoints: typing.Optional[typing.Sequence[builtins.str]] = None, connect_endpoints: typing.Optional[typing.Sequence[builtins.str]] = None, namespace: typing.Optional[builtins.str] = None) -> ZenohHandle: ...
+    def __new__(cls, listen_endpoints: typing.Optional[typing.Sequence[builtins.str]] = None, connect_endpoints: typing.Optional[typing.Sequence[builtins.str]] = None, namespace: typing.Optional[builtins.str] = None, multicast_scouting: builtins.bool = False) -> ZenohHandle: ...
     async def zenoh_subscribe(self, topic: builtins.str) -> None:
         r"""
         Subscribe to a Zenoh key (topic). Idempotent.
@@ -110,6 +114,15 @@ class ZenohHandle:
     async def zenoh_publish(self, topic: builtins.str, data: bytes) -> None:
         r"""
         Publish `data` on a Zenoh key (Reliable + Block + single priority).
+        """
+    async def zenoh_connected_peer_count(self) -> builtins.int:
+        r"""
+        Count the Zenoh peers this session currently holds a live transport to.
+
+        Zero while cluster peers advertise Zenoh means this node's data plane
+        is isolated (its remote streams will fail) even though the libp2p
+        control plane is healthy; Python advertises the count so cluster
+        health can say so instead of streams dying silently.
         """
     async def recv(self) -> ZenohMessage: ...
 
@@ -124,4 +137,3 @@ class ZenohMessage:
     def topic(self) -> builtins.str: ...
     @property
     def data(self) -> bytes: ...
-

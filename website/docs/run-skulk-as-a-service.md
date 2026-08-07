@@ -22,11 +22,15 @@ About 5 minutes per machine. No coding. No sudo for the standard install.
 
 You need:
 
-1. **A working Skulk install.** You should already be able to run `uv run skulk` from your Skulk folder and have it boot cleanly. If you can't, do that first; the [Build and Runtime guide](./build-and-runtime.md) walks you through it.
+1. **A working Skulk install.** You should already be able to run `uv run skulk` from your Skulk folder and have it boot cleanly. On a fresh box, the fastest way to get there is the one-command installer (`curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash`); the [Build and Runtime guide](./build-and-runtime.md) covers it, along with the manual path.
 2. **`uv` on your PATH.** Check by running `which uv`. If you see a path, you're good. If it says "not found", install `uv` from [docs.astral.sh/uv](https://docs.astral.sh/uv/) and come back.
 3. **macOS** (any recent version) **or Linux** with systemd (Ubuntu, Debian, Fedora, Arch, anything modern).
 
 That's it.
+
+:::note Linux GPU nodes provision their own engine
+A Linux node automatically downloads and verifies a pinned `llama-server` build at startup when no engine is configured, so the service serves GGUF models with zero engine setup. Set `SKULK_NO_ENGINE_AUTOPROVISION=1` in `~/.skulk/skulk.env` to opt out; see [engine provisioning](./build-and-runtime.md#engine-provisioning) for the details. For rented-GPU pod sessions (RunPod and similar), a prebaked CUDA image at `ghcr.io/foxlight-foundation/skulk-cuda-pod` skips the slow CUDA compiles entirely (`deployment/cuda/`).
+:::
 
 ## Install: pick your platform
 
@@ -161,7 +165,8 @@ Common things to change:
 | `SKULK_AUTO_UPDATE` | `1` = auto-update on every boot, `0` = run whatever's already on disk | `1` |
 | `SKULK_VERBOSITY` | Verbosity flag passed to skulk. Empty (the default) is info-only, `-v` is verbose, `-vv` is debug. Debug logs the libp2p transport at a high rate, so leave it empty unless you are actively debugging | empty (info) |
 | `SKULK_CAPTURE_KEEP_BYTES` | How much of the previous run's captured stdout/stderr to keep (as `*.log.1`) when the service restarts. The live capture file is truncated on each launch so it cannot grow without bound | `5242880` (5 MB) |
-| `SKULK_LIBP2P_NAMESPACE` | Cluster namespace: nodes only join clusters with the same value. Use a unique value per cluster | `foxlight-main` |
+| `SKULK_LLAMA_SERVER_PARALLEL` | Concurrent request-slot ceiling for served llama.cpp models. Above one slot Skulk uses a unified KV cache so each slot retains the full advertised window, then queues exact prompt-plus-output reservations FIFO when their aggregate would exceed that shared pool. Set `1` only for serial isolation | `16` |
+| `SKULK_LIBP2P_NAMESPACE` | Cluster namespace: nodes only join clusters with the same value. Leave it unset unless you run more than one Skulk cluster on the same network and need them isolated; then set the same value on every node of a cluster, including nodes launched manually with `uv run skulk` (a node with a different value, or none, cannot see the others). Migration note: an older template set this to `foxlight-main`, and installers never rewrite an existing env file. When adding a fresh node to a cluster installed from that template, either set the old value on the new node or remove the line from every existing node's env file and restart them | unset (shared default namespace) |
 | `SKULK_LOGGING_INGEST_URL` | Where Vector ships logs (only relevant if you have the Vector agent installed) | the in-house VictoriaLogs endpoint |
 
 The env file you edit is **yours**; Skulk's `git pull` only updates the template at `deployment/install/skulk.env.example`. Diff against that template if you ever want to pick up a new default.
@@ -172,7 +177,13 @@ Every time the service starts (boot, manual restart, post-crash relaunch), it ru
 
 1. **`git pull --ff-only`** pulls new commits if any. Failure (offline, dirty tree, fast-forward not possible) is logged and ignored; the service boots whatever revision is already checked out.
 2. **`uv sync`** refreshes the Python virtualenv to match the lockfile. Failure (PyPI unreachable, wheel build error) is logged and ignored; the service boots with the current venv.
-3. **`npm install && npm run build`** in `dashboard-react/` rebuilds the dashboard. Individual failures are logged and ignored as long as a previously built `dashboard-react/dist/` exists. **If `dist/` is missing, the service refuses to start** because there'd be no dashboard to serve.
+   The script then checks whether any pulled commit touched the `rust/`
+   tree and, if so, forces a rebuild of the Rust bindings
+   (`uv sync --reinstall-package skulk_pyo3_bindings`): a plain sync reuses
+   the cached bindings wheel, which once left a fleet running stale wire
+   code for days while looking fully up to date. The rebuild is also
+   non-fatal; a failure keeps the current bindings.
+3. **Skulk's bundled Node.js runtime installs dashboard dependencies and runs the production build** in `dashboard-react/`. A compatible system Node/npm is only a recovery fallback. This is the same path as the official installer, so Linux services refresh their dashboard even when the host has no Node.js installation. Individual failures are logged and ignored as long as a previously built `dashboard-react/dist/` exists. **If `dist/` is missing, the service refuses to start** because there'd be no dashboard to serve.
 
 Everything from this phase is logged to `~/.skulk/logs/skulk.prep.log` so you can audit what actually happened on the last boot.
 
@@ -213,7 +224,11 @@ If you've turned auto-update off (`SKULK_AUTO_UPDATE=0`), do the manual flow:
 
 ```bash
 git pull
-cd dashboard-react && npm install && npm run build && cd ..
+uv run python scripts/run_bundled_npm.py --version
+cd dashboard-react
+uv run --project .. python ../scripts/run_bundled_npm.py install --no-fund --no-audit
+uv run --project .. python ../scripts/run_bundled_npm.py run build
+cd ..
 
 # then restart the service as above
 ```
@@ -242,7 +257,7 @@ If the dashboard still doesn't load, check the logs (see the table above). Look 
 - **Another program is using port 52415.** Find it with `lsof -i :52415` and stop it (or change Skulk's port with `--api-port`).
 - **A typo in your `skulk.yaml`.** Skulk logs the parse error on startup; search the log for "config".
 - **You moved your Skulk folder after running the installer.** Re-run the installer; it'll update the path.
-- **The dashboard build failed during boot prep.** Look in `~/.skulk/logs/skulk.prep.log`: if `npm run build` failed and there's no `dashboard-react/dist/` directory, the service refuses to start. Fix: build the dashboard once manually (`cd dashboard-react && npm install && npm run build`), then restart.
+- **The dashboard build failed during boot prep.** Look in `~/.skulk/logs/skulk.prep.log`: if the bundled npm build failed and there's no `dashboard-react/dist/` directory, the service refuses to start. First run `uv run python scripts/run_bundled_npm.py --version` from the checkout. If that succeeds, rebuild with the bundled commands above and restart. Use `--headless` or `SKULK_HEADLESS=1` only when the node is intentionally API-only, not merely because the host lacks system Node/npm.
 
 ### "Vector keeps crashing / no logs are reaching the central store"
 

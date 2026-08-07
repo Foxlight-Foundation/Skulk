@@ -7,6 +7,7 @@ from skulk.master.placement import (
     fallback_command_for_refused_instance,
     get_transition_events,
     place_instance,
+    replacement_command_for_download_failed_instance,
     replacement_command_for_refused_instance,
 )
 from skulk.master.tests.conftest import (
@@ -15,6 +16,7 @@ from skulk.master.tests.conftest import (
     create_rdma_connection,
     create_socket_connection,
 )
+from skulk.shared.models.memory_estimate import KV_CONTEXT_BUDGET_TOKENS
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import CreateInstance, PlaceInstance
@@ -878,6 +880,67 @@ def test_legacy_instance_backfills_context_token_limit_from_card() -> None:
     assert instance.context_token_limit == 8192
 
 
+def test_legacy_gguf_instance_backfill_clamped_to_budget_floor() -> None:
+    # A legacy GGUF instance hydrated without a stamped ceiling must NOT backfill
+    # to the card's large advertised context: the served llama.cpp engine loads
+    # the whole KV cache up front from this value, so a 128k backfill would
+    # preallocate a fictitious window and OOM the node on load. The backfill is
+    # clamped to the KV_CONTEXT_BUDGET_TOKENS floor for gguf. (P1 review, #585.)
+    node_id = NodeId()
+    runner_id = RunnerId()
+    card = ModelCard(
+        model_id=ModelId("legacy-gguf"),
+        storage_size=Memory.from_gb(1),
+        n_layers=10,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        context_length=131072,
+        gguf_file="legacy-Q4_K_M.gguf",
+    )
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=ModelId("legacy-gguf"),
+            runner_to_shard={runner_id: _make_shard_metadata(card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+    )
+    assert instance.context_token_limit == KV_CONTEXT_BUDGET_TOKENS
+
+
+def test_legacy_gguf_instance_backfill_floor_when_context_length_unknown() -> None:
+    # A gguf card's context_length is best-effort and can be 0 (unknown). A legacy
+    # gguf instance must STILL get a ceiling (the runner preallocates KV at the
+    # floor via serving_n_ctx), so it backfills to KV_CONTEXT_BUDGET_TOKENS rather
+    # than None -- else the API would admit requests larger than the runner serves.
+    node_id = NodeId()
+    runner_id = RunnerId()
+    card = ModelCard(
+        model_id=ModelId("legacy-gguf-noctx"),
+        storage_size=Memory.from_gb(1),
+        n_layers=10,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="legacy-Q4_K_M.gguf",
+        # context_length omitted -> defaults to 0 (unknown)
+    )
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=ModelId("legacy-gguf-noctx"),
+            runner_to_shard={runner_id: _make_shard_metadata(card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+    )
+    assert instance.context_token_limit == KV_CONTEXT_BUDGET_TOKENS
+
+
 def test_create_instance_restamps_context_token_limit() -> None:
     # The exact-control POST /instance path must stamp the master's
     # memory-derived ceiling too (#292 review) — runners trust the stamped
@@ -1479,3 +1542,98 @@ def test_placement_ports_avoid_live_instance_ports() -> None:
     free = low + 7
     in_use = {p for p in range(low, high + 1) if p != free}
     assert random_ephemeral_port(in_use) == free
+
+
+def test_repair_commands_preserve_original_exclusions() -> None:
+    """Repair re-placements keep the caller's per-placement exclusions (#658).
+
+    Placement stamps the effective exclusions on the instance; every repair
+    shape (wider refusal re-place, anywhere fallback, download-failure
+    replacement) must union them with its own newly excluded nodes. Before
+    the stamp existed, a repaired instance could land on exactly the nodes
+    the caller excluded (observed live: a placement pinned off five nodes
+    was repaired onto one of them).
+    """
+    topology, node_memory, node_network, node_ids = _fully_connected_three_nodes(
+        (10.0, 10.0, 10.0)
+    )
+    operator_excluded = node_ids[2]
+    card = ModelCard(
+        model_id=ModelId("exclusion-carry-model"),
+        storage_size=Memory.from_gb(6),
+        n_layers=12,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+    )
+    command = PlaceInstance(
+        model_card=card,
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=2,
+        excluded_nodes=[operator_excluded],
+    )
+    placed = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        excluded_nodes={operator_excluded},
+    )
+    instance = next(iter(placed.values()))
+    # The effective exclusions are stamped on the placement decision.
+    assert instance.excluded_nodes == [operator_excluded]
+    assert operator_excluded not in instance.shard_assignments.node_to_runner
+
+    wider = replacement_command_for_refused_instance(instance)
+    assert operator_excluded in wider.excluded_nodes
+
+    refusing_node = node_ids[0]
+    fallback = fallback_command_for_refused_instance(instance, refusing_node)
+    assert set(fallback.excluded_nodes) == {operator_excluded, refusing_node}
+
+    download_failed = replacement_command_for_download_failed_instance(
+        instance, {node_ids[1]}
+    )
+    assert set(download_failed.excluded_nodes) == {operator_excluded, node_ids[1]}
+
+    # A repair re-placement searches with the union but stamps only the
+    # ORIGINAL intent on the new instance, so a transiently failed node is
+    # not laundered into permanent operator intent across repair
+    # generations (PR #667 review). Use a width-1 placement so the union
+    # (operator exclusion plus the failed node) still leaves a host in the
+    # three-node topology: the failed node may be excluded for THIS
+    # placement yet must not be remembered as caller intent.
+    single = PlaceInstance(
+        model_card=card,
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=1,
+        excluded_nodes=[operator_excluded],
+    )
+    placed_single = place_instance(
+        single,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        excluded_nodes={operator_excluded},
+    )
+    single_instance = next(iter(placed_single.values()))
+    failed_node = next(iter(single_instance.shard_assignments.node_to_runner))
+    repair = replacement_command_for_download_failed_instance(
+        single_instance, {failed_node}
+    )
+    repaired = place_instance(
+        repair,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        excluded_nodes=set(repair.excluded_nodes),
+        stamped_exclusions=set(single_instance.excluded_nodes),
+    )
+    repaired_instance = next(iter(repaired.values()))
+    assert repaired_instance.excluded_nodes == [operator_excluded]
+    assert failed_node not in repaired_instance.shard_assignments.node_to_runner

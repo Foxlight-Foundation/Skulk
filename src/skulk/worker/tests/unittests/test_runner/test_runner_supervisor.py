@@ -3,9 +3,18 @@ from typing import cast
 
 import anyio
 import pytest
+from anyio import to_thread
 
-from skulk.shared.models.model_cards import ModelId
-from skulk.shared.types.chunks import ErrorChunk, TokenChunk
+from skulk.api.types import ImageGenerationTaskParams
+from skulk.routing.trace_data import TraceDataPacket
+from skulk.shared.models.model_cards import ModelId, ModelTask
+from skulk.shared.types.audio import (
+    AudioTranscriptionTaskParams,
+    RealtimeAudioInputFrame,
+    RealtimeAudioTranscriptionTaskParams,
+    SpeechSynthesisTaskParams,
+)
+from skulk.shared.types.chunks import ErrorChunk, ImageChunk, TokenChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.diagnostics import (
     RunnerDiagnosticContext,
@@ -15,16 +24,48 @@ from skulk.shared.types.events import (
     ChunkGenerated,
     Event,
     RunnerStatusUpdated,
+    TaskAcknowledged,
     TaskDeleted,
+    TaskFailed,
     TaskStatusUpdated,
+    TraceEventData,
+    TracesCollected,
 )
-from skulk.shared.types.tasks import Task, TaskId, TaskStatus, TextGeneration
+from skulk.shared.types.tasks import (
+    AudioTranscription,
+    ImageGeneration,
+    RealtimeAudioTranscription,
+    Shutdown,
+    SpeechSynthesis,
+    Task,
+    TaskId,
+    TaskStatus,
+    TextGeneration,
+)
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
-from skulk.shared.types.worker.instances import BoundInstance, InstanceId
-from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerRunning
-from skulk.utils.channels import channel, mp_channel
-from skulk.worker.runner.runner_supervisor import RunnerSupervisor
-from skulk.worker.tests.unittests.conftest import get_bound_mlx_ring_instance
+from skulk.shared.types.worker.instances import (
+    BoundInstance,
+    InstanceId,
+    LlamaRpcInstance,
+)
+from skulk.shared.types.worker.runners import (
+    RunnerFailed,
+    RunnerId,
+    RunnerRunning,
+    RunnerShuttingDown,
+    ShardAssignments,
+)
+from skulk.shared.types.worker.shards import RpcDonorShardMetadata
+from skulk.utils.channels import MpSender, channel, mp_channel
+from skulk.worker.runner.runner_supervisor import (
+    RunnerSupervisor,
+    _trace_expected_ranks,  # pyright: ignore[reportPrivateUsage]
+)
+from skulk.worker.tests.unittests.conftest import (
+    get_bound_mlx_ring_instance,
+    get_mlx_ring_instance,
+    get_pipeline_shard_metadata,
+)
 
 
 class _DeadProcess:
@@ -45,6 +86,219 @@ class _DeadProcess:
 
     def kill(self) -> None:
         return None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_terminal_status_after_acknowledgement() -> None:
+    """Shutdown completion must be forwarded before the supervisor can be cancelled."""
+
+    event_sender, _ = channel[Event](10)
+    task_sender, task_receiver = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    ev_send, ev_recv = mp_channel[Event]()
+    _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("shutdown-instance"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("shutdown-runner"),
+        node_id=NodeId("shutdown-node"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=ev_recv,
+        _diag_recv=diag_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+    )
+    supervisor.status = RunnerRunning()
+    task = Shutdown(
+        task_id=TaskId("shutdown-task"),
+        instance_id=bound_instance.instance.instance_id,
+        runner_id=bound_instance.bound_runner_id,
+    )
+    returned = anyio.Event()
+
+    async def submit_shutdown() -> None:
+        await supervisor.start_task(task, wait_for_terminal=True)
+        returned.set()
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                supervisor._forward_events  # pyright: ignore[reportPrivateUsage]
+            )
+            task_group.start_soon(submit_shutdown)
+            dispatched = await to_thread.run_sync(task_receiver.receive_timeout, 1)
+            assert dispatched == task
+
+            ev_send.send(
+                RunnerStatusUpdated(
+                    runner_id=bound_instance.bound_runner_id,
+                    runner_status=RunnerShuttingDown(),
+                )
+            )
+            ev_send.send(TaskAcknowledged(task_id=task.task_id))
+            with anyio.move_on_after(0.05) as acknowledgement_only:
+                await returned.wait()
+            assert acknowledgement_only.cancel_called
+
+            ev_send.send(
+                TaskStatusUpdated(
+                    task_id=task.task_id,
+                    task_status=TaskStatus.Complete,
+                )
+            )
+            await returned.wait()
+            assert (
+                task.task_id
+                not in supervisor._terminal_waiters  # pyright: ignore[reportPrivateUsage]
+            )
+            task_group.cancel_scope.cancel()
+
+    ev_send.close()
+    event_sender.close()
+
+
+def test_trace_expected_ranks_excludes_rpc_memory_donors() -> None:
+    """Trace assembly must wait only for runners that execute the task."""
+
+    model_id = ModelId("gguf/trace-test")
+    driver_node = NodeId("driver-node")
+    donor_node = NodeId("donor-node")
+    driver_runner = RunnerId("driver-runner")
+    donor_runner = RunnerId("donor-runner")
+    driver_shard = get_pipeline_shard_metadata(model_id, 0, 2)
+    donor_shard = RpcDonorShardMetadata(
+        model_card=driver_shard.model_card,
+        device_rank=1,
+        world_size=2,
+        start_layer=0,
+        end_layer=0,
+        n_layers=driver_shard.n_layers,
+    )
+    instance = LlamaRpcInstance(
+        instance_id=InstanceId("trace-rpc-instance"),
+        shard_assignments=ShardAssignments(
+            model_id=model_id,
+            node_to_runner={
+                driver_node: driver_runner,
+                donor_node: donor_runner,
+            },
+            runner_to_shard={
+                driver_runner: driver_shard,
+                donor_runner: donor_shard,
+            },
+        ),
+        driver_node=driver_node,
+        donor_endpoints={donor_node: "127.0.0.1:50052"},
+    )
+    bound_instance = BoundInstance(
+        instance=instance,
+        bound_runner_id=driver_runner,
+        bound_node_id=driver_node,
+    )
+
+    assert _trace_expected_ranks(bound_instance) == (0,)
+
+
+@pytest.mark.asyncio
+async def test_trace_payload_routes_directly_to_owning_api() -> None:
+    """Per-rank trace data must never fall back to the event sender."""
+
+    trace_sender, trace_receiver = channel[TraceDataPacket](1)
+    event_sender, event_receiver = channel[Event](1)
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    _, event_process_receiver = mp_channel[Event]()
+    _, diagnostics_receiver = mp_channel[RunnerDiagnosticUpdate]()
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("trace-instance"),
+        model_id=ModelId("mlx-community/trace-test"),
+        runner_id=RunnerId("trace-runner"),
+        node_id=NodeId("trace-worker"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=event_process_receiver,
+        _diag_recv=diagnostics_receiver,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+        _trace_sender=trace_sender,
+    )
+    task_id = TaskId("trace-task")
+    supervisor._trace_routes[task_id] = (  # pyright: ignore[reportPrivateUsage]
+        NodeId("api-owner"),
+        (0,),
+        0.0,
+    )
+    trace = TraceEventData(
+        name="decode",
+        start_us=1,
+        duration_us=2,
+        rank=0,
+        category="inference",
+    )
+
+    await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
+        TracesCollected(task_id=task_id, rank=0, traces=[trace])
+    )
+    packet = await trace_receiver.receive()
+
+    assert packet.owner_node == NodeId("api-owner")
+    assert packet.source_node == NodeId("trace-worker")
+    assert packet.traces == (trace,)
+    assert event_receiver.collect() == []
+
+
+@pytest.mark.asyncio
+async def test_generated_output_without_data_sender_never_uses_control_sender() -> None:
+    """A local wiring defect must not put payload onto the control plane."""
+
+    event_sender, event_receiver = channel[Event](1)
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    _, event_process_receiver = mp_channel[Event]()
+    _, diagnostics_receiver = mp_channel[RunnerDiagnosticUpdate]()
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("missing-data-instance"),
+        model_id=ModelId("mlx-community/data-test"),
+        runner_id=RunnerId("missing-data-runner"),
+        node_id=NodeId("missing-data-worker"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=event_process_receiver,
+        _diag_recv=diagnostics_receiver,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+    )
+
+    await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(
+            command_id=CommandId("missing-data-command"),
+            chunk=TokenChunk(
+                model=ModelId("mlx-community/data-test"),
+                text="must not cross planes",
+                token_id=0,
+                usage=None,
+                finish_reason=None,
+            ),
+        )
+    )
+
+    assert event_receiver.collect() == []
 
 
 class _ReapTrackingProcess:
@@ -82,6 +336,16 @@ class _ReapTrackingProcess:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _FailingRealtimeSender:
+    """IPC sender stub for multiprocessing queue-close race coverage."""
+
+    def __init__(self, failure: Exception) -> None:
+        self._failure = failure
+
+    async def send_async(self, _frame: RealtimeAudioInputFrame) -> None:
+        raise self._failure
 
 
 @pytest.mark.asyncio
@@ -145,12 +409,12 @@ async def test_teardown_reaps_runner_process_under_cancellation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_emit_stamps_sequence_and_clears_counter_on_terminal_chunk() -> None:
-    """Each DataChunk gets a per-command sequence; the counter clears on finish.
+async def test_emit_stamps_explicit_lifecycle_and_sequence() -> None:
+    """Each DataChunk gets an explicit lifecycle kind and ordered sequence.
 
-    #279 Phase 2b: the API reorders by this sequence. #301 review: the
-    per-command counter must be dropped on the terminal chunk so a long-lived
-    runner doesn't accumulate one entry per command served.
+    Sequence zero is the lifecycle start; payload and terminal frames follow in
+    generation order. Producer state stays available until terminal task status
+    so a status-only terminal path can still close the stream.
     """
     from skulk.shared.types.chunks import DataChunk
     from skulk.shared.types.events import ChunkGenerated
@@ -197,27 +461,35 @@ async def test_emit_stamps_sequence_and_clears_counter_on_terminal_chunk() -> No
     await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
         ChunkGenerated(command_id=cmd, chunk=chunk("b", None))
     )
-    assert supervisor._chunk_sequence[cmd] == 2  # pyright: ignore[reportPrivateUsage]
+    assert supervisor._chunk_sequence[cmd] == 3  # pyright: ignore[reportPrivateUsage]
     await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
         ChunkGenerated(command_id=cmd, chunk=chunk("c", "stop"))
     )
-    # terminal chunk clears the per-command counter
-    assert cmd not in supervisor._chunk_sequence  # pyright: ignore[reportPrivateUsage]
+    assert supervisor._chunk_sequence[cmd] == 4  # pyright: ignore[reportPrivateUsage]
+    assert cmd in supervisor._stream_terminal  # pyright: ignore[reportPrivateUsage]
 
-    seqs = [data_recv.receive_nowait().sequence for _ in range(3)]
-    assert seqs == [0, 1, 2]
+    frames = [data_recv.receive_nowait() for _ in range(4)]
+    assert [frame.sequence for frame in frames] == [0, 1, 2, 3]
+    assert [frame.kind for frame in frames] == [
+        "started",
+        "chunk",
+        "chunk",
+        "completed",
+    ]
+    assert frames[0].chunk is None
+    assert isinstance(frames[-1].chunk, TokenChunk)
     data_sender.close()
     event_sender.close()
 
 
 @pytest.mark.asyncio
-async def test_emit_stamps_owner_node_and_clears_it_on_terminal_chunk() -> None:
+async def test_emit_stamps_owner_node_on_every_lifecycle_frame() -> None:
     """_emit addresses each DataChunk to the command's owning API node.
 
     #279 Phase 2: the owner is recorded when the serving task starts and stamped
     onto every output chunk so the Zenoh data plane keys to data/<owner_node>.
-    The owner mapping clears on the terminal chunk alongside the sequence
-    counter, so a long-lived runner does not accumulate one entry per command.
+    The owner remains until terminal task status so a status-only terminal frame
+    can still be addressed to the same API node.
     """
     from skulk.shared.types.chunks import DataChunk
     from skulk.shared.types.events import ChunkGenerated
@@ -268,18 +540,239 @@ async def test_emit_stamps_owner_node_and_clears_it_on_terminal_chunk() -> None:
     await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
         ChunkGenerated(command_id=cmd, chunk=chunk("b", "stop"))
     )
-    # The owner mapping clears on the terminal chunk.
-    assert cmd not in supervisor._command_owner  # pyright: ignore[reportPrivateUsage]
+    assert supervisor._command_owner[cmd] == owner  # pyright: ignore[reportPrivateUsage]
 
-    owners = [data_recv.receive_nowait().owner_node for _ in range(2)]
-    assert owners == [owner, owner]
+    frames = [data_recv.receive_nowait() for _ in range(3)]
+    assert [frame.owner_node for frame in frames] == [owner, owner, owner]
+    assert [frame.kind for frame in frames] == ["started", "chunk", "completed"]
     data_sender.close()
     event_sender.close()
 
 
 @pytest.mark.asyncio
-async def test_check_runner_emits_error_chunk_for_inflight_text_generation() -> None:
+async def test_only_rank_zero_emits_multi_rank_data_lifecycle() -> None:
+    """A non-output rank cannot terminate a remote stream before rank zero."""
+
+    from skulk.shared.types.chunks import DataChunk
+
+    data_sender, data_receiver = channel[DataChunk]()
+    event_sender, _ = channel[Event]()
+    model_id = ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit")
+    rank_zero_bound = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-multi-rank"),
+        model_id=model_id,
+        runner_id=RunnerId("runner-zero"),
+        node_id=NodeId("node-zero"),
+    )
+    rank_one_bound = BoundInstance(
+        instance=rank_zero_bound.instance,
+        bound_runner_id=RunnerId("other_runner"),
+        bound_node_id=NodeId("other_node"),
+    )
+
+    def supervisor(bound_instance: BoundInstance) -> RunnerSupervisor:
+        task_sender, _ = mp_channel[Task]()
+        cancel_sender, _ = mp_channel[TaskId]()
+        _, event_receiver = mp_channel[Event]()
+        _, diagnostic_receiver = mp_channel[RunnerDiagnosticUpdate]()
+        return RunnerSupervisor(
+            shard_metadata=bound_instance.bound_shard,
+            bound_instance=bound_instance,
+            runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+            initialize_timeout=400,
+            _ev_recv=event_receiver,
+            _diag_recv=diagnostic_receiver,
+            _task_sender=task_sender,
+            _event_sender=event_sender,
+            _cancel_sender=cancel_sender,
+            _data_sender=data_sender,
+        )
+
+    rank_zero = supervisor(rank_zero_bound)
+    rank_one = supervisor(rank_one_bound)
+    command_id = CommandId("cmd-multi-rank")
+    owner_node = NodeId("remote-api-owner")
+
+    def generation_task(task_id: str, bound: BoundInstance) -> TextGeneration:
+        return TextGeneration(
+            task_id=TaskId(task_id),
+            instance_id=bound.instance.instance_id,
+            command_id=command_id,
+            owner_node=owner_node,
+            task_params=TextGenerationTaskParams(
+                model=model_id,
+                input=[InputMessage(role="user", content="hi")],
+                stream=True,
+            ),
+        )
+
+    rank_zero_task = generation_task("task-zero", rank_zero_bound)
+    rank_one_task = generation_task("task-one", rank_one_bound)
+    rank_zero._command_owner[command_id] = owner_node  # pyright: ignore[reportPrivateUsage]
+
+    await rank_one._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(
+            command_id=command_id,
+            chunk=TokenChunk(
+                model=model_id,
+                text="ignored",
+                token_id=0,
+                usage=None,
+                finish_reason=None,
+            ),
+        )
+    )
+    await rank_one._finish_data_stream(  # pyright: ignore[reportPrivateUsage]
+        rank_one_task, TaskStatus.Complete
+    )
+    await rank_zero._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(
+            command_id=command_id,
+            chunk=TokenChunk(
+                model=model_id,
+                text="blue",
+                token_id=0,
+                usage=None,
+                finish_reason=None,
+            ),
+        )
+    )
+    await rank_zero._finish_data_stream(  # pyright: ignore[reportPrivateUsage]
+        rank_zero_task, TaskStatus.Complete
+    )
+
+    frames = [data_receiver.receive_nowait() for _ in range(3)]
+    assert [frame.kind for frame in frames] == ["started", "chunk", "completed"]
+    assert [frame.sequence for frame in frames] == [0, 1, 2]
+    assert isinstance(frames[1].chunk, TokenChunk)
+    assert frames[1].chunk.text == "blue"
+    assert command_id not in rank_one._chunk_sequence  # pyright: ignore[reportPrivateUsage]
+    data_sender.close()
+    event_sender.close()
+
+
+@pytest.mark.asyncio
+async def test_image_data_lifecycle_uses_primary_output_rank() -> None:
+    """Image DATA follows the terminal pipeline stage that emits image chunks."""
+
+    from skulk.shared.types.chunks import DataChunk
+
+    data_sender, data_receiver = channel[DataChunk]()
+    event_sender, _ = channel[Event]()
+    model_id = ModelId("exolabs/test-image-model")
+    rank_zero_runner = RunnerId("image-runner-zero")
+    output_runner = RunnerId("image-runner-output")
+    rank_zero_node = NodeId("image-node-zero")
+    output_node = NodeId("image-node-output")
+
+    def image_shard(device_rank: int):
+        shard = get_pipeline_shard_metadata(model_id, device_rank, world_size=2)
+        image_card = shard.model_card.model_copy(
+            update={"tasks": [ModelTask.TextToImage]}
+        )
+        return shard.model_copy(update={"model_card": image_card})
+
+    instance = get_mlx_ring_instance(
+        instance_id=InstanceId("image-instance"),
+        model_id=model_id,
+        node_to_runner={
+            rank_zero_node: rank_zero_runner,
+            output_node: output_runner,
+        },
+        runner_to_shard={
+            rank_zero_runner: image_shard(0),
+            output_runner: image_shard(1),
+        },
+    )
+    rank_zero_bound = BoundInstance(
+        instance=instance,
+        bound_runner_id=rank_zero_runner,
+        bound_node_id=rank_zero_node,
+    )
+    output_bound = BoundInstance(
+        instance=instance,
+        bound_runner_id=output_runner,
+        bound_node_id=output_node,
+    )
+
+    def supervisor(bound_instance: BoundInstance) -> RunnerSupervisor:
+        task_sender, _ = mp_channel[Task]()
+        cancel_sender, _ = mp_channel[TaskId]()
+        _, event_receiver = mp_channel[Event]()
+        _, diagnostic_receiver = mp_channel[RunnerDiagnosticUpdate]()
+        return RunnerSupervisor(
+            shard_metadata=bound_instance.bound_shard,
+            bound_instance=bound_instance,
+            runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+            initialize_timeout=400,
+            _ev_recv=event_receiver,
+            _diag_recv=diagnostic_receiver,
+            _task_sender=task_sender,
+            _event_sender=event_sender,
+            _cancel_sender=cancel_sender,
+            _data_sender=data_sender,
+        )
+
+    rank_zero = supervisor(rank_zero_bound)
+    output_rank = supervisor(output_bound)
+    command_id = CommandId("cmd-image-output-rank")
+    owner_node = NodeId("remote-image-api-owner")
+
+    def image_task(task_id: str, bound: BoundInstance) -> ImageGeneration:
+        return ImageGeneration(
+            task_id=TaskId(task_id),
+            instance_id=bound.instance.instance_id,
+            command_id=command_id,
+            owner_node=owner_node,
+            task_params=ImageGenerationTaskParams(
+                prompt="a blue square",
+                model=model_id,
+            ),
+        )
+
+    rank_zero_task = image_task("image-task-zero", rank_zero_bound)
+    output_task = image_task("image-task-output", output_bound)
+    output_rank._command_owner[command_id] = owner_node  # pyright: ignore[reportPrivateUsage]
+
+    def image_chunk(data: str) -> ImageChunk:
+        return ImageChunk(
+            model=model_id,
+            data=data,
+            chunk_index=0,
+            total_chunks=1,
+            image_index=0,
+            format="png",
+        )
+
+    await rank_zero._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(command_id=command_id, chunk=image_chunk("ignored"))
+    )
+    await rank_zero._finish_data_stream(  # pyright: ignore[reportPrivateUsage]
+        rank_zero_task, TaskStatus.Complete
+    )
+    await output_rank._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(command_id=command_id, chunk=image_chunk("image-data"))
+    )
+    await output_rank._finish_data_stream(  # pyright: ignore[reportPrivateUsage]
+        output_task, TaskStatus.Complete
+    )
+
+    frames = [data_receiver.receive_nowait() for _ in range(3)]
+    assert [frame.kind for frame in frames] == ["started", "chunk", "completed"]
+    assert [frame.sequence for frame in frames] == [0, 1, 2]
+    assert isinstance(frames[1].chunk, ImageChunk)
+    assert frames[1].chunk.data == "image-data"
+    assert command_id not in rank_zero._chunk_sequence  # pyright: ignore[reportPrivateUsage]
+    data_sender.close()
+    event_sender.close()
+
+
+@pytest.mark.asyncio
+async def test_check_runner_emits_errors_for_inflight_generation_and_realtime() -> None:
+    from skulk.shared.types.chunks import DataChunk
+
     event_sender, event_receiver = channel[Event]()
+    data_sender, data_receiver = channel[DataChunk]()
     task_sender, _ = mp_channel[Task]()
     cancel_sender, _ = mp_channel[TaskId]()
     _, ev_recv = mp_channel[Event]()
@@ -302,6 +795,7 @@ async def test_check_runner_emits_error_chunk_for_inflight_text_generation() -> 
         _task_sender=task_sender,
         _event_sender=event_sender,
         _cancel_sender=cancel_sender,
+        _data_sender=data_sender,
     )
 
     command_id = CommandId("cmd-a")
@@ -316,24 +810,417 @@ async def test_check_runner_emits_error_chunk_for_inflight_text_generation() -> 
         ),
     )
     supervisor.in_progress[task.task_id] = task
+    realtime_command_id = CommandId("cmd-realtime")
+    realtime_task = RealtimeAudioTranscription(
+        task_id=TaskId("task-realtime"),
+        instance_id=bound_instance.instance.instance_id,
+        command_id=realtime_command_id,
+        owner_node=NodeId("api-node"),
+        task_params=RealtimeAudioTranscriptionTaskParams(
+            model=bound_instance.bound_shard.model_card.model_id,
+            input_sample_rate=16000,
+        ),
+    )
+    supervisor.in_progress[realtime_task.task_id] = realtime_task
     supervisor.shutdown = lambda: None
 
     await supervisor._check_runner(RuntimeError("boom"))  # pyright: ignore[reportPrivateUsage]
 
-    got_chunk = await event_receiver.receive()
     got_status = await event_receiver.receive()
+    frames = [data_receiver.receive_nowait() for _ in range(4)]
 
-    assert isinstance(got_chunk, ChunkGenerated)
-    assert got_chunk.command_id == command_id
-    assert isinstance(got_chunk.chunk, ErrorChunk)
-    assert "Runner shutdown before completing command" in got_chunk.chunk.error_message
+    assert [frame.command_id for frame in frames] == [
+        command_id,
+        command_id,
+        realtime_command_id,
+        realtime_command_id,
+    ]
+    assert [frame.kind for frame in frames] == [
+        "started",
+        "failed",
+        "started",
+        "failed",
+    ]
+    assert all(frame.chunk is None for frame in frames[::2])
+    assert all(isinstance(frame.chunk, ErrorChunk) for frame in frames[1::2])
+    generation_error = frames[1].chunk
+    realtime_error = frames[3].chunk
+    assert isinstance(generation_error, ErrorChunk)
+    assert isinstance(realtime_error, ErrorChunk)
+    assert (
+        "Runner shutdown before completing command"
+        in generation_error.error_message
+    )
+    assert (
+        "Runner shutdown before completing command"
+        in realtime_error.error_message
+    )
 
     assert isinstance(got_status, RunnerStatusUpdated)
     assert isinstance(got_status.runner_status, RunnerFailed)
 
     event_sender.close()
+    data_sender.close()
     with anyio.move_on_after(0.1):
         await event_receiver.aclose()
+
+
+@pytest.mark.asyncio
+async def test_non_output_rank_crash_fails_task_without_publishing_data() -> None:
+    """A non-output rank reports failure without competing on the DATA stream."""
+
+    from skulk.shared.types.chunks import DataChunk
+
+    event_sender, event_receiver = channel[Event]()
+    data_sender, data_receiver = channel[DataChunk]()
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    _, event_pipe_receiver = mp_channel[Event]()
+    _, diagnostic_receiver = mp_channel[RunnerDiagnosticUpdate]()
+    model_id = ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit")
+    rank_zero_bound = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-multi-rank-failure"),
+        model_id=model_id,
+        runner_id=RunnerId("runner-zero"),
+        node_id=NodeId("node-zero"),
+    )
+    rank_one_bound = BoundInstance(
+        instance=rank_zero_bound.instance,
+        bound_runner_id=RunnerId("other_runner"),
+        bound_node_id=NodeId("other_node"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=rank_one_bound.bound_shard,
+        bound_instance=rank_one_bound,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=event_pipe_receiver,
+        _diag_recv=diagnostic_receiver,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+        _data_sender=data_sender,
+    )
+    command_id = CommandId("cmd-rank-failure")
+    task = TextGeneration(
+        task_id=TaskId("task-rank-failure"),
+        instance_id=rank_one_bound.instance.instance_id,
+        command_id=command_id,
+        owner_node=NodeId("remote-api-owner"),
+        task_params=TextGenerationTaskParams(
+            model=model_id,
+            input=[InputMessage(role="user", content="hi")],
+            stream=True,
+        ),
+    )
+    supervisor.in_progress[task.task_id] = task
+    supervisor.shutdown = lambda: None
+
+    await supervisor._check_runner(RuntimeError("boom"))  # pyright: ignore[reportPrivateUsage]
+
+    failure = await event_receiver.receive()
+    status = await event_receiver.receive()
+    assert isinstance(failure, TaskFailed)
+    assert failure.task_id == task.task_id
+    assert failure.error_type == "runner_terminated"
+    assert "Runner shutdown before completing command" in failure.error_message
+    assert isinstance(status, RunnerStatusUpdated)
+    assert isinstance(status.runner_status, RunnerFailed)
+    assert data_receiver.collect() == []
+    data_sender.close()
+    event_sender.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [anyio.ClosedResourceError(), ValueError("closed"), OSError("closed")],
+)
+async def test_realtime_audio_closed_ipc_invokes_runner_failure_handling(
+    failure: Exception,
+) -> None:
+    """A closed audio pipe must not escape into the worker task group."""
+
+    event_sender, _ = channel[Event]()
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    _, ev_recv = mp_channel[Event]()
+    _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-a"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("runner-a"),
+        node_id=NodeId("node-a"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=ev_recv,
+        _diag_recv=diag_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+        _realtime_audio_sender=cast(
+            "MpSender[RealtimeAudioInputFrame]",
+            cast(object, _FailingRealtimeSender(failure)),
+        ),
+    )
+    failures: list[Exception] = []
+
+    async def check_runner(e: Exception) -> None:
+        failures.append(e)
+
+    supervisor._check_runner = check_runner  # pyright: ignore[reportPrivateUsage]
+    await supervisor.send_realtime_audio(
+        RealtimeAudioInputFrame(
+            command_id=CommandId("realtime-command"),
+            sequence=0,
+            kind="chunk",
+            data=b"\x00\x00",
+        )
+    )
+
+    assert len(failures) == 1
+    assert failures[0] is failure
+    event_sender.close()
+
+
+@pytest.mark.asyncio
+async def test_start_task_records_speech_owner_and_terminal_status_clears_it() -> None:
+    """Speech output keeps the command owner needed for Zenoh DATA routing."""
+
+    from skulk.shared.types.chunks import DataChunk
+
+    event_sender, event_receiver = channel[Event]()
+    data_sender, data_receiver = channel[DataChunk]()
+    task_sender, task_receiver = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    ev_send, ev_recv = mp_channel[Event]()
+    _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
+
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-a"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("runner-a"),
+        node_id=NodeId("node-a"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=ev_recv,
+        _diag_recv=diag_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+        _data_sender=data_sender,
+    )
+    supervisor.status = RunnerRunning()
+
+    command_id = CommandId("cmd-speech-owner")
+    owner = NodeId("api-node-speech")
+    task = SpeechSynthesis(
+        task_id=TaskId("task-speech-owner"),
+        instance_id=bound_instance.instance.instance_id,
+        command_id=command_id,
+        owner_node=owner,
+        task_params=SpeechSynthesisTaskParams(
+            model=bound_instance.bound_shard.model_card.model_id,
+            input_text="say this",
+        ),
+    )
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(supervisor._forward_events)  # pyright: ignore[reportPrivateUsage]
+            tg.start_soon(supervisor.start_task, task)
+
+            dispatched = await to_thread.run_sync(
+                task_receiver.receive_timeout,
+                1,
+            )
+            assert isinstance(dispatched, SpeechSynthesis)
+            assert dispatched.command_id == command_id
+            assert supervisor._command_owner[command_id] == owner  # pyright: ignore[reportPrivateUsage]
+
+            ev_send.send(TaskAcknowledged(task_id=task.task_id))
+            ev_send.send(
+                TaskStatusUpdated(
+                    task_id=task.task_id,
+                    task_status=TaskStatus.Complete,
+                )
+            )
+
+            forwarded_status = await event_receiver.receive()
+            assert isinstance(forwarded_status, TaskStatusUpdated)
+            assert forwarded_status.task_id == task.task_id
+            assert command_id not in supervisor._command_owner  # pyright: ignore[reportPrivateUsage]
+            assert command_id not in supervisor._chunk_sequence  # pyright: ignore[reportPrivateUsage]
+            assert task.task_id not in supervisor.in_progress
+
+            frames = [data_receiver.receive_nowait() for _ in range(2)]
+            assert [frame.sequence for frame in frames] == [0, 1]
+            assert [frame.kind for frame in frames] == ["started", "completed"]
+            assert all(frame.owner_node == owner for frame in frames)
+
+            tg.cancel_scope.cancel()
+
+    ev_send.close()
+    data_sender.close()
+    event_sender.close()
+
+
+@pytest.mark.asyncio
+async def test_start_task_records_transcription_owner_and_terminal_status_clears_it() -> None:
+    """STT output keeps the command owner needed for Zenoh DATA routing."""
+
+    event_sender, event_receiver = channel[Event]()
+    task_sender, task_receiver = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    ev_send, ev_recv = mp_channel[Event]()
+    _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
+
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-a"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("runner-a"),
+        node_id=NodeId("node-a"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=ev_recv,
+        _diag_recv=diag_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+    )
+    supervisor.status = RunnerRunning()
+
+    command_id = CommandId("cmd-transcription-owner")
+    owner = NodeId("api-node-transcription")
+    task = AudioTranscription(
+        task_id=TaskId("task-transcription-owner"),
+        instance_id=bound_instance.instance.instance_id,
+        command_id=command_id,
+        owner_node=owner,
+        task_params=AudioTranscriptionTaskParams(
+            model=bound_instance.bound_shard.model_card.model_id,
+            total_input_chunks=1,
+            audio_sha256="abc123",
+        ),
+    )
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(supervisor._forward_events)  # pyright: ignore[reportPrivateUsage]
+            tg.start_soon(supervisor.start_task, task)
+
+            dispatched = await to_thread.run_sync(
+                task_receiver.receive_timeout,
+                1,
+            )
+            assert isinstance(dispatched, AudioTranscription)
+            assert dispatched.command_id == command_id
+            assert supervisor._command_owner[command_id] == owner  # pyright: ignore[reportPrivateUsage]
+
+            ev_send.send(TaskAcknowledged(task_id=task.task_id))
+            ev_send.send(
+                TaskStatusUpdated(
+                    task_id=task.task_id,
+                    task_status=TaskStatus.Complete,
+                )
+            )
+
+            forwarded_status = await event_receiver.receive()
+            assert isinstance(forwarded_status, TaskStatusUpdated)
+            assert forwarded_status.task_id == task.task_id
+            assert command_id not in supervisor._command_owner  # pyright: ignore[reportPrivateUsage]
+            assert task.task_id not in supervisor.in_progress
+
+            tg.cancel_scope.cancel()
+
+    ev_send.close()
+    event_sender.close()
+    with anyio.move_on_after(0.1):
+        await event_receiver.aclose()
+
+
+@pytest.mark.asyncio
+async def test_realtime_transcription_failure_emits_terminal_data_frame() -> None:
+    """A status-only realtime failure must terminate DATA and clear ownership."""
+
+    from skulk.shared.types.chunks import DataChunk
+
+    event_sender, event_receiver = channel[Event]()
+    data_sender, data_receiver = channel[DataChunk]()
+    task_sender, task_receiver = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    ev_send, ev_recv = mp_channel[Event]()
+    _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-a"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("runner-a"),
+        node_id=NodeId("node-a"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=ev_recv,
+        _diag_recv=diag_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+        _data_sender=data_sender,
+    )
+    supervisor.status = RunnerRunning()
+    command_id = CommandId("cmd-realtime-transcription")
+    owner = NodeId("api-node-realtime")
+    task = RealtimeAudioTranscription(
+        task_id=TaskId("task-realtime-transcription"),
+        instance_id=bound_instance.instance.instance_id,
+        command_id=command_id,
+        owner_node=owner,
+        task_params=RealtimeAudioTranscriptionTaskParams(
+            model=bound_instance.bound_shard.model_card.model_id,
+            input_sample_rate=16000,
+        ),
+    )
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(supervisor._forward_events)  # pyright: ignore[reportPrivateUsage]
+            task_group.start_soon(supervisor.start_task, task)
+            dispatched = await to_thread.run_sync(task_receiver.receive_timeout, 1)
+            assert isinstance(dispatched, RealtimeAudioTranscription)
+            ev_send.send(TaskAcknowledged(task_id=task.task_id))
+            ev_send.send(
+                TaskStatusUpdated(
+                    task_id=task.task_id,
+                    task_status=TaskStatus.Failed,
+                )
+            )
+
+            forwarded_status = await event_receiver.receive()
+            assert isinstance(forwarded_status, TaskStatusUpdated)
+            frames = [data_receiver.receive_nowait() for _ in range(2)]
+            assert [frame.kind for frame in frames] == ["started", "failed"]
+            assert all(frame.owner_node == owner for frame in frames)
+            assert command_id not in supervisor._command_owner  # pyright: ignore[reportPrivateUsage]
+            assert task.task_id not in supervisor.in_progress
+            task_group.cancel_scope.cancel()
+
+    ev_send.close()
+    data_sender.close()
+    event_sender.close()
 
 
 @pytest.mark.asyncio

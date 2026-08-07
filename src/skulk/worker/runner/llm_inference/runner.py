@@ -8,6 +8,7 @@ import mlx.core as mx
 from anyio import WouldBlock
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
+from skulk.api.types import GenerationStats
 from skulk.shared.models.capabilities import is_gemma4_family
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -64,7 +65,7 @@ from skulk.shared.types.worker.runners import (
     RunnerStatus,
     RunnerWarmingUp,
 )
-from skulk.utils.channels import MpReceiver, MpSender
+from skulk.utils.channels import MpReceiver, MpSender, mp_channel
 from skulk.worker.engines.mlx.cache import KVPrefixCache, get_kv_cache_backend
 from skulk.worker.engines.mlx.utils_mlx import (
     initialize_mlx,
@@ -81,6 +82,7 @@ from skulk.worker.runner.bootstrap import (
 from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
 from skulk.worker.runner.llm_inference.batch_generator import (
     BatchGenerator,
+    DualModeGenerator,
     InferenceGenerator,
     SequentialGenerator,
 )
@@ -359,10 +361,7 @@ class Runner:
                 self.acknowledge_task(task)
 
                 warmup_generator = self.generator
-                assert isinstance(warmup_generator, (SequentialGenerator, BatchGenerator))
-                group_size = (
-                    warmup_generator.group.size() if warmup_generator.group else 1
-                )
+                group_size = warmup_generator.group_size()
                 if _should_skip_llm_warmup(
                     group_size,
                     self.model_id,
@@ -510,10 +509,9 @@ class Runner:
         Runs on the exception/abort path of ``handle_generation_tasks``. Without
         it, a raised ``generator.step()`` (parsing exception, model error,
         Shutdown received mid-flight) would leave ``_trace_sessions`` entries
-        behind on the runner *and* cause the master to wait forever for
-        ``TracesCollected`` from this rank — leaking the cluster trace into
-        ``_pending_traces`` permanently. The aborted marker tells the
-        downstream merge that this rank's trace is not a clean completion.
+        behind on the runner and prevent this rank's owner-addressed trace
+        packet from being emitted. The aborted marker tells the API-side merge
+        that this rank's trace is not a clean completion.
         """
         for task_id, task in list(self.active_tasks.items()):
             if not task.trace_enabled:
@@ -547,8 +545,8 @@ class Runner:
             return self._run_generation_loop()
         finally:
             # Flush traces on every exit path including exceptions —
-            # without this the master's _pending_traces leaks forever for
-            # any task that was traced when step() raised.
+            # without this the owning API never receives this rank's terminal
+            # trace payload for a task whose step() raised.
             self._flush_unfinished_trace_sessions()
 
     def _run_generation_loop(self) -> "ExitCode":
@@ -655,6 +653,42 @@ class Runner:
 
         return ExitCode.AllTasksComplete
 
+    def _stamp_stats(
+        self, stats: GenerationStats | None, task_id: TaskId
+    ) -> GenerationStats | None:
+        """Stamp runner ground truth onto a generation's terminal stats (#596).
+
+        The in-process MLX runner reports its serving node, backend, task-local
+        batching mode, and in-flight-at-admission count exactly like served
+        runners do. Task-local truth matters for multimodal instances: text
+        requests batch while image-bearing requests use sequential reference
+        generation. Without provenance the API's performance-envelope tap must
+        guess, which can classify a serialized request as batched or hide a
+        batching regression. ``None`` passes through unchanged because only
+        terminal chunks carry stats.
+        """
+        if stats is None:
+            return None
+        generator = self.generator
+        batches = (
+            generator.batches_for(task_id)
+            if isinstance(generator, InferenceGenerator)
+            else False
+        )
+        in_flight = (
+            generator.admission_concurrency(task_id)
+            if isinstance(generator, InferenceGenerator)
+            else 1
+        )
+        return stats.model_copy(
+            update={
+                "serving_node": str(self.bound_instance.bound_node_id),
+                "serving_backend": self.shard_metadata.resolved_backend,
+                "in_flight_at_admission": max(1, in_flight),
+                "serving_batches": batches,
+            }
+        )
+
     def send_response(
         self,
         response: GenerationResponse | ToolCallResponse,
@@ -696,7 +730,7 @@ class Runner:
                                 token_id=response.token,
                                 usage=response.usage,
                                 finish_reason=response.finish_reason,
-                                stats=response.stats,
+                                stats=self._stamp_stats(response.stats, task.task_id),
                                 logprob=response.logprob,
                                 top_logprobs=response.top_logprobs,
                                 is_thinking=response.is_thinking,
@@ -721,7 +755,7 @@ class Runner:
                                 tool_calls=response.tool_calls,
                                 model=self.model_id,
                                 usage=response.usage,
-                                stats=response.stats,
+                                stats=self._stamp_stats(response.stats, task.task_id),
                             ),
                         )
                     )
@@ -782,6 +816,14 @@ class Builder:
         )
         force_sequential_for_gemma4 = is_gemma4_family(
             self.model_card, model_id=self.model_id
+        )
+        # MLX-LM's BatchGenerator cannot yet carry native VLM position/model
+        # state per sequence. Card-declared vision models therefore need the
+        # dual-mode coordinator: text batches normally, while image-bearing
+        # requests use mutually exclusive reference generation. Independent
+        # constraints below still force the whole instance sequential.
+        needs_reference_vision = (
+            self.model_card is not None and self.model_card.vision is not None
         )
         # CARD-derived, never asset-derived: on multi-node placements only the
         # decider rank loads drafter weights (#254), so keying this off local
@@ -850,6 +892,47 @@ class Builder:
                 mtp_weights=self.mtp_weights,
                 assistant_model=self.assistant_model,
                 context_token_limit=self.context_token_limit,
+            )
+        if needs_reference_vision:
+            logger.info(
+                "using DualModeGenerator "
+                "(text=BatchGenerator, vision=SequentialGenerator)"
+            )
+            text_cancel_sender, text_cancel_receiver = mp_channel[TaskId]()
+            vision_cancel_sender, vision_cancel_receiver = mp_channel[TaskId]()
+            return DualModeGenerator(
+                text_generator=BatchGenerator(
+                    model=self.inference_model,
+                    tokenizer=self.tokenizer,
+                    group=self.group,
+                    tool_parser=tool_parser,
+                    kv_prefix_cache=kv_prefix_cache,
+                    model_card=self.model_card,
+                    model_id=self.model_id,
+                    device_rank=device_rank,
+                    cancel_receiver=text_cancel_receiver,
+                    event_sender=self.event_sender,
+                    vision_processor=vision_processor,
+                    context_token_limit=self.context_token_limit,
+                ),
+                vision_generator=SequentialGenerator(
+                    model=self.inference_model,
+                    tokenizer=self.tokenizer,
+                    group=self.group,
+                    tool_parser=tool_parser,
+                    kv_prefix_cache=kv_prefix_cache,
+                    model_card=self.model_card,
+                    model_id=self.model_id,
+                    device_rank=device_rank,
+                    cancel_receiver=vision_cancel_receiver,
+                    event_sender=self.event_sender,
+                    vision_processor=vision_processor,
+                    context_token_limit=self.context_token_limit,
+                ),
+                group=self.group,
+                cancel_receiver=self.cancel_receiver,
+                text_cancel_sender=text_cancel_sender,
+                vision_cancel_sender=vision_cancel_sender,
             )
         logger.info("using BatchGenerator")
         return BatchGenerator(

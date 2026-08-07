@@ -47,7 +47,11 @@ Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard),
 - `src/skulk/` — Python backend (inference, API, store, worker, routing)
 - `dashboard-react/` — React dashboard (Skulk UI)
 - `rust/` — Rust components (networking, libp2p, PyO3 bindings)
-- `resources/inference_model_cards/` — Model metadata TOML files
+- `resources/inference_model_cards/` — Text generation model metadata TOML files
+- `resources/image_model_cards/` — Image model metadata TOML files
+- `resources/embedding_model_cards/` — Embedding model metadata TOML files
+- `resources/speech_model_cards/` — Speech model metadata TOML files
+- `resources/speech_reference_voices/` — Checksummed bundled TTS conditioning audio and exact transcripts
 - `deployment/logging/` — VictoriaLogs + Grafana stack and Vector config
 - `docs/` — Technical documentation
 - `docs/model-runtime-notes/` — Internal per-model clustered runtime notes
@@ -62,6 +66,7 @@ The Skulk dashboard is a React + TypeScript + styled-components app in `dashboar
 - `src/components/chat/` — ChatForm, ChatMessages, ChatModelSelector
 - `src/stores/` — Zustand stores (chatStore, uiStore) with localStorage/sessionStorage persistence
 - `src/hooks/` — useClusterState, useConfig, useModelPicker
+- `e2e/` — Explicit Playwright qualification against a running Skulk dashboard
 
 To run the dashboard in dev mode:
 ```bash
@@ -124,6 +129,8 @@ For the React dashboard:
 Skulk uses TOML-based model cards to define model metadata and capabilities. Model cards are stored in:
 - `resources/inference_model_cards/` for text generation models
 - `resources/image_model_cards/` for image generation models
+- `resources/embedding_model_cards/` for embedding models
+- `resources/speech_model_cards/` for TTS/STT speech models
 - `~/.skulk/custom_model_cards/` for user-added custom models
 
 ### Adding a Model Card
@@ -283,6 +290,29 @@ The React dashboard has Storybook stories for key components:
 cd dashboard-react && npx storybook dev -p 6007
 ```
 
+Dashboard component tests and the production build run locally with:
+
+```bash
+cd dashboard-react
+npm run test
+npm run build
+```
+
+The live vision test is deliberately explicit because it places a real image
+through the built-in dashboard and a running model. Provide the dashboard URL,
+the exact mounted model ID, and a local PNG fixture:
+
+```bash
+cd dashboard-react
+SKULK_DASHBOARD_URL=http://localhost:52415 \
+SKULK_VISION_MODEL=mlx-community/Qwen3-VL-4B-Instruct-4bit \
+SKULK_VISION_IMAGE_PATH=/absolute/path/to/portrait.png \
+npm run test:e2e:vision
+```
+
+The test verifies the exact uploaded bytes in the completion request and checks
+the rendered answer for the portrait's identity, clothing, and background.
+
 ## Licensing and File Headers
 
 Skulk is licensed under the Apache License, Version 2.0 (see `LICENSE`). The
@@ -313,6 +343,45 @@ promoted as part of a release cut, so `main` always reflects a tested,
 releasable state. Open pull requests against `dev` (the repository
 default); release promotion PRs from `dev` to `main` are opened by the
 maintainers.
+
+### Fresh-install release qualification
+
+An end-to-end run against an existing configured fleet is regression coverage,
+not proof that a new installation works. Before a release promotion, the
+candidate commit must pass the fresh-install qualification matrix through the
+public `skulk-test-harness` command. After `dev` is promoted to `main`, the
+shipping qualification repeats the matrix using the literal installer command
+from the README. The release or tag is not published until both runs are green.
+
+The candidate profile installs a full commit ID; the shipping profile supplies
+no ref or Skulk runtime overrides. Both profiles require the installer-generated
+single-node configuration and the shipped transport/backend defaults.
+
+Release operators run:
+
+```bash
+# Before dev -> main
+uv run skulk-harness fresh-install qualify \
+  --profile candidate --expected-commit <full-dev-sha> \
+  --config <private-fresh-install-config>
+
+# After promotion, before release/tag publication
+uv run skulk-harness fresh-install qualify \
+  --profile shipping \
+  --expected-commit <full-promoted-main-sha> \
+  --config <private-fresh-install-config>
+```
+
+The green reports must cover Apple Silicon, AMD Linux, and a clean RunPod
+NVIDIA pod. A configured-fleet battery is not an acceptable substitute.
+
+After the automated candidate matrix passes, a human tester exercises the same
+exact commit through the first-install dashboard journeys in the
+[human release qualification guide](website/docs/human-release-qualification.md).
+Human acceptance supplements the automated gate; it cannot replace a failed or
+incomplete harness matrix. Any product, shipped-default, installer, dashboard,
+or model-card change made in response to human testing creates a new candidate
+that must repeat the automated qualification before promotion.
 
 ## Submitting Changes
 

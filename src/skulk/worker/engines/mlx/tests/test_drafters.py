@@ -938,6 +938,117 @@ class TestStreamGenerateDepth(TestStreamGenerateWithMTP):
 
 
 class TestRejectPathSSMState:
+    def test_reject_keeps_native_rollback_for_rotating_cache(self) -> None:
+        """Gemma 4 rotating caches must retain their cheap native rollback."""
+        from mlx_lm.models.cache import KVCache, RotatingKVCache
+
+        from skulk.worker.engines.mlx.generator.generate import (
+            _stream_generate_with_mtp,
+        )
+
+        model, tokenizer, drafter, trunk_fn, head_fn, _fake_cache = (
+            _build_fake_stream_env(
+                main_token_ids=[5, 3, 0],
+                draft_token_id=7,
+            )
+        )
+        native_rollback = MagicMock()
+        model.language_model = MagicMock(
+            rollback_speculative_cache=native_rollback
+        )
+
+        rotating_cache = RotatingKVCache(max_size=16)
+        _ = rotating_cache.update_and_fetch(  # pyright: ignore[reportUnknownMemberType]
+            mx.zeros((1, 1, 8, 4)), mx.zeros((1, 1, 8, 4))
+        )
+        kv_cache = KVCache()
+        _ = kv_cache.update_and_fetch(  # pyright: ignore[reportUnknownMemberType]
+            mx.zeros((1, 1, 8, 4)), mx.zeros((1, 1, 8, 4))
+        )
+        cache = [rotating_cache, kv_cache]
+
+        sampler = lambda lp: mx.argmax(lp, axis=-1)  # noqa: E731
+        outputs = list(
+            _stream_generate_with_mtp(
+                model=model,
+                tokenizer=tokenizer,
+                drafter=drafter,
+                trunk_fn=trunk_fn,
+                head_fn=head_fn,
+                prompt=mx.array([1, 2, 3]),
+                max_tokens=3,
+                sampler=sampler,
+                logits_processors=[],
+                prompt_cache=cache,
+                kv_group_size=None,
+                kv_bits=None,
+                depth=2,
+            )
+        )
+
+        assert outputs
+        native_rollback.assert_called()
+
+    def test_reject_does_not_call_native_rollback_without_gdn_states(self) -> None:
+        """Stateful Skulk verifies must use snapshots, not native GDN rollback.
+
+        The native mlx-vlm Qwen3.5 rollback iterates its ``gdn_states``
+        argument. Skulk's trunk/head MTP path does not produce that
+        family-specific payload, so passing ``None`` crashes on the first
+        rejected draft. The generic ArraysCache snapshot path already
+        preserves the same recurrent state without that unavailable payload.
+        """
+        from mlx_lm.models.cache import ArraysCache, KVCache
+
+        from skulk.worker.engines.mlx.generator.generate import (
+            _stream_generate_with_mtp,
+        )
+
+        model, tokenizer, drafter, trunk_fn, head_fn, _fake_cache = (
+            _build_fake_stream_env(
+                main_token_ids=[5, 3, 0],
+                draft_token_id=7,
+            )
+        )
+        native_rollback = MagicMock(
+            side_effect=TypeError("'NoneType' object is not iterable")
+        )
+        model.language_model = MagicMock(
+            rollback_speculative_cache=native_rollback
+        )
+
+        ssm_cache = ArraysCache(size=1)
+        sentinel = mx.ones((1, 4))
+        ssm_cache.state = [sentinel]
+        kv_cache = KVCache()
+        _ = kv_cache.update_and_fetch(  # pyright: ignore[reportUnknownMemberType]
+            mx.zeros((1, 1, 8, 4)), mx.zeros((1, 1, 8, 4))
+        )
+        cache = [ssm_cache, kv_cache]
+
+        sampler = lambda lp: mx.argmax(lp, axis=-1)  # noqa: E731
+        outputs = list(
+            _stream_generate_with_mtp(
+                model=model,
+                tokenizer=tokenizer,
+                drafter=drafter,
+                trunk_fn=trunk_fn,
+                head_fn=head_fn,
+                prompt=mx.array([1, 2, 3]),
+                max_tokens=3,
+                sampler=sampler,
+                logits_processors=[],
+                prompt_cache=cache,
+                kv_group_size=None,
+                kv_bits=None,
+            )
+        )
+
+        assert outputs
+        native_rollback.assert_not_called()
+        assert ssm_cache.state[0] is not None
+        assert mx.array_equal(ssm_cache.state[0], sentinel)
+
     def test_reject_restores_ssm_state(self) -> None:
         """A reject must restore SSM (ArraysCache) state, not zero it.
 

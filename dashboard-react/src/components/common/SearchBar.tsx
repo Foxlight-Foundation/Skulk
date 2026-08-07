@@ -12,6 +12,8 @@ export interface SearchBarProps {
   debounceMs?: number;
   autoFocus?: boolean;
   className?: string;
+  /** Stable accessible name used by assistive technology and browser tests. */
+  ariaLabel?: string;
 }
 
 const SearchIcon = () => (
@@ -47,6 +49,7 @@ export function SearchBar({
   debounceMs,
   autoFocus,
   className,
+  ariaLabel,
 }: SearchBarProps) {
   const { t } = useSkulkTranslation();
   const [local, setLocal] = useState(value);
@@ -87,6 +90,7 @@ export function SearchBar({
       placeholder={placeholder ?? t('common.searchPlaceholder', 'Search...')}
       size={size}
       autoFocus={autoFocus}
+      aria-label={ariaLabel}
       icon={<SearchIcon />}
       rightElement={
         local ? (

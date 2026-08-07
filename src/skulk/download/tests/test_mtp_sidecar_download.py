@@ -76,6 +76,7 @@ class TestMtpSidecarDownload:
             allow_patterns: list[str] | None = None,
             skip_internet: bool = False,
             skip_download: bool = False,
+            capacity_preflight: Any = None,
         ) -> tuple[Path, Any]:
             download_calls.append(
                 {
@@ -113,6 +114,7 @@ class TestMtpSidecarDownload:
             allow_patterns: list[str] | None = None,
             skip_internet: bool = False,
             skip_download: bool = False,
+            capacity_preflight: Any = None,
         ) -> tuple[Path, Any]:
             download_calls.append({"model_id": str(shard.model_card.model_id)})
             return tmp_path, MagicMock()
@@ -144,6 +146,7 @@ class TestMtpSidecarDownload:
             allow_patterns: list[str] | None = None,
             skip_internet: bool = False,
             skip_download: bool = False,
+            capacity_preflight: Any = None,
         ) -> tuple[Path, Any]:
             download_calls.append({"model_id": str(shard.model_card.model_id)})
             return tmp_path, MagicMock()
@@ -174,6 +177,7 @@ class TestMtpSidecarDownload:
             allow_patterns: list[str] | None = None,
             skip_internet: bool = False,
             skip_download: bool = False,
+            capacity_preflight: Any = None,
         ) -> tuple[Path, Any]:
             download_calls.append({"model_id": str(shard.model_card.model_id)})
             return tmp_path, MagicMock()

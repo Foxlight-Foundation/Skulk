@@ -1,7 +1,7 @@
 from pydantic import TypeAdapter
 
 from skulk.shared.types.profiling import MachMemoryCategories
-from skulk.utils.info_gatherer.info_gatherer import GatheredInfo
+from skulk.utils.info_gatherer.info_gatherer import GatheredInfo, find_mactop_path
 from skulk.utils.info_gatherer.mactop import MacmonMetrics, MactopMetrics
 
 # A representative `mactop --headless --format json` line (trimmed; real output
@@ -112,3 +112,33 @@ def test_old_macmon_event_still_decodes():
     assert isinstance(decoded, MacmonMetrics)
     assert decoded.system_profile.gpu_usage == 8.66
     assert decoded.memory.ram_total.in_bytes == 17179869184
+
+
+def test_find_mactop_path_prefers_path_lookup():
+    def fake_which(_name: str) -> str | None:
+        return "/custom/bin/mactop"
+
+    def fake_is_executable(_path: str) -> bool:
+        return False
+
+    assert (
+        find_mactop_path(which=fake_which, is_executable=fake_is_executable)
+        == "/custom/bin/mactop"
+    )
+
+
+def test_find_mactop_path_falls_back_to_homebrew_prefix():
+    checked_paths: list[str] = []
+
+    def fake_which(_name: str) -> str | None:
+        return None
+
+    def fake_is_executable(path: str) -> bool:
+        checked_paths.append(path)
+        return path == "/opt/homebrew/bin/mactop"
+
+    assert (
+        find_mactop_path(which=fake_which, is_executable=fake_is_executable)
+        == "/opt/homebrew/bin/mactop"
+    )
+    assert checked_paths == ["/opt/homebrew/bin/mactop"]

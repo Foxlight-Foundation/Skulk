@@ -9,6 +9,7 @@ import type {
   TraceResponse,
   TracingStateResponse,
 } from '../../types/traces';
+import type { ClusterPerformanceEnvelopes } from '../../types/performanceEnvelope';
 
 export type TraceScope = 'cluster' | 'local';
 
@@ -86,6 +87,12 @@ export const observabilityApi = apiSlice.injectEndpoints({
       providesTags: (_result, _err, nodeId) => [{ type: 'NodeDiagnostics', id: nodeId }],
     }),
 
+    /* ── Performance envelopes (adaptive concurrency, Phase 0) ──── */
+
+    getClusterPerformanceEnvelopes: build.query<ClusterPerformanceEnvelopes, void>({
+      query: () => '/v1/diagnostics/performance-envelopes/cluster',
+    }),
+
     cancelRunnerTask: build.mutation<CancelRunnerTaskResponse, CancelRunnerTaskArgs>({
       query: ({ nodeId, runnerId, taskId }) => ({
         url: `/v1/diagnostics/cluster/${encodeURIComponent(nodeId)}/runners/${encodeURIComponent(runnerId)}/cancel`,
@@ -120,6 +127,7 @@ export const {
   useGetTracesListQuery,
   useGetTraceQuery,
   useGetNodeDiagnosticsQuery,
+  useGetClusterPerformanceEnvelopesQuery,
   useCancelRunnerTaskMutation,
   useCaptureRunnerBundleMutation,
 } = observabilityApi;

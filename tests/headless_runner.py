@@ -11,9 +11,11 @@ from pydantic import BaseModel
 
 from skulk.shared.constants import SKULK_MODELS_DIR
 from skulk.shared.models.model_cards import ModelCard, ModelId
+from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.chunks import TokenChunk
 from skulk.shared.types.commands import CommandId
 from skulk.shared.types.common import Host, NodeId
+from skulk.shared.types.diagnostics import RunnerDiagnosticUpdate
 from skulk.shared.types.events import ChunkGenerated, Event, RunnerStatusUpdated
 from skulk.shared.types.tasks import (
     ConnectToGroup,
@@ -21,6 +23,7 @@ from skulk.shared.types.tasks import (
     Shutdown,
     StartWarmup,
     Task,
+    TaskId,
     TextGeneration,
 )
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
@@ -214,7 +217,10 @@ async def execute_test(test: Tests, instance: Instance, hn: str) -> list[Event]:
         instance=instance, bound_runner_id=RunnerId(hn), bound_node_id=NodeId(hn)
     )
     ev_send, _ev_recv = mp_channel[Event]()
+    diagnostic_send, _diagnostic_recv = mp_channel[RunnerDiagnosticUpdate]()
     task_send, task_recv = mp_channel[Task]()
+    cancel_send, cancel_recv = mp_channel[TaskId]()
+    realtime_send, realtime_recv = mp_channel[RealtimeAudioInputFrame]()
 
     for command in commands:
         task_send.send(command)
@@ -222,9 +228,15 @@ async def execute_test(test: Tests, instance: Instance, hn: str) -> list[Event]:
     entrypoint(
         bound_instance,
         ev_send,
+        diagnostic_send,
         task_recv,
+        cancel_recv,
+        realtime_recv,
         logger,
     )
+
+    cancel_send.close()
+    realtime_send.close()
 
     # TODO(evan): return ev_recv.collect()
     return []

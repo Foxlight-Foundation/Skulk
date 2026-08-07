@@ -25,10 +25,20 @@ class _FakeInner:
 
     def __init__(self) -> None:
         self.last_kwargs: dict[str, object] = {}
+        self.call_count = 0
 
     def __call__(self, *_args: object, **kwargs: object) -> _FakeOutput:
+        self.call_count += 1
         self.last_kwargs = dict(kwargs)
         return _FakeOutput(mx.array([1.0]))
+
+
+class _FakeVlmWithLanguageModel(_FakeInner):
+    """Multimodal model stub with a dedicated text-generation trunk."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.language_model = _FakeInner()
 
 
 def test_vlm_wrapper_tolerates_missing_pixel_values_attr() -> None:
@@ -45,6 +55,19 @@ def test_vlm_wrapper_tolerates_missing_pixel_values_attr() -> None:
     assert result.tolist() == [1.0]
 
 
+def test_vlm_wrapper_routes_text_only_calls_to_language_model() -> None:
+    """Text requests must bypass the multimodal outer model's position logic."""
+
+    inner = _FakeVlmWithLanguageModel()
+    wrapper = _vlm_model_wrapper(inner)
+
+    result = cast(Callable[[mx.array], mx.array], wrapper)(mx.array([1]))
+
+    assert inner.call_count == 0
+    assert result.tolist() == [1.0]
+    assert inner.language_model.call_count == 1
+
+
 def test_vlm_wrapper_injects_pixel_values_when_present() -> None:
     """Native vision pixel values should be forwarded exactly once per call."""
     inner = _FakeInner()
@@ -58,3 +81,22 @@ def test_vlm_wrapper_injects_pixel_values_when_present() -> None:
     _ = cast(Callable[[mx.array], mx.array], wrapper)(mx.array([1]))
 
     assert inner.last_kwargs["pixel_values"] is pixel_values
+
+
+def test_vlm_wrapper_keeps_vision_calls_on_multimodal_model() -> None:
+    """Image prefill uses the outer model; later decode uses its text trunk."""
+
+    inner = _FakeVlmWithLanguageModel()
+    wrapper = _vlm_model_wrapper(inner)
+    pixel_values = mx.array([2.0])
+    cast(
+        Callable[[mx.array | list[mx.array] | None], None],
+        object.__getattribute__(wrapper, "set_pixel_values"),
+    )(pixel_values)
+
+    _ = cast(Callable[[mx.array], mx.array], wrapper)(mx.array([1]))
+    _ = cast(Callable[[mx.array], mx.array], wrapper)(mx.array([2]))
+
+    assert inner.call_count == 1
+    assert inner.last_kwargs["pixel_values"] is pixel_values
+    assert inner.language_model.call_count == 1

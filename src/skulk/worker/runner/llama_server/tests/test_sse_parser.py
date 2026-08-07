@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from skulk.shared.types.common import ModelId
 from skulk.worker.runner.llama_server.runner import (
     _SPEC_TYPE_FLAG,
     _draft_model_args,
@@ -36,9 +37,18 @@ def test_draft_args_required_modes_raise_without_draft() -> None:
             _draft_model_args(_runtime(), mode)
 
 
-def test_draft_args_repo_without_file_raises() -> None:
-    with pytest.raises(RuntimeError, match="served_spec_draft_file is"):
-        _draft_model_args(_runtime(repo="org/draft-GGUF"), "draft_mtp")
+def test_draft_args_ngram_ignores_spurious_draft_repo() -> None:
+    # ngram-cache uses no --model-draft; a draft repo on an ngram card is
+    # spurious and must NOT drop --spec-type ngram-cache (returns [], not None).
+    assert (
+        _draft_model_args(_runtime(repo="org/draft-GGUF", file="draft.gguf"), "ngram") == []
+    )
+
+
+def test_draft_args_repo_without_file_degrades() -> None:
+    # A card that names a draft repo but no file cannot pass --model-draft;
+    # degrade to plain decode (None) rather than crash the runner (#574).
+    assert _draft_model_args(_runtime(repo="org/draft-GGUF"), "draft_mtp") is None
 
 
 def test_draft_args_resolves_model_draft_path(
@@ -48,7 +58,9 @@ def test_draft_args_resolves_model_draft_path(
     (tmp_path / "draft.gguf").write_bytes(b"GGUF")
     import skulk.download.download_utils as du
 
-    def _fake_build_model_path(_model_id: object) -> Path:
+    def _fake_build_model_path(
+        _model_id: object, _source_revision: str | None = None
+    ) -> Path:
         return tmp_path
 
     monkeypatch.setattr(du, "build_model_path", _fake_build_model_path)
@@ -56,17 +68,69 @@ def test_draft_args_resolves_model_draft_path(
     assert args == ["--model-draft", str(tmp_path / "draft.gguf")]
 
 
-def test_draft_args_missing_file_on_disk_raises(
+def test_same_repo_draft_inherits_pinned_base_revision(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Bundled draft lookup must accept the base's qualified cache directory."""
+
+    revision = "1" * 40
+    (tmp_path / "draft.gguf").write_bytes(b"GGUF")
+    observed: list[tuple[object, str | None]] = []
     import skulk.download.download_utils as du
 
-    def _fake_build_model_path(_model_id: object) -> Path:
+    def _fake_build_model_path(
+        model_id: object, source_revision: str | None = None
+    ) -> Path:
+        observed.append((model_id, source_revision))
         return tmp_path
 
     monkeypatch.setattr(du, "build_model_path", _fake_build_model_path)
-    with pytest.raises(RuntimeError, match="not found under"):
+
+    args = _draft_model_args(
+        _runtime(repo="org/bundle", file="draft.gguf"),
+        "draft_mtp",
+        base_model_id=ModelId("org/bundle"),
+        source_revision=revision,
+    )
+
+    assert args == ["--model-draft", str(tmp_path / "draft.gguf")]
+    assert observed == [(ModelId("org/bundle"), revision)]
+
+
+def test_draft_args_missing_file_on_disk_degrades(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Draft dir resolves but the declared file is not present: degrade to plain
+    # decode (None), not crash (#574).
+    import skulk.download.download_utils as du
+
+    def _fake_build_model_path(
+        _model_id: object, _source_revision: str | None = None
+    ) -> Path:
+        return tmp_path
+
+    monkeypatch.setattr(du, "build_model_path", _fake_build_model_path)
+    assert (
         _draft_model_args(_runtime(repo="org/draft-GGUF", file="missing.gguf"), "draft_simple")
+        is None
+    )
+
+
+def test_draft_args_draft_dir_absent_degrades(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The gemma-4-31B scenario: the cross-repo draft was never staged (its
+    # best-effort co-fetch failed and was swallowed, #574), so build_model_path
+    # raises FileNotFoundError. Degrade to plain decode rather than crash the
+    # runner at launch.
+    import skulk.download.download_utils as du
+
+    def _raise(_model_id: object, _source_revision: str | None = None) -> Path:
+        raise FileNotFoundError("Model org/draft-GGUF not found on disk")
+
+    monkeypatch.setattr(du, "build_model_path", _raise)
+    assert (
+        _draft_model_args(_runtime(repo="org/draft-GGUF", file="draft.gguf"), "draft_mtp")
+        is None
+    )
 
 
 def _card(reasoning: object = None, capabilities: list[str] | None = None) -> SimpleNamespace:
@@ -148,6 +212,7 @@ def test_spec_type_flag_maps_to_llama_server_flags() -> None:
     assert _SPEC_TYPE_FLAG["draft_mtp"] == "draft-mtp"
     assert _SPEC_TYPE_FLAG["draft_eagle3"] == "draft-eagle3"
     assert _SPEC_TYPE_FLAG["draft_simple"] == "draft-simple"
+    assert _SPEC_TYPE_FLAG["draft_dflash"] == "draft-dflash"
     # ngram is the special case: it maps to ngram-cache, not "ngram".
     assert _SPEC_TYPE_FLAG["ngram"] == "ngram-cache"
 
@@ -167,3 +232,48 @@ def test_gpu_layers_match_vram_admission(resolved: str | None, expected: str) ->
     # The runner's -ngl decision must mirror placement_utils._has_gpu_offload_backend
     # so a RAM-admitted placement never grabs an unbudgeted GPU.
     assert _gpu_layers_for_backend(resolved) == expected
+
+
+def test_parse_sse_line_extracts_final_chunk_timings() -> None:
+    # llama-server attaches its native timings to the final streamed chunk
+    # when the request set timings_per_token; they become GenerationStats.
+    line = (
+        'data: {"choices": [{"delta": {}, "finish_reason": "stop"}], '
+        '"timings": {"prompt_n": 50, "prompt_ms": 250.0, '
+        '"predicted_n": 128, "predicted_ms": 4000.0}}'
+    )
+    delta = _parse_sse_line(line)
+    assert delta is not None
+    assert delta.finish == "stop"
+    assert delta.timings == {
+        "prompt_n": 50,
+        "prompt_ms": 250.0,
+        "predicted_n": 128,
+        "predicted_ms": 4000.0,
+    }
+
+
+def test_parse_sse_line_timings_absent_or_malformed_is_none() -> None:
+    plain = _parse_sse_line('data: {"choices": [{"delta": {"content": "hi"}}]}')
+    assert plain is not None
+    assert plain.timings is None
+    wrong_shape = _parse_sse_line(
+        'data: {"choices": [{"delta": {}}], "timings": [1, 2]}'
+    )
+    assert wrong_shape is not None
+    assert wrong_shape.timings is None
+
+
+def test_parse_sse_line_skips_non_dict_choice_and_delta_shapes() -> None:
+    # A malformed payload is skipped (or treated as empty), never raised: one
+    # stray line must not break the whole stream.
+    assert _parse_sse_line('data: {"choices": ["garbage"]}') is None
+    listy_delta = _parse_sse_line('data: {"choices": [{"delta": []}]}')
+    assert listy_delta is not None
+    assert listy_delta.content == ""
+    assert listy_delta.reasoning == ""
+
+
+def test_parse_sse_line_skips_non_list_choices() -> None:
+    assert _parse_sse_line('data: {"choices": {"0": {}}}') is None
+    assert _parse_sse_line('data: [1, 2, 3]') is None
