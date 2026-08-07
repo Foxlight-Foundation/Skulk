@@ -7,6 +7,8 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-07
+
 ### Changed
 
 - Redesigned the dashboard's dark mode around the Foxlight operator design
