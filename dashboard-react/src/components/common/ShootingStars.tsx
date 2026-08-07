@@ -8,8 +8,9 @@
  * accelerate or decelerate) and removes itself on finish.
  *
  * Design notes:
- * - Stars belong to the sky, so the layer renders only when the active
- *   palette declares a scene (the same token gate as SceneBackdrop) and
+ * - Stars belong to the night, so the layer renders only when the active
+ *   palette declares a scene AND opts in via `sceneMeteors` (the day scene
+ *   declines), and
  *   every star must be fully gone before halfway down the viewport: the
  *   layer hard-clips at 50vh and a bottom mask dissolves anything that
  *   approaches the boundary, so no trajectory can end in the content.
@@ -129,7 +130,7 @@ export function ShootingStars({
 }: ShootingStarsProps) {
   const theme = useTheme() as Theme;
   const hostRef = useRef<HTMLDivElement | null>(null);
-  const hasScene = theme.colors.scene !== 'none';
+  const hasScene = theme.colors.scene !== 'none' && theme.colors.sceneMeteors === 'on';
 
   useEffect(() => {
     if (!hasScene || prefersReducedMotion()) return;
