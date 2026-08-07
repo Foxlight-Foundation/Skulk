@@ -46,6 +46,8 @@ export interface ChatState {
   selectedSpeechModelId: string | null;
   selectedVoice: string | null;
   autoSpeakAssistant: boolean;
+  /** Speak short interjections while a code block streams (voice loop). */
+  narrateCodeBlocks: boolean;
   realtimeVoiceEnabled: boolean;
   autoSubmitVoice: boolean;
   modelToConversationId: Record<string, string>;
@@ -56,6 +58,7 @@ interface PersistedDurable {
   modelToConversationId?: Record<string, string>;
   selectedVoice?: string | null;
   autoSpeakAssistant?: boolean;
+  narrateCodeBlocks?: boolean;
   realtimeVoiceEnabled?: boolean;
   autoSubmitVoice?: boolean;
 }
@@ -103,6 +106,7 @@ function initialState(): ChatState {
     selectedSpeechModelId: session.selectedSpeechModelId ?? null,
     selectedVoice: durable.selectedVoice ?? null,
     autoSpeakAssistant: durable.autoSpeakAssistant ?? false,
+    narrateCodeBlocks: durable.narrateCodeBlocks ?? true,
     realtimeVoiceEnabled: durable.realtimeVoiceEnabled ?? true,
     autoSubmitVoice: durable.autoSubmitVoice ?? false,
   };
@@ -178,6 +182,10 @@ const slice = createSlice({
 
     setAutoSpeakAssistant(state, action: PayloadAction<boolean>) {
       state.autoSpeakAssistant = action.payload;
+    },
+
+    setNarrateCodeBlocks(state, action: PayloadAction<boolean>) {
+      state.narrateCodeBlocks = action.payload;
     },
 
     setRealtimeVoiceEnabled(state, action: PayloadAction<boolean>) {
@@ -350,6 +358,7 @@ export function subscribeChatPersistence(
         modelToConversationId: chat.modelToConversationId,
         selectedVoice: chat.selectedVoice,
         autoSpeakAssistant: chat.autoSpeakAssistant,
+        narrateCodeBlocks: chat.narrateCodeBlocks,
         realtimeVoiceEnabled: chat.realtimeVoiceEnabled,
         autoSubmitVoice: chat.autoSubmitVoice,
       },

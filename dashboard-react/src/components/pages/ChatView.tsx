@@ -23,9 +23,11 @@ import {
   SPEECH_PAUSE_MARKER,
   SPEECH_PAUSE_SECONDS,
   SpeechSentenceQueue,
+  hasUnterminatedFence,
   splitCompleteSpeechSentences,
   StreamingSpeechPlayback,
 } from '../../audio/streamingSpeechPlayback';
+import { CodeNarrator } from '../../audio/codeNarration';
 import {
   createPinnedSpeechVoiceSelector,
   fetchSpeechVoiceCatalog,
@@ -592,6 +594,9 @@ export function ChatView({
     dispatch(chatActions.setSelectedVoice(voice));
   const setAutoSpeakAssistant = (enabled: boolean) =>
     dispatch(chatActions.setAutoSpeakAssistant(enabled));
+  const narrateCodeBlocks = useAppSelector((s) => s.chat.narrateCodeBlocks);
+  const setNarrateCodeBlocks = (enabled: boolean) =>
+    dispatch(chatActions.setNarrateCodeBlocks(enabled));
   const setRealtimeVoiceEnabled = (enabled: boolean) =>
     dispatch(chatActions.setRealtimeVoiceEnabled(enabled));
   const setAutoSubmitVoice = (enabled: boolean) =>
@@ -1234,6 +1239,38 @@ export function ChatView({
         })()
       : null;
     speechSentenceQueueRef.current = sentenceQueue;
+    // Code narration (#769): short spoken interjections while a fenced code
+    // block streams. Live generation only (replays never build a narrator),
+    // and fillers fire only when the voice has run out of things to say.
+    const codeNarrator = sentenceQueue && narrateCodeBlocks
+      ? new CodeNarrator({
+          openers: [
+            t('chat.narration.opener1', "Let's write this out."),
+            t('chat.narration.opener2', 'Time for some code.'),
+            t('chat.narration.opener3', 'Writing it up now.'),
+          ],
+          fillers: [
+            t('chat.narration.filler1', 'Okay, next part.'),
+            t('chat.narration.filler2', 'Very good, now this.'),
+            t('chat.narration.filler3', 'Still writing.'),
+            t('chat.narration.filler4', 'Almost there.'),
+            t('chat.narration.filler5', 'And a little more.'),
+          ],
+          closers: [
+            t('chat.narration.closer1', 'Done!'),
+            t('chat.narration.closer2', 'And that does it.'),
+          ],
+        })
+      : null;
+    const narrate = () => {
+      if (!codeNarrator || !sentenceQueue) return;
+      const utterance = codeNarrator.update({
+        fenceOpen: hasUnterminatedFence(speechTail),
+        queueStarved: sentenceQueue.isStarved(),
+        bufferedSeconds: streamingPlaybackRef.current?.bufferedSeconds() ?? 0,
+      });
+      if (utterance) sentenceQueue.enqueue([utterance]);
+    };
 
     try {
       const apiMessages: ApiMessagePayload[] = buildApiMessages(allMessages);
@@ -1343,6 +1380,7 @@ export function ChatView({
                     roundSpeechSentences.push(...split.sentences);
                   } else {
                     sentenceQueue.enqueue(split.sentences);
+                    narrate();
                   }
                 } else if (sentenceQueue) {
                   const split = resyncVisibleSpeech(
@@ -1356,6 +1394,7 @@ export function ChatView({
                     roundSpeechSentences.push(...split.sentences);
                   } else {
                     sentenceQueue.enqueue(split.sentences);
+                    narrate();
                   }
                 }
               }
@@ -1494,6 +1533,10 @@ export function ChatView({
       } else if (autoSpeakAssistant && selectedSpeechModelId && finalAssistantContent) {
         void speakText(finalAssistantContent, assistantMsg.id);
       }
+    }
+    if (codeNarrator && sentenceQueue) {
+      const closer = codeNarrator.finish();
+      if (closer) sentenceQueue.enqueue([closer]);
     }
     sentenceQueue?.finish();
     setStreamingContent(null);
@@ -1666,6 +1709,8 @@ export function ChatView({
           onReferenceAudioChange={setReferenceAudioFile}
           onReferenceAudioTextChange={setReferenceAudioText}
           onAutoSpeakAssistantChange={setAutoSpeakAssistant}
+          narrateCodeBlocks={narrateCodeBlocks}
+          onNarrateCodeBlocksChange={setNarrateCodeBlocks}
           onRealtimeVoiceEnabledChange={setRealtimeVoiceEnabled}
           onAutoSubmitVoiceChange={setAutoSubmitVoice}
           onRealtimeTranscript={handleRealtimeTranscript}

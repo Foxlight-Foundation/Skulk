@@ -222,6 +222,11 @@ model and local node advertise the required capabilities.
   matching catalog voice, then pins that voice for every sentence request in
   the response. An explicit user selection overrides automatic matching but
   remains pinned for the same response.
+- While a fenced code block streams during live generation, the voice loop
+  can narrate it (a short opener, occasional fillers gated on the voice
+  actually running dry, and a closer) instead of going silent; the Narrate
+  code toggle beside Auto speech disables this, and replayed messages are
+  never narrated.
 - Spoken text is prepared structurally from the rendered Markdown: code
   fences, markup, and emoji are stripped; blocks that end without terminal
   punctuation (a bold title, an unpunctuated heading) gain a period so they

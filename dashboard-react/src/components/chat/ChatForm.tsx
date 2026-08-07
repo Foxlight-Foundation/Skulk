@@ -62,6 +62,8 @@ export interface ChatFormProps {
   referenceAudioText?: string;
   /** Whether final assistant messages should be spoken automatically. */
   autoSpeakAssistant?: boolean;
+  /** Speak short interjections while a code block streams. */
+  narrateCodeBlocks?: boolean;
   /** Enable a persistent server-VAD conversation instead of push-to-transcribe. */
   realtimeVoiceEnabled?: boolean;
   /** Submit final realtime transcripts through the dashboard chat flow. */
@@ -82,6 +84,7 @@ export interface ChatFormProps {
   onReferenceAudioTextChange?: (text: string) => void;
   /** Toggle automatic TTS playback for final assistant messages. */
   onAutoSpeakAssistantChange?: (enabled: boolean) => void;
+  onNarrateCodeBlocksChange?: (enabled: boolean) => void;
   onRealtimeVoiceEnabledChange?: (enabled: boolean) => void;
   onAutoSubmitVoiceChange?: (enabled: boolean) => void;
   onRealtimeTranscript?: (text: string, final: boolean) => void;
@@ -431,6 +434,7 @@ export function ChatForm({
   referenceAudioFile = null,
   referenceAudioText = '',
   autoSpeakAssistant = false,
+  narrateCodeBlocks = true,
   realtimeVoiceEnabled = true,
   autoSubmitVoice = false,
   isSpeaking = false,
@@ -441,6 +445,7 @@ export function ChatForm({
   onReferenceAudioChange,
   onReferenceAudioTextChange,
   onAutoSpeakAssistantChange,
+  onNarrateCodeBlocksChange,
   onRealtimeVoiceEnabledChange,
   onAutoSubmitVoiceChange,
   onRealtimeTranscript,
@@ -1268,6 +1273,21 @@ export function ChatForm({
             >
               {t('chat.form.autoSpeak', 'Auto')}
             </VoiceToggle>
+            {autoSpeakAssistant && (
+              <VoiceToggle
+                type="button"
+                disabled={!speechReady}
+                $active={narrateCodeBlocks}
+                aria-pressed={narrateCodeBlocks}
+                onClick={() => onNarrateCodeBlocksChange?.(!narrateCodeBlocks)}
+                title={t(
+                  'chat.form.narrateCodeTitle',
+                  'Speak short interjections while a code block streams instead of staying silent',
+                )}
+              >
+                {t('chat.form.narrateCode', 'Narrate code')}
+              </VoiceToggle>
+            )}
             {isSpeaking ? (
               <VoiceIconBtn
                 variant="ghost"
