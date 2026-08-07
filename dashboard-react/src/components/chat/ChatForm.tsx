@@ -84,6 +84,7 @@ export interface ChatFormProps {
   onReferenceAudioTextChange?: (text: string) => void;
   /** Toggle automatic TTS playback for final assistant messages. */
   onAutoSpeakAssistantChange?: (enabled: boolean) => void;
+  /** Toggle spoken interjections while a code block streams. */
   onNarrateCodeBlocksChange?: (enabled: boolean) => void;
   onRealtimeVoiceEnabledChange?: (enabled: boolean) => void;
   onAutoSubmitVoiceChange?: (enabled: boolean) => void;

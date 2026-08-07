@@ -46,6 +46,61 @@ export interface CodeNarratorOptions {
   random?: () => number;
 }
 
+/**
+ * Incremental fence-state probe: feed it visible stream chunks and it keeps
+ * the same CommonMark fence open/closed state the sentence splitter derives,
+ * without re-scanning the whole retained tail on every delta (long streamed
+ * code blocks would otherwise make that scan quadratic). Reset and re-feed
+ * when a reasoning rewrite replaces the visible content wholesale.
+ */
+export class FenceProbe {
+  private carry = '';
+  private insideFence = false;
+  private fenceCharacter = '';
+  private fenceLength = 0;
+
+  /** Process newly streamed visible text. */
+  feed(chunk: string): void {
+    this.carry += chunk;
+    for (;;) {
+      const newline = this.carry.indexOf('\n');
+      if (newline === -1) break;
+      this.processLine(this.carry.slice(0, newline));
+      this.carry = this.carry.slice(newline + 1);
+    }
+  }
+
+  /** Whether the stream currently sits inside an unclosed fence. */
+  isOpen(): boolean {
+    return this.insideFence;
+  }
+
+  /** Forget everything (reasoning rewrite replaced the visible stream). */
+  reset(): void {
+    this.carry = '';
+    this.insideFence = false;
+    this.fenceCharacter = '';
+    this.fenceLength = 0;
+  }
+
+  private processLine(line: string): void {
+    const delimiterMatch = /^\s{0,3}(?:>\s?)*\s{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (!delimiterMatch) return;
+    const run = delimiterMatch[1];
+    if (!this.insideFence) {
+      this.insideFence = true;
+      this.fenceCharacter = run[0];
+      this.fenceLength = run.length;
+    } else if (
+      run[0] === this.fenceCharacter
+      && run.length >= this.fenceLength
+      && delimiterMatch[2].trim() === ''
+    ) {
+      this.insideFence = false;
+    }
+  }
+}
+
 /** Emits at most one narration utterance per update; null means silence. */
 export class CodeNarrator {
   private readonly minimumGapMs: number;
@@ -78,6 +133,20 @@ export class CodeNarrator {
   update(signals: CodeNarrationSignals): string | null {
     const timestamp = this.now();
 
+    // Settle an expired pending close before anything else: if the stream
+    // went quiet past the debounce window and the next delta opens a new
+    // fence, the finished block still deserves its closer (the opener for
+    // the new fence follows on the next delta).
+    if (
+      this.pendingCloseSince !== null
+      && timestamp - this.pendingCloseSince >= this.reopenDebounceMs
+    ) {
+      this.pendingCloseSince = null;
+      this.openerPlayed = false;
+      this.lastUtteranceAt = timestamp;
+      return this.pick(this.phrases.closers);
+    }
+
     if (signals.fenceOpen && !this.fenceOpen) {
       this.fenceOpen = true;
       if (this.pendingCloseSince !== null) {
@@ -96,16 +165,6 @@ export class CodeNarrator {
       this.fenceOpen = false;
       if (this.openerPlayed) this.pendingCloseSince = timestamp;
       return null;
-    }
-
-    if (
-      this.pendingCloseSince !== null
-      && timestamp - this.pendingCloseSince >= this.reopenDebounceMs
-    ) {
-      this.pendingCloseSince = null;
-      this.openerPlayed = false;
-      this.lastUtteranceAt = timestamp;
-      return this.pick(this.phrases.closers);
     }
 
     if (
@@ -135,7 +194,10 @@ export class CodeNarrator {
 
   private pick(list: readonly string[]): string | null {
     if (list.length === 0) return null;
-    const candidates = list.length > 1 ? list.filter((p) => p !== this.lastPhrase) : list;
+    const filtered = list.filter((p) => p !== this.lastPhrase);
+    // Translations may collapse distinct phrases to one string; fall back to
+    // the full list rather than returning nothing.
+    const candidates = filtered.length > 0 ? filtered : list;
     const choice = candidates[Math.floor(this.random() * candidates.length)] ?? candidates[0];
     this.lastPhrase = choice;
     return choice;

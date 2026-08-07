@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CodeNarrator } from './codeNarration';
+import { CodeNarrator, FenceProbe } from './codeNarration';
 
 const PHRASES = {
   openers: ['Opener A', 'Opener B'],
@@ -88,5 +88,55 @@ describe('CodeNarrator', () => {
     expect(first).toBe('Opener A');
     expect(second).not.toBe(first);
     expect(third).not.toBe(second);
+  });
+});
+
+describe('CodeNarrator debounce expiry ordering', () => {
+  it('plays the finished closer when a new fence opens after a quiet gap', () => {
+    let clock = 0;
+    const n = narrator({ now: () => clock });
+    n.update(open);
+    clock += 100;
+    n.update(closed);
+    clock += 5000;
+    expect(n.update(open)).toMatch(/Closer/);
+    expect(n.update(open)).toMatch(/Opener/);
+  });
+});
+
+describe('CodeNarrator collapsed translations', () => {
+  it('still speaks when every phrase collapses to one string', () => {
+    let clock = 0;
+    const n = new CodeNarrator(
+      { openers: ['Same', 'Same'], fillers: ['Same'], closers: ['Same'] },
+      { now: () => clock, random: () => 0 },
+    );
+    expect(n.update(open)).toBe('Same');
+    clock += 7100;
+    expect(n.update(open)).toBe('Same');
+  });
+});
+
+describe('FenceProbe', () => {
+  it('tracks fence state incrementally across arbitrary chunk boundaries', () => {
+    const probe = new FenceProbe();
+    probe.feed('Before.\n``');
+    expect(probe.isOpen()).toBe(false);
+    probe.feed('`js\nconst x');
+    expect(probe.isOpen()).toBe(true);
+    probe.feed(' = 1;\n~~~\n# still code\n');
+    expect(probe.isOpen()).toBe(true);
+    probe.feed('```\nAfter');
+    expect(probe.isOpen()).toBe(false);
+  });
+
+  it('resets for a reasoning rewrite and re-feeds cleanly', () => {
+    const probe = new FenceProbe();
+    probe.feed('```py\n');
+    expect(probe.isOpen()).toBe(true);
+    probe.reset();
+    expect(probe.isOpen()).toBe(false);
+    probe.feed('Plain prose only.\n');
+    expect(probe.isOpen()).toBe(false);
   });
 });

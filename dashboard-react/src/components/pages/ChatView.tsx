@@ -23,11 +23,10 @@ import {
   SPEECH_PAUSE_MARKER,
   SPEECH_PAUSE_SECONDS,
   SpeechSentenceQueue,
-  hasUnterminatedFence,
   splitCompleteSpeechSentences,
   StreamingSpeechPlayback,
 } from '../../audio/streamingSpeechPlayback';
-import { CodeNarrator } from '../../audio/codeNarration';
+import { CodeNarrator, FenceProbe } from '../../audio/codeNarration';
 import {
   createPinnedSpeechVoiceSelector,
   fetchSpeechVoiceCatalog,
@@ -1262,10 +1261,11 @@ export function ChatView({
           ],
         })
       : null;
+    const fenceProbe = codeNarrator ? new FenceProbe() : null;
     const narrate = () => {
-      if (!codeNarrator || !sentenceQueue) return;
+      if (!codeNarrator || !sentenceQueue || !fenceProbe) return;
       const utterance = codeNarrator.update({
-        fenceOpen: hasUnterminatedFence(speechTail),
+        fenceOpen: fenceProbe.isOpen(),
         queueStarved: sentenceQueue.isStarved(),
         bufferedSeconds: streamingPlaybackRef.current?.bufferedSeconds() ?? 0,
       });
@@ -1379,6 +1379,7 @@ export function ChatView({
                   if (requestTools) {
                     roundSpeechSentences.push(...split.sentences);
                   } else {
+                    fenceProbe?.feed(visibleDelta);
                     sentenceQueue.enqueue(split.sentences);
                     narrate();
                   }
@@ -1393,6 +1394,8 @@ export function ChatView({
                   if (requestTools) {
                     roundSpeechSentences.push(...split.sentences);
                   } else {
+                    fenceProbe?.reset();
+                    fenceProbe?.feed(separated.content);
                     sentenceQueue.enqueue(split.sentences);
                     narrate();
                   }
