@@ -7,16 +7,20 @@ const APPLE_LOGO_PATH =
 const LOGO_NATIVE_WIDTH = 814;
 const LOGO_NATIVE_HEIGHT = 1000;
 
-/** Centered Apple mark shared by every Mac glyph. `fill` is the device
- *  outline colour, so the mark always matches the case's wire at both hours
- *  and stays readable over the RAM fill. */
-function AppleMark({ cx, centerY, targetH, fill }: { cx: number; centerY: number; targetH: number; fill: string }) {
+/** Centered Apple mark shared by the Mac glyphs. The desktop Macs fill it
+ *  with the device outline colour so the mark always matches the case's
+ *  wire in both palettes; the MacBook keeps its white-on-screen fill. Marks
+ *  below a legible height render nothing, so miniature glyph contexts (the
+ *  cluster card's 48px tiles, drawn with a dimmed wire) stay clean instead
+ *  of carrying an unreadable smudge. */
+function AppleMark({ cx, centerY, targetH, fill, opacity = 0.85 }: { cx: number; centerY: number; targetH: number; fill: string; opacity?: number }) {
+  if (targetH < 12) return null;
   const scale = targetH / LOGO_NATIVE_HEIGHT;
   const x = cx - (LOGO_NATIVE_WIDTH * scale) / 2;
   const y = centerY - targetH / 2;
   return (
     <path d={APPLE_LOGO_PATH} transform={`translate(${x}, ${y}) scale(${scale})`}
-      fill={fill} opacity={0.85} />
+      fill={fill} opacity={opacity} />
   );
 }
 
@@ -309,11 +313,6 @@ function MacBookPro({ cx, cy, width, height, ramPercent, wireColor, strokeWidth,
   const innerH = screenH - bezel * 2;
   const memFillH = (ramPercent / 100) * innerH;
 
-  // Apple logo sizing
-  const logoTargetH = screenH * 0.22;
-  const logoScale = logoTargetH / LOGO_NATIVE_HEIGHT;
-  const logoX = cx - (LOGO_NATIVE_WIDTH * logoScale) / 2;
-  const logoY = screenY + screenH / 2 - logoTargetH / 2;
 
   // Base (keyboard) trapezoid
   const baseY = screenY + screenH;
@@ -351,9 +350,7 @@ function MacBookPro({ cx, cy, width, height, ramPercent, wireColor, strokeWidth,
           fill={ramColor} clipPath={`url(#${clipId}-mbp-screen)`} />
       )}
       {/* Apple logo */}
-      <path d={APPLE_LOGO_PATH}
-        transform={`translate(${logoX}, ${logoY}) scale(${logoScale})`}
-        fill="#FFFFFF" opacity={0.9} />
+      <AppleMark cx={cx} centerY={screenY + screenH / 2} targetH={screenH * 0.22} fill="#FFFFFF" opacity={0.9} />
       {/* Keyboard base */}
       <path
         d={`M ${baseTopX} ${baseY} L ${baseTopX + baseTopW} ${baseY} L ${baseBottomX + baseBottomW} ${baseY + baseH} L ${baseBottomX} ${baseY + baseH} Z`}
