@@ -106,6 +106,12 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
 - **Master**: Coordinates cluster state, places model instances across nodes; retained event-log replay is coalesced onto one asynchronously paced worker, and sustained idle-state event-log growth emits an operator warning
 - **Election**: Bully algorithm for master election, carried on the isolated election gossipsub behavior with duplicate candidate suppression during protocol migration
 - **API**: FastAPI server for OpenAI-compatible chat completions
+- **Operator identity/authority foundation**: stable per-host and cluster
+  identities plus an encrypted local compare-and-set journal under
+  `src/skulk/operator/`. It remains separate from event-sourced `State`,
+  telemetry, diagnostics, and the public event log. The journal requires an
+  injected external data-key provider and does not itself claim quorum or
+  gateway fencing.
 
 ### Node Facts & capability derivation (#614)
 Detection creates capability; configuration overrides it; disagreement is
@@ -279,6 +285,8 @@ The system uses event sourcing for state management:
 - Master admits only the explicit durable control-event allowlist, indexes and
   broadcasts those events, and payload-free skips any decodable non-control
   event before ordering; workers apply indexed control events
+- Operator identity and mutable authorization are a separate security plane;
+  they must never be represented as `State` fields or ordinary Skulk events.
 
 **Versioning: all nodes in a cluster MUST run the same Skulk version and source build before serving workloads.** Mixed-build clusters are a degraded deployment window, not an interoperability mode: correctness-bearing events, commands, state, telemetry envelopes, and DATA types remain strict (`extra="forbid"`), with no dual-publish, legacy-event bridge, or snapshot-hydration shim. Operational diagnostics are the only tolerant boundary: peer node/capture responses ignore unknown additive fields recursively, additive counters require compatibility defaults, `/v1/diagnostics/cluster` reports aggregate/per-node `versionStatus`, and `/state.nodeHealth` warns with `version_mismatch` until identity telemetry converges. This preserves rollout observability without claiming cross-version inference compatibility. See `website/docs/architecture.md` "Deployment & versioning" and #293.
 
@@ -294,6 +302,9 @@ The system uses event sourcing for state management:
 - `src/skulk/shared/models/`: persisted model metadata and capability resolution
   - `model_cards.py`: declarative model cards, including optional advanced capability sections; machine-generated custom cards carry `generator_revision`, and a stamped card older than `CARD_GENERATOR_REVISION` loses override power against the bundled card for the same id (unstamped = hand-authored, keeps #652 override)
   - `capabilities.py`: normalized runtime capability profiles derived from model cards plus conservative family defaults
+- `src/skulk/operator/`: stable operator identity and encrypted authority
+  persistence. Runtime libp2p `NodeId` remains unsuitable for mobile history,
+  device membership, or authorization subjects.
 
 ### Rust Components
 Rust code in `rust/` provides:

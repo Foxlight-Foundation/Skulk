@@ -59,6 +59,10 @@ dependencies = [
   # does not quietly move the torch under the rest of the stack.
   "torchvision==0.26.0; sys_platform == 'darwin'",
   "jsonschema>=4.26.0",
+  # Operator cluster identity and authority records use Ed25519 and AES-GCM.
+  # This is a direct production dependency: secret storage must not rely on a
+  # transitive dependency accidentally keeping cryptography installed.
+  "cryptography>=46.0.3",
   "webrtcvad-wheels>=2.0.14,<3",
   # Platform-conditional HARD dependency (#614): nothing optional may be
   # load-bearing. Without this binding an NVIDIA node silently loses VRAM

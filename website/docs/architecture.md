@@ -876,7 +876,32 @@ The wider observability story (cluster timeline, hang-rate SLO, per-node panel) 
 
 ## Storage
 
-Three on-disk responsibilities:
+Four on-disk responsibilities:
+
+### Operator identity and authority foundation
+
+Remote operator identity is deliberately separate from runtime libp2p identity
+and from the event-sourced inference state. `src/skulk/operator/identity.py`
+creates one persistent random `node_install_id` per host and generates the
+cluster's Ed25519 public identity. A libp2p peer ID may change after a process
+restart; a mobile history reference, device membership record, or future deep
+link must therefore never use it as a durable subject.
+
+`src/skulk/operator/authority.py` is the encrypted local projection for the
+future replicated operator authority. Secret-bearing JSON records use
+AES-256-GCM with authenticated metadata binding the cluster ID, authority term,
+commit index, record type, record ID, schema version, and external key version.
+The database stores ciphertext and public journal metadata only. The active
+data key comes from an injected `AuthorityKeyProvider`; the database never
+persists it. Cluster bootstrap commits the Ed25519 private key as the first
+encrypted record.
+
+This foundation supplies durable local compare-and-set behavior, but it does
+not claim distributed consensus. A later authority-replication component must
+assign committed terms and indexes, implement membership and recovery, and
+fence stale gateways before operator traffic can be authorized. Operator
+identity and authorization records never enter `State`, telemetry,
+diagnostics, or the public event log.
 
 ### Event log
 

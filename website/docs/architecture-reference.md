@@ -91,6 +91,36 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Localization:** Tolgee provider in `dashboard-react/src/i18n/tolgee.ts`; app wrapper in `dashboard-react/src/main.tsx`; English namespace data in `dashboard-react/src/i18n/en/skulk.json`. All dashboard keys use the `skulk` namespace and are called through `t(key, englishFallback, params?)`, not `<T>`.
 - **Translation loading:** `BackendFetch` reads CDN/static JSON from `VITE_TOLGEE_CDN_PREFIX` (default `/i18n`) with bundled English fallback; `VITE_TOLGEE_AVAILABLE_LANGUAGES` controls the comma-separated language allow/preload list and always includes `en`.
 
+### Operator identity and authority foundation
+
+- **Role:** owns stable host/cluster identities and the encrypted local
+  projection that future operator pairing, credentials, revocation, and
+  gateway fencing build upon.
+- **Lives in:** `src/skulk/operator/identity.py` and
+  `src/skulk/operator/authority.py`; focused tests live in
+  `src/skulk/operator/tests/`.
+- **Stable node identity:** `NodeInstallationIdentity.node_install_id` is a
+  persisted UUIDv4 under the protected operator configuration directory. It is
+  intentionally independent of the currently ephemeral libp2p `NodeId`.
+- **Cluster identity:** `ClusterPublicIdentity` carries the UUIDv4 cluster ID,
+  normalized operator-visible name, raw Ed25519 public key, bound SHA-256
+  fingerprint, and creation timestamp. The private key may be handed only to
+  `EncryptedAuthorityStore.initialize_cluster`, which encrypts it before
+  persistence.
+- **Encrypted journal:** SQLite WAL with `synchronous=FULL`, mode-`0700` parent
+  and mode-`0600` database/sidecars on POSIX. AES-256-GCM AAD binds every
+  ciphertext to cluster ID, schema version, authority term, commit index,
+  record type/ID, and external key ID. Appends require the caller's exact
+  expected commit index.
+- **Key boundary:** `AuthorityKeyProvider` supplies the active unwrapped 32-byte
+  data key and immutable key-version ID. Production OS-wrapping providers and
+  replicated key envelopes are later S1 slices; this store never writes the
+  plaintext data key itself.
+- **Critical boundary:** this is a local encrypted projection, not quorum or a
+  gateway lease. No operator traffic may treat local SQLite commit as a
+  distributed authorization decision. None of these records enters `State`,
+  telemetry, diagnostics, or the API event log.
+
 ### Extensions (plugins)
 
 - **Role:** load separately installed packages and call them at serving-path hooks; deployment-specific behavior without forking Skulk
