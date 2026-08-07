@@ -30,8 +30,11 @@ curl -fsSL \
 
 Both the installer script and the checkout therefore come from the same exact
 candidate. Fetching the script from `main` would leave candidate installer
-changes untested; the literal `main/install.sh | bash` command belongs only to
-the post-promotion shipping qualification.
+changes untested; the literal `main/install.sh | bash` command belongs to the
+harness shipping profile (`skulk-harness fresh-install qualify --profile
+shipping`), an optional post-promotion sanity check that the public installer
+resolves the promoted commit. It is not a release gate: every release gate
+runs before promotion.
 
 Do not add `SKULK_*` overrides, edit the generated `skulk.yaml`, substitute an
 engine, reuse an existing Skulk home, or use a private setup wrapper. Those
@@ -116,15 +119,21 @@ Remove secrets, tokens, private hostnames, addresses, node identifiers, and
 unrelated local paths before posting evidence publicly.
 
 If the fix changes Skulk code, the installer, shipped defaults, dashboard, or a
-model card, it creates a new candidate. Merge the fix to `dev`, record the new
-full commit, repeat automated fresh-install qualification, and only then repeat
-the affected human journey. A documentation-only clarification that does not
-change the commands or runtime contract does not invalidate the candidate.
+model card, the release owner judges whether the change is material to the
+first-install experience. A material change creates a new candidate: merge the
+fix to `dev`, record the new full commit, repeat automated fresh-install
+qualification, and only then repeat the affected human journey. A change judged
+immaterial (or a documentation-only clarification that does not change the
+commands or runtime contract) does not invalidate the candidate; record the
+judgment and the commits it covers in the sign-off.
 
 ## Sign-off
 
 Record the candidate commit, automated qualification report, tester, date,
-platforms exercised, journeys completed, and links to any issues. Human
-acceptance permits the `dev` to `main` promotion; it does not publish the
-release. After promotion, the automated shipping profile must still pass using
-the literal public `main` installer before the release or tag is published.
+platforms exercised, journeys completed, any post-qualification materiality
+judgments, and links to any issues. Qualification is complete before
+promotion: human acceptance on top of the passed automated matrix is the final
+release gate, and the `dev` to `main` promotion publishes the already-qualified
+release. The harness shipping profile may be run after promotion as a
+non-gating sanity check that the literal public `main` installer resolves the
+promoted commit.
