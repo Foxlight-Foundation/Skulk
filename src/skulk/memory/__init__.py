@@ -36,8 +36,18 @@ from skulk.memory.separation import (
     DEFAULT_SHRINKAGE,
     Whitener,
 )
+from skulk.memory.store import (
+    ContentStore,
+    SpanRecord,
+    StoreFullError,
+    encode_vector,
+)
 
 __all__ = [
+    "ContentStore",
+    "SpanRecord",
+    "StoreFullError",
+    "encode_vector",
     "DEFAULT_ALPHA",
     "DEFAULT_CONFIDENCE_GATE",
     "DEFAULT_FIELD_DIM",
