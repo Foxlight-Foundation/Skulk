@@ -237,7 +237,7 @@ const VoiceToggle = styled.button<{ $active: boolean }>`
   ${({ $active }) =>
     $active
       ? css`border-color: ${({ theme }) => theme.colors.gold}; color: ${({ theme }) => theme.colors.gold}; background: ${({ theme }) => theme.colors.goldBg};`
-      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.textMuted}; &:hover { border-color: ${({ theme }) => theme.colors.goldDim}; color: ${({ theme }) => theme.colors.gold}; }`}
+      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.textMuted}; &:hover { border-color: ${({ theme }) => theme.colors.goldTextDim}; color: ${({ theme }) => theme.colors.gold}; }`}
 
   &:disabled {
     opacity: 0.88;
@@ -261,7 +261,7 @@ const VoiceIconBtn = styled(Button)<{ $active?: boolean }>`
 `;
 
 const VoiceStatus = styled.span<{ $error?: boolean }>`
-  color: ${({ $error, theme }) => ($error ? theme.colors.error : theme.colors.goldDim)};
+  color: ${({ $error, theme }) => ($error ? theme.colors.error : theme.colors.goldTextDim)};
   font-variant-numeric: tabular-nums;
 `;
 
@@ -304,7 +304,7 @@ const ThinkingBtn = styled.button<{ $active: boolean }>`
   ${({ $active }) =>
     $active
       ? css`border-color: ${({ theme }) => theme.colors.gold}; color: ${({ theme }) => theme.colors.gold}; background: ${({ theme }) => theme.colors.goldBg};`
-      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.textMuted}; &:hover { border-color: ${({ theme }) => theme.colors.goldDim}; color: ${({ theme }) => theme.colors.gold}; }`}
+      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.textMuted}; &:hover { border-color: ${({ theme }) => theme.colors.goldTextDim}; color: ${({ theme }) => theme.colors.gold}; }`}
 `;
 
 const Stat = styled.span`
@@ -313,7 +313,7 @@ const Stat = styled.span`
 `;
 
 const StatValue = styled.span`
-  color: ${({ theme }) => theme.colors.goldDim};
+  color: ${({ theme }) => theme.colors.goldTextDim};
 `;
 
 const Spacer = styled.span`

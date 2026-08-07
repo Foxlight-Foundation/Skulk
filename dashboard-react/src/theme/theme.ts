@@ -81,6 +81,12 @@ interface ColorTokens {
   goldDim: string;
   goldBg: string;
   goldStrong: string; // readable on goldBg
+  /**
+   * De-emphasized accent-family FOREGROUND text (metric values, thinking
+   * headers, code-language labels). Unlike `goldDim`, which dims far enough
+   * to serve as borders and glows, this stays readable at small sizes.
+   */
+  goldTextDim: string;
 
   /**
    * The living colour (Den design language): marks work actually in flight —
@@ -225,6 +231,7 @@ const darkColors: ColorTokens = {
   // Den's secondary accent so amber (see `live`) stays scarce and alive.
   gold: '#93AEDF',
   goldDim: 'rgba(147, 174, 223, 0.45)',
+  goldTextDim: 'rgba(147, 174, 223, 0.72)',
   goldBg: 'rgba(147, 174, 223, 0.12)',
   goldStrong: '#B9CBEC',
 
@@ -317,6 +324,9 @@ const lightColors: ColorTokens = {
   // doesn't need to know which palette is active.
   gold: '#1d4ed8',
   goldDim: 'rgba(29, 78, 216, 0.55)',
+  // Same value as goldDim: the light palette's dim blue is already readable
+  // as text, so the split only changes dark mode.
+  goldTextDim: 'rgba(29, 78, 216, 0.55)',
   goldBg: 'rgba(29, 78, 216, 0.10)',
   goldStrong: '#1e3a8a',
 

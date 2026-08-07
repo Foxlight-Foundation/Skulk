@@ -64,8 +64,8 @@ function buildStatusConfig(
   t: SkulkTranslate,
 ): Record<InstanceStatus, { label: string; color: string; glow: string; defaultMessage: string }> {
   return {
-    loading:       { label: t('instance.status.loading', 'Loading'),       color: theme.colors.gold,    glow: theme.colors.goldDim,    defaultMessage: t('instance.status.loadingMessage', 'Downloading model...') },
-    warming_up:    { label: t('instance.status.warmingUp', 'Warming Up'),    color: theme.colors.gold,    glow: theme.colors.goldDim,    defaultMessage: t('instance.status.warmingUpMessage', 'Preparing for inference...') },
+    loading:       { label: t('instance.status.loading', 'Loading'),       color: theme.colors.gold,    glow: theme.colors.goldTextDim,    defaultMessage: t('instance.status.loadingMessage', 'Downloading model...') },
+    warming_up:    { label: t('instance.status.warmingUp', 'Warming Up'),    color: theme.colors.gold,    glow: theme.colors.goldTextDim,    defaultMessage: t('instance.status.warmingUpMessage', 'Preparing for inference...') },
     ready:         { label: t('instance.status.ready', 'Ready'),         color: theme.colors.healthy, glow: theme.colors.accentBg,   defaultMessage: t('instance.status.readyMessage', 'Ready to chat!') },
     running:       { label: t('instance.status.running', 'Running'),       color: theme.colors.healthy, glow: theme.colors.accentBg,   defaultMessage: t('instance.status.runningMessage', 'Processing inference...') },
     failed:        { label: t('instance.status.failed', 'Failed'),        color: theme.colors.error,   glow: theme.colors.errorBg,    defaultMessage: t('instance.status.failedMessage', 'Instance failed') },

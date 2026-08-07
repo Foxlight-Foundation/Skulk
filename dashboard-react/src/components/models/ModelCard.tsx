@@ -451,7 +451,7 @@ export function ModelCard({
               </ProgressTrack>
               <span style={{
                 textAlign: 'right',
-                color: nd.status === 'completed' ? theme.colors.goldDim : nd.status === 'downloading' ? theme.colors.info : theme.colors.textMuted,
+                color: nd.status === 'completed' ? theme.colors.goldTextDim : nd.status === 'downloading' ? theme.colors.info : theme.colors.textMuted,
               }}>
                 {nd.status === 'downloading' && nd.progress
                   ? `${Math.round(nd.percentage)}% ${formatSpeed(nd.progress.speed, t)}`
