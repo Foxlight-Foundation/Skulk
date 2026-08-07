@@ -224,8 +224,22 @@ const EMOJI_CHARACTERS = /\p{Extended_Pictographic}|\u{FE0F}|\u{200D}|\u{20E3}|[
  * horizontal rules contribute nothing here (the sentence pipeline turns
  * them into an audible pause).
  */
+/** Remove HTML tags to a fixed point so nested fragments cannot survive. */
+function stripHtmlTags(value: string): string {
+  let previous = value;
+  for (let pass = 0; pass < 5; pass += 1) {
+    const next = previous.replace(/<[^<>]*>/g, '');
+    if (next === previous) return next;
+    previous = next;
+  }
+  // Give up on pathological nesting rather than looping: angle brackets have
+  // no spoken reading anyway.
+  return previous.replace(/[<>]/g, ' ');
+}
+
 export function speechTextFromMarkdown(text: string): string {
   const spokenBlocks = text
+    .replace(/\r\n/g, '\n')
     .replace(/```[\s\S]*?```/g, ' ')
     .split(/\n\s*\n/)
     .map((block) => {
@@ -243,8 +257,8 @@ export function speechTextFromMarkdown(text: string): string {
             .replace(/`([^`]+)`/g, '$1')
             .replace(/(\*\*|__)(.*?)\1/g, '$2')
             .replace(/(\*|_)(.*?)\1/g, '$2')
-            .replace(/~~(.*?)~~/g, '$1')
-            .replace(/<[^>]+>/g, '')
+            .replace(/~~(.*?)~~/g, '$1');
+          spoken = stripHtmlTags(spoken)
             .replace(/[\\*_~]/g, '')
             .replace(EMOJI_CHARACTERS, '')
             .replace(/\s+/g, ' ')
@@ -275,10 +289,47 @@ export function splitCompleteSpeechSentences(text: string): {
   sentences: string[];
   remainder: string;
 } {
+  // Fenced code suppresses every boundary inside it: a blank line or a
+  // list-looking line of code is not a speech boundary, and splitting there
+  // would hand the queue an unterminated fence whose contents get read
+  // aloud. An unclosed fence suppresses to the end of the text, keeping the
+  // fence in the retained tail until it completes.
+  const fenceRanges: Array<{ start: number; end: number }> = [];
+  {
+    let fenceStart = -1;
+    let scanFrom = 0;
+    for (;;) {
+      const newline = text.indexOf('\n', scanFrom);
+      const lineEnd = newline === -1 ? text.length : newline;
+      const line = text.slice(scanFrom, lineEnd);
+      if (/^\s{0,3}(?:```|~~~)/.test(line)) {
+        if (fenceStart === -1) {
+          fenceStart = scanFrom;
+        } else {
+          fenceRanges.push({ start: fenceStart, end: lineEnd + 1 });
+          fenceStart = -1;
+        }
+      }
+      if (newline === -1) break;
+      scanFrom = newline + 1;
+    }
+    if (fenceStart !== -1) fenceRanges.push({ start: fenceStart, end: text.length + 1 });
+  }
+  const insideFence = (position: number) => fenceRanges.some(
+    (range) => position > range.start && position <= range.end,
+  );
+
   const boundaries: number[] = [];
+  // A completed fence is itself a segment: emit a boundary right after its
+  // closing line so the fence travels to the queue whole (where the Markdown
+  // conversion drops it) instead of gluing onto the following prose.
+  for (const range of fenceRanges) {
+    if (range.end <= text.length) boundaries.push(range.end);
+  }
   const matcher = /[.!?](?:["')\]*_~]*)\s+/g;
   for (const match of text.matchAll(matcher)) {
     const punctuation = match.index ?? 0;
+    if (insideFence(punctuation)) continue;
     const lineStart = text.lastIndexOf('\n', punctuation) + 1;
     const linePrefix = text.slice(lineStart, punctuation + 1).trim();
     if (/^(?:\d+|[A-Za-z])[.)]$/.test(linePrefix)) continue;
@@ -291,9 +342,12 @@ export function splitCompleteSpeechSentences(text: string): {
     const lineStart = text.lastIndexOf('\n', newline - 1) + 1;
     const line = text.slice(lineStart, newline);
     if (
-      !line.trim()
-      || STRUCTURAL_SPEECH_LINE.test(line)
-      || HORIZONTAL_RULE_LINE.test(line)
+      !insideFence(newline)
+      && (
+        !line.trim()
+        || STRUCTURAL_SPEECH_LINE.test(line)
+        || HORIZONTAL_RULE_LINE.test(line)
+      )
     ) {
       boundaries.push(newline + 1);
     }

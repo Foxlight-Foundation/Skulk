@@ -1041,7 +1041,9 @@ export function ChatView({
         sentence,
         messageId,
         signal,
-        selectVoice(sentence),
+        // The pause sentinel is not prose: keep it away from response-scoped
+        // automatic voice selection so its Latin token cannot pin a voice.
+        sentence === SPEECH_PAUSE_MARKER ? null : selectVoice(sentence),
         responseSession,
       ),
       (error) => {

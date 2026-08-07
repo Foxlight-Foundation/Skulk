@@ -358,6 +358,32 @@ describe('splitCompleteSpeechSentences structural boundaries', () => {
     });
   });
 
+  it('does not split inside a fenced code block', () => {
+    const streamed = 'Look at this.\n```python\n# not a heading\n\nvalue = 1\n```\nDone. Tail';
+    expect(splitCompleteSpeechSentences(streamed)).toEqual({
+      sentences: ['Look at this.', '```python\n# not a heading\n\nvalue = 1\n```', 'Done.'],
+      remainder: 'Tail',
+    });
+  });
+
+  it('retains an unterminated fence in the tail', () => {
+    const streamed = 'Intro.\n```python\nprint(1)\n\n';
+    expect(splitCompleteSpeechSentences(streamed)).toEqual({
+      sentences: ['Intro.'],
+      remainder: '```python\nprint(1)\n\n',
+    });
+  });
+
+  it('handles Windows newlines around a title block', () => {
+    expect(speechTextFromMarkdown('**A Title**\r\n\r\nBody text.')).toBe('A Title. Body text.');
+  });
+
+  it('strips nested HTML tag fragments to a fixed point', () => {
+    expect(speechTextFromMarkdown('safe <scr<script>ipt>alert(1)</scr</script>ipt> text')).toBe(
+      'safe alert(1) text.',
+    );
+  });
+
   it('emits a horizontal rule as its own segment', () => {
     expect(splitCompleteSpeechSentences('Before the break.\n\n---\n\nAfter')).toEqual({
       sentences: ['Before the break.', '---'],
