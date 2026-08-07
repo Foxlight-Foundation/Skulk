@@ -151,17 +151,22 @@ export function ModelSearchModal({
     // here would race it and let whichever response lands last control the
     // Show more button.
     if (lastQueryRef.current.trim()) return;
+    // Stale-response guard, mirroring the search path: rapid filter changes
+    // overlap requests, and only the latest may write state.
+    const controller = new AbortController();
     (async () => {
       try {
         const params = new URLSearchParams({ query: '', limit: String(hfLimit), mlx_only: String(mlxOnly) });
         if (hfTask) params.set('pipeline_tag', hfTask);
-        const res = await fetch(`/models/search?${params}`);
-        if (!res.ok) return;
+        const res = await fetch(`/models/search?${params}`, { signal: controller.signal });
+        if (!res.ok || controller.signal.aborted) return;
         const results = (await res.json()) as HuggingFaceModel[];
+        if (controller.signal.aborted) return;
         setHfTrending(results);
         setHfHasMore(results.length >= hfLimit);
       } catch { /* ignore */ }
     })();
+    return () => controller.abort();
   }, [open, mlxOnly, hfLimit, hfTask]);
 
   const searchSeqRef = useRef(0);
