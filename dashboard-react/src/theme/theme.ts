@@ -268,103 +268,96 @@ const darkColors: ColorTokens = {
 };
 
 const lightColors: ColorTokens = {
-  // Noon Ridge (the valley at midday), from the operator app design system:
-  // crisp white cards over an open-sky canvas, the deep-ink primary blue for
-  // the everyday accent, and amber (deepened so it reads on white) still
-  // reserved for whatever is alive. Values track
-  // skulk-app/src/theme/tokens.ts (the 2a Noon palette).
-  bg: '#EEF4FB',
-  // The same three-stop atmosphere as the night, at noon: open sky crowning
-  // the header, the warm horizon breathing up from below the frame, and the
-  // far ridge's haze on the left.
+  bg: '#eef3fb',
   bgGradient: `
-    radial-gradient(ellipse 90% 55% at 50% -12%, rgba(120, 168, 228, 0.42) 0%, transparent 62%),
-    radial-gradient(ellipse 68% 38% at 82% 108%, rgba(255, 230, 188, 0.55) 0%, transparent 66%),
-    radial-gradient(ellipse 90% 30% at 12% 112%, rgba(190, 212, 232, 0.5) 0%, transparent 58%),
-    #EEF4FB
+    radial-gradient(ellipse at 0% 0%, #dbeafe 0%, transparent 50%),
+    radial-gradient(ellipse at 100% 100%, #e0e7ff 0%, transparent 50%),
+    #eef3fb
   `,
-  surface: '#FFFFFF',
-  surfaceHover: '#EEF4FB',
-  surfaceElevated: 'rgba(255, 255, 255, 0.97)',
-  surfaceSunken: 'rgba(17, 33, 60, 0.04)',
-  header: 'rgba(238, 244, 251, 0.9)',
-  headerBorder: 'linear-gradient(to right, rgba(69, 111, 176, 0.24), rgba(69, 111, 176, 0.04))',
-  overlay: 'rgba(17, 33, 60, 0.42)',
-  shadow: 'rgba(17, 33, 60, 0.10)',
-  shadowStrong: 'rgba(17, 33, 60, 0.20)',
+  surface: '#ffffff',
+  surfaceHover: '#e6edf8',
+  surfaceElevated: 'rgba(255, 255, 255, 0.96)',
+  surfaceSunken: 'rgba(15, 23, 42, 0.04)',
+  header: 'rgba(255, 255, 255, 0.78)',
+  headerBorder: 'linear-gradient(to right, rgba(30, 64, 175, 0.18), rgba(30, 64, 175, 0.03))',
+  overlay: 'rgba(15, 23, 42, 0.42)',
+  shadow: 'rgba(15, 23, 42, 0.10)',
+  shadowStrong: 'rgba(15, 23, 42, 0.18)',
 
-  border: 'rgba(17, 33, 60, 0.10)',
-  borderLight: 'rgba(17, 33, 60, 0.07)',
-  borderStrong: 'rgba(17, 33, 60, 0.18)',
+  border: 'rgba(30, 64, 175, 0.16)',
+  borderLight: 'rgba(30, 64, 175, 0.10)',
+  borderStrong: 'rgba(30, 64, 175, 0.32)',
 
-  text: '#11213C',
-  textSecondary: 'rgba(17, 33, 60, 0.74)',
-  textMuted: '#5F7086',
-  textOnAccent: '#FFFFFF',
+  text: '#0f172a',
+  textSecondary: 'rgba(15, 23, 42, 0.72)',
+  textMuted: 'rgba(15, 23, 42, 0.5)',
+  textOnAccent: '#ffffff',
 
-  // The dark palette's `gold` family carries the everyday accent; at noon
-  // that is the primary blue, so the rest of the codebase doesn't need to
-  // know which palette is active.
-  gold: '#456FB0',
-  goldDim: 'rgba(69, 111, 176, 0.55)',
-  goldBg: 'rgba(69, 111, 176, 0.10)',
-  goldStrong: '#29446F',
+  // The dark palette uses gold as the brand accent. Light mode reuses the same
+  // token names but maps them to a dominant blue so the rest of the codebase
+  // doesn't need to know which palette is active.
+  gold: '#1d4ed8',
+  goldDim: 'rgba(29, 78, 216, 0.55)',
+  goldBg: 'rgba(29, 78, 216, 0.10)',
+  goldStrong: '#1e3a8a',
 
   // Noon identity amber (the deeper value that reads on white).
   live: '#AC580A',
   liveBg: '#FCF2E6',
   onLive: '#FFF6EA',
 
-  accent: '#1C7A54',
-  accentHover: '#166245',
-  accentBg: '#E1F1EA',
-  error: '#B23A44',
-  errorBg: '#F8E6E8',
-  errorText: '#8E2E36',
-  // Solid-callout pair: on-fill contrast (white-on-red) guaranteed on any
-  // surface.
-  errorFill: '#B23A44',
-  errorOnFill: '#FFFFFF',
-  errorOnSurface: '#B23A44',
-  warning: '#96601A',
-  warningBg: '#FAEEDC',
-  warningText: '#6B4512',
-  // Solid attention badging: the identity amber, deepened for daylight, so
-  // "act on this" speaks the same language at both hours.
-  warningFill: '#AC580A',
-  warningOnFill: '#FFF6EA',
-  warningOnSurface: '#96601A',
-  info: '#456FB0',
-  infoBg: 'rgba(69, 111, 176, 0.10)',
+  accent: '#0ea5e9',
+  accentHover: '#0284c7',
+  accentBg: 'rgba(14, 165, 233, 0.12)',
+  error: '#dc2626',
+  errorBg: 'rgba(220, 38, 38, 0.10)',
+  errorText: '#991b1b',
+  // Same solid-callout pair as the dark palette — palette-independent so
+  // the on-fill contrast (white-on-red) is guaranteed regardless of mode.
+  errorFill: '#dc2626',
+  errorOnFill: '#ffffff',
+  errorOnSurface: '#b91c1c',                 // red-700, readable on white
+  // Light-theme warnings stay greyscale rather than borrowing the amber
+  // palette the dark theme uses — amber clashed with the cool blue accents
+  // and read as a stain on the surface. The semantic ("this is a warning")
+  // is carried by the section heading and the surrounding context; the body
+  // just needs to be legible and not draw the eye away from the brand.
+  warning: '#475569',                       // slate-600 (border/accent)
+  warningBg: 'rgba(71, 85, 105, 0.08)',     // slate-600 at 8%
+  warningText: '#1e293b',                   // slate-800
+  // Solid-callout pair: high-attention badging, not subtle tinting. Light
+  // mode keeps the legacy yellow; the night palette badges in its amber.
+  warningFill: '#ffcc33',
+  warningOnFill: '#000000',
+  warningOnSurface: '#b45309',               // amber-700, readable on white
+  info: '#1d4ed8',
+  infoBg: 'rgba(29, 78, 216, 0.10)',
 
-  chatBubbleUser: 'rgba(69, 111, 176, 0.10)',
-  chatBubbleAssistant: '#FFFFFF',
-  chatBubbleBorder: 'rgba(17, 33, 60, 0.10)',
-  chatCodeBg: 'rgba(17, 33, 60, 0.05)',
+  chatBubbleUser: 'rgba(29, 78, 216, 0.10)',
+  chatBubbleAssistant: '#ffffff',
+  chatBubbleBorder: 'rgba(30, 64, 175, 0.16)',
+  chatCodeBg: 'rgba(15, 23, 42, 0.06)',
 
-  heatmapLow: '#DCE8F6',
-  heatmapMid: '#456FB0',
-  heatmapHigh: '#1C2B4A',
+  heatmapLow: '#dbeafe',
+  heatmapMid: '#3b82f6',
+  heatmapHigh: '#1e3a8a',
 
-  deviceIconStroke: '#1C2B4A',
-  deviceIconFill: 'rgba(69, 111, 176, 0.08)',
-  deviceBody: '#DCE8F6',          // near-void sky tint: the "empty RAM" case
-  // Memory pressure is the one gauge that legitimately burns amber at noon
-  // too — same "node actually holding work" semantic as the night palette.
-  ramFill: 'rgba(172, 88, 10, 0.70)',
-  deviceLabel: '#5F7086',
-  gpuBarBg: '#BED4E8',             // the far ridge's haze; separates the bar from the case
-  meshLine: 'rgba(69, 111, 176, 0.30)',
-  meshNode: 'rgba(69, 111, 176, 0.55)',
-  bgMeshLine: 'rgba(69, 111, 176, 0.14)',
-  bgMeshNode: 'rgba(69, 111, 176, 0.10)',
+  deviceIconStroke: '#1e3a8a',
+  deviceIconFill: 'rgba(29, 78, 216, 0.08)',
+  deviceBody: '#dbeafe',          // light-blue "empty RAM" case background
+  ramFill: 'rgba(29, 78, 216, 0.75)', // darker blue RAM fullness
+  deviceLabel: '#475569',         // slate-grey wordmark, readable on the light case
+  gpuBarBg: '#bccfe8',             // a touch darker than the device case so the bar reads as a separate element
+  meshLine: 'rgba(29, 78, 216, 0.30)',
+  meshNode: 'rgba(29, 78, 216, 0.55)',
+  bgMeshLine: 'rgba(29, 78, 216, 0.16)',
+  bgMeshNode: 'rgba(29, 78, 216, 0.12)',
 
-  // Noon has no star field; the mesh carries the daylight atmosphere.
   scene: 'none',
   sceneScrim: 'none',
 
-  healthy: '#1C7A54',
-  unhealthy: '#B23A44',
+  healthy: '#0ea5e9',
+  unhealthy: '#dc2626',
 };
 
 function buildTheme(colors: ColorTokens) {
