@@ -145,7 +145,9 @@ function MacMini({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, cl
         <rect x={x} y={y + topSurfaceH + (bodyH - memFillH)} width={boxW} height={memFillH}
           fill={ramColor} clipPath={`url(#${clipId}-mini)`} />
       )}
-      {[cx - boxW * 0.24, cx - boxW * 0.14].map((vx, i) => (
+      {/* Port slots sit well left of centre so they never crowd the Apple
+          mark's clear space. */}
+      {[cx - boxW * 0.34, cx - boxW * 0.24].map((vx, i) => (
         <rect key={i} x={vx - vSlotW / 2} y={vSlotY} width={vSlotW} height={slotH}
           fill="rgba(0,0,0,0.35)" rx={1.2} />
       ))}
