@@ -167,37 +167,35 @@ interface NvidiaGpuProps {
 }
 
 /**
- * NVIDIA CUDA device (datacenter GPU pod or a DGX-Spark-class box). Rendered
- * in the same visual language as the other device glyphs (theme body, memory
- * fills from the bottom in the theme accent); the distinguishing signals are
- * the compact spark-style cube with a front intake grid and the NVIDIA
- * wordmark in the brand green. The memory fill represents the unified/VRAM
- * pool like every other tile (#555).
+ * NVIDIA Grace/Blackwell mini PC (GB10-class: DGX Spark, ASUS Ascent GX10).
+ * Drawn in the same visual language as the other fleet glyphs so the ring
+ * reads as one family: a low wide case with the theme body, the RAM fill
+ * rising from the bottom, and small feet like the AMD tile. The
+ * distinguishing signals are the ribbed front (the GX10's vertical fluting)
+ * and the NVIDIA wordmark in brand green. The memory fill represents the
+ * unified pool like every other tile.
  */
-function NvidiaGpu({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId, bodyColor, ramColor, labelColor }: NvidiaGpuProps) {
-  const boxW = width * 0.62;
-  const boxH = height * 0.62;
+function NvidiaGpu({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId, bodyColor, ramColor }: NvidiaGpuProps) {
+  const boxW = width * 0.85;
+  const boxH = height * 0.55;
   const x = cx - boxW / 2;
   const y = cy - boxH / 2;
-  const cornerRadius = 5;
+  const cornerRadius = 3;
   const memFillH = (ramPercent / 100) * boxH;
   const bodyClip = `${clipId}-nvidia-body`;
-  // Front intake grid: a spark-box face of small rounded cells.
-  const gridCols = 5;
-  const gridRows = 3;
-  const gridPad = boxW * 0.12;
-  const gridW = boxW - gridPad * 2;
-  const gridTop = y + boxH * 0.16;
-  const gridH = boxH * 0.42;
-  const cellGap = 2.5;
-  const cellW = (gridW - cellGap * (gridCols - 1)) / gridCols;
-  const cellH = (gridH - cellGap * (gridRows - 1)) / gridRows;
-  const cells: { cxi: number; cyi: number }[] = [];
-  for (let r = 0; r < gridRows; r += 1) {
-    for (let c = 0; c < gridCols; c += 1) {
-      cells.push({ cxi: x + gridPad + c * (cellW + cellGap), cyi: gridTop + r * (cellH + cellGap) });
-    }
-  }
+
+  // Ribbed front: dense vertical flutes across the lower case.
+  const ribCount = 14;
+  const ribPad = boxW * 0.06;
+  const ribAreaW = boxW - ribPad * 2;
+  const ribGap = ribAreaW / ribCount;
+  const ribW = Math.max(1, ribGap * 0.42);
+  const ribTop = y + boxH * 0.42;
+  const ribH = boxH * 0.5;
+
+  const footW = boxW * 0.08;
+  const footH = Math.max(1.5, height * 0.02);
+  const footY = y + boxH;
 
   return (
     <g>
@@ -206,28 +204,30 @@ function NvidiaGpu({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, 
           <rect x={x} y={y} width={boxW} height={boxH} rx={cornerRadius - 1} />
         </clipPath>
       </defs>
-      {/* Body: compact cube */}
+      {/* Case body */}
       <rect x={x} y={y} width={boxW} height={boxH} rx={cornerRadius}
         fill={bodyColor} stroke={wireColor} strokeWidth={strokeWidth} />
-      {/* Memory fill */}
+      {/* RAM fill rises from the bottom */}
       {ramPercent > 0 && (
         <rect x={x} y={y + (boxH - memFillH)} width={boxW} height={memFillH}
           fill={ramColor} clipPath={`url(#${bodyClip})`} />
       )}
-      {/* Front intake grid */}
-      {cells.map((cell, i) => (
-        <rect key={i} x={cell.cxi} y={cell.cyi} width={cellW} height={cellH}
-          fill="rgba(0,0,0,0.28)" rx={1.5} />
+      {/* Fluted front */}
+      {Array.from({ length: ribCount }, (_, i) => (
+        <rect key={i} x={x + ribPad + i * ribGap + (ribGap - ribW) / 2} y={ribTop}
+          width={ribW} height={ribH} rx={ribW / 2}
+          fill="rgba(0,0,0,0.28)" clipPath={`url(#${bodyClip})`} />
       ))}
-      {/* NVIDIA wordmark in brand green; labelColor keeps theme contrast for
-          the base line under it. */}
-      <text x={cx} y={y + boxH * 0.82} textAnchor="middle"
-        fontSize={Math.max(9, boxW * 0.16)} fontWeight={700}
-        fontFamily="inherit" letterSpacing="0.5"
+      {/* NVIDIA wordmark in brand green, centred above the flutes */}
+      <text x={cx} y={y + boxH * 0.26} textAnchor="middle" dominantBaseline="central"
+        fontFamily="Arial, Helvetica, sans-serif" fontWeight={700}
+        fontSize={boxH * 0.24} letterSpacing={boxH * 0.02}
         fill="#76B900">NVIDIA</text>
-      {/* Base line, matching the AMD tile's silver base cue */}
-      <rect x={x + boxW * 0.08} y={y + boxH + 2} width={boxW * 0.84} height={2.5}
-        rx={1.25} fill={labelColor} opacity={0.55} />
+      {/* Feet */}
+      {[x + boxW * 0.12, x + boxW * 0.88 - footW].map((fx, i) => (
+        <rect key={i} x={fx} y={footY} width={footW} height={footH} rx={footH / 2}
+          fill="#8a8f98" />
+      ))}
     </g>
   );
 }
