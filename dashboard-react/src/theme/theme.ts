@@ -169,7 +169,7 @@ const darkColors: ColorTokens = {
   // so the canvas carries the valley's atmosphere without the painting.
   bgGradient: `
     radial-gradient(ellipse 90% 55% at 50% -12%, rgba(43, 58, 99, 0.55) 0%, transparent 62%),
-    radial-gradient(ellipse 64% 34% at 82% 108%, rgba(168, 86, 12, 0.22) 0%, transparent 65%),
+    radial-gradient(ellipse 68% 38% at 82% 108%, rgba(168, 86, 12, 0.28) 0%, transparent 66%),
     radial-gradient(ellipse 90% 30% at 12% 112%, rgba(43, 58, 99, 0.38) 0%, transparent 58%),
     #080C1A
   `,
