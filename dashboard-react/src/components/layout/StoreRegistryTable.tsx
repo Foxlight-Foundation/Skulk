@@ -207,6 +207,10 @@ const EmptyBox = styled.div`
 const Table = styled.div`
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md};
+  /* Dense content keeps its ground: near-opaque so the scene backdrop
+   * cannot compete with a column of identifiers (atmosphere yields to
+   * density). */
+  background: ${({ theme }) => theme.colors.surfaceElevated};
   overflow: hidden;
   display: flex;
   flex-direction: column;

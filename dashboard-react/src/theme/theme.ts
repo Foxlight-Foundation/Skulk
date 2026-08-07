@@ -1,3 +1,5 @@
+import valleyNight from '../assets/scene/valley-night.webp';
+
 /**
  * Theme palettes for the Skulk dashboard.
  *
@@ -141,6 +143,18 @@ interface ColorTokens {
   bgMeshLine: string;
   bgMeshNode: string;
 
+  /**
+   * Full-bleed scene painting behind the whole app, or 'none'. The night
+   * palette shows the brand valley (the same painting foxlight.ai and the
+   * operator app use) in place of the abstract mesh; a palette without a
+   * scene keeps the mesh. Components branch on this token's value, never on
+   * the theme name.
+   */
+  scene: string;
+  /** Structural scrim over the scene: sinks the top for the header and
+   * buries the base so dense content keeps its ground. */
+  sceneScrim: string;
+
   // Status (always-on, palette-independent severity colors are ok inside semantic.*)
   healthy: string;
   unhealthy: string;
@@ -225,6 +239,9 @@ const darkColors: ColorTokens = {
   meshNode: 'rgba(147, 174, 223, 0.55)',
   bgMeshLine: 'rgba(147, 174, 223, 0.10)',
   bgMeshNode: 'rgba(147, 174, 223, 0.08)',
+
+  scene: `url(${valleyNight})`,
+  sceneScrim: 'rgba(0, 0, 0, 0.30)',
 
   healthy: '#54C79A',
   unhealthy: '#F2707E',
@@ -316,6 +333,9 @@ const lightColors: ColorTokens = {
   meshNode: 'rgba(29, 78, 216, 0.55)',
   bgMeshLine: 'rgba(29, 78, 216, 0.16)',
   bgMeshNode: 'rgba(29, 78, 216, 0.12)',
+
+  scene: 'none',
+  sceneScrim: 'none',
 
   healthy: '#0ea5e9',
   unhealthy: '#dc2626',
