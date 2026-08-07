@@ -8,6 +8,15 @@
 
 import valleyNight from '../assets/scene/valley-night.webp';
 
+/**
+ * Build-time opt-in for the night-sky scene (`VITE_NIGHT_SKY=1`): the star
+ * field from the brand valley painting crowns dark mode, shooting stars
+ * included, and the abstract mesh stands down. Without the flag, dark mode
+ * ships the plain CSS night. Everything downstream keys off the `scene`
+ * token, so the flag decides it in exactly one place.
+ */
+const nightSkyEnabled = import.meta.env.VITE_NIGHT_SKY === '1';
+
 const sharedFonts = {
   body: "'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
   mono: "'JetBrains Mono', 'Fira Code', monospace",
@@ -248,9 +257,10 @@ const darkColors: ColorTokens = {
   bgMeshLine: 'rgba(147, 174, 223, 0.10)',
   bgMeshNode: 'rgba(147, 174, 223, 0.08)',
 
-  // The star field crowns the viewport and dissolves on the way down; the
-  // CSS night gradient beneath it carries the rest of the atmosphere.
-  scene: `url(${valleyNight})`,
+  // With the flag, the star field crowns the viewport and dissolves on the
+  // way down; without it, the CSS night gradient carries the atmosphere
+  // alone and the mesh returns.
+  scene: nightSkyEnabled ? `url(${valleyNight})` : 'none',
   sceneScrim: 'none',
 
   healthy: '#54C79A',
