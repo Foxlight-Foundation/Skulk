@@ -194,6 +194,7 @@ class ContentStore:
             if not self._manifest_path().exists():
                 self._write_manifest(self._default_manifest())
             self._reconcile_stale_tombstones()
+            self._sweep_orphan_segments()
             segments = self._segments()
             if segments and segments[-1].exists():
                 # Acknowledged appends from a previous process may still sit
@@ -591,6 +592,38 @@ class ContentStore:
             # the scratch squatting on a struggling volume.
             scratch.unlink(missing_ok=True)
             raise
+
+    def _sweep_orphan_segments(self) -> None:
+        """Remove segment files no healthy manifest references (startup).
+
+        Orphans arise from compaction failures: a crashed compaction leaves
+        its sequence-fresh file, and the ambiguous-commit window (manifest
+        swap landed but the call raised) preserves the committed file while
+        skipping old-segment cleanup. The manifest is the truth whenever its
+        segments field is a valid list (rotation lists a name before
+        creating the file; compaction commits by atomic swap), so anything
+        unlisted is reclaimable. When the manifest is malformed, reads run
+        on discovery and nothing here can tell orphans from data: skip.
+        """
+        listed = self._read_manifest().get("segments")
+        if not isinstance(listed, list):
+            return
+        named = {str(entry) for entry in listed}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+        removed = 0
+        for stray in self.root.glob("spans-*.jsonl.tmp"):
+            stray.unlink(missing_ok=True)
+            removed += 1
+        for candidate in self.root.glob("spans-*.jsonl"):
+            if candidate.name not in named:
+                candidate.unlink(missing_ok=True)
+                removed += 1
+        if removed:
+            self._fsync_directory()
+            _LOGGER.info(
+                "memory store reclaimed %d orphan segment file(s) at %s",
+                removed,
+                self.root,
+            )
 
     def _known_span_ids(self) -> set[str]:
         """Every reserved span id: in segments, or named by a tombstone.

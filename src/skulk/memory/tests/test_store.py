@@ -550,6 +550,23 @@ def test_compact_keeps_final_when_manifest_swap_already_landed(
     named = manifest["segments"][0]
     assert (tmp_path / "memory" / named).exists()
     assert [r.span_id for r in store.scan()] == ["s1", "s2"]
+    # The old segments the failed call never cleaned up are reclaimed at
+    # the next startup rather than leaking forever.
+    reopened = ContentStore(root=tmp_path / "memory")
+    remaining = {p.name for p in (tmp_path / "memory").glob("spans-*.jsonl")}
+    assert remaining == {named}
+    assert [r.span_id for r in reopened.scan()] == ["s1", "s2"]
+
+
+def test_startup_sweeps_orphan_segment_files(tmp_path: Path) -> None:
+    _store, records = _seeded_store(tmp_path, 2)
+    (tmp_path / "memory" / "spans-000099.jsonl").write_text('{"span_id":"x"}\n')
+    (tmp_path / "memory" / "spans-000099.jsonl.tmp").write_text("partial")
+
+    reopened = ContentStore(root=tmp_path / "memory")
+    assert not (tmp_path / "memory" / "spans-000099.jsonl").exists()
+    assert not (tmp_path / "memory" / "spans-000099.jsonl.tmp").exists()
+    assert [r.span_id for r in reopened.scan()] == [r.span_id for r in records]
 
 
 def test_torn_tail_repair_retries_after_transient_failure(
