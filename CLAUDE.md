@@ -107,11 +107,12 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
 - **Election**: Bully algorithm for master election, carried on the isolated election gossipsub behavior with duplicate candidate suppression during protocol migration
 - **API**: FastAPI server for OpenAI-compatible chat completions
 - **Operator identity/authority foundation**: stable per-host and cluster
-  identities plus an encrypted local compare-and-set journal under
-  `src/skulk/operator/`. It remains separate from event-sourced `State`,
-  telemetry, diagnostics, and the public event log. The journal requires an
-  injected external data-key provider and does not itself claim quorum or
-  gateway fencing.
+  identities, deterministic Ed25519 quorum-certificate verification, and an
+  encrypted local compare-and-set journal under `src/skulk/operator/`. It
+  remains separate from event-sourced `State`, telemetry, diagnostics, and the
+  public event log. The journal requires an injected external data-key
+  provider. Network vote collection, replicated recovery, OS key wrapping, and
+  gateway fencing remain later slices.
 
 ### Node Facts & capability derivation (#614)
 Detection creates capability; configuration overrides it; disagreement is
@@ -302,9 +303,10 @@ The system uses event sourcing for state management:
 - `src/skulk/shared/models/`: persisted model metadata and capability resolution
   - `model_cards.py`: declarative model cards, including optional advanced capability sections; machine-generated custom cards carry `generator_revision`, and a stamped card older than `CARD_GENERATOR_REVISION` loses override power against the bundled card for the same id (unstamped = hand-authored, keeps #652 override)
   - `capabilities.py`: normalized runtime capability profiles derived from model cards plus conservative family defaults
-- `src/skulk/operator/`: stable operator identity and encrypted authority
-  persistence. Runtime libp2p `NodeId` remains unsuitable for mobile history,
-  device membership, or authorization subjects.
+- `src/skulk/operator/`: stable operator identity, deterministic quorum
+  certification, and encrypted authority persistence. Runtime libp2p `NodeId`
+  remains unsuitable for mobile history, device membership, or authorization
+  subjects.
 
 ### Rust Components
 Rust code in `rust/` provides:

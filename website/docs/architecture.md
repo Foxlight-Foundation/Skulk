@@ -887,21 +887,36 @@ cluster's Ed25519 public identity. A libp2p peer ID may change after a process
 restart; a mobile history reference, device membership record, or future deep
 link must therefore never use it as a durable subject.
 
-`src/skulk/operator/authority.py` is the encrypted local projection for the
-future replicated operator authority. Secret-bearing JSON records use
+`src/skulk/operator/authority.py` is the encrypted local projection for
+replicated operator authority. Secret-bearing JSON records use
 AES-256-GCM with authenticated metadata binding the cluster ID, authority term,
 commit index, record type, record ID, schema version, and external key version.
 The database stores ciphertext and public journal metadata only. The active
 data key comes from an injected `AuthorityKeyProvider`; the database never
 persists it. Cluster bootstrap commits the Ed25519 private key as the first
-encrypted record.
+encrypted record. Every open repairs POSIX directory and database modes,
+identity replacement fsyncs both file and parent directory, and public cluster
+metadata is rebound to the decrypted private key before use.
 
-This foundation supplies durable local compare-and-set behavior, but it does
-not claim distributed consensus. A later authority-replication component must
-assign committed terms and indexes, implement membership and recovery, and
-fence stale gateways before operator traffic can be authorized. Operator
-identity and authorization records never enter `State`, telemetry,
-diagnostics, or the public event log.
+`src/skulk/operator/replication.py` is the deterministic cryptographic apply
+boundary in front of that projection. Each authority transition names the
+cluster, monotonic term and contiguous index, previous-commit digest, payload
+digest, and one active membership digest or two joint-membership digests.
+The first shared log position is derived from stable cluster public-key
+material and deliberately excludes the editable display name.
+Ed25519 votes bind the complete descriptor and the stable
+`node_install_id`. A strict majority is required for every named membership;
+learners never count, duplicate nodes/keys/votes fail closed, and joint changes
+require consecutive generations plus a majority in both the old and new
+configurations. Only an exact certified payload can pass the final local
+compare-and-set append.
+
+This slice verifies quorum evidence but does not yet collect votes, elect an
+authority leader, replicate or recover the certificate log, wrap keys through
+the operating system, or issue gateway leases. Those networked responsibilities
+must preserve this verifier's semantics and fence stale gateways before
+operator traffic can be authorized. Operator identity and authorization
+records never enter `State`, telemetry, diagnostics, or the public event log.
 
 ### Event log
 

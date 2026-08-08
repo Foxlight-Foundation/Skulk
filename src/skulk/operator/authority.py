@@ -153,6 +153,7 @@ def _canonical_json(payload: Mapping[str, object]) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
+        allow_nan=False,
     ).encode("utf-8")
 
 
@@ -288,7 +289,21 @@ class EncryptedAuthorityStore:
         return record
 
     def cluster_identity(self) -> ClusterPublicIdentity:
-        """Return the initialized cluster's public identity."""
+        """Return the public identity after rebinding it to the private key.
+
+        Raises:
+            AuthorityIntegrityError: Public and private identity material do
+                not form the same Ed25519 key pair.
+            AuthorityNotInitializedError: Cluster bootstrap has not completed.
+        """
+
+        identity = self._load_cluster_identity_metadata()
+        private_key = self._load_cluster_private_key_for_identity(identity)
+        self._validate_cluster_key_binding(identity, private_key)
+        return identity
+
+    def _load_cluster_identity_metadata(self) -> ClusterPublicIdentity:
+        """Load and validate public identity metadata without key recursion."""
 
         with closing(self._connect_existing()) as connection:
             raw = self._metadata_value(connection, "cluster_public_identity")
@@ -309,7 +324,19 @@ class EncryptedAuthorityStore:
             AuthorityNotInitializedError: Cluster bootstrap has not completed.
         """
 
-        payload = self.read_latest_payload(
+        identity = self._load_cluster_identity_metadata()
+        private_key = self._load_cluster_private_key_for_identity(identity)
+        self._validate_cluster_key_binding(identity, private_key)
+        return private_key
+
+    def _load_cluster_private_key_for_identity(
+        self,
+        identity: ClusterPublicIdentity,
+    ) -> bytes:
+        """Decrypt private identity material against known public metadata."""
+
+        payload = self._read_latest_payload_for_identity(
+            identity,
             _CLUSTER_PRIVATE_KEY_RECORD_TYPE,
             _CLUSTER_PRIVATE_KEY_RECORD_ID,
         )
@@ -330,6 +357,26 @@ class EncryptedAuthorityStore:
         if len(decoded) != 32:
             raise AuthorityIntegrityError("cluster private-key record is malformed")
         return decoded
+
+    @staticmethod
+    def _validate_cluster_key_binding(
+        identity: ClusterPublicIdentity,
+        private_key: bytes,
+    ) -> None:
+        """Reject public metadata substituted independently of private state."""
+
+        derived_public_key = (
+            Ed25519PrivateKey.from_private_bytes(private_key)
+            .public_key()
+            .public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+        )
+        if derived_public_key != _cluster_public_key_bytes(identity):
+            raise AuthorityIntegrityError(
+                "cluster public identity does not match encrypted private key"
+            )
 
     def append(
         self,
@@ -427,6 +474,20 @@ class EncryptedAuthorityStore:
 
         self._validate_record_identity(record_type, record_id)
         cluster_identity = self.cluster_identity()
+        return self._read_latest_payload_for_identity(
+            cluster_identity,
+            record_type,
+            record_id,
+        )
+
+    def _read_latest_payload_for_identity(
+        self,
+        cluster_identity: ClusterPublicIdentity,
+        record_type: str,
+        record_id: str,
+    ) -> dict[str, object]:
+        """Decrypt one record using already-validated identity metadata."""
+
         with closing(self._connect_existing()) as connection:
             row = self._fetch_one(
                 connection.execute(
@@ -574,6 +635,7 @@ class EncryptedAuthorityStore:
     def _connect(self) -> sqlite3.Connection:
         """Open the authority database with durable local settings."""
 
+        self._prepare_path()
         connection = sqlite3.connect(self._path, isolation_level=None)
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=FULL")
@@ -588,6 +650,7 @@ class EncryptedAuthorityStore:
             raise AuthorityNotInitializedError(
                 "operator authority store is not initialized"
             )
+        self._prepare_path()
         uri = f"{self._path.resolve().as_uri()}?mode=rw"
         connection = sqlite3.connect(uri, uri=True, isolation_level=None)
         connection.execute("PRAGMA journal_mode=WAL")
