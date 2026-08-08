@@ -15,9 +15,14 @@ from skulk.operator.key_provider import (
     LocalFileAuthorityKeyProvider,
 )
 from skulk.operator.pairing import (
+    OperatorCredentialExpiredError,
+    OperatorCredentialInvalidError,
+    OperatorDeviceNotFoundError,
     OperatorPairingService,
+    OperatorTokenRequest,
     PairingChallengeRequest,
     PairingExchangeRequest,
+    PairingExchangeResponse,
     PairingProofError,
     PairingSessionExpiredError,
     PairingSessionStateError,
@@ -51,6 +56,37 @@ def _device_key() -> tuple[Ed25519PrivateKey, str]:
         format=serialization.PublicFormat.Raw,
     )
     return private_key, _base64url(public_key)
+
+
+def _complete_pairing(
+    service: OperatorPairingService,
+    *,
+    device_name: str = "Phone",
+) -> PairingExchangeResponse:
+    """Complete one host-authorized pairing against the service."""
+
+    package = service.create_session(exchange_url="https://example.invalid")
+    private_key, public_key = _device_key()
+    challenge = service.create_challenge(
+        PairingChallengeRequest(
+            nonce=package.nonce,
+            device_name=device_name,
+            device_public_key=public_key,
+        )
+    )
+    signature = private_key.sign(
+        pairing_signature_message(
+            cluster_id=UUID(str(package.cluster_id)),
+            nonce=package.nonce,
+            challenge=challenge.challenge,
+        )
+    )
+    return service.exchange(
+        PairingExchangeRequest(
+            nonce=package.nonce,
+            signature=_base64url(signature),
+        )
+    )
 
 
 def test_pairing_challenge_exchange_consumes_session(tmp_path: Path) -> None:
@@ -94,6 +130,7 @@ def test_pairing_challenge_exchange_consumes_session(tmp_path: Path) -> None:
         "models:read",
         "chat:write",
         "operations:write",
+        "devices:manage",
     )
     assert package.nonce.encode("ascii") not in (
         tmp_path / "authority.sqlite3"
@@ -183,6 +220,9 @@ def test_pairing_rejects_cleartext_non_loopback_exchange_url(
     with pytest.raises(ValueError, match="must use HTTPS"):
         service.create_session(exchange_url="http://gateway.example.invalid")
 
+    assert not (tmp_path / "authority-key.bin").exists()
+    assert not (tmp_path / "authority.sqlite3").exists()
+
 
 def test_pairing_allows_cleartext_loopback_for_local_development(
     tmp_path: Path,
@@ -209,3 +249,107 @@ def test_existing_authority_fails_closed_when_local_key_is_lost(
 
     with pytest.raises(AuthorityKeyUnavailableError, match="not initialized"):
         service.create_session(exchange_url="https://example.invalid")
+
+
+def test_refresh_rotates_both_credentials_and_rejects_replay(tmp_path: Path) -> None:
+    """Refresh rotation invalidates both members of the previous token pair."""
+
+    clock = [datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+    paired = _complete_pairing(service)
+
+    refreshed = service.refresh(
+        OperatorTokenRequest(
+            device_id=paired.device_id,
+            refresh_token=paired.refresh_token,
+        )
+    )
+
+    assert refreshed.access_token != paired.access_token
+    assert refreshed.refresh_token != paired.refresh_token
+    with pytest.raises(OperatorCredentialInvalidError, match="access"):
+        service.validate_access_token(paired.access_token)
+    with pytest.raises(OperatorCredentialInvalidError, match="refresh"):
+        service.refresh(
+            OperatorTokenRequest(
+                device_id=paired.device_id,
+                refresh_token=paired.refresh_token,
+            )
+        )
+    context = service.validate_access_token(
+        refreshed.access_token,
+        required_scopes=("cluster:read", "devices:manage"),
+    )
+    assert context.device_id == paired.device_id
+
+
+def test_access_and_refresh_credentials_expire_independently(tmp_path: Path) -> None:
+    """The service enforces the short access and longer refresh lifetimes."""
+
+    clock = [datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+    paired = _complete_pairing(service)
+    clock[0] += timedelta(minutes=15)
+
+    with pytest.raises(OperatorCredentialExpiredError, match="access"):
+        service.validate_access_token(paired.access_token)
+
+    refreshed = service.refresh(
+        OperatorTokenRequest(
+            device_id=paired.device_id,
+            refresh_token=paired.refresh_token,
+        )
+    )
+    clock[0] += timedelta(days=30)
+    with pytest.raises(OperatorCredentialExpiredError, match="refresh"):
+        service.refresh(
+            OperatorTokenRequest(
+                device_id=paired.device_id,
+                refresh_token=refreshed.refresh_token,
+            )
+        )
+
+
+def test_device_listing_and_revocation_expose_no_credentials(tmp_path: Path) -> None:
+    """An authorized device can inspect and immediately revoke a peer."""
+
+    clock = [datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+    first = _complete_pairing(service, device_name="First phone")
+    clock[0] += timedelta(seconds=1)
+    second = _complete_pairing(service, device_name="Second phone")
+
+    before = service.devices(second.access_token)
+    assert [device.name for device in before.devices] == [
+        "First phone",
+        "Second phone",
+    ]
+    assert [device.current for device in before.devices] == [False, True]
+
+    service.revoke_device(second.access_token, first.device_id)
+    after = service.devices(second.access_token)
+    revoked = next(device for device in after.devices if device.device_id == first.device_id)
+    assert revoked.state == "revoked"
+    assert revoked.refresh_expires_at is None
+    with pytest.raises(OperatorCredentialInvalidError, match="access"):
+        service.validate_access_token(first.access_token)
+    with pytest.raises(OperatorCredentialInvalidError, match="revoked"):
+        service.refresh(
+            OperatorTokenRequest(
+                device_id=first.device_id,
+                refresh_token=first.refresh_token,
+            )
+        )
+    with pytest.raises(OperatorDeviceNotFoundError, match="not found"):
+        service.revoke_device(second.access_token, UUID(int=0))
+
+
+def test_malformed_unicode_credentials_fail_safely(tmp_path: Path) -> None:
+    """Unexpected Unicode bearer material is unknown rather than a server error."""
+
+    clock = [datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+    _complete_pairing(service)
+
+    with pytest.raises(OperatorCredentialInvalidError, match="access"):
+        service.validate_access_token("snowman-☃")

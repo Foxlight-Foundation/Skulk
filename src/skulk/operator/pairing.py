@@ -6,8 +6,9 @@ import base64
 import hashlib
 import json
 import secrets
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
+from hmac import compare_digest
 from ipaddress import ip_address
 from typing import Literal, cast, final
 from uuid import UUID, uuid4
@@ -36,6 +37,7 @@ type OperatorScope = Literal[
     "models:read",
     "chat:write",
     "operations:write",
+    "devices:manage",
 ]
 
 _DEFAULT_SCOPES: tuple[OperatorScope, ...] = (
@@ -43,6 +45,7 @@ _DEFAULT_SCOPES: tuple[OperatorScope, ...] = (
     "models:read",
     "chat:write",
     "operations:write",
+    "devices:manage",
 )
 
 
@@ -68,6 +71,26 @@ class PairingProofError(PairingError):
 
 class PairingGatewayNotInitializedError(PairingError):
     """Raised when this API node has not been designated through local pairing."""
+
+
+class OperatorCredentialError(RuntimeError):
+    """Base class for safe operator credential failures."""
+
+
+class OperatorCredentialInvalidError(OperatorCredentialError):
+    """Raised when an access or refresh credential is unknown or revoked."""
+
+
+class OperatorCredentialExpiredError(OperatorCredentialError):
+    """Raised when an otherwise valid operator credential has expired."""
+
+
+class OperatorScopeError(OperatorCredentialError):
+    """Raised when a credential lacks a required canonical API scope."""
+
+
+class OperatorDeviceNotFoundError(OperatorCredentialError):
+    """Raised when a stable paired-device identity is unknown."""
 
 
 class PairingPackage(FrozenModel):
@@ -106,19 +129,7 @@ class PairingPackage(FrozenModel):
     ) -> AnyHttpUrl:
         """Require HTTPS except for explicitly local development URLs."""
 
-        if value.scheme == "https":
-            return value
-        if value.host is None:
-            raise ValueError("pairing exchange_url must include a host")
-        host = value.host.strip("[]")
-        if host == "localhost":
-            return value
-        try:
-            if ip_address(host).is_loopback:
-                return value
-        except ValueError:
-            pass
-        raise ValueError("remote pairing exchange_url must use HTTPS")
+        return _validate_exchange_url(value)
 
     def as_url(self) -> str:
         """Return the package as a compact custom-scheme QR payload."""
@@ -207,6 +218,80 @@ class PairingExchangeResponse(FrozenModel):
     )
 
 
+class OperatorTokenRequest(FrozenModel):
+    """Rotating refresh credential presented for a new token pair."""
+
+    device_id: UUID = Field(description="Stable paired-device identity.")
+    refresh_token: str = Field(
+        min_length=40,
+        max_length=128,
+        description="Current opaque refresh credential returned only once.",
+    )
+
+    @field_validator("device_id", mode="before")
+    @classmethod
+    def _parse_wire_device_id(cls, value: object) -> object:
+        """Convert the JSON UUID representation before strict validation."""
+
+        if not isinstance(value, str):
+            return value
+        try:
+            return UUID(value)
+        except ValueError as exc:
+            raise ValueError("device_id must be a UUID") from exc
+
+
+class OperatorTokenResponse(FrozenModel):
+    """Fresh rotating access and refresh credentials."""
+
+    access_token: str = Field(description="New short-lived bearer credential.")
+    access_token_expires_at: datetime = Field(
+        description="UTC expiry of the new access credential."
+    )
+    refresh_token: str = Field(description="New rotating refresh credential.")
+    refresh_token_expires_at: datetime = Field(
+        description="UTC expiry of the new refresh credential."
+    )
+    scopes: tuple[OperatorScope, ...] = Field(
+        description="Canonical API scopes retained by the device."
+    )
+
+
+class OperatorAccessContext(FrozenModel):
+    """Validated device identity and scopes for one bearer request."""
+
+    device_id: UUID = Field(description="Stable paired-device identity.")
+    device_name: str = Field(description="Operator-visible device name.")
+    scopes: tuple[OperatorScope, ...] = Field(
+        description="Canonical API scopes authorized for the request."
+    )
+
+
+class OperatorDevice(FrozenModel):
+    """Safe operator-visible projection of one paired device."""
+
+    device_id: UUID = Field(description="Stable paired-device identity.")
+    name: str = Field(description="Operator-visible device name.")
+    paired_at: datetime = Field(description="UTC pairing-session creation time.")
+    refresh_expires_at: datetime | None = Field(
+        description="UTC refresh expiry, absent after revocation."
+    )
+    state: Literal["active", "revoked"] = Field(
+        description="Whether credentials can still authorize the device."
+    )
+    current: bool = Field(
+        description="Whether this row represents the requesting device."
+    )
+
+
+class OperatorDevicesResponse(FrozenModel):
+    """Paired devices visible to an authorized operator."""
+
+    devices: tuple[OperatorDevice, ...] = Field(
+        description="Stable paired-device projections in pairing order."
+    )
+
+
 class _StoredPairingSession(FrozenModel):
     """Encrypted durable state for one pairing capability and resulting device."""
 
@@ -252,7 +337,26 @@ def _base64url_decode(value: str) -> bytes:
 def _opaque_digest(value: str) -> str:
     """Return a non-reversible identifier for a bearer value."""
 
-    return _base64url_encode(hashlib.sha256(value.encode("ascii")).digest())
+    return _base64url_encode(hashlib.sha256(value.encode("utf-8")).digest())
+
+
+def _validate_exchange_url(value: str | AnyHttpUrl) -> AnyHttpUrl:
+    """Validate that a pairing exchange cannot expose credentials in cleartext."""
+
+    url = value if isinstance(value, AnyHttpUrl) else AnyHttpUrl(value)
+    if url.scheme == "https":
+        return url
+    if url.host is None:
+        raise ValueError("pairing exchange_url must include a host")
+    host = url.host.strip("[]")
+    if host == "localhost":
+        return url
+    try:
+        if ip_address(host).is_loopback:
+            return url
+    except ValueError:
+        pass
+    raise ValueError("remote pairing exchange_url must use HTTPS")
 
 
 def pairing_signature_message(
@@ -329,6 +433,7 @@ class OperatorPairingService:
             Public package safe to render as a QR code.
         """
 
+        validated_exchange_url = _validate_exchange_url(exchange_url)
         if self._store.path.exists():
             self._key_provider.load_data_key(self._key_provider.active_key_id)
         else:
@@ -352,7 +457,7 @@ class OperatorPairingService:
             cluster_id=UUID(str(identity.cluster_id)),
             cluster_name=identity.name,
             cluster_fingerprint=identity.fingerprint,
-            exchange_url=AnyHttpUrl(exchange_url),
+            exchange_url=validated_exchange_url,
             expires_at=expires_at,
             nonce=nonce,
         )
@@ -483,6 +588,218 @@ class OperatorPairingService:
             refresh_token_expires_at=refresh_expires_at,
             scopes=_DEFAULT_SCOPES,
         )
+
+    def refresh(self, request: OperatorTokenRequest) -> OperatorTokenResponse:
+        """Rotate one valid refresh credential and its access token.
+
+        Args:
+            request: Stable device identity and current refresh credential.
+
+        Returns:
+            A fresh access and refresh pair returned exactly once.
+
+        Raises:
+            OperatorCredentialInvalidError: The token is unknown or revoked.
+            OperatorCredentialExpiredError: The refresh lifetime elapsed.
+            OperatorDeviceNotFoundError: The device identity is unknown.
+            PairingSessionStateError: Concurrent authority state changed.
+        """
+
+        record_id, session, session_commit_index = self._load_device_session(
+            request.device_id
+        )
+        self._require_active_device(session)
+        if (
+            session.refresh_token_hash is None
+            or not compare_digest(
+                session.refresh_token_hash,
+                _opaque_digest(request.refresh_token),
+            )
+        ):
+            raise OperatorCredentialInvalidError("refresh credential is invalid")
+        if (
+            session.refresh_token_expires_at is None
+            or self._now() >= session.refresh_token_expires_at
+        ):
+            raise OperatorCredentialExpiredError("refresh credential expired")
+
+        now = self._now()
+        access_token = secrets.token_urlsafe(32)
+        refresh_token = secrets.token_urlsafe(48)
+        access_expires_at = now + _ACCESS_TOKEN_LIFETIME
+        refresh_expires_at = now + _REFRESH_TOKEN_LIFETIME
+        updated = session.model_copy(
+            update={
+                "access_token_hash": _opaque_digest(access_token),
+                "access_token_expires_at": access_expires_at,
+                "refresh_token_hash": _opaque_digest(refresh_token),
+                "refresh_token_expires_at": refresh_expires_at,
+            }
+        )
+        self._append_session(
+            record_id,
+            updated,
+            expected_record_commit_index=session_commit_index,
+        )
+        return OperatorTokenResponse(
+            access_token=access_token,
+            access_token_expires_at=access_expires_at,
+            refresh_token=refresh_token,
+            refresh_token_expires_at=refresh_expires_at,
+            scopes=session.scopes,
+        )
+
+    def validate_access_token(
+        self,
+        token: str,
+        *,
+        required_scopes: Sequence[OperatorScope] = (),
+    ) -> OperatorAccessContext:
+        """Validate one bearer credential and enforce required scopes.
+
+        Args:
+            token: Opaque bearer access credential.
+            required_scopes: Canonical scopes required by the target route.
+
+        Returns:
+            Validated device identity and granted scopes.
+
+        Raises:
+            OperatorCredentialInvalidError: The token is unknown or revoked.
+            OperatorCredentialExpiredError: The access lifetime elapsed.
+            OperatorScopeError: A required scope is absent.
+        """
+
+        token_hash = _opaque_digest(token)
+        matched_session: _StoredPairingSession | None = None
+        for _, session, _ in self._latest_device_sessions():
+            if session.access_token_hash is not None and compare_digest(
+                session.access_token_hash,
+                token_hash,
+            ):
+                matched_session = session
+        if matched_session is None or matched_session.state != "consumed":
+            raise OperatorCredentialInvalidError("access credential is invalid")
+        if (
+            matched_session.access_token_expires_at is None
+            or self._now() >= matched_session.access_token_expires_at
+        ):
+            raise OperatorCredentialExpiredError("access credential expired")
+        missing_scopes = set(required_scopes).difference(matched_session.scopes)
+        if missing_scopes:
+            raise OperatorScopeError("access credential lacks a required scope")
+        if matched_session.device_id is None or matched_session.device_name is None:
+            raise PairingError("stored paired device is invalid")
+        return OperatorAccessContext(
+            device_id=matched_session.device_id,
+            device_name=matched_session.device_name,
+            scopes=matched_session.scopes,
+        )
+
+    def devices(self, access_token: str) -> OperatorDevicesResponse:
+        """List safe paired-device projections for an authorized device.
+
+        Args:
+            access_token: Bearer credential requiring device-management scope.
+
+        Returns:
+            Active and revoked device records without credential material.
+        """
+
+        context = self.validate_access_token(
+            access_token,
+            required_scopes=("devices:manage",),
+        )
+        devices: list[OperatorDevice] = []
+        for _, session, _ in self._latest_device_sessions():
+            if session.device_id is None or session.device_name is None:
+                continue
+            devices.append(
+                OperatorDevice(
+                    device_id=session.device_id,
+                    name=session.device_name,
+                    paired_at=session.created_at,
+                    refresh_expires_at=session.refresh_token_expires_at,
+                    state="revoked" if session.state == "revoked" else "active",
+                    current=session.device_id == context.device_id,
+                )
+            )
+        devices.sort(key=lambda device: (device.paired_at, str(device.device_id)))
+        return OperatorDevicesResponse(devices=tuple(devices))
+
+    def revoke_device(self, access_token: str, device_id: UUID) -> None:
+        """Revoke one paired device immediately and idempotently.
+
+        Args:
+            access_token: Bearer credential requiring device-management scope.
+            device_id: Stable identity of the device to revoke.
+
+        Raises:
+            OperatorCredentialError: The requesting bearer is invalid.
+            OperatorDeviceNotFoundError: The target device is unknown.
+            PairingSessionStateError: Concurrent authority state changed.
+        """
+
+        self.validate_access_token(
+            access_token,
+            required_scopes=("devices:manage",),
+        )
+        record_id, session, session_commit_index = self._load_device_session(device_id)
+        if session.state == "revoked":
+            return
+        revoked = session.model_copy(
+            update={
+                "state": "revoked",
+                "access_token_hash": None,
+                "access_token_expires_at": None,
+                "refresh_token_hash": None,
+                "refresh_token_expires_at": None,
+            }
+        )
+        self._append_session(
+            record_id,
+            revoked,
+            expected_record_commit_index=session_commit_index,
+        )
+
+    def _latest_device_sessions(
+        self,
+    ) -> tuple[tuple[str, _StoredPairingSession, int], ...]:
+        """Return the newest durable session record for every paired device."""
+
+        latest_record_ids: list[str] = []
+        seen: set[str] = set()
+        for record in reversed(self._store.records()):
+            if record.record_type != _PAIRING_RECORD_TYPE or record.record_id in seen:
+                continue
+            seen.add(record.record_id)
+            latest_record_ids.append(record.record_id)
+        sessions: list[tuple[str, _StoredPairingSession, int]] = []
+        for record_id in reversed(latest_record_ids):
+            session, commit_index = self._load_session(record_id)
+            if session.device_id is not None:
+                sessions.append((record_id, session, commit_index))
+        return tuple(sessions)
+
+    def _load_device_session(
+        self,
+        device_id: UUID,
+    ) -> tuple[str, _StoredPairingSession, int]:
+        """Load the newest credential state for one stable device identity."""
+
+        for record_id, session, commit_index in self._latest_device_sessions():
+            if session.device_id == device_id:
+                return record_id, session, commit_index
+        raise OperatorDeviceNotFoundError("paired device was not found")
+
+    @staticmethod
+    def _require_active_device(session: _StoredPairingSession) -> None:
+        """Reject a revoked or structurally incomplete device record."""
+
+        if session.state != "consumed":
+            raise OperatorCredentialInvalidError("device credential is revoked")
+        if session.device_id is None or session.device_name is None:
+            raise PairingError("stored paired device is invalid")
 
     def _load_session(self, nonce_hash: str) -> tuple[_StoredPairingSession, int]:
         """Load and validate one encrypted session by its nonce digest."""

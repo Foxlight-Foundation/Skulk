@@ -189,6 +189,9 @@ The Ollama group also serves alias paths (`/ollama/api/api/...`,
 
 - `POST /v1/auth/pairing-sessions/challenge`
 - `POST /v1/auth/pairing-sessions/exchange`
+- `POST /v1/auth/token`
+- `GET /v1/auth/devices`
+- `DELETE /v1/auth/devices/{device_id}`
 
 The node diagnostics bundle includes the node's own Tailscale state
 (`tailscale`: running flag, tailnet IP, hostname, MagicDNS name), probed on
@@ -270,9 +273,72 @@ Behavior:
 - returns `401` for an invalid proof, `409` for reuse or an out-of-order
   exchange, `410` after expiry, and `503` on a non-designated node.
 
-These two endpoints are the complete pre-credential HTTP surface. The tokens
-are not yet accepted by general API routes in this increment; canonical API
-authentication, refresh rotation, and revocation are the next pairing slice.
+These two endpoints are the complete pre-credential HTTP surface. The access
+token is accepted by the device-management routes below. Protecting selected
+canonical cluster, model, chat, and operation routes with the same validator is
+a subsequent slice; Skulk does not create parallel mobile-only model or
+inference APIs.
+
+### Rotate operator credentials
+
+**POST** `/v1/auth/token`
+
+Parameters:
+
+- JSON body `deviceId` (required): stable paired-device UUID returned by the
+  exchange.
+- JSON body `refreshToken` (required): current opaque rotating refresh
+  credential.
+
+Behavior:
+
+- validates the device and current refresh-token digest;
+- atomically invalidates both members of the previous token pair;
+- returns a fresh 15-minute access token and 30-day refresh token, their
+  expiries, and the device's unchanged scopes;
+- returns `401` for an unknown, revoked, expired, or replayed credential and
+  `409` if concurrent credential state changed.
+
+The client must replace both stored credentials as one operation. A response
+lost after the gateway commits rotation requires pairing again because replaying
+the previous refresh token is intentionally rejected.
+
+### List paired devices
+
+**GET** `/v1/auth/devices`
+
+Parameters:
+
+- `Authorization: Bearer <access-token>` (required): a valid credential with
+  `devices:manage` scope.
+
+Behavior:
+
+- returns stable device IDs, display names, pairing times, refresh expiries,
+  active/revoked state, and which row represents the caller;
+- never returns device public keys, token digests, raw credentials, or pairing
+  nonces;
+- returns `401` for a missing, malformed, unknown, revoked, or expired bearer
+  and `403` when the bearer lacks device-management scope.
+
+### Revoke a paired device
+
+**DELETE** `/v1/auth/devices/{device_id}`
+
+Parameters:
+
+- path `device_id` (required): stable paired-device UUID to revoke;
+- `Authorization: Bearer <access-token>` (required): a valid credential with
+  `devices:manage` scope.
+
+Behavior:
+
+- atomically clears the target's access and refresh digests and expiries;
+- returns `204` after successful revocation and when an authorized caller
+  repeats revocation for the same already-revoked target;
+- makes both credentials unusable immediately;
+- returns `401` for an invalid caller, `403` for insufficient scope, `404` for
+  an unknown target device, and `409` if concurrent credential state changed.
 
 ## OpenAI Chat Completions
 

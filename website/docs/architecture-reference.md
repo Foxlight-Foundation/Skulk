@@ -101,7 +101,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   `src/skulk/operator/consensus.py`, `src/skulk/operator/consensus_store.py`,
   `src/skulk/operator/service.py`, `src/skulk/operator/transport.py`,
   `src/skulk/operator/key_provider.py`, `src/skulk/operator/pairing.py`, and
-  `src/skulk/operator/cli.py`; the two pre-credential routes live in
+  `src/skulk/operator/cli.py`; pairing and credential-lifecycle routes live in
   `src/skulk/api/operator_auth.py`, and focused tests live in
   `src/skulk/operator/tests/` and `src/skulk/api/tests/test_operator_auth.py`.
 - **Stable node identity:** `NodeInstallationIdentity.node_install_id` is a
@@ -160,8 +160,11 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   emits one five-minute QR capability. Challenge binds a proposed Ed25519
   device key; exchange verifies a domain-separated signature, consumes the
   session, and returns one access/refresh credential pair. The journal stores
-  encrypted state and one-way token digests, not raw nonces or tokens. General
-  API authorization, refresh, and revocation remain the next slice.
+  encrypted state and one-way token digests, not raw nonces or tokens. Refresh
+  rotates both tokens atomically; bearer validation enforces typed scopes; and
+  device list/revoke routes expose no credential material. Applying that same
+  validator to selected canonical model, inference, and command routes remains
+  the next slice; no mobile-only replacement surface is introduced.
 - **Key boundary:** `AuthorityKeyProvider` supplies the active unwrapped 32-byte
   data key and immutable key-version ID. V1's
   `LocalFileAuthorityKeyProvider` creates one random local key protected by
