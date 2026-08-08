@@ -100,10 +100,12 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   `src/skulk/operator/authority.py`, `src/skulk/operator/replication.py`,
   `src/skulk/operator/consensus.py`, `src/skulk/operator/consensus_store.py`,
   `src/skulk/operator/service.py`, `src/skulk/operator/transport.py`,
-  `src/skulk/operator/key_provider.py`, `src/skulk/operator/pairing.py`, and
-  `src/skulk/operator/cli.py`; pairing and credential-lifecycle routes live in
-  `src/skulk/api/operator_auth.py`, and focused tests live in
-  `src/skulk/operator/tests/` and `src/skulk/api/tests/test_operator_auth.py`.
+  `src/skulk/operator/key_provider.py`, `src/skulk/operator/pairing.py`,
+  `src/skulk/operator/relay.py`, and `src/skulk/operator/cli.py`; pairing and
+  credential-lifecycle routes live in `src/skulk/api/operator_auth.py`, the
+  relay-only canonical API guard lives in `src/skulk/api/operator_gateway.py`,
+  and focused tests live in `src/skulk/operator/tests/` and
+  `src/skulk/api/tests/`.
 - **Stable node identity:** `NodeInstallationIdentity.node_install_id` is a
   persisted UUIDv4 under the protected operator configuration directory. It is
   intentionally independent of the currently ephemeral libp2p `NodeId`.
@@ -162,23 +164,38 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   session, and returns one access/refresh credential pair. The journal stores
   encrypted state and one-way token digests, not raw nonces or tokens. Refresh
   rotates both tokens atomically; bearer validation enforces typed scopes; and
-  device list/revoke routes expose no credential material. Applying that same
-  validator to selected canonical model, inference, and command routes remains
-  the next slice; no mobile-only replacement surface is introduced.
+  device list/revoke routes expose no credential material. A relay-configured
+  exchange also returns the app-role carrier credential, opaque locator, and
+  pinned inner-TLS trust once; the gateway role never leaves Skulk.
+- **V1 remote carrier:** `skulk operator configure-relay --provisioning-file`
+  validates one generated paired-WebSocket route, encrypts locator and distinct
+  app/gateway carrier credentials in the local journal, and creates a protected
+  pinned TLS identity. `OperatorGatewayConnector` maintains 1–32 independent
+  outbound gateway lanes with bounded frames and reconnect delay. Each lane is
+  an opaque byte bridge to a loopback TLS listener serving the same FastAPI app.
+  `OperatorGatewayAuthorization` leaves pairing/refresh bootstrap reachable and
+  maps every other canonical route onto existing cluster/model/chat/operation/
+  device scopes. The ordinary local API/dashboard listener is unchanged and is
+  not relay-accessible; no mobile-only replacement surface exists.
 - **Key boundary:** `AuthorityKeyProvider` supplies the active unwrapped 32-byte
   data key and immutable key-version ID. V1's
   `LocalFileAuthorityKeyProvider` creates one random local key protected by
   POSIX mode `0600` on the designated gateway. Hardware-backed wrapping and
   replicated key envelopes are later hardening; the authority SQLite database
   never writes the plaintext data key itself.
-- **Critical boundary:** deterministic network vote collection, certified log
+- **Critical boundary:** local pairing, scoped canonical relay ingress, and the
+  outbound designated-gateway lane pool are active when provisioned.
+  Deterministic network vote collection, certified log
   recovery, and caller-selected bounded proposal orchestration are implemented,
   but authority leader selection, encrypted payload replication, OS-protected
   key wrapping, gateway leases, and Node lifecycle integration are later slices.
-  V1 explicitly claims no automatic authority failover: local pairing state is
-  authoritative only for the designated gateway and remote access is
-  unavailable when that host is unavailable. None of these records enters
-  `State`, telemetry, diagnostics, or the API event log.
+  V1 explicitly claims no automatic authority or gateway failover: local
+  pairing and relay state are authoritative only for the designated gateway,
+  and remote access is unavailable when that host is unavailable. Relay state
+  loading and the relay listener/connector are isolated from the ordinary local
+  API, so damaged protected material or carrier startup failure disables only
+  remote access. None of these records enters `State`, telemetry, diagnostics,
+  or the API event log.
 
 ### Extensions (plugins)
 

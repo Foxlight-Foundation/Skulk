@@ -209,6 +209,23 @@ designated remote gateway. It does not expose an HTTP endpoint that creates
 pairing sessions:
 
 ```bash
+uv run skulk operator configure-relay \
+  --provisioning-file /protected/path/relay-v1.json \
+  --operator-api-port 52416 \
+  --cluster-name "Cluster"
+```
+
+The generated provisioning document is supplied by the Foxlight relay service
+and contains `version`, `appWebsocketUrl`, `gatewayWebsocketUrl`,
+`routingLocator`, distinct `appCarrierCredential` and
+`gatewayCarrierCredential` values, and `laneCount`. Treat the file as a secret:
+it contains both outer carrier roles. Skulk validates exact fixed carrier paths,
+requires WSS except for loopback development, stores the route and credentials
+inside the encrypted authority journal, generates an owner-only pinned TLS
+identity, and refuses silent replacement. Restart Skulk after initial
+configuration so the designated gateway opens its bounded outbound lane pool.
+
+```bash
 uv run skulk operator pair \
   --exchange-url https://gateway.example.invalid \
   --cluster-name "Cluster"
@@ -268,16 +285,23 @@ Behavior:
 - returns a stable `deviceId`, the validated cluster identity, a 15-minute
   opaque access token, a 30-day rotating refresh token, their expiries, and the
   granted canonical API scopes;
+- when relay access is configured, also returns one-time `remoteAccess` material:
+  `transport=paired_websocket_v1`, app WebSocket URL, opaque route locator,
+  app-role carrier credential, inner-TLS server name, and pinned gateway CA
+  certificate. The gateway-role carrier credential is never returned;
 - stores only encrypted session/device state and one-way token digests;
 - never returns either credential again;
 - returns `401` for an invalid proof, `409` for reuse or an out-of-order
   exchange, `410` after expiry, and `503` on a non-designated node.
 
-These two endpoints are the complete pre-credential HTTP surface. The access
-token is accepted by the device-management routes below. Protecting selected
-canonical cluster, model, chat, and operation routes with the same validator is
-a subsequent slice; Skulk does not create parallel mobile-only model or
-inference APIs.
+Together with refresh rotation, these are the complete pre-access-token HTTP
+surface on the relay-only listener. That listener serves the existing canonical
+Skulk app rather than a parallel mobile API: safe reads require `cluster:read`
+or `models:read`, inference/WebSocket routes require `chat:write`, mutations
+require `operations:write`, and device routes require `devices:manage`. The
+existing local listener and dashboard remain unchanged for direct clients; only
+the separate loopback TLS listener connected to the relay applies this bearer
+boundary.
 
 ### Rotate operator credentials
 
@@ -301,7 +325,9 @@ Behavior:
 
 The client must replace both stored credentials as one operation. A response
 lost after the gateway commits rotation requires pairing again because replaying
-the previous refresh token is intentionally rejected.
+the previous refresh token is intentionally rejected. Relay and pinned TLS
+material are not repeated during refresh; the app retains them in platform
+secure storage until it disconnects or pairs again.
 
 ### List paired devices
 
