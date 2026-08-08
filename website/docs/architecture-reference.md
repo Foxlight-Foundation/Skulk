@@ -157,16 +157,21 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   consensus. The topic and consensus service remain dormant. API nodes do
   construct the independent local pairing service, which never uses this
   network topic.
-- **V1 pairing:** `skulk operator pair --exchange-url ...` explicitly
-  designates the local host, initializes the encrypted store when needed, and
-  emits one five-minute QR capability. Challenge binds a proposed Ed25519
+- **V1 pairing:** `skulk operator pair` explicitly designates the local host,
+  initializes the encrypted store when needed, and emits one five-minute QR
+  capability. A relay-configured gateway emits the version-two package with
+  app-role carrier and pinned inner-TLS bootstrap material; `--exchange-url`
+  remains the direct-development fallback. The relay package is bounded compact
+  JSON compressed with zlib under the QR's `z` parameter and is rejected before
+  session persistence if it exceeds the terminal-scannable budget. Challenge binds a proposed Ed25519
   device key; exchange verifies a domain-separated signature, consumes the
   session, and returns one access/refresh credential pair. The journal stores
   encrypted state and one-way token digests, not raw nonces or tokens. Refresh
   rotates both tokens atomically; bearer validation enforces typed scopes; and
   device list/revoke routes expose no credential material. A relay-configured
   exchange also returns the app-role carrier credential, opaque locator, and
-  pinned inner-TLS trust once; the gateway role never leaves Skulk.
+  pinned inner-TLS trust once for durable local storage; the gateway role never
+  leaves Skulk. Neither QR version contains a canonical access or refresh token.
 - **V1 remote carrier:** `skulk operator configure-relay --provisioning-file`
   validates one generated paired-WebSocket route, encrypts locator and distinct
   app/gateway carrier credentials in the local journal, and creates a protected
