@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 """Tests for signed registry loading and artifact identity separation."""
 
 import json
@@ -6,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import skulk.download.download_utils as download_utils
+import skulk.shared.models.model_cards as model_cards_module
 import skulk.shared.models.registry as registry_module
 from skulk.shared.models.model_cards import ModelCard, ModelTask, registry_model_cards
 from skulk.shared.models.registry import (
@@ -49,9 +51,7 @@ def _catalog_payload() -> bytes:
                         "tasks": ["TextGeneration"],
                         "gguf_file": "model-Q4_K_M.gguf",
                         "quantization": "Q4_K_M",
-                        "placement": {
-                            "compatible_backends": ["llama_server"]
-                        },
+                        "placement": {"compatible_backends": ["llama_server"]},
                     },
                 }
             ],
@@ -125,6 +125,42 @@ def test_embedded_roots_match_release_resources() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_refresh_removes_previous_registry_cards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expired in-memory catalog cannot outlive the configured LKG bound."""
+    registry_card = registry_model_cards(
+        RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    )[0]
+    bundled_card = registry_card.model_copy(
+        update={
+            "model_id": ModelId("org/bundled"),
+            "source_repository": None,
+            "registry_card_id": None,
+            "registry_snapshot_id": None,
+        }
+    )
+
+    class FailingClient:
+        def load_catalog(self) -> RegistryCatalog:
+            raise OSError("registry offline and LKG expired")
+
+    original_cache = dict(model_cards_module._card_cache)
+    model_cards_module._card_cache.clear()
+    model_cards_module._card_cache[registry_card.model_id] = registry_card
+    model_cards_module._card_cache[bundled_card.model_id] = bundled_card
+    monkeypatch.setattr(model_cards_module, "_registry_enabled", lambda: True)
+    monkeypatch.setattr(model_cards_module, "_registry_client", FailingClient())
+    try:
+        await model_cards_module._load_cards_from_registry()
+        assert registry_card.model_id not in model_cards_module._card_cache
+        assert model_cards_module._card_cache[bundled_card.model_id] == bundled_card
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+
+
+@pytest.mark.asyncio
 async def test_downloader_fetches_source_repository_under_alias_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -144,9 +180,7 @@ async def test_downloader_fetches_source_repository_under_alias_directory(
         pass
 
     monkeypatch.setattr(download_utils, "ensure_models_dir", fake_models_dir)
-    monkeypatch.setattr(
-        download_utils, "fetch_file_list_with_cache", fake_file_list
-    )
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", fake_file_list)
     card = ModelCard(
         model_id=ModelId("org/multi@q4"),
         source_repository=ModelId("org/multi"),

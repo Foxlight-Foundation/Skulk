@@ -637,6 +637,7 @@ class ModelStore:
         pinned_gguf: str | None = None,
         extra_pinned_gguf: list[str] | None = None,
         source_revision: str | None = None,
+        source_repository: str | None = None,
     ) -> StoreDownloadStatus:
         """Request that the store download a model from HuggingFace.
 
@@ -655,6 +656,8 @@ class ModelStore:
         immutable Hugging Face commit. A different registered revision is
         replaced only after the requested revision has downloaded and
         registered successfully.
+        ``source_repository`` names the upstream byte source when ``model_id``
+        is a distinct store and runtime alias.
         """
         # Checked outside the lock: it may do a (cached) repo file-list fetch, and
         # holding the download lock across network I/O would serialize unrelated
@@ -755,6 +758,7 @@ class ModelStore:
                 pinned_gguf,
                 extra_pinned_gguf,
                 source_revision,
+                source_repository,
             )
         )
         self._download_tasks.add(task)
@@ -789,6 +793,7 @@ class ModelStore:
         pinned_gguf: str | None = None,
         extra_pinned_gguf: list[str] | None = None,
         source_revision: str | None = None,
+        source_repository: str | None = None,
     ) -> None:
         """Download a model from HuggingFace into the store and register it.
 
@@ -796,6 +801,8 @@ class ModelStore:
         GGUF quant's shard group to fetch, honoring a custom pin (#344).
         ``extra_pinned_gguf`` names same-repo companion GGUFs (a served-engine
         draft bundled with the base) co-fetched in the same store download.
+        ``source_repository`` is the upstream repository when ``model_id`` is
+        a distinct immutable-artifact alias used for store identity.
         """
         from skulk.download.download_utils import (
             download_file_with_retry,
@@ -806,6 +813,7 @@ class ModelStore:
 
         status = self._active_downloads[model_id]
         revision = source_revision or "main"
+        artifact_repository = source_repository or model_id
         sanitized = model_id.replace("/", "--")
         if source_revision is not None:
             sanitized = f"{sanitized}--revision-{source_revision}"
@@ -813,7 +821,8 @@ class ModelStore:
         previous_entry = self.get_entry(model_id)
         transfer_lock_acquired = False
         logger.info(
-            f"ModelStore: downloading {model_id} from HuggingFace to {target_dir}"
+            f"ModelStore: downloading {model_id} from HuggingFace repository "
+            f"{artifact_repository} to {target_dir}"
         )
 
         try:
@@ -832,7 +841,7 @@ class ModelStore:
             await aios.makedirs(str(target_dir), exist_ok=True)
 
             repo_file_list = await fetch_file_list_with_cache(
-                ModelId(model_id), revision, recursive=True
+                ModelId(artifact_repository), revision, recursive=True
             )
             # A vision GGUF (LLaVA/Qwen-VL/Gemma-VLM style) ships its multimodal
             # projector as a separate ``*mmproj*.gguf`` alongside the LM weights;
@@ -906,7 +915,7 @@ class ModelStore:
                     return cb
 
                 await download_file_with_retry(
-                    ModelId(model_id),
+                    ModelId(artifact_repository),
                     revision,
                     f.path,
                     target_dir,

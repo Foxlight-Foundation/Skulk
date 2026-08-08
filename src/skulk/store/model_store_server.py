@@ -342,14 +342,17 @@ class ModelStoreServer:
         Optional ``{"extra_gguf_files": ["<path>", ...]}`` names same-repo
         companion GGUFs (a served-engine draft bundled with the base) to
         co-fetch with the base quant. Optional ``source_revision`` pins every
-        repository read to a full immutable Hugging Face commit. The body is
-        optional: a request without it (or a non-JSON body) falls back to the
-        default quant preference, no companions, and mutable ``main``.
+        repository read to a full immutable Hugging Face commit. Optional
+        ``source_repository`` separates an alias used as store identity from
+        the upstream repository containing its bytes. The body is optional: a
+        request without it (or a non-JSON body) falls back to the default quant
+        preference, no companions, and mutable ``main``.
         """
         model_id = _sanitize_model_id(request.match_info["model_id"])
         pinned_gguf: str | None = None
         extra_pinned_gguf: list[str] | None = None
         source_revision: str | None = None
+        source_repository: str | None = None
         if request.can_read_body:
             try:
                 body: object = cast("object", await request.json())
@@ -378,12 +381,20 @@ class ModelStoreServer:
                             )
                         )
                     source_revision = raw_revision
+                raw_repository = body_dict.get("source_repository")
+                if isinstance(raw_repository, str) and raw_repository:
+                    if len(raw_repository) > 512 or "/" not in raw_repository:
+                        raise web.HTTPBadRequest(
+                            reason="source_repository must be a repository identifier"
+                        )
+                    source_repository = raw_repository
         try:
             status = await self._store.request_download(
                 model_id,
-                pinned_gguf,
-                extra_pinned_gguf,
-                source_revision,
+                pinned_gguf=pinned_gguf,
+                extra_pinned_gguf=extra_pinned_gguf,
+                source_revision=source_revision,
+                source_repository=source_repository,
             )
         except ValueError as exc:
             raise web.HTTPConflict(reason=str(exc)) from exc

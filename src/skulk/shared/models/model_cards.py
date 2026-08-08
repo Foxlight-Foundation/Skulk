@@ -130,6 +130,9 @@ async def _load_cards_from_registry() -> None:
         logger.warning(
             f"signed model registry unavailable ({error}); using bundled model cards"
         )
+        for model_id, card in tuple(_card_cache.items()):
+            if card.registry_card_id is not None and not card.is_custom:
+                del _card_cache[model_id]
         return
     for model_id, card in tuple(_card_cache.items()):
         if card.registry_card_id is not None and not card.is_custom:

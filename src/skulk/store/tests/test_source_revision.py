@@ -22,6 +22,51 @@ _OLD_REVISION = "0" * 40
 _NEW_REVISION = "1" * 40
 
 
+async def test_store_alias_download_reads_from_artifact_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The canonical store key must not become the Hugging Face origin."""
+    store = ModelStore(tmp_path)
+    alias = "org/multi@q4-k-m"
+    repository = ModelId("org/multi")
+    observed: list[ModelId] = []
+    store._active_downloads[alias] = StoreDownloadStatus(model_id=alias)
+
+    async def file_list(
+        model_id: ModelId,
+        _revision: str,
+        recursive: bool,
+    ) -> list[FileListEntry]:
+        assert recursive
+        observed.append(model_id)
+        return [FileListEntry(type="file", path="config.json", size=2)]
+
+    async def download_file(
+        model_id: ModelId,
+        _revision: str,
+        path: str,
+        download_dir: Path,
+        on_progress: Callable[[int, int, bool], None],
+        *_: object,
+        **__: object,
+    ) -> Path:
+        observed.append(model_id)
+        target = download_dir / path
+        target.write_bytes(b"{}")
+        on_progress(2, 2, True)
+        return target
+
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", file_list)
+    monkeypatch.setattr(download_utils, "download_file_with_retry", download_file)
+
+    await store._do_download(alias, source_repository=str(repository))
+
+    assert observed == [repository, repository]
+    assert store.get_entry(alias) is not None
+    assert store.get_entry(str(repository)) is None
+
+
 def test_canonical_capacity_counts_resumable_and_replaced_bytes(
     tmp_path: Path,
 ) -> None:
@@ -38,8 +83,7 @@ def test_canonical_capacity_counts_resumable_and_replaced_bytes(
     ]
 
     assert (
-        model_store_module._remaining_store_download_bytes(target, files)
-        == 5 + 5 + 7
+        model_store_module._remaining_store_download_bytes(target, files) == 5 + 5 + 7
     )
 
 
@@ -65,7 +109,9 @@ def test_canonical_capacity_does_not_credit_hardlinked_target(
 
 
 def test_canonical_capacity_rejects_unknown_manifest_sizes(tmp_path: Path) -> None:
-    with pytest.raises(model_store_module.ModelStoreCapacityError, match="unknown size"):
+    with pytest.raises(
+        model_store_module.ModelStoreCapacityError, match="unknown size"
+    ):
         model_store_module._remaining_store_download_bytes(
             tmp_path,
             [FileListEntry(type="file", path="missing.safetensors", size=None)],
@@ -135,9 +181,7 @@ async def test_canonical_download_reuses_complete_artifact_without_reserve(
         recursive: bool,
     ) -> list[FileListEntry]:
         assert recursive
-        return [
-            FileListEntry(type="file", path="model.gguf", size=len(b"complete"))
-        ]
+        return [FileListEntry(type="file", path="model.gguf", size=len(b"complete"))]
 
     async def reuse_file(
         _model_id: ModelId,
@@ -222,9 +266,7 @@ def test_external_pinned_registration_writes_loadable_revision_marker(
         source_revision=_NEW_REVISION,
     )
 
-    assert (
-        model_dir / ".skulk-source-revision"
-    ).read_text().strip() == _NEW_REVISION
+    assert (model_dir / ".skulk-source-revision").read_text().strip() == _NEW_REVISION
     assert (
         download_utils.build_model_path(ModelId("org/model"), _NEW_REVISION)
         == model_dir
@@ -534,9 +576,7 @@ async def test_unpinned_staging_rejects_interrupted_pinned_cache(
     destination = tmp_path / "org--model"
     destination.mkdir()
     (destination / "model.gguf").write_bytes(b"pinned")
-    (destination / ".skulk-source-revision-staging").write_text(
-        f"{_NEW_REVISION}\n"
-    )
+    (destination / ".skulk-source-revision-staging").write_text(f"{_NEW_REVISION}\n")
 
     assert not _staged_source_revision_matches(destination, None)
 

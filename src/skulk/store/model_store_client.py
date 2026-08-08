@@ -89,6 +89,7 @@ from skulk.download.download_utils import (
     same_repo_served_draft_files,
 )
 from skulk.download.shard_downloader import ShardDownloader
+from skulk.shared.models.remote_code_approval import require_remote_code_approval
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.downloads import RepoDownloadProgress
 from skulk.shared.types.worker.shards import ShardMetadata
@@ -883,6 +884,7 @@ class ModelStoreClient:
         pinned_gguf: str | None = None,
         extra_pinned_gguf: list[str] | None = None,
         source_revision: str | None = None,
+        source_repository: str | None = None,
     ) -> bool:
         """Request the store host download a model from HuggingFace, then wait.
 
@@ -911,6 +913,8 @@ class ModelStoreClient:
                 companion. An older store host ignores the unknown field.
             source_revision: Immutable Hugging Face commit required by the card,
                 or ``None`` to follow mutable ``main``.
+            source_repository: Upstream Hugging Face repository containing the
+                bytes. ``None`` means it is identical to the store identity.
 
         Returns:
             ``True`` if download completed successfully.
@@ -945,9 +949,12 @@ class ModelStoreClient:
             download_body["extra_gguf_files"] = extra_pinned_gguf
         if source_revision:
             download_body["source_revision"] = source_revision
+        if source_repository and source_repository != model_id:
+            download_body["source_repository"] = source_repository
         post_kwargs: dict[str, object] = (
             {"json": download_body} if download_body else {}
         )
+
         async def _post_download_request() -> bool:
             async with (
                 create_http_session(timeout_profile="short") as session,
@@ -1500,6 +1507,7 @@ class ModelStoreDownloader(ShardDownloader):
         best-effort — the runner degrades to run-without-speculation, so
         their failures log loudly without failing a loadable base model.
         """
+        require_remote_code_approval(shard.model_card)
         protected_model_ids = {
             str(shard.model_card.model_id),
             *(
@@ -1668,6 +1676,7 @@ class ModelStoreDownloader(ShardDownloader):
                         pinned_gguf=shard.model_card.gguf_file,
                         extra_pinned_gguf=same_repo_drafts,
                         source_revision=shard.model_card.source_revision,
+                        source_repository=str(shard.model_card.artifact_repository),
                     )
                 logger.info(
                     f"ModelStoreDownloader: staging {model_id} from store → {dest_path}"
@@ -1710,6 +1719,7 @@ class ModelStoreDownloader(ShardDownloader):
                     pinned_gguf=shard.model_card.gguf_file,
                     extra_pinned_gguf=same_repo_drafts,
                     source_revision=shard.model_card.source_revision,
+                    source_repository=str(shard.model_card.artifact_repository),
                 )
             except StoreUnreachableError as exc:
                 # The store became unreachable between the probe and the
