@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 from typing import cast
 
 import pytest
 from pydantic import ValidationError
 
+import skulk.operator.identity as identity_module
 from skulk.operator.identity import (
     ClusterPublicIdentity,
     OperatorIdentityRepository,
@@ -79,3 +81,25 @@ def test_repository_repairs_overly_broad_directory_mode(tmp_path: Path) -> None:
     OperatorIdentityRepository(root).load_or_create_node_identity()
 
     assert root.stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX durability only")
+def test_identity_replace_fsyncs_parent_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A durable rename also flushes the directory entry containing it."""
+
+    fsync_targets: list[bool] = []
+    original_fsync = os.fsync
+
+    def record_fsync(descriptor: int) -> None:
+        """Record whether each flushed descriptor is a directory."""
+
+        fsync_targets.append(stat.S_ISDIR(os.fstat(descriptor).st_mode))
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(identity_module.os, "fsync", record_fsync)
+    OperatorIdentityRepository(tmp_path / "operator").load_or_create_node_identity()
+
+    assert fsync_targets == [False, True]

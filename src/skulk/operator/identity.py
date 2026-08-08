@@ -291,5 +291,10 @@ class OperatorIdentityRepository:
             os.replace(temporary_path, path)
             if os.name == "posix":
                 path.chmod(0o600)
+                directory_descriptor = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_descriptor)
+                finally:
+                    os.close(directory_descriptor)
         finally:
             temporary_path.unlink(missing_ok=True)

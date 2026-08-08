@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -217,6 +218,51 @@ def test_ciphertext_tamper_fails_closed(tmp_path: Path) -> None:
         store.load_cluster_private_key()
 
 
+def test_public_identity_is_rebound_to_encrypted_private_key(tmp_path: Path) -> None:
+    """Valid but substituted public metadata cannot redefine the cluster."""
+
+    store = _store(tmp_path)
+    original = create_cluster_identity("Fox Den")
+    store.initialize_cluster(original.public_identity, original.private_key)
+    substituted = create_cluster_identity("Impostor")
+    substituted_payload = substituted.public_identity.model_dump(
+        mode="json",
+        by_alias=True,
+    )
+    substituted_payload["clusterId"] = str(original.public_identity.cluster_id)
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE authority_metadata SET value = ? WHERE name = ?",
+            (
+                json.dumps(substituted_payload),
+                "cluster_public_identity",
+            ),
+        )
+
+    with pytest.raises(
+        AuthorityIntegrityError,
+        match="does not match encrypted private key",
+    ):
+        store.cluster_identity()
+
+
+def test_append_rejects_non_finite_json(tmp_path: Path) -> None:
+    """NaN and infinity cannot create non-portable authority digests."""
+
+    store = _store(tmp_path)
+    material = create_cluster_identity()
+    store.initialize_cluster(material.public_identity, material.private_key)
+
+    with pytest.raises(ValueError, match="JSON object"):
+        store.append(
+            expected_commit_index=1,
+            authority_term=1,
+            record_type="device",
+            record_id="device-1",
+            payload={"invalid": float("nan")},
+        )
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions only")
 def test_authority_files_are_service_account_only(tmp_path: Path) -> None:
     """The database and parent directory never inherit permissive umasks."""
@@ -227,3 +273,16 @@ def test_authority_files_are_service_account_only(tmp_path: Path) -> None:
 
     assert store.path.parent.stat().st_mode & 0o777 == 0o700
     assert store.path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions only")
+def test_authority_open_repairs_overly_broad_directory_mode(tmp_path: Path) -> None:
+    """Every database open repairs a directory broadened after bootstrap."""
+
+    store = _store(tmp_path)
+    material = create_cluster_identity()
+    store.initialize_cluster(material.public_identity, material.private_key)
+    store.path.parent.chmod(0o755)
+
+    assert store.records()
+    assert store.path.parent.stat().st_mode & 0o777 == 0o700

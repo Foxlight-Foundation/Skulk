@@ -93,11 +93,12 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ### Operator identity and authority foundation
 
-- **Role:** owns stable host/cluster identities and the encrypted local
-  projection that future operator pairing, credentials, revocation, and
-  gateway fencing build upon.
+- **Role:** owns stable host/cluster identities, deterministic quorum
+  certification, and the encrypted local projection that operator pairing,
+  credentials, revocation, and gateway fencing build upon.
 - **Lives in:** `src/skulk/operator/identity.py` and
-  `src/skulk/operator/authority.py`; focused tests live in
+  `src/skulk/operator/authority.py` plus
+  `src/skulk/operator/replication.py`; focused tests live in
   `src/skulk/operator/tests/`.
 - **Stable node identity:** `NodeInstallationIdentity.node_install_id` is a
   persisted UUIDv4 under the protected operator configuration directory. It is
@@ -111,15 +112,27 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   and mode-`0600` database/sidecars on POSIX. AES-256-GCM AAD binds every
   ciphertext to cluster ID, schema version, authority term, commit index,
   record type/ID, and external key ID. Appends require the caller's exact
-  expected commit index.
+  expected commit index. Opens repair directory modes; identity replacement
+  fsyncs its parent; public cluster metadata is rebound to the encrypted key;
+  and non-finite JSON fails closed.
+- **Quorum certificate:** `AuthorityCommitDescriptor` signs the cluster, term,
+  contiguous index, prior digest, exact payload digest, record target, and one
+  active or two joint membership digests. Ed25519 votes bind the descriptor to
+  a stable `node_install_id`. The bootstrap log head derives from stable
+  cluster public-key material, not the editable display name. Every membership
+  needs a strict majority;
+  learners, duplicate members/keys/votes, stale chain heads, non-consecutive
+  joint generations, invalid signatures, and substituted payloads fail closed.
 - **Key boundary:** `AuthorityKeyProvider` supplies the active unwrapped 32-byte
   data key and immutable key-version ID. Production OS-wrapping providers and
   replicated key envelopes are later S1 slices; this store never writes the
   plaintext data key itself.
-- **Critical boundary:** this is a local encrypted projection, not quorum or a
-  gateway lease. No operator traffic may treat local SQLite commit as a
-  distributed authorization decision. None of these records enters `State`,
-  telemetry, diagnostics, or the API event log.
+- **Critical boundary:** quorum verification is implemented, but network vote
+  collection, leader election, replicated certificate-log recovery,
+  OS-protected key wrapping, and gateway leases are later slices. No operator
+  traffic may treat an uncertified local SQLite commit as a distributed
+  authorization decision. None of these records enters `State`, telemetry,
+  diagnostics, or the API event log.
 
 ### Extensions (plugins)
 
