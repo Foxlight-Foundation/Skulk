@@ -3040,7 +3040,7 @@ wheels = [
 
 [[package]]
 name = "skulk"
-version = "1.5.1"
+version = "1.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },

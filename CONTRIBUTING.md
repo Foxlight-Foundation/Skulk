@@ -87,7 +87,6 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
   secrets or mutable authorization records in `State`, telemetry, diagnostics,
   or ordinary events.
 - `src/skulk/shared/` — Shared types, constants, topology
-- `src/skulk/memory/` — Fabric-memory core library (HRR primitives, pattern separation, memory index); inert until later phases wire it
 - `website/docs/` — Docusaurus documentation source, including API guide and model-capability docs
 
 ## Development Guidelines
