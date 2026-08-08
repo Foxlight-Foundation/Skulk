@@ -47,8 +47,12 @@ def test_pairing_routes_issue_credentials_and_reject_reuse(tmp_path: Path) -> No
     client = TestClient(app)
 
     challenge_response = client.post(
-        f"/v1/auth/pairing-sessions/{package.nonce}/challenge",
-        json={"deviceName": "Test phone", "devicePublicKey": _base64url(public_key)},
+        "/v1/auth/pairing-sessions/challenge",
+        json={
+            "nonce": package.nonce,
+            "deviceName": "Test phone",
+            "devicePublicKey": _base64url(public_key),
+        },
     )
     assert challenge_response.status_code == 200
     challenge_body = cast(dict[str, object], challenge_response.json())
@@ -62,8 +66,8 @@ def test_pairing_routes_issue_credentials_and_reject_reuse(tmp_path: Path) -> No
     )
 
     exchange_response = client.post(
-        f"/v1/auth/pairing-sessions/{package.nonce}/exchange",
-        json={"signature": _base64url(signature)},
+        "/v1/auth/pairing-sessions/exchange",
+        json={"nonce": package.nonce, "signature": _base64url(signature)},
     )
     assert exchange_response.status_code == 200
     exchange_body = cast(dict[str, object], exchange_response.json())
@@ -71,8 +75,8 @@ def test_pairing_routes_issue_credentials_and_reject_reuse(tmp_path: Path) -> No
     assert isinstance(exchange_body["refreshToken"], str)
 
     reused_response = client.post(
-        f"/v1/auth/pairing-sessions/{package.nonce}/exchange",
-        json={"signature": _base64url(signature)},
+        "/v1/auth/pairing-sessions/exchange",
+        json={"nonce": package.nonce, "signature": _base64url(signature)},
     )
     assert reused_response.status_code == 409
 
@@ -89,5 +93,5 @@ def test_pairing_routes_are_present_in_openapi(tmp_path: Path) -> None:
     app.include_router(create_operator_auth_router(service))
 
     paths = cast(dict[str, object], app.openapi()["paths"])
-    assert "/v1/auth/pairing-sessions/{nonce}/challenge" in paths
-    assert "/v1/auth/pairing-sessions/{nonce}/exchange" in paths
+    assert "/v1/auth/pairing-sessions/challenge" in paths
+    assert "/v1/auth/pairing-sessions/exchange" in paths

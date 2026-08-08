@@ -65,8 +65,8 @@ def test_pairing_challenge_exchange_consumes_session(tmp_path: Path) -> None:
     private_key, public_key = _device_key()
 
     challenge = service.create_challenge(
-        package.nonce,
         PairingChallengeRequest(
+            nonce=package.nonce,
             device_name="  Tom's   iPhone  ",
             device_public_key=public_key,
         ),
@@ -79,8 +79,10 @@ def test_pairing_challenge_exchange_consumes_session(tmp_path: Path) -> None:
         )
     )
     result = service.exchange(
-        package.nonce,
-        PairingExchangeRequest(signature=_base64url(signature)),
+        PairingExchangeRequest(
+            nonce=package.nonce,
+            signature=_base64url(signature),
+        ),
     )
 
     assert result.cluster.name == "Fox Den"
@@ -98,8 +100,10 @@ def test_pairing_challenge_exchange_consumes_session(tmp_path: Path) -> None:
     ).read_bytes()
     with pytest.raises(PairingSessionStateError, match="not awaiting"):
         service.exchange(
-            package.nonce,
-            PairingExchangeRequest(signature=_base64url(signature)),
+            PairingExchangeRequest(
+                nonce=package.nonce,
+                signature=_base64url(signature),
+            ),
         )
 
 
@@ -112,8 +116,8 @@ def test_pairing_rejects_wrong_device_proof(tmp_path: Path) -> None:
     _, public_key = _device_key()
     wrong_private_key, _ = _device_key()
     challenge = service.create_challenge(
-        package.nonce,
         PairingChallengeRequest(
+            nonce=package.nonce,
             device_name="Phone",
             device_public_key=public_key,
         ),
@@ -128,8 +132,10 @@ def test_pairing_rejects_wrong_device_proof(tmp_path: Path) -> None:
 
     with pytest.raises(PairingProofError, match="invalid"):
         service.exchange(
-            package.nonce,
-            PairingExchangeRequest(signature=_base64url(signature)),
+            PairingExchangeRequest(
+                nonce=package.nonce,
+                signature=_base64url(signature),
+            ),
         )
 
 
@@ -144,8 +150,8 @@ def test_pairing_expires_after_five_minutes(tmp_path: Path) -> None:
 
     with pytest.raises(PairingSessionExpiredError, match="expired"):
         service.create_challenge(
-            package.nonce,
             PairingChallengeRequest(
+                nonce=package.nonce,
                 device_name="Phone",
                 device_public_key=public_key,
             ),
@@ -164,6 +170,31 @@ def test_pairing_package_contains_no_durable_credential(tmp_path: Path) -> None:
     assert "accessToken" not in payload
     assert "refreshToken" not in payload
     assert package.as_url().startswith("skulk://pair?payload=")
+
+
+def test_pairing_rejects_cleartext_non_loopback_exchange_url(
+    tmp_path: Path,
+) -> None:
+    """Remote pairing credentials cannot be issued over cleartext HTTP."""
+
+    clock = [datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        service.create_session(exchange_url="http://gateway.example.invalid")
+
+
+def test_pairing_allows_cleartext_loopback_for_local_development(
+    tmp_path: Path,
+) -> None:
+    """Loopback remains available for isolated local development."""
+
+    clock = [datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)]
+    package = _service(tmp_path, clock).create_session(
+        exchange_url="http://127.0.0.1:52415"
+    )
+
+    assert str(package.exchange_url) == "http://127.0.0.1:52415/"
 
 
 def test_existing_authority_fails_closed_when_local_key_is_lost(

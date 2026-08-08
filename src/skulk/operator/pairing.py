@@ -8,6 +8,7 @@ import json
 import secrets
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
+from ipaddress import ip_address
 from typing import Literal, cast, final
 from uuid import UUID, uuid4
 
@@ -97,6 +98,28 @@ class PairingPackage(FrozenModel):
             raise ValueError("expires_at must include a timezone")
         return value
 
+    @field_validator("exchange_url")
+    @classmethod
+    def _exchange_url_protects_remote_credentials(
+        cls,
+        value: AnyHttpUrl,
+    ) -> AnyHttpUrl:
+        """Require HTTPS except for explicitly local development URLs."""
+
+        if value.scheme == "https":
+            return value
+        if value.host is None:
+            raise ValueError("pairing exchange_url must include a host")
+        host = value.host.strip("[]")
+        if host == "localhost":
+            return value
+        try:
+            if ip_address(host).is_loopback:
+                return value
+        except ValueError:
+            pass
+        raise ValueError("remote pairing exchange_url must use HTTPS")
+
     def as_url(self) -> str:
         """Return the package as a compact custom-scheme QR payload."""
 
@@ -109,6 +132,11 @@ class PairingPackage(FrozenModel):
 class PairingChallengeRequest(FrozenModel):
     """Candidate device identity submitted before credential exchange."""
 
+    nonce: str = Field(
+        min_length=32,
+        max_length=128,
+        description="High-entropy single-use capability from the pairing QR.",
+    )
     device_name: str = Field(
         min_length=1,
         max_length=80,
@@ -143,6 +171,11 @@ class PairingChallengeResponse(FrozenModel):
 class PairingExchangeRequest(FrozenModel):
     """Device proof completing a pending pairing session."""
 
+    nonce: str = Field(
+        min_length=32,
+        max_length=128,
+        description="High-entropy single-use capability from the pairing QR.",
+    )
     signature: str = Field(
         min_length=80,
         max_length=100,
@@ -335,14 +368,12 @@ class OperatorPairingService:
 
     def create_challenge(
         self,
-        nonce: str,
         request: PairingChallengeRequest,
     ) -> PairingChallengeResponse:
         """Bind a candidate device key and issue one random challenge.
 
         Args:
-            nonce: Single-use pairing capability from the QR package.
-            request: Candidate device name and public key.
+            request: Pairing capability, candidate device name, and public key.
 
         Returns:
             Challenge that expires with the pairing session.
@@ -355,7 +386,7 @@ class OperatorPairingService:
         """
 
         self._decode_device_public_key(request.device_public_key)
-        nonce_hash = _opaque_digest(nonce)
+        nonce_hash = _opaque_digest(request.nonce)
         session, session_commit_index = self._load_session(nonce_hash)
         self._require_pending(session)
         challenge = _base64url_encode(secrets.token_bytes(32))
@@ -379,14 +410,12 @@ class OperatorPairingService:
 
     def exchange(
         self,
-        nonce: str,
         request: PairingExchangeRequest,
     ) -> PairingExchangeResponse:
         """Verify device-key possession and consume one pairing session.
 
         Args:
-            nonce: Single-use pairing capability from the QR package.
-            request: Ed25519 proof over the issued challenge.
+            request: Pairing capability and Ed25519 proof over the issued challenge.
 
         Returns:
             One-time access and refresh credentials.
@@ -397,7 +426,7 @@ class OperatorPairingService:
             PairingSessionExpiredError: The session expired.
         """
 
-        nonce_hash = _opaque_digest(nonce)
+        nonce_hash = _opaque_digest(request.nonce)
         session, session_commit_index = self._load_session(nonce_hash)
         self._require_unexpired(session)
         if (
@@ -416,7 +445,7 @@ class OperatorPairingService:
                 signature,
                 pairing_signature_message(
                     cluster_id=UUID(str(self._store.cluster_identity().cluster_id)),
-                    nonce=nonce,
+                    nonce=request.nonce,
                     challenge=session.challenge,
                 ),
             )

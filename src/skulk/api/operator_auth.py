@@ -31,7 +31,7 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
     router = APIRouter(prefix="/v1/auth", tags=["Authentication"])
 
     @router.post(
-        "/pairing-sessions/{nonce}/challenge",
+        "/pairing-sessions/challenge",
         response_model=PairingChallengeResponse,
         summary="Bind a device key to a local pairing session",
         description=(
@@ -41,13 +41,12 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
         ),
     )
     def create_pairing_challenge(
-        nonce: str,
         request: PairingChallengeRequest,
     ) -> PairingChallengeResponse:
         """Create one device proof challenge for a pending pairing session."""
 
         try:
-            return service.create_challenge(nonce, request)
+            return service.create_challenge(request)
         except PairingGatewayNotInitializedError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except PairingSessionNotFoundError as exc:
@@ -60,7 +59,7 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @router.post(
-        "/pairing-sessions/{nonce}/exchange",
+        "/pairing-sessions/exchange",
         response_model=PairingExchangeResponse,
         summary="Exchange a device-key proof for operator credentials",
         description=(
@@ -70,13 +69,12 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
         ),
     )
     def exchange_pairing_proof(
-        nonce: str,
         request: PairingExchangeRequest,
     ) -> PairingExchangeResponse:
         """Verify a candidate device and consume its pairing capability."""
 
         try:
-            return service.exchange(nonce, request)
+            return service.exchange(request)
         except PairingGatewayNotInitializedError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except PairingSessionNotFoundError as exc:

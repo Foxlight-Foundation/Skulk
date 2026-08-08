@@ -50,7 +50,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     pair_parser.add_argument(
         "--exchange-url",
         required=True,
-        help="Direct or relayed HTTP(S) base URL the phone can reach.",
+        help="HTTPS base URL the phone can reach; HTTP is accepted only on loopback.",
     )
     pair_parser.add_argument(
         "--cluster-name",

@@ -187,8 +187,8 @@ The Ollama group also serves alias paths (`/ollama/api/api/...`,
 
 ### Operator Authentication
 
-- `POST /v1/auth/pairing-sessions/{nonce}/challenge`
-- `POST /v1/auth/pairing-sessions/{nonce}/exchange`
+- `POST /v1/auth/pairing-sessions/challenge`
+- `POST /v1/auth/pairing-sessions/exchange`
 
 The node diagnostics bundle includes the node's own Tailscale state
 (`tailscale`: running flag, tailnet IP, hostname, MagicDNS name), probed on
@@ -215,15 +215,19 @@ The command initializes the gateway's encrypted local authority store when
 needed, creates one high-entropy session that expires after five minutes, and
 prints a terminal QR code plus the exact `skulk://pair?...` fallback payload.
 The QR contains cluster identity, fingerprint, exchange URL, expiry, and the
-single-use nonce. It never contains an access or refresh credential.
+single-use nonce. It never contains an access or refresh credential. Remote
+exchange URLs must use HTTPS; cleartext HTTP is accepted only for loopback
+development URLs.
 
 ### Create a device challenge
 
-**POST** `/v1/auth/pairing-sessions/{nonce}/challenge`
+**POST** `/v1/auth/pairing-sessions/challenge`
 
 Parameters:
 
-- `nonce` (path, required): high-entropy capability from the QR package.
+- JSON body `nonce` (required): high-entropy capability from the QR package.
+  It is deliberately excluded from the URL so normal request-path logs cannot
+  retain it.
 - JSON body `deviceName` (required): operator-visible device label, 1–80
   characters after whitespace normalization.
 - JSON body `devicePublicKey` (required): unpadded URL-safe base64 containing
@@ -245,11 +249,12 @@ this prose.
 
 ### Exchange device proof
 
-**POST** `/v1/auth/pairing-sessions/{nonce}/exchange`
+**POST** `/v1/auth/pairing-sessions/exchange`
 
 Parameters:
 
-- `nonce` (path, required): the same pairing capability.
+- JSON body `nonce` (required): the same pairing capability. It is deliberately
+  excluded from the URL so normal request-path logs cannot retain it.
 - JSON body `signature` (required): unpadded URL-safe base64 Ed25519 signature
   produced by the challenged device key.
 
