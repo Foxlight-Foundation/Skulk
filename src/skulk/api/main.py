@@ -107,6 +107,7 @@ from skulk.api.node_health import (
     live_skulk_build_mismatch,
 )
 from skulk.api.operator_auth import create_operator_auth_router
+from skulk.api.operator_gateway import OperatorGatewayAuthorization
 from skulk.api.performance_envelope import (
     ClusterPerformanceEnvelopes,
     GenerationOutcome,
@@ -268,6 +269,7 @@ from skulk.master.placement_utils import (
     usable_vram_by_node,
 )
 from skulk.operator.pairing import OperatorPairingService
+from skulk.operator.relay import OperatorGatewayConnector, OperatorRelayConfiguration
 from skulk.routing.provider_streams import ProviderStreamPacket
 from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.routing.speech_media import SpeechMediaPacket
@@ -1243,6 +1245,12 @@ class API:
         operator_pairing_service: OperatorPairingService | None = None,
     ) -> None:
         self.state = State()
+        self._operator_pairing_service = operator_pairing_service
+        self._operator_relay_configuration: OperatorRelayConfiguration | None = (
+            operator_pairing_service.relay_configuration()
+            if operator_pairing_service is not None
+            else None
+        )
         # External extensions remain optional. Production nodes prepend
         # first-party provider facades that expose core services through the
         # same generic contracts without duplicating their runtimes.
@@ -7285,6 +7293,15 @@ class API:
                 tg.start_soon(self._field_telemetry.flush_loop)
                 print_startup_banner(self.port)
                 tg.start_soon(self.run_api, shutdown_ev)
+                if (
+                    self._operator_pairing_service is not None
+                    and self._operator_relay_configuration is not None
+                ):
+                    operator_gateway = OperatorGatewayConnector(
+                        self._operator_relay_configuration
+                    )
+                    tg.start_soon(self.run_operator_api, shutdown_ev)
+                    tg.start_soon(operator_gateway.run)
                 try:
                     await anyio.sleep_forever()
                 finally:
@@ -7308,6 +7325,43 @@ class API:
         with anyio.CancelScope(shield=True):
             await serve(
                 cast(ASGIFramework, self.app),
+                cfg,
+                shutdown_trigger=ev.wait,
+            )
+
+    async def run_operator_api(self, ev: anyio.Event) -> None:
+        """Serve the canonical API through a relay-only authenticated TLS bind.
+
+        Args:
+            ev: Shared API shutdown signal.
+
+        Raises:
+            RuntimeError: Relay configuration or pairing service is absent.
+        """
+
+        configuration = self._operator_relay_configuration
+        service = self._operator_pairing_service
+        if configuration is None or service is None:
+            raise RuntimeError("operator relay API requires configured pairing")
+        # Validate protected TLS material before opening a listener or carrier
+        # lane. Hypercorn loads the same exact certificate and key paths below.
+        configuration.server_ssl_context()
+        cfg = Config()
+        cfg.bind = [f"127.0.0.1:{configuration.operator_api_port}"]
+        cfg.certfile = str(configuration.certificate_path)
+        cfg.keyfile = str(configuration.private_key_path)
+        cfg.accesslog = None
+        cfg.errorlog = "-"
+        cfg.logger_class = InterceptLogger
+        cfg.websocket_max_message_size = REALTIME_WEBSOCKET_MAX_MESSAGE_BYTES
+        cfg.websocket_ping_interval = 20.0
+        protected_app = OperatorGatewayAuthorization(
+            self.app,
+            service,
+        )
+        with anyio.CancelScope(shield=True):
+            await serve(
+                cast(ASGIFramework, protected_app),
                 cfg,
                 shutdown_trigger=ev.wait,
             )

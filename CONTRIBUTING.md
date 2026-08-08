@@ -83,9 +83,11 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
 - `src/skulk/operator/` — Stable operator identity, quorum certification,
   crash-fault consensus, bounded dormant proposal lifecycle, and
   encrypted/public authority persistence. It also owns the designated-gateway
-  local key provider, `skulk operator pair` command, and single-use device
-  pairing plus credential lifecycle; the matching FastAPI routes live in
-  `src/skulk/api/operator_auth.py`. It is a
+  local key provider, paired-WebSocket relay configuration/connector,
+  `skulk operator pair` and `configure-relay` commands, and single-use device
+  pairing plus credential lifecycle; the matching FastAPI routes and relay-only
+  canonical API guard live in `src/skulk/api/operator_auth.py` and
+  `src/skulk/api/operator_gateway.py`. It is a
   separate security plane from event-sourced inference state; do not place its
   secrets or mutable authorization records in `State`, telemetry, diagnostics,
   or ordinary events.

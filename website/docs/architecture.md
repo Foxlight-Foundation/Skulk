@@ -965,9 +965,27 @@ refresh credentials once. Raw nonces and tokens are never stored in plaintext;
 the authority journal contains encrypted state and one-way token digests.
 Refresh rotates and invalidates the prior access/refresh pair atomically. The
 same service validates short-lived bearer access, exposes credential-free
-paired-device projections, and makes revocation immediate. These lifecycle
-routes prove the authorization boundary before selected canonical Skulk APIs
-adopt it; they do not create parallel model, inference, or command APIs.
+paired-device projections, and makes revocation immediate. The relay-only
+listener applies these scopes to the existing canonical routes; Skulk does not
+create parallel model, inference, or command APIs.
+
+`skulk operator configure-relay` installs one generated paired-WebSocket route
+before normal public operation. The app and gateway use distinct 256-bit outer
+carrier credentials and one opaque locator; all are encrypted in the local
+authority journal, while the generated inner-TLS private key is an owner-only
+file. Pairing returns only the app role plus the pinned self-signed gateway
+certificate. On startup the designated gateway maintains a bounded pool of
+outbound WebSockets. Each lane bridges opaque binary messages to a separate
+loopback TLS listener serving the existing FastAPI application. The relay never
+terminates that inner TLS connection.
+
+The loopback TLS listener wraps the canonical application with operator bearer
+validation: reads, model views, inference/WebSockets, mutations, and device
+management map onto the existing scopes. Pairing challenge/exchange and refresh
+remain reachable before access-token validation. The ordinary port-52415 local
+listener remains unchanged for the dashboard and existing direct clients; it is
+never the relay connector's destination. If the designated gateway or relay is
+unavailable, remote access fails while local cluster operation continues.
 
 ### Event log
 

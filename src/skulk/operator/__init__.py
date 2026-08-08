@@ -48,6 +48,16 @@ from skulk.operator.identity import (
     OperatorIdentityRepository,
     create_cluster_identity,
 )
+from skulk.operator.relay import (
+    OperatorGatewayConnector,
+    OperatorRelayAlreadyConfiguredError,
+    OperatorRelayConfiguration,
+    OperatorRelayConfigurationRepository,
+    OperatorRelayError,
+    OperatorRelayProvisioning,
+    OperatorRelayUnavailableError,
+    OperatorRemoteAccessMaterial,
+)
 from skulk.operator.replication import (
     AuthorityAppliedCommit,
     AuthorityCertificateError,
@@ -127,7 +137,15 @@ __all__ = [
     "ClusterPublicIdentity",
     "EncryptedAuthorityStore",
     "NodeInstallationIdentity",
+    "OperatorGatewayConnector",
     "OperatorIdentityRepository",
+    "OperatorRelayAlreadyConfiguredError",
+    "OperatorRelayConfiguration",
+    "OperatorRelayConfigurationRepository",
+    "OperatorRelayError",
+    "OperatorRelayProvisioning",
+    "OperatorRelayUnavailableError",
+    "OperatorRemoteAccessMaterial",
     "SqliteAuthorityConsensusRepository",
     "apply_quorum_certified_payload",
     "authority_bootstrap_position",

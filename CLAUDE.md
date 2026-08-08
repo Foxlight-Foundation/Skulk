@@ -120,6 +120,11 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
   credentials while persisting encrypted state and token digests. Refresh
   rotates both credentials, bearer validation enforces canonical scopes, and
   authorized devices can list or revoke credential-free device projections.
+  `skulk operator configure-relay` persists one generated paired-WebSocket
+  route, creates a protected pinned TLS identity, and enables a bounded outbound
+  gateway lane pool. Relay lanes bridge opaque inner-TLS bytes to a separate
+  loopback listener serving the same canonical FastAPI app behind scoped bearer
+  validation; the ordinary dashboard/API listener remains unchanged.
   A dormant bounded service
   can drive one caller-selected proposal with deadlines, retries, accepted-value
   recovery, local durable commit, and catch-up broadcast; it is not started by

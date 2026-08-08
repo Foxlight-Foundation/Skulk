@@ -24,6 +24,12 @@ from skulk.operator.authority import (
 )
 from skulk.operator.identity import ClusterPublicIdentity, create_cluster_identity
 from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
+from skulk.operator.relay import (
+    OperatorRelayConfiguration,
+    OperatorRelayConfigurationRepository,
+    OperatorRelayProvisioning,
+    OperatorRemoteAccessMaterial,
+)
 from skulk.utils.pydantic_ext import FrozenModel
 
 _PAIRING_RECORD_TYPE = "operator_pairing_session"
@@ -216,6 +222,13 @@ class PairingExchangeResponse(FrozenModel):
     scopes: tuple[OperatorScope, ...] = Field(
         description="Canonical API scopes granted to the paired device."
     )
+    remote_access: OperatorRemoteAccessMaterial | None = Field(
+        default=None,
+        description=(
+            "One-time relay and pinned inner-TLS material when this gateway "
+            "has remote access configured."
+        ),
+    )
 
 
 class OperatorTokenRequest(FrozenModel):
@@ -395,6 +408,7 @@ class OperatorPairingService:
         store: EncryptedAuthorityStore,
         key_provider: LocalFileAuthorityKeyProvider,
         *,
+        relay_repository: OperatorRelayConfigurationRepository | None = None,
         now: Callable[[], datetime] = _utc_now,
     ) -> None:
         """Create a pairing service with injected persistence and time.
@@ -403,11 +417,15 @@ class OperatorPairingService:
             store: Encrypted local authority journal.
             key_provider: Local data-key provider used only during explicit
                 gateway initialization.
+            relay_repository: Encrypted designated-gateway relay repository.
             now: Time provider for deterministic expiry tests.
         """
 
         self._store = store
         self._key_provider = key_provider
+        self._relay_repository = relay_repository or OperatorRelayConfigurationRepository(
+            store
+        )
         self._now = now
 
     @classmethod
@@ -415,7 +433,56 @@ class OperatorPairingService:
         """Create the production service for the designated gateway paths."""
 
         key_provider = LocalFileAuthorityKeyProvider()
-        return cls(EncryptedAuthorityStore(key_provider), key_provider)
+        store = EncryptedAuthorityStore(key_provider)
+        return cls(
+            store,
+            key_provider,
+            relay_repository=OperatorRelayConfigurationRepository(store),
+        )
+
+    def initialize_gateway(self, cluster_name: str = "Cluster") -> ClusterPublicIdentity:
+        """Load or create the single designated gateway identity.
+
+        Args:
+            cluster_name: Initial operator-visible name for a new gateway.
+
+        Returns:
+            Stable public cluster identity owned by this gateway.
+        """
+
+        if self._store.path.exists():
+            self._key_provider.load_data_key(self._key_provider.active_key_id)
+        else:
+            self._key_provider.ensure_data_key()
+        try:
+            return self._store.cluster_identity()
+        except AuthorityNotInitializedError:
+            material = create_cluster_identity(cluster_name)
+            self._store.initialize_cluster(
+                material.public_identity,
+                material.private_key,
+            )
+            return material.public_identity
+
+    def configure_relay(
+        self,
+        provisioning: OperatorRelayProvisioning,
+        *,
+        operator_api_port: int,
+        cluster_name: str = "Cluster",
+    ) -> OperatorRelayConfiguration:
+        """Persist one generated relay route for this designated gateway."""
+
+        self.initialize_gateway(cluster_name)
+        return self._relay_repository.configure(
+            provisioning,
+            operator_api_port=operator_api_port,
+        )
+
+    def relay_configuration(self) -> OperatorRelayConfiguration | None:
+        """Return the configured designated-gateway route, when present."""
+
+        return self._relay_repository.load()
 
     def create_session(
         self,
@@ -434,19 +501,7 @@ class OperatorPairingService:
         """
 
         validated_exchange_url = _validate_exchange_url(exchange_url)
-        if self._store.path.exists():
-            self._key_provider.load_data_key(self._key_provider.active_key_id)
-        else:
-            self._key_provider.ensure_data_key()
-        try:
-            identity = self._store.cluster_identity()
-        except AuthorityNotInitializedError:
-            material = create_cluster_identity(cluster_name)
-            self._store.initialize_cluster(
-                material.public_identity,
-                material.private_key,
-            )
-            identity = material.public_identity
+        identity = self.initialize_gateway(cluster_name)
 
         now = self._now()
         nonce = secrets.token_urlsafe(32)
@@ -557,6 +612,13 @@ class OperatorPairingService:
         except (InvalidSignature, ValueError, UnicodeError) as exc:
             raise PairingProofError("device pairing proof is invalid") from exc
 
+        relay_configuration = self._relay_repository.load()
+        remote_access = (
+            relay_configuration.device_material()
+            if relay_configuration is not None
+            else None
+        )
+
         now = self._now()
         device_id = uuid4()
         access_token = secrets.token_urlsafe(32)
@@ -587,6 +649,7 @@ class OperatorPairingService:
             refresh_token=refresh_token,
             refresh_token_expires_at=refresh_expires_at,
             scopes=_DEFAULT_SCOPES,
+            remote_access=remote_access,
         )
 
     def refresh(self, request: OperatorTokenRequest) -> OperatorTokenResponse:

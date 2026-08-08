@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
-from typing import Literal
+from pathlib import Path
+from typing import Literal, cast
 
 from skulk.operator.pairing import OperatorPairingService
+from skulk.operator.relay import OperatorRelayProvisioning
 from skulk.utils.pydantic_ext import FrozenModel
 
 
@@ -16,6 +18,15 @@ class _PairArguments(FrozenModel):
 
     command: Literal["pair"]
     exchange_url: str
+    cluster_name: str
+
+
+class _ConfigureRelayArguments(FrozenModel):
+    """Strictly validated local relay-provisioning command arguments."""
+
+    command: Literal["configure-relay"]
+    provisioning_file: Path
+    operator_api_port: int
     cluster_name: str
 
 
@@ -57,9 +68,50 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="Cluster",
         help="Initial cluster name when designating a gateway for the first time.",
     )
+    relay_parser = subparsers.add_parser(
+        "configure-relay",
+        help="Install generated relay material on the designated gateway.",
+    )
+    relay_parser.add_argument(
+        "--provisioning-file",
+        required=True,
+        type=Path,
+        help="Protected JSON provisioning file received from the relay service.",
+    )
+    relay_parser.add_argument(
+        "--operator-api-port",
+        default=52416,
+        type=int,
+        help="Loopback-only authenticated TLS API port (default: 52416).",
+    )
+    relay_parser.add_argument(
+        "--cluster-name",
+        default="Cluster",
+        help="Initial cluster name when designating a gateway for the first time.",
+    )
     parsed = parser.parse_args(list(argv) if argv is not None else None)
-    arguments = _PairArguments.model_validate(vars(parsed))
+    parsed_values = cast(dict[str, object], vars(parsed))
     service = OperatorPairingService.from_default_paths()
+    if parsed_values.get("command") == "configure-relay":
+        arguments = _ConfigureRelayArguments.model_validate(parsed_values)
+        try:
+            provisioning = OperatorRelayProvisioning.model_validate_json(
+                arguments.provisioning_file.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as exc:
+            parser.error(f"invalid relay provisioning file: {exc}")
+        configuration = service.configure_relay(
+            provisioning,
+            operator_api_port=arguments.operator_api_port,
+            cluster_name=arguments.cluster_name,
+        )
+        print(
+            "Configured the designated gateway with "
+            f"{configuration.lane_count} relay lanes. Restart Skulk to connect."
+        )
+        return 0
+
+    arguments = _PairArguments.model_validate(parsed_values)
     package = service.create_session(
         exchange_url=arguments.exchange_url,
         cluster_name=arguments.cluster_name,
