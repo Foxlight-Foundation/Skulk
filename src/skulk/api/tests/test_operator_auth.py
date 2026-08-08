@@ -195,3 +195,25 @@ def test_token_rotation_and_device_revocation_http_contract(tmp_path: Path) -> N
         "/v1/auth/devices",
         headers={"Authorization": f"Bearer {next_access_token}"},
     ).status_code == 401
+
+
+def test_lifecycle_routes_fail_closed_on_an_uninitialized_gateway(
+    tmp_path: Path,
+) -> None:
+    """A non-designated API node returns 503 instead of leaking an error 500."""
+
+    provider = LocalFileAuthorityKeyProvider(tmp_path / "key.bin")
+    service = OperatorPairingService(
+        EncryptedAuthorityStore(provider, tmp_path / "authority.sqlite3"),
+        provider,
+    )
+    app = FastAPI()
+    app.include_router(create_operator_auth_router(service))
+    client = TestClient(app)
+
+    listed = client.get(
+        "/v1/auth/devices",
+        headers={"Authorization": "Bearer unknown-access-token"},
+    )
+    assert listed.status_code == 503
+    assert listed.json() == {"detail": "operator gateway is not initialized"}

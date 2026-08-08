@@ -51,6 +51,8 @@ def _require_bearer(authorization: str | None) -> str:
 def _raise_credential_http_error(exc: Exception) -> Never:
     """Map safe credential-domain failures onto stable HTTP semantics."""
 
+    if isinstance(exc, PairingGatewayNotInitializedError):
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     if isinstance(exc, OperatorScopeError):
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     if isinstance(
@@ -155,7 +157,11 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
                 detail="refresh credential is invalid",
                 headers=_BEARER_CHALLENGE,
             ) from exc
-        except (OperatorCredentialInvalidError, OperatorCredentialExpiredError) as exc:
+        except (
+            OperatorCredentialInvalidError,
+            OperatorCredentialExpiredError,
+            PairingGatewayNotInitializedError,
+        ) as exc:
             _raise_credential_http_error(exc)
         except PairingSessionStateError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -181,6 +187,7 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
             OperatorCredentialInvalidError,
             OperatorCredentialExpiredError,
             OperatorScopeError,
+            PairingGatewayNotInitializedError,
         ) as exc:
             _raise_credential_http_error(exc)
 
@@ -208,6 +215,7 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
             OperatorCredentialInvalidError,
             OperatorCredentialExpiredError,
             OperatorScopeError,
+            PairingGatewayNotInitializedError,
         ) as exc:
             _raise_credential_http_error(exc)
         except PairingSessionStateError as exc:

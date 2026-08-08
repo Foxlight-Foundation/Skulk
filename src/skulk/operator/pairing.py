@@ -769,7 +769,13 @@ class OperatorPairingService:
 
         latest_record_ids: list[str] = []
         seen: set[str] = set()
-        for record in reversed(self._store.records()):
+        try:
+            records = self._store.records()
+        except AuthorityNotInitializedError as exc:
+            raise PairingGatewayNotInitializedError(
+                "operator gateway is not initialized"
+            ) from exc
+        for record in reversed(records):
             if record.record_type != _PAIRING_RECORD_TYPE or record.record_id in seen:
                 continue
             seen.add(record.record_id)

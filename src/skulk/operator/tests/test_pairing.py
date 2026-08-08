@@ -23,6 +23,7 @@ from skulk.operator.pairing import (
     PairingChallengeRequest,
     PairingExchangeRequest,
     PairingExchangeResponse,
+    PairingGatewayNotInitializedError,
     PairingProofError,
     PairingSessionExpiredError,
     PairingSessionStateError,
@@ -353,3 +354,13 @@ def test_malformed_unicode_credentials_fail_safely(tmp_path: Path) -> None:
 
     with pytest.raises(OperatorCredentialInvalidError, match="access"):
         service.validate_access_token("snowman-☃")
+
+
+def test_lifecycle_rejects_an_uninitialized_gateway_safely(tmp_path: Path) -> None:
+    """Credential operations never leak a missing authority store as an error 500."""
+
+    clock = [datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+
+    with pytest.raises(PairingGatewayNotInitializedError, match="not initialized"):
+        service.validate_access_token("unknown-access-token")
