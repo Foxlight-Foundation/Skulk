@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import socket
 import ssl
 from collections.abc import Awaitable, Callable
@@ -20,6 +21,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from skulk.operator.authority import EncryptedAuthorityStore
+from skulk.operator.cli import main as operator_cli_main
 from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
 from skulk.operator.pairing import (
     OperatorPairingService,
@@ -153,6 +155,34 @@ def test_relay_provisioning_rejects_unsafe_or_ambiguous_material(
     payload[field] = value
     with pytest.raises(ValueError):
         OperatorRelayProvisioning.model_validate(payload)
+
+
+def test_configure_relay_cli_never_echoes_rejected_secret_material(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Invalid provisioning reports no credential-bearing validation detail."""
+
+    secret = _base64url(bytes(range(32, 64)))
+    provisioning_path = tmp_path / "invalid-provisioning.json"
+    provisioning_path.write_text(
+        json.dumps(
+            {
+                **_provisioning().model_dump(mode="json"),
+                "app_carrier_credential": f"invalid-{secret}",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit):
+        operator_cli_main(
+            ["configure-relay", "--provisioning-file", str(provisioning_path)]
+        )
+
+    captured = capsys.readouterr()
+    assert "unreadable or invalid" in captured.err
+    assert secret not in captured.err
 
 
 class _SyntheticRelay:

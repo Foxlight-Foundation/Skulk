@@ -98,8 +98,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             provisioning = OperatorRelayProvisioning.model_validate_json(
                 arguments.provisioning_file.read_text(encoding="utf-8")
             )
-        except (OSError, ValueError) as exc:
-            parser.error(f"invalid relay provisioning file: {exc}")
+        except (OSError, ValueError):
+            # Validation errors may echo the rejected credential-bearing input.
+            # The command reports only the safe failure class to stderr.
+            parser.error("relay provisioning file is unreadable or invalid")
         configuration = service.configure_relay(
             provisioning,
             operator_api_port=arguments.operator_api_port,
