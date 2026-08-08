@@ -418,7 +418,11 @@ def test_floor_admission_accounts_for_pending_write_size(
     # The record line is tens of KiB; only 100 bytes sit above the floor.
     with pytest.raises(StoreFullError):
         store.append(_record("s-oversize", keys[0], values[0]))
-    assert store.degraded
+    # One oversized refusal does not latch degraded: a small write (the
+    # tombstone line is tiny) still fits above the floor and succeeds.
+    assert not store.degraded
+    store.tombstone("s0", deleted_at=1_700_000_100.0)
+    assert [r.span_id for r in store.scan()] == []
 
 
 def test_whitener_crash_recovery_retry_is_idempotent(tmp_path: Path) -> None:
@@ -556,6 +560,60 @@ def test_compact_keeps_final_when_manifest_swap_already_landed(
     remaining = {p.name for p in (tmp_path / "memory").glob("spans-*.jsonl")}
     assert remaining == {named}
     assert [r.span_id for r in reopened.scan()] == ["s1", "s2"]
+
+
+def test_missing_manifest_recovers_from_discovered_segments(
+    tmp_path: Path,
+) -> None:
+    """A lost manifest over live segments rebuilds instead of sweeping them."""
+    _store, records = _seeded_store(tmp_path, 3)
+    (tmp_path / "memory" / "MANIFEST.json").unlink()
+
+    reopened = ContentStore(root=tmp_path / "memory")
+    assert [r.span_id for r in reopened.scan()] == [r.span_id for r in records]
+    manifest = json.loads((tmp_path / "memory" / "MANIFEST.json").read_text())
+    assert manifest["segments"], "rebuilt manifest must list the segments"
+
+
+def test_schema_invalid_tombstone_is_loud(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    store, _records = _seeded_store(tmp_path, 2)
+    (tmp_path / "memory" / "tombstones.jsonl").write_text(
+        '{"span_id": 42, "deleted_at": 1.0}\n{"span_id": "s0", "deleted_at": 1.0}\n'
+    )
+    with caplog.at_level("WARNING", logger="skulk.memory.store"):
+        survivors = [r.span_id for r in store.scan()]
+    assert survivors == ["s1"]
+    assert store.corrupt_lines_dropped == 1
+    assert any("schema-invalid" in message for message in caplog.messages)
+
+
+def test_failed_whitener_save_removes_uncommitted_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caught failure after the archive rename must not shadow the version."""
+    store = ContentStore(root=tmp_path / "memory")
+    corpus = np.random.default_rng(11).normal(size=(32, 16)).astype(np.float32)
+    whitener = Whitener.fit(corpus, embedding_model_id="bge-small", version="v12")
+    real_open = Path.open
+
+    def failing_manifest_open(self: Path, *args: object, **kwargs: object) -> object:
+        if self.name == "MANIFEST.tmp":
+            raise OSError(28, "No space left on device")
+        return real_open(self, *args, **kwargs)  # pyright: ignore[reportCallIssue, reportUnknownVariableType, reportArgumentType] - passthrough shim
+
+    monkeypatch.setattr(Path, "open", failing_manifest_open)
+    with pytest.raises(StoreFullError):
+        store.save_whitener(whitener)
+    monkeypatch.undo()
+    # Neither scratch nor an orphan archive shadows the version...
+    assert not list((tmp_path / "memory").glob("whitener-*"))
+    # ...so a fresh store can persist a refit under the same version string.
+    retry = ContentStore(root=tmp_path / "memory")
+    refit = Whitener.fit(corpus * 2, embedding_model_id="bge-small", version="v12")
+    retry.save_whitener(refit)
+    assert retry.load_whitener().version == "v12"
 
 
 def test_startup_sweeps_orphan_segment_files(tmp_path: Path) -> None:

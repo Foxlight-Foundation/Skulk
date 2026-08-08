@@ -192,7 +192,23 @@ class ContentStore:
             for created in reversed(missing):
                 self._fsync_directory(created.parent)
             if not self._manifest_path().exists():
-                self._write_manifest(self._default_manifest())
+                manifest = self._default_manifest()
+                # A missing manifest over existing segments (manual deletion,
+                # partial filesystem loss) is a recoverable store: rebuild
+                # the listing from discovery rather than writing an empty
+                # one, which would condemn every segment to the orphan sweep.
+                recovered = sorted(self.root.glob("spans-*.jsonl"))
+                if recovered:
+                    manifest["segments"] = [
+                        segment.name for segment in recovered
+                    ]
+                    _LOGGER.warning(
+                        "memory store manifest missing at %s; rebuilt from "
+                        "%d discovered segment(s)",
+                        self.root,
+                        len(recovered),
+                    )
+                self._write_manifest(manifest)
             self._reconcile_stale_tombstones()
             self._sweep_orphan_segments()
             segments = self._segments()
@@ -376,11 +392,18 @@ class ContentStore:
         if self._degraded:
             raise StoreFullError("memory store is in degraded (out of space) mode")
         free = shutil.disk_usage(self.root).free
-        if free < self.free_space_floor_bytes + pending_bytes:
+        if free < self.free_space_floor_bytes:
             self._degraded = True
             raise StoreFullError(
-                f"memory store free-space floor reached ({free} bytes free, "
-                f"{pending_bytes} pending); capture disabled, reads continue"
+                f"memory store free-space floor reached ({free} bytes free); "
+                "capture disabled, reads continue"
+            )
+        if free < self.free_space_floor_bytes + pending_bytes:
+            # One oversized write is refused without latching degraded:
+            # ordinary-sized captures may still fit while this one cannot.
+            raise StoreFullError(
+                f"write of {pending_bytes} bytes would breach the free-space "
+                f"floor ({free} bytes free); refused without degrading"
             )
 
     def _translate_out_of_space(self, error: OSError) -> None:
@@ -727,6 +750,17 @@ class ContentStore:
             span_id = entry.get("span_id")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
             if isinstance(span_id, str):
                 ids.add(span_id)
+                return
+        # Parsed but schema-invalid: this is corruption too, and the span it
+        # named is silently re-exposed, so it must be as loud as unparseable.
+        self._corrupt_lines_dropped += 1
+        _LOGGER.warning(
+            "memory store dropped schema-invalid tombstone at %s:%d "
+            "(a forgotten span may be re-exposed until it is tombstoned "
+            "again)",
+            path.name,
+            number,
+        )
 
     @property
     def corrupt_lines_dropped(self) -> int:
@@ -964,6 +998,7 @@ class ContentStore:
                 "fit under a new version"
             )
         scratch = self.root / (path.name + ".tmp")
+        renamed = False
         try:
             # Write to a scratch handle and fsync before the rename, then
             # fsync the directory: the manifest update below is durable, so
@@ -982,6 +1017,7 @@ class ContentStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(scratch, path)
+            renamed = True
             self._fsync_directory()
             manifest = self._read_manifest()
             manifest["whitener_version"] = whitener.version
@@ -989,10 +1025,29 @@ class ContentStore:
             manifest["embedding_model_id"] = whitener.embedding_model_id
             self._write_manifest(manifest)
         except OSError as error:
+            # The caller sees this failure and owns the retry, so an archive
+            # renamed into place but never named by the manifest is removed
+            # rather than left to shadow the version (the power-loss orphan,
+            # by contrast, is recovered by the identical-retry path above).
             scratch.unlink(missing_ok=True)
+            if renamed and not self._names_active_whitener(whitener.version):
+                path.unlink(missing_ok=True)
             self._translate_out_of_space(error)
             raise
         return path
+
+    def _names_active_whitener(self, version: str) -> bool:
+        """Whether the on-disk manifest names ``version`` as active.
+
+        Unreadable counts as named: when the manifest's state is unknown,
+        keeping an archive is recoverable and deleting a referenced one
+        is not.
+        """
+        try:
+            manifest = self._read_manifest()
+        except (OSError, ValueError):
+            return True
+        return manifest.get("whitener_version") == version
 
     def _matches_persisted_whitener(self, whitener: Whitener) -> bool:
         """Whether the persisted archive for this version is exactly ``whitener``.
