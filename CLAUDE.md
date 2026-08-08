@@ -316,6 +316,17 @@ The system uses event sourcing for state management:
   remains unsuitable for mobile history, device membership, or authorization
   subjects.
 
+### Memory library (experimental, inert)
+`src/skulk/memory/` holds the fabric-memory core library: HRR primitives
+(`hrr.py`), the fractional-ZCA pattern-separation stage (`separation.py`), the
+`MemoryIndex` interface with exact and holographic implementations
+(`index.py`), and the durable node-local content store (`store.py`: JSONL
+segments, torn-tail repair, tombstone+compact exact forgetting, ENOSPC/floor
+degraded mode where capture stops but reads and inference continue, and
+`rebuild()` replaying stored spans into a fresh index). The store is the
+source of truth; fields are rebuildable indexes over it. Nothing outside the
+package imports it yet.
+
 ### Rust Components
 Rust code in `rust/` provides:
 - `networking`: libp2p networking (gossipsub, peer discovery)
