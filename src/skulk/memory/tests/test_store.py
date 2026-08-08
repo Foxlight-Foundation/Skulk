@@ -442,6 +442,30 @@ def test_whitener_crash_recovery_retry_is_idempotent(tmp_path: Path) -> None:
         store.save_whitener(refit)
 
 
+def test_save_whitener_refuses_to_replace_a_populated_cue_space(
+    tmp_path: Path,
+) -> None:
+    """A store holding spans cannot be repointed at a different cue space."""
+    store, _records = _seeded_store(tmp_path, 2)
+    corpus = np.random.default_rng(9).normal(size=(32, 16)).astype(np.float32)
+    foreign = Whitener.fit(corpus, embedding_model_id="bge-small", version="v7")
+    with pytest.raises(ValueError, match="cue space"):
+        store.save_whitener(foreign)
+
+    # The matching identity is accepted, and an empty store may switch.
+    matching = Whitener.fit(
+        corpus, embedding_model_id="bge-small-en-v1.5", version="v1"
+    )
+    store.save_whitener(matching)
+    empty = ContentStore(root=tmp_path / "empty-memory")
+    empty.save_whitener(foreign)
+    replacement = Whitener.fit(
+        corpus * 2, embedding_model_id="bge-small", version="v8"
+    )
+    empty.save_whitener(replacement)
+    assert empty.load_whitener().version == "v8"
+
+
 def test_whitener_round_trip_preserves_cue_space(tmp_path: Path) -> None:
     store = ContentStore(root=tmp_path / "memory")
     corpus = np.random.default_rng(3).normal(size=(32, 16)).astype(np.float32)

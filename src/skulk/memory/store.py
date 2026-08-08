@@ -621,6 +621,24 @@ class ContentStore:
         """Persist the frozen separation stage for exact cue-space rebuilds."""
         pending = whitener.mu.nbytes + whitener.matrix.nbytes + 4096
         self._refuse_writes_if_degraded(pending_bytes=pending)
+        # A store holding spans is committed to their cue space: activating a
+        # whitener the stored keys were not whitened in would make the default
+        # load_whitener() return a transform that probes those keys wrong.
+        # Live records are uniform (append enforces it once an identity is
+        # active), so the first one speaks for all; an empty store may switch.
+        first = next(self.scan(), None)
+        if first is not None and (
+            first.embedding_model_id != whitener.embedding_model_id
+            or first.whitener_version != whitener.version
+        ):
+            raise ValueError(
+                f"store holds spans in cue space "
+                f"({first.embedding_model_id!r}, {first.whitener_version!r}) "
+                f"but the offered whitener is "
+                f"({whitener.embedding_model_id!r}, {whitener.version!r}); "
+                "a cue-space upgrade mints a new store or replays through a "
+                "migration, it never repoints live records"
+            )
         path = self.root / f"whitener-{whitener.version}.npz"
         if path.exists():
             # A version string names one immutable cue space; stored records
