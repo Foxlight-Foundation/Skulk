@@ -234,6 +234,17 @@ Centralized logging uses a three-layer stack:
 
 These rules apply to every change. No exceptions.
 
+### Experimental code stays out of dev
+
+Unproven, demo-bound, or design-in-motion work never merges to dev. It lives
+on a long-lived `initiative/<name>` branch, deploys only to an isolated
+cluster segment for validation, and merges to dev only after its acceptance
+gate passes (a working demo, an explicit design sign-off, or both). "The code
+is inert" and "nothing imports it yet" are not exemptions: if the design is
+still moving, the code is experimental and dev must not carry it. Cutting the
+initiative branch, deploying it to the isolated segment, and gating the
+merge-back are part of starting the work, not cleanup afterward.
+
 ### Documentation
 
 - **Every API endpoint must be documented** in `website/docs/api-guide.md` with method, path, parameters, and behavior. If you add or modify an endpoint, update the docs in the same commit or PR.
