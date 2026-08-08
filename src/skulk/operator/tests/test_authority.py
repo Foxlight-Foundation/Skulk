@@ -152,6 +152,46 @@ def test_append_requires_exact_commit_index(tmp_path: Path) -> None:
     assert b"secret-verifier" not in persisted
 
 
+def test_append_rejects_stale_logical_record_after_unrelated_activity(
+    tmp_path: Path,
+) -> None:
+    """A fresh global index cannot authorize a stale logical transition."""
+
+    store = _store(tmp_path)
+    material = create_cluster_identity()
+    store.initialize_cluster(material.public_identity, material.private_key)
+    original = store.append(
+        expected_commit_index=1,
+        expected_record_commit_index=0,
+        authority_term=1,
+        record_type="pairing",
+        record_id="session-1",
+        payload={"state": "pending"},
+    )
+    store.append(
+        expected_commit_index=2,
+        expected_record_commit_index=original.commit_index,
+        authority_term=1,
+        record_type="pairing",
+        record_id="session-1",
+        payload={"state": "consumed"},
+    )
+
+    with pytest.raises(AuthorityCommitConflictError, match="record changed"):
+        store.append(
+            expected_commit_index=3,
+            expected_record_commit_index=original.commit_index,
+            authority_term=1,
+            record_type="pairing",
+            record_id="session-1",
+            payload={"state": "challenged"},
+        )
+
+    assert store.read_latest_payload("pairing", "session-1") == {
+        "state": "consumed"
+    }
+
+
 def test_old_records_remain_readable_during_data_key_rotation(tmp_path: Path) -> None:
     """The provider selects key versions per record during staged rotation."""
 

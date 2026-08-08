@@ -106,6 +106,7 @@ from skulk.api.node_health import (
     live_data_transports,
     live_skulk_build_mismatch,
 )
+from skulk.api.operator_auth import create_operator_auth_router
 from skulk.api.performance_envelope import (
     ClusterPerformanceEnvelopes,
     GenerationOutcome,
@@ -266,6 +267,7 @@ from skulk.master.placement_utils import (
     unified_memory_gpu_node_ids,
     usable_vram_by_node,
 )
+from skulk.operator.pairing import OperatorPairingService
 from skulk.routing.provider_streams import ProviderStreamPacket
 from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.routing.speech_media import SpeechMediaPacket
@@ -1061,6 +1063,10 @@ API_TAGS_METADATA = [
         "name": "Admin",
         "description": "Administrative operations such as node restart.",
     },
+    {
+        "name": "Authentication",
+        "description": "Host-authorized device pairing and operator credential lifecycle.",
+    },
 ]
 
 
@@ -1234,6 +1240,7 @@ class API:
         ) = None,
         extensions: LoadedExtensions | None = None,
         enable_builtin_providers: bool = False,
+        operator_pairing_service: OperatorPairingService | None = None,
     ) -> None:
         self.state = State()
         # External extensions remain optional. Production nodes prepend
@@ -1412,6 +1419,10 @@ class API:
         self._setup_exception_handlers()
         self._setup_cors()
         self._setup_routes()
+        if operator_pairing_service is not None:
+            self.app.include_router(
+                create_operator_auth_router(operator_pairing_service)
+            )
 
         # A headless/worker node may have no built dashboard assets
         # (DASHBOARD_DIR is None); serving the UI is then skipped so the node

@@ -382,6 +382,7 @@ class EncryptedAuthorityStore:
         self,
         *,
         expected_commit_index: int,
+        expected_record_commit_index: int | None = None,
         authority_term: int,
         record_type: str,
         record_id: str,
@@ -391,6 +392,9 @@ class EncryptedAuthorityStore:
 
         Args:
             expected_commit_index: Last commit index observed by the caller.
+            expected_record_commit_index: Last commit index observed for this
+                logical record. When supplied, the append also fails if that
+                record changed independently of unrelated journal activity.
             authority_term: Consensus term that authorized this append.
             record_type: Bounded non-secret semantic record type.
             record_id: Bounded non-secret opaque record identity.
@@ -417,6 +421,7 @@ class EncryptedAuthorityStore:
                 connection,
                 cluster_id=UUID(str(cluster_identity.cluster_id)),
                 expected_commit_index=expected_commit_index,
+                expected_record_commit_index=expected_record_commit_index,
                 authority_term=authority_term,
                 record_type=record_type,
                 record_id=record_id,
@@ -472,9 +477,31 @@ class EncryptedAuthorityStore:
             AuthorityIntegrityError: Authenticated decryption or validation fails.
         """
 
+        _, payload = self.read_latest_record_payload(record_type, record_id)
+        return payload
+
+    def read_latest_record_payload(
+        self,
+        record_type: str,
+        record_id: str,
+    ) -> tuple[AuthorityRecord, dict[str, object]]:
+        """Read one logical record's metadata and payload atomically.
+
+        Args:
+            record_type: Exact record type.
+            record_id: Exact record identity.
+
+        Returns:
+            Public metadata and decrypted payload from the same journal row.
+
+        Raises:
+            AuthorityNotInitializedError: No matching record exists.
+            AuthorityIntegrityError: Authenticated decryption or validation fails.
+        """
+
         self._validate_record_identity(record_type, record_id)
         cluster_identity = self.cluster_identity()
-        return self._read_latest_payload_for_identity(
+        return self._read_latest_record_payload_for_identity(
             cluster_identity,
             record_type,
             record_id,
@@ -487,6 +514,21 @@ class EncryptedAuthorityStore:
         record_id: str,
     ) -> dict[str, object]:
         """Decrypt one record using already-validated identity metadata."""
+
+        _, payload = self._read_latest_record_payload_for_identity(
+            cluster_identity,
+            record_type,
+            record_id,
+        )
+        return payload
+
+    def _read_latest_record_payload_for_identity(
+        self,
+        cluster_identity: ClusterPublicIdentity,
+        record_type: str,
+        record_id: str,
+    ) -> tuple[AuthorityRecord, dict[str, object]]:
+        """Decrypt one record and retain metadata from the same selected row."""
 
         with closing(self._connect_existing()) as connection:
             row = self._fetch_one(
@@ -544,7 +586,17 @@ class EncryptedAuthorityStore:
                     "authority record must contain string object keys"
                 )
             result[key_name] = value
-        return result
+        record = self._record_from_row(
+            (
+                row[0],
+                row[1],
+                row[2],
+                row[3],
+                row[4],
+                row[7],
+            )
+        )
+        return record, result
 
     def _insert_encrypted_record(
         self,
@@ -552,6 +604,7 @@ class EncryptedAuthorityStore:
         *,
         cluster_id: UUID,
         expected_commit_index: int,
+        expected_record_commit_index: int | None = None,
         authority_term: int,
         record_type: str,
         record_id: str,
@@ -565,6 +618,16 @@ class EncryptedAuthorityStore:
             raise AuthorityCommitConflictError(
                 "authority commit index changed before append"
             )
+        if expected_record_commit_index is not None:
+            latest_record_index = self._latest_record_commit_index(
+                connection,
+                record_type=record_type,
+                record_id=record_id,
+            )
+            if latest_record_index != expected_record_commit_index:
+                raise AuthorityCommitConflictError(
+                    "authority record changed before append"
+                )
         commit_index = current_index + 1
         key_id = self._key_provider.active_key_id
         key = self._load_data_key(key_id=key_id)
@@ -710,6 +773,32 @@ class EncryptedAuthorityStore:
         if row is None:
             return 0
         return EncryptedAuthorityStore._required_int(row[0], "commit_index")
+
+    @staticmethod
+    def _latest_record_commit_index(
+        connection: sqlite3.Connection,
+        *,
+        record_type: str,
+        record_id: str,
+    ) -> int:
+        """Return the newest commit index for one logical record, or zero."""
+
+        row = EncryptedAuthorityStore._fetch_one(
+            connection.execute(
+                """
+                SELECT COALESCE(MAX(commit_index), 0)
+                FROM authority_journal
+                WHERE record_type = ? AND record_id = ?
+                """,
+                (record_type, record_id),
+            )
+        )
+        if row is None:
+            return 0
+        return EncryptedAuthorityStore._required_int(
+            row[0],
+            "record commit index",
+        )
 
     @staticmethod
     def _validate_record_identity(record_type: str, record_id: str) -> None:

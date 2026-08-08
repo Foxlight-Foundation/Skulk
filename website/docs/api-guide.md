@@ -36,6 +36,7 @@ token.
 - Placement and launch: [Placement and Instance Management](#placement-and-instance-management)
 - Store and config: [Model Store Endpoints](#model-store-endpoints) and [Configuration Endpoints](#configuration-endpoints)
 - Debugging: [State, Events, and Tracing](#state-events-and-tracing)
+- Pair a device: [Operator Device Pairing](#operator-device-pairing)
 
 ## First Success Flow
 
@@ -184,6 +185,11 @@ The Ollama group also serves alias paths (`/ollama/api/api/...`,
 - `POST /v1/capabilities/stream`
 - `POST /v1/capabilities/stream/cancel`
 
+### Operator Authentication
+
+- `POST /v1/auth/pairing-sessions/{nonce}/challenge`
+- `POST /v1/auth/pairing-sessions/{nonce}/exchange`
+
 The node diagnostics bundle includes the node's own Tailscale state
 (`tailscale`: running flag, tailnet IP, hostname, MagicDNS name), probed on
 the node the bundle describes, so the per-node cluster endpoint reports the
@@ -192,6 +198,76 @@ request. The probe is best-effort: a node without a working `tailscale` CLI
 reports `running: false`, and `null` marks only an unexpected probe failure.
 
 For the full interactive reference with request/response schemas, see the [API Reference](/api/skulk-api).
+
+## Operator Device Pairing
+
+Operator pairing is explicitly started on the host that will act as the
+designated remote gateway. It does not expose an HTTP endpoint that creates
+pairing sessions:
+
+```bash
+uv run skulk operator pair \
+  --exchange-url https://gateway.example.invalid \
+  --cluster-name "Cluster"
+```
+
+The command initializes the gateway's encrypted local authority store when
+needed, creates one high-entropy session that expires after five minutes, and
+prints a terminal QR code plus the exact `skulk://pair?...` fallback payload.
+The QR contains cluster identity, fingerprint, exchange URL, expiry, and the
+single-use nonce. It never contains an access or refresh credential.
+
+### Create a device challenge
+
+**POST** `/v1/auth/pairing-sessions/{nonce}/challenge`
+
+Parameters:
+
+- `nonce` (path, required): high-entropy capability from the QR package.
+- JSON body `deviceName` (required): operator-visible device label, 1–80
+  characters after whitespace normalization.
+- JSON body `devicePublicKey` (required): unpadded URL-safe base64 containing
+  one raw 32-byte Ed25519 public key.
+
+Behavior:
+
+- accepts only a host-created, unused, unexpired session;
+- binds the proposed device key to the session;
+- returns a random base64url `challenge` and the session `expiresAt`;
+- returns `404` for an unknown nonce, `410` after expiry, `409` after another
+  transition already used the session, `422` for an invalid public key, and
+  `503` on an API node that has not been initialized as a gateway.
+
+The device signs the domain-separated message defined by
+`pairing_signature_message` in `src/skulk/operator/pairing.py`. Clients should
+consume the generated contract rather than reconstructing the message from
+this prose.
+
+### Exchange device proof
+
+**POST** `/v1/auth/pairing-sessions/{nonce}/exchange`
+
+Parameters:
+
+- `nonce` (path, required): the same pairing capability.
+- JSON body `signature` (required): unpadded URL-safe base64 Ed25519 signature
+  produced by the challenged device key.
+
+Behavior:
+
+- verifies possession of the exact device key bound during the challenge;
+- atomically consumes the session;
+- returns a stable `deviceId`, the validated cluster identity, a 15-minute
+  opaque access token, a 30-day rotating refresh token, their expiries, and the
+  granted canonical API scopes;
+- stores only encrypted session/device state and one-way token digests;
+- never returns either credential again;
+- returns `401` for an invalid proof, `409` for reuse or an out-of-order
+  exchange, `410` after expiry, and `503` on a non-designated node.
+
+These two endpoints are the complete pre-credential HTTP surface. The tokens
+are not yet accepted by general API routes in this increment; canonical API
+authentication, refresh rotation, and revocation are the next pairing slice.
 
 ## OpenAI Chat Completions
 
