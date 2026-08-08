@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import errno
 import json
+import logging
 import os
 import shutil
 from collections.abc import Callable, Iterator
@@ -49,6 +50,8 @@ lesson); an optional memory subsystem must never be what fills the last byte.
 _MANIFEST_NAME = "MANIFEST.json"
 _TOMBSTONES_NAME = "tombstones.jsonl"
 _STORE_SCHEMA_VERSION = 1
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def encode_vector(vector: Vector) -> str:
@@ -112,6 +115,7 @@ class ContentStore:
     _appends_since_sync: int = field(default=0, init=False)
     _degraded: bool = field(default=False, init=False)
     _tails_repaired: set[str] = field(default_factory=set, init=False)
+    _corrupt_lines_dropped: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         self.root = Path(self.root)
@@ -289,6 +293,7 @@ class ContentStore:
         try:
             segment = self._active_segment()
             self._repair_torn_tail(segment)
+            fresh = not segment.exists()
             with segment.open("a", encoding="utf-8") as handle:
                 handle.write(line)
                 handle.flush()
@@ -296,6 +301,11 @@ class ContentStore:
                 if self._appends_since_sync >= self.fsync_every:
                     os.fsync(handle.fileno())
                     self._appends_since_sync = 0
+            if fresh:
+                # A new file's directory entry is not durable until the
+                # directory itself is fsynced; without this, a power loss can
+                # unlink a segment whose appends were already acknowledged.
+                self._fsync_directory()
         except OSError as error:
             self._translate_out_of_space(error)
             raise
@@ -307,10 +317,15 @@ class ContentStore:
         path = self.root / _TOMBSTONES_NAME
         try:
             self._repair_torn_tail(path)
+            fresh = not path.exists()
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(entry)
                 handle.flush()
                 os.fsync(handle.fileno())
+            if fresh:
+                # Forgetting is a promise; the first tombstone's directory
+                # entry must survive power loss like every later one.
+                self._fsync_directory()
         except OSError as error:
             self._translate_out_of_space(error)
             raise
@@ -322,14 +337,17 @@ class ContentStore:
         if not path.exists():
             return set()
         ids: set[str] = set()
-        with path.open("r", encoding="utf-8") as handle:
+        # Binary mode: a crash can tear a line mid-multibyte-character, and
+        # text-mode iteration would raise UnicodeDecodeError before any
+        # per-line tolerance could run. json.loads accepts bytes directly.
+        with path.open("rb") as handle:
             for raw in handle:
                 line = raw.strip()
                 if not line:
                     continue
                 try:
                     entry = json.loads(line)  # pyright: ignore[reportAny] - json.loads stub gap
-                except json.JSONDecodeError:
+                except ValueError:
                     continue  # torn tail on the tombstone file: skip, never fatal
                 if isinstance(entry, dict):
                     span_id = entry.get("span_id")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
@@ -337,31 +355,70 @@ class ContentStore:
                         ids.add(span_id)
         return ids
 
-    def scan(self, *, include_tombstoned: bool = False) -> Iterator[SpanRecord]:
-        """Iterate records in append order, dropping torn tails silently.
+    @property
+    def corrupt_lines_dropped(self) -> int:
+        """Mid-segment lines dropped as unparseable across this store's reads.
 
-        A partial final line (crash mid-append) fails JSON parsing and is
-        skipped; every complete line before it is preserved. This is the
-        crash-safety contract the gate tests pin.
+        The expected torn tail (last line of the last segment) does not
+        count; anything else here means bytes rotted underneath us and was
+        logged when skipped.
+        """
+        return self._corrupt_lines_dropped
+
+    def scan(self, *, include_tombstoned: bool = False) -> Iterator[SpanRecord]:
+        """Iterate records in append order; never fatal on damaged lines.
+
+        A partial final line in the final segment is the expected crash
+        artifact and is dropped silently. Corruption anywhere else is not
+        expected (segments are append-only and never mutated in place), so
+        it is still skipped (reads must keep working) but logged loudly and
+        counted in :attr:`corrupt_lines_dropped`: silence here would let
+        compaction quietly persist the loss.
         """
         dead: set[str] = set() if include_tombstoned else self._tombstoned()
-        for segment in self._segments():
-            if not segment.exists():
-                continue
+        segments = [segment for segment in self._segments() if segment.exists()]
+        for segment in segments:
+            final_segment = segment == segments[-1]
             # Stream line by line so a full 64 MiB segment never has to sit
-            # in memory at once (the DiskEventLog read posture).
-            with segment.open("r", encoding="utf-8") as handle:
-                for raw in handle:
-                    line = raw.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = SpanRecord.model_validate_json(line)
-                    except ValueError:
-                        continue  # torn or corrupt line: drop, never fatal
-                    if record.span_id in dead:
-                        continue
-                    yield record
+            # in memory at once (the DiskEventLog read posture). Binary mode:
+            # a tear inside a multibyte character would raise
+            # UnicodeDecodeError during text-mode iteration, before any
+            # per-line tolerance could run; pydantic validates bytes directly.
+            with segment.open("rb") as handle:
+                pending: tuple[int, bytes] | None = None
+                for number, raw in enumerate(handle, start=1):
+                    if pending is not None:
+                        record = self._parse_line(segment, pending, is_tail=False)
+                        if record is not None and record.span_id not in dead:
+                            yield record
+                    pending = (number, raw)
+                if pending is not None:
+                    record = self._parse_line(
+                        segment, pending, is_tail=final_segment
+                    )
+                    if record is not None and record.span_id not in dead:
+                        yield record
+
+    def _parse_line(
+        self, segment: Path, numbered: tuple[int, bytes], *, is_tail: bool
+    ) -> SpanRecord | None:
+        number, raw = numbered
+        line = raw.strip()
+        if not line:
+            return None
+        try:
+            return SpanRecord.model_validate_json(line)
+        except ValueError:
+            if not is_tail:
+                self._corrupt_lines_dropped += 1
+                _LOGGER.warning(
+                    "memory store dropped unparseable record at %s:%d "
+                    "(mid-segment corruption; reads continue, but this line "
+                    "is lost and compaction will not carry it)",
+                    segment.name,
+                    number,
+                )
+            return None
 
     def get(self, span_id: str) -> SpanRecord | None:
         """Fetch one live record by id (linear; the index owns fast lookup)."""
@@ -436,21 +493,32 @@ class ContentStore:
         """Persist the frozen separation stage for exact cue-space rebuilds."""
         self._refuse_writes_if_degraded()
         path = self.root / f"whitener-{whitener.version}.npz"
+        scratch = self.root / (path.name + ".tmp")
         try:
-            np.savez(
-                path,
-                mu=whitener.mu,
-                matrix=whitener.matrix,
-                alpha=np.float64(whitener.alpha),
-                shrinkage=np.float64(whitener.shrinkage),
-                embedding_model_id=np.str_(whitener.embedding_model_id),
-                version=np.str_(whitener.version),
-            )
+            # Write to a scratch handle and fsync before the rename, then
+            # fsync the directory: the manifest update below is durable, so
+            # the file it names must be durable first, or a power loss leaves
+            # the manifest pointing at a missing or truncated archive.
+            with scratch.open("wb") as handle:
+                np.savez(
+                    handle,
+                    mu=whitener.mu,
+                    matrix=whitener.matrix,
+                    alpha=np.float64(whitener.alpha),
+                    shrinkage=np.float64(whitener.shrinkage),
+                    embedding_model_id=np.str_(whitener.embedding_model_id),
+                    version=np.str_(whitener.version),
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(scratch, path)
+            self._fsync_directory()
             manifest = self._read_manifest()
             manifest["whitener_version"] = whitener.version
             manifest["embedding_model_id"] = whitener.embedding_model_id
             self._write_manifest(manifest)
         except OSError as error:
+            scratch.unlink(missing_ok=True)
             self._translate_out_of_space(error)
             raise
         return path

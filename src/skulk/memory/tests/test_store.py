@@ -274,6 +274,37 @@ def test_compact_never_reuses_an_old_segment_name(tmp_path: Path) -> None:
     assert [r.span_id for r in store2.scan()][-1] == "c-post"
 
 
+def test_torn_multibyte_tail_is_dropped_not_fatal(tmp_path: Path) -> None:
+    """A tear inside a multibyte UTF-8 character must not abort the scan."""
+    store, records = _seeded_store(tmp_path, 3)
+    segment = next(p for p in (tmp_path / "memory").glob("spans-*.jsonl"))
+    with segment.open("ab") as handle:
+        handle.write(b'{"span_id": "torn", "text": "caf\xc3')
+    assert [r.span_id for r in store.scan()] == [r.span_id for r in records]
+
+    # And the repair path handles it too: the next append truncates cleanly.
+    reopened = ContentStore(root=tmp_path / "memory")
+    keys = random_vectors(1, DIM, seed=23)
+    values = random_vectors(1, DIM, seed=24)
+    reopened.append(_record("s-after-tear", keys[0], values[0]))
+    assert [r.span_id for r in reopened.scan()][-1] == "s-after-tear"
+
+
+def test_mid_segment_corruption_is_loud_but_not_fatal(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    store, records = _seeded_store(tmp_path, 4)
+    segment = next(p for p in (tmp_path / "memory").glob("spans-*.jsonl"))
+    lines = segment.read_bytes().splitlines(keepends=True)
+    corrupted = lines[:2] + [b"garbage not json\n"] + lines[2:]
+    segment.write_bytes(b"".join(corrupted))
+    with caplog.at_level("WARNING", logger="skulk.memory.store"):
+        survivors = [r.span_id for r in store.scan()]
+    assert survivors == [r.span_id for r in records]
+    assert store.corrupt_lines_dropped == 1
+    assert any("mid-segment corruption" in message for message in caplog.messages)
+
+
 def test_whitener_round_trip_preserves_cue_space(tmp_path: Path) -> None:
     store = ContentStore(root=tmp_path / "memory")
     corpus = np.random.default_rng(3).normal(size=(32, 16)).astype(np.float32)
