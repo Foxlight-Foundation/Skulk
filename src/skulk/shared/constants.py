@@ -156,6 +156,45 @@ SKULK_MAX_CHUNK_SIZE = 512 * 1024
 
 SKULK_CUSTOM_MODEL_CARDS_DIR = SKULK_DATA_HOME / "custom_model_cards"
 
+# Signed external model-card registry. The transition release prefers this
+# catalog but retains bundled cards as a fallback until registry qualification
+# and offline behavior have been observed across the heterogeneous fleet.
+SKULK_MODEL_REGISTRY_ENABLED = (
+    _env("SKULK_MODEL_REGISTRY_ENABLED", "true") or "false"
+).lower() == "true"
+SKULK_MODEL_REGISTRY_URL = _env(
+    "SKULK_MODEL_REGISTRY_URL", "https://registry.foxlight.ai/"
+) or "https://registry.foxlight.ai/"
+_MODEL_REGISTRY_CACHE_DIR_ENV = _env("SKULK_MODEL_REGISTRY_CACHE_DIR")
+SKULK_MODEL_REGISTRY_CACHE_DIR = (
+    SKULK_CACHE_HOME / "model_registry"
+    if _MODEL_REGISTRY_CACHE_DIR_ENV is None
+    else Path(_MODEL_REGISTRY_CACHE_DIR_ENV).expanduser()
+)
+SKULK_MODEL_REGISTRY_REFRESH_SECONDS = float(
+    _env("SKULK_MODEL_REGISTRY_REFRESH_SECONDS", "60") or "60"
+)
+SKULK_MODEL_REGISTRY_TIMEOUT_SECONDS = int(
+    _env("SKULK_MODEL_REGISTRY_TIMEOUT_SECONDS", "5") or "5"
+)
+SKULK_MODEL_REGISTRY_MAX_STALE_DAYS = int(
+    _env("SKULK_MODEL_REGISTRY_MAX_STALE_DAYS", "30") or "30"
+)
+if SKULK_MODEL_REGISTRY_REFRESH_SECONDS <= 0:
+    raise ValueError("SKULK_MODEL_REGISTRY_REFRESH_SECONDS must be greater than 0")
+if SKULK_MODEL_REGISTRY_TIMEOUT_SECONDS <= 0:
+    raise ValueError("SKULK_MODEL_REGISTRY_TIMEOUT_SECONDS must be greater than 0")
+if SKULK_MODEL_REGISTRY_MAX_STALE_DAYS < 0:
+    raise ValueError("SKULK_MODEL_REGISTRY_MAX_STALE_DAYS cannot be negative")
+_MODEL_REMOTE_CODE_APPROVALS_PATH_ENV = _env(
+    "SKULK_MODEL_REMOTE_CODE_APPROVALS_PATH"
+)
+SKULK_MODEL_REMOTE_CODE_APPROVALS_PATH = (
+    SKULK_CONFIG_HOME / "model_remote_code_approvals.json"
+    if _MODEL_REMOTE_CODE_APPROVALS_PATH_ENV is None
+    else Path(_MODEL_REMOTE_CODE_APPROVALS_PATH_ENV).expanduser()
+)
+
 # Managed engine binaries (#614 Phase 3): pinned prebuilt inference-engine
 # builds provisioned by skulk.provisioning live here, keyed by engine and
 # build tag (e.g. engines/llama-server/b10068/vulkan/...). SKULK_LLAMA_SERVER_BIN

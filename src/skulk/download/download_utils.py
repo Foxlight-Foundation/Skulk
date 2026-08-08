@@ -33,6 +33,7 @@ from skulk.download.huggingface_utils import (
 )
 from skulk.shared.constants import SKULK_MODELS_DIR
 from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.models.remote_code_approval import require_remote_code_approval
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.downloads import (
@@ -370,7 +371,10 @@ def companion_download_specs(
         )
 
     specs: list[tuple[PipelineShardMetadata, list[str], bool]] = []
-    if model_card.vision and model_card.vision.weights_repo != str(model_card.model_id):
+    if (
+        model_card.vision
+        and model_card.vision.weights_repo != str(model_card.artifact_repository)
+    ):
         specs.append(
             (
                 _bare_shard(model_card.vision.weights_repo),
@@ -408,7 +412,7 @@ def companion_download_specs(
     if (
         runtime
         and runtime.served_spec_draft_repo
-        and runtime.served_spec_draft_repo != str(model_card.model_id)
+        and runtime.served_spec_draft_repo != str(model_card.artifact_repository)
         and runtime.served_spec_draft_file
     ):
         # Just the pinned draft file -- a draft GGUF is single-file and is not a
@@ -429,7 +433,7 @@ def same_repo_served_draft_files(model_card: ModelCard) -> list[str]:
     runtime = model_card.runtime
     if (
         runtime is not None
-        and runtime.served_spec_draft_repo == str(model_card.model_id)
+        and runtime.served_spec_draft_repo == str(model_card.artifact_repository)
         and runtime.served_spec_draft_file
     ):
         return [runtime.served_spec_draft_file]
@@ -458,7 +462,10 @@ def model_companions_present_on_disk(
     model complete after ensure_shard returns, so the gate cannot loop
     within a session.
     """
-    if model_card.vision and model_card.vision.weights_repo != str(model_card.model_id):
+    if (
+        model_card.vision
+        and model_card.vision.weights_repo != str(model_card.artifact_repository)
+    ):
         vision_repo = ModelId(model_card.vision.weights_repo)
         # Probe BOTH search roots: SKULK_MODELS_PATH (staging/store) and
         # SKULK_MODELS_DIR (where download_shard writes) — a vision repo
@@ -496,14 +503,19 @@ def model_companions_present_on_disk(
     # base's directory or live in its own repo dir).
     if runtime.served_spec_draft_repo and runtime.served_spec_draft_file:
         try:
+            draft_shares_repository = (
+                runtime.served_spec_draft_repo
+                == str(model_card.artifact_repository)
+            )
             draft_revision = (
-                model_card.source_revision
-                if runtime.served_spec_draft_repo == str(model_card.model_id)
-                else None
+                model_card.source_revision if draft_shares_repository else None
             )
-            draft_dir = build_model_path(
-                ModelId(runtime.served_spec_draft_repo), draft_revision
+            draft_model_id = (
+                model_card.model_id
+                if draft_shares_repository
+                else ModelId(runtime.served_spec_draft_repo)
             )
+            draft_dir = build_model_path(draft_model_id, draft_revision)
         except FileNotFoundError:
             return False
         if not (draft_dir / runtime.served_spec_draft_file).is_file():
@@ -1327,6 +1339,7 @@ async def download_shard(
     on_connection_lost: Callable[[], None] = lambda: None,
     capacity_preflight: DownloadCapacityPreflight | None = None,
 ) -> tuple[Path, RepoDownloadProgress]:
+    require_remote_code_approval(shard.model_card)
     if not skip_download:
         logger.debug(f"Downloading {shard.model_card.model_id=}")
 
@@ -1376,7 +1389,7 @@ async def download_shard(
     all_start_time = time.time()
     try:
         file_list = await fetch_file_list_with_cache(
-            shard.model_card.model_id,
+            shard.model_card.artifact_repository,
             revision,
             recursive=True,
             skip_internet=skip_internet,
@@ -1533,7 +1546,7 @@ async def download_shard(
     async def download_with_semaphore(file: FileListEntry) -> None:
         async with semaphore:
             await download_file_with_retry(
-                shard.model_card.model_id,
+                shard.model_card.artifact_repository,
                 revision,
                 file.path,
                 target_dir,

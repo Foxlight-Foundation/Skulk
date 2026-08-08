@@ -59,7 +59,9 @@ node in a cluster must run the same Skulk version.
 ### Identity and size
 
 - `model_id`
-  - Hugging Face / MLX model identifier
+  - selectable artifact alias; legacy and bundled cards normally use the Hugging Face repository id, while registry cards may give two exact files or quants from one repository different aliases
+- `source_repository`
+  - optional upstream Hugging Face repository containing the bytes; defaults to `model_id` and is set by the registry when the selectable alias differs from the byte origin
 - `storage_size`
   - total model size used for store/download/placement planning
 - `n_layers`
@@ -82,11 +84,14 @@ node in a cluster must run the same Skulk version.
 - `tasks`
   - supported task families such as `TextGeneration`, `TextEmbedding`, image tasks, `TextToSpeech`, `SpeechToText`, or `SpeechTranslation`
 - `trust_remote_code`
-  - whether the loader may enable remote-code behavior for this model
+  - whether the artifact requires repository-supplied Python; for signed-registry cards this remains model truth but execution is blocked until the immutable `registry_card_id` is approved locally on every serving node
 - `uses_cfg`
   - whether the model uses classifier-free guidance (relevant to some image/diffusion models)
 
 ### Catalog metadata
+
+- `registry_card_id` / `registry_snapshot_id`
+  - runtime provenance attached by the verified external catalog; these are absent from bundled and custom cards
 
 - `family`
   - coarse family label such as `gemma`, `qwen`, `deepseek`

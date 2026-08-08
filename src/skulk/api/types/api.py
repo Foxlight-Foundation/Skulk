@@ -122,6 +122,41 @@ class ModelListModel(BaseModel):
     family: str = Field(default="")
     quantization: str = Field(default="")
     base_model: str = Field(default="")
+    artifact_repository: str = Field(
+        default="",
+        description=(
+            "Upstream repository containing the exact artifact; distinct from id "
+            "when multiple registry cards select files from one repository."
+        ),
+    )
+    artifact_file: str | None = Field(
+        default=None,
+        description="Exact selected repository file for file-addressed artifacts.",
+    )
+    registry_card_id: str | None = Field(
+        default=None,
+        pattern=r"^card_[a-z2-7]{52}$",
+        description="Immutable signed-registry card id, or null for local cards.",
+    )
+    registry_snapshot_id: str | None = Field(
+        default=None,
+        description="Signed snapshot that supplied this card, or null for local cards.",
+    )
+    catalog_source: Literal["registry", "bundled", "custom"] = Field(
+        default="bundled",
+        description="Trust and precedence source for this catalog entry.",
+    )
+    remote_code_approval_required: bool = Field(
+        default=False,
+        description=(
+            "Whether this signed registry artifact executes repository Python and "
+            "therefore requires an explicit approval on each serving node."
+        ),
+    )
+    remote_code_approved_on_this_node: bool = Field(
+        default=False,
+        description="Whether the required immutable card id is approved locally.",
+    )
     source_revision: str | None = Field(
         default=None,
         pattern=r"^[0-9a-f]{40}$",
@@ -162,6 +197,15 @@ class ModelListModel(BaseModel):
             "Request-specific options such as tools may change some resolved values."
         ),
     )
+
+
+class RemoteCodeApprovalView(BaseModel):
+    """Node-local approval state for one immutable signed-registry card."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    card_id: str = Field(pattern=r"^card_[a-z2-7]{52}$")
+    approved_on_this_node: bool
 
 
 class ResolvedModelCapabilities(BaseModel):

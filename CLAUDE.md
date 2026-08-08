@@ -322,7 +322,9 @@ The system uses event sourcing for state management:
     honoring them (searching with intent-plus-failed-nodes but stamping
     only the original intent, #658)
 - `src/skulk/shared/models/`: persisted model metadata and capability resolution
-  - `model_cards.py`: declarative model cards, including optional advanced capability sections; machine-generated custom cards carry `generator_revision`, and a stamped card older than `CARD_GENERATOR_REVISION` loses override power against the bundled card for the same id (unstamped = hand-authored, keeps #652 override)
+  - `model_cards.py`: declarative model cards plus remote-first signed-catalog loading; registry artifact aliases are distinct from `source_repository`, bundled cards are transition fallback, and custom cards remain final overrides
+  - `registry.py`: python-tuf client, embedded root trust, serialized 60-second refresh, and hash-bound last-known-good catalog
+  - `remote_code_approval.py`: owner-only node-local immutable-card approvals enforced before download and runner startup
   - `capabilities.py`: normalized runtime capability profiles derived from model cards plus conservative family defaults
 - `src/skulk/operator/`: stable operator identity, deterministic quorum
   certification, crash-fault consensus and recovery, bounded dormant proposal
@@ -390,6 +392,16 @@ full commit hash. Metadata probes, direct downloads, model-store registry
 entries, and worker staging must preserve that revision. Never collapse a
 pinned artifact back onto mutable `main`, and never treat a staged directory
 from another revision as a cache hit.
+
+The external card registry is the curated catalog source. Only separately
+runtime-qualified candidates are published; structural schema checks do not
+mean “supported.” Skulk verifies its static TUF feed from the package-embedded
+root, refreshes at most every 60 seconds, uses a hash-bound 30-day
+last-known-good cache during outages, and retains bundled cards only as the
+transition fallback. `model_id` may be an artifact alias while
+`source_repository` is the byte origin. Registry cards with
+`trust_remote_code=true` require an immutable-card approval on every serving
+node; registry publication cannot grant it.
 TTS cards may declare `audio.voices`, optional ordered `audio.voice_catalog`
 display/preferred-language metadata, optional checksummed bundled
 `reference_profile` identifiers, and a validated `audio.default_voice`, which

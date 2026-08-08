@@ -184,6 +184,7 @@ from skulk.api.types import (
     PurgeStagingRequest,
     PurgeStagingResponse,
     ReasoningCapabilitySection,
+    RemoteCodeApprovalView,
     ResolvedModelCapabilities,
     RuntimeCapabilitySection,
     StartDownloadParams,
@@ -303,6 +304,9 @@ from skulk.shared.models.model_cards import (
     get_card,
     get_model_cards,
     preserve_generated_card_constraints,
+)
+from skulk.shared.models.remote_code_approval import (
+    REMOTE_CODE_APPROVALS,
 )
 from skulk.shared.tracing import (
     TraceEvent,
@@ -1797,6 +1801,33 @@ class API:
             summary="List known models",
             description="OpenAI-style model listing endpoint backed by Skulk's model catalog rather than only currently running instances.",
         )(self.get_models)
+        self.app.get(
+            "/models/remote-code-approvals",
+            tags=["Models"],
+            summary="List remote-code approvals on this node",
+            description=(
+                "Lists immutable signed-registry card ids approved to execute "
+                "repository Python on this node. Approvals are deliberately "
+                "node-local and must be repeated on every serving node."
+            ),
+        )(self.list_remote_code_approvals)
+        self.app.post(
+            "/models/remote-code-approvals/{card_id}",
+            tags=["Models"],
+            summary="Approve registry remote code on this node",
+            description=(
+                "Approves one immutable signed-registry card to download and execute "
+                "repository Python on this node only."
+            ),
+        )(self.approve_remote_code)
+        self.app.delete(
+            "/models/remote-code-approvals/{card_id}",
+            tags=["Models"],
+            summary="Revoke registry remote code on this node",
+            description=(
+                "Revokes node-local execution approval for one immutable registry card."
+            ),
+        )(self.revoke_remote_code)
         self.app.post(
             "/models/add",
             tags=["Models"],
@@ -7116,8 +7147,16 @@ class API:
         return tags
 
     @staticmethod
-    def _model_list_entry(card: "ModelCard") -> ModelListModel:
+    def _model_list_entry(
+        card: "ModelCard",
+        approved_remote_code_card_ids: frozenset[str] | None = None,
+    ) -> ModelListModel:
         """Build the public model-list representation for one model card."""
+        remote_code_approval_required = (
+            card.registry_card_id is not None and card.trust_remote_code
+        )
+        if remote_code_approval_required and approved_remote_code_card_ids is None:
+            approved_remote_code_card_ids = REMOTE_CODE_APPROVALS.approved_card_ids()
         resolved_profile = resolve_model_capability_profile(
             card.model_id,
             model_card=card,
@@ -7129,7 +7168,7 @@ class API:
         )
         return ModelListModel(
             id=card.model_id,
-            hugging_face_id=card.model_id,
+            hugging_face_id=card.artifact_repository,
             name=card.model_id.short(),
             description=description,
             tags=API._model_tags(card),
@@ -7140,6 +7179,22 @@ class API:
             family=card.family,
             quantization=card.quantization,
             base_model=card.base_model,
+            artifact_repository=card.artifact_repository,
+            artifact_file=card.gguf_file,
+            registry_card_id=card.registry_card_id,
+            registry_snapshot_id=card.registry_snapshot_id,
+            catalog_source=(
+                "custom"
+                if card.is_custom
+                else "registry"
+                if card.registry_card_id is not None
+                else "bundled"
+            ),
+            remote_code_approval_required=remote_code_approval_required,
+            remote_code_approved_on_this_node=(
+                remote_code_approval_required
+                and card.registry_card_id in (approved_remote_code_card_ids or ())
+            ),
             source_revision=card.source_revision,
             capabilities=card.capabilities,
             context_length=card.context_length,
@@ -7165,7 +7220,49 @@ class API:
                         downloaded_model_ids.add(dl.shard_metadata.model_card.model_id)
             cards = [c for c in cards if c.model_id in downloaded_model_ids]
 
-        return ModelList(data=[self._model_list_entry(card) for card in cards])
+        approved_remote_code_card_ids = REMOTE_CODE_APPROVALS.approved_card_ids()
+        return ModelList(
+            data=[
+                self._model_list_entry(card, approved_remote_code_card_ids)
+                for card in cards
+            ]
+        )
+
+    async def list_remote_code_approvals(self) -> list[RemoteCodeApprovalView]:
+        """List immutable registry card ids approved on this API node."""
+        return [
+            RemoteCodeApprovalView(card_id=card_id, approved_on_this_node=True)
+            for card_id in sorted(REMOTE_CODE_APPROVALS.approved_card_ids())
+        ]
+
+    async def approve_remote_code(self, card_id: str) -> RemoteCodeApprovalView:
+        """Approve one existing remote-code registry card on this API node."""
+        if not re.fullmatch(r"card_[a-z2-7]{52}", card_id):
+            raise HTTPException(status_code=422, detail="Invalid registry card id")
+        card = next(
+            (
+                candidate
+                for candidate in await get_model_cards()
+                if candidate.registry_card_id == card_id
+            ),
+            None,
+        )
+        if card is None:
+            raise HTTPException(status_code=404, detail="Registry card not found")
+        if not card.trust_remote_code:
+            raise HTTPException(
+                status_code=409,
+                detail="Registry card does not request repository-code execution",
+            )
+        REMOTE_CODE_APPROVALS.approve(card_id)
+        return RemoteCodeApprovalView(card_id=card_id, approved_on_this_node=True)
+
+    async def revoke_remote_code(self, card_id: str) -> RemoteCodeApprovalView:
+        """Revoke one immutable registry card approval on this API node."""
+        if not re.fullmatch(r"card_[a-z2-7]{52}", card_id):
+            raise HTTPException(status_code=422, detail="Invalid registry card id")
+        REMOTE_CODE_APPROVALS.revoke(card_id)
+        return RemoteCodeApprovalView(card_id=card_id, approved_on_this_node=False)
 
     async def add_custom_model(self, payload: AddCustomModelParams) -> ModelListModel:
         """Fetch a Hugging Face model card, optionally pinning one GGUF file."""

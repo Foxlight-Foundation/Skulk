@@ -179,6 +179,17 @@ const InStoreChip = styled.span`
   padding: 2px 8px;
 `;
 
+const RegistryChip = styled.span`
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.healthy};
+  border: 1px solid ${({ theme }) => theme.colors.borderLight};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  padding: 1px 6px;
+`;
+
 const StatusDot = styled.span<{ $class: string }>`
   width: 7px;
   height: 7px;
@@ -289,6 +300,22 @@ function ModelGroupInfo({ group, title }: { group: ModelGroup; title: string }) 
           <>
             <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.family', 'Family')}</span>
             <span>{v.family}</span>
+          </>
+        )}
+        <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.catalogSource', 'Catalog source')}</span>
+        <span>{v.catalog_source === 'registry' ? t('modelInfo.signedRegistry', 'Signed registry') : (v.catalog_source ?? 'bundled')}</span>
+        {v.registry_card_id && (
+          <>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.registryCard', 'Registry card')}</span>
+            <code title={v.registry_card_id}>{`${v.registry_card_id.slice(0, 15)}…`}</code>
+          </>
+        )}
+        {v.remote_code_approval_required && (
+          <>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.remoteCode', 'Repository code')}</span>
+            <span style={{ color: v.remote_code_approved_on_this_node ? theme.colors.healthy : theme.colors.warning }}>
+              {v.remote_code_approved_on_this_node ? t('modelInfo.approvedHere', 'Approved on this node') : t('modelInfo.approvalRequired', 'Approval required on this node')}
+            </span>
           </>
         )}
         <span style={{ color: theme.colors.textMuted }}>{t('modelPickerGroup.variants', 'Variants')}</span>
@@ -447,6 +474,9 @@ export function ModelPickerGroup({
             {uniformFormat && <QuantBadge>{uniformFormat}</QuantBadge>}
             {singleVariant?.quantization && (
               <QuantBadge>{singleVariant.quantization}</QuantBadge>
+            )}
+            {variants.every((variant) => variant.catalog_source === 'registry') && (
+              <RegistryChip>{t('modelInfo.signedRegistry', 'Signed registry')}</RegistryChip>
             )}
             <MetaText>
               {[

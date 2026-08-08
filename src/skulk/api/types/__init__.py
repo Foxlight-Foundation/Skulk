@@ -70,6 +70,7 @@ from .api import PromptTokensDetails as PromptTokensDetails
 from .api import PurgeStagingRequest as PurgeStagingRequest
 from .api import PurgeStagingResponse as PurgeStagingResponse
 from .api import ReasoningCapabilitySection as ReasoningCapabilitySection
+from .api import RemoteCodeApprovalView as RemoteCodeApprovalView
 from .api import ResolvedModelCapabilities as ResolvedModelCapabilities
 from .api import RuntimeCapabilitySection as RuntimeCapabilitySection
 from .api import StartDownloadParams as StartDownloadParams

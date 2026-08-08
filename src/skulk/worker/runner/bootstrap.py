@@ -14,6 +14,7 @@ from skulk.shared.models.model_cards import (
     RuntimeCapabilityCardConfig,
     card_serves_speech,
 )
+from skulk.shared.models.remote_code_approval import require_remote_code_approval
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.diagnostics import (
     RunnerDiagnosticContext,
@@ -408,6 +409,7 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
         resolve_node_engine,
     )
     shard = bound_instance.bound_shard
+    require_remote_code_approval(shard.model_card)
     if shard.resolved_backend is not None:
         return engine_of(shard.resolved_backend)
 

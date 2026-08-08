@@ -2993,6 +2993,15 @@ wheels = [
 ]
 
 [[package]]
+name = "securesystemslib"
+version = "1.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b8/11/9623c61604f9b8955248d43fc6a75658bb687c0d3ab65b032b2e43613bd5/securesystemslib-1.4.0.tar.gz", hash = "sha256:faea87be0f9c4b4277a5fa1b54bf9bfd807be9a94ab11be6c557dc8b75c43285", size = 934332, upload-time = "2026-05-27T08:01:53.21Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f9/29/3ff76b9d90ce4482dc8e8d216dc3a6b6d0c934c52f68b0738e2c99ca685f/securesystemslib-1.4.0-py3-none-any.whl", hash = "sha256:a0743a3d978cf26e98a70a57e3fbd5a18e0a74c20cabe615f6a55b02ef0272b3", size = 871457, upload-time = "2026-05-27T08:01:51.093Z" },
+]
+
+[[package]]
 name = "sentencepiece"
 version = "0.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3088,6 +3097,7 @@ dependencies = [
     { name = "tomlkit", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "torchvision", marker = "sys_platform == 'darwin'" },
     { name = "transformers", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "tuf", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "types-aiofiles", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "types-pyyaml", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "webrtcvad-wheels", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -3149,6 +3159,7 @@ requires-dist = [
     { name = "tomlkit", specifier = ">=0.14.0" },
     { name = "torchvision", marker = "sys_platform == 'darwin'", specifier = "==0.26.0" },
     { name = "transformers", specifier = ">=5.5.0,<6.0.0" },
+    { name = "tuf", specifier = ">=6,<7" },
     { name = "types-aiofiles", specifier = ">=24.1.0.20250708" },
     { name = "types-pyyaml", specifier = ">=6.0.12" },
     { name = "webrtcvad-wheels", specifier = ">=2.0.14,<3" },
@@ -3512,6 +3523,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/53/a3/1585216310e344e8102c22482f6060c7a6ea0322b63e026372e6dcefcfd6/truststore-0.10.4.tar.gz", hash = "sha256:9d91bd436463ad5e4ee4aba766628dd6cd7010cf3e2461756b3303710eebc301", size = 26169, upload-time = "2025-08-12T18:49:02.73Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/19/97/56608b2249fe206a67cd573bc93cd9896e1efb9e98bce9c163bcdc704b88/truststore-0.10.4-py3-none-any.whl", hash = "sha256:adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981", size = 18660, upload-time = "2025-08-12T18:49:01.46Z" },
+]
+
+[[package]]
+name = "tuf"
+version = "6.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "securesystemslib", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "urllib3", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/25/b5/377a566dfa8286b2ca27ddbc792ab1645de0b6c65dd5bf03027b3bf8cc8f/tuf-6.0.0.tar.gz", hash = "sha256:9eed0f7888c5fff45dc62164ff243a05d47fb8a3208035eb268974287e0aee8d", size = 271268, upload-time = "2025-03-11T10:48:45.489Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6b/3d/161ab4fec446048707cb13e8ba22220e05a6c4a6587d3631feeb5715037e/tuf-6.0.0-py3-none-any.whl", hash = "sha256:458f663a233d95cc76dde0e1a3d01796516a05ce2781fefafebe037f7729601a", size = 54774, upload-time = "2025-03-11T10:48:44.188Z" },
 ]
 
 [[package]]
