@@ -309,6 +309,21 @@ npm run test
 npm run build
 ```
 
+The joined operator-access qualification is opt-in because it executes a real
+`paired-websocket-service` binary from the sibling `skulk-relay` repository.
+It starts an isolated loopback relay and a minimal relay-only Skulk API with
+temporary authority state; it does not discover, join, or mutate a fleet:
+
+```bash
+SKULK_PAIRED_RELAY_BINARY=/absolute/path/to/paired-websocket-service \
+uv run pytest src/skulk/operator/tests/test_joined_relay_integration.py
+```
+
+The test proves QR package generation, Ed25519 device proof, credential
+exchange, authenticated canonical `/state`, token rotation, paired-device
+listing, revocation, and rejection of revoked credentials through the actual
+opaque carrier and pinned inner TLS connection.
+
 The live vision test is deliberately explicit because it places a real image
 through the built-in dashboard and a running model. Provide the dashboard URL,
 the exact mounted model ID, and a local PNG fixture:
