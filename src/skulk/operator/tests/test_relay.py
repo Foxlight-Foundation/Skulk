@@ -20,8 +20,8 @@ from aiohttp import web
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import skulk.operator.cli as operator_cli
 from skulk.operator.authority import EncryptedAuthorityStore
-from skulk.operator.cli import main as operator_cli_main
 from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
 from skulk.operator.pairing import (
     OperatorPairingService,
@@ -98,7 +98,24 @@ def test_relay_configuration_is_encrypted_and_returned_once_with_pairing(
     assert provisioning.app_carrier_credential.encode("ascii") not in authority_bytes
     assert provisioning.gateway_carrier_credential.encode("ascii") not in authority_bytes
 
-    package = service.create_session(exchange_url="https://example.invalid")
+    package = service.create_session()
+    assert package.version == 2
+    assert package.remote_access is not None
+    assert package.remote_access.app_carrier_credential == (
+        provisioning.app_carrier_credential
+    )
+    assert package.remote_access.routing_locator == provisioning.routing_locator
+    assert str(package.exchange_url) == (
+        f"https://{configuration.gateway_server_name}/"
+    )
+    assert len(package.as_url()) < 8_192
+    assert provisioning.gateway_carrier_credential not in package.model_dump_json()
+
+    direct_package = service.create_session(
+        exchange_url="https://gateway.example.invalid"
+    )
+    assert direct_package.version == 1
+    assert direct_package.remote_access is None
     device_private_key = Ed25519PrivateKey.generate()
     device_public_key = device_private_key.public_key().public_bytes(
         encoding=serialization.Encoding.Raw,
@@ -176,13 +193,42 @@ def test_configure_relay_cli_never_echoes_rejected_secret_material(
     )
 
     with pytest.raises(SystemExit):
-        operator_cli_main(
+        operator_cli.main(
             ["configure-relay", "--provisioning-file", str(provisioning_path)]
         )
 
     captured = capsys.readouterr()
     assert "unreadable or invalid" in captured.err
     assert secret not in captured.err
+
+
+def test_pair_cli_uses_configured_relay_without_direct_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normal pairing needs no manually supplied phone-reachable URL."""
+
+    service, _ = _service(tmp_path)
+    service.configure_relay(_provisioning(), operator_api_port=52416)
+    payloads: list[str] = []
+
+    def service_from_default_paths(
+        _service_type: type[OperatorPairingService],
+    ) -> OperatorPairingService:
+        """Return the isolated configured service for this CLI invocation."""
+
+        return service
+
+    monkeypatch.setattr(
+        OperatorPairingService,
+        "from_default_paths",
+        classmethod(service_from_default_paths),
+    )
+    monkeypatch.setattr(operator_cli, "_print_pairing_qr", payloads.append)
+
+    assert operator_cli.main(["pair"]) == 0
+    assert len(payloads) == 1
+    assert payloads[0].startswith("skulk://pair?payload=")
 
 
 class _SyntheticRelay:

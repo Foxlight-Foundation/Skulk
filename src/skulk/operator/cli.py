@@ -17,7 +17,7 @@ class _PairArguments(FrozenModel):
     """Strictly validated local pairing command arguments."""
 
     command: Literal["pair"]
-    exchange_url: str
+    exchange_url: str | None
     cluster_name: str
 
 
@@ -60,8 +60,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     pair_parser.add_argument(
         "--exchange-url",
-        required=True,
-        help="HTTPS base URL the phone can reach; HTTP is accepted only on loopback.",
+        help=(
+            "Optional direct HTTPS base URL; a configured relay is used by default. "
+            "HTTP is accepted only on loopback."
+        ),
     )
     pair_parser.add_argument(
         "--cluster-name",
@@ -114,10 +116,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     arguments = _PairArguments.model_validate(parsed_values)
-    package = service.create_session(
-        exchange_url=arguments.exchange_url,
-        cluster_name=arguments.cluster_name,
-    )
+    try:
+        package = service.create_session(
+            exchange_url=arguments.exchange_url,
+            cluster_name=arguments.cluster_name,
+        )
+    except ValueError:
+        parser.error(
+            "pairing requires a configured relay or an explicit --exchange-url"
+        )
     print(
         f"Pair with {package.cluster_name} before "
         f"{package.expires_at.isoformat()}."

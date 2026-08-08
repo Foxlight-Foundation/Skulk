@@ -197,7 +197,7 @@ def test_pairing_expires_after_five_minutes(tmp_path: Path) -> None:
 
 
 def test_pairing_package_contains_no_durable_credential(tmp_path: Path) -> None:
-    """The QR carries identity and one short-lived capability only."""
+    """A direct QR carries identity and one short-lived capability only."""
 
     clock = [datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)]
     package = _service(tmp_path, clock).create_session(
@@ -207,7 +207,34 @@ def test_pairing_package_contains_no_durable_credential(tmp_path: Path) -> None:
 
     assert "accessToken" not in payload
     assert "refreshToken" not in payload
+    assert package.version == 1
+    assert package.remote_access is None
     assert package.as_url().startswith("skulk://pair?payload=")
+    assert "remoteAccess" not in _pairing_url_payload(package.as_url())
+
+
+def test_pairing_requires_direct_url_before_relay_configuration(
+    tmp_path: Path,
+) -> None:
+    """A host cannot print an unreachable pairing package before provisioning."""
+
+    clock = [datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+
+    with pytest.raises(ValueError, match="exchange_url is required"):
+        service.create_session()
+
+    assert not (tmp_path / "authority-key.bin").exists()
+    assert not (tmp_path / "authority.sqlite3").exists()
+
+
+def _pairing_url_payload(value: str) -> str:
+    """Decode a generated QR URL for wire-shape assertions."""
+
+    encoded = value.split("payload=", maxsplit=1)[1]
+    return base64.urlsafe_b64decode(f"{encoded}{'=' * (-len(encoded) % 4)}").decode(
+        "utf-8"
+    )
 
 
 def test_pairing_rejects_cleartext_non_loopback_exchange_url(

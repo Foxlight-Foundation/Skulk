@@ -227,17 +227,26 @@ configuration so the designated gateway opens its bounded outbound lane pool.
 
 ```bash
 uv run skulk operator pair \
-  --exchange-url https://gateway.example.invalid \
   --cluster-name "Cluster"
 ```
 
 The command initializes the gateway's encrypted local authority store when
 needed, creates one high-entropy session that expires after five minutes, and
 prints a terminal QR code plus the exact `skulk://pair?...` fallback payload.
-The QR contains cluster identity, fingerprint, exchange URL, expiry, and the
-single-use nonce. It never contains an access or refresh credential. Remote
+When relay access is configured, the version-two QR uses it by default and
+contains cluster identity, fingerprint, the single-use nonce and expiry, plus
+the app-role outer carrier locator/credential and pinned inner-TLS material
+needed to reach these same pairing routes. It never contains a canonical access
+or refresh credential, or the gateway-role carrier credential. Treat the QR as
+host-authorized pairing material and do not publish it. The app-role carrier
+credential only admits an opaque relay lane; the five-minute nonce and device
+proof still gate credential issuance at Skulk.
+
+`--exchange-url https://gateway.example.invalid` remains an optional direct
+LAN/Tailscale path and is required only before relay provisioning. Remote
 exchange URLs must use HTTPS; cleartext HTTP is accepted only for loopback
-development URLs.
+development URLs. A relay-configured package includes both the protected inner
+origin and relay bootstrap material, and the app prefers the relay path.
 
 ### Create a device challenge
 
