@@ -448,20 +448,23 @@ def test_save_whitener_refuses_to_replace_a_populated_cue_space(
 ) -> None:
     """A store holding spans cannot be repointed at a different cue space."""
     store, _records = _seeded_store(tmp_path, 2)
-    corpus = np.random.default_rng(9).normal(size=(32, 16)).astype(np.float32)
-    foreign = Whitener.fit(corpus, embedding_model_id="bge-small", version="v7")
+    wide = np.random.default_rng(9).normal(size=(32, DIM)).astype(np.float32)
+    foreign = Whitener.fit(wide, embedding_model_id="bge-small", version="v7")
     with pytest.raises(ValueError, match="cue space"):
         store.save_whitener(foreign)
 
     # The matching identity is accepted, and an empty store may switch.
     matching = Whitener.fit(
-        corpus, embedding_model_id="bge-small-en-v1.5", version="v1"
+        wide, embedding_model_id="bge-small-en-v1.5", version="v1"
     )
     store.save_whitener(matching)
+    narrow = np.random.default_rng(9).normal(size=(32, 16)).astype(np.float32)
     empty = ContentStore(root=tmp_path / "empty-memory")
-    empty.save_whitener(foreign)
+    empty.save_whitener(
+        Whitener.fit(narrow, embedding_model_id="bge-small", version="v7")
+    )
     replacement = Whitener.fit(
-        corpus * 2, embedding_model_id="bge-small", version="v8"
+        narrow * 2, embedding_model_id="bge-small", version="v8"
     )
     empty.save_whitener(replacement)
     assert empty.load_whitener().version == "v8"
@@ -670,6 +673,87 @@ def test_reconcile_keeps_backed_tombstones(tmp_path: Path) -> None:
     assert "s0" in content
     assert "never-existed" not in content
     assert [r.span_id for r in reopened.scan()] == ["s1", "s2"]
+
+
+def test_malformed_manifest_falls_back_to_discovery(tmp_path: Path) -> None:
+    """A corrupt segments field must not hide data or reset sequencing."""
+    store, records = _seeded_store(tmp_path, 3)
+    manifest_path = tmp_path / "memory" / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["segments"] = {"oops": True}
+    manifest_path.write_text(json.dumps(manifest))
+
+    assert [r.span_id for r in store.scan()] == [r.span_id for r in records]
+    keys = random_vectors(1, DIM, seed=50)
+    values = random_vectors(1, DIM, seed=51)
+    store.append(_record("s-post-corruption", keys[0], values[0]))
+    reopened = ContentStore(root=tmp_path / "memory")
+    survivors = [r.span_id for r in reopened.scan()]
+    assert survivors == [r.span_id for r in records] + ["s-post-corruption"]
+
+
+def test_dangling_tombstone_reserves_its_id(tmp_path: Path) -> None:
+    store, _records = _seeded_store(tmp_path, 1)
+    store.tombstone("never-appended", deleted_at=1_700_000_100.0)
+    keys = random_vectors(1, DIM, seed=52)
+    values = random_vectors(1, DIM, seed=53)
+    # Appending under the dangling tombstone would be hidden by it.
+    with pytest.raises(ValueError, match="already exists"):
+        store.append(_record("never-appended", keys[0], values[0]))
+    # Startup reconciliation drops the unbacked entry, freeing the id.
+    reopened = ContentStore(root=tmp_path / "memory")
+    reopened.append(_record("never-appended", keys[0], values[0]))
+    assert [r.span_id for r in reopened.scan()] == ["s0", "never-appended"]
+
+
+def test_whitener_dimension_must_match_the_store(tmp_path: Path) -> None:
+    store, _records = _seeded_store(tmp_path, 1)
+    narrow = np.random.default_rng(10).normal(size=(32, 16)).astype(np.float32)
+    mismatched = Whitener.fit(
+        narrow, embedding_model_id="bge-small-en-v1.5", version="v1"
+    )
+    with pytest.raises(ValueError, match="vector dimension"):
+        store.save_whitener(mismatched)
+
+    # And the other direction: a whitener stamps the dimension first, so a
+    # wider first record is refused at append.
+    empty = ContentStore(root=tmp_path / "empty-memory")
+    empty.save_whitener(mismatched)
+    keys = random_vectors(1, DIM, seed=54)
+    values = random_vectors(1, DIM, seed=55)
+    with pytest.raises(ValueError, match="dimension"):
+        empty.append(_record("s-wide", keys[0], values[0]))
+
+
+def test_low_space_startup_skips_reconciliation_and_degrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil as shutil_module
+    from typing import NamedTuple
+
+    class Usage(NamedTuple):
+        total: int
+        used: int
+        free: int
+
+    store, _records = _seeded_store(tmp_path, 2)
+    store.tombstone("s0", deleted_at=1_700_000_100.0)
+    tombstones = tmp_path / "memory" / "tombstones.jsonl"
+    with tombstones.open("a", encoding="utf-8") as handle:
+        handle.write('{"span_id": "stale-mix", "deleted_at": 1.0}\n')
+    before = tombstones.read_text()
+
+    def tiny_disk(_root: object) -> Usage:
+        return Usage(total=100, used=99, free=1)
+
+    monkeypatch.setattr(shutil_module, "disk_usage", tiny_disk)
+    reopened = ContentStore(root=tmp_path / "memory")
+    monkeypatch.undo()
+    assert reopened.degraded
+    assert tombstones.read_text() == before
+    assert not list((tmp_path / "memory").glob("*.tmp"))
+    # Reads still work; the backed tombstone still applies.
+    assert [r.span_id for r in reopened.scan()] == ["s1"]
 
 
 def test_non_finite_vector_payloads_are_rejected(tmp_path: Path) -> None:

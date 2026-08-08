@@ -173,6 +173,7 @@ class ContentStore:
     _tails_repaired: set[str] = field(default_factory=set, init=False)
     _corrupt_lines_dropped: int = field(default=0, init=False)
     _seen_span_ids: set[str] | None = field(default=None, init=False)
+    _manifest_fallback_warned: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         self.root = Path(self.root)
@@ -292,7 +293,21 @@ class ContentStore:
         manifest = self._read_manifest()
         names = manifest.get("segments")
         if not isinstance(names, list):
-            return []
+            # A malformed manifest must not make the data invisible: an
+            # empty answer would hide every record from reads AND reset
+            # sequence numbering into overwriting live segments. Fall back
+            # to on-disk discovery (zero-padded names sort in append order);
+            # the next rotation or compaction rewrites a healthy manifest.
+            discovered = sorted(self.root.glob("spans-*.jsonl"))
+            if discovered and not self._manifest_fallback_warned:
+                self._manifest_fallback_warned = True
+                _LOGGER.warning(
+                    "memory store manifest at %s lists no valid segments; "
+                    "falling back to on-disk discovery of %d segment(s)",
+                    self._manifest_path(),
+                    len(discovered),
+                )
+            return discovered
         return [self.root / str(name) for name in names]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
 
     def _next_sequence(self) -> int:
@@ -327,8 +342,10 @@ class ContentStore:
         # references; never let rotation silently adopt its contents.
         segment.unlink(missing_ok=True)
         manifest = self._read_manifest()
-        listed = manifest.get("segments")
-        names: list[object] = listed if isinstance(listed, list) else []  # pyright: ignore[reportUnknownVariableType]
+        # Rebuild the list from _segments() rather than the raw field: when
+        # the manifest was malformed and reads ran on on-disk discovery,
+        # writing only the new name would orphan every discovered segment.
+        names = [existing.name for existing in segments]
         names.append(segment.name)
         manifest["segments"] = names
         self._write_manifest(manifest)
@@ -518,6 +535,20 @@ class ContentStore:
             path.unlink()
             self._fsync_directory()
             return
+        # The rewrite temporarily duplicates the surviving tombstone stream;
+        # on a volume already at the floor, skip it and degrade instead. A
+        # degraded store refuses appends, so the stale entries cannot hide a
+        # reused id while they wait for a roomier startup to clean them.
+        free = shutil.disk_usage(self.root).free
+        if free < self.free_space_floor_bytes + path.stat().st_size:
+            self._degraded = True
+            _LOGGER.warning(
+                "memory store cannot reconcile stale tombstones at %s "
+                "(%d bytes free); starting degraded",
+                self.root,
+                free,
+            )
+            return
         # Rewrite keeping the original entries (deleted_at included) whose
         # span a segment still backs; the atomic replace pattern matches the
         # manifest's.
@@ -536,23 +567,32 @@ class ContentStore:
                     if isinstance(span_id, str) and span_id in present:
                         surviving_lines.append(line + b"\n")
         scratch = self.root / (_TOMBSTONES_NAME + ".tmp")
-        with scratch.open("wb") as handle:
-            handle.writelines(surviving_lines)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(scratch, path)
-        self._fsync_directory()
+        try:
+            with scratch.open("wb") as handle:
+                handle.writelines(surviving_lines)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(scratch, path)
+            self._fsync_directory()
+        except OSError:
+            # Leave the original file for a later attempt, but never leave
+            # the scratch squatting on a struggling volume.
+            scratch.unlink(missing_ok=True)
+            raise
 
     def _known_span_ids(self) -> set[str]:
-        """Every span id present in the segments, live or tombstoned.
+        """Every reserved span id: in segments, or named by a tombstone.
 
-        Loaded lazily from one scan and maintained by successful appends;
+        A tombstone with no backing record (forgetting an id that was never
+        appended, or not yet appended) still reserves the id: an append
+        under it would be immediately hidden by that tombstone. Loaded
+        lazily from one scan and maintained by successful writes;
         invalidated whenever a failure or compaction could change the truth.
         """
         if self._seen_span_ids is None:
             self._seen_span_ids = {
                 record.span_id for record in self.scan(include_tombstoned=True)
-            }
+            } | self._tombstoned()
         return self._seen_span_ids
 
     def _remember_span_id(self, span_id: str) -> None:
@@ -579,8 +619,12 @@ class ContentStore:
                 # Forgetting is a promise; the first tombstone's directory
                 # entry must survive power loss like every later one.
                 self._fsync_directory()
+            # A tombstone reserves its id even with no backing record: an
+            # append under it would be hidden by this very entry.
+            self._remember_span_id(span_id)
         except OSError as error:
             self._tails_repaired.discard(path.name)
+            self._seen_span_ids = None
             self._translate_out_of_space(error)
             raise
 
@@ -823,6 +867,16 @@ class ContentStore:
         """Persist the frozen separation stage for exact cue-space rebuilds."""
         pending = whitener.mu.nbytes + whitener.matrix.nbytes + 4096
         self._refuse_writes_if_degraded(pending_bytes=pending)
+        whitener_dim = int(whitener.mu.shape[0])  # pyright: ignore[reportAny] - ndarray.shape stub gap
+        active_dim = self._read_manifest().get("vector_dim")
+        if isinstance(active_dim, int) and active_dim != whitener_dim:
+            # The whitener defines the key space's dimension; a mismatch
+            # with the store's stamped dimension would let cue and stored
+            # key sizes diverge and crash binding later.
+            raise ValueError(
+                f"whitener dimension {whitener_dim} does not match the "
+                f"store's vector dimension {active_dim}"
+            )
         # A store holding spans is committed to their cue space: activating a
         # whitener the stored keys were not whitened in would make the default
         # load_whitener() return a transform that probes those keys wrong.
@@ -852,6 +906,7 @@ class ContentStore:
                 try:
                     manifest = self._read_manifest()
                     manifest["whitener_version"] = whitener.version
+                    manifest["vector_dim"] = whitener_dim
                     manifest["embedding_model_id"] = whitener.embedding_model_id
                     self._write_manifest(manifest)
                 except OSError as error:
@@ -885,6 +940,7 @@ class ContentStore:
             self._fsync_directory()
             manifest = self._read_manifest()
             manifest["whitener_version"] = whitener.version
+            manifest["vector_dim"] = whitener_dim
             manifest["embedding_model_id"] = whitener.embedding_model_id
             self._write_manifest(manifest)
         except OSError as error:
