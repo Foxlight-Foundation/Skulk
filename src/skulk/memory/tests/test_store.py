@@ -1078,6 +1078,46 @@ def test_reconcile_keeps_tombstones_backed_by_omitted_segments(
     assert "t2" in content, "the tombstone must survive for reconciliation"
 
 
+def test_ids_in_omitted_segments_stay_reserved(tmp_path: Path) -> None:
+    """Reusing an omitted segment's id would collide at reconciliation."""
+    store = ContentStore(root=tmp_path / "memory", rotation_bytes=1024)
+    keys = random_vectors(4, DIM, seed=74)
+    values = random_vectors(4, DIM, seed=75)
+    for i in range(3):
+        store.append(_record(f"r{i}", keys[i], values[i]))
+    manifest_path = tmp_path / "memory" / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["segments"] = manifest["segments"][:1]
+    manifest_path.write_text(json.dumps(manifest))
+
+    reopened = ContentStore(root=tmp_path / "memory", rotation_bytes=1024)
+    with pytest.raises(ValueError, match="already exists"):
+        reopened.append(_record("r2", keys[3], values[3]))
+
+
+def test_sweep_keeps_superseded_when_replacement_is_missing(
+    tmp_path: Path,
+) -> None:
+    """Superseded files are the last copies if the compacted final is gone."""
+    store = ContentStore(root=tmp_path / "memory", rotation_bytes=1024)
+    keys = random_vectors(3, DIM, seed=76)
+    values = random_vectors(3, DIM, seed=77)
+    for i in range(3):
+        store.append(_record(f"k{i}", keys[i], values[i]))
+    old_names = sorted(p.name for p in (tmp_path / "memory").glob("spans-*.jsonl"))
+    # Simulate a selective restore: the manifest claims a compacted final
+    # that is missing on disk, with the old files marked superseded.
+    manifest_path = tmp_path / "memory" / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["segments"] = ["spans-000009.jsonl"]
+    manifest["superseded"] = old_names
+    manifest_path.write_text(json.dumps(manifest))
+
+    _reopened = ContentStore(root=tmp_path / "memory")
+    for name in old_names:
+        assert (tmp_path / "memory" / name).exists(), name
+
+
 def test_boolean_tombstone_timestamp_is_rejected(tmp_path: Path) -> None:
     store, _records = _seeded_store(tmp_path, 1)
     with pytest.raises(ValueError, match="finite number"):

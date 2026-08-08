@@ -783,6 +783,22 @@ class ContentStore:
             removed += 1
         superseded = manifest.get("superseded")
         cleared = 0
+        if (
+            isinstance(superseded, list)
+            and superseded
+            and any(not (self.root / name).exists() for name in named)
+        ):
+            # A selectively restored store may hold the superseded files
+            # while missing the compacted replacement; deleting the only
+            # remaining copies would turn a recoverable state into loss.
+            _LOGGER.warning(
+                "memory store at %s lists a segment that is missing on "
+                "disk; keeping %d superseded file(s) until an operator "
+                "reconciles",
+                self.root,
+                len(superseded),  # pyright: ignore[reportUnknownArgumentType]
+            )
+            superseded = None
         if isinstance(superseded, list) and superseded:
             for entry in superseded:  # pyright: ignore[reportUnknownVariableType]
                 name = str(entry)  # pyright: ignore[reportUnknownArgumentType]
@@ -807,14 +823,14 @@ class ContentStore:
 
         A tombstone with no backing record (forgetting an id that was never
         appended, or not yet appended) still reserves the id: an append
-        under it would be immediately hidden by that tombstone. Loaded
-        lazily from one scan and maintained by successful writes;
+        under it would be immediately hidden by that tombstone. Ids in
+        preserved unlisted segments count too: reusing one would collide
+        the moment an operator reconciles that segment back. Loaded lazily
+        from one pass over the disk and maintained by successful writes;
         invalidated whenever a failure or compaction could change the truth.
         """
         if self._seen_span_ids is None:
-            self._seen_span_ids = {
-                record.span_id for record in self.scan(include_tombstoned=True)
-            } | self._tombstoned()
+            self._seen_span_ids = self._span_ids_on_disk() | self._tombstoned()
         return self._seen_span_ids
 
     def _remember_span_id(self, span_id: str) -> None:
