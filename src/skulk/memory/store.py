@@ -601,7 +601,9 @@ class ContentStore:
                 handle.write(line)
                 handle.flush()
                 self._appends_since_sync += 1
-                if self._appends_since_sync >= self.fsync_every:
+                # A pending stamp forces the fsync: the durable manifest
+                # must never describe a record the disk does not yet hold.
+                if self._appends_since_sync >= self.fsync_every or needs_stamp:
                     os.fsync(handle.fileno())
                     self._appends_since_sync = 0
             if fresh:
@@ -724,8 +726,25 @@ class ContentStore:
         for stray in self.root.glob("spans-*.jsonl.tmp"):
             stray.unlink(missing_ok=True)
             removed += 1
+        # Compaction orphans are always OLDER than the committed final (the
+        # final gets a sequence-fresh name above everything it replaced), so
+        # only files below the highest listed sequence are provably orphans.
+        # Unlisted files at or above it (a stale or operator-restored
+        # manifest, or a crashed compaction's stray) are preserved; rotation
+        # unlinks a stray lazily if it ever adopts that name.
+        highest_listed = 0
+        for name in named:
+            digits = Path(name).stem.rsplit("-", 1)[-1]
+            if not digits.isdigit():
+                # A listed name outside our scheme means the manifest's
+                # provenance is unknown; deleting on that basis is unsafe.
+                return
+            highest_listed = max(highest_listed, int(digits))
         for candidate in self.root.glob("spans-*.jsonl"):
-            if candidate.name not in named:
+            if candidate.name in named:
+                continue
+            digits = candidate.stem.rsplit("-", 1)[-1]
+            if digits.isdigit() and int(digits) < highest_listed:
                 candidate.unlink(missing_ok=True)
                 removed += 1
         if removed:

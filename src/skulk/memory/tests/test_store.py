@@ -192,12 +192,15 @@ def test_rotation_preserves_fsync_cadence(tmp_path: Path) -> None:
     store = ContentStore(root=tmp_path / "memory", rotation_bytes=1024, fsync_every=100)
     keys = random_vectors(3, DIM, seed=19)
     values = random_vectors(3, DIM, seed=20)
+    # The first append carries the cue-space stamp, which forces its fsync.
     store.append(_record("f0", keys[0], values[0]))
+    assert store._appends_since_sync == 0  # pyright: ignore[reportPrivateUsage]
+    store.append(_record("f1", keys[1], values[1]))
     assert store._appends_since_sync == 1  # pyright: ignore[reportPrivateUsage]
     # Records exceed rotation_bytes, so this append rotates; the outgoing
     # segment's unsynced tail must be fsynced and the counter reset, leaving
     # only the new segment's single append pending.
-    store.append(_record("f1", keys[1], values[1]))
+    store.append(_record("f2", keys[2], values[2]))
     assert store._appends_since_sync == 1  # pyright: ignore[reportPrivateUsage]
 
 
@@ -704,14 +707,41 @@ def test_corrupt_manifest_json_recovers_from_segments(tmp_path: Path) -> None:
 
 
 def test_startup_sweeps_orphan_segment_files(tmp_path: Path) -> None:
-    _store, records = _seeded_store(tmp_path, 2)
-    (tmp_path / "memory" / "spans-000099.jsonl").write_text('{"span_id":"x"}\n')
+    """Only files provably below the committed compaction are reclaimed."""
+    store = ContentStore(root=tmp_path / "memory", rotation_bytes=1024)
+    keys = random_vectors(4, DIM, seed=66)
+    values = random_vectors(4, DIM, seed=67)
+    for i in range(4):
+        store.append(_record(f"o{i}", keys[i], values[i]))
+    store.tombstone("o0", deleted_at=1_700_000_100.0)
+    assert store.compact() == 1
+    # An orphan BELOW the committed final (the ambiguous-commit shape) and
+    # a scratch are reclaimed; an unlisted file ABOVE it (stale manifest or
+    # crashed compaction) is preserved, since it may be data.
+    below = tmp_path / "memory" / "spans-000001.jsonl"
+    below.write_text('{"span_id":"x"}\n')
     (tmp_path / "memory" / "spans-000099.jsonl.tmp").write_text("partial")
+    above = tmp_path / "memory" / "spans-000099.jsonl"
+    above.write_text('{"span_id":"y"}\n')
 
     reopened = ContentStore(root=tmp_path / "memory")
-    assert not (tmp_path / "memory" / "spans-000099.jsonl").exists()
+    assert not below.exists()
     assert not (tmp_path / "memory" / "spans-000099.jsonl.tmp").exists()
-    assert [r.span_id for r in reopened.scan()] == [r.span_id for r in records]
+    assert above.exists()
+    assert [r.span_id for r in reopened.scan()] == ["o1", "o2", "o3"]
+
+
+def test_stale_empty_manifest_list_preserves_segments(tmp_path: Path) -> None:
+    """An operator-restored empty segments list must not condemn live data."""
+    _store, _records = _seeded_store(tmp_path, 2)
+    manifest_path = tmp_path / "memory" / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["segments"] = []
+    manifest_path.write_text(json.dumps(manifest))
+
+    _reopened = ContentStore(root=tmp_path / "memory")
+    remaining = sorted(p.name for p in (tmp_path / "memory").glob("spans-*.jsonl"))
+    assert remaining, "live segment files must survive a stale empty manifest"
 
 
 def test_torn_tail_repair_retries_after_transient_failure(
