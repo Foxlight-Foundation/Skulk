@@ -963,6 +963,9 @@ the version-two package includes only the app-role outer carrier admission and
 pinned inner-TLS material needed to reach the same challenge/exchange routes;
 the gateway-role carrier credential and canonical access/refresh credentials
 never enter the QR. `--exchange-url` remains the direct-development fallback.
+The relay package uses bounded compact JSON compressed with zlib so the
+terminal QR remains camera-scannable; oversized packages are rejected before
+their session is persisted.
 The API exposes only challenge and exchange before authentication: a phone
 proposes an Ed25519 key, signs a domain-separated random challenge, and receives
 opaque access and refresh credentials once. Raw nonces and tokens are never stored in plaintext;

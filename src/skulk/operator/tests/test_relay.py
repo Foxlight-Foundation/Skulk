@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import socket
 import ssl
+import zlib
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -16,9 +18,11 @@ from uuid import UUID
 
 import aiohttp
 import pytest
+import qrcode
 from aiohttp import web
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from qrcode.constants import ERROR_CORRECT_L
 
 import skulk.operator.cli as operator_cli
 from skulk.operator.authority import EncryptedAuthorityStore
@@ -27,6 +31,8 @@ from skulk.operator.pairing import (
     OperatorPairingService,
     PairingChallengeRequest,
     PairingExchangeRequest,
+    PairingPackage,
+    PairingPackageTooLargeError,
     pairing_signature_message,
 )
 from skulk.operator.relay import (
@@ -108,7 +114,33 @@ def test_relay_configuration_is_encrypted_and_returned_once_with_pairing(
     assert str(package.exchange_url) == (
         f"https://{configuration.gateway_server_name}/"
     )
-    assert len(package.as_url()) < 8_192
+    assert len(package.as_url().encode("utf-8")) <= 1_170
+    code = qrcode.QRCode(
+        border=2,
+        error_correction=ERROR_CORRECT_L,
+    )
+    code.add_data(package.as_url())
+    code.make(fit=True)
+    terminal_output = io.StringIO()
+    code.print_ascii(out=terminal_output, invert=True)
+    assert max(map(len, terminal_output.getvalue().splitlines())) <= 120
+    encoded = package.as_url().split("?z=", maxsplit=1)[1]
+    decoded_payload = cast(
+        object,
+        json.loads(
+            zlib.decompress(
+                base64.urlsafe_b64decode(f"{encoded}{'=' * (-len(encoded) % 4)}")
+            )
+        ),
+    )
+    assert isinstance(decoded_payload, dict)
+    compact_payload = cast(dict[str, object], decoded_payload)
+    assert compact_payload["v"] == 2
+    assert compact_payload["i"] == str(package.cluster_id)
+    remote_payload_value = compact_payload["r"]
+    assert isinstance(remote_payload_value, dict)
+    remote_payload = cast(dict[str, object], remote_payload_value)
+    assert remote_payload["c"] == provisioning.app_carrier_credential
     assert provisioning.gateway_carrier_credential not in package.model_dump_json()
 
     direct_package = service.create_session(
@@ -151,6 +183,29 @@ def test_relay_configuration_is_encrypted_and_returned_once_with_pairing(
     assert provisioning.gateway_carrier_credential not in exchange.model_dump_json()
     with pytest.raises(OperatorRelayAlreadyConfiguredError):
         service.configure_relay(provisioning, operator_api_port=52416)
+
+
+def test_oversized_relay_package_is_rejected_before_session_persistence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal-hostile relay QR must not leave a live nonce behind."""
+
+    service, _ = _service(tmp_path)
+    service.configure_relay(_provisioning(), operator_api_port=52416)
+
+    def oversized_url(_package: PairingPackage) -> str:
+        return "x" * 1_171
+
+    monkeypatch.setattr(PairingPackage, "as_url", oversized_url)
+
+    def unexpected_append(*_arguments: object) -> None:
+        raise AssertionError("oversized pairing session was persisted")
+
+    monkeypatch.setattr(OperatorPairingService, "_append_session", unexpected_append)
+
+    with pytest.raises(PairingPackageTooLargeError, match="supported QR size"):
+        service.create_session()
 
 
 @pytest.mark.parametrize(
@@ -228,7 +283,7 @@ def test_pair_cli_uses_configured_relay_without_direct_url(
 
     assert operator_cli.main(["pair"]) == 0
     assert len(payloads) == 1
-    assert payloads[0].startswith("skulk://pair?payload=")
+    assert payloads[0].startswith("skulk://pair?z=")
 
 
 class _SyntheticRelay:

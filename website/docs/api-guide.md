@@ -242,6 +242,11 @@ host-authorized pairing material and do not publish it. The app-role carrier
 credential only admits an opaque relay lane; the five-minute nonce and device
 proof still gate credential issuance at Skulk.
 
+Version-two packages use bounded compact JSON compressed with zlib and carried
+in the QR's single `z` query parameter. Skulk rejects a package before
+persisting its session if it would exceed the terminal-scannable budget.
+Version-one direct packages retain the uncompressed `payload` shape.
+
 `--exchange-url https://gateway.example.invalid` remains an optional direct
 LAN/Tailscale path and is required only before relay provisioning. Remote
 exchange URLs must use HTTPS; cleartext HTTP is accepted only for loopback

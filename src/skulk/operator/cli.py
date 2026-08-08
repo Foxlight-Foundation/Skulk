@@ -8,7 +8,10 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal, cast
 
-from skulk.operator.pairing import OperatorPairingService
+from skulk.operator.pairing import (
+    OperatorPairingService,
+    PairingPackageTooLargeError,
+)
 from skulk.operator.relay import OperatorRelayProvisioning
 from skulk.utils.pydantic_ext import FrozenModel
 
@@ -34,8 +37,12 @@ def _print_pairing_qr(payload: str) -> None:
     """Render a terminal QR code plus the exact fallback payload."""
 
     import qrcode
+    from qrcode.constants import ERROR_CORRECT_L
 
-    code = qrcode.QRCode(border=2)
+    code = qrcode.QRCode(
+        border=2,
+        error_correction=ERROR_CORRECT_L,
+    )
     code.add_data(payload)
     code.make(fit=True)
     code.print_ascii(invert=True)
@@ -121,6 +128,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             exchange_url=arguments.exchange_url,
             cluster_name=arguments.cluster_name,
         )
+    except PairingPackageTooLargeError:
+        parser.error("relay pairing package is too large for a reliable QR code")
     except ValueError:
         parser.error(
             "pairing requires a configured relay or an explicit --exchange-url"

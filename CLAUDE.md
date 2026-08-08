@@ -117,7 +117,8 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
   uses a protected local-file provider and `skulk operator pair` to create a
   five-minute QR capability. A relay-configured gateway includes app-role
   carrier and pinned inner-TLS bootstrap material in the version-two QR while
-  retaining `--exchange-url` as a direct fallback; the API exposes only
+  retaining `--exchange-url` as a direct fallback. Relay packages use bounded,
+  zlib-compressed compact JSON so terminal QRs remain scannable; the API exposes only
   device-key challenge and exchange before authentication, returning one-time opaque access/refresh
   credentials while persisting encrypted state and token digests. Refresh
   rotates both credentials, bearer validation enforces canonical scopes, and

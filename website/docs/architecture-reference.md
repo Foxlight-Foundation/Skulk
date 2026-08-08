@@ -161,7 +161,9 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   initializes the encrypted store when needed, and emits one five-minute QR
   capability. A relay-configured gateway emits the version-two package with
   app-role carrier and pinned inner-TLS bootstrap material; `--exchange-url`
-  remains the direct-development fallback. Challenge binds a proposed Ed25519
+  remains the direct-development fallback. The relay package is bounded compact
+  JSON compressed with zlib under the QR's `z` parameter and is rejected before
+  session persistence if it exceeds the terminal-scannable budget. Challenge binds a proposed Ed25519
   device key; exchange verifies a domain-separated signature, consumes the
   session, and returns one access/refresh credential pair. The journal stores
   encrypted state and one-way token digests, not raw nonces or tokens. Refresh

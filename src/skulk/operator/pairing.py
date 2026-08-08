@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import secrets
+import zlib
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from hmac import compare_digest
@@ -37,6 +38,7 @@ _PAIRING_LIFETIME = timedelta(minutes=5)
 _ACCESS_TOKEN_LIFETIME = timedelta(minutes=15)
 _REFRESH_TOKEN_LIFETIME = timedelta(days=30)
 _PAIRING_SIGNATURE_CONTEXT = b"skulk-device-pairing-v1\x00"
+_MAXIMUM_RELAY_PAIRING_URL_BYTES = 1_170
 
 type OperatorScope = Literal[
     "cluster:read",
@@ -77,6 +79,10 @@ class PairingProofError(PairingError):
 
 class PairingGatewayNotInitializedError(PairingError):
     """Raised when this API node has not been designated through local pairing."""
+
+
+class PairingPackageTooLargeError(PairingError):
+    """Raised before persisting relay pairing material that will not scan reliably."""
 
 
 class OperatorCredentialError(RuntimeError):
@@ -154,6 +160,35 @@ class PairingPackage(FrozenModel):
 
     def as_url(self) -> str:
         """Return the package as a compact custom-scheme QR payload."""
+
+        if self.version == 2:
+            remote_access = cast(OperatorRemoteAccessMaterial, self.remote_access)
+            compact_payload = {
+                "v": self.version,
+                "i": str(self.cluster_id),
+                "n": self.cluster_name,
+                "f": self.cluster_fingerprint,
+                "u": str(self.exchange_url),
+                "e": self.expires_at.isoformat(),
+                "o": self.nonce,
+                "r": {
+                    "t": remote_access.transport,
+                    "w": remote_access.app_websocket_url,
+                    "l": remote_access.routing_locator,
+                    "c": remote_access.app_carrier_credential,
+                    "s": remote_access.gateway_server_name,
+                    "p": remote_access.gateway_ca_certificate_pem,
+                },
+            }
+            compressed = zlib.compress(
+                json.dumps(
+                    compact_payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8"),
+                level=9,
+            )
+            return f"skulk://pair?z={_base64url_encode(compressed)}"
 
         encoded = _base64url_encode(
             self.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8")
@@ -549,6 +584,14 @@ class OperatorPairingService:
             nonce=nonce,
             remote_access=remote_access,
         )
+        if (
+            package.version == 2
+            and len(package.as_url().encode("utf-8"))
+            > _MAXIMUM_RELAY_PAIRING_URL_BYTES
+        ):
+            raise PairingPackageTooLargeError(
+                "relay pairing package exceeds the supported QR size"
+            )
         session = _StoredPairingSession(
             state="pending",
             nonce_hash=nonce_hash,
