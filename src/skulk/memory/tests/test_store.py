@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
@@ -659,14 +660,80 @@ def test_rebuild_rejects_mixed_cue_spaces(tmp_path: Path) -> None:
     drifted = _record("s-drift", keys[0], values[0]).model_copy(
         update={"whitener_version": "v2"}
     )
-    # No whitener is registered, so append cannot arbitrate; rebuild must.
-    store.append(drifted)
+    # append() arbitrates cue spaces now, so a mixed store can only arise
+    # from history written before that guard (or foreign tooling); inject
+    # the drifted row directly to prove rebuild still refuses it.
+    segment = next(p for p in (tmp_path / "memory").glob("spans-*.jsonl"))
+    with segment.open("a", encoding="utf-8") as handle:
+        handle.write(drifted.model_dump_json() + "\n")
 
     def factory() -> MemoryIndex:
         return HolographicField(dim=DIM)
 
     with pytest.raises(ValueError, match="cue spaces"):
         store.rebuild(factory)
+
+
+def test_append_stamps_cue_space_from_first_record(tmp_path: Path) -> None:
+    """Mixing is arbitrated from record one, before any whitener exists."""
+    store, _records = _seeded_store(tmp_path, 1)
+    keys = random_vectors(1, DIM, seed=39)
+    values = random_vectors(1, DIM, seed=40)
+    drifted = _record("s-mixed", keys[0], values[0]).model_copy(
+        update={"whitener_version": "v2"}
+    )
+    with pytest.raises(ValueError, match="cue space"):
+        store.append(drifted)
+
+
+def test_append_rejects_duplicate_span_ids(tmp_path: Path) -> None:
+    store, _records = _seeded_store(tmp_path, 2)
+    keys = random_vectors(1, DIM, seed=41)
+    values = random_vectors(1, DIM, seed=42)
+    with pytest.raises(ValueError, match="already exists"):
+        store.append(_record("s1", keys[0], values[0]))
+    # The guard holds across a reopen (fresh in-memory state)...
+    reopened = ContentStore(root=tmp_path / "memory")
+    with pytest.raises(ValueError, match="already exists"):
+        reopened.append(_record("s1", keys[0], values[0]))
+    # ...and while tombstoned-but-not-compacted, since the old tombstone
+    # would hide the new row; after compaction the id is genuinely free.
+    reopened.tombstone("s1", deleted_at=1_700_000_100.0)
+    with pytest.raises(ValueError, match="already exists"):
+        reopened.append(_record("s1", keys[0], values[0]))
+    _ = reopened.compact()
+    reopened.append(_record("s1", keys[0], values[0]))
+    assert [r.span_id for r in reopened.scan()] == ["s0", "s1"]
+
+
+def test_malformed_vector_payloads_are_rejected(tmp_path: Path) -> None:
+    keys = random_vectors(1, DIM, seed=43)
+    with pytest.raises(ValueError, match="base64"):
+        _ = SpanRecord(
+            span_id="s-bad",
+            text="a thing",
+            role="user",
+            session_id="session-1",
+            node_id="node-a",
+            created_at=1_700_000_000.0,
+            key_b64="not/base64!!",
+            value_b64=encode_vector(keys[0]),
+            embedding_model_id="bge-small-en-v1.5",
+            whitener_version="v1",
+        )
+    with pytest.raises(ValueError, match="fp16"):
+        _ = SpanRecord(
+            span_id="s-odd",
+            text="a thing",
+            role="user",
+            session_id="session-1",
+            node_id="node-a",
+            created_at=1_700_000_000.0,
+            key_b64=base64.b64encode(b"abc").decode("ascii"),
+            value_b64=encode_vector(keys[0]),
+            embedding_model_id="bge-small-en-v1.5",
+            whitener_version="v1",
+        )
 
 
 def test_segment_rotation(tmp_path: Path) -> None:

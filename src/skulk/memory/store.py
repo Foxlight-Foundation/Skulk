@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from skulk.memory.hrr import DTYPE, Vector
 from skulk.memory.index import MemoryIndex
@@ -103,6 +103,26 @@ class SpanRecord(BaseModel):
     embedding_model_id: str = Field(description="Cue-space anchor identity.")
     whitener_version: str = Field(description="Separation-stage version.")
 
+    @field_validator("key_b64", "value_b64")
+    @classmethod
+    def _validate_vector_payload(cls, value: str) -> str:
+        """Reject payloads that could not decode back into fp16 vectors.
+
+        Catching this at construction keeps append/acknowledge honest: a
+        malformed payload would otherwise surface only when rebuild() tries
+        to decode it, long after the caller was told the record was stored.
+        """
+        try:
+            raw = base64.b64decode(value.encode("ascii"), validate=True)
+        except ValueError as error:
+            raise ValueError("vector payload is not valid base64") from error
+        if len(raw) == 0 or len(raw) % 2 != 0:
+            raise ValueError(
+                "vector payload does not decode to fp16 data "
+                f"({len(raw)} bytes)"
+            )
+        return value
+
     def key_vector(self) -> Vector:
         """Decode the stored key vector."""
         return _decode_vector(self.key_b64)
@@ -131,6 +151,7 @@ class ContentStore:
     _degraded: bool = field(default=False, init=False)
     _tails_repaired: set[str] = field(default_factory=set, init=False)
     _corrupt_lines_dropped: int = field(default=0, init=False)
+    _seen_span_ids: set[str] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self.root = Path(self.root)
@@ -390,8 +411,26 @@ class ContentStore:
                     f"{offered!r} but the store's active cue space is "
                     f"{active!r}; one store holds one cue space"
                 )
+        if record.span_id in self._known_span_ids():
+            # The field treats trace ids as unique; two rows under one id
+            # would give get() and rebuild() conflicting views, and a
+            # tombstone filters by id so a reused id would be hidden by the
+            # old tombstone until compaction.
+            raise ValueError(
+                f"span id {record.span_id!r} already exists in the store; "
+                "span ids are unique for the store's lifetime"
+            )
         segment: Path | None = None
         try:
+            if not isinstance(manifest.get("embedding_model_id"), str) or not (
+                isinstance(manifest.get("whitener_version"), str)
+            ):
+                # The first append stamps the store's cue space, so mixing is
+                # arbitrated from the very first record even when capture
+                # begins before a whitener is persisted.
+                manifest["embedding_model_id"] = record.embedding_model_id
+                manifest["whitener_version"] = record.whitener_version
+                self._write_manifest(manifest)
             segment = self._active_segment()
             self._repair_torn_tail(segment)
             fresh = not segment.exists()
@@ -407,13 +446,33 @@ class ContentStore:
                 # directory itself is fsynced; without this, a power loss can
                 # unlink a segment whose appends were already acknowledged.
                 self._fsync_directory()
+            self._remember_span_id(record.span_id)
         except OSError as error:
             # A failure mid-write can leave a fresh torn tail; re-arm repair
-            # so a retry on this store truncates it instead of fusing.
+            # so a retry on this store truncates it instead of fusing. The
+            # id cache is dropped too: a complete line may have landed even
+            # though the append failed afterward.
             if segment is not None:
                 self._tails_repaired.discard(segment.name)
+            self._seen_span_ids = None
             self._translate_out_of_space(error)
             raise
+
+    def _known_span_ids(self) -> set[str]:
+        """Every span id present in the segments, live or tombstoned.
+
+        Loaded lazily from one scan and maintained by successful appends;
+        invalidated whenever a failure or compaction could change the truth.
+        """
+        if self._seen_span_ids is None:
+            self._seen_span_ids = {
+                record.span_id for record in self.scan(include_tombstoned=True)
+            }
+        return self._seen_span_ids
+
+    def _remember_span_id(self, span_id: str) -> None:
+        if self._seen_span_ids is not None:
+            self._seen_span_ids.add(span_id)
 
     def tombstone(self, span_id: str, *, deleted_at: float) -> None:
         """Record exact forgetting of one span (drop at next compaction)."""
@@ -621,6 +680,15 @@ class ContentStore:
             manifest["compacted_through"] = survivors
             self._write_manifest(manifest)
             committed = True
+            # Past the commit point: cleanup can only cost disk, never
+            # records, but the deletions themselves must be made durable.
+            # A resurrected tombstones file in particular would wrongly
+            # hide a future record reusing a compacted-away span id.
+            for stale in old_segments:
+                if stale != final:
+                    stale.unlink(missing_ok=True)
+            (self.root / _TOMBSTONES_NAME).unlink(missing_ok=True)
+            self._fsync_directory()
         except OSError as error:
             # A failed rewrite must not squat on the disk's last bytes: free
             # the partial scratch, and if the failure landed between the
@@ -634,11 +702,9 @@ class ContentStore:
                 final.unlink(missing_ok=True)
             self._translate_out_of_space(error)
             raise
-        # Past the commit point: cleanup failures cost disk, never records.
-        for stale in old_segments:
-            if stale != final:
-                stale.unlink(missing_ok=True)
-        (self.root / _TOMBSTONES_NAME).unlink(missing_ok=True)
+        finally:
+            # Compaction moves which span ids exist; reload lazily.
+            self._seen_span_ids = None
         return dropped
 
     def rebuild(self, index_factory: Callable[[], MemoryIndex]) -> MemoryIndex:
