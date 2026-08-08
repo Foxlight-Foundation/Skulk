@@ -22,6 +22,8 @@ from typing import Protocol, cast, final
 from uuid import UUID
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from pydantic import Field, field_validator
 
@@ -126,6 +128,17 @@ def _base64url_encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
 
+def _cluster_public_key_bytes(identity: ClusterPublicIdentity) -> bytes:
+    """Decode the validated raw Ed25519 public key from a cluster identity."""
+
+    padding = "=" * (-len(identity.public_key) % 4)
+    return base64.b64decode(
+        f"{identity.public_key}{padding}",
+        altchars=b"-_",
+        validate=True,
+    )
+
+
 def _utc_now() -> datetime:
     """Return the current timezone-aware UTC time."""
 
@@ -227,6 +240,18 @@ class EncryptedAuthorityStore:
 
         if len(private_key) != 32:
             raise ValueError("cluster identity private key must contain 32 bytes")
+        derived_public_key = (
+            Ed25519PrivateKey.from_private_bytes(private_key)
+            .public_key()
+            .public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+        )
+        if derived_public_key != _cluster_public_key_bytes(identity):
+            raise ValueError(
+                "cluster identity private key does not match the public identity"
+            )
         if authority_term < 1:
             raise ValueError("authority_term must be positive")
         self._prepare_path()

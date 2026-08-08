@@ -101,6 +101,24 @@ def test_initialize_cluster_is_single_use(tmp_path: Path) -> None:
     assert store.cluster_identity() == first.public_identity
 
 
+def test_initialize_cluster_rejects_mismatched_key_pair(tmp_path: Path) -> None:
+    """Bootstrap cannot permanently bind public identity to another private key."""
+
+    store = _store(tmp_path)
+    identity = create_cluster_identity()
+    unrelated = create_cluster_identity()
+
+    with pytest.raises(
+        ValueError,
+        match="private key does not match the public identity",
+    ):
+        store.initialize_cluster(identity.public_identity, unrelated.private_key)
+
+    record = store.initialize_cluster(identity.public_identity, identity.private_key)
+    assert record.commit_index == 1
+    assert store.load_cluster_private_key() == identity.private_key
+
+
 def test_append_requires_exact_commit_index(tmp_path: Path) -> None:
     """Concurrent authority transitions cannot both commit from stale state."""
 
