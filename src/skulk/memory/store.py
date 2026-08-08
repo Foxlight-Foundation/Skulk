@@ -192,6 +192,7 @@ class ContentStore:
                 self._fsync_directory(created.parent)
             if not self._manifest_path().exists():
                 self._write_manifest(self._default_manifest())
+            self._reconcile_stale_tombstones()
         except OSError as error:
             # First use on an already-full volume must still honor the
             # contract: the store exists in degraded mode (reads work and
@@ -493,6 +494,54 @@ class ContentStore:
             self._seen_span_ids = None
             self._translate_out_of_space(error)
             raise
+
+    def _reconcile_stale_tombstones(self) -> None:
+        """Drop tombstones for spans no segment holds (startup repair).
+
+        A crash after compaction's durable manifest swap but before the
+        tombstone unlink leaves entries for records the compacted segments
+        no longer contain. Left in place, such an entry would silently hide
+        a future record that legitimately reuses the compacted-away id, so
+        startup rewrites the file down to entries a segment still backs
+        (or removes it when none remain).
+        """
+        path = self.root / _TOMBSTONES_NAME
+        if not path.exists():
+            return
+        recorded = self._tombstoned()
+        present = {
+            record.span_id for record in self.scan(include_tombstoned=True)
+        }
+        if recorded <= present:
+            return
+        if not (recorded & present):
+            path.unlink()
+            self._fsync_directory()
+            return
+        # Rewrite keeping the original entries (deleted_at included) whose
+        # span a segment still backs; the atomic replace pattern matches the
+        # manifest's.
+        surviving_lines: list[bytes] = []
+        with path.open("rb") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)  # pyright: ignore[reportAny] - json.loads stub gap
+                except ValueError:
+                    continue
+                if isinstance(entry, dict):
+                    span_id = entry.get("span_id")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+                    if isinstance(span_id, str) and span_id in present:
+                        surviving_lines.append(line + b"\n")
+        scratch = self.root / (_TOMBSTONES_NAME + ".tmp")
+        with scratch.open("wb") as handle:
+            handle.writelines(surviving_lines)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(scratch, path)
+        self._fsync_directory()
 
     def _known_span_ids(self) -> set[str]:
         """Every span id present in the segments, live or tombstoned.

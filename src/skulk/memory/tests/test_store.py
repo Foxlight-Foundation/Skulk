@@ -640,6 +640,38 @@ def test_non_finite_timestamps_are_rejected(tmp_path: Path) -> None:
         store.tombstone("s0", deleted_at=float("inf"))
 
 
+def test_startup_reconciles_stale_tombstones(tmp_path: Path) -> None:
+    """A tombstone left behind by a crashed compaction must not hide reuse."""
+    store, _records = _seeded_store(tmp_path, 3)
+    store.tombstone("s1", deleted_at=1_700_000_100.0)
+    assert store.compact() == 1
+    # Simulate the crash window: manifest swap landed, tombstone unlink lost.
+    tombstones = tmp_path / "memory" / "tombstones.jsonl"
+    tombstones.write_text('{"span_id": "s1", "deleted_at": 1700000100.0}\n')
+
+    reopened = ContentStore(root=tmp_path / "memory")
+    assert not tombstones.exists()
+    keys = random_vectors(1, DIM, seed=48)
+    values = random_vectors(1, DIM, seed=49)
+    reopened.append(_record("s1", keys[0], values[0]))
+    assert [r.span_id for r in reopened.scan()] == ["s0", "s2", "s1"]
+
+
+def test_reconcile_keeps_backed_tombstones(tmp_path: Path) -> None:
+    """Reconciliation drops only entries no segment backs."""
+    store, _records = _seeded_store(tmp_path, 3)
+    store.tombstone("s0", deleted_at=1_700_000_100.0)
+    tombstones = tmp_path / "memory" / "tombstones.jsonl"
+    with tombstones.open("a", encoding="utf-8") as handle:
+        handle.write('{"span_id": "never-existed", "deleted_at": 1.0}\n')
+
+    reopened = ContentStore(root=tmp_path / "memory")
+    content = tombstones.read_text()
+    assert "s0" in content
+    assert "never-existed" not in content
+    assert [r.span_id for r in reopened.scan()] == ["s1", "s2"]
+
+
 def test_non_finite_vector_payloads_are_rejected(tmp_path: Path) -> None:
     keys = random_vectors(1, DIM, seed=44)
     poisoned = keys[0].copy()
