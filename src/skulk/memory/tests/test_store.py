@@ -689,6 +689,20 @@ def test_failed_whitener_save_removes_uncommitted_archive(
     assert retry.load_whitener().version == "v12"
 
 
+def test_corrupt_manifest_json_recovers_from_segments(tmp_path: Path) -> None:
+    """A syntactically invalid manifest must not make the store unopenable."""
+    _store, records = _seeded_store(tmp_path, 3)
+    manifest_path = tmp_path / "memory" / "MANIFEST.json"
+    manifest_path.write_text('{"schema": 1, "segments": [truncated')
+
+    reopened = ContentStore(root=tmp_path / "memory")
+    assert [r.span_id for r in reopened.scan()] == [r.span_id for r in records]
+    healed = json.loads(manifest_path.read_text())
+    assert healed["segments"]
+    assert healed["embedding_model_id"] == records[0].embedding_model_id
+    assert (tmp_path / "memory" / "MANIFEST.json.corrupt").exists()
+
+
 def test_startup_sweeps_orphan_segment_files(tmp_path: Path) -> None:
     _store, records = _seeded_store(tmp_path, 2)
     (tmp_path / "memory" / "spans-000099.jsonl").write_text('{"span_id":"x"}\n')

@@ -192,7 +192,25 @@ class ContentStore:
             self.root.mkdir(parents=True, exist_ok=True)
             for created in reversed(missing):
                 self._fsync_directory(created.parent)
-            if not self._manifest_path().exists():
+            manifest_readable = False
+            if self._manifest_path().exists():
+                try:
+                    _ = self._read_manifest()
+                    manifest_readable = True
+                except ValueError:
+                    # A truncated or corrupted manifest must not make the
+                    # store unopenable while its segments are intact: set
+                    # the bad file aside for forensics and rebuild through
+                    # the same recovery as a missing manifest.
+                    quarantined = self.root / (_MANIFEST_NAME + ".corrupt")
+                    os.replace(self._manifest_path(), quarantined)
+                    _LOGGER.warning(
+                        "memory store manifest at %s is unreadable; set "
+                        "aside as %s and rebuilding from discovery",
+                        self._manifest_path(),
+                        quarantined.name,
+                    )
+            if not manifest_readable:
                 manifest = self._default_manifest()
                 # A missing manifest over existing segments (manual deletion,
                 # partial filesystem loss) is a recoverable store: rebuild
