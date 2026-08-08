@@ -191,8 +191,11 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   key wrapping, gateway leases, and Node lifecycle integration are later slices.
   V1 explicitly claims no automatic authority or gateway failover: local
   pairing and relay state are authoritative only for the designated gateway,
-  and remote access is unavailable when that host is unavailable. None of these records enters
-  `State`, telemetry, diagnostics, or the API event log.
+  and remote access is unavailable when that host is unavailable. Relay state
+  loading and the relay listener/connector are isolated from the ordinary local
+  API, so damaged protected material or carrier startup failure disables only
+  remote access. None of these records enters `State`, telemetry, diagnostics,
+  or the API event log.
 
 ### Extensions (plugins)
 

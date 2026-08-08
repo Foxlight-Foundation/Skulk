@@ -985,7 +985,11 @@ management map onto the existing scopes. Pairing challenge/exchange and refresh
 remain reachable before access-token validation. The ordinary port-52415 local
 listener remains unchanged for the dashboard and existing direct clients; it is
 never the relay connector's destination. If the designated gateway or relay is
-unavailable, remote access fails while local cluster operation continues.
+unavailable, remote access fails while local cluster operation continues. Relay
+configuration loading, the loopback TLS listener, and the outbound connector
+are supervised as an optional ingress unit: corrupt authority/TLS material,
+bind failures, and connector failures are reported with sanitized messages and
+cannot cancel or prevent startup of the ordinary local API.
 
 ### Event log
 

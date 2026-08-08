@@ -10,6 +10,7 @@ import random
 import re
 import shutil
 import socket
+import sqlite3
 import time
 import weakref
 from collections.abc import (
@@ -1246,11 +1247,20 @@ class API:
     ) -> None:
         self.state = State()
         self._operator_pairing_service = operator_pairing_service
-        self._operator_relay_configuration: OperatorRelayConfiguration | None = (
-            operator_pairing_service.relay_configuration()
-            if operator_pairing_service is not None
-            else None
-        )
+        self._operator_relay_configuration: OperatorRelayConfiguration | None = None
+        if operator_pairing_service is not None:
+            try:
+                self._operator_relay_configuration = (
+                    operator_pairing_service.relay_configuration()
+                )
+            except (OSError, RuntimeError, ValueError, sqlite3.Error):
+                # Relay state is an optional ingress path. A damaged local
+                # authority record must fail remote access closed without
+                # turning that optional failure into cluster downtime.
+                logger.warning(
+                    "Operator relay configuration is unavailable; "
+                    "continuing with local API access only"
+                )
         # External extensions remain optional. Production nodes prepend
         # first-party provider facades that expose core services through the
         # same generic contracts without duplicating their runtimes.
@@ -7297,11 +7307,7 @@ class API:
                     self._operator_pairing_service is not None
                     and self._operator_relay_configuration is not None
                 ):
-                    operator_gateway = OperatorGatewayConnector(
-                        self._operator_relay_configuration
-                    )
-                    tg.start_soon(self.run_operator_api, shutdown_ev)
-                    tg.start_soon(operator_gateway.run)
+                    tg.start_soon(self.run_operator_remote_access, shutdown_ev)
                 try:
                     await anyio.sleep_forever()
                 finally:
@@ -7364,6 +7370,36 @@ class API:
                 cast(ASGIFramework, protected_app),
                 cfg,
                 shutdown_trigger=ev.wait,
+            )
+
+    async def run_operator_remote_access(self, ev: anyio.Event) -> None:
+        """Supervise optional relay ingress without coupling it to the local API.
+
+        Args:
+            ev: Shared API shutdown signal.
+
+        Side effects:
+            Starts the relay-only TLS listener and outbound carrier lanes. Any
+            startup or runtime failure disables remote access for this process
+            while the ordinary local API continues serving.
+        """
+
+        configuration = self._operator_relay_configuration
+        if configuration is None:
+            return
+        try:
+            async with anyio.create_task_group() as operator_task_group:
+                operator_gateway = OperatorGatewayConnector(configuration)
+                operator_task_group.start_soon(self.run_operator_api, ev)
+                operator_task_group.start_soon(operator_gateway.run)
+                await ev.wait()
+                operator_task_group.cancel_scope.cancel()
+        except Exception:
+            # Do not include exception text: relay paths and lower-level
+            # transport errors can contain private deployment metadata.
+            logger.warning(
+                "Operator remote access is unavailable; "
+                "the local API remains available"
             )
 
     def _maybe_compact_event_log(self) -> None:
