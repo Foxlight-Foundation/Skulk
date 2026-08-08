@@ -84,9 +84,7 @@ def _membership(
     for _ in range(learners):
         member_id, private_key = _member()
         keys[member_id] = private_key
-        members.append(
-            create_authority_member(member_id, private_key, role="learner")
-        )
+        members.append(create_authority_member(member_id, private_key, role="learner"))
     return AuthorityMembership(generation=generation, members=tuple(members)), keys
 
 
@@ -139,8 +137,7 @@ def _descriptor(
         payload_digest=authority_payload_digest(selected_payload),
         required_membership_digests=tuple(
             sorted(
-                authority_membership_digest(membership)
-                for membership in memberships
+                authority_membership_digest(membership) for membership in memberships
             )
         ),
     )

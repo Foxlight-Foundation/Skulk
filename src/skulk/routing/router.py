@@ -55,6 +55,7 @@ from .realtime_audio import RealtimeAudioPacket
 from .speech_media import SpeechMediaPacket
 from .telemetry_plane import NO_PEER_WARNING_AFTER_SECONDS, TelemetryPlaneObserver
 from .topics import (
+    AUTHORITY_MESSAGES,
     CONNECTION_MESSAGES,
     DATA,
     ELECTION_MESSAGES,
@@ -111,6 +112,10 @@ _VISION_NETWORK_TERMINAL_BUFFER = 1024
 # Election egress owns a small bounded queue and publish loop so a burst on the
 # ordinary gossipsub topics cannot leave liveness traffic waiting in their FIFO.
 _ELECTION_OUTBOUND_BUFFER = 128
+# Consensus rounds are low-volume correctness traffic. A dedicated bounded
+# Python egress queue prevents ordinary control bursts from queuing ahead of
+# ballots and certificates while making overload backpressure explicit.
+_AUTHORITY_OUTBOUND_BUFFER = 128
 # Telemetry holds at most one serialized packet beyond the in-flight publish.
 # Newer values remain in the keyed admission map and replace stale values there.
 _TELEMETRY_OUTBOUND_BUFFER = 1
@@ -285,9 +290,8 @@ class TopicRouter[T: CamelCaseModel]:
                 f"{self.topic.topic} from {origin}"
             )
             return
-        if (
-            self.topic.topic == VISION_MEDIA.topic
-            and not self._routes_to_local_node(item)
+        if self.topic.topic == VISION_MEDIA.topic and not self._routes_to_local_node(
+            item
         ):
             return
         await self.publish(item, origin=origin)
@@ -310,15 +314,11 @@ class TopicRouter[T: CamelCaseModel]:
         # The routing key (Zenoh data plane only) addresses this message to a
         # single subscriber; None broadcasts on the bare topic (#279 Phase 2).
         routing_key = (
-            self.topic.routing_key(item)
-            if self.topic.routing_key is not None
-            else None
+            self.topic.routing_key(item) if self.topic.routing_key is not None else None
         )
         started_at = time.monotonic()
         stream_key = (
-            self.topic.stream_key(item)
-            if self.topic.stream_key is not None
-            else None
+            self.topic.stream_key(item) if self.topic.stream_key is not None else None
         )
         is_terminal = (
             self.topic.is_terminal(item)
@@ -334,10 +334,7 @@ class TopicRouter[T: CamelCaseModel]:
             logger.opt(exception=exception).warning(
                 f"Dropping unserializable message on topic {self.topic.topic}"
             )
-            if (
-                routing_key is not None
-                and self._data_plane_egress_observer is not None
-            ):
+            if routing_key is not None and self._data_plane_egress_observer is not None:
                 self._data_plane_egress_observer.record_dropped(routing_key)
             return
         await self.networking_sender.send(
@@ -349,7 +346,10 @@ class TopicRouter[T: CamelCaseModel]:
                 data=serialized,
             )
         )
-        if self.topic.routing_key is not None and self._data_plane_egress_observer is not None:
+        if (
+            self.topic.routing_key is not None
+            and self._data_plane_egress_observer is not None
+        ):
             self._data_plane_egress_observer.record_enqueue_latency(
                 time.monotonic() - started_at
             )
@@ -393,9 +393,7 @@ class TelemetryTopicRouter(TopicRouter[NodeTelemetry]):
         self._pending[key] = _PendingTelemetry(item=item, enqueued_at=time.monotonic())
         self._observer.record_depth(
             pending=len(self._pending),
-            network_queue=(
-                self.networking_sender.statistics().current_buffer_used
-            ),
+            network_queue=(self.networking_sender.statistics().current_buffer_used),
         )
         with suppress(WouldBlock):
             self._wake_send.send_nowait(None)
@@ -544,6 +542,11 @@ class Router:
         )
         self._election_out_send = election_send
         self._election_out_recv = election_recv
+        authority_send, authority_recv = channel[OutboundPacket](
+            _AUTHORITY_OUTBOUND_BUFFER
+        )
+        self._authority_out_send = authority_send
+        self._authority_out_recv = authority_recv
         telemetry_send, telemetry_recv = channel[OutboundPacket](
             _TELEMETRY_OUTBOUND_BUFFER
         )
@@ -635,6 +638,8 @@ class Router:
             send = self._zenoh_out_send.clone()
         elif topic.topic == ELECTION_MESSAGES.topic:
             send = self._election_out_send.clone()
+        elif topic.topic == AUTHORITY_MESSAGES.topic:
+            send = self._authority_out_send.clone()
         elif topic.topic == TELEMETRY.topic:
             send = self._telemetry_out_send.clone()
         else:
@@ -722,9 +727,7 @@ class Router:
         assert router.topic.model_type == topic.model_type
 
         send, recv = channel[tuple[str | None, T]]()
-        router.origin_senders.add(
-            cast(Sender[tuple[str | None, CamelCaseModel]], send)
-        )
+        router.origin_senders.add(cast(Sender[tuple[str | None, CamelCaseModel]], send))
         return recv
 
     async def run(self):
@@ -737,6 +740,7 @@ class Router:
                 tg.start_soon(self._networking_recv)
                 tg.start_soon(self._networking_publish)
                 tg.start_soon(self._election_networking_publish)
+                tg.start_soon(self._authority_networking_publish)
                 tg.start_soon(self._telemetry_networking_publish)
                 tg.start_soon(self._vision_networking_publish)
                 tg.start_soon(self._vision_networking_ingress)
@@ -946,8 +950,8 @@ class Router:
     async def _networking_publish(self):
         # Gossipsub control traffic plus DATA when Zenoh is off. DATA on Zenoh is
         # diverted to _zenoh_networking_publish at register time, while election
-        # and telemetry each have a dedicated loop. routing_key is irrelevant to
-        # bare-topic gossipsub broadcast.
+        # authority, election, and telemetry each have a dedicated Python
+        # egress loop. routing_key is irrelevant to bare-topic gossipsub broadcast.
         with self.networking_receiver as networked_items:
             async for packet in networked_items:
                 await self._publish_gossipsub_packet(packet)
@@ -957,6 +961,13 @@ class Router:
 
         with self._election_out_recv as election_items:
             async for packet in election_items:
+                await self._publish_gossipsub_packet(packet)
+
+    async def _authority_networking_publish(self) -> None:
+        """Publish authority traffic independently from ordinary Python egress."""
+
+        with self._authority_out_recv as authority_items:
+            async for packet in authority_items:
                 await self._publish_gossipsub_packet(packet)
 
     async def _telemetry_networking_publish(self) -> None:
@@ -1052,9 +1063,7 @@ class Router:
         )
         assert receiver is not None
         stream_buffer = (
-            _ZENOH_VISION_STREAM_BUFFER
-            if vision_ingress
-            else _ZENOH_DATA_STREAM_BUFFER
+            _ZENOH_VISION_STREAM_BUFFER if vision_ingress else _ZENOH_DATA_STREAM_BUFFER
         )
         max_streams_per_owner = (
             _ZENOH_VISION_MAX_STREAMS_PER_OWNER
@@ -1085,20 +1094,17 @@ class Router:
         def reject_stream(stream: tuple[str, str, str]) -> None:
             rejected_streams.add(stream)
             rejected_stream_order.append(stream)
-            while (
-                len(rejected_stream_order)
-                > rejected_tombstones
-            ):
+            while len(rejected_stream_order) > rejected_tombstones:
                 rejected_streams.discard(rejected_stream_order.popleft())
 
         async with TaskGroup() as task_group:
             with receiver as items:
                 async for packet in items:
                     observer = self._egress_observer_for_topic(packet.topic)
-                # Nodes subscribe only to data/<own_node_id>, never the bare
-                # topic, so a keyless message reaches no subscriber. Every serving
-                # task carries owner_node (#279 Phase 2), so this should not
-                # happen - warn loudly rather than drop silently (#310 review).
+                    # Nodes subscribe only to data/<own_node_id>, never the bare
+                    # topic, so a keyless message reaches no subscriber. Every serving
+                    # task carries owner_node (#279 Phase 2), so this should not
+                    # happen - warn loudly rather than drop silently (#310 review).
                     if not packet.routing_key:
                         logger.warning(
                             f"Zenoh DATA publish on {packet.topic} has no routing key "
@@ -1153,9 +1159,7 @@ class Router:
                                 True,
                             )
                             continue
-                        sender, receiver = channel[OutboundPacket](
-                            stream_buffer
-                        )
+                        sender, receiver = channel[OutboundPacket](stream_buffer)
                         stream_senders[stream] = sender
                         owner_stream_counts[owner] = (
                             owner_stream_counts.get(owner, 0) + 1
@@ -1211,9 +1215,7 @@ class Router:
 
         await self._zenoh_networking_publish(vision_ingress=True)
 
-    def _offer_vision_network_packet(
-        self, data: bytes, origin: str | None
-    ) -> None:
+    def _offer_vision_network_packet(self, data: bytes, origin: str | None) -> None:
         """Admit one network frame without awaiting a vision component consumer."""
 
         try:
@@ -1375,9 +1377,7 @@ class Router:
                 original,
                 (RealtimeAudioPacket, SpeechMediaPacket, VisionMediaPacket),
             ):
-                rejection_frames = [
-                    original.transport_failure(failure_message)
-                ]
+                rejection_frames = [original.transport_failure(failure_message)]
             else:
                 return
             for frame in rejection_frames:
@@ -1405,7 +1405,9 @@ class Router:
                 except get_cancelled_exc_class():
                     raise
                 except Exception as exception:
-                    self._egress_observer_for_topic(packet.topic).record_publish_failure(
+                    self._egress_observer_for_topic(
+                        packet.topic
+                    ).record_publish_failure(
                         rejection_owner, time.monotonic() - started_at
                     )
                     logger.opt(exception=exception).warning(
@@ -1526,9 +1528,7 @@ class Router:
             sender = stream_senders.pop(stream, None)
             if sender is not None:
                 sender.close()
-            owner_stream_counts[owner] = max(
-                0, owner_stream_counts.get(owner, 1) - 1
-            )
+            owner_stream_counts[owner] = max(0, owner_stream_counts.get(owner, 1) - 1)
             if owner_stream_counts[owner] == 0:
                 owner_stream_counts.pop(owner, None)
             observer.record_stream_closed(owner)

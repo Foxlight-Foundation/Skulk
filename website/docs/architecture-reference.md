@@ -96,9 +96,10 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Role:** owns stable host/cluster identities, deterministic quorum
   certification, and the encrypted local projection that operator pairing,
   credentials, revocation, and gateway fencing build upon.
-- **Lives in:** `src/skulk/operator/identity.py` and
-  `src/skulk/operator/authority.py` plus
-  `src/skulk/operator/replication.py`; focused tests live in
+- **Lives in:** `src/skulk/operator/identity.py`,
+  `src/skulk/operator/authority.py`, `src/skulk/operator/replication.py`,
+  `src/skulk/operator/consensus.py`, `src/skulk/operator/consensus_store.py`,
+  and `src/skulk/operator/transport.py`; focused tests live in
   `src/skulk/operator/tests/`.
 - **Stable node identity:** `NodeInstallationIdentity.node_install_id` is a
   persisted UUIDv4 under the protected operator configuration directory. It is
@@ -123,14 +124,35 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   needs a strict majority;
   learners, duplicate members/keys/votes, stale chain heads, non-consecutive
   joint generations, invalid signatures, and substituted payloads fail closed.
+- **Consensus protocol:** `AuthorityBallot(counter, proposer_node_install_id)`
+  totally orders concurrent proposals. A voter persists a promise before its
+  phase-one response and an accepted descriptor before its phase-two vote. A
+  replacement proposer recovers the highest accepted value returned by a
+  prepare quorum. Learners catch up but do not vote; joint transitions require
+  both majorities and the resulting committed membership fences removed nodes.
+  Catch-up carries bounded contiguous certificate suffixes only.
+- **Consensus persistence:** `SqliteAuthorityConsensusRepository` stores
+  promise/accept state and an append-only certified log separately from the
+  encrypted authority projection. Immutable bootstrap position/membership
+  anchors permit every restart to reverify the complete signature, quorum,
+  digest, index, and membership chain. Writes use revisioned compare-and-set in
+  one SQLite transaction; secret authority payloads and keys are not accepted.
+- **Network boundary:** `AUTHORITY_MESSAGES` carries Ed25519-signed envelopes
+  binding stable source and target installation IDs, message ID, and one typed
+  public protocol payload. It has a dedicated bounded Python egress queue and
+  currently rides the default authenticated libp2p gossipsub behavior.
+  `AuthorityChannelTransport` discards broadcasts for other targets before
+  consensus. The topic is registered, but no authority service lifecycle or API
+  authorization consumer starts in this slice.
 - **Key boundary:** `AuthorityKeyProvider` supplies the active unwrapped 32-byte
   data key and immutable key-version ID. Production OS-wrapping providers and
   replicated key envelopes are later S1 slices; this store never writes the
   plaintext data key itself.
-- **Critical boundary:** quorum verification is implemented, but network vote
-  collection, leader election, replicated certificate-log recovery,
-  OS-protected key wrapping, and gateway leases are later slices. No operator
-  traffic may treat an uncertified local SQLite commit as a distributed
+- **Critical boundary:** deterministic network vote collection and certified
+  log recovery are implemented, but leader selection/retry orchestration,
+  encrypted payload replication, OS-protected key wrapping, gateway leases,
+  and Node lifecycle integration are later slices. No remotely authenticated
+  request may treat an uncertified local SQLite commit as a distributed
   authorization decision. None of these records enters `State`, telemetry,
   diagnostics, or the API event log.
 
@@ -203,6 +225,7 @@ Defined in `src/skulk/routing/topics.py`.
 | `DOWNLOAD_COMMANDS` | `ForwarderDownloadCommand` | `DownloadCommand` (`StartDownload`, `DeleteDownload`, `CancelDownload`, `SyncConfig`, `PurgeStagingCache`, `RestartNode`) | API (download/restart/sync admin ops), Master, Workers | All nodes |
 | `STATE_SYNC_MESSAGES` | `StateSyncMessage` | bidirectional: followers retry `kind="request"` through startup for snapshot/config bootstrap; master publishes `kind="response"` with the requested payload (`StateSnapshotHydrated` etc.) and its routable authoritative store address | All nodes (request: followers; response: master) | All nodes |
 | `ELECTION_MESSAGES` | `ElectionMessage` | bully election rounds on dedicated Python egress and a dedicated gossipsub behavior/protocol and handler queue; deduplicated legacy copy during migration | All nodes | All nodes |
+| `AUTHORITY_MESSAGES` | `AuthorityNetworkEnvelope` | signed stable-installation-addressed prepare/promise/accept/vote/commit/catch-up metadata; no secret authority payloads | Future authority service; deterministic harness today | Future authority service; registered router topic is otherwise dormant |
 | `CONNECTION_MESSAGES` | libp2p connection updates | peer arrivals / departures | Router | All nodes |
 | `TELEMETRY` | `NodeTelemetry` | `GatheredInfo` plus non-terminal `DownloadPending` / `DownloadOngoing`; bounded latest-value admission and an isolated gossipsub protocol | Workers | All nodes (applied into `TelemetryView`) |
 | `DATA` | `DataChunk` | `{command_id, kind, chunk?, sequence, owner_node}`: explicit `started/chunk/completed/failed/cancelled` lifecycle for token, image, embedding, transcription, and audio output | One serving output worker: rank 0 for text/embedding/speech, primary terminal stage for image generation | Owning API node only on Zenoh; API nodes on gossipsub; master does NOT consume it |

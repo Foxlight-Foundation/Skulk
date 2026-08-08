@@ -101,17 +101,20 @@ If `nix fmt` changes any files, stage them before committing. The CI runs `nix f
 
 ### Node Composition
 A single Skulk `Node` (src/skulk/main.py) runs multiple components:
-- **Router**: libp2p-based pub/sub messaging via Rust bindings (`skulk_pyo3_bindings`). `TELEMETRY` uses bounded latest-value admission, a one-packet Python egress queue, and its own gossipsub protocol/handler queues; `ELECTION_MESSAGES` has a separate Python egress queue and isolated protocol/handler queues. Neither can be starved by ordinary control fan-out, and telemetry pressure cannot consume election capacity. Election alone carries a temporary legacy-protocol copy. Peer discovery tries all mDNS addresses once, then slows link-local retries to one minute after another path connects; socket liveness requires three consecutive five-second ping failures. Live authenticated libp2p sessions are also recorded as `session=True` topology edges (refcounted per peer, seeded across worker recreation), keeping NAT'd/proxied remote members visible and placeable; placement host selection skips session edges, and advertised addresses that fail three consecutive probe sweeps back off to every sixth sweep while no-longer-advertised addresses still delete their edges (#662). Telemetry publishes that reach no subscribed peers are counted (`noPeerPublishes` in `GET /v1/diagnostics/telemetry`) and, sustained on a connected node, warn that the node will be invisible to membership (#660).
+- **Router**: libp2p-based pub/sub messaging via Rust bindings (`skulk_pyo3_bindings`). `TELEMETRY` uses bounded latest-value admission, a one-packet Python egress queue, and its own gossipsub protocol/handler queues; `ELECTION_MESSAGES` has a separate Python egress queue and isolated protocol/handler queues. `AUTHORITY_MESSAGES` has a distinct bounded Python egress queue and carries only signed public consensus metadata on the default authenticated gossipsub behavior. Ordinary Python control backlog cannot queue ahead of election or authority traffic, and telemetry pressure cannot consume election capacity. Election alone carries a temporary legacy-protocol copy. Peer discovery tries all mDNS addresses once, then slows link-local retries to one minute after another path connects; socket liveness requires three consecutive five-second ping failures. Live authenticated libp2p sessions are also recorded as `session=True` topology edges (refcounted per peer, seeded across worker recreation), keeping NAT'd/proxied remote members visible and placeable; placement host selection skips session edges, and advertised addresses that fail three consecutive probe sweeps back off to every sixth sweep while no-longer-advertised addresses still delete their edges (#662). Telemetry publishes that reach no subscribed peers are counted (`noPeerPublishes` in `GET /v1/diagnostics/telemetry`) and, sustained on a connected node, warn that the node will be invisible to membership (#660).
 - **Worker**: Handles inference tasks, downloads models, manages runner processes
 - **Master**: Coordinates cluster state, places model instances across nodes; retained event-log replay is coalesced onto one asynchronously paced worker, and sustained idle-state event-log growth emits an operator warning
 - **Election**: Bully algorithm for master election, carried on the isolated election gossipsub behavior with duplicate candidate suppression during protocol migration
 - **API**: FastAPI server for OpenAI-compatible chat completions
 - **Operator identity/authority foundation**: stable per-host and cluster
-  identities, deterministic Ed25519 quorum-certificate verification, and an
-  encrypted local compare-and-set journal under `src/skulk/operator/`. It
+  identities, deterministic Ed25519 quorum certification, two-phase
+  crash-fault vote collection and recovery, a public consensus SQLite log, and
+  an encrypted local compare-and-set journal under `src/skulk/operator/`. It
   remains separate from event-sourced `State`, telemetry, diagnostics, and the
-  public event log. The journal requires an injected external data-key
-  provider. Network vote collection, replicated recovery, OS key wrapping, and
+  public event log. Restart recovery reverifies the complete certificate and
+  membership chain from immutable bootstrap anchors. The encrypted journal
+  requires an injected external data-key provider. Leader/retry orchestration,
+  secret payload replication, OS key wrapping, Node lifecycle integration, and
   gateway fencing remain later slices.
 
 ### Node Facts & capability derivation (#614)
@@ -275,6 +278,7 @@ Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `TRACE_DATA`: Best-effort diagnostic trace payloads, off the event log/master/State. Each runner supervisor sends one terminal packet per traced task rank to the owning API; that API assembles the expected rank set under fixed task-count and age bounds before writing the Chrome trace. Same-version fleet required.
 - `VISION_MEDIA`: VLM and image-edit input, off the event log/master/State. The API waits for authoritative `TaskCreated` placement, then sends an `opened -> chunk* -> completed` binary-framed stream directly to every selected worker rank. Workers apply stream/frame/byte/age bounds and expose input to planning only after exact sequence, metadata, task-owner, and SHA-256 verification plus successful acknowledgement admission; timed-out acknowledgement sends retry while the task remains gated. Each rank returns `accepted`, and a bounded missing-ack deadline fails the source request. Vision ingress has separate bounded network-receive lanes and a separate remote dispatcher; `NodeDiagnostics.visionMediaEgress` reports router pressure and `visionMediaIngress` reports worker retention and outcomes, so uploads cannot delay control receive, consume generated-output capacity, or fail invisibly. Same-version fleet required.
 - `ELECTION_MESSAGES`: Election protocol messages
+- `AUTHORITY_MESSAGES`: Stable-installation-addressed, Ed25519-signed public authority consensus messages (prepare/promise/accept/vote/commit/catch-up). It has dedicated bounded Python egress, but currently uses the default libp2p gossipsub behavior; secret payloads never enter it.
 - `CONNECTION_MESSAGES`: libp2p connection updates
 - `TELEMETRY`: Workers offer `NodeTelemetry` without blocking into a bounded 256-key latest-value map, drained through a one-packet queue and dedicated gossipsub protocol/handler queues. The in-memory `TelemetryView` holds node resources/memory/system/identity/disk/rdma-ctl, extension capability tags, the payload-free `NodeHeartbeat`, and non-terminal `DownloadPending`/`DownloadOngoing`; none enters the event log. Only download completed/failed outcomes remain in `State`, with opaque attempt IDs preventing delayed telemetry from overriding terminal/reset decisions; `effective_downloads()` restores the existing planner/worker/`GET /state` view. `GET /v1/diagnostics/telemetry` exposes aggregate local pressure. Heartbeat publishes every two seconds; ordinary telemetry and the last indexed control event remain liveness fallbacks, and `NodeTimedOut.evidence` persists the deciding ages. Connectivity readings (`node_network`, thunderbolt maps/cycles) deliberately remain ordered control state because they define the topology graph. Topology edges come from HTTP identity probes of advertised addresses PLUS authenticated libp2p sessions recorded as first-class edges (#662, refcounted per peer; the session edge is what keeps a NAT'd remote member out of floating-node limbo), with failing advertised addresses probed at a backed-off cadence. Same-version fleets remain required.
 
@@ -304,7 +308,8 @@ The system uses event sourcing for state management:
   - `model_cards.py`: declarative model cards, including optional advanced capability sections; machine-generated custom cards carry `generator_revision`, and a stamped card older than `CARD_GENERATOR_REVISION` loses override power against the bundled card for the same id (unstamped = hand-authored, keeps #652 override)
   - `capabilities.py`: normalized runtime capability profiles derived from model cards plus conservative family defaults
 - `src/skulk/operator/`: stable operator identity, deterministic quorum
-  certification, and encrypted authority persistence. Runtime libp2p `NodeId`
+  certification, crash-fault consensus and recovery, separate public consensus
+  persistence, and encrypted authority persistence. Runtime libp2p `NodeId`
   remains unsuitable for mobile history, device membership, or authorization
   subjects.
 

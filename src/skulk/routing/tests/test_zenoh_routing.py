@@ -13,6 +13,7 @@ import pytest
 from skulk_pyo3_bindings import NetworkingHandle, ZenohHandle
 
 from skulk.routing.router import (
+    _AUTHORITY_OUTBOUND_BUFFER,  # pyright: ignore[reportPrivateUsage]
     _ELECTION_OUTBOUND_BUFFER,  # pyright: ignore[reportPrivateUsage]
     _VISION_NETWORK_PAYLOAD_BUFFER,  # pyright: ignore[reportPrivateUsage]
     _ZENOH_DATA_OUTBOUND_BUFFER,  # pyright: ignore[reportPrivateUsage]
@@ -22,6 +23,7 @@ from skulk.routing.router import (
     Router,
 )
 from skulk.routing.topics import (
+    AUTHORITY_MESSAGES,
     COMMANDS,
     DATA,
     ELECTION_MESSAGES,
@@ -359,6 +361,31 @@ async def test_election_egress_uses_a_dedicated_bounded_channel() -> None:
     )
 
 
+async def test_authority_egress_uses_a_dedicated_bounded_channel() -> None:
+    """Ordinary and election backlog cannot queue ahead of authority traffic."""
+
+    router = _router(zenoh=False)
+    await router.register_topic(AUTHORITY_MESSAGES)
+    authority_router = router.topic_routers[AUTHORITY_MESSAGES.topic]
+    packet = OutboundPacket(
+        topic=AUTHORITY_MESSAGES.topic,
+        routing_key=None,
+        stream_key=None,
+        is_terminal=False,
+        data=b"authority",
+    )
+
+    await authority_router.networking_sender.send(packet)
+
+    assert await router._authority_out_recv.receive() == packet  # pyright: ignore[reportPrivateUsage]
+    assert router.networking_receiver.collect() == []
+    assert router._election_out_recv.collect() == []  # pyright: ignore[reportPrivateUsage]
+    assert (
+        authority_router.networking_sender.statistics().max_buffer_size
+        == _AUTHORITY_OUTBOUND_BUFFER
+    )
+
+
 def test_data_owner_key_addresses_owning_node() -> None:
     """The DATA topic's routing key is the chunk's owner node id (#279 Phase 2).
 
@@ -375,9 +402,7 @@ def test_data_owner_key_addresses_owning_node() -> None:
     def _chunk(owner: NodeId | None) -> DataChunk:
         return DataChunk(
             command_id=CommandId("c"),
-            chunk=TokenChunk(
-                model=ModelId("m"), text="x", token_id=0, usage=None
-            ),
+            chunk=TokenChunk(model=ModelId("m"), text="x", token_id=0, usage=None),
             sequence=0,
             owner_node=owner,
         )
@@ -428,9 +453,7 @@ def test_zenoh_publish_keys_by_owner_and_subscribe_keys_by_self() -> None:
         # Publishing a chunk addressed to another owner keys to data/<owner>.
         chunk = DataChunk(
             command_id=CommandId("c"),
-            chunk=TokenChunk(
-                model=ModelId("m"), text="hi", token_id=0, usage=None
-            ),
+            chunk=TokenChunk(model=ModelId("m"), text="hi", token_id=0, usage=None),
             sequence=0,
             owner_node=NodeId("owner-9"),
         )
