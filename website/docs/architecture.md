@@ -948,6 +948,25 @@ dormant service do not authorize any API route by themselves.
 Operator identity and authorization records never enter `State`, telemetry,
 diagnostics, or the public event log.
 
+The first usable remote-operator slice deliberately chooses a simpler
+availability contract. One API-capable host is designated by running
+`skulk operator pair`. `LocalFileAuthorityKeyProvider` creates a random
+32-byte key in the protected Skulk configuration directory and
+`OperatorPairingService` persists pairing transitions in the encrypted local
+journal. POSIX mode `0600` protects the local key; hardware-backed wrapping and
+automatic gateway failover are later hardening, not prerequisites for pairing.
+If this gateway is down, remote operator access is down while local cluster and
+dashboard operation continue.
+
+The local command creates a five-minute QR capability. The API exposes only
+challenge and exchange before authentication: a phone proposes an Ed25519 key,
+signs a domain-separated random challenge, and receives opaque access and
+refresh credentials once. Raw nonces and tokens are never stored in plaintext;
+the authority journal contains encrypted state and one-way token digests. This
+slice issues credentials but does not yet authorize general routes. The next
+slice adds refresh, revocation, and one canonical API authorization policy
+shared by remote clients without creating parallel model or inference APIs.
+
 ### Event log
 
 `src/skulk/utils/disk_event_log.py` is an append-only log: the live file (`events.bin`) is uncompressed length-prefixed msgpack records (4-byte big-endian length + msgpack payload). When the log rotates or the master shuts down, the live file is zstd-compressed into a rotated archive (`events.*.bin.zst`); only the rotated archives are compressed, not the active write target. Every indexed event passes through here. Followers replay from this log on bootstrap. Snapshots can be written periodically; events older than a snapshot can be compacted (with a guarded rollout window, see "State and events" above).

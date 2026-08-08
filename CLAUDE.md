@@ -113,11 +113,15 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
   remains separate from event-sourced `State`, telemetry, diagnostics, and the
   public event log. Restart recovery reverifies the complete certificate and
   membership chain from immutable bootstrap anchors. The encrypted journal
-  requires an injected external data-key provider. A dormant bounded service
+  requires an injected external data-key provider. The v1 designated gateway
+  uses a protected local-file provider and `skulk operator pair` to create a
+  five-minute QR capability; the API exposes only device-key challenge and
+  exchange before authentication, returning one-time opaque access/refresh
+  credentials while persisting encrypted state and token digests. A dormant bounded service
   can drive one caller-selected proposal with deadlines, retries, accepted-value
   recovery, local durable commit, and catch-up broadcast; it is not started by
   `Node`. Authority leader selection, secret payload replication, OS key
-  wrapping, Node lifecycle integration, and gateway fencing remain later slices.
+  wrapping, automatic gateway failover, and gateway fencing remain later slices.
 
 ### Node Facts & capability derivation (#614)
 Detection creates capability; configuration overrides it; disagreement is

@@ -30,6 +30,7 @@ from skulk.download.coordinator import DownloadCoordinator
 from skulk.download.impl_shard_downloader import skulk_shard_downloader
 from skulk.extensions import load_extensions
 from skulk.master.main import Master
+from skulk.operator.pairing import OperatorPairingService
 from skulk.routing.event_router import EventRouter
 from skulk.routing.router import Router, TelemetrySender, get_node_id_keypair
 from skulk.routing.zenoh_status import ZenohPeerSampler
@@ -711,6 +712,7 @@ class Node:
                 # by the API and delegate to the existing core runtimes.
                 extensions=load_extensions(),
                 enable_builtin_providers=True,
+                operator_pairing_service=OperatorPairingService.from_default_paths(),
             )
         else:
             api = None
@@ -1316,6 +1318,11 @@ class Node:
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "operator":
+        # Operator commands are local administration and never launch a node.
+        from skulk.operator.cli import main as operator_main
+
+        sys.exit(operator_main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "doctor":
         # `skulk doctor` is a standalone audit, not a node launch: dispatch
         # before Args.parse() so the node argument parser never sees it.

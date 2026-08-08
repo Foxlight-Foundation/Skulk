@@ -63,6 +63,8 @@ dependencies = [
   # This is a direct production dependency: secret storage must not rely on a
   # transitive dependency accidentally keeping cryptography installed.
   "cryptography>=46.0.3",
+  # Local operator pairing renders a terminal QR without requiring a browser.
+  "qrcode>=8.2",
   "webrtcvad-wheels>=2.0.14,<3",
   # Platform-conditional HARD dependency (#614): nothing optional may be
   # load-bearing. Without this binding an NVIDIA node silently loses VRAM

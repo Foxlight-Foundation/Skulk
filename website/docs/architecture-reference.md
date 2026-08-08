@@ -99,8 +99,11 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Lives in:** `src/skulk/operator/identity.py`,
   `src/skulk/operator/authority.py`, `src/skulk/operator/replication.py`,
   `src/skulk/operator/consensus.py`, `src/skulk/operator/consensus_store.py`,
-  `src/skulk/operator/service.py`, and `src/skulk/operator/transport.py`; focused tests live in
-  `src/skulk/operator/tests/`.
+  `src/skulk/operator/service.py`, `src/skulk/operator/transport.py`,
+  `src/skulk/operator/key_provider.py`, `src/skulk/operator/pairing.py`, and
+  `src/skulk/operator/cli.py`; the two pre-credential routes live in
+  `src/skulk/api/operator_auth.py`, and focused tests live in
+  `src/skulk/operator/tests/` and `src/skulk/api/tests/test_operator_auth.py`.
 - **Stable node identity:** `NodeInstallationIdentity.node_install_id` is a
   persisted UUIDv4 under the protected operator configuration directory. It is
   intentionally independent of the currently ephemeral libp2p `NodeId`.
@@ -149,20 +152,30 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   queue are both bounded, and traffic currently rides the default authenticated
   libp2p gossipsub behavior.
   `AuthorityChannelTransport` discards broadcasts for other targets before
-  consensus. The topic is registered, but neither the dormant authority service
-  nor an API authorization consumer starts from `Node` in this slice.
+  consensus. The topic and consensus service remain dormant. API nodes do
+  construct the independent local pairing service, which never uses this
+  network topic.
+- **V1 pairing:** `skulk operator pair --exchange-url ...` explicitly
+  designates the local host, initializes the encrypted store when needed, and
+  emits one five-minute QR capability. Challenge binds a proposed Ed25519
+  device key; exchange verifies a domain-separated signature, consumes the
+  session, and returns one access/refresh credential pair. The journal stores
+  encrypted state and one-way token digests, not raw nonces or tokens. General
+  API authorization, refresh, and revocation remain the next slice.
 - **Key boundary:** `AuthorityKeyProvider` supplies the active unwrapped 32-byte
-  data key and immutable key-version ID. Production OS-wrapping providers and
-  replicated key envelopes are later S1 slices; this store never writes the
-  plaintext data key itself.
+  data key and immutable key-version ID. V1's
+  `LocalFileAuthorityKeyProvider` creates one random local key protected by
+  POSIX mode `0600` on the designated gateway. Hardware-backed wrapping and
+  replicated key envelopes are later hardening; the authority SQLite database
+  never writes the plaintext data key itself.
 - **Critical boundary:** deterministic network vote collection, certified log
   recovery, and caller-selected bounded proposal orchestration are implemented,
   but authority leader selection, encrypted payload replication, OS-protected
   key wrapping, gateway leases, and Node lifecycle integration are later slices.
-  No remotely authenticated
-  request may treat an uncertified local SQLite commit as a distributed
-  authorization decision. None of these records enters `State`, telemetry,
-  diagnostics, or the API event log.
+  V1 explicitly claims no automatic authority failover: local pairing state is
+  authoritative only for the designated gateway and remote access is
+  unavailable when that host is unavailable. None of these records enters
+  `State`, telemetry, diagnostics, or the API event log.
 
 ### Extensions (plugins)
 
