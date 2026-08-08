@@ -605,6 +605,37 @@ def test_schema_invalid_tombstone_is_loud(
     assert any("schema-invalid" in message for message in caplog.messages)
 
 
+def test_failed_first_append_leaves_no_phantom_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed first append must not durably stamp its cue space."""
+    store = ContentStore(root=tmp_path / "memory")
+    keys = random_vectors(1, DIM, seed=62)
+    values = random_vectors(1, DIM, seed=63)
+    real_open = Path.open
+
+    def failing_append_open(self: Path, *args: object, **kwargs: object) -> object:
+        if self.name.startswith("spans-") and "'a'" in str(args):
+            raise OSError(5, "Input/output error")
+        return real_open(self, *args, **kwargs)  # pyright: ignore[reportCallIssue, reportUnknownVariableType, reportArgumentType] - passthrough shim
+
+    monkeypatch.setattr(Path, "open", failing_append_open)
+    with pytest.raises(OSError):
+        store.append(_record("s-io-first", keys[0], values[0]))
+    monkeypatch.undo()
+    manifest = json.loads((tmp_path / "memory" / "MANIFEST.json").read_text())
+    assert manifest["embedding_model_id"] is None
+    assert manifest["whitener_version"] is None
+    # The empty store accepts a different cue space afterward, since the
+    # failed attempt never became truth.
+    drifted = _record("s-other-space", keys[0], values[0]).model_copy(
+        update={"whitener_version": "v2"}
+    )
+    store.append(drifted)
+    healed = json.loads((tmp_path / "memory" / "MANIFEST.json").read_text())
+    assert healed["whitener_version"] == "v2"
+
+
 def test_partial_manifest_metadata_re_derives_from_stored_records(
     tmp_path: Path,
 ) -> None:
@@ -622,6 +653,11 @@ def test_partial_manifest_metadata_re_derives_from_stored_records(
     # arbitrate even though the manifest field was lost.
     with pytest.raises(ValueError, match="dimension"):
         reopened.append(_record("s-shrunk", small_keys[0], small_values[0]))
+    # The refusal writes nothing; the next legitimate append heals the
+    # manifest from the stored truth it just validated against.
+    full_keys = random_vectors(1, DIM, seed=64)
+    full_values = random_vectors(1, DIM, seed=65)
+    reopened.append(_record("s-full-size", full_keys[0], full_values[0]))
     healed = json.loads(manifest_path.read_text())
     assert healed["vector_dim"] == DIM
 

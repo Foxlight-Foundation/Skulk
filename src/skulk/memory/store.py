@@ -203,6 +203,18 @@ class ContentStore:
                     manifest["segments"] = [
                         segment.name for segment in recovered
                     ]
+                    # The records are the truth for the rest of the lost
+                    # metadata: without it, the next append would re-stamp
+                    # the cue space blind from its incoming record, and the
+                    # default load_whitener() would find no active version.
+                    # Read directly from the discovered files (scan needs a
+                    # manifest) so recovery is a single durable commit with
+                    # no half-recovered window between two writes.
+                    first = self._first_record_in(recovered)
+                    if first is not None:
+                        manifest["embedding_model_id"] = first.embedding_model_id
+                        manifest["whitener_version"] = first.whitener_version
+                        manifest["vector_dim"] = first.vector_dim()
                     _LOGGER.warning(
                         "memory store manifest missing at %s; rebuilt from "
                         "%d discovered segment(s)",
@@ -210,17 +222,6 @@ class ContentStore:
                         len(recovered),
                     )
                 self._write_manifest(manifest)
-                if recovered:
-                    # The records are the truth for the rest of the lost
-                    # metadata: without this, the next append would re-stamp
-                    # the cue space blind from its incoming record, and the
-                    # default load_whitener() would find no active version.
-                    first = next(self.scan(), None)
-                    if first is not None:
-                        manifest["embedding_model_id"] = first.embedding_model_id
-                        manifest["whitener_version"] = first.whitener_version
-                        manifest["vector_dim"] = first.vector_dim()
-                        self._write_manifest(manifest)
             self._reconcile_stale_tombstones()
             self._sweep_orphan_segments()
             segments = self._segments()
@@ -243,6 +244,28 @@ class ContentStore:
                 "degraded (capture disabled, reads continue)",
                 self.root,
             )
+
+    @staticmethod
+    def _first_record_in(segments: list[Path]) -> SpanRecord | None:
+        """First parseable record across ``segments``, read directly.
+
+        Used during manifest recovery, before a manifest exists for scan()
+        to consult; damaged lines are skipped the same way scan() skips
+        them.
+        """
+        for segment in segments:
+            if not segment.exists():
+                continue
+            with segment.open("rb") as handle:
+                for raw in handle:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        return SpanRecord.model_validate_json(line)
+                    except ValueError:
+                        continue
+        return None
 
     # --- manifest -----------------------------------------------------------
 
@@ -518,45 +541,41 @@ class ContentStore:
                 f"span id {record.span_id!r} already exists in the store; "
                 "span ids are unique for the store's lifetime"
             )
+        needs_stamp = (
+            not isinstance(manifest.get("embedding_model_id"), str)
+            or not isinstance(manifest.get("whitener_version"), str)
+            or not isinstance(manifest.get("vector_dim"), int)
+        )
+        if needs_stamp:
+            # The first append stamps the store's cue space and vector
+            # dimension, so mixing is arbitrated from the very first record
+            # even when capture begins before a whitener is persisted. When
+            # records already exist under a partially populated manifest
+            # (legacy or partial recovery), THEY are the truth, not the
+            # incoming record; validate before writing anything.
+            stored = next(self.scan(), None)
+            if stored is not None:
+                if (
+                    record.embedding_model_id != stored.embedding_model_id
+                    or record.whitener_version != stored.whitener_version
+                ):
+                    raise ValueError(
+                        f"span {record.span_id!r} carries cue space "
+                        f"({record.embedding_model_id!r}, "
+                        f"{record.whitener_version!r}) but stored records "
+                        f"hold ({stored.embedding_model_id!r}, "
+                        f"{stored.whitener_version!r}); one store holds "
+                        "one cue space"
+                    )
+                if record.vector_dim() != stored.vector_dim():
+                    raise ValueError(
+                        f"span {record.span_id!r} carries dimension "
+                        f"{record.vector_dim()} but stored records hold "
+                        f"dimension {stored.vector_dim()}; one store holds "
+                        "one vector dimension"
+                    )
         segment: Path | None = None
         try:
-            if (
-                not isinstance(manifest.get("embedding_model_id"), str)
-                or not isinstance(manifest.get("whitener_version"), str)
-                or not isinstance(manifest.get("vector_dim"), int)
-            ):
-                # The first append stamps the store's cue space and vector
-                # dimension, so mixing is arbitrated from the very first
-                # record even when capture begins before a whitener is
-                # persisted. When records already exist under a partially
-                # populated manifest (legacy or partial recovery), THEY are
-                # the truth, not the incoming record.
-                stored = next(self.scan(), None)
-                basis = stored if stored is not None else record
-                manifest["embedding_model_id"] = basis.embedding_model_id
-                manifest["whitener_version"] = basis.whitener_version
-                manifest["vector_dim"] = basis.vector_dim()
-                self._write_manifest(manifest)
-                if basis is not record:
-                    if (
-                        record.embedding_model_id != basis.embedding_model_id
-                        or record.whitener_version != basis.whitener_version
-                    ):
-                        raise ValueError(
-                            f"span {record.span_id!r} carries cue space "
-                            f"({record.embedding_model_id!r}, "
-                            f"{record.whitener_version!r}) but stored records "
-                            f"hold ({basis.embedding_model_id!r}, "
-                            f"{basis.whitener_version!r}); one store holds "
-                            "one cue space"
-                        )
-                    if record.vector_dim() != basis.vector_dim():
-                        raise ValueError(
-                            f"span {record.span_id!r} carries dimension "
-                            f"{record.vector_dim()} but stored records hold "
-                            f"dimension {basis.vector_dim()}; one store holds "
-                            "one vector dimension"
-                        )
             segment = self._active_segment()
             self._repair_torn_tail(segment)
             fresh = not segment.exists()
@@ -572,6 +591,16 @@ class ContentStore:
                 # directory itself is fsynced; without this, a power loss can
                 # unlink a segment whose appends were already acknowledged.
                 self._fsync_directory()
+            if needs_stamp:
+                # Stamp only after the record landed: a failed append must
+                # not leave a phantom identity on an empty store, and a
+                # crash between the record write and this stamp heals at
+                # the next append, which re-derives from stored records.
+                manifest = self._read_manifest()
+                manifest["embedding_model_id"] = record.embedding_model_id
+                manifest["whitener_version"] = record.whitener_version
+                manifest["vector_dim"] = record.vector_dim()
+                self._write_manifest(manifest)
             self._remember_span_id(record.span_id)
         except OSError as error:
             # A failure mid-write can leave a fresh torn tail; re-arm repair
