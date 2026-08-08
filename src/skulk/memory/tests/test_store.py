@@ -583,6 +583,62 @@ def test_torn_tail_repair_retries_after_transient_failure(
     assert survivors == [r.span_id for r in records] + ["s-second-try"]
 
 
+def test_malformed_manifest_counts_as_referenced(tmp_path: Path) -> None:
+    """Unknown manifest state must protect files, not condemn them."""
+    store, _records = _seeded_store(tmp_path, 1)
+    manifest_path = tmp_path / "memory" / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["segments"] = "not a list"
+    manifest_path.write_text(json.dumps(manifest))
+    assert store._manifest_references("anything.jsonl")  # pyright: ignore[reportPrivateUsage]
+
+
+def test_failed_append_rearms_torn_tail_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _records = _seeded_store(tmp_path, 2)
+    segment = next(p for p in (tmp_path / "memory").glob("spans-*.jsonl"))
+    assert segment.name in store._tails_repaired  # pyright: ignore[reportPrivateUsage]
+    keys = random_vectors(1, DIM, seed=35)
+    values = random_vectors(1, DIM, seed=36)
+    real_open = Path.open
+
+    def failing_append_open(self: Path, *args: object, **kwargs: object) -> object:
+        if self.name.startswith("spans-") and "'a'" in str(args):
+            raise OSError(5, "Input/output error")
+        return real_open(self, *args, **kwargs)  # pyright: ignore[reportCallIssue, reportUnknownVariableType, reportArgumentType] - passthrough shim
+
+    monkeypatch.setattr(Path, "open", failing_append_open)
+    with pytest.raises(OSError):
+        store.append(_record("s-io", keys[0], values[0]))
+    monkeypatch.undo()
+    # A failed write may have left a fresh torn tail; repair must re-run.
+    assert segment.name not in store._tails_repaired  # pyright: ignore[reportPrivateUsage]
+    store.append(_record("s-retry", keys[0], values[0]))
+    assert [r.span_id for r in store.scan()][-1] == "s-retry"
+
+
+def test_non_finite_timestamps_are_rejected(tmp_path: Path) -> None:
+    store, _records = _seeded_store(tmp_path, 1)
+    keys = random_vectors(1, DIM, seed=37)
+    values = random_vectors(1, DIM, seed=38)
+    with pytest.raises(ValueError):
+        SpanRecord(
+            span_id="s-nan",
+            text="a thing",
+            role="user",
+            session_id="session-1",
+            node_id="node-a",
+            created_at=float("nan"),
+            key_b64=encode_vector(keys[0]),
+            value_b64=encode_vector(values[0]),
+            embedding_model_id="bge-small-en-v1.5",
+            whitener_version="v1",
+        )
+    with pytest.raises(ValueError, match="finite"):
+        store.tombstone("s0", deleted_at=float("inf"))
+
+
 def test_append_rejects_foreign_cue_space(tmp_path: Path) -> None:
     store = ContentStore(root=tmp_path / "memory")
     corpus = np.random.default_rng(8).normal(size=(32, 16)).astype(np.float32)

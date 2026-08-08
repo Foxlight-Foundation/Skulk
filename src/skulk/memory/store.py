@@ -21,6 +21,7 @@ import base64
 import errno
 import json
 import logging
+import math
 import os
 import shutil
 from collections.abc import Callable, Iterator
@@ -91,7 +92,12 @@ class SpanRecord(BaseModel):
     role: SpanRole = Field(description="Speaker role of the span.")
     session_id: str = Field(description="Conversation/session provenance.")
     node_id: str = Field(description="Capturing node's id at write time.")
-    created_at: float = Field(description="Unix seconds at capture.")
+    created_at: float = Field(
+        description="Unix seconds at capture.",
+        # NaN/inf would serialize to JSON null and fail validation at read
+        # time, turning an acknowledged append into a corrupt line.
+        allow_inf_nan=False,
+    )
     key_b64: str = Field(description="Whitened cue key, base64 fp16.")
     value_b64: str = Field(description="Bound value vector, base64 fp16.")
     embedding_model_id: str = Field(description="Cue-space anchor identity.")
@@ -186,7 +192,8 @@ class ContentStore:
             return True
         listed = manifest.get("segments")
         if not isinstance(listed, list):
-            return False
+            # Malformed is unknown, and unknown counts as referenced too.
+            return True
         return name in [str(entry) for entry in listed]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
 
     def _read_manifest(self) -> dict[str, object]:
@@ -383,6 +390,7 @@ class ContentStore:
                     f"{offered!r} but the store's active cue space is "
                     f"{active!r}; one store holds one cue space"
                 )
+        segment: Path | None = None
         try:
             segment = self._active_segment()
             self._repair_torn_tail(segment)
@@ -400,11 +408,19 @@ class ContentStore:
                 # unlink a segment whose appends were already acknowledged.
                 self._fsync_directory()
         except OSError as error:
+            # A failure mid-write can leave a fresh torn tail; re-arm repair
+            # so a retry on this store truncates it instead of fusing.
+            if segment is not None:
+                self._tails_repaired.discard(segment.name)
             self._translate_out_of_space(error)
             raise
 
     def tombstone(self, span_id: str, *, deleted_at: float) -> None:
         """Record exact forgetting of one span (drop at next compaction)."""
+        if not math.isfinite(deleted_at):
+            # json.dumps would emit bare NaN/Infinity, which is not JSON and
+            # would read back as a corrupt tombstone line.
+            raise ValueError(f"deleted_at must be finite, got {deleted_at!r}")
         entry = json.dumps({"span_id": span_id, "deleted_at": deleted_at}) + "\n"
         self._refuse_writes_if_degraded(pending_bytes=len(entry.encode("utf-8")))
         path = self.root / _TOMBSTONES_NAME
@@ -420,6 +436,7 @@ class ContentStore:
                 # entry must survive power loss like every later one.
                 self._fsync_directory()
         except OSError as error:
+            self._tails_repaired.discard(path.name)
             self._translate_out_of_space(error)
             raise
 
