@@ -81,7 +81,8 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
 - `src/skulk/worker/` — Worker node (inference, runner management, download coordination)
 - `src/skulk/store/` — Model store (registry, downloads, config, model optimizer)
 - `src/skulk/operator/` — Stable operator identity, quorum certification,
-  crash-fault consensus, and encrypted/public authority persistence. It is a
+  crash-fault consensus, bounded dormant proposal lifecycle, and
+  encrypted/public authority persistence. It is a
   separate security plane from event-sourced inference state; do not place its
   secrets or mutable authorization records in `State`, telemetry, diagnostics,
   or ordinary events.

@@ -384,6 +384,10 @@ async def test_authority_egress_uses_a_dedicated_bounded_channel() -> None:
         authority_router.networking_sender.statistics().max_buffer_size
         == _AUTHORITY_OUTBOUND_BUFFER
     )
+    assert (
+        authority_router.receiver.statistics().max_buffer_size
+        == _AUTHORITY_OUTBOUND_BUFFER
+    )
 
 
 def test_data_owner_key_addresses_owning_node() -> None:

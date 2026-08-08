@@ -927,14 +927,24 @@ state in a separate SQLite WAL database. Promise and accepted state, immutable
 bootstrap anchors, and an append-only certificate log commit atomically through
 compare-and-set revisions. On every load the repository re-verifies the full
 signature, quorum, digest, index, and membership chain from bootstrap; it never
-stores secret-bearing payloads or encryption keys.
+stores secret-bearing payloads or encryption keys. Every open also repairs the
+database, WAL, and shared-memory sidecar modes on POSIX.
 `src/skulk/operator/transport.py` filters the broadcast authority topic by
 stable target identity before a participant sees it.
 
-Leader selection and retry scheduling, encrypted authority-payload replication,
-OS-protected key wrapping, gateway fencing leases, and Node lifecycle
-orchestration remain later slices. The registered `AUTHORITY_MESSAGES` topic and
-deterministic participant do not authorize any API route by themselves.
+`src/skulk/operator/service.py` provides a still-dormant asynchronous lifecycle
+around that deterministic participant. It admits one local proposal at a time,
+uses bounded outbound and response queues, applies explicit phase deadlines and
+bounded retries, recovers a prior proposer's accepted value before advancing the
+caller's intent, persists the local certificate before reporting success, and
+broadcasts commits to voters and learners for bounded catch-up. Its diagnostics
+contain queue depths and counters only. Authority producer admission is bounded
+both before serialization and in the dedicated network egress queue.
+
+Authority leader selection, encrypted authority-payload replication,
+OS-protected key wrapping, gateway fencing leases, and Node startup integration
+remain later slices. The registered `AUTHORITY_MESSAGES` topic, participant, and
+dormant service do not authorize any API route by themselves.
 Operator identity and authorization records never enter `State`, telemetry,
 diagnostics, or the public event log.
 

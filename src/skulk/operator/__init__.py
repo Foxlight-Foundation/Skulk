@@ -67,6 +67,16 @@ from skulk.operator.replication import (
     validate_authority_descriptor,
     verify_quorum_certificate,
 )
+from skulk.operator.service import (
+    AuthorityConsensusService,
+    AuthorityProposalBusyError,
+    AuthorityProposalConfigurationError,
+    AuthorityProposalUnavailableError,
+    AuthorityServiceDiagnostics,
+    AuthorityServiceError,
+    AuthorityServiceNotRunningError,
+    AuthorityTransitionRequest,
+)
 from skulk.operator.transport import AuthorityChannelTransport
 
 __all__ = [
@@ -90,6 +100,7 @@ __all__ = [
     "AuthorityConsensusNotInitializedError",
     "AuthorityConsensusParticipant",
     "AuthorityConsensusRepository",
+    "AuthorityConsensusService",
     "AuthorityConsensusSnapshot",
     "AuthorityConsensusState",
     "AuthorityEnvelopeError",
@@ -98,11 +109,18 @@ __all__ = [
     "AuthorityMembership",
     "AuthorityNetworkEnvelope",
     "AuthorityPrepareMessage",
+    "AuthorityProposalBusyError",
+    "AuthorityProposalConfigurationError",
+    "AuthorityProposalUnavailableError",
     "AuthorityPromiseMessage",
     "AuthorityQuorumCertificate",
     "AuthorityRecord",
     "AuthorityRejectedMessage",
+    "AuthorityServiceDiagnostics",
+    "AuthorityServiceError",
+    "AuthorityServiceNotRunningError",
     "AuthorityTransport",
+    "AuthorityTransitionRequest",
     "AuthorityVote",
     "AuthorityVoteCollector",
     "ClusterIdentityMaterial",

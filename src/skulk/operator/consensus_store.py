@@ -224,9 +224,22 @@ class SqliteAuthorityConsensusRepository:
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA synchronous = FULL")
         connection.execute("PRAGMA busy_timeout = 5000")
-        if os.name == "posix":
-            os.chmod(self._path, 0o600)
+        self._harden_database_files()
         return connection
+
+    def _harden_database_files(self) -> None:
+        """Repair database, WAL, and shared-memory sidecar permissions."""
+
+        if os.name != "posix":
+            return
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(f"{self._path}{suffix}")
+            try:
+                os.chmod(candidate, 0o600)
+            except FileNotFoundError:
+                # SQLite creates and removes sidecars with connection lifetime.
+                # Missing files are normal; every later open re-runs this repair.
+                continue
 
     @staticmethod
     def _create_schema(connection: sqlite3.Connection) -> None:

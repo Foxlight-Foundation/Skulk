@@ -275,7 +275,7 @@ def test_restart_reverifies_persisted_certificate_signatures(tmp_path: Path) -> 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission semantics only")
 def test_repository_repairs_directory_and_database_permissions(tmp_path: Path) -> None:
-    """Every open repairs permissive authority metadata paths."""
+    """Every open repairs permissive authority metadata and sidecar paths."""
 
     directory = tmp_path / "operator"
     path = directory / "authority.sqlite3"
@@ -284,8 +284,19 @@ def test_repository_repairs_directory_and_database_permissions(tmp_path: Path) -
     repository.initialize(state)
     os.chmod(directory, 0o777)
     os.chmod(path, 0o666)
+    with sqlite3.connect(path) as sidecar_owner:
+        sidecar_owner.execute("PRAGMA journal_mode = WAL")
+        sidecar_owner.execute("BEGIN IMMEDIATE")
+        wal_path = Path(f"{path}-wal")
+        shared_memory_path = Path(f"{path}-shm")
+        assert wal_path.exists()
+        assert shared_memory_path.exists()
+        os.chmod(wal_path, 0o666)
+        os.chmod(shared_memory_path, 0o666)
 
-    repository.load()
+        repository.load()
 
-    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(wal_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(shared_memory_path.stat().st_mode) == 0o600
