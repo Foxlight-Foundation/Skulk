@@ -129,13 +129,19 @@ class ContentStore:
     def __post_init__(self) -> None:
         self.root = Path(self.root)
         try:
-            created = not self.root.exists()
+            # Each created directory's entry lives in its parent; without
+            # these fsyncs a power loss can erase the entire newly
+            # initialized store no matter how carefully its contents were
+            # fsynced. mkdir(parents=True) may create several levels, and
+            # every one of them needs its parent made durable.
+            missing: list[Path] = []
+            probe = self.root
+            while not probe.exists() and probe.parent != probe:
+                missing.append(probe)
+                probe = probe.parent
             self.root.mkdir(parents=True, exist_ok=True)
-            if created:
-                # The store directory's own entry lives in its parent; without
-                # this, a power loss can erase the entire newly initialized
-                # store no matter how carefully its contents were fsynced.
-                self._fsync_directory(self.root.parent)
+            for created in reversed(missing):
+                self._fsync_directory(created.parent)
             if not self._manifest_path().exists():
                 self._write_manifest(self._default_manifest())
         except OSError as error:
@@ -166,6 +172,22 @@ class ContentStore:
 
     def _manifest_path(self) -> Path:
         return self.root / _MANIFEST_NAME
+
+    def _manifest_references(self, name: str) -> bool:
+        """Whether the on-disk manifest currently lists ``name`` as a segment.
+
+        Unreadable counts as referenced: when the manifest's state is
+        unknown, leaking a file is recoverable and deleting a possibly
+        live segment is not.
+        """
+        try:
+            manifest = self._read_manifest()
+        except (OSError, ValueError):
+            return True
+        listed = manifest.get("segments")
+        if not isinstance(listed, list):
+            return False
+        return name in [str(entry) for entry in listed]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
 
     def _read_manifest(self) -> dict[str, object]:
         path = self._manifest_path()
@@ -200,6 +222,10 @@ class ContentStore:
         real storage failures (EIO, ENOSPC) propagate, because acknowledging
         a write whose directory entry may not survive would be a lie.
         """
+        if os.name != "posix":
+            # Directory fsync is a POSIX mechanism; opening a directory with
+            # os.open fails on Windows, where the whole concept is a no-op.
+            return
         descriptor = os.open(directory if directory is not None else self.root, os.O_RDONLY)
         try:
             os.fsync(descriptor)
@@ -299,14 +325,19 @@ class ContentStore:
         """
         if segment.name in self._tails_repaired:
             return
-        self._tails_repaired.add(segment.name)
         if not segment.exists() or segment.stat().st_size == 0:
+            self._tails_repaired.add(segment.name)
             return
+        # The name is marked repaired only after the I/O below succeeds: a
+        # transient failure mid-repair must leave the segment eligible for
+        # another attempt, or a retried append would fuse with the torn
+        # fragment after all.
         with segment.open("rb+") as handle:
             _ = handle.seek(0, os.SEEK_END)
             size = handle.tell()
             _ = handle.seek(max(0, size - 1))
             if handle.read(1) == b"\n":
+                self._tails_repaired.add(segment.name)
                 return
             # Walk back to the last newline; everything after it is the torn
             # fragment. Segments are line-oriented so a bounded backward scan
@@ -325,6 +356,7 @@ class ContentStore:
             handle.truncate(keep)
             handle.flush()
             os.fsync(handle.fileno())
+        self._tails_repaired.add(segment.name)
 
     def append(self, record: SpanRecord) -> None:
         """Durably append one span record.
@@ -575,11 +607,13 @@ class ContentStore:
         except OSError as error:
             # A failed rewrite must not squat on the disk's last bytes: free
             # the partial scratch, and if the failure landed between the
-            # rename and the manifest swap, the uncommitted final file too
-            # (its sequence-fresh name is referenced by no manifest, so this
-            # can only ever discard the duplicate, never records).
+            # rename and the manifest swap, the uncommitted final file too.
+            # `committed` alone is not proof of the swap NOT landing: a
+            # directory-fsync failure inside _write_manifest() happens after
+            # its os.replace, so the on-disk manifest is consulted and the
+            # file is deleted only when no manifest references it.
             scratch.unlink(missing_ok=True)
-            if not committed:
+            if not committed and not self._manifest_references(final.name):
                 final.unlink(missing_ok=True)
             self._translate_out_of_space(error)
             raise

@@ -514,6 +514,75 @@ def test_compact_failure_after_rename_removes_uncommitted_final(
     assert [r.span_id for r in store.scan()] == ["s1", "s2"]
 
 
+def test_compact_keeps_final_when_manifest_swap_already_landed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory-fsync failure after the manifest rename must not delete data."""
+    store, _records = _seeded_store(tmp_path, 3)
+    store.tombstone("s0", deleted_at=1_700_000_100.0)
+    real_fsync_directory = ContentStore._fsync_directory  # pyright: ignore[reportPrivateUsage]
+    calls = {"count": 0}
+
+    def failing_after_manifest_rename(
+        self: ContentStore, directory: Path | None = None
+    ) -> None:
+        calls["count"] += 1
+        # Call 1 follows the compacted-segment rename; call 2 is inside
+        # _write_manifest AFTER its os.replace has landed.
+        if calls["count"] == 2:
+            raise OSError(28, "No space left on device")
+        real_fsync_directory(self, directory)
+
+    monkeypatch.setattr(
+        ContentStore, "_fsync_directory", failing_after_manifest_rename
+    )
+    with pytest.raises(StoreFullError):
+        store.compact()
+    monkeypatch.undo()
+    assert store.degraded
+    # The manifest swap landed, so the compacted view IS the store now; the
+    # cleanup path must not have deleted the file the manifest names.
+    manifest = json.loads((tmp_path / "memory" / "MANIFEST.json").read_text())
+    named = manifest["segments"][0]
+    assert (tmp_path / "memory" / named).exists()
+    assert [r.span_id for r in store.scan()] == ["s1", "s2"]
+
+
+def test_torn_tail_repair_retries_after_transient_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed repair attempt must leave the segment eligible for another."""
+    _store, records = _seeded_store(tmp_path, 3)
+    segment = next(p for p in (tmp_path / "memory").glob("spans-*.jsonl"))
+    with segment.open("a", encoding="utf-8") as handle:
+        handle.write('{"span_id": "torn", "text": "cut off mid-w')
+
+    reopened = ContentStore(root=tmp_path / "memory")
+    keys = random_vectors(1, DIM, seed=33)
+    values = random_vectors(1, DIM, seed=34)
+    real_open = Path.open
+    attempts = {"count": 0}
+
+    def transiently_failing_open(
+        self: Path, *args: object, **kwargs: object
+    ) -> object:
+        if "rb+" in str(args) and self.name.startswith("spans-"):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise OSError(5, "Input/output error")
+        return real_open(self, *args, **kwargs)  # pyright: ignore[reportCallIssue, reportUnknownVariableType, reportArgumentType] - passthrough shim
+
+    monkeypatch.setattr(Path, "open", transiently_failing_open)
+    with pytest.raises(OSError):
+        reopened.append(_record("s-first-try", keys[0], values[0]))
+    # The retry must run the repair (not skip it) and land cleanly.
+    reopened.append(_record("s-second-try", keys[0], values[0]))
+    monkeypatch.undo()
+    assert attempts["count"] == 2
+    survivors = [r.span_id for r in reopened.scan()]
+    assert survivors == [r.span_id for r in records] + ["s-second-try"]
+
+
 def test_append_rejects_foreign_cue_space(tmp_path: Path) -> None:
     store = ContentStore(root=tmp_path / "memory")
     corpus = np.random.default_rng(8).normal(size=(32, 16)).astype(np.float32)
