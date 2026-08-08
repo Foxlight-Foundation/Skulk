@@ -599,12 +599,13 @@ def test_schema_invalid_tombstone_is_loud(
     (tmp_path / "memory" / "tombstones.jsonl").write_text(
         '{"span_id": 42, "deleted_at": 1.0}\n'
         '{"span_id": "s2"}\n'
+        '{"span_id": "s2", "deleted_at": NaN}\n'
         '{"span_id": "s0", "deleted_at": 1.0}\n'
     )
     with caplog.at_level("WARNING", logger="skulk.memory.store"):
         survivors = [r.span_id for r in store.scan()]
     assert survivors == ["s1", "s2"]
-    assert store.corrupt_lines_dropped == 2
+    assert store.corrupt_lines_dropped == 3
     assert any("schema-invalid" in message for message in caplog.messages)
 
 
@@ -950,6 +951,16 @@ def test_whitener_dimension_must_match_the_store(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="vector dimension"):
         store.save_whitener(mismatched)
+
+    # A manifest that lost its vector_dim stamp still refuses: the stored
+    # records remain the dimension truth.
+    manifest_path = tmp_path / "memory" / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["vector_dim"] = None
+    manifest_path.write_text(json.dumps(manifest))
+    unstamped = ContentStore(root=tmp_path / "memory")
+    with pytest.raises(ValueError, match="vector dimension"):
+        unstamped.save_whitener(mismatched)
 
     # And the other direction: a whitener stamps the dimension first, so a
     # wider first record is refused at append.

@@ -65,6 +65,15 @@ would let a caller typo become a permanently misattributed memory.
 """
 
 
+def _is_finite_number(value: object) -> bool:
+    """True for a finite int or float that is not a bool."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
 def encode_vector(vector: Vector) -> str:
     """Encode a vector as base64 fp16 for compact JSONL storage (capture path)."""
     return base64.b64encode(np.asarray(vector, dtype=np.float16).tobytes()).decode(
@@ -703,7 +712,7 @@ class ContentStore:
                     deleted_at = entry.get("deleted_at")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
                     if (
                         isinstance(span_id, str)
-                        and isinstance(deleted_at, (int, float))
+                        and _is_finite_number(deleted_at)  # pyright: ignore[reportUnknownArgumentType] - json dict value
                         and span_id in present
                     ):
                         surviving_lines.append(line + b"\n")
@@ -871,10 +880,11 @@ class ContentStore:
         if isinstance(entry, dict):
             span_id = entry.get("span_id")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
             deleted_at = entry.get("deleted_at")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-            # Every writer stamps a finite deleted_at, so its absence marks
-            # a line no writer produced; honoring such a line would let
-            # corruption hide a span forever.
-            if isinstance(span_id, str) and isinstance(deleted_at, (int, float)):
+            # Every writer stamps a finite numeric deleted_at, so anything
+            # else marks a line no writer produced (json.loads permissively
+            # parses NaN/Infinity, and bool is an int); honoring such a
+            # line would let corruption hide a span forever.
+            if isinstance(span_id, str) and _is_finite_number(deleted_at):  # pyright: ignore[reportUnknownArgumentType] - json dict value
                 ids.add(span_id)
                 return
         # Parsed but schema-invalid: this is corruption too, and the span it
@@ -1073,7 +1083,14 @@ class ContentStore:
         pending = whitener.mu.nbytes + whitener.matrix.nbytes + 4096
         self._refuse_writes_if_degraded(pending_bytes=pending)
         whitener_dim = int(whitener.mu.shape[0])  # pyright: ignore[reportAny] - ndarray.shape stub gap
+        # Live records are uniform (append enforces it once an identity is
+        # active), so the first one speaks for all; an empty store may switch.
+        first = next(self.scan(), None)
         active_dim = self._read_manifest().get("vector_dim")
+        if not isinstance(active_dim, int) and first is not None:
+            # A legacy or partially recovered manifest may lack the stamp;
+            # the stored records remain the dimension truth.
+            active_dim = first.vector_dim()
         if isinstance(active_dim, int) and active_dim != whitener_dim:
             # The whitener defines the key space's dimension; a mismatch
             # with the store's stamped dimension would let cue and stored
@@ -1085,9 +1102,6 @@ class ContentStore:
         # A store holding spans is committed to their cue space: activating a
         # whitener the stored keys were not whitened in would make the default
         # load_whitener() return a transform that probes those keys wrong.
-        # Live records are uniform (append enforces it once an identity is
-        # active), so the first one speaks for all; an empty store may switch.
-        first = next(self.scan(), None)
         if first is not None and (
             first.embedding_model_id != whitener.embedding_model_id
             or first.whitener_version != whitener.version
