@@ -117,7 +117,10 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
   uses a protected local-file provider and `skulk operator pair` to create a
   five-minute QR capability; the API exposes only device-key challenge and
   exchange before authentication, returning one-time opaque access/refresh
-  credentials while persisting encrypted state and token digests. A dormant bounded service
+  credentials while persisting encrypted state and token digests. Refresh
+  rotates both credentials, bearer validation enforces canonical scopes, and
+  authorized devices can list or revoke credential-free device projections.
+  A dormant bounded service
   can drive one caller-selected proposal with deadlines, retries, accepted-value
   recovery, local durable commit, and catch-up broadcast; it is not started by
   `Node`. Authority leader selection, secret payload replication, OS key

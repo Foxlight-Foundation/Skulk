@@ -962,10 +962,12 @@ The local command creates a five-minute QR capability. The API exposes only
 challenge and exchange before authentication: a phone proposes an Ed25519 key,
 signs a domain-separated random challenge, and receives opaque access and
 refresh credentials once. Raw nonces and tokens are never stored in plaintext;
-the authority journal contains encrypted state and one-way token digests. This
-slice issues credentials but does not yet authorize general routes. The next
-slice adds refresh, revocation, and one canonical API authorization policy
-shared by remote clients without creating parallel model or inference APIs.
+the authority journal contains encrypted state and one-way token digests.
+Refresh rotates and invalidates the prior access/refresh pair atomically. The
+same service validates short-lived bearer access, exposes credential-free
+paired-device projections, and makes revocation immediate. These lifecycle
+routes prove the authorization boundary before selected canonical Skulk APIs
+adopt it; they do not create parallel model, inference, or command APIs.
 
 ### Event log
 
