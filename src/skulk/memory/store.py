@@ -194,12 +194,19 @@ class ContentStore:
             if not self._manifest_path().exists():
                 self._write_manifest(self._default_manifest())
             self._reconcile_stale_tombstones()
+            segments = self._segments()
+            if segments and segments[-1].exists():
+                # Acknowledged appends from a previous process may still sit
+                # in the kernel cache; one fsync at startup re-grounds the
+                # documented at-most-fsync_every loss window across restarts.
+                with segments[-1].open("rb+") as handle:
+                    os.fsync(handle.fileno())
         except OSError as error:
             # First use on an already-full volume must still honor the
             # contract: the store exists in degraded mode (reads work and
             # report nothing stored) instead of construction raising a raw
             # OSError into whatever component owns it.
-            if error.errno != errno.ENOSPC:
+            if error.errno not in (errno.ENOSPC, errno.EDQUOT):
                 raise
             self._degraded = True
             _LOGGER.warning(
@@ -376,11 +383,16 @@ class ContentStore:
             )
 
     def _translate_out_of_space(self, error: OSError) -> None:
-        """Flip degraded mode and re-raise as :class:`StoreFullError` on ENOSPC."""
-        if error.errno == errno.ENOSPC:
+        """Flip degraded mode and raise :class:`StoreFullError` when storage is full.
+
+        EDQUOT counts: on a quota-limited filesystem writes fail with it
+        while ``disk_usage`` still reports free space above the floor.
+        """
+        if error.errno in (errno.ENOSPC, errno.EDQUOT):
             self._degraded = True
             raise StoreFullError(
-                "memory store hit ENOSPC; capture disabled, reads continue"
+                "memory store is out of space (disk full or quota exhausted); "
+                "capture disabled, reads continue"
             ) from error
 
     def _repair_torn_tail(self, segment: Path) -> None:

@@ -756,6 +756,29 @@ def test_low_space_startup_skips_reconciliation_and_degrades(
     assert [r.span_id for r in reopened.scan()] == ["s1"]
 
 
+def test_quota_exhaustion_degrades_like_enospc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno as errno_module
+
+    store, records = _seeded_store(tmp_path, 2)
+    keys = random_vectors(1, DIM, seed=56)
+    values = random_vectors(1, DIM, seed=57)
+    real_open = Path.open
+
+    def quota_failing_open(self: Path, *args: object, **kwargs: object) -> object:
+        if self.name.startswith("spans-") and "'a'" in str(args):
+            raise OSError(errno_module.EDQUOT, "Disk quota exceeded")
+        return real_open(self, *args, **kwargs)  # pyright: ignore[reportCallIssue, reportUnknownVariableType, reportArgumentType] - passthrough shim
+
+    monkeypatch.setattr(Path, "open", quota_failing_open)
+    with pytest.raises(StoreFullError):
+        store.append(_record("s-quota", keys[0], values[0]))
+    monkeypatch.undo()
+    assert store.degraded
+    assert [r.span_id for r in store.scan()] == [r.span_id for r in records]
+
+
 def test_non_finite_vector_payloads_are_rejected(tmp_path: Path) -> None:
     keys = random_vectors(1, DIM, seed=44)
     poisoned = keys[0].copy()
