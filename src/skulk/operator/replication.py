@@ -261,7 +261,7 @@ class AuthorityVote(FrozenModel):
             raise ValueError("signature is not valid URL-safe base64") from exc
         if len(decoded) != 64:
             raise ValueError("signature must contain one Ed25519 signature")
-        return value
+        return _base64url_encode(decoded)
 
 
 @final
@@ -526,35 +526,8 @@ def verify_quorum_certificate(
             quorum check fails.
     """
 
-    if not 1 <= len(memberships) <= 2:
-        raise AuthorityCertificateError(
-            "authority verification requires one or two memberships"
-        )
     descriptor = certificate.descriptor
-    if UUID(str(descriptor.cluster_id)) != UUID(str(previous_position.cluster_id)):
-        raise AuthorityCertificateError("authority commit belongs to another cluster")
-    if descriptor.commit_index != previous_position.commit_index + 1:
-        raise AuthorityCertificateError("authority commit index is not contiguous")
-    if descriptor.authority_term < previous_position.authority_term:
-        raise AuthorityCertificateError("authority term moved backwards")
-    if descriptor.previous_commit_digest != previous_position.commit_digest:
-        raise AuthorityCertificateError("authority previous-commit digest is stale")
-
-    membership_digests = tuple(
-        sorted(authority_membership_digest(membership) for membership in memberships)
-    )
-    if len(set(membership_digests)) != len(membership_digests):
-        raise AuthorityCertificateError("joint memberships must be distinct")
-    if descriptor.required_membership_digests != membership_digests:
-        raise AuthorityCertificateError(
-            "authority commit names a different membership"
-        )
-    if len(memberships) == 2:
-        generations = sorted(membership.generation for membership in memberships)
-        if generations[1] != generations[0] + 1:
-            raise AuthorityCertificateError(
-                "joint authority memberships must be consecutive generations"
-            )
+    validate_authority_descriptor(descriptor, memberships, previous_position)
 
     member_by_id: dict[UUID, AuthorityMember] = {}
     member_id_by_public_key: dict[str, UUID] = {}
@@ -581,7 +554,9 @@ def verify_quorum_certificate(
         voter_id = UUID(str(vote.node_install_id))
         member = member_by_id.get(voter_id)
         if member is None:
-            raise AuthorityCertificateError("authority vote came from an unknown member")
+            raise AuthorityCertificateError(
+                "authority vote came from an unknown member"
+            )
         if voter_id not in voting_members:
             raise AuthorityCertificateError("authority learner vote cannot count")
         try:
@@ -603,6 +578,62 @@ def verify_quorum_certificate(
         if votes_in_membership < membership.quorum_size:
             raise AuthorityCertificateError(
                 "authority certificate does not satisfy every required quorum"
+            )
+
+    return AuthorityCommitPosition(
+        cluster_id=descriptor.cluster_id,
+        authority_term=descriptor.authority_term,
+        commit_index=descriptor.commit_index,
+        commit_digest=authority_commit_digest(descriptor),
+    )
+
+
+def validate_authority_descriptor(
+    descriptor: AuthorityCommitDescriptor,
+    memberships: tuple[AuthorityMembership, ...],
+    previous_position: AuthorityCommitPosition,
+) -> AuthorityCommitPosition:
+    """Validate one unsigned proposal before an authority voter signs it.
+
+    Args:
+        descriptor: Exact proposed authority transition.
+        memberships: Active membership, or old and new memberships for a
+            joint transition.
+        previous_position: Last locally verified authority commit.
+
+    Returns:
+        The position the descriptor would occupy after quorum certification.
+
+    Raises:
+        AuthorityCertificateError: Continuity, term, or membership binding is
+            invalid.
+    """
+
+    if not 1 <= len(memberships) <= 2:
+        raise AuthorityCertificateError(
+            "authority verification requires one or two memberships"
+        )
+    if UUID(str(descriptor.cluster_id)) != UUID(str(previous_position.cluster_id)):
+        raise AuthorityCertificateError("authority commit belongs to another cluster")
+    if descriptor.commit_index != previous_position.commit_index + 1:
+        raise AuthorityCertificateError("authority commit index is not contiguous")
+    if descriptor.authority_term < previous_position.authority_term:
+        raise AuthorityCertificateError("authority term moved backwards")
+    if descriptor.previous_commit_digest != previous_position.commit_digest:
+        raise AuthorityCertificateError("authority previous-commit digest is stale")
+
+    membership_digests = tuple(
+        sorted(authority_membership_digest(membership) for membership in memberships)
+    )
+    if len(set(membership_digests)) != len(membership_digests):
+        raise AuthorityCertificateError("joint memberships must be distinct")
+    if descriptor.required_membership_digests != membership_digests:
+        raise AuthorityCertificateError("authority commit names a different membership")
+    if len(memberships) == 2:
+        generations = sorted(membership.generation for membership in memberships)
+        if generations[1] != generations[0] + 1:
+            raise AuthorityCertificateError(
+                "joint authority memberships must be consecutive generations"
             )
 
     return AuthorityCommitPosition(
@@ -678,9 +709,7 @@ def _descriptor_bytes(descriptor: AuthorityCommitDescriptor) -> bytes:
             "previousCommitDigest": descriptor.previous_commit_digest,
             "recordId": descriptor.record_id,
             "recordType": descriptor.record_type,
-            "requiredMembershipDigests": list(
-                descriptor.required_membership_digests
-            ),
+            "requiredMembershipDigests": list(descriptor.required_membership_digests),
         }
     )
 

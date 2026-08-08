@@ -144,9 +144,7 @@ async def _publish_management_node_resources(
                     else None
                 ),
             )
-            await telemetry_sender.send(
-                NodeTelemetry(node_id=node_id, info=resources)
-            )
+            await telemetry_sender.send(NodeTelemetry(node_id=node_id, info=resources))
         except (ClosedResourceError, BrokenResourceError):
             return
         except Exception as error:
@@ -233,7 +231,9 @@ def _resolve_zenoh_listen(env_value: str) -> str:
     if listen:
         return listen
     candidate = _routable_local_ipv4()
-    host = candidate if candidate and _is_trusted_fabric_ipv4(candidate) else "127.0.0.1"
+    host = (
+        candidate if candidate and _is_trusted_fabric_ipv4(candidate) else "127.0.0.1"
+    )
     return f"tcp/{host}:{_DEFAULT_ZENOH_PORT}"
 
 
@@ -351,7 +351,9 @@ def _routable_local_ipv4() -> str | None:
     return routable[0] if routable else None
 
 
-def _routable_store_advertise_host(configured: str | None, hostname_fallback: str) -> str:
+def _routable_store_advertise_host(
+    configured: str | None, hostname_fallback: str
+) -> str:
     """Pick an address other nodes can actually reach the model store host at.
 
     The store host broadcasts this as ``store_http_host`` so workers build the
@@ -569,6 +571,7 @@ class Node:
         await router.register_topic(topics.LOCAL_EVENTS)
         await router.register_topic(topics.COMMANDS)
         await router.register_topic(topics.ELECTION_MESSAGES)
+        await router.register_topic(topics.AUTHORITY_MESSAGES)
         await router.register_topic(topics.CONNECTION_MESSAGES)
         await router.register_topic(topics.DOWNLOAD_COMMANDS)
         await router.register_topic(topics.STATE_SYNC_MESSAGES)
@@ -612,7 +615,9 @@ class Node:
             and skulk_config.inference is not None
             and not _user_set_kv_backend
         ):
-            os.environ["SKULK_KV_CACHE_BACKEND"] = skulk_config.inference.kv_cache_backend
+            os.environ["SKULK_KV_CACHE_BACKEND"] = (
+                skulk_config.inference.kv_cache_backend
+            )
             logger.info(
                 f"Inference config: kv_cache_backend={skulk_config.inference.kv_cache_backend}"
             )
@@ -626,7 +631,9 @@ class Node:
             os.environ["HF_TOKEN"] = skulk_config.hf_token
             logger.info("HF token loaded from config")
 
-        store_client, store_server = _configure_model_store_runtime(node_id, skulk_config)
+        store_client, store_server = _configure_model_store_runtime(
+            node_id, skulk_config
+        )
 
         # Create DownloadCoordinator (unless --no-downloads)
         if not args.no_downloads:
@@ -686,9 +693,7 @@ class Node:
                 provider_stream_sender=router.sender(topics.PROVIDER_DATA),
                 provider_stream_receiver=router.receiver(topics.PROVIDER_DATA),
                 realtime_audio_packet_sender=router.sender(topics.REALTIME_AUDIO),
-                realtime_audio_packet_receiver=router.receiver(
-                    topics.REALTIME_AUDIO
-                ),
+                realtime_audio_packet_receiver=router.receiver(topics.REALTIME_AUDIO),
                 speech_media_packet_sender=router.sender(topics.SPEECH_MEDIA),
                 speech_media_packet_receiver=router.receiver(topics.SPEECH_MEDIA),
                 trace_data_receiver=router.receiver(topics.TRACE_DATA),
@@ -699,9 +704,7 @@ class Node:
                 ),
                 data_plane_zenoh=_zenoh_on,
                 data_plane_egress_provider=router.data_plane_egress_diagnostics,
-                vision_media_egress_provider=(
-                    router.vision_media_egress_diagnostics
-                ),
+                vision_media_egress_provider=(router.vision_media_egress_diagnostics),
                 telemetry_plane_provider=router.telemetry_plane_diagnostics,
                 # Installed plugins (skulk.extensions entry points), discovered
                 # once per process. First-party provider facades are registered
@@ -742,25 +745,18 @@ class Node:
                 data_sender=router.sender(topics.DATA),
                 trace_data_sender=router.sender(topics.TRACE_DATA),
                 realtime_audio_receiver=realtime_audio_receiver,
-                realtime_audio_packet_receiver=router.receiver(
-                    topics.REALTIME_AUDIO
-                ),
+                realtime_audio_packet_receiver=router.receiver(topics.REALTIME_AUDIO),
                 speech_media_packet_receiver=router.receiver(topics.SPEECH_MEDIA),
                 vision_media_packet_sender=router.sender(topics.VISION_MEDIA),
                 vision_media_packet_receiver=router.receiver(topics.VISION_MEDIA),
-                connection_message_receiver=router.receiver(
-                    topics.CONNECTION_MESSAGES
-                ),
+                connection_message_receiver=router.receiver(topics.CONNECTION_MESSAGES),
                 session_connection_snapshot=router.current_session_connections,
                 store_client=worker_store_client,
                 staging_config=worker_staging_cfg,
             )
-            if (
-                download_coordinator is not None
-                and isinstance(
-                    download_coordinator.shard_downloader,
-                    ModelStoreDownloader,
-                )
+            if download_coordinator is not None and isinstance(
+                download_coordinator.shard_downloader,
+                ModelStoreDownloader,
             ):
                 download_coordinator.shard_downloader.set_staging_capacity_callback(
                     worker.prepare_staging_transfer
@@ -935,9 +931,7 @@ class Node:
                         session_id=session_id,
                     )
                 )
-                with anyio.move_on_after(
-                    _CLUSTER_CONFIG_SYNC_RESPONSE_TIMEOUT_SECONDS
-                ):
+                with anyio.move_on_after(_CLUSTER_CONFIG_SYNC_RESPONSE_TIMEOUT_SECONDS):
                     async for origin, message in messages:
                         if message.kind != "response":
                             continue
@@ -1282,12 +1276,9 @@ class Node:
                                 topics.VISION_MEDIA
                             ),
                         )
-                        if (
-                            self.download_coordinator is not None
-                            and isinstance(
-                                self.download_coordinator.shard_downloader,
-                                ModelStoreDownloader,
-                            )
+                        if self.download_coordinator is not None and isinstance(
+                            self.download_coordinator.shard_downloader,
+                            ModelStoreDownloader,
                         ):
                             self.download_coordinator.shard_downloader.set_staging_capacity_callback(
                                 self.worker.prepare_staging_transfer
@@ -1399,9 +1390,7 @@ def main():
         from skulk.provisioning import ensure_llama_server
 
         if (
-            ensure_llama_server(
-                current_node_facts(), allow_download=not args.offline
-            )
+            ensure_llama_server(current_node_facts(), allow_download=not args.offline)
             is not None
         ):
             refresh_node_facts()

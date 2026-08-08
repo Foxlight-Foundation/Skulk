@@ -80,11 +80,11 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
 - `src/skulk/master/` — Master node (placement, election, event sourcing)
 - `src/skulk/worker/` — Worker node (inference, runner management, download coordination)
 - `src/skulk/store/` — Model store (registry, downloads, config, model optimizer)
-- `src/skulk/operator/` — Stable operator identity, quorum-certificate
-  verification, and encrypted authority-store foundation. It is a separate
-  security plane from event-sourced inference state; do not place its secrets
-  or mutable authorization records in `State`, telemetry, diagnostics, or
-  ordinary events.
+- `src/skulk/operator/` — Stable operator identity, quorum certification,
+  crash-fault consensus, and encrypted/public authority persistence. It is a
+  separate security plane from event-sourced inference state; do not place its
+  secrets or mutable authorization records in `State`, telemetry, diagnostics,
+  or ordinary events.
 - `src/skulk/shared/` — Shared types, constants, topology
 - `src/skulk/memory/` — Fabric-memory core library (HRR primitives, pattern separation, memory index); inert until later phases wire it
 - `website/docs/` — Docusaurus documentation source, including API guide and model-capability docs

@@ -2,6 +2,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
+from skulk.operator.consensus import AuthorityNetworkEnvelope
 from skulk.routing.connection_message import ConnectionMessage
 from skulk.routing.provider_streams import (
     ProviderStreamPacket,
@@ -49,6 +50,7 @@ class MessagePlane(str, Enum):
     """Runtime isolation boundary assigned to one transport topic."""
 
     Control = "control"
+    Authority = "authority"
     Telemetry = "telemetry"
     Data = "data"
 
@@ -98,6 +100,12 @@ COMMANDS = TypedTopic(
 ELECTION_MESSAGES = TypedTopic(
     "election_messages", PublishPolicy.Always, MessagePlane.Control, ElectionMessage
 )
+AUTHORITY_MESSAGES = TypedTopic(
+    "authority_messages",
+    PublishPolicy.Always,
+    MessagePlane.Authority,
+    AuthorityNetworkEnvelope,
+)
 CONNECTION_MESSAGES = TypedTopic(
     "connection_messages", PublishPolicy.Never, MessagePlane.Control, ConnectionMessage
 )
@@ -115,6 +123,8 @@ STATE_SYNC_MESSAGES = TypedTopic(
 TELEMETRY = TypedTopic(
     "telemetry", PublishPolicy.Always, MessagePlane.Telemetry, NodeTelemetry
 )
+
+
 # Data plane (#279 Phase 2): per-token generation output chunks streamed
 # directly from the serving rank-0 worker to the owning API node, off the event
 # log entirely. The master never sees these — no indexing, no disk, no
@@ -153,9 +163,7 @@ PROVIDER_DATA = TypedTopic(
     MessagePlane.Data,
     ProviderStreamPacket,
     routing_key=_provider_owner_key,
-    stream_key=lambda packet: (
-        f"{packet.frame.call_id}:{packet.frame.direction}"
-    ),
+    stream_key=lambda packet: (f"{packet.frame.call_id}:{packet.frame.direction}"),
     is_terminal=lambda packet: packet.frame.is_terminal,
     serializer=encode_provider_stream_packet,
     deserializer=decode_provider_stream_packet,
@@ -219,6 +227,7 @@ TOPIC_PLANE_CENSUS = {
         LOCAL_EVENTS,
         COMMANDS,
         ELECTION_MESSAGES,
+        AUTHORITY_MESSAGES,
         CONNECTION_MESSAGES,
         DOWNLOAD_COMMANDS,
         STATE_SYNC_MESSAGES,

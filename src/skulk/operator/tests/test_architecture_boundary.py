@@ -6,8 +6,11 @@ import ast
 from pathlib import Path
 
 import skulk.operator.authority as authority_module
+import skulk.operator.consensus as consensus_module
+import skulk.operator.consensus_store as consensus_store_module
 import skulk.operator.identity as identity_module
 import skulk.operator.replication as replication_module
+import skulk.operator.transport as transport_module
 
 
 def test_operator_persistence_does_not_import_inference_or_logging_planes() -> None:
@@ -22,8 +25,11 @@ def test_operator_persistence_does_not_import_inference_or_logging_planes() -> N
     )
     module_paths = (
         Path(authority_module.__file__),
+        Path(consensus_module.__file__),
+        Path(consensus_store_module.__file__),
         Path(identity_module.__file__),
         Path(replication_module.__file__),
+        Path(transport_module.__file__),
     )
 
     for module_path in module_paths:
