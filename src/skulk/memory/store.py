@@ -278,6 +278,26 @@ class ContentStore:
                 self.root,
             )
 
+    def _span_ids_on_disk(self) -> set[str]:
+        """Span ids across every on-disk segment file, listed or not.
+
+        Damaged lines are skipped the way scan() skips them; unlisted files
+        count because they may be reconciled back by an operator.
+        """
+        ids: set[str] = set()
+        for segment in sorted(self.root.glob("spans-*.jsonl")):
+            with segment.open("rb") as handle:
+                for raw in handle:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = SpanRecord.model_validate_json(line)
+                    except ValueError:
+                        continue
+                    ids.add(record.span_id)
+        return ids
+
     @staticmethod
     def _first_record_in(segments: list[Path]) -> SpanRecord | None:
         """First parseable record across ``segments``, read directly.
@@ -678,9 +698,11 @@ class ContentStore:
         if not path.exists():
             return
         recorded = self._tombstoned()
-        present = {
-            record.span_id for record in self.scan(include_tombstoned=True)
-        }
+        # "Backed" must mean backed by ANY on-disk segment, listed or not: a
+        # stale manifest may omit a live segment the sweep deliberately
+        # preserves, and dropping its record's tombstone here would
+        # resurrect the span un-forgotten when an operator reconciles.
+        present = self._span_ids_on_disk()
         if recorded <= present:
             return
         if not (recorded & present):
@@ -801,10 +823,12 @@ class ContentStore:
 
     def tombstone(self, span_id: str, *, deleted_at: float) -> None:
         """Record exact forgetting of one span (drop at next compaction)."""
-        if not math.isfinite(deleted_at):
-            # json.dumps would emit bare NaN/Infinity, which is not JSON and
-            # would read back as a corrupt tombstone line.
-            raise ValueError(f"deleted_at must be finite, got {deleted_at!r}")
+        if not _is_finite_number(deleted_at):
+            # json.dumps would emit bare NaN/Infinity (not JSON) or a JSON
+            # boolean, and reads reject both; the writer must match.
+            raise ValueError(
+                f"deleted_at must be a finite number, got {deleted_at!r}"
+            )
         entry = json.dumps({"span_id": span_id, "deleted_at": deleted_at}) + "\n"
         self._refuse_writes_if_degraded(pending_bytes=len(entry.encode("utf-8")))
         path = self.root / _TOMBSTONES_NAME

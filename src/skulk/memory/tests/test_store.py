@@ -1057,6 +1057,35 @@ def test_quota_exhaustion_degrades_like_enospc(
     assert [r.span_id for r in store.scan()] == [r.span_id for r in records]
 
 
+def test_reconcile_keeps_tombstones_backed_by_omitted_segments(
+    tmp_path: Path,
+) -> None:
+    """Forgetting survives a stale manifest omitting the record's segment."""
+    store = ContentStore(root=tmp_path / "memory", rotation_bytes=1024)
+    keys = random_vectors(3, DIM, seed=72)
+    values = random_vectors(3, DIM, seed=73)
+    for i in range(3):
+        store.append(_record(f"t{i}", keys[i], values[i]))
+    store.tombstone("t2", deleted_at=1_700_000_100.0)
+    manifest_path = tmp_path / "memory" / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text())
+    # The stale manifest omits segment 3, which holds the tombstoned t2.
+    manifest["segments"] = manifest["segments"][:2]
+    manifest_path.write_text(json.dumps(manifest))
+
+    _reopened = ContentStore(root=tmp_path / "memory")
+    content = (tmp_path / "memory" / "tombstones.jsonl").read_text()
+    assert "t2" in content, "the tombstone must survive for reconciliation"
+
+
+def test_boolean_tombstone_timestamp_is_rejected(tmp_path: Path) -> None:
+    store, _records = _seeded_store(tmp_path, 1)
+    with pytest.raises(ValueError, match="finite number"):
+        # bool is assignable to float in the type system; the runtime
+        # guard is what stands between a dynamic caller and the file.
+        store.tombstone("s0", deleted_at=True)
+
+
 def test_non_finite_vector_payloads_are_rejected(tmp_path: Path) -> None:
     keys = random_vectors(1, DIM, seed=44)
     poisoned = keys[0].copy()
