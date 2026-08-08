@@ -171,8 +171,8 @@ class AuthorityConsensusState(FrozenModel):
                 )
             assert self.accepted_ballot is not None
             assert self.accepted_memberships is not None
-            if self.accepted_descriptor.authority_term != self.accepted_ballot.counter:
-                raise ValueError("accepted descriptor term must match its ballot")
+            if self.accepted_descriptor.authority_term > self.accepted_ballot.counter:
+                raise ValueError("accepted descriptor term exceeds its ballot")
             if self.accepted_ballot.counter <= self.position.authority_term:
                 raise ValueError("accepted ballot must exceed the committed term")
             try:
@@ -473,6 +473,10 @@ class AuthorityCatchUpResponseMessage(FrozenModel):
         max_length=_MAX_CATCH_UP_ENTRIES,
         description="Bounded ascending certified suffix with no secret payloads.",
     )
+    has_more: bool = Field(
+        default=False,
+        description="Whether another bounded suffix remains after these entries.",
+    )
 
     @model_validator(mode="after")
     def _entries_are_cluster_bound_and_ordered(
@@ -490,6 +494,8 @@ class AuthorityCatchUpResponseMessage(FrozenModel):
             for entry in self.entries
         ):
             raise ValueError("authority catch-up entries belong to another cluster")
+        if self.has_more and not self.entries:
+            raise ValueError("authority catch-up continuation requires progress")
         return self
 
 
@@ -822,23 +828,7 @@ class AuthorityVoteCollector:
             assert recovered.accepted_memberships is not None
             selected_memberships = recovered.accepted_memberships
             _validate_membership_order(selected_memberships)
-            selected_descriptor = AuthorityCommitDescriptor(
-                cluster_id=recovered.accepted_descriptor.cluster_id,
-                authority_term=self.ballot.counter,
-                commit_index=recovered.accepted_descriptor.commit_index,
-                previous_commit_digest=(
-                    recovered.accepted_descriptor.previous_commit_digest
-                ),
-                record_type=recovered.accepted_descriptor.record_type,
-                record_id=recovered.accepted_descriptor.record_id,
-                payload_digest=recovered.accepted_descriptor.payload_digest,
-                required_membership_digests=tuple(
-                    sorted(
-                        authority_membership_digest(membership)
-                        for membership in selected_memberships
-                    )
-                ),
-            )
+            selected_descriptor = recovered.accepted_descriptor
             validate_authority_descriptor(
                 selected_descriptor,
                 selected_memberships,
@@ -1038,8 +1028,7 @@ class AuthorityConsensusParticipant:
             response = self._handle_catch_up_request(snapshot, envelope, payload)
             return (response,)
         if isinstance(payload, AuthorityCatchUpResponseMessage):
-            self._handle_catch_up_response(snapshot, payload)
-            return ()
+            return self._handle_catch_up_response(snapshot, envelope, payload)
         raise AuthorityEnvelopeError(
             "authority participant received a leader-side response message"
         )
@@ -1172,24 +1161,27 @@ class AuthorityConsensusParticipant:
     ) -> AuthorityNetworkEnvelope:
         """Return a bounded certified suffix without any secret payload."""
 
-        entries = tuple(
+        available = tuple(
             entry
             for entry in snapshot.state.committed_entries
             if entry.certificate.descriptor.commit_index > payload.after_commit_index
-        )[:_MAX_CATCH_UP_ENTRIES]
+        )
+        entries = available[:_MAX_CATCH_UP_ENTRIES]
         response = AuthorityCatchUpResponseMessage(
             cluster_id=snapshot.state.position.cluster_id,
             request_id=payload.request_id,
             entries=entries,
+            has_more=len(available) > len(entries),
         )
         return self.envelope_for(envelope.source_node_install_id, response)
 
     def _handle_catch_up_response(
         self,
         snapshot: AuthorityConsensusSnapshot,
+        envelope: AuthorityNetworkEnvelope,
         payload: AuthorityCatchUpResponseMessage,
-    ) -> None:
-        """Apply a certified suffix one entry and one durable CAS at a time."""
+    ) -> tuple[AuthorityNetworkEnvelope, ...]:
+        """Apply one certified page and request the next page when advertised."""
 
         current = snapshot
         for entry in payload.entries:
@@ -1198,6 +1190,14 @@ class AuthorityConsensusParticipant:
             current = self._repository.load()
             if current.state.position.commit_index == before:
                 continue
+        if not payload.has_more:
+            return ()
+        request = AuthorityCatchUpRequestMessage(
+            cluster_id=current.state.position.cluster_id,
+            request_id=uuid4(),
+            after_commit_index=current.state.position.commit_index,
+        )
+        return (self.envelope_for(envelope.source_node_install_id, request),)
 
     def _apply_entry(
         self,
@@ -1264,7 +1264,7 @@ class AuthorityConsensusParticipant:
                 "membership_mismatch",
                 state,
             )
-        if descriptor.authority_term != ballot.counter:
+        if descriptor.authority_term > ballot.counter:
             return self._rejection(
                 envelope,
                 request_id,
@@ -1397,8 +1397,8 @@ def _validate_message_descriptor(
     _validate_membership_order(memberships)
     if UUID(str(descriptor.cluster_id)) != UUID(str(cluster_id)):
         raise ValueError("authority descriptor belongs to another cluster")
-    if descriptor.authority_term != ballot.counter:
-        raise ValueError("authority descriptor term does not match its ballot")
+    if descriptor.authority_term > ballot.counter:
+        raise ValueError("authority descriptor term exceeds its ballot")
     expected_digests = tuple(
         sorted(authority_membership_digest(membership) for membership in memberships)
     )

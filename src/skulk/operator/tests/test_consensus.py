@@ -337,6 +337,12 @@ def test_three_voters_recover_accepted_value_after_leader_restart() -> None:
     accept = replacement.accept_message()
 
     assert accept.descriptor.record_id == "must-survive"
+    assert accept.descriptor == interrupted.accept_message().descriptor
+    assert authority_commit_digest(accept.descriptor) == authority_commit_digest(
+        interrupted.accept_message().descriptor
+    )
+    assert accept.descriptor.authority_term == 2
+    assert accept.ballot.counter == 3
     harness.accept(second_leader, replacement, (second_leader, third_voter))
     entry = harness.commit(
         second_leader,
@@ -498,6 +504,40 @@ def test_lagging_replica_requests_and_applies_certified_catch_up() -> None:
     recovered = harness.participants[lagging_id].snapshot.state
     assert recovered.committed_entries == (first, second)
     assert recovered.position.commit_index == 3
+
+
+def test_lagging_replica_continues_across_bounded_catch_up_pages() -> None:
+    """A replica more than one response behind requests every remaining page."""
+
+    harness = _AuthorityHarness(3)
+    leader_id, follower_id, lagging_id = harness.voter_ids
+    entries = tuple(
+        harness.run_round(
+            leader_id,
+            term,
+            f"device-{term}",
+            (leader_id, follower_id),
+            commit_targets=(leader_id, follower_id),
+        )
+        for term in range(2, 67)
+    )
+    final_commit = AuthorityCommitMessage(
+        cluster_id=entries[-1].certificate.descriptor.cluster_id,
+        request_id=uuid4(),
+        entry=entries[-1],
+    )
+
+    request = harness.participants[lagging_id].handle(
+        harness.participants[leader_id].envelope_for(lagging_id, final_commit)
+    )[0]
+    response = harness.participants[leader_id].handle(request)[0]
+    continuation = harness.participants[lagging_id].handle(response)[0]
+    final_response = harness.participants[leader_id].handle(continuation)[0]
+    assert harness.participants[lagging_id].handle(final_response) == ()
+
+    recovered = harness.participants[lagging_id].snapshot.state
+    assert recovered.committed_entries == entries
+    assert recovered.position.commit_index == entries[-1].certificate.descriptor.commit_index
 
 
 def test_stale_ballot_cannot_overwrite_newer_durable_promise() -> None:
