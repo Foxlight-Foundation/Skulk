@@ -211,7 +211,7 @@ pairing sessions:
 ```bash
 uv run skulk operator configure-relay \
   --provisioning-file /protected/path/relay-v1.json \
-  --operator-api-port 52416 \
+  --operator-api-port 52417 \
   --cluster-name "Cluster"
 ```
 
@@ -224,6 +224,8 @@ requires WSS except for loopback development, stores the route and credentials
 inside the encrypted authority journal, generates an owner-only pinned TLS
 identity, and refuses silent replacement. Restart Skulk after initial
 configuration so the designated gateway opens its bounded outbound lane pool.
+The operator listener defaults to loopback port `52417`, separate from Skulk's
+default `52416` fabric transport.
 
 ```bash
 uv run skulk operator pair \

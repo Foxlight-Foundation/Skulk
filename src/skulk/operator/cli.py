@@ -15,6 +15,8 @@ from skulk.operator.pairing import (
 from skulk.operator.relay import OperatorRelayProvisioning
 from skulk.utils.pydantic_ext import FrozenModel
 
+DEFAULT_OPERATOR_API_PORT = 52417
+
 
 class _PairArguments(FrozenModel):
     """Strictly validated local pairing command arguments."""
@@ -89,9 +91,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     relay_parser.add_argument(
         "--operator-api-port",
-        default=52416,
+        default=DEFAULT_OPERATOR_API_PORT,
         type=int,
-        help="Loopback-only authenticated TLS API port (default: 52416).",
+        help=(
+            "Loopback-only authenticated TLS API port "
+            f"(default: {DEFAULT_OPERATOR_API_PORT})."
+        ),
     )
     relay_parser.add_argument(
         "--cluster-name",
