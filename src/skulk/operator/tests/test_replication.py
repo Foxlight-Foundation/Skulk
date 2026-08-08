@@ -101,14 +101,15 @@ def _previous_position(cluster_id: UUID) -> AuthorityCommitPosition:
     )
 
 
-def test_bootstrap_position_is_stable_across_display_name_changes() -> None:
-    """Unauthenticated display metadata cannot fork the authority trust anchor."""
+def test_bootstrap_position_canonicalizes_untrusted_public_metadata() -> None:
+    """Equivalent public metadata cannot fork the authority trust anchor."""
 
     identity = create_cluster_identity("Fox Den").public_identity
     edited_metadata = identity.model_copy(
         update={
             "name": "Home Fabric",
             "created_at": identity.created_at + timedelta(days=1),
+            "public_key": f"{identity.public_key}=",
         }
     )
 

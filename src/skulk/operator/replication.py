@@ -404,6 +404,13 @@ def authority_bootstrap_position(
 
     if authority_term < 1:
         raise ValueError("authority_term must be positive")
+    try:
+        public_key_bytes = _base64url_decode(identity.public_key)
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("cluster public key is not valid URL-safe base64") from exc
+    if len(public_key_bytes) != 32:
+        raise ValueError("cluster public key must contain one raw Ed25519 public key")
+    canonical_public_key = _base64url_encode(public_key_bytes)
     digest = _sha256_digest(
         _AUTHORITY_BOOTSTRAP_CONTEXT,
         _canonical_json(
@@ -411,7 +418,7 @@ def authority_bootstrap_position(
                 "clusterId": str(identity.cluster_id),
                 "fingerprint": identity.fingerprint,
                 "formatVersion": identity.format_version,
-                "publicKey": identity.public_key,
+                "publicKey": canonical_public_key,
             }
         ),
     )
