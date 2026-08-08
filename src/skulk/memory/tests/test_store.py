@@ -731,6 +731,50 @@ def test_startup_sweeps_orphan_segment_files(tmp_path: Path) -> None:
     assert [r.span_id for r in reopened.scan()] == ["o1", "o2", "o3"]
 
 
+def test_rotation_never_adopts_an_omitted_live_segment(tmp_path: Path) -> None:
+    """Sequencing derives from disk too, so stale manifests cost no data."""
+    store = ContentStore(root=tmp_path / "memory", rotation_bytes=1024)
+    keys = random_vectors(4, DIM, seed=68)
+    values = random_vectors(4, DIM, seed=69)
+    for i in range(3):
+        store.append(_record(f"m{i}", keys[i], values[i]))
+    manifest_path = tmp_path / "memory" / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert len(manifest["segments"]) == 3
+    # An operator-restored manifest omits segments 2 and 3.
+    manifest["segments"] = manifest["segments"][:1]
+    manifest_path.write_text(json.dumps(manifest))
+
+    reopened = ContentStore(root=tmp_path / "memory", rotation_bytes=1024)
+    reopened.append(_record("m-post-stale", keys[3], values[3]))
+    # Rotation must have taken a sequence above the omitted files, leaving
+    # their records intact on disk for operator recovery.
+    assert (tmp_path / "memory" / "spans-000002.jsonl").exists()
+    assert (tmp_path / "memory" / "spans-000003.jsonl").exists()
+    healed = json.loads(manifest_path.read_text())
+    assert "spans-000004.jsonl" in healed["segments"]
+
+
+def test_recovery_survives_full_volume_reads_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failed manifest-recovery persistence must not blind reads."""
+    _store, records = _seeded_store(tmp_path, 3)
+    (tmp_path / "memory" / "MANIFEST.json").unlink()
+    real_open = Path.open
+
+    def failing_manifest_open(self: Path, *args: object, **kwargs: object) -> object:
+        if self.name == "MANIFEST.tmp":
+            raise OSError(28, "No space left on device")
+        return real_open(self, *args, **kwargs)  # pyright: ignore[reportCallIssue, reportUnknownVariableType, reportArgumentType] - passthrough shim
+
+    monkeypatch.setattr(Path, "open", failing_manifest_open)
+    reopened = ContentStore(root=tmp_path / "memory")
+    monkeypatch.undo()
+    assert reopened.degraded
+    assert [r.span_id for r in reopened.scan()] == [r.span_id for r in records]
+
+
 def test_stale_empty_manifest_list_preserves_segments(tmp_path: Path) -> None:
     """An operator-restored empty segments list must not condemn live data."""
     _store, _records = _seeded_store(tmp_path, 2)

@@ -175,6 +175,7 @@ class ContentStore:
     _corrupt_lines_dropped: int = field(default=0, init=False)
     _seen_span_ids: set[str] | None = field(default=None, init=False)
     _manifest_fallback_warned: bool = field(default=False, init=False)
+    _unpersisted_manifest: dict[str, object] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self.root = Path(self.root)
@@ -239,7 +240,12 @@ class ContentStore:
                         self.root,
                         len(recovered),
                     )
+                # Held in memory until the write lands: if persisting the
+                # recovery fails on a full volume, reads must still see the
+                # discovered segments instead of a blank default.
+                self._unpersisted_manifest = dict(manifest)
                 self._write_manifest(manifest)
+                self._unpersisted_manifest = None
             self._reconcile_stale_tombstones()
             self._sweep_orphan_segments()
             segments = self._segments()
@@ -321,6 +327,11 @@ class ContentStore:
     def _read_manifest(self) -> dict[str, object]:
         path = self._manifest_path()
         if not path.exists():
+            if self._unpersisted_manifest is not None:
+                # Manifest recovery ran but could not be persisted (full
+                # volume); serve the recovered view from memory so reads
+                # keep working while writes stay refused.
+                return dict(self._unpersisted_manifest)
             # A store that degraded before its first manifest write reads as
             # empty rather than failing.
             return self._default_manifest()
@@ -388,14 +399,18 @@ class ContentStore:
         return [self.root / str(name) for name in names]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
 
     def _next_sequence(self) -> int:
-        """Next segment sequence number, parsed from listed names.
+        """Next segment sequence number, above every listed AND on-disk name.
 
         Parsing (rather than counting) keeps sequences monotonic across
-        compaction, so a rotation can never reuse a name an older manifest
-        generation referenced.
+        compaction, and including unlisted on-disk files means rotation and
+        compaction can never adopt (and destroy) a live segment a stale
+        manifest omitted; unlisted files wait for the conservative sweep or
+        an operator instead.
         """
         highest = 0
-        for segment in self._segments():
+        candidates = list(self._segments())
+        candidates.extend(self.root.glob("spans-*.jsonl"))
+        for segment in candidates:
             digits = segment.stem.rsplit("-", 1)[-1]
             if digits.isdigit():
                 highest = max(highest, int(digits))
