@@ -305,6 +305,83 @@ def test_mid_segment_corruption_is_loud_but_not_fatal(
     assert any("mid-segment corruption" in message for message in caplog.messages)
 
 
+def test_compact_reserves_space_before_rewriting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compaction refuses up front when the survivor copy cannot fit."""
+    import shutil as shutil_module
+    from typing import NamedTuple
+
+    class Usage(NamedTuple):
+        total: int
+        used: int
+        free: int
+
+    store, _records = _seeded_store(tmp_path, 3)
+    store.free_space_floor_bytes = 0
+    store.tombstone("s0", deleted_at=1_700_000_100.0)
+
+    def tiny_disk(_root: object) -> Usage:
+        return Usage(total=100, used=99, free=1)
+
+    monkeypatch.setattr(shutil_module, "disk_usage", tiny_disk)
+    with pytest.raises(StoreFullError):
+        store.compact()
+    # Refusal is not degradation: appends may still fit when a full
+    # duplicate temporarily cannot.
+    assert not store.degraded
+    monkeypatch.undo()
+    assert store.compact() == 1
+    assert [r.span_id for r in store.scan()] == ["s1", "s2"]
+
+
+def test_init_on_full_volume_starts_degraded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """First use on a full disk yields a degraded store, not a raw OSError."""
+    real_open = Path.open
+
+    def failing_open(self: Path, *args: object, **kwargs: object) -> object:
+        if self.name == "MANIFEST.tmp":
+            raise OSError(28, "No space left on device")
+        return real_open(self, *args, **kwargs)  # pyright: ignore[reportCallIssue, reportUnknownVariableType, reportArgumentType] - passthrough shim
+
+    monkeypatch.setattr(Path, "open", failing_open)
+    store = ContentStore(root=tmp_path / "memory")
+    monkeypatch.undo()
+    assert store.degraded
+    assert list(store.scan()) == []
+    keys = random_vectors(1, DIM, seed=25)
+    values = random_vectors(1, DIM, seed=26)
+    with pytest.raises(StoreFullError):
+        store.append(_record("s-init-full", keys[0], values[0]))
+
+
+def test_mid_file_tombstone_corruption_is_loud(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    store, _records = _seeded_store(tmp_path, 3)
+    (tmp_path / "memory" / "tombstones.jsonl").write_text(
+        'corrupt mid-file line\n{"span_id": "s1", "deleted_at": 1}\n'
+    )
+    with caplog.at_level("WARNING", logger="skulk.memory.store"):
+        survivors = [r.span_id for r in store.scan()]
+    # The valid tombstone still applies; the corrupt one is loud, not fatal.
+    assert survivors == ["s0", "s2"]
+    assert store.corrupt_lines_dropped == 1
+    assert any("tombstone" in message for message in caplog.messages)
+
+
+def test_whitener_versions_are_immutable(tmp_path: Path) -> None:
+    store = ContentStore(root=tmp_path / "memory")
+    corpus = np.random.default_rng(6).normal(size=(32, 16)).astype(np.float32)
+    whitener = Whitener.fit(corpus, embedding_model_id="bge-small", version="v9")
+    store.save_whitener(whitener)
+    refit = Whitener.fit(corpus * 2, embedding_model_id="bge-small", version="v9")
+    with pytest.raises(ValueError, match="immutable"):
+        store.save_whitener(refit)
+
+
 def test_whitener_round_trip_preserves_cue_space(tmp_path: Path) -> None:
     store = ContentStore(root=tmp_path / "memory")
     corpus = np.random.default_rng(3).normal(size=(32, 16)).astype(np.float32)

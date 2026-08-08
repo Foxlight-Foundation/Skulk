@@ -119,23 +119,46 @@ class ContentStore:
 
     def __post_init__(self) -> None:
         self.root = Path(self.root)
-        self.root.mkdir(parents=True, exist_ok=True)
-        if not self._manifest_path().exists():
-            self._write_manifest({
-                "schema": _STORE_SCHEMA_VERSION,
-                "embedding_model_id": None,
-                "whitener_version": None,
-                "segments": [],
-                "compacted_through": 0,
-            })
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            if not self._manifest_path().exists():
+                self._write_manifest(self._default_manifest())
+        except OSError as error:
+            # First use on an already-full volume must still honor the
+            # contract: the store exists in degraded mode (reads work and
+            # report nothing stored) instead of construction raising a raw
+            # OSError into whatever component owns it.
+            if error.errno != errno.ENOSPC:
+                raise
+            self._degraded = True
+            _LOGGER.warning(
+                "memory store initialization hit ENOSPC at %s; starting "
+                "degraded (capture disabled, reads continue)",
+                self.root,
+            )
 
     # --- manifest -----------------------------------------------------------
+
+    @staticmethod
+    def _default_manifest() -> dict[str, object]:
+        return {
+            "schema": _STORE_SCHEMA_VERSION,
+            "embedding_model_id": None,
+            "whitener_version": None,
+            "segments": [],
+            "compacted_through": 0,
+        }
 
     def _manifest_path(self) -> Path:
         return self.root / _MANIFEST_NAME
 
     def _read_manifest(self) -> dict[str, object]:
-        data = json.loads(self._manifest_path().read_text())  # pyright: ignore[reportAny] - json.loads stub gap
+        path = self._manifest_path()
+        if not path.exists():
+            # A store that degraded before its first manifest write reads as
+            # empty rather than failing.
+            return self._default_manifest()
+        data = json.loads(path.read_text())  # pyright: ignore[reportAny] - json.loads stub gap
         if not isinstance(data, dict):
             raise ValueError("memory store manifest is not an object")
         return {str(key): value for key, value in data.items()}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
@@ -156,18 +179,18 @@ class ContentStore:
     def _fsync_directory(self) -> None:
         """Make renames and unlinks in the store directory durable.
 
-        POSIX requires a directory fsync for metadata durability; platforms
-        that refuse fsync on a directory descriptor simply skip it, which is
-        no worse than the pre-fsync behavior there.
+        POSIX requires a directory fsync for metadata durability. Only a
+        platform's refusal to fsync a directory descriptor (EINVAL/ENOTSUP)
+        is tolerated, which is no worse than the pre-fsync behavior there;
+        real storage failures (EIO, ENOSPC) propagate, because acknowledging
+        a write whose directory entry may not survive would be a lie.
         """
-        try:
-            descriptor = os.open(self.root, os.O_RDONLY)
-        except OSError:
-            return
+        descriptor = os.open(self.root, os.O_RDONLY)
         try:
             os.fsync(descriptor)
-        except OSError:
-            pass
+        except OSError as error:
+            if error.errno not in (errno.EINVAL, errno.ENOTSUP):
+                raise
         finally:
             os.close(descriptor)
 
@@ -340,20 +363,48 @@ class ContentStore:
         # Binary mode: a crash can tear a line mid-multibyte-character, and
         # text-mode iteration would raise UnicodeDecodeError before any
         # per-line tolerance could run. json.loads accepts bytes directly.
+        # Like scan(), only the final line is the expected torn-tail artifact;
+        # corruption elsewhere would silently re-expose a forgotten span, so
+        # it is skipped loudly.
         with path.open("rb") as handle:
-            for raw in handle:
-                line = raw.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)  # pyright: ignore[reportAny] - json.loads stub gap
-                except ValueError:
-                    continue  # torn tail on the tombstone file: skip, never fatal
-                if isinstance(entry, dict):
-                    span_id = entry.get("span_id")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-                    if isinstance(span_id, str):
-                        ids.add(span_id)
+            pending: tuple[int, bytes] | None = None
+            for number, raw in enumerate(handle, start=1):
+                if pending is not None:
+                    self._collect_tombstone(ids, path, pending, is_tail=False)
+                pending = (number, raw)
+            if pending is not None:
+                self._collect_tombstone(ids, path, pending, is_tail=True)
         return ids
+
+    def _collect_tombstone(
+        self,
+        ids: set[str],
+        path: Path,
+        numbered: tuple[int, bytes],
+        *,
+        is_tail: bool,
+    ) -> None:
+        number, raw = numbered
+        line = raw.strip()
+        if not line:
+            return
+        try:
+            entry = json.loads(line)  # pyright: ignore[reportAny] - json.loads stub gap
+        except ValueError:
+            if not is_tail:
+                self._corrupt_lines_dropped += 1
+                _LOGGER.warning(
+                    "memory store dropped unparseable tombstone at %s:%d "
+                    "(a forgotten span may be re-exposed until it is "
+                    "tombstoned again)",
+                    path.name,
+                    number,
+                )
+            return
+        if isinstance(entry, dict):
+            span_id = entry.get("span_id")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            if isinstance(span_id, str):
+                ids.add(span_id)
 
     @property
     def corrupt_lines_dropped(self) -> int:
@@ -441,6 +492,21 @@ class ContentStore:
         self._refuse_writes_if_degraded()
         dead = self._tombstoned()
         old_segments = self._segments()
+        # Reserve before rewriting: the live segment bytes are an upper bound
+        # on the survivor stream, so if that plus the floor does not fit, the
+        # rewrite would only churn the disk toward ENOSPC before failing.
+        # Refusing here does not flip degraded: ordinary appends may still
+        # fit even when a full duplicate temporarily cannot.
+        live_bytes = sum(
+            segment.stat().st_size for segment in old_segments if segment.exists()
+        )
+        free = shutil.disk_usage(self.root).free
+        if free < live_bytes + self.free_space_floor_bytes:
+            raise StoreFullError(
+                f"compaction needs up to {live_bytes} bytes plus the "
+                f"{self.free_space_floor_bytes}-byte floor but only {free} "
+                "bytes are free; retry after space is reclaimed"
+            )
         final = self.root / f"spans-{self._next_sequence():06d}.jsonl"
         scratch = self.root / (final.name + ".tmp")
         survivors = 0
@@ -493,6 +559,14 @@ class ContentStore:
         """Persist the frozen separation stage for exact cue-space rebuilds."""
         self._refuse_writes_if_degraded()
         path = self.root / f"whitener-{whitener.version}.npz"
+        if path.exists():
+            # A version string names one immutable cue space; stored records
+            # identify their keys by it. Refitting must mint a new version,
+            # never silently repoint an existing one.
+            raise ValueError(
+                f"whitener version {whitener.version!r} is already persisted; "
+                "whitener versions are immutable, fit under a new version"
+            )
         scratch = self.root / (path.name + ".tmp")
         try:
             # Write to a scratch handle and fsync before the rename, then
