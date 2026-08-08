@@ -257,6 +257,41 @@ def test_configure_relay_cli_never_echoes_rejected_secret_material(
     assert secret not in captured.err
 
 
+def test_configure_relay_cli_uses_non_fabric_default_port(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator listener must not collide with Skulk's default fabric port."""
+
+    service, repository = _service(tmp_path)
+    provisioning_path = tmp_path / "relay-provisioning.json"
+    provisioning_path.write_text(_provisioning().model_dump_json(), encoding="utf-8")
+
+    def service_from_default_paths(
+        _service_type: type[OperatorPairingService],
+    ) -> OperatorPairingService:
+        """Return the isolated service for this CLI invocation."""
+
+        return service
+
+    monkeypatch.setattr(
+        OperatorPairingService,
+        "from_default_paths",
+        classmethod(service_from_default_paths),
+    )
+
+    assert operator_cli.DEFAULT_OPERATOR_API_PORT != 52416
+    assert (
+        operator_cli.main(
+            ["configure-relay", "--provisioning-file", str(provisioning_path)]
+        )
+        == 0
+    )
+    configuration = repository.load()
+    assert configuration is not None
+    assert configuration.operator_api_port == operator_cli.DEFAULT_OPERATOR_API_PORT
+
+
 def test_pair_cli_uses_configured_relay_without_direct_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
