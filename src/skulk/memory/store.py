@@ -18,6 +18,7 @@ working; memory degrades to off, inference never degrades.
 from __future__ import annotations
 
 import base64
+import contextlib
 import errno
 import json
 import logging
@@ -209,6 +210,17 @@ class ContentStore:
                         len(recovered),
                     )
                 self._write_manifest(manifest)
+                if recovered:
+                    # The records are the truth for the rest of the lost
+                    # metadata: without this, the next append would re-stamp
+                    # the cue space blind from its incoming record, and the
+                    # default load_whitener() would find no active version.
+                    first = next(self.scan(), None)
+                    if first is not None:
+                        manifest["embedding_model_id"] = first.embedding_model_id
+                        manifest["whitener_version"] = first.whitener_version
+                        manifest["vector_dim"] = first.vector_dim()
+                        self._write_manifest(manifest)
             self._reconcile_stale_tombstones()
             self._sweep_orphan_segments()
             segments = self._segments()
@@ -1032,6 +1044,12 @@ class ContentStore:
             scratch.unlink(missing_ok=True)
             if renamed and not self._names_active_whitener(whitener.version):
                 path.unlink(missing_ok=True)
+                # Best effort: the rename before it was fsynced durable, so
+                # the unlink should be too, or a power loss can resurrect
+                # the orphan. If the disk refuses even this, the
+                # identical-retry path still recovers the match case.
+                with contextlib.suppress(OSError):
+                    self._fsync_directory()
             self._translate_out_of_space(error)
             raise
         return path

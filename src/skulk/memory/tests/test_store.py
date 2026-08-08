@@ -573,6 +573,18 @@ def test_missing_manifest_recovers_from_discovered_segments(
     assert [r.span_id for r in reopened.scan()] == [r.span_id for r in records]
     manifest = json.loads((tmp_path / "memory" / "MANIFEST.json").read_text())
     assert manifest["segments"], "rebuilt manifest must list the segments"
+    # The cue space is restored from the records, so a foreign append is
+    # still refused rather than re-stamping blind into a mixed store.
+    assert manifest["embedding_model_id"] == records[0].embedding_model_id
+    assert manifest["whitener_version"] == records[0].whitener_version
+    assert manifest["vector_dim"] == records[0].vector_dim()
+    keys = random_vectors(1, DIM, seed=58)
+    values = random_vectors(1, DIM, seed=59)
+    drifted = _record("s-foreign-after-recovery", keys[0], values[0]).model_copy(
+        update={"whitener_version": "v2"}
+    )
+    with pytest.raises(ValueError, match="cue space"):
+        reopened.append(drifted)
 
 
 def test_schema_invalid_tombstone_is_loud(
