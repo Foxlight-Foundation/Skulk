@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from skulk.memory.hrr import DTYPE, Vector
 from skulk.memory.index import MemoryIndex
@@ -121,7 +121,28 @@ class SpanRecord(BaseModel):
                 "vector payload does not decode to fp16 data "
                 f"({len(raw)} bytes)"
             )
+        decoded = np.frombuffer(raw, dtype=np.float16)
+        if not bool(np.isfinite(decoded).all()):
+            # One NaN or infinity superposed into a field contaminates every
+            # later probe; refuse it while the caller can still handle it.
+            raise ValueError("vector payload contains non-finite fp16 values")
         return value
+
+    @model_validator(mode="after")
+    def _validate_matching_dimensions(self) -> SpanRecord:
+        """Key and value vectors must share one dimension to bind."""
+        key_dim = len(base64.b64decode(self.key_b64)) // 2
+        value_dim = len(base64.b64decode(self.value_b64)) // 2
+        if key_dim != value_dim:
+            raise ValueError(
+                f"key dimension {key_dim} does not match value dimension "
+                f"{value_dim}; binding requires one shared dimension"
+            )
+        return self
+
+    def vector_dim(self) -> int:
+        """The shared key/value vector dimension of this record."""
+        return len(base64.b64decode(self.key_b64)) // 2
 
     def key_vector(self) -> Vector:
         """Decode the stored key vector."""
@@ -193,6 +214,7 @@ class ContentStore:
             "schema": _STORE_SCHEMA_VERSION,
             "embedding_model_id": None,
             "whitener_version": None,
+            "vector_dim": None,
             "segments": [],
             "compacted_through": 0,
         }
@@ -411,6 +433,16 @@ class ContentStore:
                     f"{offered!r} but the store's active cue space is "
                     f"{active!r}; one store holds one cue space"
                 )
+        active_dim = manifest.get("vector_dim")
+        if isinstance(active_dim, int) and record.vector_dim() != active_dim:
+            # A field superposes vectors of exactly one dimension; a record
+            # of another dimension would be acknowledged now and crash
+            # rebuild() later.
+            raise ValueError(
+                f"span {record.span_id!r} carries dimension "
+                f"{record.vector_dim()} but the store holds dimension "
+                f"{active_dim}; one store holds one vector dimension"
+            )
         if record.span_id in self._known_span_ids():
             # The field treats trace ids as unique; two rows under one id
             # would give get() and rebuild() conflicting views, and a
@@ -422,14 +454,18 @@ class ContentStore:
             )
         segment: Path | None = None
         try:
-            if not isinstance(manifest.get("embedding_model_id"), str) or not (
-                isinstance(manifest.get("whitener_version"), str)
+            if (
+                not isinstance(manifest.get("embedding_model_id"), str)
+                or not isinstance(manifest.get("whitener_version"), str)
+                or not isinstance(manifest.get("vector_dim"), int)
             ):
-                # The first append stamps the store's cue space, so mixing is
-                # arbitrated from the very first record even when capture
-                # begins before a whitener is persisted.
+                # The first append stamps the store's cue space and vector
+                # dimension, so mixing is arbitrated from the very first
+                # record even when capture begins before a whitener is
+                # persisted.
                 manifest["embedding_model_id"] = record.embedding_model_id
                 manifest["whitener_version"] = record.whitener_version
+                manifest["vector_dim"] = record.vector_dim()
                 self._write_manifest(manifest)
             segment = self._active_segment()
             self._repair_torn_tail(segment)

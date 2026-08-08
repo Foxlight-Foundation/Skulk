@@ -640,6 +640,26 @@ def test_non_finite_timestamps_are_rejected(tmp_path: Path) -> None:
         store.tombstone("s0", deleted_at=float("inf"))
 
 
+def test_non_finite_vector_payloads_are_rejected(tmp_path: Path) -> None:
+    keys = random_vectors(1, DIM, seed=44)
+    poisoned = keys[0].copy()
+    poisoned[7] = np.float32("nan")
+    with pytest.raises(ValueError, match="non-finite"):
+        _ = _record("s-nan-vec", poisoned, keys[0])
+
+
+def test_append_rejects_foreign_vector_dimension(tmp_path: Path) -> None:
+    store, _records = _seeded_store(tmp_path, 1)
+    small_keys = random_vectors(1, DIM // 2, seed=45)
+    small_values = random_vectors(1, DIM // 2, seed=46)
+    with pytest.raises(ValueError, match="dimension"):
+        store.append(_record("s-small", small_keys[0], small_values[0]))
+    # Mismatched key/value dimensions never even construct.
+    full_keys = random_vectors(1, DIM, seed=47)
+    with pytest.raises(ValueError, match="dimension"):
+        _ = _record("s-mismatch", full_keys[0], small_values[0])
+
+
 def test_append_rejects_foreign_cue_space(tmp_path: Path) -> None:
     store = ContentStore(root=tmp_path / "memory")
     corpus = np.random.default_rng(8).normal(size=(32, 16)).astype(np.float32)
