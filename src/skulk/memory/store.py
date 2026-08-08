@@ -129,7 +129,13 @@ class ContentStore:
     def __post_init__(self) -> None:
         self.root = Path(self.root)
         try:
+            created = not self.root.exists()
             self.root.mkdir(parents=True, exist_ok=True)
+            if created:
+                # The store directory's own entry lives in its parent; without
+                # this, a power loss can erase the entire newly initialized
+                # store no matter how carefully its contents were fsynced.
+                self._fsync_directory(self.root.parent)
             if not self._manifest_path().exists():
                 self._write_manifest(self._default_manifest())
         except OSError as error:
@@ -185,8 +191,8 @@ class ContentStore:
         os.replace(scratch, self._manifest_path())
         self._fsync_directory()
 
-    def _fsync_directory(self) -> None:
-        """Make renames and unlinks in the store directory durable.
+    def _fsync_directory(self, directory: Path | None = None) -> None:
+        """Make renames and unlinks in a directory durable (default: the root).
 
         POSIX requires a directory fsync for metadata durability. Only a
         platform's refusal to fsync a directory descriptor (EINVAL/ENOTSUP)
@@ -194,7 +200,7 @@ class ContentStore:
         real storage failures (EIO, ENOSPC) propagate, because acknowledging
         a write whose directory entry may not survive would be a lie.
         """
-        descriptor = os.open(self.root, os.O_RDONLY)
+        descriptor = os.open(directory if directory is not None else self.root, os.O_RDONLY)
         try:
             os.fsync(descriptor)
         except OSError as error:
@@ -328,6 +334,23 @@ class ContentStore:
         """
         line = record.model_dump_json() + "\n"
         self._refuse_writes_if_degraded(pending_bytes=len(line.encode("utf-8")))
+        manifest = self._read_manifest()
+        for identity_key, offered in (
+            ("embedding_model_id", record.embedding_model_id),
+            ("whitener_version", record.whitener_version),
+        ):
+            active = manifest.get(identity_key)
+            if isinstance(active, str) and active != offered:
+                # One store holds one cue space: keys whitened under a
+                # different identity would silently superpose into a field
+                # they cannot be correctly probed in. An upgrade mints a new
+                # store (or a future migration replays through the new
+                # whitener); it never mixes.
+                raise ValueError(
+                    f"span {record.span_id!r} carries {identity_key} "
+                    f"{offered!r} but the store's active cue space is "
+                    f"{active!r}; one store holds one cue space"
+                )
         try:
             segment = self._active_segment()
             self._repair_torn_tail(segment)
@@ -406,7 +429,9 @@ class ContentStore:
         try:
             entry = json.loads(line)  # pyright: ignore[reportAny] - json.loads stub gap
         except ValueError:
-            if not is_tail:
+            # As in _parse_line: only a newline-less final line is the
+            # expected torn tail; complete unparseable lines are corruption.
+            if not (is_tail and not raw.endswith(b"\n")):
                 self._corrupt_lines_dropped += 1
                 _LOGGER.warning(
                     "memory store dropped unparseable tombstone at %s:%d "
@@ -475,12 +500,15 @@ class ContentStore:
         try:
             return SpanRecord.model_validate_json(line)
         except ValueError:
-            if not is_tail:
+            # Only a line missing its terminating newline is the expected
+            # crash-torn artifact; a complete-but-unparseable line is
+            # corruption wherever it sits.
+            if not (is_tail and not raw.endswith(b"\n")):
                 self._corrupt_lines_dropped += 1
                 _LOGGER.warning(
                     "memory store dropped unparseable record at %s:%d "
-                    "(mid-segment corruption; reads continue, but this line "
-                    "is lost and compaction will not carry it)",
+                    "(corruption; reads continue, but this line is lost "
+                    "and compaction will not carry it)",
                     segment.name,
                     number,
                 )
@@ -526,6 +554,7 @@ class ContentStore:
         scratch = self.root / (final.name + ".tmp")
         survivors = 0
         dropped = 0
+        committed = False
         try:
             with scratch.open("w", encoding="utf-8") as handle:
                 for record in self.scan(include_tombstoned=True):
@@ -542,10 +571,16 @@ class ContentStore:
             manifest["segments"] = [final.name]
             manifest["compacted_through"] = survivors
             self._write_manifest(manifest)
+            committed = True
         except OSError as error:
             # A failed rewrite must not squat on the disk's last bytes: free
-            # the partial scratch before entering degraded mode.
+            # the partial scratch, and if the failure landed between the
+            # rename and the manifest swap, the uncommitted final file too
+            # (its sequence-fresh name is referenced by no manifest, so this
+            # can only ever discard the duplicate, never records).
             scratch.unlink(missing_ok=True)
+            if not committed:
+                final.unlink(missing_ok=True)
             self._translate_out_of_space(error)
             raise
         # Past the commit point: cleanup failures cost disk, never records.
@@ -564,7 +599,19 @@ class ContentStore:
         field costs recency salience, never memories).
         """
         index = index_factory()
+        cue_space: tuple[str, str] | None = None
         for record in self.scan():
+            identity = (record.embedding_model_id, record.whitener_version)
+            if cue_space is None:
+                cue_space = identity
+            elif identity != cue_space:
+                # Superposing keys from two cue spaces produces a field that
+                # probes wrong in both; failing loud beats recalling wrong.
+                raise ValueError(
+                    f"store mixes cue spaces {cue_space!r} and {identity!r} "
+                    f"(first seen at span {record.span_id!r}); a field can "
+                    "only be rebuilt from one embedding/whitener identity"
+                )
             index.write(record.span_id, record.key_vector(), record.value_vector())
         return index
 

@@ -302,7 +302,7 @@ def test_mid_segment_corruption_is_loud_but_not_fatal(
         survivors = [r.span_id for r in store.scan()]
     assert survivors == [r.span_id for r in records]
     assert store.corrupt_lines_dropped == 1
-    assert any("mid-segment corruption" in message for message in caplog.messages)
+    assert any("corruption" in message for message in caplog.messages)
 
 
 def test_compact_reserves_space_before_rewriting(
@@ -389,6 +389,8 @@ def test_torn_multibyte_tombstone_tail_is_dropped_not_fatal(tmp_path: Path) -> N
     with (tmp_path / "memory" / "tombstones.jsonl").open("ab") as handle:
         handle.write(b'{"span_id": "caf\xc3')
     assert [r.span_id for r in store.scan()] == ["s1", "s2"]
+    # A newline-less final line is the expected torn tail: silent, uncounted.
+    assert store.corrupt_lines_dropped == 0
 
 
 def test_floor_admission_accounts_for_pending_write_size(
@@ -458,6 +460,64 @@ def test_manifest_survives_corrupt_tombstone_lines(tmp_path: Path) -> None:
         '{"span_id": "s0", "deleted_at": 1}\nnot json at all\n'
     )
     assert [r.span_id for r in store.scan()] == ["s1"]
+    # Newline-terminated means complete: this is corruption, not a torn
+    # tail, and must be counted rather than silently tolerated.
+    assert store.corrupt_lines_dropped == 1
+
+
+def test_compact_failure_after_rename_removes_uncommitted_final(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manifest failure after the rename must not leave the survivor copy."""
+    store, _records = _seeded_store(tmp_path, 3)
+    store.tombstone("s0", deleted_at=1_700_000_100.0)
+    old_names = {p.name for p in (tmp_path / "memory").glob("spans-*.jsonl")}
+    real_open = Path.open
+
+    def failing_open(self: Path, *args: object, **kwargs: object) -> object:
+        if self.name == "MANIFEST.tmp":
+            raise OSError(28, "No space left on device")
+        return real_open(self, *args, **kwargs)  # pyright: ignore[reportCallIssue, reportUnknownVariableType, reportArgumentType] - passthrough shim
+
+    monkeypatch.setattr(Path, "open", failing_open)
+    with pytest.raises(StoreFullError):
+        store.compact()
+    monkeypatch.undo()
+    assert store.degraded
+    # No scratch and no uncommitted sequence-fresh file squat on the disk.
+    assert not list((tmp_path / "memory").glob("*.tmp"))
+    assert {p.name for p in (tmp_path / "memory").glob("spans-*.jsonl")} == old_names
+    assert [r.span_id for r in store.scan()] == ["s1", "s2"]
+
+
+def test_append_rejects_foreign_cue_space(tmp_path: Path) -> None:
+    store = ContentStore(root=tmp_path / "memory")
+    corpus = np.random.default_rng(8).normal(size=(32, 16)).astype(np.float32)
+    whitener = Whitener.fit(corpus, embedding_model_id="bge-small", version="v7")
+    store.save_whitener(whitener)
+    keys = random_vectors(1, DIM, seed=29)
+    values = random_vectors(1, DIM, seed=30)
+    # _record carries embedding_model_id "bge-small-en-v1.5" / whitener "v1",
+    # which is not the store's active cue space.
+    with pytest.raises(ValueError, match="cue space"):
+        store.append(_record("s-foreign", keys[0], values[0]))
+
+
+def test_rebuild_rejects_mixed_cue_spaces(tmp_path: Path) -> None:
+    store, _records = _seeded_store(tmp_path, 2)
+    keys = random_vectors(1, DIM, seed=31)
+    values = random_vectors(1, DIM, seed=32)
+    drifted = _record("s-drift", keys[0], values[0]).model_copy(
+        update={"whitener_version": "v2"}
+    )
+    # No whitener is registered, so append cannot arbitrate; rebuild must.
+    store.append(drifted)
+
+    def factory() -> MemoryIndex:
+        return HolographicField(dim=DIM)
+
+    with pytest.raises(ValueError, match="cue spaces"):
+        store.rebuild(factory)
 
 
 def test_segment_rotation(tmp_path: Path) -> None:
