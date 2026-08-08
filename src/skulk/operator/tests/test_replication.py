@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import timedelta
 from pathlib import Path
 from typing import final
 from uuid import UUID, uuid4
@@ -101,13 +102,18 @@ def _previous_position(cluster_id: UUID) -> AuthorityCommitPosition:
 
 
 def test_bootstrap_position_is_stable_across_display_name_changes() -> None:
-    """Editable cluster naming cannot fork the authority trust anchor."""
+    """Unauthenticated display metadata cannot fork the authority trust anchor."""
 
     identity = create_cluster_identity("Fox Den").public_identity
-    renamed = identity.model_copy(update={"name": "Home Fabric"})
+    edited_metadata = identity.model_copy(
+        update={
+            "name": "Home Fabric",
+            "created_at": identity.created_at + timedelta(days=1),
+        }
+    )
 
     assert authority_bootstrap_position(identity) == authority_bootstrap_position(
-        renamed
+        edited_metadata
     )
 
 
@@ -301,6 +307,26 @@ def test_membership_rejects_one_signing_key_for_two_nodes() -> None:
             members=(
                 create_authority_member(uuid4(), private_key),
                 create_authority_member(uuid4(), private_key),
+            ),
+        )
+
+
+def test_membership_canonicalizes_signing_key_encoding_before_uniqueness() -> None:
+    """Padding aliases cannot register one Ed25519 key as two voters."""
+
+    private_key = _private_key()
+    first_member = create_authority_member(uuid4(), private_key)
+
+    with pytest.raises(ValidationError, match="duplicate signing key"):
+        AuthorityMembership(
+            generation=1,
+            members=(
+                first_member,
+                AuthorityMember(
+                    node_install_id=uuid4(),
+                    public_key=f"{first_member.public_key}=",
+                    role="voter",
+                ),
             ),
         )
 

@@ -118,7 +118,7 @@ class AuthorityMember(FrozenModel):
             raise ValueError("public_key is not valid URL-safe base64") from exc
         if len(decoded) != 32:
             raise ValueError("public_key must contain one raw Ed25519 public key")
-        return value
+        return _base64url_encode(decoded)
 
 
 @final
@@ -409,7 +409,6 @@ def authority_bootstrap_position(
         _canonical_json(
             {
                 "clusterId": str(identity.cluster_id),
-                "createdAt": identity.created_at.isoformat(),
                 "fingerprint": identity.fingerprint,
                 "formatVersion": identity.format_version,
                 "publicKey": identity.public_key,
