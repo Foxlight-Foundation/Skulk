@@ -184,7 +184,10 @@ def test_enospc_during_rotation_degrades(
     monkeypatch.setattr(Path, "open", failing_open)
     with pytest.raises(StoreFullError):
         store.append(_record("s-rotate", keys[0], values[0]))
+    monkeypatch.undo()
     assert store.degraded
+    # The failed swap's scratch does not squat on the volume.
+    assert not (tmp_path / "memory" / "MANIFEST.tmp").exists()
 
 
 def test_rotation_preserves_fsync_cadence(tmp_path: Path) -> None:
@@ -708,7 +711,7 @@ def test_corrupt_manifest_json_recovers_from_segments(tmp_path: Path) -> None:
 
 
 def test_startup_sweeps_orphan_segment_files(tmp_path: Path) -> None:
-    """Only files provably below the committed compaction are reclaimed."""
+    """Only files a committed compaction declared superseded are reclaimed."""
     store = ContentStore(root=tmp_path / "memory", rotation_bytes=1024)
     keys = random_vectors(4, DIM, seed=66)
     values = random_vectors(4, DIM, seed=67)
@@ -716,20 +719,48 @@ def test_startup_sweeps_orphan_segment_files(tmp_path: Path) -> None:
         store.append(_record(f"o{i}", keys[i], values[i]))
     store.tombstone("o0", deleted_at=1_700_000_100.0)
     assert store.compact() == 1
-    # An orphan BELOW the committed final (the ambiguous-commit shape) and
-    # a scratch are reclaimed; an unlisted file ABOVE it (stale manifest or
-    # crashed compaction) is preserved, since it may be data.
-    below = tmp_path / "memory" / "spans-000001.jsonl"
-    below.write_text('{"span_id":"x"}\n')
+    # Simulate the ambiguous-commit window: the commit's superseded list
+    # persisted but the cleanup was lost, so the replaced file remains.
+    manifest_path = tmp_path / "memory" / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["superseded"] == []
+    manifest["superseded"] = ["spans-000001.jsonl"]
+    manifest_path.write_text(json.dumps(manifest))
+    replaced = tmp_path / "memory" / "spans-000001.jsonl"
+    replaced.write_text('{"span_id":"x"}\n')
     (tmp_path / "memory" / "spans-000099.jsonl.tmp").write_text("partial")
-    above = tmp_path / "memory" / "spans-000099.jsonl"
-    above.write_text('{"span_id":"y"}\n')
+    # An unlisted file NOT declared superseded may be data: preserved.
+    unlisted = tmp_path / "memory" / "spans-000099.jsonl"
+    unlisted.write_text('{"span_id":"y"}\n')
 
     reopened = ContentStore(root=tmp_path / "memory")
-    assert not below.exists()
+    assert not replaced.exists()
     assert not (tmp_path / "memory" / "spans-000099.jsonl.tmp").exists()
-    assert above.exists()
+    assert unlisted.exists()
     assert [r.span_id for r in reopened.scan()] == ["o1", "o2", "o3"]
+    healed = json.loads(manifest_path.read_text())
+    assert healed["superseded"] == []
+
+
+def test_compact_refuses_with_unlisted_segments(tmp_path: Path) -> None:
+    """Compaction never runs while unreconciled segment files exist."""
+    store = ContentStore(root=tmp_path / "memory", rotation_bytes=1024)
+    keys = random_vectors(3, DIM, seed=70)
+    values = random_vectors(3, DIM, seed=71)
+    for i in range(3):
+        store.append(_record(f"u{i}", keys[i], values[i]))
+    manifest_path = tmp_path / "memory" / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["segments"] = manifest["segments"][:1]
+    manifest_path.write_text(json.dumps(manifest))
+
+    reopened = ContentStore(root=tmp_path / "memory", rotation_bytes=1024)
+    reopened.tombstone("u0", deleted_at=1_700_000_100.0)
+    with pytest.raises(ValueError, match="does not list"):
+        _ = reopened.compact()
+    # The omitted files are untouched by the refusal.
+    assert (tmp_path / "memory" / "spans-000002.jsonl").exists()
+    assert (tmp_path / "memory" / "spans-000003.jsonl").exists()
 
 
 def test_rotation_never_adopts_an_omitted_live_segment(tmp_path: Path) -> None:

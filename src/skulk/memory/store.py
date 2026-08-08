@@ -310,6 +310,7 @@ class ContentStore:
             "whitener_version": None,
             "vector_dim": None,
             "segments": [],
+            "superseded": [],
             "compacted_through": 0,
         }
 
@@ -355,11 +356,17 @@ class ContentStore:
         # a power loss cannot persist later operations (segment unlinks) while
         # dropping the manifest swap they depend on.
         scratch = self._manifest_path().with_suffix(".tmp")
-        with scratch.open("w", encoding="utf-8") as handle:
-            handle.write(json.dumps(manifest, indent=2) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(scratch, self._manifest_path())
+        try:
+            with scratch.open("w", encoding="utf-8") as handle:
+                handle.write(json.dumps(manifest, indent=2) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(scratch, self._manifest_path())
+        except OSError:
+            # A failed swap must not leave the partial scratch squatting on
+            # a struggling volume; the old manifest remains authoritative.
+            scratch.unlink(missing_ok=True)
+            raise
         self._fsync_directory()
 
     def _fsync_directory(self, directory: Path | None = None) -> None:
@@ -731,18 +738,20 @@ class ContentStore:
             raise
 
     def _sweep_orphan_segments(self) -> None:
-        """Remove segment files no healthy manifest references (startup).
+        """Remove provably superseded segment files (startup).
 
-        Orphans arise from compaction failures: a crashed compaction leaves
-        its sequence-fresh file, and the ambiguous-commit window (manifest
-        swap landed but the call raised) preserves the committed file while
-        skipping old-segment cleanup. The manifest is the truth whenever its
-        segments field is a valid list (rotation lists a name before
-        creating the file; compaction commits by atomic swap), so anything
-        unlisted is reclaimable. When the manifest is malformed, reads run
-        on discovery and nothing here can tell orphans from data: skip.
+        Compaction records the exact names it replaced in the manifest's
+        ``superseded`` list within its atomic commit, so the sweep never
+        infers orphans from name shapes or sequence order: it deletes only
+        names a committed compaction declared replaced (the
+        ambiguous-commit window leaves that list persisted for exactly this
+        cleanup), plus compaction scratch files. Anything else unlisted, a
+        stale or operator-restored manifest's omissions included, is
+        preserved for an operator. When the manifest is malformed, reads
+        run on discovery and nothing here can tell orphans from data: skip.
         """
-        listed = self._read_manifest().get("segments")
+        manifest = self._read_manifest()
+        listed = manifest.get("segments")
         if not isinstance(listed, list):
             return
         named = {str(entry) for entry in listed}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
@@ -750,34 +759,26 @@ class ContentStore:
         for stray in self.root.glob("spans-*.jsonl.tmp"):
             stray.unlink(missing_ok=True)
             removed += 1
-        # Compaction orphans are always OLDER than the committed final (the
-        # final gets a sequence-fresh name above everything it replaced), so
-        # only files below the highest listed sequence are provably orphans.
-        # Unlisted files at or above it (a stale or operator-restored
-        # manifest, or a crashed compaction's stray) are preserved; rotation
-        # unlinks a stray lazily if it ever adopts that name.
-        highest_listed = 0
-        for name in named:
-            digits = Path(name).stem.rsplit("-", 1)[-1]
-            if not digits.isdigit():
-                # A listed name outside our scheme means the manifest's
-                # provenance is unknown; deleting on that basis is unsafe.
-                return
-            highest_listed = max(highest_listed, int(digits))
-        for candidate in self.root.glob("spans-*.jsonl"):
-            if candidate.name in named:
-                continue
-            digits = candidate.stem.rsplit("-", 1)[-1]
-            if digits.isdigit() and int(digits) < highest_listed:
-                candidate.unlink(missing_ok=True)
+        superseded = manifest.get("superseded")
+        cleared = 0
+        if isinstance(superseded, list) and superseded:
+            for entry in superseded:  # pyright: ignore[reportUnknownVariableType]
+                name = str(entry)  # pyright: ignore[reportUnknownArgumentType]
+                if name in named:
+                    continue  # never delete anything currently listed
+                (self.root / name).unlink(missing_ok=True)
                 removed += 1
+                cleared += 1
         if removed:
             self._fsync_directory()
             _LOGGER.info(
-                "memory store reclaimed %d orphan segment file(s) at %s",
+                "memory store reclaimed %d superseded/scratch file(s) at %s",
                 removed,
                 self.root,
             )
+        if cleared:
+            manifest["superseded"] = []
+            self._write_manifest(manifest)
 
     def _known_span_ids(self) -> set[str]:
         """Every reserved span id: in segments, or named by a tombstone.
@@ -987,6 +988,24 @@ class ContentStore:
         self._refuse_writes_if_degraded()
         dead = self._tombstoned()
         old_segments = self._segments()
+        # Unlisted segment files are an anomaly an operator must resolve
+        # (a stale or restored manifest omitting live data): compacting
+        # through the manifest view alone would produce a history without
+        # their records while they linger unreconciled. Disagreement is
+        # loud, not silently compounded.
+        listed_names = {segment.name for segment in old_segments}
+        unlisted = [
+            candidate
+            for candidate in self.root.glob("spans-*.jsonl")
+            if candidate.name not in listed_names
+        ]
+        if unlisted:
+            raise ValueError(
+                f"store holds {len(unlisted)} segment file(s) the manifest "
+                "does not list "
+                f"({', '.join(sorted(p.name for p in unlisted))}); refusing "
+                "to compact until they are reconciled or removed"
+            )
         # Reserve before rewriting: the live segment bytes are an upper bound
         # on the survivor stream, so if that plus the floor does not fit, the
         # rewrite would only churn the disk toward ENOSPC before failing.
@@ -1021,6 +1040,13 @@ class ContentStore:
             self._fsync_directory()
             manifest = self._read_manifest()
             manifest["segments"] = [final.name]
+            # The commit records exactly which names it replaced, so the
+            # startup sweep deletes only provably superseded files and never
+            # has to infer orphans from name shapes or sequence order.
+            replaced = [
+                stale.name for stale in old_segments if stale != final
+            ]
+            manifest["superseded"] = replaced
             manifest["compacted_through"] = survivors
             self._write_manifest(manifest)
             committed = True
@@ -1033,6 +1059,10 @@ class ContentStore:
                     stale.unlink(missing_ok=True)
             (self.root / _TOMBSTONES_NAME).unlink(missing_ok=True)
             self._fsync_directory()
+            if replaced:
+                manifest = self._read_manifest()
+                manifest["superseded"] = []
+                self._write_manifest(manifest)
         except OSError as error:
             # A failed rewrite must not squat on the disk's last bytes: free
             # the partial scratch, and if the failure landed between the
