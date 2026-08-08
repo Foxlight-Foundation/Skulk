@@ -26,6 +26,7 @@ import shutil
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
@@ -53,6 +54,14 @@ _STORE_SCHEMA_VERSION = 1
 
 _LOGGER = logging.getLogger(__name__)
 
+SpanRole = Literal["user", "assistant"]
+"""Speaker roles the capture pipeline persists.
+
+A closed set on purpose: provenance is quoted back at surfacing time
+("you told me..." versus "I said..."), so an unconstrained string here
+would let a caller typo become a permanently misattributed memory.
+"""
+
 
 def encode_vector(vector: Vector) -> str:
     """Encode a vector as base64 fp16 for compact JSONL storage (capture path)."""
@@ -79,7 +88,7 @@ class SpanRecord(BaseModel):
 
     span_id: str = Field(description="Unique id; the field's trace id.")
     text: str = Field(description="Verbatim span text quoted at surfacing.")
-    role: str = Field(description="Speaker role of the span (user/assistant).")
+    role: SpanRole = Field(description="Speaker role of the span.")
     session_id: str = Field(description="Conversation/session provenance.")
     node_id: str = Field(description="Capturing node's id at write time.")
     created_at: float = Field(description="Unix seconds at capture.")
@@ -249,15 +258,21 @@ class ContentStore:
         """Whether the store refuses writes after an out-of-space failure."""
         return self._degraded
 
-    def _refuse_writes_if_degraded(self) -> None:
+    def _refuse_writes_if_degraded(self, pending_bytes: int = 0) -> None:
+        """Refuse while degraded, or when the pending write would breach the floor.
+
+        Span text and whitener matrices are not size-bounded by this layer,
+        so the admission check accounts for the write actually being asked
+        for rather than admitting anything while one byte above the floor.
+        """
         if self._degraded:
             raise StoreFullError("memory store is in degraded (out of space) mode")
         free = shutil.disk_usage(self.root).free
-        if free < self.free_space_floor_bytes:
+        if free < self.free_space_floor_bytes + pending_bytes:
             self._degraded = True
             raise StoreFullError(
-                f"memory store free-space floor reached ({free} bytes free); "
-                "capture disabled, reads continue"
+                f"memory store free-space floor reached ({free} bytes free, "
+                f"{pending_bytes} pending); capture disabled, reads continue"
             )
 
     def _translate_out_of_space(self, error: OSError) -> None:
@@ -311,8 +326,8 @@ class ContentStore:
         Raises :class:`StoreFullError` while degraded; the caller's contract
         is that capture stops and serving continues (memory degrades to off).
         """
-        self._refuse_writes_if_degraded()
         line = record.model_dump_json() + "\n"
+        self._refuse_writes_if_degraded(pending_bytes=len(line.encode("utf-8")))
         try:
             segment = self._active_segment()
             self._repair_torn_tail(segment)
@@ -335,8 +350,8 @@ class ContentStore:
 
     def tombstone(self, span_id: str, *, deleted_at: float) -> None:
         """Record exact forgetting of one span (drop at next compaction)."""
-        self._refuse_writes_if_degraded()
         entry = json.dumps({"span_id": span_id, "deleted_at": deleted_at}) + "\n"
+        self._refuse_writes_if_degraded(pending_bytes=len(entry.encode("utf-8")))
         path = self.root / _TOMBSTONES_NAME
         try:
             self._repair_torn_tail(path)
@@ -557,15 +572,29 @@ class ContentStore:
 
     def save_whitener(self, whitener: Whitener) -> Path:
         """Persist the frozen separation stage for exact cue-space rebuilds."""
-        self._refuse_writes_if_degraded()
+        pending = whitener.mu.nbytes + whitener.matrix.nbytes + 4096
+        self._refuse_writes_if_degraded(pending_bytes=pending)
         path = self.root / f"whitener-{whitener.version}.npz"
         if path.exists():
             # A version string names one immutable cue space; stored records
-            # identify their keys by it. Refitting must mint a new version,
-            # never silently repoint an existing one.
+            # identify their keys by it. The one legitimate re-persist is
+            # crash recovery: a power loss between the archive rename and the
+            # manifest update leaves a complete identical orphan, and
+            # retrying then only needs the manifest half.
+            if self._matches_persisted_whitener(whitener):
+                try:
+                    manifest = self._read_manifest()
+                    manifest["whitener_version"] = whitener.version
+                    manifest["embedding_model_id"] = whitener.embedding_model_id
+                    self._write_manifest(manifest)
+                except OSError as error:
+                    self._translate_out_of_space(error)
+                    raise
+                return path
             raise ValueError(
-                f"whitener version {whitener.version!r} is already persisted; "
-                "whitener versions are immutable, fit under a new version"
+                f"whitener version {whitener.version!r} is already persisted "
+                "with different contents; whitener versions are immutable, "
+                "fit under a new version"
             )
         scratch = self.root / (path.name + ".tmp")
         try:
@@ -596,6 +625,25 @@ class ContentStore:
             self._translate_out_of_space(error)
             raise
         return path
+
+    def _matches_persisted_whitener(self, whitener: Whitener) -> bool:
+        """Whether the persisted archive for this version is exactly ``whitener``.
+
+        Exact array equality is the right bar: save and load round-trip
+        float32 bit-identically, so a crash-recovery retry matches exactly
+        and a refit under a reused version does not.
+        """
+        try:
+            existing = self.load_whitener(whitener.version)
+        except (OSError, ValueError, KeyError):
+            return False
+        return (
+            bool(np.array_equal(existing.mu, whitener.mu))
+            and bool(np.array_equal(existing.matrix, whitener.matrix))
+            and existing.alpha == whitener.alpha
+            and existing.shrinkage == whitener.shrinkage
+            and existing.embedding_model_id == whitener.embedding_model_id
+        )
 
     def load_whitener(self, version: str | None = None) -> Whitener:
         """Load a persisted whitener (the manifest's active one by default)."""

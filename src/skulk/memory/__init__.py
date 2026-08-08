@@ -42,6 +42,7 @@ from skulk.memory.separation import (
 from skulk.memory.store import (
     ContentStore,
     SpanRecord,
+    SpanRole,
     StoreFullError,
     encode_vector,
 )
@@ -49,6 +50,7 @@ from skulk.memory.store import (
 __all__ = [
     "ContentStore",
     "SpanRecord",
+    "SpanRole",
     "StoreFullError",
     "encode_vector",
     "DEFAULT_ALPHA",

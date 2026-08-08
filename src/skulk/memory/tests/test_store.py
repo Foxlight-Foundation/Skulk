@@ -382,6 +382,64 @@ def test_whitener_versions_are_immutable(tmp_path: Path) -> None:
         store.save_whitener(refit)
 
 
+def test_torn_multibyte_tombstone_tail_is_dropped_not_fatal(tmp_path: Path) -> None:
+    """UnicodeDecodeError is a ValueError: the tolerance already covers it."""
+    store, _records = _seeded_store(tmp_path, 3)
+    store.tombstone("s0", deleted_at=1_700_000_100.0)
+    with (tmp_path / "memory" / "tombstones.jsonl").open("ab") as handle:
+        handle.write(b'{"span_id": "caf\xc3')
+    assert [r.span_id for r in store.scan()] == ["s1", "s2"]
+
+
+def test_floor_admission_accounts_for_pending_write_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Free space slightly above the floor must not admit an oversized write."""
+    import shutil as shutil_module
+    from typing import NamedTuple
+
+    class Usage(NamedTuple):
+        total: int
+        used: int
+        free: int
+
+    store, _records = _seeded_store(tmp_path, 1)
+    store.free_space_floor_bytes = 1000
+    keys = random_vectors(1, DIM, seed=27)
+    values = random_vectors(1, DIM, seed=28)
+
+    def slightly_above_floor(_root: object) -> Usage:
+        return Usage(total=10_000, used=8_900, free=1_100)
+
+    monkeypatch.setattr(shutil_module, "disk_usage", slightly_above_floor)
+    # The record line is tens of KiB; only 100 bytes sit above the floor.
+    with pytest.raises(StoreFullError):
+        store.append(_record("s-oversize", keys[0], values[0]))
+    assert store.degraded
+
+
+def test_whitener_crash_recovery_retry_is_idempotent(tmp_path: Path) -> None:
+    """Re-persisting the identical whitener completes a torn manifest update."""
+    store = ContentStore(root=tmp_path / "memory")
+    corpus = np.random.default_rng(7).normal(size=(32, 16)).astype(np.float32)
+    whitener = Whitener.fit(corpus, embedding_model_id="bge-small", version="v11")
+    store.save_whitener(whitener)
+    # Simulate the crash window: archive durable, manifest update lost.
+    manifest_path = tmp_path / "memory" / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["whitener_version"] = None
+    manifest["embedding_model_id"] = None
+    manifest_path.write_text(json.dumps(manifest))
+
+    store.save_whitener(whitener)
+    loaded = store.load_whitener()
+    assert loaded.version == "v11"
+    # A genuinely different refit under the same version is still refused.
+    refit = Whitener.fit(corpus * 3, embedding_model_id="bge-small", version="v11")
+    with pytest.raises(ValueError, match="immutable"):
+        store.save_whitener(refit)
+
+
 def test_whitener_round_trip_preserves_cue_space(tmp_path: Path) -> None:
     store = ContentStore(root=tmp_path / "memory")
     corpus = np.random.default_rng(3).normal(size=(32, 16)).astype(np.float32)
