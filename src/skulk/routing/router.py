@@ -659,12 +659,22 @@ class Router:
                 ),
             )
         else:
+            if topic.topic == VISION_MEDIA.topic:
+                producer_buffer_size = 0
+            elif topic.topic == AUTHORITY_MESSAGES.topic:
+                # Authority admission must be bounded before serialization as
+                # well as after it. Otherwise callers can fill TopicRouter's
+                # producer queue without limit while the dedicated egress
+                # queue is correctly applying backpressure downstream.
+                producer_buffer_size = _AUTHORITY_OUTBOUND_BUFFER
+            else:
+                producer_buffer_size = inf
             router = TopicRouter[T](
                 topic,
                 send,
                 # Vision producer admission is a rendezvous: packet retention
                 # lives only in the bounded, observable egress/stream queues.
-                max_buffer_size=0 if topic.topic == VISION_MEDIA.topic else inf,
+                max_buffer_size=producer_buffer_size,
                 local_routing_key=local_routing_key,
                 data_plane_egress_observer=(
                     self._vision_media_egress_observer

@@ -99,7 +99,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Lives in:** `src/skulk/operator/identity.py`,
   `src/skulk/operator/authority.py`, `src/skulk/operator/replication.py`,
   `src/skulk/operator/consensus.py`, `src/skulk/operator/consensus_store.py`,
-  and `src/skulk/operator/transport.py`; focused tests live in
+  `src/skulk/operator/service.py`, and `src/skulk/operator/transport.py`; focused tests live in
   `src/skulk/operator/tests/`.
 - **Stable node identity:** `NodeInstallationIdentity.node_install_id` is a
   persisted UUIDv4 under the protected operator configuration directory. It is
@@ -137,21 +137,29 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   anchors permit every restart to reverify the complete signature, quorum,
   digest, index, and membership chain. Writes use revisioned compare-and-set in
   one SQLite transaction; secret authority payloads and keys are not accepted.
+- **Dormant runtime:** `AuthorityConsensusService` serializes local proposal
+  admission, drives prepare/accept/commit with phase deadlines and bounded
+  retries, recovers a previously accepted value before advancing caller intent,
+  and keeps outbound and response queues bounded. It persists the local commit
+  before success and broadcasts the certificate to voters and learners. Runtime
+  diagnostics expose payload-free queue depths and counters.
 - **Network boundary:** `AUTHORITY_MESSAGES` carries Ed25519-signed envelopes
   binding stable source and target installation IDs, message ID, and one typed
-  public protocol payload. It has a dedicated bounded Python egress queue and
-  currently rides the default authenticated libp2p gossipsub behavior.
+  public protocol payload. Producer admission and the dedicated Python egress
+  queue are both bounded, and traffic currently rides the default authenticated
+  libp2p gossipsub behavior.
   `AuthorityChannelTransport` discards broadcasts for other targets before
-  consensus. The topic is registered, but no authority service lifecycle or API
-  authorization consumer starts in this slice.
+  consensus. The topic is registered, but neither the dormant authority service
+  nor an API authorization consumer starts from `Node` in this slice.
 - **Key boundary:** `AuthorityKeyProvider` supplies the active unwrapped 32-byte
   data key and immutable key-version ID. Production OS-wrapping providers and
   replicated key envelopes are later S1 slices; this store never writes the
   plaintext data key itself.
-- **Critical boundary:** deterministic network vote collection and certified
-  log recovery are implemented, but leader selection/retry orchestration,
-  encrypted payload replication, OS-protected key wrapping, gateway leases,
-  and Node lifecycle integration are later slices. No remotely authenticated
+- **Critical boundary:** deterministic network vote collection, certified log
+  recovery, and caller-selected bounded proposal orchestration are implemented,
+  but authority leader selection, encrypted payload replication, OS-protected
+  key wrapping, gateway leases, and Node lifecycle integration are later slices.
+  No remotely authenticated
   request may treat an uncertified local SQLite commit as a distributed
   authorization decision. None of these records enters `State`, telemetry,
   diagnostics, or the API event log.

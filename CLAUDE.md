@@ -101,7 +101,7 @@ If `nix fmt` changes any files, stage them before committing. The CI runs `nix f
 
 ### Node Composition
 A single Skulk `Node` (src/skulk/main.py) runs multiple components:
-- **Router**: libp2p-based pub/sub messaging via Rust bindings (`skulk_pyo3_bindings`). `TELEMETRY` uses bounded latest-value admission, a one-packet Python egress queue, and its own gossipsub protocol/handler queues; `ELECTION_MESSAGES` has a separate Python egress queue and isolated protocol/handler queues. `AUTHORITY_MESSAGES` has a distinct bounded Python egress queue and carries only signed public consensus metadata on the default authenticated gossipsub behavior. Ordinary Python control backlog cannot queue ahead of election or authority traffic, and telemetry pressure cannot consume election capacity. Election alone carries a temporary legacy-protocol copy. Peer discovery tries all mDNS addresses once, then slows link-local retries to one minute after another path connects; socket liveness requires three consecutive five-second ping failures. Live authenticated libp2p sessions are also recorded as `session=True` topology edges (refcounted per peer, seeded across worker recreation), keeping NAT'd/proxied remote members visible and placeable; placement host selection skips session edges, and advertised addresses that fail three consecutive probe sweeps back off to every sixth sweep while no-longer-advertised addresses still delete their edges (#662). Telemetry publishes that reach no subscribed peers are counted (`noPeerPublishes` in `GET /v1/diagnostics/telemetry`) and, sustained on a connected node, warn that the node will be invisible to membership (#660).
+- **Router**: libp2p-based pub/sub messaging via Rust bindings (`skulk_pyo3_bindings`). `TELEMETRY` uses bounded latest-value admission, a one-packet Python egress queue, and its own gossipsub protocol/handler queues; `ELECTION_MESSAGES` has a separate Python egress queue and isolated protocol/handler queues. `AUTHORITY_MESSAGES` has bounded producer admission plus a distinct bounded Python egress queue and carries only signed public consensus metadata on the default authenticated gossipsub behavior. Ordinary Python control backlog cannot queue ahead of election or authority traffic, and telemetry pressure cannot consume election capacity. Election alone carries a temporary legacy-protocol copy. Peer discovery tries all mDNS addresses once, then slows link-local retries to one minute after another path connects; socket liveness requires three consecutive five-second ping failures. Live authenticated libp2p sessions are also recorded as `session=True` topology edges (refcounted per peer, seeded across worker recreation), keeping NAT'd/proxied remote members visible and placeable; placement host selection skips session edges, and advertised addresses that fail three consecutive probe sweeps back off to every sixth sweep while no-longer-advertised addresses still delete their edges (#662). Telemetry publishes that reach no subscribed peers are counted (`noPeerPublishes` in `GET /v1/diagnostics/telemetry`) and, sustained on a connected node, warn that the node will be invisible to membership (#660).
 - **Worker**: Handles inference tasks, downloads models, manages runner processes
 - **Master**: Coordinates cluster state, places model instances across nodes; retained event-log replay is coalesced onto one asynchronously paced worker, and sustained idle-state event-log growth emits an operator warning
 - **Election**: Bully algorithm for master election, carried on the isolated election gossipsub behavior with duplicate candidate suppression during protocol migration
@@ -113,9 +113,11 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
   remains separate from event-sourced `State`, telemetry, diagnostics, and the
   public event log. Restart recovery reverifies the complete certificate and
   membership chain from immutable bootstrap anchors. The encrypted journal
-  requires an injected external data-key provider. Leader/retry orchestration,
-  secret payload replication, OS key wrapping, Node lifecycle integration, and
-  gateway fencing remain later slices.
+  requires an injected external data-key provider. A dormant bounded service
+  can drive one caller-selected proposal with deadlines, retries, accepted-value
+  recovery, local durable commit, and catch-up broadcast; it is not started by
+  `Node`. Authority leader selection, secret payload replication, OS key
+  wrapping, Node lifecycle integration, and gateway fencing remain later slices.
 
 ### Node Facts & capability derivation (#614)
 Detection creates capability; configuration overrides it; disagreement is
@@ -308,8 +310,9 @@ The system uses event sourcing for state management:
   - `model_cards.py`: declarative model cards, including optional advanced capability sections; machine-generated custom cards carry `generator_revision`, and a stamped card older than `CARD_GENERATOR_REVISION` loses override power against the bundled card for the same id (unstamped = hand-authored, keeps #652 override)
   - `capabilities.py`: normalized runtime capability profiles derived from model cards plus conservative family defaults
 - `src/skulk/operator/`: stable operator identity, deterministic quorum
-  certification, crash-fault consensus and recovery, separate public consensus
-  persistence, and encrypted authority persistence. Runtime libp2p `NodeId`
+  certification, crash-fault consensus and recovery, bounded dormant proposal
+  lifecycle, separate public consensus persistence, and encrypted authority
+  persistence. Runtime libp2p `NodeId`
   remains unsuitable for mobile history, device membership, or authorization
   subjects.
 
