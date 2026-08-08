@@ -1209,9 +1209,18 @@ class AuthorityConsensusParticipant:
         state = snapshot.state
         descriptor = entry.certificate.descriptor
         if descriptor.commit_index <= state.position.commit_index:
-            if (
-                descriptor.commit_index == state.position.commit_index
-                and authority_commit_digest(descriptor) == state.position.commit_digest
+            retained = next(
+                (
+                    committed
+                    for committed in state.committed_entries
+                    if committed.certificate.descriptor.commit_index
+                    == descriptor.commit_index
+                ),
+                None,
+            )
+            if retained is not None and (
+                authority_commit_digest(retained.certificate.descriptor)
+                == authority_commit_digest(descriptor)
             ):
                 return
             raise AuthorityConsensusError(

@@ -506,6 +506,41 @@ def test_lagging_replica_requests_and_applies_certified_catch_up() -> None:
     assert recovered.position.commit_index == 3
 
 
+def test_delayed_committed_entry_is_an_idempotent_replay() -> None:
+    """An exact older certificate is harmless after the replica advances."""
+
+    harness = _AuthorityHarness(3)
+    leader_id, follower_id, third_id = harness.voter_ids
+    first = harness.run_round(
+        leader_id,
+        2,
+        "device-1",
+        (leader_id, follower_id),
+        commit_targets=harness.voter_ids,
+    )
+    harness.run_round(
+        leader_id,
+        3,
+        "device-2",
+        (leader_id, follower_id),
+        commit_targets=harness.voter_ids,
+    )
+    delayed = AuthorityCommitMessage(
+        cluster_id=first.certificate.descriptor.cluster_id,
+        request_id=uuid4(),
+        entry=first,
+    )
+    before = harness.participants[third_id].snapshot
+
+    assert (
+        harness.participants[third_id].handle(
+            harness.participants[leader_id].envelope_for(third_id, delayed)
+        )
+        == ()
+    )
+    assert harness.participants[third_id].snapshot == before
+
+
 def test_lagging_replica_continues_across_bounded_catch_up_pages() -> None:
     """A replica more than one response behind requests every remaining page."""
 
