@@ -528,11 +528,35 @@ class ContentStore:
                 # The first append stamps the store's cue space and vector
                 # dimension, so mixing is arbitrated from the very first
                 # record even when capture begins before a whitener is
-                # persisted.
-                manifest["embedding_model_id"] = record.embedding_model_id
-                manifest["whitener_version"] = record.whitener_version
-                manifest["vector_dim"] = record.vector_dim()
+                # persisted. When records already exist under a partially
+                # populated manifest (legacy or partial recovery), THEY are
+                # the truth, not the incoming record.
+                stored = next(self.scan(), None)
+                basis = stored if stored is not None else record
+                manifest["embedding_model_id"] = basis.embedding_model_id
+                manifest["whitener_version"] = basis.whitener_version
+                manifest["vector_dim"] = basis.vector_dim()
                 self._write_manifest(manifest)
+                if basis is not record:
+                    if (
+                        record.embedding_model_id != basis.embedding_model_id
+                        or record.whitener_version != basis.whitener_version
+                    ):
+                        raise ValueError(
+                            f"span {record.span_id!r} carries cue space "
+                            f"({record.embedding_model_id!r}, "
+                            f"{record.whitener_version!r}) but stored records "
+                            f"hold ({basis.embedding_model_id!r}, "
+                            f"{basis.whitener_version!r}); one store holds "
+                            "one cue space"
+                        )
+                    if record.vector_dim() != basis.vector_dim():
+                        raise ValueError(
+                            f"span {record.span_id!r} carries dimension "
+                            f"{record.vector_dim()} but stored records hold "
+                            f"dimension {basis.vector_dim()}; one store holds "
+                            "one vector dimension"
+                        )
             segment = self._active_segment()
             self._repair_torn_tail(segment)
             fresh = not segment.exists()
@@ -612,7 +636,12 @@ class ContentStore:
                     continue
                 if isinstance(entry, dict):
                     span_id = entry.get("span_id")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-                    if isinstance(span_id, str) and span_id in present:
+                    deleted_at = entry.get("deleted_at")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+                    if (
+                        isinstance(span_id, str)
+                        and isinstance(deleted_at, (int, float))
+                        and span_id in present
+                    ):
                         surviving_lines.append(line + b"\n")
         scratch = self.root / (_TOMBSTONES_NAME + ".tmp")
         try:
@@ -760,7 +789,11 @@ class ContentStore:
             return
         if isinstance(entry, dict):
             span_id = entry.get("span_id")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-            if isinstance(span_id, str):
+            deleted_at = entry.get("deleted_at")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            # Every writer stamps a finite deleted_at, so its absence marks
+            # a line no writer produced; honoring such a line would let
+            # corruption hide a span forever.
+            if isinstance(span_id, str) and isinstance(deleted_at, (int, float)):
                 ids.add(span_id)
                 return
         # Parsed but schema-invalid: this is corruption too, and the span it

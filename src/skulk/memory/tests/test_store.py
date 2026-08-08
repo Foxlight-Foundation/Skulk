@@ -590,15 +590,40 @@ def test_missing_manifest_recovers_from_discovered_segments(
 def test_schema_invalid_tombstone_is_loud(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    store, _records = _seeded_store(tmp_path, 2)
+    store, _records = _seeded_store(tmp_path, 3)
+    # A non-string span_id and a missing deleted_at are both lines no
+    # writer produces; neither may hide a span.
     (tmp_path / "memory" / "tombstones.jsonl").write_text(
-        '{"span_id": 42, "deleted_at": 1.0}\n{"span_id": "s0", "deleted_at": 1.0}\n'
+        '{"span_id": 42, "deleted_at": 1.0}\n'
+        '{"span_id": "s2"}\n'
+        '{"span_id": "s0", "deleted_at": 1.0}\n'
     )
     with caplog.at_level("WARNING", logger="skulk.memory.store"):
         survivors = [r.span_id for r in store.scan()]
-    assert survivors == ["s1"]
-    assert store.corrupt_lines_dropped == 1
+    assert survivors == ["s1", "s2"]
+    assert store.corrupt_lines_dropped == 2
     assert any("schema-invalid" in message for message in caplog.messages)
+
+
+def test_partial_manifest_metadata_re_derives_from_stored_records(
+    tmp_path: Path,
+) -> None:
+    """Stored records, not the incoming one, are the truth for a re-stamp."""
+    _store, _records = _seeded_store(tmp_path, 2)
+    manifest_path = tmp_path / "memory" / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["vector_dim"] = None
+    manifest_path.write_text(json.dumps(manifest))
+
+    reopened = ContentStore(root=tmp_path / "memory")
+    small_keys = random_vectors(1, DIM // 2, seed=60)
+    small_values = random_vectors(1, DIM // 2, seed=61)
+    # Same cue-space identity, wrong dimension: the stored records must
+    # arbitrate even though the manifest field was lost.
+    with pytest.raises(ValueError, match="dimension"):
+        reopened.append(_record("s-shrunk", small_keys[0], small_values[0]))
+    healed = json.loads(manifest_path.read_text())
+    assert healed["vector_dim"] == DIM
 
 
 def test_failed_whitener_save_removes_uncommitted_archive(
