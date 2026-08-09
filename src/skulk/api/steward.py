@@ -76,6 +76,20 @@ CANARY_FAILURE_THRESHOLD = 3
 re-placement. One failure is a blip; three spaced five minutes apart is a
 wedge."""
 
+STEWARD_THINKING_ENABLED = False
+"""Whether steward turns ask the brain to think before answering.
+
+Off, by measurement. The steward bench ranked every candidate with thinking
+disabled and then ran a thinking-on tiebreaker over the two finalists: both
+scored WORSE on the trust axes with thinking on (the winner's trust score
+fell and it began proposing forbidden actions it had never proposed before)
+and neither gained on the established task tier. The steward workload is
+short tool-driven investigation, not open-ended reasoning, so the harness
+pins thinking off for every brain rather than encoding the verdict on one
+card. Reasoning stays available on the same cards for ordinary chat: this is
+the harness's own request shape, not a claim about the model.
+"""
+
 STEWARD_SYSTEM_PROMPT = """\
 You are the steward: the resident operator intelligence of this Skulk
 cluster. Skulk is a distributed AI inference fabric that runs models across
@@ -530,8 +544,8 @@ class StewardHarness:
             # A thinking-default model would spend the whole bounded budget
             # reasoning and emit no non-thinking text, failing every probe
             # and tearing down a healthy steward. The probe is a liveness
-            # check, not a benchmark: thinking off.
-            enable_thinking=False,
+            # check, not a benchmark: thinking off, same as a real turn.
+            enable_thinking=STEWARD_THINKING_ENABLED,
         )
         model_card = await api.running_model_card(request.model)
         task_params = await chat_request_to_text_generation(
@@ -935,6 +949,11 @@ class StewardHarness:
             temperature=0.1,
             max_tokens=1024,
             stream=False,
+            # Thinking off for every steward brain, by bench measurement
+            # (see STEWARD_THINKING_ENABLED). Non-toggleable models ignore
+            # this at the capability boundary, so it is safe to send
+            # unconditionally.
+            enable_thinking=STEWARD_THINKING_ENABLED,
         )
         model_card = await api.running_model_card(request.model)
         task_params = await chat_request_to_text_generation(
