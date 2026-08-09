@@ -13,18 +13,21 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import cast
+from typing import cast, final
 from uuid import UUID
 
 import aiohttp
 import pytest
 import qrcode
 from aiohttp import web
+from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.x509.oid import ExtendedKeyUsageOID
 from qrcode.constants import ERROR_CORRECT_L
 
 import skulk.operator.cli as operator_cli
+import skulk.operator.relay as relay_module
 from skulk.operator.authority import EncryptedAuthorityStore
 from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
 from skulk.operator.pairing import (
@@ -84,6 +87,48 @@ def _service(
         ),
         repository,
     )
+
+
+@final
+class _RecordingWebSocket:
+    """Record gateway-to-app binary frames without opening a relay socket."""
+
+    def __init__(self) -> None:
+        self.frames: list[bytes] = []
+
+    async def send_bytes(self, payload: bytes) -> None:
+        """Retain one exact outbound binary frame."""
+
+        self.frames.append(payload)
+
+
+@pytest.mark.asyncio
+async def test_gateway_default_frames_fit_native_client_buffer(tmp_path: Path) -> None:
+    """Large TLS responses are split before reaching the 64 KiB native pump."""
+
+    service, _ = _service(tmp_path)
+    configuration = service.configure_relay(
+        _provisioning(),
+        operator_api_port=52416,
+    )
+    connector = OperatorGatewayConnector(configuration)
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"x" * ((64 * 1024) + 1))
+    reader.feed_eof()
+    websocket = _RecordingWebSocket()
+
+    await connector.forward_tls_to_websocket(
+        reader,
+        cast(aiohttp.ClientWebSocketResponse, cast(object, websocket)),
+    )
+
+    assert list(map(len, websocket.frames)) == [64 * 1024, 1]
+
+
+def test_gateway_aiohttp_receive_limit_is_above_inclusive_frame_bound() -> None:
+    """The aiohttp exclusive receive limit must admit an exact 64 KiB frame."""
+
+    assert relay_module._aiohttp_receive_limit_bytes(64 * 1024) == (64 * 1024) + 1  # pyright: ignore[reportPrivateUsage]
 
 
 def test_relay_configuration_is_encrypted_and_returned_once_with_pairing(
@@ -180,6 +225,15 @@ def test_relay_configuration_is_encrypted_and_returned_once_with_pairing(
     )
     assert exchange.remote_access.routing_locator == provisioning.routing_locator
     assert "BEGIN CERTIFICATE" in exchange.remote_access.gateway_ca_certificate_pem
+    certificate = x509.load_pem_x509_certificate(
+        exchange.remote_access.gateway_ca_certificate_pem.encode("ascii")
+    )
+    assert not certificate.extensions.get_extension_for_class(
+        x509.BasicConstraints
+    ).value.ca
+    assert certificate.extensions.get_extension_for_class(
+        x509.ExtendedKeyUsage
+    ).value == x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH])
     assert provisioning.gateway_carrier_credential not in exchange.model_dump_json()
     with pytest.raises(OperatorRelayAlreadyConfiguredError):
         service.configure_relay(provisioning, operator_api_port=52416)
