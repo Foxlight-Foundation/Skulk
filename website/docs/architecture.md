@@ -263,7 +263,11 @@ whose fleet has other live Zenoh members raises the error-level
 naming the fix. This closes the silent-failure shape where a member that
 multicast scouting cannot reach (for example one joined over a routed or
 overlay network) looks healthy on the control plane while every remote stream
-through it dies with transport errors.
+through it dies with transport errors. The placement planner consumes the same
+positive-evidence predicate: it removes every candidate cycle touching a known
+isolated node and returns a specific placement error if none remain. Unknown
+peer counts stay eligible during startup, so missing telemetry does not create a
+false hard failure.
 
 Zenoh is the shipping default, including for a zero-config installation. Startup
 binds a specific private-LAN or CGNAT fabric IPv4, falling back to loopback on
