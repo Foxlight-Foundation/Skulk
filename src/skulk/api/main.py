@@ -3034,9 +3034,9 @@ class API:
         history as ``input``. Those are also the only two channels read back,
         because they are the only ones the harness owns (sampling, tools, and
         the model are the steward's, not the caller's). A transform that
-        leaves the turn without a trailing user message is discarded rather
-        than obeyed, since the harness's contract is that a steward turn
-        answers an operator question.
+        leaves the turn without a trailing user message is discarded in full
+        rather than obeyed, since the harness's contract is that a steward
+        turn answers an operator question.
 
         Every middleware call inside is guarded by the loader, so a raising
         extension is logged and the steward answers unchanged.
@@ -3047,10 +3047,12 @@ class API:
                 so observers see the real request shape.
 
         Returns:
-            The possibly-transformed history, the system prompt to run the
-            turn with, and the post-transform params to hand the response tap.
+            The history to run, the system prompt to run it with, and the
+            params describing that same turn. The three always agree: on a
+            rejected transform all three are the originals, so the response
+            tap never describes a turn that was not the one served.
         """
-        task_params = TextGenerationTaskParams(
+        original = TextGenerationTaskParams(
             model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
             input=[
                 InputMessage(role=message.role, content=message.content)
@@ -3060,23 +3062,31 @@ class API:
             stream=stream,
         )
         if self._extensions is None or not self._extensions.has_chat_middleware:
-            return history, STEWARD_SYSTEM_PROMPT, task_params
-        task_params = await self._extensions.transform_chat_request(
-            self._extension_context, task_params
+            return history, STEWARD_SYSTEM_PROMPT, original
+        transformed = await self._extensions.transform_chat_request(
+            self._extension_context, original
         )
-        transformed = [
+        candidate = [
             StewardChatMessage(role=message.role, content=message.content)
-            for message in task_params.input
+            for message in transformed.input
             if message.role in ("user", "assistant") and message.content
         ]
-        if transformed and transformed[-1].role == "user":
-            history = transformed
-        else:
+        if not candidate or candidate[-1].role != "user":
+            # Reject the whole transform, not just its history. Keeping the
+            # transformed instructions or params here would run the turn on
+            # one conversation while telling observers it was another, and
+            # an ambient-memory or audit middleware would then file the
+            # answer against the wrong conversation.
             logger.warning(
                 "chat middleware left the steward turn without a trailing "
-                "user message; keeping the operator's own history"
+                "user message; discarding the transform"
             )
-        return history, task_params.instructions or STEWARD_SYSTEM_PROMPT, task_params
+            return history, STEWARD_SYSTEM_PROMPT, original
+        return (
+            candidate,
+            transformed.instructions or STEWARD_SYSTEM_PROMPT,
+            transformed,
+        )
 
     async def _steward_canary_loop(self) -> None:
         """Deterministic degraded-but-alive detection for the steward.

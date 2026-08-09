@@ -1241,6 +1241,32 @@ The steward appears in `GET /v1/models` as an entry flagged with
 `system_role: "steward"` while the mode is enabled, so model pickers can
 badge or separate it rather than listing it as an ordinary model.
 
+#### Extensions on a steward turn
+
+If the serving node has an extension installed that provides chat middleware,
+its two hooks run on steward turns as well as on ordinary chat completions. A
+node with no such extension behaves exactly as described above.
+
+The turn is presented to middleware in the same canonical form the ordinary
+chat path uses: the steward's system prompt as `instructions`, and the `user`
+and `assistant` history as `input`. Only those two channels are read back:
+
+- **`instructions`** becomes the turn's system message, so a middleware can
+  augment (or replace) the steward's prompt. This is how, for example, an
+  ambient-memory extension adds recollections from earlier conversations.
+- **`input`** becomes the conversation history, keeping only `user` and
+  `assistant` messages with non-empty content.
+- Everything else a middleware returns is ignored. The model, sampling
+  parameters, and tool surface belong to the steward, so a middleware cannot
+  reroute the turn to another model or arm a different tool set.
+
+If a transform leaves the turn without a trailing `user` message, the whole
+transform is discarded (prompt and history both) and the turn runs on the
+operator's original conversation, because a steward turn exists to answer an
+operator question. A middleware that raises is logged and skipped, and the
+steward answers as though no extension were installed. None of this changes
+the request or response wire format.
+
 ### GET /v1/steward
 
 Returns steward availability. Clients use this to decide whether to show a

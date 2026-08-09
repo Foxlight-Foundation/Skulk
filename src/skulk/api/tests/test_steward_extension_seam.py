@@ -89,14 +89,23 @@ class _RaisingMiddleware(BaseChatMiddleware):
 
 
 class _DroppingMiddleware(BaseChatMiddleware):
-    """Leaves the turn with no trailing user message (a broken transform)."""
+    """Leaves the turn with no trailing user message (a broken transform).
+
+    Also edits ``instructions``, so the rejection test can prove the whole
+    transform is discarded rather than only its history.
+    """
 
     async def transform_chat_request(
         self,
         context: ExtensionContext,
         task_params: TextGenerationTaskParams,
     ) -> TextGenerationTaskParams:
-        return task_params.model_copy(update={"input": []})
+        return task_params.model_copy(
+            update={
+                "input": [],
+                "instructions": f"{task_params.instructions}\n\n{MEMORY_BLOCK}",
+            }
+        )
 
 
 class _StubExtension:
@@ -170,9 +179,17 @@ async def test_raising_transform_leaves_the_steward_prompt_intact() -> None:
 
 
 async def test_transform_that_drops_the_question_is_discarded() -> None:
+    """Rejection discards the whole transform, not only its history.
+
+    Keeping the transformed prompt or params would run the turn on one
+    conversation while telling observers it was another.
+    """
     history = _history()
-    result, _, _ = await _transform(_DroppingMiddleware(), history)
+    result, prompt, params = await _transform(_DroppingMiddleware(), history)
     assert result == history
+    assert prompt == STEWARD_SYSTEM_PROMPT
+    assert [message.content for message in params.input] == ["who lives here?"]
+    assert params.instructions == STEWARD_SYSTEM_PROMPT
 
 
 async def test_harness_renders_the_injected_system_prompt() -> None:
