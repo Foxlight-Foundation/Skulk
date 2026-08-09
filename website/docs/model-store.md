@@ -390,6 +390,7 @@ These are exposed through the main Skulk API:
 - `GET /store/registry`
 - `GET /store/downloads`
 - `POST /store/models/{model_id}/download`
+- `DELETE /store/models/{model_id}/download`
 - `GET /store/models/{model_id}/download/status`
 - `DELETE /store/models/{model_id}`
 - `POST /store/purge-staging`
@@ -399,6 +400,12 @@ The dashboard's Store Registry view combines these registry entries with model
 metadata so it can show capability-derived tags for downloaded models. Today
 that includes `vision`, `thinking`, `embedding`, `tensor`, and `optiq` when the
 underlying model card exposes enough metadata for Skulk to derive them.
+
+`DELETE /store/models/{model_id}/download` stops pending or active canonical
+store transfer work without deleting its partial files. A later
+`POST /store/models/{model_id}/download` resumes from those partials. Repeating
+the cancellation is safe; a request for a model with no cancellable transfer
+returns `409`.
 
 Common meanings:
 

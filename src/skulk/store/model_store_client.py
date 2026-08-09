@@ -854,6 +854,36 @@ class ModelStoreClient:
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
+    async def cancel_store_download(self, model_id: str) -> bool:
+        """Cancel one pending or active store-side model download.
+
+        Args:
+            model_id: HuggingFace-style model identifier.
+
+        Returns:
+            ``True`` for a newly or previously cancelled transfer. ``False``
+            means the store reported no cancellable transfer or was
+            unreachable.
+        """
+
+        url = _make_store_url(
+            self._store_host,
+            self._store_port,
+            f"/models/{quote(model_id, safe='')}/download",
+        )
+        try:
+            async with (
+                create_http_session(timeout_profile="short") as session,
+                session.delete(url) as resp,
+            ):
+                return resp.status == 200
+        except Exception as exc:
+            logger.warning(
+                f"ModelStoreClient: cancel_store_download failed for "
+                f"{model_id}: {exc}"
+            )
+            return False
+
     async def delete_store_model(self, model_id: str) -> bool:
         """Delete a model from the store registry and disk.
 
