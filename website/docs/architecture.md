@@ -994,7 +994,10 @@ The contract is deliberately small (`src/skulk/extensions/`):
   Those two are also the only channels read back, because the rest of the
   turn (model, sampling, tool surface) belongs to the steward. A transform
   that leaves the turn without a trailing user message is discarded, since a
-  steward turn exists to answer an operator question.
+  steward turn exists to answer an operator question. The response observer
+  fires once for the turn: the investigation's individual tool steps and the
+  liveness canary pass `extension_tap=False` to the shared tapped stream, so
+  observers see conversations rather than the steward's internal machinery.
 - Each hook invocation receives an `ExtensionContext` carrying the node
   identity, the running Skulk version, programmatic access to the cluster's
   embedding serving (the in-process equivalent of `POST /v1/embeddings`), and

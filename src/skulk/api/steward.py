@@ -696,7 +696,12 @@ class StewardHarness:
         command = await api.dispatch_text_generation(
             task_params, target_instance_id=instance_id
         )
-        chunk_stream = api.text_generation_chunk_stream(command, task_params)
+        # No extension tap: the canary is a synthetic liveness probe, not a
+        # conversation. An ambient-memory observer would otherwise remember
+        # the cluster asking itself to say "OK" every probe interval.
+        chunk_stream = api.text_generation_chunk_stream(
+            command, task_params, extension_tap=False
+        )
         got_text = False
         # No manual cancellation on timeout: move_on_after cancels the
         # stream iteration, and the chunk stream's own cancellation handling
@@ -1117,7 +1122,14 @@ class StewardHarness:
             task_params, target_instance_id=instance_id
         )
         self._active_command_id = command.command_id
-        chunk_stream = api.text_generation_chunk_stream(command, task_params)
+        # No extension tap: this is one investigation step, not the turn.
+        # The turn's single tap is applied by the caller of
+        # run_turn_chunks (API._steward_chat_completions), so observers see
+        # the operator's question and the final answer once, rather than
+        # every intermediate step and its tool traffic.
+        chunk_stream = api.text_generation_chunk_stream(
+            command, task_params, extension_tap=False
+        )
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         error_message: str | None = None

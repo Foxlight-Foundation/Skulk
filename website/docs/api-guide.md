@@ -1263,9 +1263,16 @@ and `assistant` history as `input`. Only those two channels are read back:
 If a transform leaves the turn without a trailing `user` message, the whole
 transform is discarded (prompt and history both) and the turn runs on the
 operator's original conversation, because a steward turn exists to answer an
-operator question. A middleware that raises is logged and skipped, and the
-steward answers as though no extension were installed. None of this changes
-the request or response wire format.
+operator question. Whatever a middleware returns, the params handed to the
+response observer always describe the turn that actually ran: the reserved
+model, the filtered history, and the effective system prompt.
+
+The response observer fires exactly once per steward turn, receiving the final
+answer. The investigation's individual tool steps and the steward's periodic
+liveness probe are not observed: they are internal machinery, not
+conversations. A middleware that raises is logged and skipped, and the steward
+answers as though no extension were installed. None of this changes the
+request or response wire format.
 
 ### GET /v1/steward
 

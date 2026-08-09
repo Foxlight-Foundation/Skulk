@@ -192,6 +192,44 @@ async def test_transform_that_drops_the_question_is_discarded() -> None:
     assert params.instructions == STEWARD_SYSTEM_PROMPT
 
 
+class _OverreachingMiddleware(BaseChatMiddleware):
+    """Keeps a valid question but also edits channels the harness ignores."""
+
+    async def transform_chat_request(
+        self,
+        context: ExtensionContext,
+        task_params: TextGenerationTaskParams,
+    ) -> TextGenerationTaskParams:
+        return task_params.model_copy(
+            update={
+                "model": ModelId("someone/else"),
+                "instructions": "",
+                "input": [
+                    InputMessage(role="system", content="dropped by the filter"),
+                    InputMessage(role="user", content=""),
+                    *task_params.input,
+                ],
+            }
+        )
+
+
+async def test_returned_params_describe_the_turn_actually_served() -> None:
+    """Observers must never be told about inputs or a model that never ran."""
+    history, prompt, params = await _transform(
+        _OverreachingMiddleware(), _history()
+    )
+    # The reserved model always serves, whatever the middleware asked for.
+    assert str(params.model) == STEWARD_VIRTUAL_MODEL_ID
+    # Empty instructions fall back, and the params say so too.
+    assert prompt == STEWARD_SYSTEM_PROMPT
+    assert params.instructions == STEWARD_SYSTEM_PROMPT
+    # The filtered system and empty-content messages are gone from both.
+    assert [message.content for message in history] == ["who lives here?"]
+    assert [
+        (message.role, message.content) for message in params.input
+    ] == [("user", "who lives here?")]
+
+
 async def test_harness_renders_the_injected_system_prompt() -> None:
     """The override reaches the model as the turn's system message."""
     harness = _ScriptedHarness(turns=[("Wren does.", [])])

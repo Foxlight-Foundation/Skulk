@@ -3082,11 +3082,23 @@ class API:
                 "user message; discarding the transform"
             )
             return history, STEWARD_SYSTEM_PROMPT, original
-        return (
-            candidate,
-            transformed.instructions or STEWARD_SYSTEM_PROMPT,
-            transformed,
+        # Report the turn as it will actually run, not as the middleware
+        # wrote it. The harness sees the filtered history, the fallback
+        # prompt when instructions came back empty, and always the reserved
+        # model; handing observers the raw transform would describe inputs
+        # or a model that were never served.
+        prompt = transformed.instructions or STEWARD_SYSTEM_PROMPT
+        effective = transformed.model_copy(
+            update={
+                "model": ModelId(STEWARD_VIRTUAL_MODEL_ID),
+                "input": [
+                    InputMessage(role=message.role, content=message.content)
+                    for message in candidate
+                ],
+                "instructions": prompt,
+            }
         )
+        return candidate, prompt, effective
 
     async def _steward_canary_loop(self) -> None:
         """Deterministic degraded-but-alive detection for the steward.
@@ -3504,6 +3516,7 @@ class API:
         model_id: ModelId,
         *,
         task_params: TextGenerationTaskParams | None = None,
+        extension_tap: bool = True,
     ) -> AsyncGenerator[
         TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None
     ]:
@@ -3521,6 +3534,14 @@ class API:
         ``model_id`` must be the POST-transform model actually dispatched (chat
         middleware may reroute it), so observations attribute to the served
         model, not the caller's requested alias.
+
+        ``extension_tap=False`` keeps the envelope and telemetry taps but
+        withholds the extension chat-summary tap. It is for generations that
+        are a step inside some larger turn rather than a turn of their own:
+        the steward's investigation steps and its liveness probe run through
+        this method, and an observer that saw each of them would record the
+        steward's internal tool traffic and count one answer many times.
+        Whoever owns the enclosing turn applies the single correct tap.
         """
         chunk_stream: AsyncGenerator[
             TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None
@@ -3533,7 +3554,8 @@ class API:
         )
         chunk_stream = self._tap_performance_envelope(model_id, chunk_stream)
         if (
-            task_params is not None
+            extension_tap
+            and task_params is not None
             and self._extensions is not None
             and self._extensions.has_chat_middleware
         ):
@@ -4285,6 +4307,8 @@ class API:
         self,
         command: TextGeneration,
         task_params: TextGenerationTaskParams,
+        *,
+        extension_tap: bool = True,
     ) -> AsyncGenerator[
         ErrorChunk | ToolCallChunk | TokenChunk | PrefillProgressChunk, None
     ]:
@@ -4293,11 +4317,19 @@ class API:
         Same observation taps as the HTTP adapters (envelopes, telemetry,
         extensions), so internal consumers are indistinguishable from
         external ones to the observability planes.
+
+        Args:
+            command: The dispatched generation to stream.
+            task_params: The params that were dispatched.
+            extension_tap: Pass ``False`` when this generation is one step
+                inside a larger turn that applies its own extension tap; see
+                :meth:`_tapped_text_stream`.
         """
         return self._tapped_text_stream(
             command.command_id,
             task_params.model,
             task_params=task_params,
+            extension_tap=extension_tap,
         )
 
     async def running_model_card(self, model_id: ModelId) -> ModelCard | None:
