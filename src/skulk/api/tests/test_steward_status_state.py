@@ -15,8 +15,13 @@ from skulk.api.steward import (
     derive_steward_state,
 )
 from skulk.api.types.api import ChatCompletionMessage, ChatCompletionRequest
-from skulk.shared.models.model_cards import ModelId
+from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.types.common import NodeId
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.telemetry import TelemetryView
+from skulk.shared.types.worker.downloads import DownloadOngoing, DownloadProgressData
 from skulk.shared.types.worker.instances import InstanceId
+from skulk.shared.types.worker.shards import PipelineShardMetadata
 
 if TYPE_CHECKING:
     from skulk.api.steward import StewardState
@@ -208,3 +213,76 @@ async def test_malformed_conversation_is_still_a_400_before_the_503() -> None:
             _stub_api(_status("starting")), payload
         )
     assert raised.value.status_code == 400
+
+
+def _download_record(model_id: str, node_id: NodeId) -> DownloadOngoing:
+    card = ModelCard(
+        model_id=ModelId(model_id),
+        storage_size=Memory.from_gb(20),
+        n_layers=40,
+        hidden_size=2048,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+    )
+    return DownloadOngoing(
+        node_id=node_id,
+        shard_metadata=PipelineShardMetadata(
+            model_card=card,
+            device_rank=0,
+            world_size=1,
+            start_layer=0,
+            end_layer=40,
+            n_layers=40,
+        ),
+        download_progress=DownloadProgressData(
+            total=Memory.from_gb(20),
+            downloaded=Memory.from_gb(4),
+            downloaded_this_session=Memory.from_gb(4),
+            completed_files=1,
+            total_files=3,
+            speed=1.0,
+            eta_ms=1000,
+            files={},
+        ),
+    )
+
+
+def _downloads_api(records: list[DownloadOngoing]) -> API:
+    """An API stand-in exposing only the download lookup's collaborators."""
+    node_id = NodeId()
+    return cast(
+        "API",
+        cast(
+            object,
+            SimpleNamespace(
+                _telemetry_view=TelemetryView(),
+                state=SimpleNamespace(downloads={node_id: records}),
+            ),
+        ),
+    )
+
+
+def test_live_download_for_the_steward_model_is_detected() -> None:
+    """The downloading state hinges on this lookup matching by model id."""
+    api = _downloads_api([_download_record("org/steward-brain", NodeId())])
+    assert (
+        API._steward_model_is_downloading(  # pyright: ignore[reportPrivateUsage]
+            api, "org/steward-brain"
+        )
+        is True
+    )
+    assert (
+        API._steward_model_is_downloading(  # pyright: ignore[reportPrivateUsage]
+            api, "org/some-other-model"
+        )
+        is False
+    )
+
+
+def test_no_download_records_is_not_downloading() -> None:
+    assert (
+        API._steward_model_is_downloading(  # pyright: ignore[reportPrivateUsage]
+            _downloads_api([]), "org/steward-brain"
+        )
+        is False
+    )
