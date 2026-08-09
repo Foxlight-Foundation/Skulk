@@ -1645,15 +1645,29 @@ Node IDs are per-session and change when the process restarts.
 
 ### Restart a node
 
-**POST** `/admin/restart?node_id=<optional node id>`
+**POST** `/admin/restart?node_install_id=<stable id>`
 
-Gracefully restart the Skulk process on this or a remote node. When `node_id` is omitted or matches the local node, replaces the current process image in-place via `os.execv` (same PID). When `node_id` targets a remote node, sends a `RestartNode` command via pub/sub.
+Gracefully restart the Skulk process on this or a remote node. Operator clients
+should pass the stable UUIDv4 `node_install_id` published under
+`GET /state` → `nodeIdentities[*].nodeInstallId`. Skulk resolves that identity
+against current live telemetry immediately before dispatch, so a process restart
+cannot leave the client targeting an expired libp2p session. A missing stable
+target returns HTTP 404; an ambiguous target returns HTTP 409.
+
+Legacy local clients may continue to pass the session-scoped
+`node_id=<runtime id>`. Supplying both target forms returns HTTP 400. Omitting
+both restarts the API node itself. A local target replaces the current process
+image in-place via `os.execv` (same PID); a remote target sends the existing
+`RestartNode` command via pub/sub.
 
 - GPU/Metal memory is released when the process image is replaced
 - the node rejoins the cluster automatically on startup
 - active inference is interrupted
 
-Returns `{"status": "restarting", "node_id": "..."}` for local restarts, or `{"status": "restart_sent", "node_id": "..."}` for remote restarts.
+Returns `{"status": "restarting", "node_id": "...", "node_install_id": "..."}`
+for stable local targets, or the corresponding `"restart_sent"` status for
+stable remote targets. Legacy session-targeted responses retain their existing
+shape without `node_install_id`.
 If a local restart is already scheduled, returns HTTP 409 with `{"status": "restart_already_pending"}`.
 
 ### Onboarding status
@@ -2474,13 +2488,15 @@ The operator panel at `/operator` is designed for mobile access and can also be 
 
 | Endpoint | Description |
 | --- | --- |
-| `POST /admin/restart?node_id=<id>` | Send a restart command to any node in the cluster |
+| `POST /admin/restart?node_install_id=<id>` | Resolve a stable installation identity and send a restart command to its current live node |
 
 ### Typical operator app workflow
 
 1. Call `GET /v1/connectivity/remote-access` on the initially discovered node to get the `preferredUrl`, then use that as the base URL for subsequent calls.
-2. Poll `GET /state` every 5 seconds for node health (memory, GPU, temperature).
-3. Show per-node cards with restart buttons that call `POST /admin/restart?node_id=<id>`.
+2. Poll `GET /state` every 5 seconds for node health (memory, GPU, temperature)
+   and stable `nodeIdentities[*].nodeInstallId` values.
+3. Show restart only when the selected live node reports a stable installation
+   identity, then call `POST /admin/restart?node_install_id=<id>`.
 4. On first launch or settings screen, show the `operatorUrl` as a QR code so users can hand it off to another device.
 
 ## Helpful Next Docs

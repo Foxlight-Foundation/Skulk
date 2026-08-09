@@ -109,6 +109,12 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Stable node identity:** `NodeInstallationIdentity.node_install_id` is a
   persisted UUIDv4 under the protected operator configuration directory. It is
   intentionally independent of the currently ephemeral libp2p `NodeId`.
+  `StaticNodeInformation` publishes only this non-secret ID on the existing
+  last-write-wins telemetry plane, so `GET /state` projects it as
+  `nodeIdentities[*].nodeInstallId`. The authority journal, keys, credentials,
+  and membership records remain excluded. Stable `POST /admin/restart`
+  targeting resolves the ID to exactly one live runtime node before dispatch;
+  missing or ambiguous mappings fail closed.
 - **Cluster identity:** `ClusterPublicIdentity` carries the UUIDv4 cluster ID,
   normalized operator-visible name, raw Ed25519 public key, bound SHA-256
   fingerprint, and creation timestamp. The private key may be handed only to
@@ -504,7 +510,7 @@ Lives in `src/skulk/api/main.py` (route registration in `API.__init__`).
 | `/store/models/{model_id}/download` | POST | Request store download |
 | `/store/models/{model_id}/download` | DELETE | Cancel a pending or active store download while preserving resumable partial files |
 | `/store/models/{model_id}` | DELETE | Delete store model |
-| `/admin/restart` | POST | Request node restart. Optional `node_id` query param targets a specific peer; without it, restarts the local node. |
+| `/admin/restart` | POST | Request node restart. Prefer `node_install_id` for a stable host target resolved against live telemetry; legacy `node_id` remains session-scoped, and omitting both restarts the local node. |
 
 ### Bench
 

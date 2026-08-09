@@ -16,8 +16,9 @@ from anyio import (
 )
 from anyio.streams.buffered import BufferedByteReceiveStream
 from loguru import logger
-from pydantic import ValidationError, field_serializer, field_validator
+from pydantic import UUID4, Field, ValidationError, field_serializer, field_validator
 
+from skulk.operator.identity import OperatorIdentityRepository
 from skulk.routing.zenoh_status import ZenohPeerSampler
 from skulk.shared.constants import SKULK_CONFIG_FILE, SKULK_MODELS_DIR
 from skulk.shared.types.memory import Memory
@@ -281,6 +282,13 @@ async def _is_service_enabled(service_name: str) -> bool | None:
 class StaticNodeInformation(TaggedModel):
     """Node information that should NEVER change, to be gathered once at startup"""
 
+    node_install_id: UUID4 | None = Field(
+        default=None,
+        description=(
+            "Stable per-installation operator identity, independent of the current "
+            "runtime libp2p node ID."
+        )
+    )
     model: str
     chip: str
     os_version: str
@@ -291,7 +299,9 @@ class StaticNodeInformation(TaggedModel):
     @classmethod
     async def gather(cls) -> Self:
         model, chip = await get_model_and_chip()
+        node_identity = OperatorIdentityRepository().load_or_create_node_identity()
         return cls(
+            node_install_id=node_identity.node_install_id,
             model=model,
             chip=chip,
             os_version=get_os_version(),

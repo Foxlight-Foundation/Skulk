@@ -888,6 +888,14 @@ cluster's Ed25519 public identity. A libp2p peer ID may change after a process
 restart; a mobile history reference, device membership record, or future deep
 link must therefore never use it as a durable subject.
 
+The non-secret `node_install_id` is included in the node's existing
+`StaticNodeInformation` telemetry reading and appears under
+`GET /state` → `nodeIdentities`. This is an identity projection, not authority
+state: keys, credentials, membership records, and encrypted journal contents
+never enter telemetry or event-sourced `State`. `POST /admin/restart` can resolve
+that stable identity to the currently live libp2p node immediately before it
+dispatches the existing `RestartNode` command.
+
 `src/skulk/operator/authority.py` is the encrypted local projection for
 replicated operator authority. Secret-bearing JSON records use
 AES-256-GCM with authenticated metadata binding the cluster ID, authority term,
