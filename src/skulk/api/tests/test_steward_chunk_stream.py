@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from skulk.api.main import API
 
 from skulk.api.steward import StewardChatMessage, StewardHarness
-from skulk.api.types.api import ToolCall, ToolCallItem
+from skulk.api.types.api import ChatCompletionMessage, ToolCall, ToolCallItem
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk
 from skulk.shared.types.worker.instances import InstanceId
@@ -25,6 +25,7 @@ class _ScriptedHarness(StewardHarness):
         self._turns = turns
         self._cursor = 0
         self.executed: list[str] = []
+        self.system_prompts: list[str] = []
 
     def steward_instance(self) -> tuple[InstanceId, str] | None:
         return InstanceId(), "org/steward-model"
@@ -35,10 +36,11 @@ class _ScriptedHarness(StewardHarness):
 
     async def _generate_events(
         self,
-        messages: list[Any],
+        messages: list[ChatCompletionMessage],
         model_id: str,
         instance_id: InstanceId,
     ):
+        self.system_prompts.append(str(messages[0].content))
         text, calls = self._turns[min(self._cursor, len(self._turns) - 1)]
         self._cursor += 1
         if text:

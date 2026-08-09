@@ -118,6 +118,7 @@ from skulk.api.realtime import (
 from skulk.api.steward import (
     STEWARD_NOT_READY_MESSAGES,
     STEWARD_RETRY_AFTER_SECONDS,
+    STEWARD_SYSTEM_PROMPT,
     STEWARD_VIRTUAL_MODEL_ID,
     StewardCanaryState,
     StewardChatMessage,
@@ -405,7 +406,10 @@ from skulk.shared.types.telemetry import (
     TelemetryView,
     record_membership_from_event,
 )
-from skulk.shared.types.text_generation import TextGenerationTaskParams
+from skulk.shared.types.text_generation import (
+    InputMessage,
+    TextGenerationTaskParams,
+)
 from skulk.shared.types.worker.downloads import DownloadCompleted, LiveDownloadProgress
 from skulk.shared.types.worker.instances import (
     Instance,
@@ -2987,7 +2991,16 @@ class API:
             )
         harness = StewardHarness(self)
         command_id = CommandId()
-        chunk_stream = harness.run_turn_chunks(history)
+        history, system_prompt, task_params = (
+            await self._steward_extension_transform(history, stream=payload.stream)
+        )
+        chunk_stream = harness.run_turn_chunks(
+            history, system_prompt=system_prompt
+        )
+        if self._extensions is not None and self._extensions.has_chat_middleware:
+            chunk_stream = self._extensions.tap_chat_stream(
+                self._extension_context, task_params, chunk_stream
+            )
         if payload.stream:
             return StreamingResponse(
                 with_sse_keepalive(
@@ -3004,6 +3017,88 @@ class API:
             collect_chat_response(command_id, chunk_stream),
             media_type="application/json",
         )
+
+    async def _steward_extension_transform(
+        self, history: list[StewardChatMessage], *, stream: bool
+    ) -> tuple[list[StewardChatMessage], str, TextGenerationTaskParams]:
+        """Run chat middleware's request transform over one steward turn.
+
+        The steward answers through a bespoke harness rather than the ordinary
+        dispatch path, so ``chat_completions`` returns before its extension
+        hook. Without this, an installed chat middleware silently sees every
+        conversation on the node except the steward's own, which is the one
+        conversation an ambient-memory or policy extension most needs.
+
+        The turn is presented in the same canonical shape the ordinary path
+        uses: the steward's system prompt as ``instructions`` and the operator
+        history as ``input``. Those are also the only two channels read back,
+        because they are the only ones the harness owns (sampling, tools, and
+        the model are the steward's, not the caller's). A transform that
+        leaves the turn without a trailing user message is discarded in full
+        rather than obeyed, since the harness's contract is that a steward
+        turn answers an operator question.
+
+        Every middleware call inside is guarded by the loader, so a raising
+        extension is logged and the steward answers unchanged.
+
+        Args:
+            history: The turn's user/assistant conversation.
+            stream: Whether the caller requested SSE, mirrored into the params
+                so observers see the real request shape.
+
+        Returns:
+            The history to run, the system prompt to run it with, and the
+            params describing that same turn. The three always agree: on a
+            rejected transform all three are the originals, so the response
+            tap never describes a turn that was not the one served.
+        """
+        original = TextGenerationTaskParams(
+            model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
+            input=[
+                InputMessage(role=message.role, content=message.content)
+                for message in history
+            ],
+            instructions=STEWARD_SYSTEM_PROMPT,
+            stream=stream,
+        )
+        if self._extensions is None or not self._extensions.has_chat_middleware:
+            return history, STEWARD_SYSTEM_PROMPT, original
+        transformed = await self._extensions.transform_chat_request(
+            self._extension_context, original
+        )
+        candidate = [
+            StewardChatMessage(role=message.role, content=message.content)
+            for message in transformed.input
+            if message.role in ("user", "assistant") and message.content
+        ]
+        if not candidate or candidate[-1].role != "user":
+            # Reject the whole transform, not just its history. Keeping the
+            # transformed instructions or params here would run the turn on
+            # one conversation while telling observers it was another, and
+            # an ambient-memory or audit middleware would then file the
+            # answer against the wrong conversation.
+            logger.warning(
+                "chat middleware left the steward turn without a trailing "
+                "user message; discarding the transform"
+            )
+            return history, STEWARD_SYSTEM_PROMPT, original
+        # Report the turn as it will actually run, not as the middleware
+        # wrote it. Built from ``original`` rather than from the transform,
+        # so accepting the two channels the harness honors cannot smuggle in
+        # any of the ones it ignores: the steward's own sampling, tool set,
+        # and response mode are what serve, whatever a middleware returned,
+        # and an audit observer must not be told otherwise.
+        prompt = transformed.instructions or STEWARD_SYSTEM_PROMPT
+        effective = original.model_copy(
+            update={
+                "input": [
+                    InputMessage(role=message.role, content=message.content)
+                    for message in candidate
+                ],
+                "instructions": prompt,
+            }
+        )
+        return candidate, prompt, effective
 
     async def _steward_canary_loop(self) -> None:
         """Deterministic degraded-but-alive detection for the steward.
@@ -3421,6 +3516,7 @@ class API:
         model_id: ModelId,
         *,
         task_params: TextGenerationTaskParams | None = None,
+        extension_tap: bool = True,
     ) -> AsyncGenerator[
         TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None
     ]:
@@ -3438,6 +3534,14 @@ class API:
         ``model_id`` must be the POST-transform model actually dispatched (chat
         middleware may reroute it), so observations attribute to the served
         model, not the caller's requested alias.
+
+        ``extension_tap=False`` keeps the envelope and telemetry taps but
+        withholds the extension chat-summary tap. It is for generations that
+        are a step inside some larger turn rather than a turn of their own:
+        the steward's investigation steps and its liveness probe run through
+        this method, and an observer that saw each of them would record the
+        steward's internal tool traffic and count one answer many times.
+        Whoever owns the enclosing turn applies the single correct tap.
         """
         chunk_stream: AsyncGenerator[
             TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None
@@ -3450,7 +3554,8 @@ class API:
         )
         chunk_stream = self._tap_performance_envelope(model_id, chunk_stream)
         if (
-            task_params is not None
+            extension_tap
+            and task_params is not None
             and self._extensions is not None
             and self._extensions.has_chat_middleware
         ):
@@ -4202,6 +4307,8 @@ class API:
         self,
         command: TextGeneration,
         task_params: TextGenerationTaskParams,
+        *,
+        extension_tap: bool = True,
     ) -> AsyncGenerator[
         ErrorChunk | ToolCallChunk | TokenChunk | PrefillProgressChunk, None
     ]:
@@ -4210,11 +4317,19 @@ class API:
         Same observation taps as the HTTP adapters (envelopes, telemetry,
         extensions), so internal consumers are indistinguishable from
         external ones to the observability planes.
+
+        Args:
+            command: The dispatched generation to stream.
+            task_params: The params that were dispatched.
+            extension_tap: Pass ``False`` when this generation is one step
+                inside a larger turn that applies its own extension tap; see
+                :meth:`_tapped_text_stream`.
         """
         return self._tapped_text_stream(
             command.command_id,
             task_params.model,
             task_params=task_params,
+            extension_tap=extension_tap,
         )
 
     async def running_model_card(self, model_id: ModelId) -> ModelCard | None:

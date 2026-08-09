@@ -349,7 +349,10 @@ clusters). Contract in `src/skulk/extensions/types.py`: chat middleware gets
 `transform_chat_request` (pre-dispatch, on the API node) and
 `observe_chat_response` (immutable summary, background task), plus an
 `ExtensionContext` with `embed_texts` (in-process `/v1/embeddings`,
-`API.embed_texts`). Invariants: every extension call is guarded (a raising
+`API.embed_texts`). Both hooks also run on the steward's bespoke turn
+(`API._steward_extension_transform`): the turn is presented as the steward's
+system prompt in `instructions` plus the operator history in `input`, and only
+those two are read back. Invariants: every extension call is guarded (a raising
 extension never degrades inference), extensions never own the chunk stream,
 and no extension installed = Skulk unchanged. Kill switch:
 `SKULK_EXTENSIONS_DISABLE=1`.

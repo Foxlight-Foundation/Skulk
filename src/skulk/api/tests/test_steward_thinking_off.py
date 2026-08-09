@@ -61,6 +61,7 @@ class _CapturingApi:
 
     def __init__(self) -> None:
         self.dispatched: list[TextGenerationTaskParams] = []
+        self.extension_taps: list[bool] = []
 
     async def running_model_card(self, model_id: ModelId) -> ModelCard:
         assert str(model_id) == _STEWARD_MODEL
@@ -75,8 +76,14 @@ class _CapturingApi:
         return SimpleNamespace(command_id=CommandId())
 
     def text_generation_chunk_stream(
-        self, command: object, task_params: TextGenerationTaskParams
+        self,
+        command: object,
+        task_params: TextGenerationTaskParams,
+        *,
+        extension_tap: bool = True,
     ) -> "AsyncGenerator[TokenChunk, None]":
+        self.extension_taps.append(extension_tap)
+
         async def _stream() -> "AsyncGenerator[TokenChunk, None]":
             yield TokenChunk(
                 model=ModelId(_STEWARD_MODEL),
@@ -114,6 +121,32 @@ async def test_canary_probe_dispatches_with_thinking_disabled() -> None:
     assert await harness.canary_probe(InstanceId(), _STEWARD_MODEL) is True
     assert len(api.dispatched) == 1
     assert api.dispatched[0].enable_thinking is False
+
+
+async def test_inner_generations_withhold_the_extension_tap() -> None:
+    """Investigation steps and the canary are not turns of their own.
+
+    Both run through ``API.text_generation_chunk_stream``, which applies the
+    extension chat-summary tap by default. Left on, an ambient-memory or
+    audit observer would fire once per investigation step (recording the
+    steward's internal tool traffic as conversation) plus once for the turn
+    the caller taps, and once per liveness probe. The single correct tap is
+    applied by ``API._steward_chat_completions`` around the whole turn.
+    """
+    api = _CapturingApi()
+    harness = StewardHarness(cast("API", cast(object, api)))
+    harness.steward_instance = lambda: (InstanceId(), _STEWARD_MODEL)
+
+    async for _chunk in harness.run_turn_chunks(
+        [StewardChatMessage(role="user", content="is the fleet ok?")]
+    ):
+        pass
+    assert api.extension_taps and not any(api.extension_taps)
+
+    canary = _CapturingApi()
+    probe = StewardHarness(cast("API", cast(object, canary)))
+    assert await probe.canary_probe(InstanceId(), _STEWARD_MODEL) is True
+    assert canary.extension_taps == [False]
 
 
 def test_thinking_stays_off_until_a_measurement_says_otherwise() -> None:

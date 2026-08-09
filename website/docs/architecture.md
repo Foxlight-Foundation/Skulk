@@ -987,6 +987,17 @@ The contract is deliberately small (`src/skulk/extensions/`):
   system region). `observe_chat_response` receives an immutable summary of
   the completed generation (final text, thinking text, finish reason) in a
   background task after the response ends.
+- Both hooks also run on the steward's turns. The steward answers through its
+  own investigation harness rather than the ordinary dispatch path, so the
+  turn is presented to middleware in the same canonical shape: the steward's
+  system prompt as `instructions` and the operator conversation as `input`.
+  Those two are also the only channels read back, because the rest of the
+  turn (model, sampling, tool surface) belongs to the steward. A transform
+  that leaves the turn without a trailing user message is discarded, since a
+  steward turn exists to answer an operator question. The response observer
+  fires once for the turn: the investigation's individual tool steps and the
+  liveness canary pass `extension_tap=False` to the shared tapped stream, so
+  observers see conversations rather than the steward's internal machinery.
 - Each hook invocation receives an `ExtensionContext` carrying the node
   identity, the running Skulk version, programmatic access to the cluster's
   embedding serving (the in-process equivalent of `POST /v1/embeddings`), and
