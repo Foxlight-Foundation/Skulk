@@ -34,7 +34,11 @@ _RELAY_RECORD_TYPE: Final = "operator_relay_configuration"
 _RELAY_RECORD_ID: Final = "designated_gateway_v1"
 _CARRIER_VALUE_BYTES: Final = 32
 _ENCODED_CARRIER_VALUE_LENGTH: Final = 43
-_DEFAULT_FRAME_BYTES: Final = 1024 * 1024
+# The native Rust carrier accepts one opaque ingress frame into a bounded
+# 64 KiB session buffer. Larger HTTP responses remain streaming-safe because
+# the gateway splits the TLS byte stream before the relay forwards it.
+_DEFAULT_FRAME_BYTES: Final = 64 * 1024
+_MAXIMUM_FRAME_BYTES: Final = 1024 * 1024
 _MINIMUM_RECONNECT_SECONDS: Final = 0.25
 _MAXIMUM_RECONNECT_SECONDS: Final = 5.0
 _TLS_VALIDITY: Final = timedelta(days=3650)
@@ -332,7 +336,7 @@ class OperatorGatewayConnector:
     ) -> None:
         """Create one connector for a persisted designated-gateway route."""
 
-        if not 1 <= frame_bytes <= _DEFAULT_FRAME_BYTES:
+        if not 1 <= frame_bytes <= _MAXIMUM_FRAME_BYTES:
             raise ValueError("frame_bytes must be between 1 and 1048576")
         self._configuration = configuration
         self._frame_bytes = frame_bytes
@@ -394,7 +398,7 @@ class OperatorGatewayConnector:
                     self._websocket_to_tls(websocket, writer)
                 )
                 tls_to_websocket = asyncio.create_task(
-                    self._tls_to_websocket(reader, websocket)
+                    self.forward_tls_to_websocket(reader, websocket)
                 )
                 tasks = (websocket_to_tls, tls_to_websocket)
                 _, pending = await asyncio.wait(
@@ -439,12 +443,12 @@ class OperatorGatewayConnector:
             if message.type is aiohttp.WSMsgType.TEXT:
                 raise OperatorRelayError("operator relay sent a non-binary frame")
 
-    async def _tls_to_websocket(
+    async def forward_tls_to_websocket(
         self,
         reader: asyncio.StreamReader,
         websocket: aiohttp.ClientWebSocketResponse,
     ) -> None:
-        """Copy inner TLS records into bounded binary WebSocket messages."""
+        """Copy inner TLS bytes into native-client-sized WebSocket messages."""
 
         while payload := await reader.read(self._frame_bytes):
             await websocket.send_bytes(payload)

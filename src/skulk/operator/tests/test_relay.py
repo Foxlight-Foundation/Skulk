@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import cast
+from typing import cast, final
 from uuid import UUID
 
 import aiohttp
@@ -86,6 +86,42 @@ def _service(
         ),
         repository,
     )
+
+
+@final
+class _RecordingWebSocket:
+    """Record gateway-to-app binary frames without opening a relay socket."""
+
+    def __init__(self) -> None:
+        self.frames: list[bytes] = []
+
+    async def send_bytes(self, payload: bytes) -> None:
+        """Retain one exact outbound binary frame."""
+
+        self.frames.append(payload)
+
+
+@pytest.mark.asyncio
+async def test_gateway_default_frames_fit_native_client_buffer(tmp_path: Path) -> None:
+    """Large TLS responses are split before reaching the 64 KiB native pump."""
+
+    service, _ = _service(tmp_path)
+    configuration = service.configure_relay(
+        _provisioning(),
+        operator_api_port=52416,
+    )
+    connector = OperatorGatewayConnector(configuration)
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"x" * ((64 * 1024) + 1))
+    reader.feed_eof()
+    websocket = _RecordingWebSocket()
+
+    await connector.forward_tls_to_websocket(
+        reader,
+        cast(aiohttp.ClientWebSocketResponse, cast(object, websocket)),
+    )
+
+    assert list(map(len, websocket.frames)) == [64 * 1024, 1]
 
 
 def test_relay_configuration_is_encrypted_and_returned_once_with_pairing(
