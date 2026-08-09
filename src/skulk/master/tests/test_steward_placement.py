@@ -7,9 +7,15 @@ from skulk.master.placement import (
     replacement_command_for_refused_instance,
 )
 from skulk.master.tests.test_placement import fully_connected_three_nodes
-from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    PlacementCardConfig,
+)
 from skulk.shared.types.commands import PlaceInstance
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.profiling import NodeResources
 from skulk.shared.types.worker.instances import InstanceMeta, MlxRingInstance
 from skulk.shared.types.worker.shards import Sharding
 
@@ -99,3 +105,64 @@ def test_repair_commands_keep_none_for_ordinary_instances() -> None:
     placed = place_instance(command, topology, {}, node_memory, node_network)
     instance = next(iter(placed.values()))
     assert replacement_command_for_refused_instance(instance).system_role is None
+
+
+def _gguf_steward_card() -> ModelCard:
+    """A card shaped like the GGUF steward brains: served lanes, no mlx."""
+    return ModelCard(
+        model_id=ModelId("org/steward-brain-GGUF"),
+        storage_size=Memory.from_gb(3),
+        n_layers=12,
+        hidden_size=30,
+        num_key_value_heads=2,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        family="qwen",
+        quantization="Q4_K_M",
+        gguf_file="steward-brain-Q4_K_M.gguf",
+        context_length=262144,
+        placement=PlacementCardConfig(
+            compatible_backends=frozenset(
+                {"llama_server-cuda", "llama_cpp-cuda"}
+            ),
+            backend_preference=("llama_server-cuda", "llama_cpp-cuda"),
+        ),
+    )
+
+
+def test_mlx_ring_meta_is_benign_for_a_single_node_gguf_steward() -> None:
+    """The invariant's hardcoded InstanceMeta.MlxRing must not break GGUF.
+
+    ``_maintain_steward_placement`` always asks for ``InstanceMeta.MlxRing``,
+    which is the same default every dashboard placement sends. For a
+    single-node cycle the planner rewrites the request to Pipeline/Ring
+    regardless of engine, and a multi-node GGUF cycle resolves to the RPC
+    shape on its own, so the meta never has to describe the engine. This
+    test pins that so a future planner change cannot make the invariant
+    place the GGUF brain wrongly (or refuse to place it) unnoticed.
+    """
+    topology, node_memory, node_network, node_ids = fully_connected_three_nodes(
+        (10.0, 10.0, 10.0)
+    )
+    command = PlaceInstance(
+        model_card=_gguf_steward_card(),
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=1,
+        system_role="steward",
+    )
+    placed = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources={
+            node_id: NodeResources(backends=frozenset({"llama_server-cuda"}))
+            for node_id in node_ids
+        },
+    )
+    instance = next(iter(placed.values()))
+    assert isinstance(instance, MlxRingInstance)
+    assert instance.system_role == "steward"
+    assert len(instance.shard_assignments.node_to_runner) == 1

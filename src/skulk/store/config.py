@@ -396,20 +396,32 @@ class IntelligentFabricConfig(FrozenModel):
             while the feature hardens; flipping it on makes the master
             establish the steward placement within one planning cycle.
         steward_models: Ordered model-card preference list for the steward
-            brain. The master places the first card the cluster can serve.
-            The defaults are the benched steward class: Qwen3.5-4B in MLX
-            and GGUF form, then the Qwen3.5-0.8B GGUF as the universal
-            floor so every fleet, including CPU-only nodes, can place a
-            steward. Operators may override with any bundled or custom
-            text model that supports tool calling.
+            brain. The master places the first card the cluster can serve,
+            so the list descends from the best brain to the universal
+            floor and a fleet simply falls through to the largest model it
+            can host. Qwen3.6-35B-A3B (GGUF first, then MLX) is the benched
+            v1 brain; Qwen3.5-4B in GGUF and MLX form is the small-fleet
+            tier; the Qwen3.5-0.8B GGUF is the floor that lets a CPU-only
+            fleet place a steward at all. Operators may override with any
+            bundled or custom text model that supports tool calling.
     """
 
     enabled: bool = False
     # list (not tuple): strict validation rejects YAML sequences for tuple
     # fields, which would make the documented override unloadable; matches
     # the convention of other config lists (e.g. bootstrap_peers).
+    #
+    # The 35B brain leads with its GGUF card because that card is text-only
+    # and therefore eligible for the served lanes as well as the in-process
+    # ones, so it is placeable on strictly more node classes than its MLX
+    # sibling; an Apple-only fleet has no GGUF engine at all and falls
+    # through to the MLX entry on the next line. The 4B and 0.8B tiers keep
+    # the order they already shipped with, so a fleet that cannot host the
+    # 35B brain behaves exactly as it did before.
     steward_models: list[str] = Field(
         default_factory=lambda: [
+            "unsloth/Qwen3.6-35B-A3B-GGUF",
+            "mlx-community/Qwen3.6-35B-A3B-4bit",
             "mlx-community/Qwen3.5-4B-MLX-4bit",
             "unsloth/Qwen3.5-4B-GGUF",
             "unsloth/Qwen3.5-0.8B-GGUF",
