@@ -71,6 +71,17 @@ def test_registry_alias_is_separate_from_artifact_repository() -> None:
     assert card.registry_snapshot_id == "snapshot_1_test"
 
 
+def test_offline_mode_disables_registry_network_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Air-gapped nodes use bundled cards without contacting public TUF."""
+    monkeypatch.delenv("SKULK_TESTS", raising=False)
+    monkeypatch.setattr(model_cards_module, "SKULK_MODEL_REGISTRY_ENABLED", True)
+    monkeypatch.setattr(model_cards_module, "SKULK_OFFLINE", True)
+
+    assert not model_cards_module._registry_enabled()
+
+
 def test_client_uses_hash_bound_last_known_good(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

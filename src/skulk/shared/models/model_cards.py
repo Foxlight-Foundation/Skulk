@@ -38,6 +38,7 @@ from skulk.shared.constants import (
     SKULK_MODEL_REGISTRY_TIMEOUT_SECONDS,
     SKULK_MODEL_REGISTRY_URL,
     SKULK_MODELS_DIRS,
+    SKULK_OFFLINE,
 )
 from skulk.shared.models.registry import (
     EMBEDDED_REGISTRY_ROOT,
@@ -86,7 +87,11 @@ _registry_client = TufRegistryClient(
 
 def _registry_enabled() -> bool:
     """Return whether this process should contact the external registry."""
-    return SKULK_MODEL_REGISTRY_ENABLED and os.environ.get("SKULK_TESTS") != "1"
+    return (
+        SKULK_MODEL_REGISTRY_ENABLED
+        and not SKULK_OFFLINE
+        and os.environ.get("SKULK_TESTS") != "1"
+    )
 
 
 def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:

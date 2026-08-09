@@ -1339,8 +1339,8 @@ async def download_shard(
     on_connection_lost: Callable[[], None] = lambda: None,
     capacity_preflight: DownloadCapacityPreflight | None = None,
 ) -> tuple[Path, RepoDownloadProgress]:
-    require_remote_code_approval(shard.model_card)
     if not skip_download:
+        require_remote_code_approval(shard.model_card)
         logger.debug(f"Downloading {shard.model_card.model_id=}")
 
     revision = shard.model_card.source_revision or "main"

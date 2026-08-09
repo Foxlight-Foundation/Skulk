@@ -1034,7 +1034,9 @@ the Python package, verifies standard TUF metadata, and downloads the complete
 once per 60 seconds. A successful refresh also writes a hash-bound
 last-known-good copy; when the registry is unreachable, that copy is accepted
 for at most 30 days. If no acceptable remote catalog exists, the transition
-release loads bundled cards instead. Custom cards still override either source.
+release loads bundled cards instead. `SKULK_OFFLINE=true` suppresses registry
+network refreshes entirely and uses the bundled catalog. Custom cards still
+override either source.
 
 A registry card separates its selectable `model_id` alias from
 `source_repository`. The alias is the fabric/store identity; metadata and byte

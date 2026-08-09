@@ -6,7 +6,9 @@ from typing import cast
 
 import pytest
 
+import skulk.download.download_utils as download_utils_module
 import skulk.shared.models.remote_code_approval as approval_module
+from skulk.download.download_utils import download_shard
 from skulk.download.shard_downloader import NoopShardDownloader
 from skulk.shared.models.model_cards import ModelCard, ModelTask, VisionCardConfig
 from skulk.shared.models.remote_code_approval import (
@@ -17,7 +19,8 @@ from skulk.shared.models.remote_code_approval import (
 )
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.worker.shards import PipelineShardMetadata
+from skulk.shared.types.worker.downloads import RepoDownloadProgress
+from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 from skulk.store.config import StagingNodeConfig
 from skulk.store.model_store_client import ModelStoreClient, ModelStoreDownloader
 
@@ -138,3 +141,39 @@ async def test_store_backed_download_fails_before_any_store_access(
 
     with pytest.raises(PermissionError, match=card.registry_card_id or ""):
         await downloader.ensure_shard(shard)
+
+
+@pytest.mark.asyncio
+async def test_status_only_probe_does_not_raise_for_unapproved_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Approval gates transfers, not the coordinator's read-only status probe."""
+    async def ignore_progress(
+        _shard: ShardMetadata, _progress: RepoDownloadProgress
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(
+        approval_module,
+        "REMOTE_CODE_APPROVALS",
+        RemoteCodeApprovalStore(tmp_path / "approvals.json"),
+    )
+    monkeypatch.setattr(download_utils_module, "SKULK_MODELS_DIR", tmp_path)
+    card = _registry_card()
+    shard = PipelineShardMetadata(
+        model_card=card,
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=card.n_layers,
+        n_layers=card.n_layers,
+    )
+
+    _path, progress = await download_shard(
+        shard,
+        ignore_progress,
+        skip_download=True,
+        skip_internet=True,
+    )
+
+    assert progress.status != "complete"

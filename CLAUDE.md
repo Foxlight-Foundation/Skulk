@@ -398,7 +398,8 @@ runtime-qualified candidates are published; structural schema checks do not
 mean “supported.” Skulk verifies its static TUF feed from the package-embedded
 root, refreshes at most every 60 seconds, uses a hash-bound 30-day
 last-known-good cache during outages, and retains bundled cards only as the
-transition fallback. `model_id` may be an artifact alias while
+transition fallback. `SKULK_OFFLINE=true` suppresses registry network refreshes
+and uses bundled cards. `model_id` may be an artifact alias while
 `source_repository` is the byte origin. Registry cards with
 `trust_remote_code=true` require an immutable-card approval on every serving
 node; registry vision cards require the same approval while the MLX processor
