@@ -46,6 +46,12 @@ _TLS_CLOCK_SKEW: Final = timedelta(minutes=5)
 _ROUTE_HEADER: Final = "x-skulk-relay-route"
 
 
+def _aiohttp_receive_limit_bytes(inclusive_frame_bytes: int) -> int:
+    """Translate the inclusive carrier frame bound to aiohttp's exclusive limit."""
+
+    return inclusive_frame_bytes + 1
+
+
 class OperatorRelayError(RuntimeError):
     """Base class for safe designated-gateway relay failures."""
 
@@ -387,7 +393,7 @@ class OperatorGatewayConnector:
             heartbeat=20.0,
             autoping=True,
             autoclose=True,
-            max_msg_size=self._frame_bytes,
+            max_msg_size=_aiohttp_receive_limit_bytes(self._frame_bytes),
         ) as websocket:
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1",

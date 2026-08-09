@@ -27,6 +27,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID
 from qrcode.constants import ERROR_CORRECT_L
 
 import skulk.operator.cli as operator_cli
+import skulk.operator.relay as relay_module
 from skulk.operator.authority import EncryptedAuthorityStore
 from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
 from skulk.operator.pairing import (
@@ -122,6 +123,12 @@ async def test_gateway_default_frames_fit_native_client_buffer(tmp_path: Path) -
     )
 
     assert list(map(len, websocket.frames)) == [64 * 1024, 1]
+
+
+def test_gateway_aiohttp_receive_limit_is_above_inclusive_frame_bound() -> None:
+    """The aiohttp exclusive receive limit must admit an exact 64 KiB frame."""
+
+    assert relay_module._aiohttp_receive_limit_bytes(64 * 1024) == (64 * 1024) + 1  # pyright: ignore[reportPrivateUsage]
 
 
 def test_relay_configuration_is_encrypted_and_returned_once_with_pairing(
