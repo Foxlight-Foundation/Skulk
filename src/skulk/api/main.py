@@ -2907,6 +2907,18 @@ class API:
         assistant turns; multimodal content parts are flattened to their
         text. Both streaming and non-streaming ride the ordinary adapters
         over the harness's chunk stream.
+
+        Refusals happen before the response begins, in this order: 400 for
+        client tool definitions, 404 when intelligent-fabric mode is off,
+        400 for a conversation with no question to answer, then 503 with the
+        steward status payload while no steward is ready to answer.
+
+        Raises:
+            HTTPException: 400, 404, or 503 per the order above.
+
+        Returns:
+            The streaming (SSE) or collected (JSON) chat-completions
+            response for one steward turn.
         """
         if payload.tools:
             raise HTTPException(
