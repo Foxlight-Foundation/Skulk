@@ -138,6 +138,16 @@ run_prep() {
         log "GPU llama.cpp node: 'uv sync --inexact' to preserve the source-built wheel"
         ;;
     esac
+    # Nodes carrying separately installed skulk.extensions plugins (for
+    # example the den's fabric-memory plugin) have the same shape as the
+    # GPU wheel: correct packages outside uv's locked resolution that a
+    # plain sync would prune, silently unloading the extension on every
+    # service restart. SKULK_PRESERVE_VENV_EXTRAS=1 opts the node into
+    # --inexact explicitly.
+    if [ "${SKULK_PRESERVE_VENV_EXTRAS:-}" = "1" ]; then
+        SYNC_FLAGS="--inexact"
+        log "SKULK_PRESERVE_VENV_EXTRAS=1: 'uv sync --inexact' to preserve plugin installs"
+    fi
     log "uv sync (non-fatal)"
     # shellcheck disable=SC2086
     if ! uv sync $SYNC_FLAGS 2>&1 | tee -a "$PREP_LOG" >&2; then
