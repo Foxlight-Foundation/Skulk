@@ -301,9 +301,10 @@ class NodeResources(CamelCaseModel):
 
     Mixes probed capability (``backends``) with operator-declared policy
     (``participation``) and the startup-resolved ``data_transport``; all ride the
-    same node-info telemetry path. The planner reads capability and policy to
-    hard-filter placement candidates, while cluster health compares transport
-    facts across live nodes. Defaults describe a normal Apple-Silicon
+    same node-info telemetry path. The planner reads capability, policy, and
+    positive data-plane isolation evidence to hard-filter placement candidates,
+    while cluster health also projects transport faults for operators. Defaults
+    describe a normal Apple-Silicon
     full-participation node so pre-upgrade telemetry stays non-breaking.
     """
 

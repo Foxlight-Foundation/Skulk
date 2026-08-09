@@ -1229,6 +1229,80 @@ def test_missing_node_resources_is_treated_as_eligible() -> None:
     assert len(placements) == 1
 
 
+def test_zenoh_isolated_node_is_excluded_from_placement() -> None:
+    """Positive data-plane isolation routes work to a connected peer."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources={
+            node_a: NodeResources(
+                data_transport="zenoh", zenoh_connected_peers=0
+            ),
+            node_b: NodeResources(
+                data_transport="zenoh", zenoh_connected_peers=1
+            ),
+        },
+    )
+
+    instance = next(iter(placements.values()))
+    assert set(instance.shard_assignments.node_to_runner) == {node_b}
+
+
+def test_all_zenoh_isolated_nodes_fail_to_place() -> None:
+    """Never create a runner when every candidate data plane is isolated."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    with pytest.raises(PlacementError, match="Zenoh inference data plane is isolated"):
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={
+                node_a: NodeResources(
+                    data_transport="zenoh", zenoh_connected_peers=0
+                ),
+                node_b: NodeResources(
+                    data_transport="zenoh", zenoh_connected_peers=0
+                ),
+            },
+        )
+
+
+def test_unknown_zenoh_peer_count_remains_placement_eligible() -> None:
+    """Startup telemetry unknowns must not create a false hard failure."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        required_nodes={node_a},
+        node_resources={
+            node_a: NodeResources(
+                data_transport="zenoh", zenoh_connected_peers=None
+            ),
+            node_b: NodeResources(
+                data_transport="zenoh", zenoh_connected_peers=1
+            ),
+        },
+    )
+
+    instance = next(iter(placements.values()))
+    assert set(instance.shard_assignments.node_to_runner) == {node_a}
+
+
 def _fully_connected_three_nodes(
     available_memory: tuple[float, float, float],
 ) -> tuple[

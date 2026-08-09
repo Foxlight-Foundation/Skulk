@@ -1355,9 +1355,10 @@ command is forwarded, so an impossible placement fails at the API instead of
 silently failing on the master:
 
 - **400** with the specific reason: no connected cycle of `min_nodes` nodes,
-  exclusions removed every candidate, the model does not support Tensor
-  sharding, or a node cannot fit its weight shard plus runtime headroom
-  (the error names the node and the GB arithmetic).
+  exclusions removed every candidate, every candidate has a positively known
+  isolated Zenoh inference data plane, the model does not support Tensor
+  sharding, or a node cannot fit its weight shard plus runtime headroom (the
+  error names the node and the GB arithmetic).
 - **503** when cluster info is still being gossiped (a cluster that just
   formed): connection edges lag node identities by a few gossip rounds, and
   per-node memory info lags the edges. The request internally waits up to
