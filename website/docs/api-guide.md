@@ -1216,13 +1216,26 @@ Semantics of the reserved id:
 - Client `system` messages are ignored in favor of the steward's own system
   prompt; `user` and `assistant` turns form the conversation history, which
   the client owns and resends each turn (the server is stateless).
+- The steward always runs with thinking disabled, regardless of what the
+  brain model supports. Requests to the reserved id cannot turn it back on;
+  addressing the underlying card directly still gives you the model's normal
+  reasoning behavior.
 - Requests to the id while intelligent-fabric mode is disabled return `404`
-  with an explanatory message. If the mode is enabled but the placement is
-  not currently available (first placement, repair in flight), the response
-  is an error chunk in the normal chat-completions error shape.
-- The underlying model card id (for example the bundled Qwen3.5-4B) remains
-  addressable as an ordinary model and answers WITHOUT tools or cluster
-  access: only the reserved id selects model-plus-harness.
+  with an explanatory message.
+- If the mode is enabled but the steward is not ready to answer (still being
+  placed, still downloading its weights, still loading), the request is
+  refused with `503` before any streaming begins, carrying a `Retry-After`
+  header and a JSON body whose `detail` is the `GET /v1/steward` payload
+  (`enabled`, `present`, `ready`, `steward_model`, `instance_id`, `state`)
+  plus a human-readable `message`. Clients should back off and retry, or
+  poll `GET /v1/steward` and show the `state` while they wait.
+- A steward that disappears in the window between that check and dispatch
+  (a repair starting at exactly the wrong moment) still surfaces as an error
+  chunk in the normal chat-completions error shape, because the response has
+  already begun by then.
+- The underlying model card id (for example the bundled Qwen3.6-35B-A3B)
+  remains addressable as an ordinary model and answers WITHOUT tools or
+  cluster access: only the reserved id selects model-plus-harness.
 
 The steward appears in `GET /v1/models` as an entry flagged with
 `system_role: "steward"` while the mode is enabled, so model pickers can
@@ -1242,6 +1255,19 @@ Response fields:
   should keep showing a preparing state and hold chat until ready.
 - `steward_model`: model card id of the steward brain when present, else null.
 - `instance_id`: the steward instance id when present, else null.
+- `state`: a one-word lifecycle summary derived from the fields above plus
+  the liveness canary's history, for clients that want to render a single
+  line instead of re-deriving the precedence rules. The booleans remain
+  authoritative. Values:
+  - `disabled`: intelligent-fabric mode is off.
+  - `downloading`: a placement exists and the brain's weights are still
+    being staged. This is the long first-run wait.
+  - `starting`: the fabric is placing the steward, or it is placed and
+    loading.
+  - `ready`: serving, with no outstanding liveness failure.
+  - `degraded`: serving, but the hosting node's liveness canary has at least
+    one failed probe outstanding. The steward may still answer; three
+    consecutive failures make the fabric replace the placement.
 
 Note: deleting the steward instance through `DELETE /instance/{instance_id}`
 is refused with `409` while intelligent-fabric mode is enabled; disable the
