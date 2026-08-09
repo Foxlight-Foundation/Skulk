@@ -2411,12 +2411,6 @@ class API:
             summary="List active store downloads",
             description="List in-progress downloads being managed by the shared model store.",
         )(self.get_store_downloads)
-        self.app.delete(
-            "/store/models/{model_id:path}",
-            tags=["Store"],
-            summary="Delete a model from the store",
-            description="Delete a model and its shared-store artifacts from the configured model store.",
-        )(self.delete_store_model)
         self.app.post(
             "/store/models/{model_id:path}/download",
             tags=["Store"],
@@ -2428,12 +2422,27 @@ class API:
                 "from a bundled model card when declared."
             ),
         )(self.request_store_download)
+        self.app.delete(
+            "/store/models/{model_id:path}/download",
+            tags=["Store"],
+            summary="Cancel a store download",
+            description=(
+                "Cancel one pending or active shared-store model download. "
+                "Partial files remain available for a later resumable request."
+            ),
+        )(self.cancel_store_download)
         self.app.get(
             "/store/models/{model_id:path}/download/status",
             tags=["Store"],
             summary="Get store download status",
             description="Return current status for a shared-store download request for one model.",
         )(self.get_store_download_status)
+        self.app.delete(
+            "/store/models/{model_id:path}",
+            tags=["Store"],
+            summary="Delete a model from the store",
+            description="Delete a model and its shared-store artifacts from the configured model store.",
+        )(self.delete_store_model)
         self.app.post(
             "/store/purge-staging",
             tags=["Downloads"],
@@ -10671,6 +10680,38 @@ class API:
             raise HTTPException(status_code=503, detail="Store not configured")
         result = await self._store_client.get_store_download_status(model_id)
         return JSONResponse(result)
+
+    async def cancel_store_download(self, model_id: str) -> JSONResponse:
+        """Cancel one pending or active canonical-store download.
+
+        Args:
+            model_id: HuggingFace-style model identifier from the route.
+
+        Returns:
+            A confirmation naming the cancelled model and terminal state.
+
+        Raises:
+            HTTPException: If the store is unavailable or no cancellable
+                transfer exists.
+
+        The store retains partial files so a later download can resume.
+        """
+
+        if self._store_client is None:
+            raise HTTPException(status_code=503, detail="Store not configured")
+        cancelled = await self._store_client.cancel_store_download(model_id)
+        if not cancelled:
+            raise HTTPException(
+                status_code=409,
+                detail=f"No active store download for {model_id}",
+            )
+        return JSONResponse(
+            {
+                "modelId": model_id,
+                "status": "cancelled",
+                "cancelled": True,
+            }
+        )
 
     async def delete_store_model(self, model_id: str) -> JSONResponse:
         if self._store_client is None:

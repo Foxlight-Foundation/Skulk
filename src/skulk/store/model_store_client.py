@@ -854,6 +854,36 @@ class ModelStoreClient:
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
+    async def cancel_store_download(self, model_id: str) -> bool:
+        """Cancel one pending or active store-side model download.
+
+        Args:
+            model_id: HuggingFace-style model identifier.
+
+        Returns:
+            ``True`` for a newly or previously cancelled transfer. ``False``
+            means the store reported no cancellable transfer or was
+            unreachable.
+        """
+
+        url = _make_store_url(
+            self._store_host,
+            self._store_port,
+            f"/models/{quote(model_id, safe='')}/download",
+        )
+        try:
+            async with (
+                create_http_session(timeout_profile="short") as session,
+                session.delete(url) as resp,
+            ):
+                return resp.status == 200
+        except Exception as exc:
+            logger.warning(
+                f"ModelStoreClient: cancel_store_download failed for "
+                f"{model_id}: {exc}"
+            )
+            return False
+
     async def delete_store_model(self, model_id: str) -> bool:
         """Delete a model from the store registry and disk.
 
@@ -887,7 +917,7 @@ class ModelStoreClient:
         """Request the store host download a model from HuggingFace, then wait.
 
         Posts to ``/models/{id}/download`` to start the download, then polls
-        ``/models/{id}/download/status`` until complete or failed.
+        ``/models/{id}/download/status`` until complete, failed, or cancelled.
 
         Args:
             model_id: HuggingFace model ID.
@@ -916,7 +946,8 @@ class ModelStoreClient:
             ``True`` if download completed successfully.
 
         Raises:
-            RuntimeError: If the download failed on the store host.
+            RuntimeError: If the download failed or was cancelled on the store
+                host.
             TimeoutError: If the download made no progress for *timeout* seconds.
             StoreUnreachableError: If the store host stopped answering at the
                 transport level (exhausted request retries, or
@@ -1020,6 +1051,10 @@ class ModelStoreClient:
                             if status == "failed":
                                 raise RuntimeError(
                                     f"Store download of {model_id} failed: {data.get('error', 'unknown')}"
+                                )
+                            if status == "cancelled":
+                                raise RuntimeError(
+                                    f"Store download of {model_id} was cancelled"
                                 )
                             if status == "pending":
                                 # Canonical transfers serialize capacity

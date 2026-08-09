@@ -60,6 +60,7 @@ when a new model is registered, so this is not a hot path.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import shutil
 from collections.abc import Iterable
@@ -295,7 +296,9 @@ class StoreDownloadStatus:
 
     model_id: str
     source_revision: str | None = None
-    status: Literal["pending", "downloading", "complete", "failed"] = "pending"
+    status: Literal[
+        "pending", "downloading", "complete", "failed", "cancelled"
+    ] = "pending"
     progress: float = 0.0
     error: str | None = None
 
@@ -339,6 +342,7 @@ class ModelStore:
         self._download_lock = asyncio.Lock()
         self._download_transfer_lock = asyncio.Lock()
         self._download_tasks: set[asyncio.Task[None]] = set()
+        self._download_tasks_by_model: dict[str, asyncio.Task[None]] = {}
 
     @property
     def store_path(self) -> Path:
@@ -453,13 +457,17 @@ class ModelStore:
         # a stale "complete" here makes a later request_download short-circuit and
         # never re-fetch the model we just removed (the registry entry and files
         # are gone but the in-memory status would still say complete). Only clear
-        # complete/failed entries: an in-flight (pending/downloading) entry is
+        # complete/failed/cancelled entries: an in-flight (pending/downloading) entry is
         # held by a live _do_download task, and popping it would crash that task
         # (it reads self._active_downloads[model_id]). request_download also
         # re-checks is_in_store as a backstop, so a surviving in-flight entry that
         # later completes against a since-deleted model is still self-correcting.
         cached = self._active_downloads.get(model_id)
-        if cached is not None and cached.status in ("complete", "failed"):
+        if cached is not None and cached.status in (
+            "complete",
+            "failed",
+            "cancelled",
+        ):
             del self._active_downloads[model_id]
         return True
 
@@ -699,7 +707,7 @@ class ModelStore:
                     or existing.source_revision != source_revision
                     or not self.is_in_store(model_id)
                 )
-                if existing.status == "failed" or stale_complete:
+                if existing.status in ("failed", "cancelled") or stale_complete:
                     del self._active_downloads[model_id]
                 else:
                     return existing
@@ -749,17 +757,51 @@ class ModelStore:
                 status="pending",
             )
             self._active_downloads[model_id] = status
-        task = asyncio.create_task(
-            self._do_download(
-                model_id,
-                pinned_gguf,
-                extra_pinned_gguf,
-                source_revision,
+            task = asyncio.create_task(
+                self._do_download(
+                    model_id,
+                    pinned_gguf,
+                    extra_pinned_gguf,
+                    source_revision,
+                )
             )
-        )
-        self._download_tasks.add(task)
-        task.add_done_callback(self._download_tasks.discard)
+            self._download_tasks.add(task)
+            self._download_tasks_by_model[model_id] = task
+            task.add_done_callback(self._download_tasks.discard)
         return status
+
+    async def cancel_download(self, model_id: str) -> StoreDownloadStatus | None:
+        """Cancel one pending or active canonical-store download.
+
+        Partial files remain available for the resumable downloader. Repeating
+        cancellation for an already-cancelled request is idempotent. ``None``
+        means the model has no cancellable store transfer.
+
+        Args:
+            model_id: HuggingFace-style model identifier.
+
+        Returns:
+            The cancelled status, or ``None`` when no transfer can be cancelled.
+        """
+
+        async with self._download_lock:
+            status = self._active_downloads.get(model_id)
+            if status is not None and status.status == "cancelled":
+                return status
+            if status is None or status.status not in ("pending", "downloading"):
+                return None
+            task = self._download_tasks_by_model.get(model_id)
+            if task is None:
+                return None
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        final_status = self.get_download_status(model_id)
+        return (
+            final_status
+            if final_status is not None and final_status.status == "cancelled"
+            else None
+        )
 
     def get_download_status(self, model_id: str) -> StoreDownloadStatus | None:
         """Return the download status for *model_id*, or None."""
@@ -989,6 +1031,11 @@ class ModelStore:
                 f"ModelStore: downloaded {model_id} from HuggingFace ({total:,} bytes)"
             )
 
+        except asyncio.CancelledError:
+            status.status = "cancelled"
+            status.error = None
+            logger.info(f"ModelStore: cancelled download of {model_id}")
+            raise
         except Exception as exc:
             status.status = "failed"
             # Always record the exception TYPE: several failure modes (notably a
@@ -1002,3 +1049,6 @@ class ModelStore:
         finally:
             if transfer_lock_acquired:
                 self._download_transfer_lock.release()
+            current_task = asyncio.current_task()
+            if self._download_tasks_by_model.get(model_id) is current_task:
+                del self._download_tasks_by_model[model_id]

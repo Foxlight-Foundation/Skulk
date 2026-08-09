@@ -502,6 +502,7 @@ Lives in `src/skulk/api/main.py` (route registration in `API.__init__`).
 | `/store/health` | GET | Model store health |
 | `/store/registry` | GET | Model store registry |
 | `/store/models/{model_id}/download` | POST | Request store download |
+| `/store/models/{model_id}/download` | DELETE | Cancel a pending or active store download while preserving resumable partial files |
 | `/store/models/{model_id}` | DELETE | Delete store model |
 | `/admin/restart` | POST | Request node restart. Optional `node_id` query param targets a specific peer; without it, restarts the local node. |
 

@@ -145,6 +145,7 @@ The Ollama group also serves alias paths (`/ollama/api/api/...`,
 - `GET /store/registry`
 - `GET /store/downloads`
 - `POST /store/models/{model_id}/download`
+- `DELETE /store/models/{model_id}/download`
 - `GET /store/models/{model_id}/download/status`
 - `DELETE /store/models/{model_id}`
 - `POST /store/purge-staging`
@@ -1502,6 +1503,15 @@ requesting a download.
 ### Store download status
 
 **GET** `/store/models/{model_id}/download/status`
+
+### Cancel a store download
+
+**DELETE** `/store/models/{model_id}/download`
+
+Cancels one pending or active canonical-store download. Partial files remain in
+the store staging directory so a later request can resume instead of starting
+over. Repeating cancellation for an already-cancelled transfer succeeds. The
+endpoint returns `409` when no cancellable transfer exists.
 
 ### Delete a model from the store
 
