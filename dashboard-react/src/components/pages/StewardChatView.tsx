@@ -169,7 +169,15 @@ export function StewardChatView() {
           try {
             const body: unknown = await res.json();
             const parsed = (body as { detail?: unknown }).detail;
-            if (typeof parsed === 'string') detail = parsed;
+            if (typeof parsed === 'string') {
+              detail = parsed;
+            } else if (typeof parsed === 'object' && parsed !== null) {
+              // The not-ready 503 answers with the steward status object
+              // plus a human message; surface the message rather than
+              // falling back to the generic failure text.
+              const message = (parsed as { message?: unknown }).message;
+              if (typeof message === 'string') detail = message;
+            }
           } catch {
             /* keep fallback */
           }
@@ -275,6 +283,9 @@ export function StewardChatView() {
             'stewardChat.placing.body',
             'The fabric is placing the steward and preparing its model. This page will become available automatically; the first start may take a few minutes while the model downloads.',
           )}
+        </CenterBody>
+        <CenterBody>
+          {t('stewardChat.placing.state', 'Status: {state}', { state: status.state })}
         </CenterBody>
       </CenterState>
     );

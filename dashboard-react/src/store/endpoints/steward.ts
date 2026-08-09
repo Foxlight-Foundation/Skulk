@@ -1,5 +1,18 @@
 import { apiSlice } from '../api';
 
+/**
+ * One-word lifecycle summary of the steward, derived server-side from the
+ * boolean fields plus liveness-canary history:
+ *
+ * - `disabled`: intelligent-fabric mode is off.
+ * - `downloading`: placed, weights still staging (the long first wait).
+ * - `starting`: being placed, or placed and loading.
+ * - `ready`: serving, with a clean canary history.
+ * - `degraded`: serving, but a liveness probe has failed and the fabric may
+ *   repair the placement.
+ */
+export type StewardState = 'disabled' | 'downloading' | 'starting' | 'ready' | 'degraded';
+
 /** Steward availability as reported by `GET /v1/steward`. */
 export interface StewardStatus {
   /** Whether intelligent-fabric mode is enabled in Settings. */
@@ -12,6 +25,11 @@ export interface StewardStatus {
   steward_model: string | null;
   /** The steward instance id when present. */
   instance_id: string | null;
+  /**
+   * Renderable lifecycle word. The booleans above stay authoritative; this
+   * saves every client from re-deriving the same precedence rules.
+   */
+  state: StewardState;
 }
 
 /**
