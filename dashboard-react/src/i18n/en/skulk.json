@@ -666,6 +666,7 @@
   "stewardChat.loading.title": "Checking steward status",
   "stewardChat.placeholder": "Ask about the cluster...",
   "stewardChat.placing.body": "The fabric is placing the steward and preparing its model. This page will become available automatically; the first start may take a few minutes while the model downloads.",
+  "stewardChat.placing.state": "Status: {state}",
   "stewardChat.placing.title": "Steward is being placed",
   "stewardChat.servedBy": "steward: {model}",
   "storeRegistry.chatWithModel": "Chat with model",

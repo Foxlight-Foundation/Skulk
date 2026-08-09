@@ -20,7 +20,7 @@ import contextlib
 import json
 import re
 from collections.abc import AsyncGenerator, Mapping
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, final
 
 import anyio
 from pydantic import BaseModel, ConfigDict, Field
@@ -75,6 +75,57 @@ CANARY_FAILURE_THRESHOLD = 3
 """Consecutive probe failures before the steward is torn down for
 re-placement. One failure is a blip; three spaced five minutes apart is a
 wedge."""
+
+STEWARD_RETRY_AFTER_SECONDS = 15
+"""``Retry-After`` hint sent with the not-ready 503 on the chat surface.
+
+Short on purpose: the states behind that 503 resolve on the master's ten
+second planning tick or on a download, so a client that backs off for a
+quarter of a minute and retries tracks the fabric closely without polling
+it hard.
+"""
+
+StewardState = Literal["disabled", "downloading", "starting", "ready", "degraded"]
+"""One-word lifecycle summary of the steward, derived from the other status
+fields plus canary history. See :func:`derive_steward_state`."""
+
+STEWARD_NOT_READY_MESSAGES: dict[StewardState, str] = {
+    "disabled": (
+        "Intelligent-fabric mode is disabled; enable it in Settings to use "
+        "the steward."
+    ),
+    "downloading": (
+        "The steward is staging its model weights and cannot answer yet."
+    ),
+    "starting": (
+        "The fabric is establishing the steward placement; it cannot answer "
+        "yet."
+    ),
+    "degraded": (
+        "The steward is not answering right now; the fabric is repairing it."
+    ),
+    "ready": "The steward is not available right now.",
+}
+"""Human-readable reason accompanying the not-ready 503, keyed by state.
+
+``ready`` and ``disabled`` are unreachable through that path (a ready
+steward is dispatched and a disabled one is already a 404), but the mapping
+stays total so a future state cannot silently produce a message-less error.
+"""
+
+STEWARD_THINKING_ENABLED = False
+"""Whether steward turns ask the brain to think before answering.
+
+Off, by measurement. The steward bench ranked every candidate with thinking
+disabled and then ran a thinking-on tiebreaker over the two finalists: both
+scored WORSE on the trust axes with thinking on (the winner's trust score
+fell and it began proposing forbidden actions it had never proposed before)
+and neither gained on the established task tier. The steward workload is
+short tool-driven investigation, not open-ended reasoning, so the harness
+pins thinking off for every brain rather than encoding the verdict on one
+card. Reasoning stays available on the same cards for ordinary chat: this is
+the harness's own request shape, not a claim about the model.
+"""
 
 STEWARD_SYSTEM_PROMPT = """\
 You are the steward: the resident operator intelligence of this Skulk
@@ -207,6 +258,100 @@ class StewardChatMessage(BaseModel):
     content: str = Field(description="The message text.")
 
 
+def derive_steward_state(
+    *,
+    enabled: bool,
+    present: bool,
+    ready: bool,
+    downloading: bool,
+    canary_failures: int,
+) -> StewardState:
+    """Collapse the steward's status signals into one lifecycle word.
+
+    The individual booleans stay on the response (nothing is removed), but a
+    client that only wants to render one line should not have to re-derive
+    the precedence rules. They are:
+
+    - ``disabled``: intelligent-fabric mode is off, so no other signal means
+      anything.
+    - ``degraded``: serving, but the hosting node's canary has at least one
+      consecutive failed probe outstanding. The steward still answers; this
+      is the early warning before the third failure tears it down.
+    - ``ready``: serving with a clean canary history.
+    - ``downloading``: a placement exists and its weights are still being
+      staged, which is the long wait a client should explain to the operator.
+    - ``starting``: everything else while the mode is on, which covers both
+      "the master has not placed it yet" and "placed, staged, still loading".
+
+    Args:
+        enabled: whether intelligent-fabric mode is enabled.
+        present: whether a steward placement exists in state.
+        ready: whether every runner of that placement is Ready or Running.
+        downloading: whether the steward model has a live download record.
+        canary_failures: consecutive canary probe failures currently
+            outstanding for this steward instance.
+
+    Returns:
+        The lifecycle word for this combination of signals.
+    """
+    if not enabled:
+        return "disabled"
+    if ready:
+        return "degraded" if canary_failures >= 1 else "ready"
+    if present and downloading:
+        return "downloading"
+    return "starting"
+
+
+@final
+class StewardCanaryState:
+    """Consecutive canary-probe failures for the current steward instance.
+
+    Lifted out of ``_steward_canary_loop``'s local variables so the status
+    endpoint can report ``degraded`` before the third failure tears the
+    steward down. Both the loop that writes it and the status handler that
+    reads it run as tasks on the API's single event loop, and every mutation
+    here is a whole method with no ``await`` inside, so no reader can observe
+    a half-applied update and no lock is needed.
+    """
+
+    def __init__(self) -> None:
+        self._instance_id: InstanceId | None = None
+        self._failures: int = 0
+
+    @property
+    def instance_id(self) -> InstanceId | None:
+        """The steward instance the current failure count belongs to."""
+        return self._instance_id
+
+    def consecutive_failures_for(self, instance_id: InstanceId) -> int:
+        """Outstanding consecutive failures for ``instance_id``.
+
+        Zero for any other instance: a count earned by a torn-down steward
+        says nothing about its replacement.
+        """
+        return self._failures if self._instance_id == instance_id else 0
+
+    def track(self, instance_id: InstanceId) -> None:
+        """Start counting for a newly observed steward instance."""
+        self._instance_id = instance_id
+        self._failures = 0
+
+    def record_failure(self) -> int:
+        """Count one failed probe and return the new consecutive total."""
+        self._failures += 1
+        return self._failures
+
+    def clear_failures(self) -> None:
+        """Forget the failure run (a probe succeeded, or one was acted on)."""
+        self._failures = 0
+
+    def reset(self) -> None:
+        """Forget the tracked instance entirely (the steward is gone)."""
+        self._instance_id = None
+        self._failures = 0
+
+
 class StewardStatusResponse(BaseModel):
     """Whether the steward exists and what serves it right now."""
 
@@ -233,6 +378,17 @@ class StewardStatusResponse(BaseModel):
     instance_id: str | None = Field(
         default=None,
         description="The steward instance id, when present.",
+    )
+    state: StewardState = Field(
+        default="disabled",
+        description=(
+            "One-word lifecycle summary derived from the other fields plus "
+            "canary history: 'disabled' (mode off), 'downloading' (placed, "
+            "weights still staging), 'starting' (placing or loading), "
+            "'ready' (serving, clean canary), 'degraded' (serving, but the "
+            "liveness canary has an outstanding failed probe). The boolean "
+            "fields remain authoritative; this is the renderable summary."
+        ),
     )
 
 
@@ -530,8 +686,8 @@ class StewardHarness:
             # A thinking-default model would spend the whole bounded budget
             # reasoning and emit no non-thinking text, failing every probe
             # and tearing down a healthy steward. The probe is a liveness
-            # check, not a benchmark: thinking off.
-            enable_thinking=False,
+            # check, not a benchmark: thinking off, same as a real turn.
+            enable_thinking=STEWARD_THINKING_ENABLED,
         )
         model_card = await api.running_model_card(request.model)
         task_params = await chat_request_to_text_generation(
@@ -935,6 +1091,11 @@ class StewardHarness:
             temperature=0.1,
             max_tokens=1024,
             stream=False,
+            # Thinking off for every steward brain, by bench measurement
+            # (see STEWARD_THINKING_ENABLED). Non-toggleable models ignore
+            # this at the capability boundary, so it is safe to send
+            # unconditionally.
+            enable_thinking=STEWARD_THINKING_ENABLED,
         )
         model_card = await api.running_model_card(request.model)
         task_params = await chat_request_to_text_generation(

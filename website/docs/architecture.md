@@ -661,12 +661,25 @@ the answer; client-supplied tool definitions are rejected, and client system
 prompts are ignored in favor of the steward's own. Generation itself rides
 the normal text-generation dispatch path, pinned to the steward instance,
 and the underlying model card id remains addressable as an ordinary model
-without tools or cluster access. A small status endpoint reports presence
-and readiness so clients know whether to offer the surface. The node
+without tools or cluster access. Steward turns always run with the brain's
+thinking disabled: the model candidates were compared with and without it,
+and thinking made the finalists measurably less trustworthy on this
+workload while gaining nothing, so the harness pins it off rather than
+leaving the choice to whichever model is placed.
+
+A small status endpoint reports presence and readiness so clients know
+whether to offer the surface, along with a single lifecycle word covering
+the whole progression from disabled through downloading, starting, and
+ready to degraded. Because a steward that has not finished being placed
+cannot answer, the reserved model id refuses those requests up front with a
+service-unavailable response carrying that same status, so a client can tell
+"the fabric is still setting up" from "the answer failed halfway". The node
 hosting the steward also runs a slow deterministic canary: a minimal
 pinned generation whose answer is shape-checked by code, so a steward
 that is alive in state but wedged in generation is torn down and
-re-placed by the same invariant that handles node loss. In this release
+re-placed by the same invariant that handles node loss. The first failed
+probe already shows up in the status as a degraded steward, well before the
+third one triggers the replacement. In this release
 the steward observes and advises only: no tool can change the cluster, and
 anything action-shaped is returned to the operator as a recommendation.
 

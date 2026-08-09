@@ -116,10 +116,14 @@ from skulk.api.realtime import (
     RealtimeTranscriptionBridge,
 )
 from skulk.api.steward import (
+    STEWARD_NOT_READY_MESSAGES,
+    STEWARD_RETRY_AFTER_SECONDS,
     STEWARD_VIRTUAL_MODEL_ID,
+    StewardCanaryState,
     StewardChatMessage,
     StewardHarness,
     StewardStatusResponse,
+    derive_steward_state,
 )
 from skulk.api.types import (
     AddCustomModelParams,
@@ -402,7 +406,7 @@ from skulk.shared.types.telemetry import (
     record_membership_from_event,
 )
 from skulk.shared.types.text_generation import TextGenerationTaskParams
-from skulk.shared.types.worker.downloads import DownloadCompleted
+from skulk.shared.types.worker.downloads import DownloadCompleted, LiveDownloadProgress
 from skulk.shared.types.worker.instances import (
     Instance,
     InstanceId,
@@ -1339,6 +1343,11 @@ class API:
             for descriptor in self._extensions.capability_descriptors:
                 self._telemetry_view.local_advertised_capabilities.add(descriptor.id)
             self._extensions.run_startup_hooks(self._extension_context)
+        # Steward liveness history, shared between the canary loop that writes
+        # it and the status endpoint that reads it (both event-loop tasks on
+        # this node), so an outstanding failed probe surfaces as `degraded`
+        # instead of hiding until the third failure tears the steward down.
+        self._steward_canary = StewardCanaryState()
         self._event_log = DiskEventLog(_API_EVENT_LOG_DIR) if enable_event_log else None
         self._event_log_appends_since_retention_check = 0
         self._system_id = SystemId()
@@ -1809,7 +1818,10 @@ class API:
             description=(
                 "Generate text with an OpenAI Chat Completions-compatible payload. The requested "
                 "model must already be placed, running, and declare TextGeneration; speech-only "
-                "models are rejected before command dispatch."
+                "models are rejected before command dispatch. The reserved model id "
+                "'skulk/steward' selects the intelligent-fabric steward and answers 404 when "
+                "that mode is disabled, or 503 with the steward status payload while the "
+                "steward is still being placed, staged, or loaded."
             ),
         )(self.chat_completions)
         self.app.post(
@@ -2228,8 +2240,11 @@ class API:
             description=(
                 "Report whether intelligent-fabric mode is enabled and whether "
                 "a steward placement currently exists, with its model and "
-                "instance id when present. The steward is the fabric-maintained "
-                "resident assistant; see the steward chat endpoint."
+                "instance id when present, plus a one-word lifecycle 'state' "
+                "(disabled, downloading, starting, ready, degraded) derived "
+                "from those fields and the liveness canary's history. The "
+                "steward is the fabric-maintained resident assistant; see the "
+                "steward chat endpoint."
             ),
         )(self.get_steward_status)
         self.app.post(
@@ -2892,6 +2907,18 @@ class API:
         assistant turns; multimodal content parts are flattened to their
         text. Both streaming and non-streaming ride the ordinary adapters
         over the harness's chunk stream.
+
+        Refusals happen before the response begins, in this order: 400 for
+        client tool definitions, 404 when intelligent-fabric mode is off,
+        400 for a conversation with no question to answer, then 503 with the
+        steward status payload while no steward is ready to answer.
+
+        Raises:
+            HTTPException: 400, 404, or 503 per the order above.
+
+        Returns:
+            The streaming (SSE) or collected (JSON) chat-completions
+            response for one steward turn.
         """
         if payload.tools:
             raise HTTPException(
@@ -2941,6 +2968,23 @@ class API:
                     "steward to answer"
                 ),
             )
+        status = self._steward_status()
+        if not status.ready:
+            # Readiness preflight: a steward that is still placing, staging
+            # weights, or loading cannot answer, and saying so as a 503 with
+            # the status payload is a contract a client can act on (retry,
+            # show progress). Reporting it as a 200 SSE error chunk instead
+            # made "the fabric is still setting up" indistinguishable from
+            # "the model failed mid-answer" to every OpenAI-compatible
+            # client. The in-stream error path stays for the race where the
+            # placement disappears between this check and dispatch.
+            detail: dict[str, object] = status.model_dump(mode="json")
+            detail["message"] = STEWARD_NOT_READY_MESSAGES[status.state]
+            raise HTTPException(
+                status_code=503,
+                detail=detail,
+                headers={"Retry-After": str(STEWARD_RETRY_AFTER_SECONDS)},
+            )
         harness = StewardHarness(self)
         command_id = CommandId()
         chunk_stream = harness.run_turn_chunks(history)
@@ -2983,13 +3027,12 @@ class API:
             canary_probe_target,
         )
 
-        failures = 0
-        last_instance: InstanceId | None = None
+        canary = self._steward_canary
         while True:
             await anyio.sleep(CANARY_INTERVAL_SECONDS)
             try:
                 if not self._intelligent_fabric_enabled():
-                    failures = 0
+                    canary.clear_failures()
                     continue
                 target = canary_probe_target(
                     self.state.instances,
@@ -3003,23 +3046,20 @@ class API:
                     # count so "3 consecutive failures" means three failed
                     # probes with no intervening success. Reset only when
                     # the steward instance itself is gone.
-                    if last_instance is not None and last_instance not in (
-                        self.state.instances
-                    ):
-                        failures = 0
-                        last_instance = None
+                    tracked = canary.instance_id
+                    if tracked is not None and tracked not in self.state.instances:
+                        canary.reset()
                     continue
-                if target != last_instance:
-                    failures = 0
-                    last_instance = target
+                if target != canary.instance_id:
+                    canary.track(target)
                 harness = StewardHarness(self)
                 located = harness.steward_instance()
                 if located is None or located[0] != target:
                     continue
                 if await harness.canary_probe(target, located[1]):
-                    failures = 0
+                    canary.clear_failures()
                     continue
-                failures += 1
+                failures = canary.record_failure()
                 logger.warning(
                     f"Steward canary probe failed ({failures}/"
                     f"{CANARY_FAILURE_THRESHOLD}) for instance {target}"
@@ -3031,7 +3071,7 @@ class API:
                         "probes; tearing it down for re-placement"
                     )
                     await self._send(DeleteInstance(instance_id=target))
-                    failures = 0
+                    canary.clear_failures()
             except Exception:
                 # The canary must never take the API down; a broken probe
                 # pass just waits for the next interval.
@@ -3039,10 +3079,38 @@ class API:
 
     async def get_steward_status(self) -> "StewardStatusResponse":
         """Report intelligent-fabric mode and the current steward placement."""
-        from skulk.api.steward import StewardHarness, StewardStatusResponse
+        return self._steward_status()
 
+    def _steward_model_is_downloading(self, model_id: str) -> bool:
+        """Whether any node holds a live download record for ``model_id``.
+
+        Live means Pending or Ongoing in the effective view (telemetry's
+        non-terminal records merged over the terminal ones in state), which
+        is exactly the window in which the steward exists as a placement but
+        its weights are not on disk yet.
+        """
+        for records in self._telemetry_view.effective_downloads(
+            self.state.downloads
+        ).values():
+            for record in records:
+                if not isinstance(record, LiveDownloadProgress):
+                    continue
+                if str(record.shard_metadata.model_card.model_id) == model_id:
+                    return True
+        return False
+
+    def _steward_status(self) -> "StewardStatusResponse":
+        """Build the steward status snapshot.
+
+        Shared by ``GET /v1/steward`` and the chat-completions readiness
+        preflight so a client polling the status endpoint and a client
+        posting a turn can never disagree about whether the steward is
+        servable.
+        """
         located = StewardHarness(self).steward_instance()
         ready = False
+        downloading = False
+        canary_failures = 0
         if located is not None:
             instance = self.state.instances.get(located[0])
             if instance is not None:
@@ -3056,12 +3124,25 @@ class API:
                     )
                     for runner_id in runner_ids
                 )
+            if not ready:
+                downloading = self._steward_model_is_downloading(located[1])
+            canary_failures = self._steward_canary.consecutive_failures_for(
+                located[0]
+            )
+        enabled = self._intelligent_fabric_enabled()
         return StewardStatusResponse(
-            enabled=self._intelligent_fabric_enabled(),
+            enabled=enabled,
             present=located is not None,
             ready=ready,
             steward_model=located[1] if located is not None else None,
             instance_id=str(located[0]) if located is not None else None,
+            state=derive_steward_state(
+                enabled=enabled,
+                present=located is not None,
+                ready=ready,
+                downloading=downloading,
+                canary_failures=canary_failures,
+            ),
         )
 
     def _intelligent_fabric_enabled(self) -> bool:

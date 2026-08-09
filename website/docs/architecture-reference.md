@@ -83,9 +83,18 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 ### Steward (intelligent fabric)
 
 - Config: `intelligent_fabric` in `skulk.yaml` (`enabled`, default false;
-  `steward_models` preference list, default Qwen3.5-4B MLX, then the 4B
-  GGUF, then the Qwen3.5-0.8B GGUF universal floor so CPU-only fleets
-  still place a steward).
+  `steward_models` preference list, default Qwen3.6-35B-A3B GGUF then MLX
+  (the benched v1 brain), then Qwen3.5-4B MLX, then the 4B GGUF, then the
+  Qwen3.5-0.8B GGUF universal floor so CPU-only fleets still place a
+  steward). The master places the first entry the cluster can serve, so a
+  fleet falls through to the largest brain it can host.
+- Thinking: OFF for every steward generation
+  (`STEWARD_THINKING_ENABLED = False`, sent as `enable_thinking` on both
+  investigation turns and canary probes). Bench measurement, not a card
+  field: the candidate matrix ranked thinking-off, and the thinking-on
+  tiebreaker made both finalists worse on the trust axes. Model cards keep
+  declaring their real reasoning support; this is the harness's request
+  shape.
 - Identity: `BaseInstance.system_role = "steward" | None` (additive field;
   None on replayed old logs). Stamped from `PlaceInstance.system_role` at
   mint; all three repair builders re-stamp it from the instance.
@@ -94,7 +103,10 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   task; busy-wedge belongs to the worker wedge detector). Probe = minimal
   pinned no-tools generation, code-checked non-empty text within 120s; 3
   consecutive failures send DeleteInstance and the invariant re-places.
-  Pure target selection = `canary_probe_target` (steward.py). Limitation:
+  Pure target selection = `canary_probe_target` (steward.py). The failure
+  run lives in `StewardCanaryState` on the API (not a loop local), so the
+  status endpoint can report `degraded` from the FIRST failure instead of
+  hiding the problem until teardown; single event loop, no lock. Limitation:
   requires the hosting node to run an API; split API/worker shapes = #734.
 - Invariant: `Master._maintain_steward_placement` runs each planning tick
   behind the topology-settle grace: places first servable card from the
@@ -122,14 +134,27 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   hold-back gate (`splittable_prefix`): prose emits as it arrives, a
   suspicious tail holds until disambiguated, and tool markup is never
   emitted as content. `GET /v1/models` carries a flagged entry
-  (`system_role: "steward"`) while enabled. `GET /v1/steward` = presence.
-  The earlier bespoke `POST /v1/steward/chat` was removed before any
-  release. Ordinary `DELETE /instance/{id}` of the steward is refused 409
-  while the mode is enabled.
+  (`system_role: "steward"`) while enabled. `GET /v1/steward` = presence
+  plus `state` (`disabled | downloading | starting | ready | degraded`,
+  pure `derive_steward_state`; the booleans stay authoritative). The
+  earlier bespoke `POST /v1/steward/chat` was removed before any release.
+  Ordinary `DELETE /instance/{id}` of the steward is refused 409 while the
+  mode is enabled.
+- Readiness preflight: the reserved id answers 404 when the mode is off and
+  503 (status payload + `message` + `Retry-After`) when the mode is on but
+  no steward is ready, checked BEFORE the response begins. The in-stream
+  ErrorChunk path remains only for the placement-vanishes-after-preflight
+  race, so "the fabric is still setting up" is no longer indistinguishable
+  from "the model failed mid-answer".
 - Dashboard: instances with `systemRole` set are hidden from all instance
   surfaces (filter in App.tsx instanceCards).
-- Cards: `mlx-community/Qwen3.5-4B-MLX-4bit` (vision, MLX) and
-  `unsloth/Qwen3.5-4B-GGUF` (text-only so served lanes stay eligible).
+- Cards: `unsloth/Qwen3.6-35B-A3B-GGUF` (text-only so served lanes stay
+  eligible) and `mlx-community/Qwen3.6-35B-A3B-4bit` (vision, MLX) are the
+  v1 brain, both revision-pinned; `mlx-community/Qwen3.5-4B-MLX-4bit` /
+  `unsloth/Qwen3.5-4B-GGUF` are the small-fleet tier and
+  `unsloth/Qwen3.5-0.8B-GGUF` the floor. GGUF steward cards must stay
+  text-only: a `[vision]` section gates them off `llama_server`, whose
+  runner cannot load an mmproj projector.
 
 ### Dashboard
 

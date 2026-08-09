@@ -265,10 +265,15 @@ Optional resident operator assistant, config-gated (`intelligent_fabric` in
 skulk.yaml, default off). Identity = `BaseInstance.system_role` flagged
 placement (additive schema field); the master's `_maintain_steward_placement`
 planning-tick invariant keeps exactly one steward placed from the
-`steward_models` preference list (Qwen3.5-4B MLX/GGUF cards, then the
-Qwen3.5-0.8B GGUF universal floor so CPU-only fleets place one), tears down
-duplicates, and inherits failover from election since the invariant re-runs
-on every tick. Repair builders re-stamp `system_role` (same pattern as #658
+`steward_models` preference list (Qwen3.6-35B-A3B GGUF then MLX = the
+benched v1 brain, then the Qwen3.5-4B MLX/GGUF cards, then the Qwen3.5-0.8B
+GGUF universal floor so CPU-only fleets place one), tears down duplicates,
+and inherits failover from election since the invariant re-runs on every
+tick. Every steward generation runs with thinking OFF
+(`STEWARD_THINKING_ENABLED`): bench-measured, thinking degraded the
+finalists' trust behavior, and it is the harness's request shape rather
+than a card claim. GGUF steward cards must stay text-only or the vision
+platform gate bars them from `llama_server`. Repair builders re-stamp `system_role` (same pattern as #658
 exclusions). `TextGeneration.target_instance_id` pins generation to one
 instance (mirrors SpeechSynthesis). Harness = `src/skulk/api/steward.py`:
 bounded read-only tools (state/resources/telemetry/data-plane/versions/
@@ -276,13 +281,18 @@ envelopes/doctor/catalog), 8 steps per turn, observe/advise only, rides the
 normal chat dispatch path. Client surface = reserved virtual
 model `skulk/steward` on chat-completions (client tools 400; trace as
 reasoning_content; streaming via the ordinary adapters over
-`run_turn_chunks`); `GET /v1/steward` = presence; flagged entry in
-/v1/models (`system_role`). Ordinary deletion of the steward is refused
-while the mode is on; the dashboard hides `systemRole` instances. Canary:
-the hosting node's API probes the steward every 300s when idle-Ready
-(minimal pinned generation, code-checked); 3 consecutive failures tear it
-down and the invariant re-places (degraded-but-alive coverage; busy-wedge
-stays with the worker wedge detector).
+`run_turn_chunks`); `GET /v1/steward` = presence plus a derived `state`
+(`disabled|downloading|starting|ready|degraded`); flagged entry in
+/v1/models (`system_role`). The reserved id refuses with 503 (status
+payload + Retry-After) before streaming when no steward is ready, keeping
+the in-stream ErrorChunk for the post-preflight race. Ordinary deletion of
+the steward is refused while the mode is on; the dashboard hides
+`systemRole` instances. Canary: the hosting node's API probes the steward
+every 300s when idle-Ready (minimal pinned generation, code-checked); the
+failure run lives in `StewardCanaryState` so one failure already reads as
+`degraded`, and 3 consecutive failures tear it down and the invariant
+re-places (degraded-but-alive coverage; busy-wedge stays with the worker
+wedge detector).
 
 ### Message Flow
 Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):

@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { store } from '../../store';
 import { apiSlice } from '../../store/api';
+import type { StewardState } from '../../store/endpoints/steward';
 import { darkTheme } from '../../theme/theme';
 import { StewardChatView } from './StewardChatView';
 
@@ -45,6 +46,7 @@ interface StewardStatusFixture {
   ready: boolean;
   steward_model: string | null;
   instance_id: string | null;
+  state: StewardState;
 }
 
 function sseBody(events: string[]): ReadableStream<Uint8Array> {
@@ -133,11 +135,14 @@ const READY: StewardStatusFixture = {
   ready: true,
   steward_model: 'org/steward-4b',
   instance_id: 'inst-1',
+  state: 'ready',
 };
 
 describe('StewardChatView', () => {
   it('shows the disabled state when intelligent fabric is off', async () => {
-    stubFetch({ status: { ...READY, enabled: false, present: false, ready: false } });
+    stubFetch({
+      status: { ...READY, enabled: false, present: false, ready: false, state: 'disabled' },
+    });
     await renderPage();
     await waitFor(
       () => container?.textContent?.includes('Intelligent Fabric is off') ?? false,
@@ -146,12 +151,15 @@ describe('StewardChatView', () => {
   });
 
   it('holds the placing state until the steward is ready, not merely present', async () => {
-    stubFetch({ status: { ...READY, ready: false } });
+    stubFetch({ status: { ...READY, ready: false, state: 'downloading' } });
     await renderPage();
     await waitFor(
       () => container?.textContent?.includes('Steward is being placed') ?? false,
       'placing state never rendered',
     );
+    // The lifecycle word distinguishes "still staging weights" from "placing",
+    // which is the difference between a minutes-long and a seconds-long wait.
+    expect(container?.textContent?.includes('Status: downloading')).toBe(true);
     expect(container?.querySelector('textarea')).toBeNull();
   });
 
