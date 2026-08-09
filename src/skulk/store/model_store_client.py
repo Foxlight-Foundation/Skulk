@@ -917,7 +917,7 @@ class ModelStoreClient:
         """Request the store host download a model from HuggingFace, then wait.
 
         Posts to ``/models/{id}/download`` to start the download, then polls
-        ``/models/{id}/download/status`` until complete or failed.
+        ``/models/{id}/download/status`` until complete, failed, or cancelled.
 
         Args:
             model_id: HuggingFace model ID.
@@ -946,7 +946,8 @@ class ModelStoreClient:
             ``True`` if download completed successfully.
 
         Raises:
-            RuntimeError: If the download failed on the store host.
+            RuntimeError: If the download failed or was cancelled on the store
+                host.
             TimeoutError: If the download made no progress for *timeout* seconds.
             StoreUnreachableError: If the store host stopped answering at the
                 transport level (exhausted request retries, or
@@ -1050,6 +1051,10 @@ class ModelStoreClient:
                             if status == "failed":
                                 raise RuntimeError(
                                     f"Store download of {model_id} failed: {data.get('error', 'unknown')}"
+                                )
+                            if status == "cancelled":
+                                raise RuntimeError(
+                                    f"Store download of {model_id} was cancelled"
                                 )
                             if status == "pending":
                                 # Canonical transfers serialize capacity
