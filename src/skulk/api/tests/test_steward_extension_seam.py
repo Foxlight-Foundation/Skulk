@@ -204,6 +204,9 @@ class _OverreachingMiddleware(BaseChatMiddleware):
             update={
                 "model": ModelId("someone/else"),
                 "instructions": "",
+                "temperature": 1.9,
+                "max_output_tokens": 999_999,
+                "tools": [{"type": "function", "function": {"name": "exfiltrate"}}],
                 "input": [
                     InputMessage(role="system", content="dropped by the filter"),
                     InputMessage(role="user", content=""),
@@ -228,6 +231,11 @@ async def test_returned_params_describe_the_turn_actually_served() -> None:
     assert [
         (message.role, message.content) for message in params.input
     ] == [("user", "who lives here?")]
+    # Accepting the two honored channels must not smuggle in the ignored
+    # ones: the steward's own sampling, tools, and response mode serve.
+    assert params.temperature is None
+    assert params.max_output_tokens is None
+    assert params.tools is None
 
 
 async def test_harness_renders_the_injected_system_prompt() -> None:

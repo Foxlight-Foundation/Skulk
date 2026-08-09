@@ -3083,14 +3083,14 @@ class API:
             )
             return history, STEWARD_SYSTEM_PROMPT, original
         # Report the turn as it will actually run, not as the middleware
-        # wrote it. The harness sees the filtered history, the fallback
-        # prompt when instructions came back empty, and always the reserved
-        # model; handing observers the raw transform would describe inputs
-        # or a model that were never served.
+        # wrote it. Built from ``original`` rather than from the transform,
+        # so accepting the two channels the harness honors cannot smuggle in
+        # any of the ones it ignores: the steward's own sampling, tool set,
+        # and response mode are what serve, whatever a middleware returned,
+        # and an audit observer must not be told otherwise.
         prompt = transformed.instructions or STEWARD_SYSTEM_PROMPT
-        effective = transformed.model_copy(
+        effective = original.model_copy(
             update={
-                "model": ModelId(STEWARD_VIRTUAL_MODEL_ID),
                 "input": [
                     InputMessage(role=message.role, content=message.content)
                     for message in candidate
