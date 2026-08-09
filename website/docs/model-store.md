@@ -85,35 +85,43 @@ An operator-supplied routable IP in `store_http_host` is still honored as-is.
 Make sure:
 
 - all nodes are running the same Skulk build
-- you know which machine should be the store host
-- that machine has enough storage for the models you want to share
-- the chosen `store_path` is mounted and writable
+- for an explicit store deployment, you know which machine should be the
+  store host and its chosen `store_path` is mounted, writable, and large enough
+- for a default fresh cluster, the elected master's normal user-home
+  filesystem has enough space for the models you want to share
 
 The store server uses port `12415` by default. This listener is deliberately
 outside the dynamic client-port ranges used by supported operating systems, so
 an unrelated outbound connection cannot claim it before Skulk starts.
 
 :::note Fresh installs
-`install.sh` writes a `skulk.yaml` with single-node store defaults (this
-host as its own store host, storing under `~/.skulk/model-store`) when no
-config exists, so the store API works out of the box. When you join several
-such nodes into one cluster, designate exactly ONE store host and point
-every node's `store_host` at it.
+`install.sh` writes bootstrap store defaults (this host under
+`~/.skulk/model-store`) when no config exists, so a single node works
+immediately. When several independently installed nodes form a cluster, the
+elected master advertises a routable store address through bootstrap state
+sync. Followers adopt that authoritative config, stop their temporary local
+store servers, and point both dashboard and worker traffic at the same store.
+If you need a specific machine or attached volume, configure the same explicit
+`store_host` on every node instead.
 :::
 
 ## Recommended Setup: Dashboard First
 
 This is the simplest path for most people.
 
-1. Start Skulk on all nodes with `uv run skulk`.
-2. Open the dashboard on the node you want to become the store host.
+1. Start Skulk on all nodes with `uv run skulk`. Fresh defaults already
+   converge on one store.
+2. Open the dashboard on the node you want to use for administration.
 3. Go to **Settings**.
-4. Enable the store host toggle.
-5. Choose the store path.
+4. To override the elected default, enable the store host toggle for the
+   machine that should own the canonical store.
+5. Choose its store path.
 6. Save the config.
 7. Restart Skulk on all nodes if the dashboard tells you a restart is required.
 
-After that, use the dashboard or API normally. When models are available in the store, worker nodes stage from the store host instead of downloading independently.
+After that, use the dashboard or API normally. When models are available in
+the store, worker nodes stage from the store host instead of downloading
+independently.
 
 ## Manual Setup with `skulk.yaml`
 

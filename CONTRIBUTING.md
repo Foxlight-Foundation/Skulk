@@ -51,6 +51,7 @@ Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard),
 - `resources/image_model_cards/` — Image model metadata TOML files
 - `resources/embedding_model_cards/` — Embedding model metadata TOML files
 - `resources/speech_model_cards/` — Speech model metadata TOML files
+- `resources/speech_reference_voices/` — Checksummed bundled TTS conditioning audio and exact transcripts
 - `deployment/logging/` — VictoriaLogs + Grafana stack and Vector config
 - `docs/` — Technical documentation
 - `docs/model-runtime-notes/` — Internal per-model clustered runtime notes
@@ -79,7 +80,14 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
 - `src/skulk/master/` — Master node (placement, election, event sourcing)
 - `src/skulk/worker/` — Worker node (inference, runner management, download coordination)
 - `src/skulk/store/` — Model store (registry, downloads, config, model optimizer)
+- `src/skulk/operator/` — Stable operator identity, quorum certification,
+  crash-fault consensus, bounded dormant proposal lifecycle, and
+  encrypted/public authority persistence. It is a
+  separate security plane from event-sourced inference state; do not place its
+  secrets or mutable authorization records in `State`, telemetry, diagnostics,
+  or ordinary events.
 - `src/skulk/shared/` — Shared types, constants, topology
+- `src/skulk/memory/` — Fabric-memory core library (HRR primitives, pattern separation, memory index); inert until later phases wire it
 - `website/docs/` — Docusaurus documentation source, including API guide and model-capability docs
 
 ## Development Guidelines
@@ -373,6 +381,14 @@ uv run skulk-harness fresh-install qualify \
 
 The green reports must cover Apple Silicon, AMD Linux, and a clean RunPod
 NVIDIA pod. A configured-fleet battery is not an acceptable substitute.
+
+After the automated candidate matrix passes, a human tester exercises the same
+exact commit through the first-install dashboard journeys in the
+[human release qualification guide](website/docs/human-release-qualification.md).
+Human acceptance supplements the automated gate; it cannot replace a failed or
+incomplete harness matrix. Any product, shipped-default, installer, dashboard,
+or model-card change made in response to human testing creates a new candidate
+that must repeat the automated qualification before promotion.
 
 ## Submitting Changes
 

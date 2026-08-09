@@ -81,8 +81,15 @@ AUTO_UPDATE="${SKULK_AUTO_UPDATE:-1}"
 # tens of GB on long-lived nodes (#382). The durable, size-rotated record lives
 # in ~/.skulk/logs/skulk.log regardless of this setting.
 VERBOSITY="${SKULK_VERBOSITY:-}"
-# Headless nodes serve the API without the web UI (no dashboard build).
+# Explicitly headless nodes serve the API without the web UI. A normal Linux
+# install is not implicitly headless: Skulk's bundled Node.js runtime builds
+# the dashboard even when the host has no npm.
 HEADLESS="${SKULK_HEADLESS:-0}"
+
+run_bundled_npm() {
+    uv run --project "$REPO_ROOT" python \
+        "$REPO_ROOT/scripts/run_bundled_npm.py" "$@"
+}
 
 run_prep() {
     # `git pull` — non-fatal. Common failure modes (offline at boot,
@@ -245,26 +252,41 @@ run_prep() {
         fi
     fi
 
-    # Headless nodes (e.g. a non-Mac worker like a Strix Halo / ROCm box)
-    # intentionally serve the API without the web UI: the node sets
-    # DASHBOARD_DIR=None and skips the mount when assets are absent (#333).
-    # For those, skip the dashboard build and its fatal dist/ check entirely
-    # so the service can run without Node/npm installed.
+    # Explicitly headless nodes intentionally serve the API without the web UI:
+    # the node sets DASHBOARD_DIR=None and skips the mount when assets are absent
+    # (#333). A normal Linux install still builds the UI through the bundled
+    # runtime below, so the absence of a host npm executable is not headlessness.
     if [[ "$HEADLESS" == "1" ]]; then
         log "SKULK_HEADLESS=1: skipping dashboard build; API serves without the web UI"
         return
     fi
 
-    # Dashboard build — non-fatal on success path (we boot with the
-    # previously built dist/), fatal only if dist/ ends up missing.
+    # Dashboard build — non-fatal on success path (we boot with the previously
+    # built dist/), fatal only if dist/ ends up missing. Prefer the same pinned
+    # bundled runtime as install.sh so a supervised Linux node without system
+    # Node/npm can refresh its UI after every git update. The system fallback is
+    # retained for recovery when the bundled dependency itself cannot launch.
     if [[ -d dashboard-react ]]; then
-        log "npm install + build (non-fatal unless dist/ is missing)"
+        log "dashboard install + build (non-fatal unless dist/ is missing)"
         (
             cd dashboard-react
-            npm install 2>&1 | tee -a "$PREP_LOG" >&2 || \
-                log "warning: npm install failed"
-            npm run build 2>&1 | tee -a "$PREP_LOG" >&2 || \
-                log "warning: npm run build failed"
+            if run_bundled_npm --version 2>&1 | tee -a "$PREP_LOG" >&2; then
+                log "using Skulk's bundled Node.js runtime"
+                run_bundled_npm install --no-fund --no-audit 2>&1 \
+                    | tee -a "$PREP_LOG" >&2 \
+                    || log "warning: bundled npm install failed"
+                run_bundled_npm run build 2>&1 | tee -a "$PREP_LOG" >&2 \
+                    || log "warning: bundled npm run build failed"
+            elif command -v node >/dev/null 2>&1 \
+                && command -v npm >/dev/null 2>&1; then
+                log "warning: bundled Node.js runtime unavailable; using system npm"
+                npm install --no-fund --no-audit 2>&1 | tee -a "$PREP_LOG" >&2 \
+                    || log "warning: system npm install failed"
+                npm run build 2>&1 | tee -a "$PREP_LOG" >&2 \
+                    || log "warning: system npm run build failed"
+            else
+                log "warning: bundled Node.js runtime unavailable and system npm is absent"
+            fi
         )
     fi
 

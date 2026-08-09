@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import random
+import re
 import shutil
 import socket
 import time
@@ -95,7 +96,11 @@ from skulk.api.field_telemetry import (
     tap_generation_stream,
 )
 from skulk.api.keepalive import with_sse_keepalive
-from skulk.api.model_search import search_hugging_face_models
+from skulk.api.model_search import (
+    fetch_card_summary,
+    list_gguf_quant_options,
+    search_hugging_face_models,
+)
 from skulk.api.node_health import (
     compute_node_health,
     live_data_transports,
@@ -165,6 +170,8 @@ from skulk.api.types import (
     ExtractPageToolResponse,
     FinishReason,
     GenerationStats,
+    GgufQuantOptions,
+    HuggingFaceCardSummary,
     HuggingFaceSearchResult,
     ImageData,
     ImageEditsTaskParams,
@@ -299,8 +306,10 @@ from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
     ModelTask,
+    get_bundled_card,
     get_card,
     get_model_cards,
+    preserve_generated_card_constraints,
 )
 from skulk.shared.tracing import (
     TraceEvent,
@@ -1814,6 +1823,29 @@ class API:
                 "manifests and return the matched repo-relative file path."
             ),
         )(self.search_models)
+        self.app.get(
+            "/models/card-summary",
+            tags=["Models"],
+            summary="Fetch a Hugging Face model card summary",
+            description=(
+                "Download a repository's model card README and return its first "
+                "prose paragraphs with markup stripped, for the dashboard's "
+                "model discovery popovers. The summary is empty when the card "
+                "has no usable prose."
+            ),
+        )(self.get_model_card_summary)
+        self.app.get(
+            "/models/gguf-quants",
+            tags=["Models"],
+            summary="List a GGUF repository's quantizations",
+            description=(
+                "Enumerate the downloadable quantizations of a Hugging Face "
+                "GGUF repository: one option per quant shard group with its "
+                "loadable first shard, human label, exact total bytes, and "
+                "shard count, smallest first. Companion artifacts such as "
+                "speculative drafters and imatrix files are excluded."
+            ),
+        )(self.get_gguf_quant_options)
         self.app.post(
             "/v1/chat/completions",
             response_model=None,
@@ -1876,8 +1908,9 @@ class API:
             tags=["Audio"],
             summary="List voices for a mounted speech model",
             description=(
-                "Skulk extension that returns stable built-in voice identifiers "
-                "declared by a mounted text-to-speech model."
+                "Skulk extension that returns stable model-native and bundled-"
+                "reference voice identifiers declared by a mounted text-to-speech "
+                "model."
             ),
         )(self.audio_voices)
         self.app.websocket("/v1/realtime")(self.realtime_transcription)
@@ -4978,6 +5011,28 @@ class API:
 
         self._sync_builtin_speech_capability()
 
+    def set_model_store_runtime(
+        self,
+        skulk_config: "SkulkConfig | None",
+        store_client: "ModelStoreClient | None",
+    ) -> None:
+        """Replace config and store client after cluster-config convergence.
+
+        Args:
+            skulk_config: The authoritative cluster configuration, or ``None``
+                when the cluster has no configuration.
+            store_client: Client for the authoritative model store, or ``None``
+                when the model store is disabled.
+
+        Side effects:
+            Subsequent dashboard store requests use the replacement client and
+            config-dependent provider advertisements are refreshed.
+        """
+
+        self._skulk_config = skulk_config
+        self._store_client = store_client
+        self.refresh_config_dependent_capabilities()
+
     async def _validate_audio_transcription_model(
         self,
         model_id: ModelId,
@@ -7627,12 +7682,17 @@ class API:
 
     async def add_custom_model(self, payload: AddCustomModelParams) -> ModelListModel:
         """Fetch a Hugging Face model card, optionally pinning one GGUF file."""
+        # Load curated truth before generating the override. A generated card
+        # is a metadata cache, not operator-authored placement policy, and must
+        # retain architecture safety constraints from an exact bundled match.
+        bundled_card = await get_bundled_card(payload.model_id)
         try:
             card = await ModelCard.fetch_from_hf(
                 payload.model_id,
                 gguf_file=payload.gguf_file,
                 source_revision=payload.source_revision,
             )
+            card = preserve_generated_card_constraints(card, bundled_card)
         except Exception as exc:
             raise HTTPException(
                 status_code=400, detail=f"Failed to fetch model: {exc}"
@@ -7664,15 +7724,62 @@ class API:
             {"message": "Model card deleted", "model_id": str(model_id)}
         )
 
+    async def get_model_card_summary(self, model_id: str) -> HuggingFaceCardSummary:
+        """Return the prose summary of one Hugging Face repository's model card.
+
+        Args:
+            model_id: Repository id in ``owner/name`` form.
+
+        Returns:
+            The extracted summary; the ``summary`` field is empty when the
+            README is missing or carries no usable prose.
+        """
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", model_id):
+            raise HTTPException(status_code=422, detail="Invalid model id")
+        try:
+            summary = await to_thread.run_sync(fetch_card_summary, model_id)
+        except Exception:
+            summary = ""
+        return HuggingFaceCardSummary(model_id=model_id, summary=summary)
+
+    async def get_gguf_quant_options(self, model_id: str) -> GgufQuantOptions:
+        """List one GGUF repository's downloadable quantizations.
+
+        Args:
+            model_id: Repository id in ``owner/name`` form.
+
+        Returns:
+            The quant inventory; empty options for a non-GGUF repository.
+        """
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", model_id):
+            raise HTTPException(status_code=422, detail="Invalid model id")
+        try:
+            options = await to_thread.run_sync(list_gguf_quant_options, model_id)
+        except Exception:
+            options = []
+        return GgufQuantOptions(model_id=model_id, options=options)
+
     async def search_models(
-        self, query: str = "", limit: int = 20, mlx_only: bool = False
+        self,
+        query: str = "",
+        limit: int = Query(default=20, ge=1, le=200),
+        mlx_only: bool = False,
+        offset: int = Query(default=0, ge=0, le=2000),
+        pipeline_tag: str | None = None,
     ) -> list[HuggingFaceSearchResult]:
-        """Search Hugging Face repositories and exact GGUF filenames."""
+        """Search Hugging Face repositories and exact GGUF filenames.
+
+        An empty query returns trending repositories; ``offset`` skips leading
+        results for "show more" paging, and ``pipeline_tag`` restricts results
+        to one Hugging Face task.
+        """
         return await to_thread.run_sync(
             search_hugging_face_models,
             query,
             limit,
             mlx_only,
+            offset,
+            pipeline_tag,
         )
 
     async def run(self):
@@ -11218,6 +11325,7 @@ class API:
         model_id: ModelId,
         response_format: AudioResponseFormat,
         *,
+        reference_voice_profile: str | None = None,
         reference_audio_filename: str | None = None,
         reference_audio_content_type: str | None = None,
         reference_audio_sha256: str | None = None,
@@ -11237,9 +11345,11 @@ class API:
             top_k=request.top_k,
             repetition_penalty=request.repetition_penalty,
             max_tokens=request.max_tokens,
+            seed=request.seed,
             stream=request.stream,
             streaming_interval=request.streaming_interval,
             reference_text=request.reference_text,
+            reference_voice_profile=reference_voice_profile,
             reference_audio_present=reference_audio_sha256 is not None,
             reference_audio_filename=reference_audio_filename,
             reference_audio_content_type=reference_audio_content_type,
@@ -11276,7 +11386,20 @@ class API:
         if card.audio is None:
             return request
         if request.voice is not None:
-            if card.audio.voices and request.voice not in card.audio.voices:
+            if card.audio.supports_voice_listing is not True:
+                reference_guidance = (
+                    "; omit `voice` and provide `reference_audio` instead"
+                    if card.audio.supports_reference_audio is True
+                    else "; omit `voice`"
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Model {model_id} does not expose a voice catalog"
+                        f"{reference_guidance}"
+                    ),
+                )
+            if request.voice not in card.audio.voices:
                 raise HTTPException(
                     status_code=400,
                     detail=(
@@ -11288,6 +11411,49 @@ class API:
         if card.audio.default_voice is None:
             return request
         return request.model_copy(update={"voice": card.audio.default_voice})
+
+    async def _bundled_reference_profile_for_voice(
+        self,
+        model_id: ModelId,
+        voice: str | None,
+    ) -> str | None:
+        """Return the bundled profile backing a validated voice selection.
+
+        Args:
+            model_id: Mounted TTS model selected for synthesis.
+            voice: Explicit or card-default voice identifier.
+
+        Returns:
+            The bundled profile identifier, or ``None`` for model-native voices.
+        """
+
+        if voice is None:
+            return None
+        matching_instances = tuple(
+            instance
+            for instance in self.state.instances.values()
+            if instance.shard_assignments.model_id == model_id
+        )
+        # Request validation normally guarantees mounted state. Keep this
+        # lookup inert for isolated adapters/tests that replace validation.
+        if not matching_instances:
+            return None
+        card = next(
+            (
+                candidate
+                for instance in matching_instances
+                if (candidate := self._model_card_for_instance(instance)) is not None
+            ),
+            None,
+        )
+        if card is None:
+            card = await self._get_running_model_card(model_id)
+        if card.audio is None:
+            return None
+        for catalog_voice in card.audio.voice_catalog:
+            if catalog_voice.id == voice:
+                return catalog_voice.reference_profile
+        return None
 
     async def _start_speech_synthesis(
         self,
@@ -11399,6 +11565,10 @@ class API:
             stream=True,
         )
         request = await self._apply_default_speech_voice(request, model_id)
+        reference_voice_profile = await self._bundled_reference_profile_for_voice(
+            model_id,
+            request.voice,
+        )
         if response_format != AudioResponseFormat.Mp3:
             raise HTTPException(
                 status_code=400,
@@ -11411,6 +11581,7 @@ class API:
             request,
             model_id,
             response_format,
+            reference_voice_profile=reference_voice_profile,
         )
 
     async def _admit_builtin_tts_stream(
@@ -12365,7 +12536,7 @@ class API:
             ):
                 if key in payload:
                     payload[key] = float(cast(str, payload[key]))
-            for key in ("top_k", "max_tokens"):
+            for key in ("top_k", "max_tokens", "seed"):
                 if key in payload:
                     payload[key] = int(cast(str, payload[key]))
         except ValueError as exc:
@@ -12430,7 +12601,23 @@ class API:
         model_id, response_format = await self._validate_speech_synthesis_model(
             ModelId(request.model), requested_response_format, stream=request.stream
         )
-        request = await self._apply_default_speech_voice(request, model_id)
+        if reference_audio_file is not None and request.voice is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "`voice` cannot be combined with an uploaded `reference_audio`; "
+                    "omit `voice` to use the request-scoped reference"
+                ),
+            )
+        reference_voice_profile: str | None = None
+        if reference_audio_file is None:
+            request = await self._apply_default_speech_voice(request, model_id)
+            reference_voice_profile = (
+                await self._bundled_reference_profile_for_voice(
+                    model_id,
+                    request.voice,
+                )
+            )
         if request.stream and response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
             supported = ", ".join(
                 audio_format.value
@@ -12477,6 +12664,7 @@ class API:
                 request,
                 model_id,
                 response_format,
+                reference_voice_profile=reference_voice_profile,
                 reference_audio_filename=reference_filename,
                 reference_audio_content_type=reference_content_type,
                 reference_audio_sha256=reference_sha256,
@@ -13061,7 +13249,7 @@ class API:
             Query(description="Mounted text-to-speech model id."),
         ],
     ) -> AudioVoiceList:
-        """Return built-in voices declared by one mounted TTS model."""
+        """Return stable built-in and bundled-reference voices for a TTS model."""
 
         if not model.strip():
             raise HTTPException(status_code=400, detail="`model` must not be empty")
@@ -13103,6 +13291,12 @@ class API:
                         catalog_by_id[voice].preferred_languages
                         if voice in catalog_by_id
                         else ()
+                    ),
+                    kind=(
+                        "reference"
+                        if voice in catalog_by_id
+                        and catalog_by_id[voice].reference_profile is not None
+                        else "builtin"
                     ),
                 )
                 for voice in model_card.audio.voices

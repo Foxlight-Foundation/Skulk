@@ -13,6 +13,7 @@ from skulk.shared.models.model_cards import (
     ModelCard,
     ModelTask,
     ReasoningCardConfig,
+    ReasoningFormat,
 )
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
@@ -101,6 +102,36 @@ async def test_toggleable_model_explicit_false_normalizes_to_disabled_effort() -
 
     assert params.enable_thinking is False
     assert params.reasoning_effort == "minimal"
+
+
+@pytest.mark.anyio
+async def test_qwen35_toggleable_model_defaults_to_thinking_disabled() -> None:
+    model_id = ModelId("mlx-community/Qwen3.5-2B-4bit")
+    card = ModelCard(
+        model_id=model_id,
+        storage_size=Memory.from_mb(1700),
+        n_layers=24,
+        hidden_size=2048,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        family="qwen",
+        capabilities=["text", "thinking", "thinking_toggle", "vision"],
+        reasoning=ReasoningCardConfig(
+            supports_toggle=True,
+            format=ReasoningFormat.TokenDelimited,
+            default_effort="medium",
+            disabled_effort="none",
+        ),
+    )
+    request = ChatCompletionRequest(
+        model=model_id,
+        messages=[ChatCompletionMessage(role="user", content="Hello")],
+    )
+
+    params = await chat_request_to_text_generation(request, model_card=card)
+
+    assert params.enable_thinking is False
+    assert params.reasoning_effort == "none"
 
 
 @pytest.mark.anyio

@@ -1,4 +1,5 @@
 import json
+import re
 import struct
 from collections.abc import Awaitable, Callable, Iterable
 from enum import Enum
@@ -45,7 +46,7 @@ from skulk.utils.pydantic_ext import CamelCaseModel, FrozenModel
 # whatever that generator got wrong (the fresh-fleet audit found exactly that:
 # pre-#652-fix cards forcing serial in-process llama_cpp over the served
 # engine).
-CARD_GENERATOR_REVISION: Final[int] = 1
+CARD_GENERATOR_REVISION: Final[int] = 2
 
 # kinda ugly...
 # TODO: load search path from config.toml
@@ -105,6 +106,8 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
                 if vision is not None:
                     card = card.model_copy(update={"vision": vision})
             existing = _card_cache.get(card.model_id)
+            if is_custom and existing is not None and not existing.is_custom:
+                card = preserve_generated_card_constraints(card, existing)
             stale_generated = (
                 card.generator_revision is not None
                 and card.generator_revision < CARD_GENERATOR_REVISION
@@ -170,6 +173,29 @@ async def get_model_cards() -> list["ModelCard"]:
     return [c for c in _card_cache.values() if not _is_image_card(c)]
 
 
+async def get_bundled_card(model_id: ModelId) -> "ModelCard | None":
+    """Load the curated card for a model independently of custom overrides.
+
+    Args:
+        model_id: Exact repository identifier to resolve.
+
+    Returns:
+        The matching bundled card, or ``None`` when the repository is not in
+        the curated catalog.
+
+    The live cache intentionally lets custom cards win. Callers that need the
+    curated safety baseline must therefore resolve it from bundled storage,
+    especially when a repeated add request has already replaced the cache
+    entry with a generated custom card.
+    """
+    card_path = model_id.normalize() + ".toml"
+    for directory in _BUILTIN_CARD_DIRS:
+        path = directory / card_path
+        if await path.exists():
+            return await ModelCard.load_from_path(path)
+    return None
+
+
 class ModelTask(str, Enum):
     """Task families a model card can declare as servable."""
 
@@ -200,7 +226,7 @@ class AudioCardKind(str, Enum):
 
 
 class AudioVoiceConfig(FrozenModel):
-    """Declarative metadata for one stable built-in TTS voice."""
+    """Declarative metadata for one stable TTS voice."""
 
     id: str
     """Model-specific voice identifier accepted by speech synthesis."""
@@ -208,10 +234,14 @@ class AudioVoiceConfig(FrozenModel):
     """Human-readable voice name shown by clients."""
     preferred_languages: tuple[str, ...] = ()
     """Ordered BCP 47 language tags for which this voice is a preferred match."""
+    reference_profile: str | None = None
+    """Bundled reference profile used to condition models without built-in voices."""
 
-    @field_validator("id", "name", mode="before")
+    @field_validator("id", "name", "reference_profile", mode="before")
     @classmethod
-    def _normalize_voice_text(cls, value: object) -> str:
+    def _normalize_voice_text(cls, value: object) -> str | None:
+        if value is None:
+            return None
         normalized = str(value).strip()
         if not normalized:
             raise ValueError("voice id and name must not be empty")
@@ -553,6 +583,19 @@ class AudioCardConfig(CamelCaseModel):
                 raise ValueError(
                     "voice_catalog ids must match voices exactly and preserve order"
                 )
+            reference_voices = tuple(
+                voice
+                for voice in self.voice_catalog
+                if voice.reference_profile is not None
+            )
+            if reference_voices and self.supports_reference_audio is not True:
+                raise ValueError(
+                    "reference voice profiles require supports_reference_audio=true"
+                )
+            if any(voice.id != voice.reference_profile for voice in reference_voices):
+                raise ValueError(
+                    "reference voice ids must match their bundled profile ids"
+                )
         if self.default_voice is not None and self.default_voice not in self.voices:
             raise ValueError("default_voice must be included in voices")
         return self
@@ -611,6 +654,15 @@ class PlacementCardConfig(CamelCaseModel):
 
     max_context_tokens: int | None = None
     """Soft: caps the placement-time KV budget check (see #145) when set."""
+
+    max_pipeline_split_layer: int | None = Field(default=None, ge=1)
+    """Largest layer boundary at which a pipeline rank may begin.
+
+    Some architectures end with layers that reuse KV produced by earlier
+    concrete layers. Keeping every split at or before this boundary ensures the
+    final rank owns those producers as well as their dependent tail. ``None``
+    allows the planner to split at any ordinary layer boundary.
+    """
 
     backend_preference: tuple[str, ...] = ()
     """Soft, ordered preference among the node's backend tags (e.g.
@@ -1019,6 +1071,16 @@ class ModelCard(CamelCaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_pipeline_split_limit(self) -> "ModelCard":
+        """Require a constrained split boundary to lie inside the model."""
+        split_limit = self.placement.max_pipeline_split_layer
+        if split_limit is not None and split_limit >= self.n_layers:
+            raise ValueError(
+                "placement.max_pipeline_split_layer must be smaller than n_layers"
+            )
+        return self
+
     @field_validator("tasks", mode="before")
     @classmethod
     def _validate_tasks(cls, v: list[str | ModelTask]) -> list[ModelTask]:
@@ -1278,6 +1340,39 @@ class ModelCard(CamelCaseModel):
                 ),
             ),
         )
+
+
+def preserve_generated_card_constraints(
+    generated: ModelCard,
+    bundled: ModelCard | None,
+) -> ModelCard:
+    """Carry curated hard placement constraints into a generated override.
+
+    Args:
+        generated: Machine-generated Hugging Face metadata card.
+        bundled: Existing curated card for the same model, when one exists.
+
+    Returns:
+        The generated card with any curated pipeline split boundary retained.
+
+    Operator-authored cards have no generator stamp and remain authoritative.
+    Generated cards are metadata caches, so they must not erase a bundled
+    architecture invariant merely because the user added the same repository
+    through the dashboard.
+    """
+    if (
+        generated.generator_revision is None
+        or bundled is None
+        or bundled.is_custom
+        or bundled.placement.max_pipeline_split_layer is None
+    ):
+        return generated
+    placement = generated.placement.model_copy(
+        update={
+            "max_pipeline_split_layer": bundled.placement.max_pipeline_split_layer
+        }
+    )
+    return generated.model_copy(update={"placement": placement})
 
 
 def add_to_card_cache(card: "ModelCard") -> None:
@@ -1562,18 +1657,47 @@ def _gguf_quant_label(name: str) -> str:
     return ""
 
 
+# Companion artifacts a GGUF repo ships ALONGSIDE the model: speculative
+# drafters (dspark/dflash/draft), importance-matrix calibration files, and
+# multimodal projectors. Useless (or worse, actively misleading) as the main
+# model: a repo default that picked unsloth's ``dspark-*-Q8_0.gguf`` drafter
+# would stage a 10 GB draft model wearing a 284B model's name. Word-boundary
+# matched so ordinary model names containing these letters don't trip it.
+_COMPANION_GGUF_PATTERN: Final = re.compile(
+    r"(?:^|[^a-z0-9])(?:mmproj|imatrix|dspark|dflash|draft)(?:$|[^a-z])"
+)
+
+
+def is_companion_gguf(name: str) -> bool:
+    """True when a GGUF filename names a companion artifact, not LM weights.
+
+    Companions are speculative-decoding drafters (``dspark``/``dflash``/
+    ``draft``), importance-matrix calibration files, and multimodal
+    projectors. They are ranked dead-last by default selection so a repo
+    default never picks one, while a drafter-only repo (a published draft
+    companion) still resolves.
+    """
+    return _COMPANION_GGUF_PATTERN.search(name.rsplit("/", 1)[-1].lower()) is not None
+
+
 def select_preferred_gguf(gguf_files: "list[tuple[str, int]]") -> str:
     """Pick the GGUF weights file to load: best quant, then basename order.
 
     Prefers a real quantization (Q4_K_M first) over the unquantized BF16/F16 a
-    multi-quant repo also ships (#334). The basename tie-break makes the choice
+    multi-quant repo also ships (#334), and ranks companion artifacts
+    (drafters, imatrix files) behind every real quant so a repo default never
+    stages a speculator as the model. The basename tie-break makes the choice
     deterministic and, for a shard group, picks the first shard. The runner's
     ``select_gguf_file`` falls back to this same ranking when the card does not
     pin a file, so download, sizing, and loading all agree.
     """
     return min(
         (name for name, _ in gguf_files),
-        key=lambda name: (gguf_quant_rank(name), name.rsplit("/", 1)[-1]),
+        key=lambda name: (
+            is_companion_gguf(name),
+            gguf_quant_rank(name),
+            name.rsplit("/", 1)[-1],
+        ),
     )
 
 

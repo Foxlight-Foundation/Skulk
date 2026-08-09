@@ -5,11 +5,72 @@ from __future__ import annotations
 import os
 import shlex
 import sys
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import nodejs_wheel
+
+_NPM_PROBE_ATTEMPTS = 3
+
+
+def run_npm_probe(
+    arguments: list[str],
+    *,
+    npm_runner: Callable[[list[str]], int],
+    sleep: Callable[[float], None],
+) -> int:
+    """Retry the read-only npm version probe and report every failure.
+
+    The dashboard installer uses this probe immediately after a large first
+    environment sync. A transient process-launch failure must not strand a
+    fresh install, while a persistent failure must retain enough evidence for
+    the operator to diagnose it.
+
+    Args:
+        arguments: npm arguments for the version probe.
+        npm_runner: Effect that invokes bundled npm and returns its exit status.
+        sleep: Effect used to pause between attempts.
+
+    Returns:
+        Zero after a successful attempt, otherwise the final failure status.
+
+    Raises:
+        OSError: The final probe attempt could not launch the bundled process.
+
+    Side effects:
+        Writes failed-attempt diagnostics to stderr and invokes ``sleep``
+        between attempts.
+    """
+
+    final_status = 1
+    for attempt in range(1, _NPM_PROBE_ATTEMPTS + 1):
+        launch_error: OSError | None = None
+        try:
+            final_status = int(npm_runner(arguments))
+        except OSError as error:
+            launch_error = error
+        else:
+            if final_status == 0:
+                return 0
+        retrying = attempt < _NPM_PROBE_ATTEMPTS
+        suffix = "; retrying" if retrying else ""
+        failure = (
+            f"launch error {launch_error!s}"
+            if launch_error is not None
+            else f"exit {final_status}"
+        )
+        print(
+            "bundled Node.js probe attempt "
+            f"{attempt}/{_NPM_PROBE_ATTEMPTS} failed with {failure}{suffix}",
+            file=sys.stderr,
+        )
+        if retrying:
+            sleep(1.0)
+        elif launch_error is not None:
+            raise launch_error
+    return final_status
 
 
 def _write_node_launcher(
@@ -73,6 +134,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
             if current_path
             else str(shim_directory)
         )
+        if resolved_arguments == ["--version"]:
+            return run_npm_probe(
+                resolved_arguments,
+                npm_runner=nodejs_wheel.npm,
+                sleep=time.sleep,
+            )
         return int(nodejs_wheel.npm(resolved_arguments))
 
 

@@ -28,8 +28,16 @@ class SpeechSynthesisTaskParams(BaseModel, frozen=True):
     top_k: int | None = None
     repetition_penalty: float | None = None
     max_tokens: int | None = None
+    seed: int | None = Field(
+        default=None,
+        ge=0,
+        le=2**32 - 1,
+        description="Optional deterministic MLX sampling seed for this request.",
+    )
     reference_audio: str | None = None
     reference_text: str | None = None
+    reference_voice_profile: str | None = None
+    """Verified bundled profile ID resolved locally by the selected worker."""
     reference_audio_present: bool = False
     reference_audio_filename: str | None = None
     reference_audio_content_type: str | None = None
@@ -49,6 +57,16 @@ class SpeechSynthesisTaskParams(BaseModel, frozen=True):
             )
         if self.reference_audio_data is not None and not self.reference_audio_present:
             raise ValueError("reference_audio_data requires reference_audio_present")
+        if self.reference_voice_profile is not None and (
+            self.reference_audio is not None
+            or self.reference_text is not None
+            or self.reference_audio_present
+            or self.reference_audio_data is not None
+        ):
+            raise ValueError(
+                "bundled reference voice profiles cannot be combined with "
+                "request-scoped reference audio"
+            )
         return self
 
 

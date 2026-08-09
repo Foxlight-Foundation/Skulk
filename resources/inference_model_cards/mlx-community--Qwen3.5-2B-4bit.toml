@@ -16,15 +16,12 @@ format = "token_delimited"
 default_effort = "medium"
 disabled_effort = "none"
 
-# MTP speculative decoding re-validated 2026-06-05 under the bonus-driven
-# cadence (deferred replay + quantize-on-load sidecar): 80% acceptance,
-# 91.3 tok/s vs 78.9 vanilla (1.16x — modest on a trunk this fast, where
-# per-round drafter overhead is a large fraction of a 13ms decode step)
-# (Skulk #192 / PR #193 / bonus-driven cadence rework).
+# MTP is deliberately disabled for this card. Although the sidecar previously
+# measured high token acceptance on a narrow greedy benchmark, fresh-install
+# text and vision journeys produced repetitive output until the token limit.
+# The same model completed both journeys normally without speculative decoding.
 [runtime]
-mtp_heads = true
-mtp_max_depth = 1
-mtp_sidecar_repo = "FoxlightAI/qwen3-5-2b-base-mtp"
+mtp_heads = false
 
 # Qwen3.5 is a natively multimodal (early-fusion) VLM: config.json ships a
 # vision_config and the repo is tagged image-text-to-text /

@@ -3,11 +3,13 @@
 # pyright: reportAny=false, reportPrivateUsage=false
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 import anyio
 import pytest
 
+import skulk.main as main_module
 from skulk.api.main import API
 from skulk.download.coordinator import DownloadCoordinator
 from skulk.main import Node
@@ -20,6 +22,7 @@ from skulk.shared.types.state_sync import StateSnapshot, StateSyncMessage
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
 from skulk.store.config import ModelStoreConfig, SkulkConfig
 from skulk.store.model_store_client import ModelStoreClient
+from skulk.store.model_store_server import ModelStoreServer
 from skulk.utils.channels import channel
 from skulk.worker.main import Worker
 
@@ -72,6 +75,14 @@ class _OldWorker:
         self._events.append("old_worker.shutdown")
 
 
+class _OldStoreServer:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    async def stop(self) -> None:
+        self._events.append("old_store_server.stop")
+
+
 class _FakeApi:
     def __init__(self, events: list[str]) -> None:
         self._events = events
@@ -102,6 +113,13 @@ class _FakeApi:
 
     def refresh_config_dependent_capabilities(self) -> None:
         self._events.append("api.refresh_config_dependent_capabilities")
+
+    def set_model_store_runtime(
+        self,
+        _skulk_config: SkulkConfig | None,
+        _store_client: ModelStoreClient | None,
+    ) -> None:
+        self._events.append("api.set_model_store_runtime")
 
 
 @pytest.mark.asyncio
@@ -495,3 +513,138 @@ async def test_request_cluster_config_ignores_non_master_origin() -> None:
 
         await request_finished.wait()
         assert result["config"] == "good: true\n"
+
+
+@pytest.mark.asyncio
+async def test_request_cluster_config_survives_delayed_master_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router = _StateSyncOnlyRouter()
+    _election_sender, election_receiver = channel[ElectionResult]()
+    node = Node(
+        router=cast(Router, cast(object, router)),
+        event_router=cast(EventRouter, object()),
+        download_coordinator=None,
+        worker=None,
+        election=cast(Election, object()),
+        election_result_receiver=election_receiver,
+        master=None,
+        api=None,
+        node_id=NodeId("self"),
+        offline=False,
+        skulk_config=None,
+        store_client=None,
+        store_server=None,
+        telemetry_view=TelemetryView(),
+        telemetry_receiver=channel[NodeTelemetry]()[1],
+    )
+    monkeypatch.setattr(main_module, "_CLUSTER_CONFIG_SYNC_ATTEMPTS", 6)
+    monkeypatch.setattr(
+        main_module,
+        "_CLUSTER_CONFIG_SYNC_RESPONSE_TIMEOUT_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_CLUSTER_CONFIG_SYNC_RETRY_INTERVAL_SECONDS",
+        0.001,
+    )
+
+    session_id = SessionId(master_node_id=NodeId("master"), election_clock=10)
+    snapshot = StateSnapshot(
+        session_id=session_id,
+        last_event_applied_idx=-1,
+        state=State(last_event_applied_idx=-1),
+    )
+    result: dict[str, str | None] = {}
+
+    async def _request() -> None:
+        result["config"] = await node._request_cluster_config(session_id)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_request)
+        for attempt in range(4):
+            request = await router.request_receiver.receive()
+            if attempt == 3:
+                await router.response_sender.send(
+                    (
+                        str(session_id.master_node_id),
+                        StateSyncMessage(
+                            kind="response",
+                            requester=request.requester,
+                            session_id=session_id,
+                            snapshot=snapshot,
+                            config_yaml="model_store: {}\n",
+                        ),
+                    )
+                )
+
+        while "config" not in result:
+            await anyio.sleep(0)
+
+        assert result["config"] == "model_store: {}\n"
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.asyncio
+async def test_authoritative_config_rewires_api_and_stops_superseded_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    config_path = tmp_path / "skulk.yaml"
+    monkeypatch.setattr(main_module, "resolve_config_path", lambda: config_path)
+    replacement_client = cast(ModelStoreClient, object())
+
+    def _replacement_runtime(
+        _node_id: NodeId,
+        _config: SkulkConfig | None,
+    ) -> tuple[ModelStoreClient, None]:
+        return replacement_client, None
+
+    monkeypatch.setattr(
+        main_module,
+        "_configure_model_store_runtime",
+        _replacement_runtime,
+    )
+
+    _election_sender, election_receiver = channel[ElectionResult]()
+    node = Node(
+        router=cast(Router, object()),
+        event_router=cast(EventRouter, object()),
+        download_coordinator=None,
+        worker=None,
+        election=cast(Election, object()),
+        election_result_receiver=election_receiver,
+        master=None,
+        api=cast(API, cast(object, _FakeApi(events))),
+        node_id=NodeId("worker"),
+        offline=False,
+        skulk_config=SkulkConfig(
+            model_store=ModelStoreConfig(
+                store_host="worker",
+                store_path="/old-store",
+            )
+        ),
+        store_client=cast(ModelStoreClient, object()),
+        store_server=cast(ModelStoreServer, cast(object, _OldStoreServer(events))),
+        telemetry_view=TelemetryView(),
+        telemetry_receiver=channel[NodeTelemetry]()[1],
+    )
+
+    await node._apply_authoritative_cluster_config(
+        "model_store:\n"
+        "  store_host: elected-master\n"
+        "  store_http_host: 192.0.2.44\n"
+        "  store_path: /master-store\n"
+    )
+
+    assert node.store_client is replacement_client
+    assert node.store_server is None
+    assert node.skulk_config is not None
+    assert node.skulk_config.model_store is not None
+    assert node.skulk_config.model_store.store_host == "elected-master"
+    assert events == [
+        "old_store_server.stop",
+        "api.set_model_store_runtime",
+    ]

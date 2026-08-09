@@ -101,11 +101,23 @@ If `nix fmt` changes any files, stage them before committing. The CI runs `nix f
 
 ### Node Composition
 A single Skulk `Node` (src/skulk/main.py) runs multiple components:
-- **Router**: libp2p-based pub/sub messaging via Rust bindings (`skulk_pyo3_bindings`). `TELEMETRY` uses bounded latest-value admission, a one-packet Python egress queue, and its own gossipsub protocol/handler queues; `ELECTION_MESSAGES` has a separate Python egress queue and isolated protocol/handler queues. Neither can be starved by ordinary control fan-out, and telemetry pressure cannot consume election capacity. Election alone carries a temporary legacy-protocol copy. Peer discovery tries all mDNS addresses once, then slows link-local retries to one minute after another path connects; socket liveness requires three consecutive five-second ping failures. Live authenticated libp2p sessions are also recorded as `session=True` topology edges (refcounted per peer, seeded across worker recreation), keeping NAT'd/proxied remote members visible and placeable; placement host selection skips session edges, and advertised addresses that fail three consecutive probe sweeps back off to every sixth sweep while no-longer-advertised addresses still delete their edges (#662). Telemetry publishes that reach no subscribed peers are counted (`noPeerPublishes` in `GET /v1/diagnostics/telemetry`) and, sustained on a connected node, warn that the node will be invisible to membership (#660).
+- **Router**: libp2p-based pub/sub messaging via Rust bindings (`skulk_pyo3_bindings`). `TELEMETRY` uses bounded latest-value admission, a one-packet Python egress queue, and its own gossipsub protocol/handler queues; `ELECTION_MESSAGES` has a separate Python egress queue and isolated protocol/handler queues. `AUTHORITY_MESSAGES` has bounded producer admission plus a distinct bounded Python egress queue and carries only signed public consensus metadata on the default authenticated gossipsub behavior. Ordinary Python control backlog cannot queue ahead of election or authority traffic, and telemetry pressure cannot consume election capacity. Election alone carries a temporary legacy-protocol copy. Peer discovery tries all mDNS addresses once, then slows link-local retries to one minute after another path connects; socket liveness requires three consecutive five-second ping failures. Live authenticated libp2p sessions are also recorded as `session=True` topology edges (refcounted per peer, seeded across worker recreation), keeping NAT'd/proxied remote members visible and placeable; placement host selection skips session edges, and advertised addresses that fail three consecutive probe sweeps back off to every sixth sweep while no-longer-advertised addresses still delete their edges (#662). Telemetry publishes that reach no subscribed peers are counted (`noPeerPublishes` in `GET /v1/diagnostics/telemetry`) and, sustained on a connected node, warn that the node will be invisible to membership (#660).
 - **Worker**: Handles inference tasks, downloads models, manages runner processes
 - **Master**: Coordinates cluster state, places model instances across nodes; retained event-log replay is coalesced onto one asynchronously paced worker, and sustained idle-state event-log growth emits an operator warning
 - **Election**: Bully algorithm for master election, carried on the isolated election gossipsub behavior with duplicate candidate suppression during protocol migration
 - **API**: FastAPI server for OpenAI-compatible chat completions
+- **Operator identity/authority foundation**: stable per-host and cluster
+  identities, deterministic Ed25519 quorum certification, two-phase
+  crash-fault vote collection and recovery, a public consensus SQLite log, and
+  an encrypted local compare-and-set journal under `src/skulk/operator/`. It
+  remains separate from event-sourced `State`, telemetry, diagnostics, and the
+  public event log. Restart recovery reverifies the complete certificate and
+  membership chain from immutable bootstrap anchors. The encrypted journal
+  requires an injected external data-key provider. A dormant bounded service
+  can drive one caller-selected proposal with deadlines, retries, accepted-value
+  recovery, local durable commit, and catch-up broadcast; it is not started by
+  `Node`. Authority leader selection, secret payload replication, OS key
+  wrapping, Node lifecycle integration, and gateway fencing remain later slices.
 
 ### Node Facts & capability derivation (#614)
 Detection creates capability; configuration overrides it; disagreement is
@@ -195,9 +207,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
   serve `/v1/audio/translations` as a standard capability (card
   `audio.supports_translation` is the only gate; the whole `experiments`
   config section is now deprecated compatibility surface, accepted but
-  ignored); TTS cards may expose static voices
-  plus preferred-language metadata through the Skulk `/v1/audio/voices`
-  extension. Dashboard Auto selection pins the first language match across all
+  ignored); TTS cards may expose model-native voices or checksummed bundled
+  reference profiles plus preferred-language metadata through the Skulk
+  `/v1/audio/voices` extension. Bundled profile IDs resolve to local audio and
+  exact transcripts only inside the worker. Dashboard Auto selection pins the first language match across all
   sentence-sized requests in one response. The realtime transcription
   WebSocket accepts bounded server VAD and serializes utterances as distinct
   provider calls. Optional response configuration routes final transcripts
@@ -307,6 +320,7 @@ Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `TRACE_DATA`: Best-effort diagnostic trace payloads, off the event log/master/State. Each runner supervisor sends one terminal packet per traced task rank to the owning API; that API assembles the expected rank set under fixed task-count and age bounds before writing the Chrome trace. Same-version fleet required.
 - `VISION_MEDIA`: VLM and image-edit input, off the event log/master/State. The API waits for authoritative `TaskCreated` placement, then sends an `opened -> chunk* -> completed` binary-framed stream directly to every selected worker rank. Workers apply stream/frame/byte/age bounds and expose input to planning only after exact sequence, metadata, task-owner, and SHA-256 verification plus successful acknowledgement admission; timed-out acknowledgement sends retry while the task remains gated. Each rank returns `accepted`, and a bounded missing-ack deadline fails the source request. Vision ingress has separate bounded network-receive lanes and a separate remote dispatcher; `NodeDiagnostics.visionMediaEgress` reports router pressure and `visionMediaIngress` reports worker retention and outcomes, so uploads cannot delay control receive, consume generated-output capacity, or fail invisibly. Same-version fleet required.
 - `ELECTION_MESSAGES`: Election protocol messages
+- `AUTHORITY_MESSAGES`: Stable-installation-addressed, Ed25519-signed public authority consensus messages (prepare/promise/accept/vote/commit/catch-up). It has dedicated bounded Python egress, but currently uses the default libp2p gossipsub behavior; secret payloads never enter it.
 - `CONNECTION_MESSAGES`: libp2p connection updates
 - `TELEMETRY`: Workers offer `NodeTelemetry` without blocking into a bounded 256-key latest-value map, drained through a one-packet queue and dedicated gossipsub protocol/handler queues. The in-memory `TelemetryView` holds node resources/memory/system/identity/disk/rdma-ctl, extension capability tags, the payload-free `NodeHeartbeat`, and non-terminal `DownloadPending`/`DownloadOngoing`; none enters the event log. Only download completed/failed outcomes remain in `State`, with opaque attempt IDs preventing delayed telemetry from overriding terminal/reset decisions; `effective_downloads()` restores the existing planner/worker/`GET /state` view. `GET /v1/diagnostics/telemetry` exposes aggregate local pressure. Heartbeat publishes every two seconds; ordinary telemetry and the last indexed control event remain liveness fallbacks, and `NodeTimedOut.evidence` persists the deciding ages. Connectivity readings (`node_network`, thunderbolt maps/cycles) deliberately remain ordered control state because they define the topology graph. Topology edges come from HTTP identity probes of advertised addresses PLUS authenticated libp2p sessions recorded as first-class edges (#662, refcounted per peer; the session edge is what keeps a NAT'd remote member out of floating-node limbo), with failing advertised addresses probed at a backed-off cadence. Same-version fleets remain required.
 
@@ -318,6 +332,8 @@ The system uses event sourcing for state management:
 - Master admits only the explicit durable control-event allowlist, indexes and
   broadcasts those events, and payload-free skips any decodable non-control
   event before ordering; workers apply indexed control events
+- Operator identity and mutable authorization are a separate security plane;
+  they must never be represented as `State` fields or ordinary Skulk events.
 
 **Versioning: all nodes in a cluster MUST run the same Skulk version and source build before serving workloads.** Mixed-build clusters are a degraded deployment window, not an interoperability mode: correctness-bearing events, commands, state, telemetry envelopes, and DATA types remain strict (`extra="forbid"`), with no dual-publish, legacy-event bridge, or snapshot-hydration shim. Operational diagnostics are the only tolerant boundary: peer node/capture responses ignore unknown additive fields recursively, additive counters require compatibility defaults, `/v1/diagnostics/cluster` reports aggregate/per-node `versionStatus`, and `/state.nodeHealth` warns with `version_mismatch` until identity telemetry converges. This preserves rollout observability without claiming cross-version inference compatibility. See `website/docs/architecture.md` "Deployment & versioning" and #293.
 
@@ -333,6 +349,23 @@ The system uses event sourcing for state management:
 - `src/skulk/shared/models/`: persisted model metadata and capability resolution
   - `model_cards.py`: declarative model cards, including optional advanced capability sections; machine-generated custom cards carry `generator_revision`, and a stamped card older than `CARD_GENERATOR_REVISION` loses override power against the bundled card for the same id (unstamped = hand-authored, keeps #652 override)
   - `capabilities.py`: normalized runtime capability profiles derived from model cards plus conservative family defaults
+- `src/skulk/operator/`: stable operator identity, deterministic quorum
+  certification, crash-fault consensus and recovery, bounded dormant proposal
+  lifecycle, separate public consensus persistence, and encrypted authority
+  persistence. Runtime libp2p `NodeId`
+  remains unsuitable for mobile history, device membership, or authorization
+  subjects.
+
+### Memory library (experimental, inert)
+`src/skulk/memory/` holds the fabric-memory core library: HRR primitives
+(`hrr.py`), the fractional-ZCA pattern-separation stage (`separation.py`), the
+`MemoryIndex` interface with exact and holographic implementations
+(`index.py`), and the durable node-local content store (`store.py`: JSONL
+segments, torn-tail repair, tombstone+compact exact forgetting, ENOSPC/floor
+degraded mode where capture stops but reads and inference continue, and
+`rebuild()` replaying stored spans into a fresh index). The store is the
+source of truth; fields are rebuildable indexes over it. Nothing outside the
+package imports it yet.
 
 ### Rust Components
 Rust code in `rust/` provides:
@@ -358,7 +391,9 @@ and no extension installed = Skulk unchanged. Kill switch:
 `SKULK_EXTENSIONS_DISABLE=1`.
 
 ### Dashboard
-React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API when present. A node without the built assets (a headless/non-Mac worker, or with no `SKULK_DASHBOARD_DIR`) sets `DASHBOARD_DIR=None`, skips the mount, and serves the API without the UI.
+React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API when present. The installer and supervised launchd/systemd startup wrapper build these assets with Skulk's pinned bundled Node.js runtime, retaining compatible system Node/npm only as a recovery fallback. Only an explicitly headless node (or one with no `SKULK_DASHBOARD_DIR`) sets `DASHBOARD_DIR=None`, skips the mount, and serves the API without the UI.
+
+Styling is theme-token-driven (`dashboard-react/src/theme/theme.ts`): dark mode is the Foxlight operator design system's Den palette, and components must never branch on the theme name; all variation lives in tokens. Building with `VITE_NIGHT_SKY=1` sets the dark palette's `scene` token to the brand valley star field, which enables the `SceneBackdrop` crown layer plus the `ShootingStars` animation and retires the abstract background mesh for that palette; the default build ships a CSS-only night gradient with the mesh.
 
 Dashboard localization uses Tolgee in `dashboard-react/src/i18n/tolgee.ts`.
 All dashboard strings must use the `skulk` namespace through Tolgee's `t()`
@@ -382,17 +417,31 @@ of truth; a store that cannot be reached at the transport level
 detection) falls back to DIRECT Hugging Face download on the node when
 `allow_hf_fallback` is on, preserving revision/GGUF pinning. The expected
 shape for store-unreachable remote members; a loud log cue elsewhere.
+Installer-generated configs begin as local bootstrap stores. On cluster
+formation, followers retry state-sync config bootstrap, receive the elected
+master's routable store address, stop superseded local store servers, and
+replace both API and worker store clients together. Do not let a fresh fleet
+retain one independent store per node: that makes dashboard download and
+placement perform repeated external downloads.
 
 Model cards may pin qualified Hugging Face artifacts with `source_revision`, a
 full commit hash. Metadata probes, direct downloads, model-store registry
 entries, and worker staging must preserve that revision. Never collapse a
 pinned artifact back onto mutable `main`, and never treat a staged directory
 from another revision as a cache hit.
-TTS cards with fixed speakers may declare `audio.voices`, optional ordered
-`audio.voice_catalog` display/preferred-language metadata, and a validated
-`audio.default_voice`, which the API applies only when callers omit `voice`.
+TTS cards may declare `audio.voices`, optional ordered `audio.voice_catalog`
+display/preferred-language metadata, optional checksummed bundled
+`reference_profile` identifiers, and a validated `audio.default_voice`, which
+the API applies only when callers omit `voice`.
 
 **Model truth vs platform truth:** a card's `compatible_backends` declares which engines the model's artifacts run on (MODEL truth) and must never encode a gap in Skulk's own runners (PLATFORM truth). Platform limitations live in code: `platform_compatible_backends` in `src/skulk/shared/backends.py` (currently: the served `llama_server` runner cannot load a vision card's mmproj projector, so vision cards are gated off served engines there; TTS/STT cards are gated to `mlx_audio`). Placement (`_card_platform_backends`) and the worker's fallback probe both apply the filter. When a runner gains a capability, flip the code table; do NOT sweep cards.
+
+Model-specific sharding truth also lives on the card:
+`placement.max_pipeline_split_layer` caps pipeline boundaries for architectures
+whose tail layers reuse KV from earlier concrete layers. The planner adjusts
+its proportional split before the ordinary per-node memory validation; the
+worker rejection remains a final invariant guard rather than the first place
+an invalid shard is discovered.
 
 ### Logging & Observability
 Centralized logging uses a three-layer stack:

@@ -106,6 +106,8 @@ def resolve_request_vision(
             tokenizer=tokenizer,
             model=model,
             task_id=task_id,
+            enable_thinking=task_params.enable_thinking,
+            reasoning_effort=task_params.reasoning_effort,
         )
     except VisionPreprocessingError:
         raise

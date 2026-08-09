@@ -16,19 +16,28 @@ import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import { chatActions } from '../../store/slices/chatSlice';
 import { store } from '../../store';
-import { useSkulkTranslation } from '../../i18n/tolgee';
+import { tolgee, useSkulkTranslation } from '../../i18n/tolgee';
 import {
   canUseStreamingSpeechPlayback,
   resyncVisibleSpeech,
+  SPEECH_PAUSE_MARKER,
+  SPEECH_PAUSE_SECONDS,
   SpeechSentenceQueue,
+  speechTextFromMarkdown,
   splitCompleteSpeechSentences,
   StreamingSpeechPlayback,
 } from '../../audio/streamingSpeechPlayback';
+import { CodeNarrator, FenceProbe } from '../../audio/codeNarration';
 import {
   createPinnedSpeechVoiceSelector,
   fetchSpeechVoiceCatalog,
 } from '../../audio/speechVoiceSelection';
-import { buildSpeechSynthesisRequest } from '../../audio/speechSynthesisRequest';
+import {
+  batchSpeechMaxTokens,
+  buildSpeechSynthesisRequest,
+  DASHBOARD_SPEECH_SEED,
+  speechLanguageForDashboardLocale,
+} from '../../audio/speechSynthesisRequest';
 import { buildApiMessages, type ApiMessagePayload } from './chatApiPayload';
 
 /* ── Types ────────────────────────────────────────────── */
@@ -120,6 +129,11 @@ const AUDIO_RESPONSE_FORMATS: readonly AudioResponseFormat[] = [
   'opus',
   'pcm',
 ];
+
+type StreamingSpeechResponseSession = {
+  playback: StreamingSpeechPlayback;
+  useEncodedFallback: boolean;
+};
 const GPT_OSS_BROWSER_TOOLS = {
   web_search: {
     type: 'function',
@@ -556,6 +570,7 @@ export function ChatView({
   className,
 }: ChatViewProps) {
   const { t } = useSkulkTranslation();
+  const speechLanguage = speechLanguageForDashboardLocale(tolgee.getLanguage());
   // Store state
   const selectedModelId = useAppSelector((s) => s.chat.selectedModelId);
   const selectedTranscriptionModelId = useAppSelector((s) => s.chat.selectedTranscriptionModelId);
@@ -579,6 +594,9 @@ export function ChatView({
     dispatch(chatActions.setSelectedVoice(voice));
   const setAutoSpeakAssistant = (enabled: boolean) =>
     dispatch(chatActions.setAutoSpeakAssistant(enabled));
+  const narrateCodeBlocks = useAppSelector((s) => s.chat.narrateCodeBlocks);
+  const setNarrateCodeBlocks = (enabled: boolean) =>
+    dispatch(chatActions.setNarrateCodeBlocks(enabled));
   const setRealtimeVoiceEnabled = (enabled: boolean) =>
     dispatch(chatActions.setRealtimeVoiceEnabled(enabled));
   const setAutoSubmitVoice = (enabled: boolean) =>
@@ -615,10 +633,7 @@ export function ChatView({
   const audioPlaybackRef = useRef<HTMLAudioElement | null>(null);
   const audioObjectUrlRef = useRef<string | null>(null);
   const streamingPlaybackRef = useRef<StreamingSpeechPlayback | null>(null);
-  const speechAbortRef = useRef<AbortController | null>(null);
   const speechSentenceQueueRef = useRef<SpeechSentenceQueue | null>(null);
-  const realtimeSpeechTextRef = useRef('');
-  const realtimeSpeechTailRef = useRef('');
 
   // Restore scroll position after store hydration + DOM render
   const dispatch = useAppDispatch();
@@ -838,10 +853,9 @@ export function ChatView({
     return () => controller.abort();
   }, [selectedSpeechModelId, selectedSpeechOption?.supportsVoiceListing, t]);
 
-  const effectiveSelectedVoice = selectedVoice && (
-    !selectedSpeechOption?.supportsVoiceListing
-    || voiceOptions.some((voice) => voice.id === selectedVoice)
-  )
+  const effectiveSelectedVoice = selectedSpeechOption?.supportsVoiceListing
+    && selectedVoice
+    && voiceOptions.some((voice) => voice.id === selectedVoice)
     ? selectedVoice
     : null;
   const voiceCatalogReady = !selectedSpeechOption?.supportsVoiceListing
@@ -854,8 +868,6 @@ export function ChatView({
   const stopSpeechPlayback = useCallback(() => {
     speechSentenceQueueRef.current?.stop();
     speechSentenceQueueRef.current = null;
-    speechAbortRef.current?.abort();
-    speechAbortRef.current = null;
     streamingPlaybackRef.current?.stop();
     streamingPlaybackRef.current = null;
     audioPlaybackRef.current?.pause();
@@ -877,9 +889,20 @@ export function ChatView({
     messageId: string | null,
     signal: AbortSignal,
     voice: string | null,
+    responseSession: StreamingSpeechResponseSession | null = null,
   ) => {
     const input = text.trim();
     if (!input || !selectedSpeechModelId) return;
+    if (input === SPEECH_PAUSE_MARKER) {
+      // Structural break (a horizontal rule): schedule silence on the shared
+      // streaming timeline instead of synthesizing text. Encoded-fallback
+      // playback has no shared timeline, so the pause is skipped there and
+      // the surrounding sentence boundaries still provide separation.
+      if (responseSession && !responseSession.useEncodedFallback) {
+        await responseSession.playback.appendSilence(SPEECH_PAUSE_SECONDS, signal);
+      }
+      return;
+    }
     if (selectedSpeechOption?.supportsVoiceListing && !voice) {
       throw new Error(t(
         'chat.view.errors.noDiscoveredVoice',
@@ -891,6 +914,7 @@ export function ChatView({
       selectedSpeechOption?.supportsStreaming
       && selectedSpeechOption.responseFormats.includes('pcm')
       && canUseStreamingSpeechPlayback()
+      && !responseSession?.useEncodedFallback
     );
     const encodedFallbackFormat = responseFormat !== 'pcm'
       ? responseFormat
@@ -902,7 +926,7 @@ export function ChatView({
     if (!useStreamingPcm && !encodedFallbackFormat) {
       throw new Error(t(
         'chat.view.errors.pcmStreamingRequired',
-        'This speech model requires secure streaming audio playback in this browser.',
+        'This speech model requires Web Audio streaming playback in this browser.',
       ));
     }
     const speechRequest = (format: AudioResponseFormat, stream: boolean) => fetch(
@@ -910,8 +934,11 @@ export function ChatView({
       buildSpeechSynthesisRequest({
         model: selectedSpeechModelId,
         input,
+        language: speechLanguage,
         responseFormat: format,
         stream,
+        maxTokens: stream ? null : batchSpeechMaxTokens(input),
+        seed: DASHBOARD_SPEECH_SEED,
         voice,
         referenceAudio: referenceAudioFile,
         referenceText: referenceAudioText,
@@ -924,6 +951,12 @@ export function ChatView({
     let response = await speechRequest(initialFormat, useStreamingPcm);
     let streamingResponse = useStreamingPcm;
     if (response.status === 503 && useStreamingPcm && encodedFallbackFormat) {
+      if (responseSession) {
+        // Once a response-scoped timeline has PCM queued, drain it before
+        // changing playback mechanisms so encoded audio cannot overlap it.
+        await responseSession.playback.finish();
+        responseSession.useEncodedFallback = true;
+      }
       response = await speechRequest(encodedFallbackFormat, false);
       streamingResponse = false;
     }
@@ -932,12 +965,18 @@ export function ChatView({
     setSpeakingMessageId(messageId);
     setIsAutoSpeaking(messageId === null);
     if (streamingResponse) {
-      const playback = new StreamingSpeechPlayback();
+      const playback = responseSession?.playback ?? new StreamingSpeechPlayback();
       streamingPlaybackRef.current = playback;
       try {
-        await playback.play(response, signal);
+        if (responseSession) {
+          await playback.append(response, signal);
+        } else {
+          await playback.play(response, signal);
+        }
       } finally {
-        if (streamingPlaybackRef.current === playback) streamingPlaybackRef.current = null;
+        if (!responseSession && streamingPlaybackRef.current === playback) {
+          streamingPlaybackRef.current = null;
+        }
       }
       return;
     }
@@ -976,38 +1015,103 @@ export function ChatView({
       if (audioObjectUrlRef.current === objectUrl) audioObjectUrlRef.current = null;
       URL.revokeObjectURL(objectUrl);
     }
-  }, [referenceAudioFile, referenceAudioText, selectedSpeechModelId, selectedSpeechOption, t]);
+  }, [
+    referenceAudioFile,
+    referenceAudioText,
+    selectedSpeechModelId,
+    selectedSpeechOption,
+    speechLanguage,
+    t,
+  ]);
 
-  const speakText = useCallback(async (text: string, messageId: string | null = 'draft') => {
+  const createSpeechSentenceQueue = useCallback((
+    messageId: string | null,
+    selectVoice: (text: string) => string | null,
+  ): SpeechSentenceQueue => {
+    const useContinuousStreaming = Boolean(
+      selectedSpeechOption?.supportsStreaming
+      && selectedSpeechOption.responseFormats.includes('pcm')
+      && canUseStreamingSpeechPlayback()
+    );
+    const responseSession: StreamingSpeechResponseSession | null = useContinuousStreaming
+      ? {
+          playback: new StreamingSpeechPlayback(),
+          useEncodedFallback: false,
+        }
+      : null;
+    if (responseSession) streamingPlaybackRef.current = responseSession.playback;
+
+    const queue = new SpeechSentenceQueue(
+      (sentence, signal) => playSpeechSegment(
+        sentence,
+        messageId,
+        signal,
+        // The pause sentinel is not prose: keep it away from response-scoped
+        // automatic voice selection so its Latin token cannot pin a voice.
+        sentence === SPEECH_PAUSE_MARKER ? null : selectVoice(sentence),
+        responseSession,
+      ),
+      (error) => {
+        const message = error instanceof Error
+          ? error.message
+          : t('chat.view.errors.speechSynthesisFailed', 'Speech synthesis failed.');
+        setSpeechError(message);
+      },
+      () => {
+        const isCurrentQueue = speechSentenceQueueRef.current === queue;
+        if (isCurrentQueue) {
+          speechSentenceQueueRef.current = null;
+          setSpeakingMessageId(null);
+          setIsAutoSpeaking(false);
+        }
+        if (
+          responseSession
+          && streamingPlaybackRef.current === responseSession.playback
+        ) {
+          streamingPlaybackRef.current = null;
+        }
+      },
+      responseSession ? () => responseSession.playback.finish() : undefined,
+      responseSession ? () => responseSession.playback.stop() : undefined,
+    );
+    speechSentenceQueueRef.current = queue;
+    setSpeakingMessageId(messageId);
+    setIsAutoSpeaking(messageId === null);
+    return queue;
+  }, [playSpeechSegment, selectedSpeechOption, t]);
+
+  const speakText = useCallback((text: string, messageId: string | null = 'draft') => {
     const input = text.trim();
     if (!input || !selectedSpeechModelId) return;
     setSpeechError(null);
     stopSpeechPlayback();
-    const abortController = new AbortController();
-    speechAbortRef.current = abortController;
     const selectVoice = createPinnedSpeechVoiceSelector(
       voiceOptions,
       effectiveSelectedVoice,
       selectedSpeechOption?.defaultVoice ?? null,
     );
-    try {
-      await playSpeechSegment(input, messageId, abortController.signal, selectVoice(input));
-      if (speechAbortRef.current === abortController) stopSpeechPlayback();
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return;
-      const messageText = error instanceof Error
-        ? error.message
-        : t('chat.view.errors.speechSynthesisFailed', 'Speech synthesis failed.');
-      setSpeechError(messageText);
-      stopSpeechPlayback();
+    const useSentenceStreaming = Boolean(
+      selectedSpeechOption?.supportsStreaming
+      && selectedSpeechOption.responseFormats.includes('pcm')
+      && canUseStreamingSpeechPlayback()
+    );
+    let segments = [input];
+    if (useSentenceStreaming) {
+      const split = splitCompleteSpeechSentences(input);
+      segments = [...split.sentences];
+      if (split.remainder.trim()) segments.push(split.remainder.trim());
     }
+    const queue = createSpeechSentenceQueue(messageId, selectVoice);
+    queue.enqueue(segments);
+    queue.finish();
   }, [
-    playSpeechSegment,
+    createSpeechSentenceQueue,
     effectiveSelectedVoice,
     selectedSpeechModelId,
     selectedSpeechOption?.defaultVoice,
+    selectedSpeechOption?.responseFormats,
+    selectedSpeechOption?.supportsStreaming,
     stopSpeechPlayback,
-    t,
     voiceOptions,
   ]);
 
@@ -1130,23 +1234,61 @@ export function ChatView({
       && selectedSpeechOption.responseFormats.includes('pcm')
       && canUseStreamingSpeechPlayback()
     )
-      ? new SpeechSentenceQueue(
-          (sentence, signal) => playSpeechSegment(
-            sentence,
-            null,
-            signal,
-            selectResponseVoice(sentence),
-          ),
-          (error) => {
-            const message = error instanceof Error
-              ? error.message
-              : t('chat.view.errors.speechSynthesisFailed', 'Speech synthesis failed.');
-            setSpeechError(message);
-          },
-          () => setIsAutoSpeaking(false),
-        )
+      ? (() => {
+          return createSpeechSentenceQueue(null, selectResponseVoice);
+        })()
       : null;
     speechSentenceQueueRef.current = sentenceQueue;
+    // Code narration (#769): short spoken interjections while a fenced code
+    // block streams. Live generation only (replays never build a narrator),
+    // and fillers fire only when the voice has run out of things to say.
+    const codeNarrator = sentenceQueue && narrateCodeBlocks
+      ? new CodeNarrator({
+          openers: [
+            t('chat.narration.opener1', "Let's write this out."),
+            t('chat.narration.opener2', 'Time for some code.'),
+            t('chat.narration.opener3', 'Writing it up now.'),
+          ],
+          fillers: [
+            t('chat.narration.filler1', 'Okay, next part.'),
+            t('chat.narration.filler2', 'Very good, now this.'),
+            t('chat.narration.filler3', 'Still writing.'),
+            t('chat.narration.filler4', 'Almost there.'),
+            t('chat.narration.filler5', 'And a little more.'),
+          ],
+          closers: [
+            t('chat.narration.closer1', 'Done!'),
+            t('chat.narration.closer2', 'And that does it.'),
+          ],
+        })
+      : null;
+    const fenceProbe = codeNarrator ? new FenceProbe() : null;
+    // Two-phase narration around each delta's enqueue: a finished block's
+    // closer settles BEFORE the prose that follows it, while an opener for
+    // a fence the delta introduces plays AFTER the introductory sentence.
+    // Only sentences that will actually be spoken count as prose (completed
+    // fences and rules produce no speech and must not defeat the debounce).
+    const narrateAround = (sentences: readonly string[]) => {
+      if (!codeNarrator || !sentenceQueue || !fenceProbe) {
+        sentenceQueue?.enqueue(sentences);
+        return;
+      }
+      const proseFollowing = sentences.some(
+        (sentence) => speechTextFromMarkdown(sentence).length > 0,
+      );
+      const closer = codeNarrator.settlePendingClose({
+        fenceNowOpen: fenceProbe.isOpen(),
+        proseFollowing,
+      });
+      if (closer) sentenceQueue.enqueue([closer]);
+      sentenceQueue.enqueue(sentences);
+      const utterance = codeNarrator.observe({
+        fenceOpen: fenceProbe.isOpen(),
+        queueStarved: sentenceQueue.isStarved(),
+        bufferedSeconds: streamingPlaybackRef.current?.bufferedSeconds() ?? 0,
+      });
+      if (utterance) sentenceQueue.enqueue([utterance]);
+    };
 
     try {
       const apiMessages: ApiMessagePayload[] = buildApiMessages(allMessages);
@@ -1255,7 +1397,8 @@ export function ChatView({
                   if (requestTools) {
                     roundSpeechSentences.push(...split.sentences);
                   } else {
-                    sentenceQueue.enqueue(split.sentences);
+                    fenceProbe?.feed(visibleDelta);
+                    narrateAround(split.sentences);
                   }
                 } else if (sentenceQueue) {
                   const split = resyncVisibleSpeech(
@@ -1268,7 +1411,9 @@ export function ChatView({
                   if (requestTools) {
                     roundSpeechSentences.push(...split.sentences);
                   } else {
-                    sentenceQueue.enqueue(split.sentences);
+                    fenceProbe?.reset();
+                    fenceProbe?.feed(separated.content);
+                    narrateAround(split.sentences);
                   }
                 }
               }
@@ -1402,12 +1547,26 @@ export function ChatView({
 
       addMessage(assistantMsg);
       if (sentenceQueue) {
+        // Settle any pending code closer ahead of the trailing prose so the
+        // acknowledgement precedes the final explanation.
+        if (codeNarrator && speechTail.trim()) {
+          const closer = codeNarrator.settlePendingClose({
+            fenceNowOpen: fenceProbe?.isOpen() ?? false,
+            proseFollowing: speechTextFromMarkdown(speechTail).length > 0,
+          });
+          if (closer) sentenceQueue.enqueue([closer]);
+        }
         if (speechTail.trim()) sentenceQueue.enqueue([speechTail.trim()]);
         speechTail = '';
       } else if (autoSpeakAssistant && selectedSpeechModelId && finalAssistantContent) {
         void speakText(finalAssistantContent, assistantMsg.id);
       }
     }
+    if (codeNarrator && sentenceQueue) {
+      const closer = codeNarrator.finish();
+      if (closer) sentenceQueue.enqueue([closer]);
+    }
+    sentenceQueue?.finish();
     setStreamingContent(null);
     setStreamingThinking(null);
     setIsLoading(false);
@@ -1418,13 +1577,13 @@ export function ChatView({
     addMessage,
     autoSpeakAssistant,
     canSendMessages,
+    createSpeechSentenceQueue,
     effectiveSelectedVoice,
     isLoading,
     selectedBuiltinTools,
     selectedModelId,
     selectedSpeechModelId,
     selectedSpeechOption,
-    playSpeechSegment,
     speakText,
     stopSpeechPlayback,
     supportsThinking,
@@ -1495,100 +1654,8 @@ export function ChatView({
 
   const handleRealtimeTranscript = useCallback((text: string, final: boolean) => {
     if (!final || !autoSubmitVoice || !canSendMessages || !text.trim()) return;
-    addMessage({
-      id: uuidv4(),
-      role: 'user',
-      content: text.trim(),
-      timestamp: Date.now(),
-    });
-  }, [addMessage, autoSubmitVoice, canSendMessages]);
-
-  const handleRealtimeAssistantText = useCallback((text: string, final: boolean) => {
-    const visibleText = text.trimStart();
-    if (!final) {
-      setStreamingContent(visibleText);
-      if (
-        autoSpeakAssistant
-        && selectedSpeechModelId
-        && voiceCatalogReady
-        && selectedSpeechOption?.supportsStreaming
-        && selectedSpeechOption.responseFormats.includes('pcm')
-        && canUseStreamingSpeechPlayback()
-      ) {
-        if (!speechSentenceQueueRef.current) {
-          const selectResponseVoice = createPinnedSpeechVoiceSelector(
-            voiceOptions,
-            effectiveSelectedVoice,
-            selectedSpeechOption.defaultVoice ?? null,
-          );
-          speechSentenceQueueRef.current = new SpeechSentenceQueue(
-            (sentence, signal) => playSpeechSegment(
-              sentence,
-              null,
-              signal,
-              selectResponseVoice(sentence),
-            ),
-            (error) => {
-              setSpeechError(error instanceof Error
-                ? error.message
-                : t('chat.view.errors.speechSynthesisFailed', 'Speech synthesis failed.'));
-            },
-            () => setIsAutoSpeaking(false),
-          );
-        }
-        if (visibleText.startsWith(realtimeSpeechTextRef.current)) {
-          const delta = visibleText.slice(realtimeSpeechTextRef.current.length);
-          const split = splitCompleteSpeechSentences(realtimeSpeechTailRef.current + delta);
-          realtimeSpeechTailRef.current = split.remainder;
-          if (split.sentences.length > 0) {
-            setIsAutoSpeaking(true);
-            speechSentenceQueueRef.current.enqueue(split.sentences);
-          }
-        }
-        realtimeSpeechTextRef.current = visibleText;
-      }
-      return;
-    }
-
-    const finalText = text.trim();
-    setStreamingContent(null);
-    if (!finalText) return;
-    const assistantMessage: ChatMessage = {
-      id: uuidv4(),
-      role: 'assistant',
-      content: finalText,
-      timestamp: Date.now(),
-    };
-    addMessage(assistantMessage);
-    const queue = speechSentenceQueueRef.current;
-    if (autoSpeakAssistant && queue && realtimeSpeechTailRef.current.trim()) {
-      setIsAutoSpeaking(true);
-      queue.enqueue([realtimeSpeechTailRef.current.trim()]);
-    } else if (autoSpeakAssistant && selectedSpeechModelId && !queue) {
-      void speakText(finalText, assistantMessage.id);
-    }
-    realtimeSpeechTextRef.current = '';
-    realtimeSpeechTailRef.current = '';
-  }, [
-    addMessage,
-    autoSpeakAssistant,
-    effectiveSelectedVoice,
-    playSpeechSegment,
-    selectedSpeechModelId,
-    selectedSpeechOption,
-    speakText,
-    t,
-    voiceCatalogReady,
-    voiceOptions,
-  ]);
-
-  const handleRealtimeResponseDone = useCallback((status: string) => {
-    if (status === 'completed') return;
-    setStreamingContent(null);
-    realtimeSpeechTextRef.current = '';
-    realtimeSpeechTailRef.current = '';
-    stopSpeechPlayback();
-  }, [stopSpeechPlayback]);
+    void handleSend(text.trim(), []);
+  }, [autoSubmitVoice, canSendMessages, handleSend]);
 
   if (readyModels.length === 0 && readyTranscriptionModels.length === 0 && readySpeechModels.length === 0) {
     return (
@@ -1662,7 +1729,6 @@ export function ChatView({
           autoSpeakAssistant={autoSpeakAssistant}
           realtimeVoiceEnabled={realtimeVoiceEnabled}
           autoSubmitVoice={autoSubmitVoice}
-          realtimeResponseModelId={selectedModelId}
           isSpeaking={speakingMessageId !== null || isAutoSpeaking}
           voiceError={voiceCatalogError ?? speechError}
           onSelectTranscriptionModel={selectTranscriptionModel}
@@ -1671,11 +1737,11 @@ export function ChatView({
           onReferenceAudioChange={setReferenceAudioFile}
           onReferenceAudioTextChange={setReferenceAudioText}
           onAutoSpeakAssistantChange={setAutoSpeakAssistant}
+          narrateCodeBlocks={narrateCodeBlocks}
+          onNarrateCodeBlocksChange={setNarrateCodeBlocks}
           onRealtimeVoiceEnabledChange={setRealtimeVoiceEnabled}
           onAutoSubmitVoiceChange={setAutoSubmitVoice}
           onRealtimeTranscript={handleRealtimeTranscript}
-          onRealtimeAssistantText={handleRealtimeAssistantText}
-          onRealtimeResponseDone={handleRealtimeResponseDone}
           onTranscribeAudio={transcribeAudio}
           onSpeakText={(text) => { void speakText(text, 'draft'); }}
           onStopSpeaking={stopSpeechPlayback}

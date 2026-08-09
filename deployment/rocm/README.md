@@ -78,12 +78,13 @@ nodes: start-on-boot (via linger), restart-on-failure, and boot-time `git pull` 
 `uv sync` through `deployment/install/skulk-startup.sh`.
 
 ```bash
-# 1. Put this node's cluster env in the service env file. Headless is required
-#    so the boot-time prep skips the (absent) dashboard build. Add the same
-#    backend/namespace/Zenoh knobs you'd otherwise set in launch-skulk.sh.
+# 1. Put this node's cluster env in the service env file. Normal installs and
+#    boot-time updates build the dashboard through Skulk's bundled Node.js
+#    runtime even when the host has no npm. Add SKULK_HEADLESS=1 only for an
+#    intentionally API-only node. Add the same backend/namespace/Zenoh knobs
+#    you'd otherwise set in launch-skulk.sh.
 mkdir -p ~/.skulk
 cat >> ~/.skulk/skulk.env <<'ENV'
-SKULK_HEADLESS=1
 SKULK_LLAMA_CPP_BACKENDS=vulkan
 # Optional: SKULK_AUTO_UPDATE=0 pins the node to what's on disk. It is no longer
 # required to protect the Vulkan wheel: with a GPU backend declared above, the
@@ -109,7 +110,8 @@ Vulkan install, then `systemctl --user restart skulk`). Manage the service with
 The node advertises `llama_cpp` + `llama_cpp-vulkan` backends (because
 `SKULK_LLAMA_CPP_BACKENDS=vulkan` is set and `llama_cpp` imports), and the
 master places GGUF models whose `compatible_backends` include `llama_cpp-vulkan`
-onto it. No dashboard build is needed on a headless node.
+onto it. An explicitly headless node skips the dashboard build; a normal node
+serves the same dashboard as macOS without requiring system Node/npm.
 
 ## Verifying the GPU stack
 

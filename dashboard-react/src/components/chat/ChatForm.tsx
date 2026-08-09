@@ -52,7 +52,7 @@ export interface ChatFormProps {
   selectedSpeechModelId?: string | null;
   /** Optional model-specific TTS voice or preset. */
   selectedVoice?: string | null;
-  /** Discovered built-in voices for the selected mounted TTS model. */
+  /** Discovered model-native or bundled-reference voices for the TTS model. */
   voiceOptions?: ChatVoiceOption[];
   /** Whether the selected model's voice catalog is still loading. */
   isVoiceCatalogLoading?: boolean;
@@ -62,12 +62,12 @@ export interface ChatFormProps {
   referenceAudioText?: string;
   /** Whether final assistant messages should be spoken automatically. */
   autoSpeakAssistant?: boolean;
+  /** Speak short interjections while a code block streams. */
+  narrateCodeBlocks?: boolean;
   /** Enable a persistent server-VAD conversation instead of push-to-transcribe. */
   realtimeVoiceEnabled?: boolean;
-  /** Route final realtime transcripts directly to the selected chat model. */
+  /** Submit final realtime transcripts through the dashboard chat flow. */
   autoSubmitVoice?: boolean;
-  /** Mounted chat model used for automatic realtime responses. */
-  realtimeResponseModelId?: string | null;
   /** Whether a dashboard-managed audio playback is active. */
   isSpeaking?: boolean;
   /** Speech-related API error surfaced from the page container. */
@@ -84,11 +84,11 @@ export interface ChatFormProps {
   onReferenceAudioTextChange?: (text: string) => void;
   /** Toggle automatic TTS playback for final assistant messages. */
   onAutoSpeakAssistantChange?: (enabled: boolean) => void;
+  /** Toggle spoken interjections while a code block streams. */
+  onNarrateCodeBlocksChange?: (enabled: boolean) => void;
   onRealtimeVoiceEnabledChange?: (enabled: boolean) => void;
   onAutoSubmitVoiceChange?: (enabled: boolean) => void;
   onRealtimeTranscript?: (text: string, final: boolean) => void;
-  onRealtimeAssistantText?: (text: string, final: boolean) => void;
-  onRealtimeResponseDone?: (status: string) => void;
   /** Transcribe a browser-recorded audio blob and return transcript text. */
   onTranscribeAudio?: (audio: Blob) => Promise<string>;
   /** Speak the current draft text with the selected TTS model. */
@@ -241,7 +241,7 @@ const VoiceToggle = styled.button<{ $active: boolean }>`
   ${({ $active }) =>
     $active
       ? css`border-color: ${({ theme }) => theme.colors.gold}; color: ${({ theme }) => theme.colors.gold}; background: ${({ theme }) => theme.colors.goldBg};`
-      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.textMuted}; &:hover { border-color: ${({ theme }) => theme.colors.goldDim}; color: ${({ theme }) => theme.colors.gold}; }`}
+      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.textMuted}; &:hover { border-color: ${({ theme }) => theme.colors.goldTextDim}; color: ${({ theme }) => theme.colors.gold}; }`}
 
   &:disabled {
     opacity: 0.88;
@@ -265,7 +265,7 @@ const VoiceIconBtn = styled(Button)<{ $active?: boolean }>`
 `;
 
 const VoiceStatus = styled.span<{ $error?: boolean }>`
-  color: ${({ $error, theme }) => ($error ? theme.colors.error : theme.colors.goldDim)};
+  color: ${({ $error, theme }) => ($error ? theme.colors.error : theme.colors.goldTextDim)};
   font-variant-numeric: tabular-nums;
 `;
 
@@ -308,7 +308,7 @@ const ThinkingBtn = styled.button<{ $active: boolean }>`
   ${({ $active }) =>
     $active
       ? css`border-color: ${({ theme }) => theme.colors.gold}; color: ${({ theme }) => theme.colors.gold}; background: ${({ theme }) => theme.colors.goldBg};`
-      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.textMuted}; &:hover { border-color: ${({ theme }) => theme.colors.goldDim}; color: ${({ theme }) => theme.colors.gold}; }`}
+      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.textMuted}; &:hover { border-color: ${({ theme }) => theme.colors.goldTextDim}; color: ${({ theme }) => theme.colors.gold}; }`}
 `;
 
 const Stat = styled.span`
@@ -317,7 +317,7 @@ const Stat = styled.span`
 `;
 
 const StatValue = styled.span`
-  color: ${({ theme }) => theme.colors.goldDim};
+  color: ${({ theme }) => theme.colors.goldTextDim};
 `;
 
 const Spacer = styled.span`
@@ -435,9 +435,9 @@ export function ChatForm({
   referenceAudioFile = null,
   referenceAudioText = '',
   autoSpeakAssistant = false,
+  narrateCodeBlocks = true,
   realtimeVoiceEnabled = true,
   autoSubmitVoice = false,
-  realtimeResponseModelId = null,
   isSpeaking = false,
   voiceError = null,
   onSelectTranscriptionModel,
@@ -446,11 +446,10 @@ export function ChatForm({
   onReferenceAudioChange,
   onReferenceAudioTextChange,
   onAutoSpeakAssistantChange,
+  onNarrateCodeBlocksChange,
   onRealtimeVoiceEnabledChange,
   onAutoSubmitVoiceChange,
   onRealtimeTranscript,
-  onRealtimeAssistantText,
-  onRealtimeResponseDone,
   onTranscribeAudio,
   onSpeakText,
   onStopSpeaking,
@@ -480,6 +479,8 @@ export function ChatForm({
   const recordingStartingRef = useRef(false);
   const conversationStoppingRef = useRef(false);
   const componentMountedRef = useRef(true);
+  const onRealtimeTranscriptRef = useRef(onRealtimeTranscript);
+  const submitRealtimeTranscriptRef = useRef(false);
   const recordingStartedAtRef = useRef(0);
   const recordingTimerRef = useRef<number | null>(null);
 
@@ -516,9 +517,13 @@ export function ChatForm({
   const browserRecordingAvailable = captureMode !== null;
   const useRealtimeCapture = captureMode === 'realtime';
   const useRealtimeConversation = useRealtimeCapture && realtimeVoiceEnabled;
-  const submitRealtimeTranscript = autoSubmitVoice
-    && canSendMessages
-    && realtimeResponseModelId !== null;
+  const submitRealtimeTranscript = autoSubmitVoice && canSendMessages && !isLoading;
+  useEffect(() => {
+    submitRealtimeTranscriptRef.current = submitRealtimeTranscript;
+  }, [submitRealtimeTranscript]);
+  useEffect(() => {
+    onRealtimeTranscriptRef.current = onRealtimeTranscript;
+  }, [onRealtimeTranscript]);
   const recordingUnavailableReason = !secureRecordingContext
     ? t('chat.form.voiceErrors.secureContextRequired', 'Microphone requires HTTPS or localhost.')
     : !browserRecordingAvailable
@@ -633,25 +638,25 @@ export function ChatForm({
         let capture: RealtimePcmCapture | null = null;
         const socket = new RealtimeConversationSocket({
           transcriptionModelId: selectedTranscriptionId,
-          responseModelId: submitRealtimeTranscript ? realtimeResponseModelId : null,
           onSpeechStarted: onStopSpeaking,
           onTranscript: (text, final) => {
             if (realtimeConversationRef.current !== socket) return;
-            setMessage(final && submitRealtimeTranscript ? '' : text);
-            onRealtimeTranscript?.(text, final);
-            if (final && conversationStoppingRef.current && !submitRealtimeTranscript) {
+            const shouldSubmit = submitRealtimeTranscriptRef.current;
+            if (!text.trim()) {
+              if (final && conversationStoppingRef.current) {
+                finishConversation();
+              }
+              return;
+            }
+            if (final && shouldSubmit) {
+              socket.setInputPaused(true);
+              capture?.setEnabled(false);
+            }
+            setMessage(final && shouldSubmit ? '' : text);
+            onRealtimeTranscriptRef.current?.(text, final);
+            if (final && conversationStoppingRef.current) {
               finishConversation();
             }
-          },
-          onAssistantText: (text, final) => {
-            if (realtimeConversationRef.current === socket) {
-              onRealtimeAssistantText?.(text, final);
-            }
-          },
-          onResponseDone: (status) => {
-            if (realtimeConversationRef.current !== socket) return;
-            onRealtimeResponseDone?.(status);
-            if (conversationStoppingRef.current) finishConversation();
           },
           onError: (error) => {
             if (realtimeConversationRef.current !== socket) return;
@@ -862,12 +867,7 @@ export function ChatForm({
     t,
     transcriptionReady,
     captureMode,
-    submitRealtimeTranscript,
-    onRealtimeAssistantText,
-    onRealtimeResponseDone,
-    onRealtimeTranscript,
     onStopSpeaking,
-    realtimeResponseModelId,
     useRealtimeConversation,
     useRealtimeCapture,
   ]);
@@ -1016,6 +1016,8 @@ export function ChatForm({
     (e?: React.FormEvent) => {
       e?.preventDefault();
       if (isLoading || !canSend) return;
+      realtimeConversationRef.current?.setInputPaused(true);
+      realtimeCaptureRef.current?.setEnabled(false);
       onSend(message.trim(), files);
       setMessage('');
       clearFiles();
@@ -1025,6 +1027,12 @@ export function ChatForm({
     },
     [isLoading, canSend, message, files, onSend, clearFiles],
   );
+
+  useEffect(() => {
+    const microphonePaused = isLoading || isSpeaking;
+    realtimeConversationRef.current?.setInputPaused(microphonePaused);
+    realtimeCaptureRef.current?.setEnabled(!microphonePaused);
+  }, [isLoading, isSpeaking]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1236,8 +1244,7 @@ export function ChatForm({
                 ))
               )}
             </VoiceSelect>
-            {speechModels.length > 0 && (
-              selectedSpeechModel?.supportsVoiceListing ? (
+            {speechModels.length > 0 && selectedSpeechModel?.supportsVoiceListing && (
                 <VoiceSelect
                   value={voiceOptions.some((voice) => voice.id === selectedVoice) ? selectedVoice ?? '' : ''}
                   disabled={isVoiceCatalogLoading}
@@ -1257,14 +1264,6 @@ export function ChatForm({
                     </option>
                   ))}
                 </VoiceSelect>
-              ) : (
-                <VoiceInput
-                  value={selectedVoice ?? ''}
-                  onChange={(event) => onSelectedVoiceChange?.(event.target.value || null)}
-                  placeholder={t('chat.form.voicePlaceholder', 'voice')}
-                  aria-label={t('chat.form.voiceName', 'Voice')}
-                />
-              )
             )}
             <VoiceToggle
               type="button"
@@ -1275,6 +1274,21 @@ export function ChatForm({
             >
               {t('chat.form.autoSpeak', 'Auto')}
             </VoiceToggle>
+            {autoSpeakAssistant && (
+              <VoiceToggle
+                type="button"
+                disabled={!speechReady}
+                $active={narrateCodeBlocks}
+                aria-pressed={narrateCodeBlocks}
+                onClick={() => onNarrateCodeBlocksChange?.(!narrateCodeBlocks)}
+                title={t(
+                  'chat.form.narrateCodeTitle',
+                  'Speak short interjections while a code block streams instead of staying silent',
+                )}
+              >
+                {t('chat.form.narrateCode', 'Narrate code')}
+              </VoiceToggle>
+            )}
             {isSpeaking ? (
               <VoiceIconBtn
                 variant="ghost"

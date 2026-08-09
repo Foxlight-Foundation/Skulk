@@ -21,6 +21,7 @@ from anyio import ClosedResourceError, EndOfStream, WouldBlock
 
 from skulk.shared.constants import SKULK_CACHE_HOME, SKULK_MAX_CHUNK_SIZE
 from skulk.shared.models.model_cards import AudioCardKind, AudioResponseFormat
+from skulk.shared.models.reference_voices import bundled_reference_voice_profile
 from skulk.shared.tracing import (
     begin_trace_session,
     bind_trace_session,
@@ -68,6 +69,7 @@ from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.bootstrap import logger
 
 _DEFAULT_STAGED_TTS_VOICE = "af_heart"
+_DEFAULT_TTS_MAX_TOKENS = 4096
 _AUDIO_BINARY_CHUNK_SIZE = max(1, (SKULK_MAX_CHUNK_SIZE // 4) * 3)
 _CANARY_MASK_COMPAT_MARKER = "_skulk_mask_dtype_compat"
 _FFMPEG_AUDIO_RESPONSE_FORMATS = frozenset(
@@ -112,6 +114,66 @@ def _filter_kwargs(fn: Callable[..., Any], kwargs: dict[str, Any]) -> dict[str, 
     if accepted is None or accepted.accepts_var_kwargs:
         return {k: v for k, v in kwargs.items() if v is not None}
     return {k: v for k, v in kwargs.items() if v is not None and k in accepted.params}
+
+
+def _tts_max_tokens(fn: Callable[..., Any], requested: int | None) -> int | None:
+    """Resolve a safe omitted TTS budget only for models declaring the control.
+
+    Upstream TTS defaults are not a stable serving contract. Fish S2's 1024-token
+    default, for example, hard-cuts an ordinary seven-word utterance at roughly
+    five seconds. Keep explicit caller limits intact and avoid injecting an
+    unknown keyword into models that expose only loose ``**kwargs``.
+    """
+
+    if requested is not None:
+        return requested
+    accepted = _callable_parameters(fn)
+    if accepted is None or "max_tokens" not in accepted.params:
+        return None
+    return _DEFAULT_TTS_MAX_TOKENS
+
+
+def _seed_tts_sampling(seed: int | None) -> None:
+    """Reset MLX sampling for one speech request when the caller supplies a seed.
+
+    Speech runners execute synthesis tasks serially, so resetting the process-global
+    MLX generator immediately before ``model.generate`` cannot race another TTS task.
+    Omitted seeds deliberately preserve the upstream generator's advancing state.
+
+    Args:
+        seed: Unsigned 32-bit sampling seed, or ``None`` to retain upstream behavior.
+    """
+
+    if seed is None:
+        return
+    import mlx.core as mx
+
+    mx.random.seed(seed)
+
+
+def _load_tts_reference_audio(audio_path: str, sample_rate: int) -> Any:
+    """Decode reference audio as the waveform expected by MLX TTS models.
+
+    Skulk calls ``model.generate`` directly rather than the upstream
+    ``generate_audio`` convenience layer. That layer normally performs this
+    decode and resample step before dispatching to model-family adapters; doing
+    the same here keeps adapters that accept only MLX arrays compatible with
+    the managed reference-audio path.
+
+    Args:
+        audio_path: Request-scoped local file containing the uploaded audio.
+        sample_rate: Model input sample rate in hertz.
+
+    Returns:
+        The decoded mono MLX waveform returned by ``mlx_audio``.
+
+    Side effects:
+        Reads the request-scoped file and may allocate a resampled waveform.
+    """
+
+    from mlx_audio.utils import load_audio
+
+    return load_audio(audio_path, sample_rate=sample_rate)
 
 
 def _install_attention_mask_dtype_compat(attention_type: type[Any]) -> None:
@@ -1312,6 +1374,11 @@ class Runner:
         """Call the TTS model and normalize its result into an iterable."""
         assert self.model is not None
         params = task.task_params
+        bundled_profile = (
+            bundled_reference_voice_profile(params.reference_voice_profile)
+            if params.reference_voice_profile is not None
+            else None
+        )
         reference_path: str | None = None
         try:
             if params.reference_audio_data is not None:
@@ -1325,26 +1392,60 @@ class Runner:
                 ) as reference_file:
                     reference_file.write(params.reference_audio_data)
                     reference_path = reference_file.name
+            generate = self.model.generate
+            reference_source = (
+                reference_path
+                or params.reference_audio
+                or (
+                    str(bundled_profile.audio_path)
+                    if bundled_profile is not None
+                    else None
+                )
+            )
+            reference_audio = (
+                _load_tts_reference_audio(
+                    reference_source,
+                    int(getattr(self.model, "sample_rate", 24000)),
+                )
+                if reference_source is not None
+                else None
+            )
+            reference_text = (
+                bundled_profile.transcript
+                if bundled_profile is not None
+                else params.reference_text
+            )
             generate_kwargs = {
-                "voice": _resolve_staged_voice_path(
-                    self.local_model_path, params.voice
+                "voice": (
+                    None
+                    if bundled_profile is not None
+                    else _resolve_staged_voice_path(
+                        self.local_model_path, params.voice
+                    )
                 ),
                 "speed": params.speed,
                 "instruct": params.instruct,
                 "lang_code": params.lang_code,
-                "ref_audio": reference_path or params.reference_audio,
-                "ref_text": params.reference_text,
+                "ref_audio": reference_audio,
+                "ref_text": reference_text,
+                "guidance_method": (
+                    "apg"
+                    if reference_audio is not None
+                    and getattr(self.shard_metadata.model_card, "family", None)
+                    == "longcat_audiodit"
+                    else None
+                ),
                 "temperature": params.temperature,
                 "top_p": params.top_p,
                 "top_k": params.top_k,
                 "repetition_penalty": params.repetition_penalty,
                 "stream": stream,
                 "streaming_interval": params.streaming_interval if stream else None,
-                "max_tokens": params.max_tokens,
+                "max_tokens": _tts_max_tokens(generate, params.max_tokens),
             }
-            generate = self.model.generate
             filtered_kwargs = _filter_kwargs(generate, generate_kwargs)
 
+            _seed_tts_sampling(params.seed)
             generated = generate(params.input_text, **filtered_kwargs)
             if (
                 isinstance(generated, (str, bytes, dict, tuple, np.ndarray))

@@ -302,8 +302,8 @@ const ReadyBadge = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-weight: 500;
   color: ${({ theme }) => theme.colors.healthy};
-  background: rgba(34, 197, 94, 0.1);
-  border: 1px solid rgba(34, 197, 94, 0.2);
+  background: ${({ theme }) => theme.colors.accentBg};
+  border: 1px solid ${({ theme }) => theme.colors.accentBg};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 3px 10px;
 `;

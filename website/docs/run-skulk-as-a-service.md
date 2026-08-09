@@ -183,7 +183,7 @@ Every time the service starts (boot, manual restart, post-crash relaunch), it ru
    the cached bindings wheel, which once left a fleet running stale wire
    code for days while looking fully up to date. The rebuild is also
    non-fatal; a failure keeps the current bindings.
-3. **`npm install && npm run build`** in `dashboard-react/` rebuilds the dashboard. Individual failures are logged and ignored as long as a previously built `dashboard-react/dist/` exists. **If `dist/` is missing, the service refuses to start** because there'd be no dashboard to serve.
+3. **Skulk's bundled Node.js runtime installs dashboard dependencies and runs the production build** in `dashboard-react/`. A compatible system Node/npm is only a recovery fallback. This is the same path as the official installer, so Linux services refresh their dashboard even when the host has no Node.js installation. Individual failures are logged and ignored as long as a previously built `dashboard-react/dist/` exists. **If `dist/` is missing, the service refuses to start** because there'd be no dashboard to serve.
 
 Everything from this phase is logged to `~/.skulk/logs/skulk.prep.log` so you can audit what actually happened on the last boot.
 
@@ -224,7 +224,11 @@ If you've turned auto-update off (`SKULK_AUTO_UPDATE=0`), do the manual flow:
 
 ```bash
 git pull
-cd dashboard-react && npm install && npm run build && cd ..
+uv run python scripts/run_bundled_npm.py --version
+cd dashboard-react
+uv run --project .. python ../scripts/run_bundled_npm.py install --no-fund --no-audit
+uv run --project .. python ../scripts/run_bundled_npm.py run build
+cd ..
 
 # then restart the service as above
 ```
@@ -253,7 +257,7 @@ If the dashboard still doesn't load, check the logs (see the table above). Look 
 - **Another program is using port 52415.** Find it with `lsof -i :52415` and stop it (or change Skulk's port with `--api-port`).
 - **A typo in your `skulk.yaml`.** Skulk logs the parse error on startup; search the log for "config".
 - **You moved your Skulk folder after running the installer.** Re-run the installer; it'll update the path.
-- **The dashboard build failed during boot prep.** Look in `~/.skulk/logs/skulk.prep.log`: if `npm run build` failed and there's no `dashboard-react/dist/` directory, the service refuses to start. Fix: build the dashboard once manually (`cd dashboard-react && npm install && npm run build`), then restart.
+- **The dashboard build failed during boot prep.** Look in `~/.skulk/logs/skulk.prep.log`: if the bundled npm build failed and there's no `dashboard-react/dist/` directory, the service refuses to start. First run `uv run python scripts/run_bundled_npm.py --version` from the checkout. If that succeeds, rebuild with the bundled commands above and restart. Use `--headless` or `SKULK_HEADLESS=1` only when the node is intentionally API-only, not merely because the host lacks system Node/npm.
 
 ### "Vector keeps crashing / no logs are reaching the central store"
 

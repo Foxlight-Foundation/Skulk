@@ -409,6 +409,7 @@ Notes:
 - Treat `resolved_capabilities` as the default tool-free request path; request-specific options such as tools can change prompt rendering and related resolved values for mixed-mode model families.
 - Thinking-control semantics are model-aware:
   - if `supports_thinking_toggle` is `true`, send `enable_thinking=true` or `false` explicitly
+  - if both `enable_thinking` and `reasoning_effort` are omitted for a model with a known toggleable capability profile, Skulk disables thinking using the profile's disabled effort
   - `reasoning_effort="none"` disables thinking for toggleable models
   - if a model does not support toggleable thinking, Skulk ignores explicit toggle overrides but still preserves explicit non-disabled reasoning-effort hints when the model family supports them
 
@@ -598,13 +599,15 @@ Request fields:
 |-------|------|-------|
 | `model` | string | Required mounted TTS model id |
 | `input` | string | Required text to synthesize |
-| `voice` | string or null | Optional model-specific voice name. When omitted, Skulk applies the mounted model card's `audio.default_voice` when declared. |
+| `voice` | string or null | Optional stable voice identifier. Accepted only when the mounted card declares a static `audio.voices` catalog; unknown names are rejected. Entries may be model-native speakers or checksummed reference profiles bundled with Skulk. When omitted, Skulk applies the card's `audio.default_voice` when declared. |
 | `speed` | number or null | Optional positive speaking speed multiplier |
 | `response_format` | string or null | Optional output format: `mp3`, `wav`, `flac`, `ogg`, `opus`, or raw `pcm`. When omitted or set to `null`, Skulk uses `mp3` for `stream=true`; otherwise it uses the mounted model card default when declared and falls back to `mp3`; supported values are constrained by the model card when declared |
 | `stream` | boolean | Optional. When `true`, Skulk returns a chunked HTTP response and yields MP3 or raw PCM bytes as the speech runner emits them; accepted only when the mounted TTS card explicitly declares `audio.supports_streaming = true` and every routable instance of the requested model has a ready runner |
 | `streaming_interval` | number or null | Optional positive model-specific streaming cadence hint, accepted only with `stream=true` |
 | `instruct`, `lang_code` | string or null | Optional model-specific generation hints |
-| `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number or integer | Optional model-specific sampling controls |
+| `temperature`, `top_p`, `top_k`, `repetition_penalty` | number | Optional model-specific sampling controls |
+| `max_tokens` | integer or null | Optional model-specific generation ceiling. An explicit value is preserved. When omitted and the mounted model explicitly declares this control, Skulk uses a 4096-token serving default instead of inheriting a potentially truncating upstream library default. Models that do not declare the control receive no injected keyword. |
+| `seed` | integer or null | Optional unsigned 32-bit sampling seed. When supplied, the speech runner resets MLX sampling immediately before generation so identical model, voice, text, and sampling controls are reproducible. Omission preserves the upstream advancing random stream. |
 | `reference_audio` | multipart file or null | Optional request-scoped voice-conditioning audio. Accepted only as a multipart upload for a mounted card declaring `audio.supports_reference_audio = true`; server-local paths are rejected |
 | `reference_text` | string or null | Optional transcript of `reference_audio`; accepted only when the multipart upload is present |
 
@@ -637,15 +640,23 @@ file when generation ends or fails. Reference-audio requests return **503
 Service Unavailable** when the Zenoh data plane is unavailable; Skulk never
 broadcasts private reference media through the gossipsub fallback.
 
+Reference-capable bundled cards may also expose Skulk's packaged voice profiles
+through the ordinary `voice` field. The worker resolves the selected identifier
+to its checksummed local MP3 and exact transcript; those asset paths and bytes
+never enter the command, State, or event log. This path does not require an
+upload or Zenoh media transfer. A multipart `reference_audio` upload is an
+explicit request-scoped override and cannot be combined with `voice`.
+
 `streaming_interval` without `stream=true`, `reference_text` without a
-multipart reference upload, and JSON `reference_audio` path strings return
-**400 Bad Request**.
+multipart reference upload, a multipart upload combined with `voice`, and JSON
+`reference_audio` path strings return **400 Bad Request**.
 
 ## Skulk Audio Voices API
 
 **GET** `/v1/audio/voices?model=<model-id>`
 
-Returns stable built-in voice identifiers declared by one mounted TTS model.
+Returns stable model-native and bundled-reference voice identifiers declared by
+one mounted TTS model.
 This is a Skulk extension, not an OpenAI compatibility route. The model must
 declare `audio.supports_voice_listing = true`; otherwise Skulk returns **400 Bad
 Request**.
@@ -655,9 +666,11 @@ curl 'http://localhost:52415/v1/audio/voices?model=org/tts-model'
 ```
 
 The response is `{ "object": "list", "data": [...] }`. Each item contains the
-voice `id`, display `name`, mounted `model`, `kind = "builtin"`, and an ordered
-`preferred_languages` array of BCP 47 tags when the model card declares
-language preferences. Version 1 does not create or persist voice profiles.
+voice `id`, display `name`, mounted `model`, a `kind` of `"builtin"` for a
+model-native speaker or `"reference"` for a checksummed profile shipped with
+Skulk, and an ordered `preferred_languages` array of BCP 47 tags when the model
+card declares language preferences. This endpoint does not create or persist
+user voice profiles.
 
 ## OpenAI Audio Transcriptions API
 
@@ -995,7 +1008,7 @@ for OpenAI-compatible clients.
 
 ### Search Hugging Face
 
-**GET** `/models/search?query=...&limit=...&mlx_only=...`
+**GET** `/models/search?query=...&limit=...&mlx_only=...&offset=...`
 
 ```bash
 curl "http://localhost:52415/models/search?query=qwen3&limit=5"
@@ -1005,11 +1018,55 @@ Behavior note:
 
 - `mlx_only=true` restricts results to the `mlx-community` author; the default
   searches all Hugging Face model repositories.
+- An empty `query` returns repositories sorted by Hugging Face's trending
+  score; text queries sort by downloads.
+- `offset` skips that many leading results, for "show more" paging.
+- `pipeline_tag` restricts results to one Hugging Face task (for example
+  `text-generation` or `automatic-speech-recognition`).
 - Ordinary text queries use Hugging Face repository search.
 - A query ending in `.gguf` also performs a bounded filename-aware fallback:
   Skulk broadens the model-name prefix, inspects those candidate repositories'
   manifests, and returns only exact filename matches. Exact matches carry a
   `matched_file` repo-relative path so the dashboard can preserve that quant.
+- Each result additionally carries discovery metadata when Hugging Face
+  reports it: `pipeline_tag` (task), `library_name`, `gated` (license
+  acceptance plus an HF token are required to download), `license`,
+  `param_count` (total parameters from safetensors or GGUF metadata),
+  `total_file_size` (exact GGUF artifact bytes), `context_length`,
+  `base_model_repo` and `base_model_relation` (derivation lineage:
+  finetune, quantized, merge, or adapter), `arxiv_ids`, `languages`, and
+  `architecture`.
+
+### List a GGUF repository's quantizations
+
+**GET** `/models/gguf-quants?model_id=owner/name`
+
+```bash
+curl "http://localhost:52415/models/gguf-quants?model_id=unsloth/DeepSeek-V4-Flash-0731-GGUF"
+```
+
+Returns `{ "model_id": ..., "options": [...] }` where each option is one
+downloadable quantization: its repo-relative first shard (`gguf_file`, the
+value to pin when adding or downloading), human `label`, exact `total_bytes`,
+and `shard_count`, sorted smallest first. Companion artifacts (speculative
+drafters, imatrix calibration files, multimodal projectors) are excluded;
+`options` is empty for a non-GGUF repository. The dashboard's Hugging Face
+results use this for the per-quant download chooser.
+
+### Fetch a model card summary
+
+**GET** `/models/card-summary?model_id=owner/name`
+
+```bash
+curl "http://localhost:52415/models/card-summary?model_id=LiquidAI/LFM2.5-2.6B"
+```
+
+Downloads the repository's model card README and returns
+`{ "model_id": ..., "summary": ... }`, where `summary` is the card's first
+prose paragraphs with markup stripped (bounded length). The summary is empty
+when the README is missing or has no usable prose. Summaries are cached per
+API process; the dashboard's discovery popovers fetch this lazily when
+opened.
 
 ### Add a Hugging Face model
 
@@ -1028,6 +1085,10 @@ generated GGUF card is compatible with both llama.cpp engines and prefers
 the served `llama_server` tags, so on a node running llama-server it gets
 that engine's concurrency slots and is eligible for multi-node pooling via
 RPC; nodes without a served binary fall through to the in-process engine.
+When the repository exactly matches a bundled card, generated metadata retains
+the bundled card's hard pipeline-split constraint; adding a curated model through
+the dashboard therefore cannot erase an architecture safety boundary. A
+hand-authored card remains an explicit operator override.
 The
 `model_id` field is required. `gguf_file` is optional; when supplied it must be
 an exact repo-relative GGUF weight path and the card pins that quant instead of
@@ -2008,7 +2069,8 @@ Its payload accepts:
 | `voice` | string | Optional model-specific voice |
 | `streaming_interval` | number | Optional positive generation cadence hint |
 | `speed`, `instruct`, `lang_code` | model-specific | Optional speech controls |
-| `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number | Optional model-specific sampling controls |
+| `temperature`, `top_p`, `repetition_penalty` | number | Optional model-specific sampling controls |
+| `top_k`, `max_tokens`, `seed` | integer | Optional model-specific sampling controls; `seed` must be unsigned 32-bit |
 
 Each `chunk` payload reports `model`, `format: "mp3"`, `chunk_index`,
 `is_partial`, and optional `sample_rate`; the MP3 bytes are carried beside it
@@ -2161,8 +2223,12 @@ samples, the dashboard continuously resamples them to 24 kHz PCM16, and the
 client aggregates worklet callbacks into 100 ms transport frames before the
 mic control commits the socket when recording stops. Realtime mode can retain
 the socket across server-VAD turns, show partial transcripts in the editable
-draft, and optionally auto-send final transcripts through the selected mounted
-chat model. If either capability truth is absent, chat retains the batch `MediaRecorder` plus
+draft, and optionally auto-send final transcripts through the same dashboard
+`POST /v1/chat/completions` flow used by typed prompts. This preserves the full
+dashboard conversation and its ordinary generation, cancellation, and TTS
+semantics; the WebSocket's optional `response` participant remains available to
+API clients but is not a second dashboard conversation. If either capability
+truth is absent, chat retains the batch `MediaRecorder` plus
 `POST /v1/audio/transcriptions` path.
 
 When `response` is configured, the API node that owns the WebSocket retains the

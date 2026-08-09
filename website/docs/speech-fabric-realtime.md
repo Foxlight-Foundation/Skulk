@@ -17,7 +17,8 @@ Skulk currently exposes:
 
 - `POST /v1/audio/speech` for text-to-speech synthesis;
 - `POST /v1/audio/transcriptions` for bounded uploaded audio clips;
-- experimental `POST /v1/audio/translations` for speech-to-English translation;
+- `POST /v1/audio/translations` for speech-to-English translation when the
+  mounted card declares translation support;
 - `GET /v1/audio/voices` for a mounted model's static built-in voice catalog;
 - `WS /v1/realtime?model=<model-id>` for serialized multi-turn realtime
   transcription, including optional bounded server VAD and automatic commit.
@@ -63,7 +64,34 @@ mounted TTS model's static built-in voices. It serves only models whose card
 declares `audio.supports_voice_listing = true`; the identifiers come from the
 card's `audio.voices` declaration, and a card may also declare a validated
 `audio.default_voice`, which the API applies only when a request omits `voice`.
+Cards may additionally attach an ordered `audio.voice_catalog` with display
+names and preferred-language metadata, which the dashboard's automatic voice
+selection uses to pin a language-matched voice for a whole response.
 See [Model cards](model-cards.md) for the card-side declarations.
+
+### Bundled reference voices
+
+Voice-cloning cards (those declaring reference-audio support) can list bundled
+reference profiles in their voice catalog: ten checksummed English reference
+voices ship with Skulk (Angus, Ember, Hannah, Ian, Jake, Kite, Rufus, Samson,
+Sydney, and Sylvie), with Kite as the shipped default. Selecting one behaves
+like any other voice at the API surface: the profile identifier resolves to
+its local conditioning audio and exact transcript only inside the selected
+worker, so the reference media never crosses the API or enters cluster state.
+This gives cloning-capable models a consistent, known-good voice out of the
+box while custom reference-audio uploads remain available for callers who
+bring their own clip.
+
+### Deterministic synthesis
+
+`/v1/audio/speech` and the built-in TTS provider accept an optional unsigned
+32-bit `seed`. The speech runner applies it immediately before model
+generation, so repeated requests with the same text, voice, and seed produce
+the same audio on the same model build. Callers that omit the seed retain the
+engine's default advancing-random-stream behavior. Dashboard speech playback
+sends one deterministic seed for every generated sentence and replay segment
+of a response, so replaying a sentence sounds identical to its first
+rendering.
 
 ### Reference-audio uploads
 
@@ -176,19 +204,34 @@ model and local node advertise the required capabilities.
 - Capture callbacks are aggregated into bounded 100 ms transport frames.
 - Realtime mode keeps one multi-turn socket open, uses server VAD for automatic
   turn boundaries, and shows partial transcripts in the editable chat draft.
-- Auto-send optionally routes final transcripts to the selected chat model;
-  assistant text remains visible while it streams and barge-in cancels active
-  response playback.
+- Auto-send submits final transcripts through the dashboard's ordinary chat
+  request path. Voice and typed turns therefore share one persisted
+  conversation, the same generation limits, streaming, cancellation, and
+  sentence-paced TTS behavior. The microphone pauses while that turn drains.
 - Batch-only models retain the `MediaRecorder` upload flow.
 - Transcription results populate the chat draft for review or submission.
-- Streaming-capable TTS models use sentence-sized raw PCM requests and a bounded
-  AudioWorklet playback queue. The dashboard pauses HTTP reads under pressure,
-  preserves sentence order, and propagates stop to queued and active requests.
+- Streaming-capable TTS models use sentence-sized raw PCM requests. The
+  dashboard prefers a bounded `AudioWorklet` queue on HTTPS and localhost, and
+  otherwise schedules bounded 100 ms `AudioBufferSourceNode` frames so ordinary
+  LAN HTTP dashboards retain streaming playback. Both paths pause HTTP reads
+  under pressure, preserve sentence order, and propagate stop to queued and
+  active requests.
 - For cards with voice discovery, the dashboard lists the mounted catalog and
-  defaults to automatic language matching. It chooses the first catalog voice
-  whose preferred language matches the response text, then pins that voice for
-  every sentence request in the response. An explicit user selection overrides
-  automatic matching but remains pinned for the same response.
+  defaults to automatic language matching. It prefers the card's default voice
+  when that voice matches the response language, otherwise chooses the first
+  matching catalog voice, then pins that voice for every sentence request in
+  the response. An explicit user selection overrides automatic matching but
+  remains pinned for the same response.
+- While a fenced code block streams during live generation, the voice loop
+  can narrate it (a short opener, occasional fillers gated on the voice
+  actually running dry, and a closer) instead of going silent; the Narrate
+  code toggle beside Auto speech disables this, and replayed messages are
+  never narrated.
+- Spoken text is prepared structurally from the rendered Markdown: code
+  fences, markup, and emoji are stripped; blocks that end without terminal
+  punctuation (a bold title, an unpunctuated heading) gain a period so they
+  do not bleed into the next sentence; and a horizontal rule becomes a brief
+  pause on the streaming playback timeline.
 - Batch-only TTS models retain complete-response encoded playback.
 
 The dashboard falls back to batch transcription when realtime model or node

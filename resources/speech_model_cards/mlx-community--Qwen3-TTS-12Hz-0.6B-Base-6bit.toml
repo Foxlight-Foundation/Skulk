@@ -1,0 +1,92 @@
+# Six-bit is the smallest Base conversion validated to terminate normally while
+# preserving stable bundled reference voices across independent streamed calls.
+model_id = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit"
+source_revision = "4e44ed4bcee28a0f89a493e07bde16e6dccd43eb"
+n_layers = 5
+hidden_size = 1024
+supports_tensor = false
+tasks = ["TextToSpeech"]
+family = "qwen3_tts"
+quantization = "6bit"
+base_model = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+capabilities = ["tts"]
+context_length = 65536
+
+[audio]
+kind = "tts"
+default_response_format = "wav"
+response_formats = ["wav", "mp3", "pcm"]
+supports_streaming = true
+supports_realtime = false
+supports_voice_listing = true
+voices = ["angus", "ember", "hannah", "ian", "jake", "kite", "rufus", "samson", "sydney", "sylvie"]
+default_voice = "kite"
+supports_reference_audio = true
+sample_rates = [24000]
+
+[[audio.voice_catalog]]
+id = "angus"
+name = "Angus"
+preferred_languages = ["en"]
+reference_profile = "angus"
+
+[[audio.voice_catalog]]
+id = "ember"
+name = "Ember"
+preferred_languages = ["en"]
+reference_profile = "ember"
+
+[[audio.voice_catalog]]
+id = "hannah"
+name = "Hannah"
+preferred_languages = ["en"]
+reference_profile = "hannah"
+
+[[audio.voice_catalog]]
+id = "ian"
+name = "Ian"
+preferred_languages = ["en"]
+reference_profile = "ian"
+
+[[audio.voice_catalog]]
+id = "jake"
+name = "Jake"
+preferred_languages = ["en"]
+reference_profile = "jake"
+
+[[audio.voice_catalog]]
+id = "kite"
+name = "Kite"
+preferred_languages = ["en"]
+reference_profile = "kite"
+
+[[audio.voice_catalog]]
+id = "rufus"
+name = "Rufus"
+preferred_languages = ["en"]
+reference_profile = "rufus"
+
+[[audio.voice_catalog]]
+id = "samson"
+name = "Samson"
+preferred_languages = ["en"]
+reference_profile = "samson"
+
+[[audio.voice_catalog]]
+id = "sydney"
+name = "Sydney"
+preferred_languages = ["en"]
+reference_profile = "sydney"
+
+[[audio.voice_catalog]]
+id = "sylvie"
+name = "Sylvie"
+preferred_languages = ["en"]
+reference_profile = "sylvie"
+
+[placement]
+compatible_backends = ["mlx_audio", "mlx_audio-metal"]
+backend_preference = ["mlx_audio-metal", "mlx_audio"]
+
+[storage_size]
+in_bytes = 1851314126
