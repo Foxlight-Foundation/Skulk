@@ -521,7 +521,10 @@ def _generate_tls_identity(server_name: str) -> tuple[bytes, bytes]:
             x509.SubjectAlternativeName([x509.DNSName(server_name)]),
             critical=False,
         )
-        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        # The phone pins this exact leaf certificate as its trust anchor. Marking
+        # the served leaf as a CA works with OpenSSL but Rustls correctly rejects
+        # it as `CaUsedAsEndEntity`, so the gateway must remain a server leaf.
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(
             x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
             critical=False,

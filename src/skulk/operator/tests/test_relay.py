@@ -20,8 +20,10 @@ import aiohttp
 import pytest
 import qrcode
 from aiohttp import web
+from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.x509.oid import ExtendedKeyUsageOID
 from qrcode.constants import ERROR_CORRECT_L
 
 import skulk.operator.cli as operator_cli
@@ -180,6 +182,15 @@ def test_relay_configuration_is_encrypted_and_returned_once_with_pairing(
     )
     assert exchange.remote_access.routing_locator == provisioning.routing_locator
     assert "BEGIN CERTIFICATE" in exchange.remote_access.gateway_ca_certificate_pem
+    certificate = x509.load_pem_x509_certificate(
+        exchange.remote_access.gateway_ca_certificate_pem.encode("ascii")
+    )
+    assert not certificate.extensions.get_extension_for_class(
+        x509.BasicConstraints
+    ).value.ca
+    assert certificate.extensions.get_extension_for_class(
+        x509.ExtendedKeyUsage
+    ).value == x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH])
     assert provisioning.gateway_carrier_credential not in exchange.model_dump_json()
     with pytest.raises(OperatorRelayAlreadyConfiguredError):
         service.configure_relay(provisioning, operator_api_port=52416)
