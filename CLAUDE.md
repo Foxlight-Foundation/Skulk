@@ -110,8 +110,11 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
   identities, deterministic Ed25519 quorum certification, two-phase
   crash-fault vote collection and recovery, a public consensus SQLite log, and
   an encrypted local compare-and-set journal under `src/skulk/operator/`. It
-  remains separate from event-sourced `State`, telemetry, diagnostics, and the
-  public event log. Restart recovery reverifies the complete certificate and
+  keeps keys, credentials, authority membership, and journal contents separate
+  from event-sourced `State`, telemetry, diagnostics, and the public event log.
+  The non-secret per-host `node_install_id` alone is published with existing
+  static node telemetry, projected through canonical `/state`, and resolved by
+  `/admin/restart` to the current live runtime node. Restart recovery reverifies the complete certificate and
   membership chain from immutable bootstrap anchors. The encrypted journal
   requires an injected external data-key provider. The v1 designated gateway
   uses a protected local-file provider and `skulk operator pair` to create a
@@ -329,7 +332,8 @@ The system uses event sourcing for state management:
   lifecycle, separate public consensus persistence, and encrypted authority
   persistence. Runtime libp2p `NodeId`
   remains unsuitable for mobile history, device membership, or authorization
-  subjects.
+  subjects; canonical node truth exposes the non-secret stable installation ID
+  for those references and for restart targeting.
 
 ### Rust Components
 Rust code in `rust/` provides:

@@ -7,6 +7,7 @@ an in-process-only test missed a strict round-trip failure.
 """
 
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 from skulk.routing.topics import TELEMETRY
 from skulk.shared.tests.conftest import get_pipeline_shard_metadata
@@ -504,22 +505,27 @@ def test_view_merges_identity_from_two_readings() -> None:
     # accumulation), regardless of arrival order.
     view = TelemetryView()
     node = NodeId("node-a")
+    node_install_id = uuid4()
     view.apply(NodeTelemetry(node_id=node, info=MiscData(friendly_name="Kite 2")))
-    view.apply(
-        NodeTelemetry(
-            node_id=node,
-            info=StaticNodeInformation(
-                model="Mac mini",
-                chip="M4",
-                os_version="26.4",
-                os_build_version="X",
-                skulk_version="1.2.0",
-                skulk_commit="abc123",
-            ),
-        )
+    static_reading = NodeTelemetry(
+        node_id=node,
+        info=StaticNodeInformation(
+            node_install_id=node_install_id,
+            model="Mac mini",
+            chip="M4",
+            os_version="26.4",
+            os_build_version="X",
+            skulk_version="1.2.0",
+            skulk_commit="abc123",
+        ),
     )
+    restored = TELEMETRY.deserialize(TELEMETRY.serialize(static_reading))
+    assert isinstance(restored.info, StaticNodeInformation)
+    assert restored.info.node_install_id == node_install_id
+    view.apply(restored)
     identity = view.node_identities[node]
     assert identity.friendly_name == "Kite 2"  # preserved across the static merge
+    assert identity.node_install_id == node_install_id
     assert identity.chip_id == "M4"
     assert identity.skulk_version == "1.2.0"
     # a later friendly-name update keeps the static fields

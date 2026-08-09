@@ -56,7 +56,7 @@ from fastapi.staticfiles import StaticFiles
 from hypercorn.config import Config
 from hypercorn.typing import ASGIFramework
 from loguru import logger
-from pydantic import ValidationError
+from pydantic import UUID4, ValidationError
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 import skulk.shared.types.tasks as task_types
@@ -2476,7 +2476,9 @@ class API:
             summary="Restart a node",
             description=(
                 "Restart the Skulk process on this or a remote node. "
-                "Pass node_id query param to target a specific node. "
+                "Pass node_install_id to resolve a stable installation identity "
+                "to its current live runtime node, or node_id for a legacy "
+                "session-scoped target. "
                 "Active inference is interrupted, and the process is replaced; "
                 "the node rejoins the cluster automatically on startup."
             ),
@@ -13103,13 +13105,56 @@ class API:
                     break
         return transcript_chunks
 
-    async def restart_node(self, node_id: NodeId | None = None) -> JSONResponse:
+    async def restart_node(
+        self,
+        node_id: Annotated[
+            NodeId | None,
+            Query(
+                description=(
+                    "Legacy session-scoped runtime node ID. Prefer node_install_id "
+                    "for operator actions."
+                )
+            ),
+        ] = None,
+        node_install_id: Annotated[
+            UUID4 | None,
+            Query(
+                description=(
+                    "Stable per-installation node identity resolved against current "
+                    "live cluster truth."
+                )
+            ),
+        ] = None,
+    ) -> JSONResponse:
         """Restart the Skulk process on this or a remote node.
 
-        If node_id is omitted or matches this node, replaces the current
-        process image via os.execv (in-place restart, same PID). Otherwise,
-        sends a RestartNode command via pub/sub to the target node."""
-        target = node_id or self.node_id
+        Args:
+            node_id: Legacy session-scoped runtime target. Omit for this API node.
+            node_install_id: Stable installation identity resolved to one live
+                runtime node before command dispatch.
+
+        Returns:
+            Accepted local or remote restart status and the resolved runtime node.
+
+        Raises:
+            HTTPException: Both target forms are supplied, or the stable target
+                is missing or ambiguous in current live cluster truth.
+        """
+        if node_id is not None and node_install_id is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="provide either node_id or node_install_id, not both",
+            )
+        target = (
+            self._runtime_node_for_installation(node_install_id)
+            if node_install_id is not None
+            else node_id or self.node_id
+        )
+        response_identity = (
+            {"node_install_id": str(node_install_id)}
+            if node_install_id is not None
+            else {}
+        )
 
         if target == self.node_id:
             from skulk.utils.restart import schedule_restart
@@ -13120,14 +13165,62 @@ class API:
             scheduled = schedule_restart()
             if not scheduled:
                 return JSONResponse(
-                    {"status": "restart_already_pending", "node_id": str(self.node_id)},
+                    {
+                        "status": "restart_already_pending",
+                        "node_id": str(self.node_id),
+                        **response_identity,
+                    },
                     status_code=409,
                 )
-            return JSONResponse({"status": "restarting", "node_id": str(self.node_id)})
+            return JSONResponse(
+                {
+                    "status": "restarting",
+                    "node_id": str(self.node_id),
+                    **response_identity,
+                }
+            )
 
         # Remote restart — send command via download commands channel
         from skulk.shared.types.commands import RestartNode
 
         logger.info(f"Remote node restart requested for {target}")
         await self._send_download(RestartNode(target_node_id=target))
-        return JSONResponse({"status": "restart_sent", "node_id": str(target)})
+        return JSONResponse(
+            {
+                "status": "restart_sent",
+                "node_id": str(target),
+                **response_identity,
+            }
+        )
+
+    def _runtime_node_for_installation(self, node_install_id: UUID4) -> NodeId:
+        """Resolve one stable installation identity to its live runtime node.
+
+        Args:
+            node_install_id: Persistent per-host identity reported in node telemetry.
+
+        Returns:
+            The current session-scoped runtime node ID.
+
+        Raises:
+            HTTPException: No live node or more than one live node reports the
+                requested installation identity.
+        """
+        live_nodes = self._live_node_timestamps()
+        matches = [
+            runtime_node_id
+            for runtime_node_id, identity in self._telemetry_view.node_identities.items()
+            if runtime_node_id in live_nodes
+            and identity.node_install_id == node_install_id
+        ]
+        if not matches:
+            raise HTTPException(
+                status_code=404,
+                detail="stable node identity is not present in current live cluster truth",
+            )
+        if len(matches) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail="stable node identity is ambiguous in current live cluster truth",
+            )
+        return matches[0]

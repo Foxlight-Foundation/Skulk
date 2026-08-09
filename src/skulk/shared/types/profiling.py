@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal, Self, cast, final
 
 import psutil
-from pydantic import BaseModel, field_serializer, field_validator
+from pydantic import UUID4, BaseModel, Field, field_serializer, field_validator
 
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.node_facts import CapabilityConflict
@@ -263,6 +263,13 @@ class NetworkInterfaceInfo(CamelCaseModel):
 class NodeIdentity(CamelCaseModel):
     """Static and slow-changing node identification data."""
 
+    node_install_id: UUID4 | None = Field(
+        default=None,
+        description=(
+            "Stable per-installation operator identity, independent of the current "
+            "runtime libp2p node ID."
+        ),
+    )
     model_id: str = "Unknown"
     chip_id: str = "Unknown"
     friendly_name: str = "Unknown"

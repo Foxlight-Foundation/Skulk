@@ -338,6 +338,7 @@ class TelemetryView:
             current = self.node_identities.get(node_id, NodeIdentity())
             self.node_identities[node_id] = current.model_copy(
                 update={
+                    "node_install_id": info.node_install_id,
                     "model_id": info.model,
                     "chip_id": info.chip,
                     "os_version": info.os_version,
