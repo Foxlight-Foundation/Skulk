@@ -118,6 +118,7 @@ from skulk.api.realtime import (
 from skulk.api.steward import (
     STEWARD_NOT_READY_MESSAGES,
     STEWARD_RETRY_AFTER_SECONDS,
+    STEWARD_SYSTEM_PROMPT,
     STEWARD_VIRTUAL_MODEL_ID,
     StewardCanaryState,
     StewardChatMessage,
@@ -405,7 +406,10 @@ from skulk.shared.types.telemetry import (
     TelemetryView,
     record_membership_from_event,
 )
-from skulk.shared.types.text_generation import TextGenerationTaskParams
+from skulk.shared.types.text_generation import (
+    InputMessage,
+    TextGenerationTaskParams,
+)
 from skulk.shared.types.worker.downloads import DownloadCompleted, LiveDownloadProgress
 from skulk.shared.types.worker.instances import (
     Instance,
@@ -2987,7 +2991,16 @@ class API:
             )
         harness = StewardHarness(self)
         command_id = CommandId()
-        chunk_stream = harness.run_turn_chunks(history)
+        history, system_prompt, task_params = (
+            await self._steward_extension_transform(history, stream=payload.stream)
+        )
+        chunk_stream = harness.run_turn_chunks(
+            history, system_prompt=system_prompt
+        )
+        if self._extensions is not None and self._extensions.has_chat_middleware:
+            chunk_stream = self._extensions.tap_chat_stream(
+                self._extension_context, task_params, chunk_stream
+            )
         if payload.stream:
             return StreamingResponse(
                 with_sse_keepalive(
@@ -3004,6 +3017,66 @@ class API:
             collect_chat_response(command_id, chunk_stream),
             media_type="application/json",
         )
+
+    async def _steward_extension_transform(
+        self, history: list[StewardChatMessage], *, stream: bool
+    ) -> tuple[list[StewardChatMessage], str, TextGenerationTaskParams]:
+        """Run chat middleware's request transform over one steward turn.
+
+        The steward answers through a bespoke harness rather than the ordinary
+        dispatch path, so ``chat_completions`` returns before its extension
+        hook. Without this, an installed chat middleware silently sees every
+        conversation on the node except the steward's own, which is the one
+        conversation an ambient-memory or policy extension most needs.
+
+        The turn is presented in the same canonical shape the ordinary path
+        uses: the steward's system prompt as ``instructions`` and the operator
+        history as ``input``. Those are also the only two channels read back,
+        because they are the only ones the harness owns (sampling, tools, and
+        the model are the steward's, not the caller's). A transform that
+        leaves the turn without a trailing user message is discarded rather
+        than obeyed, since the harness's contract is that a steward turn
+        answers an operator question.
+
+        Every middleware call inside is guarded by the loader, so a raising
+        extension is logged and the steward answers unchanged.
+
+        Args:
+            history: The turn's user/assistant conversation.
+            stream: Whether the caller requested SSE, mirrored into the params
+                so observers see the real request shape.
+
+        Returns:
+            The possibly-transformed history, the system prompt to run the
+            turn with, and the post-transform params to hand the response tap.
+        """
+        task_params = TextGenerationTaskParams(
+            model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
+            input=[
+                InputMessage(role=message.role, content=message.content)
+                for message in history
+            ],
+            instructions=STEWARD_SYSTEM_PROMPT,
+            stream=stream,
+        )
+        if self._extensions is None or not self._extensions.has_chat_middleware:
+            return history, STEWARD_SYSTEM_PROMPT, task_params
+        task_params = await self._extensions.transform_chat_request(
+            self._extension_context, task_params
+        )
+        transformed = [
+            StewardChatMessage(role=message.role, content=message.content)
+            for message in task_params.input
+            if message.role in ("user", "assistant") and message.content
+        ]
+        if transformed and transformed[-1].role == "user":
+            history = transformed
+        else:
+            logger.warning(
+                "chat middleware left the steward turn without a trailing "
+                "user message; keeping the operator's own history"
+            )
+        return history, task_params.instructions or STEWARD_SYSTEM_PROMPT, task_params
 
     async def _steward_canary_loop(self) -> None:
         """Deterministic degraded-but-alive detection for the steward.

@@ -873,7 +873,10 @@ class StewardHarness:
         )
 
     async def run_turn_chunks(
-        self, history: list[StewardChatMessage]
+        self,
+        history: list[StewardChatMessage],
+        *,
+        system_prompt: str = STEWARD_SYSTEM_PROMPT,
     ) -> "AsyncGenerator[TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None]":
         """Run one steward turn as a chat-completions chunk stream.
 
@@ -884,6 +887,15 @@ class StewardHarness:
         vocabulary is what lets the steward ride ``/v1/chat/completions``
         (streaming and non-streaming) with no adapter changes: clients see
         a normal model whose reasoning happens to be its tool trace.
+
+        Args:
+            history: The turn's user/assistant conversation, ending with the
+                operator's question.
+            system_prompt: The turn's system message. Defaults to the
+                steward's own prompt; the caller overrides it only to carry
+                chat-middleware-injected context (see
+                ``API._steward_extension_transform``), never to replace the
+                steward's instructions.
         """
 
         located = self.steward_instance()
@@ -899,7 +911,7 @@ class StewardHarness:
         instance_id, model_id = located
 
         messages: list[ChatCompletionMessage] = [
-            ChatCompletionMessage(role="system", content=STEWARD_SYSTEM_PROMPT)
+            ChatCompletionMessage(role="system", content=system_prompt)
         ]
         for message in history:
             messages.append(
