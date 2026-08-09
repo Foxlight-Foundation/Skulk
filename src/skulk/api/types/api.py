@@ -149,8 +149,9 @@ class ModelListModel(BaseModel):
     remote_code_approval_required: bool = Field(
         default=False,
         description=(
-            "Whether this signed registry artifact executes repository Python and "
-            "therefore requires an explicit approval on each serving node."
+            "Whether this signed registry artifact or its selected platform loader "
+            "can execute repository Python and therefore requires an explicit "
+            "approval on each serving node."
         ),
     )
     remote_code_approved_on_this_node: bool = Field(

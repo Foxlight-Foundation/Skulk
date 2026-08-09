@@ -307,6 +307,8 @@ from skulk.shared.models.model_cards import (
 )
 from skulk.shared.models.remote_code_approval import (
     REMOTE_CODE_APPROVALS,
+    remote_code_approval_mutation_allowed,
+    remote_code_execution_requires_approval,
 )
 from skulk.shared.tracing import (
     TraceEvent,
@@ -1817,7 +1819,8 @@ class API:
             summary="Approve registry remote code on this node",
             description=(
                 "Approves one immutable signed-registry card to download and execute "
-                "repository Python on this node only."
+                "repository Python on this node only. This mutation accepts only "
+                "loopback clients and loopback browser origins."
             ),
         )(self.approve_remote_code)
         self.app.delete(
@@ -1825,7 +1828,9 @@ class API:
             tags=["Models"],
             summary="Revoke registry remote code on this node",
             description=(
-                "Revokes node-local execution approval for one immutable registry card."
+                "Revokes node-local execution approval for one immutable registry "
+                "card. This mutation accepts only loopback clients and loopback "
+                "browser origins."
             ),
         )(self.revoke_remote_code)
         self.app.post(
@@ -7152,9 +7157,7 @@ class API:
         approved_remote_code_card_ids: frozenset[str] | None = None,
     ) -> ModelListModel:
         """Build the public model-list representation for one model card."""
-        remote_code_approval_required = (
-            card.registry_card_id is not None and card.trust_remote_code
-        )
+        remote_code_approval_required = remote_code_execution_requires_approval(card)
         if remote_code_approval_required and approved_remote_code_card_ids is None:
             approved_remote_code_card_ids = REMOTE_CODE_APPROVALS.approved_card_ids()
         resolved_profile = resolve_model_capability_profile(
@@ -7235,8 +7238,11 @@ class API:
             for card_id in sorted(REMOTE_CODE_APPROVALS.approved_card_ids())
         ]
 
-    async def approve_remote_code(self, card_id: str) -> RemoteCodeApprovalView:
+    async def approve_remote_code(
+        self, card_id: str, request: Request
+    ) -> RemoteCodeApprovalView:
         """Approve one existing remote-code registry card on this API node."""
+        self._require_node_local_remote_code_mutation(request)
         if not re.fullmatch(r"card_[a-z2-7]{52}", card_id):
             raise HTTPException(status_code=422, detail="Invalid registry card id")
         card = next(
@@ -7249,20 +7255,38 @@ class API:
         )
         if card is None:
             raise HTTPException(status_code=404, detail="Registry card not found")
-        if not card.trust_remote_code:
+        if not remote_code_execution_requires_approval(card):
             raise HTTPException(
                 status_code=409,
-                detail="Registry card does not request repository-code execution",
+                detail="Registry card does not require repository-code approval",
             )
         REMOTE_CODE_APPROVALS.approve(card_id)
         return RemoteCodeApprovalView(card_id=card_id, approved_on_this_node=True)
 
-    async def revoke_remote_code(self, card_id: str) -> RemoteCodeApprovalView:
+    async def revoke_remote_code(
+        self, card_id: str, request: Request
+    ) -> RemoteCodeApprovalView:
         """Revoke one immutable registry card approval on this API node."""
+        self._require_node_local_remote_code_mutation(request)
         if not re.fullmatch(r"card_[a-z2-7]{52}", card_id):
             raise HTTPException(status_code=422, detail="Invalid registry card id")
         REMOTE_CODE_APPROVALS.revoke(card_id)
         return RemoteCodeApprovalView(card_id=card_id, approved_on_this_node=False)
+
+    @staticmethod
+    def _require_node_local_remote_code_mutation(request: Request) -> None:
+        """Reject approval writes not made through a loopback control surface."""
+        client_host = request.client.host if request.client is not None else None
+        if not remote_code_approval_mutation_allowed(
+            client_host, request.headers.get("origin")
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Remote-code approvals may be changed only from a loopback "
+                    "client and, for browsers, a loopback origin"
+                ),
+            )
 
     async def add_custom_model(self, payload: AddCustomModelParams) -> ModelListModel:
         """Fetch a Hugging Face model card, optionally pinning one GGUF file."""

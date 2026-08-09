@@ -1,6 +1,8 @@
 """Node-local approval store for registry artifacts that execute repository code."""
 
+from ipaddress import ip_address
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from filelock import FileLock
 from pydantic import BaseModel, ConfigDict, Field
@@ -72,11 +74,25 @@ REMOTE_CODE_APPROVALS = RemoteCodeApprovalStore()
 """Process-wide facade over the node-local approval file."""
 
 
+def remote_code_execution_requires_approval(card: ModelCard) -> bool:
+    """Return whether serving a registry card can execute repository Python.
+
+    MLX vision processor discovery currently includes loaders that enable
+    ``trust_remote_code`` internally. Treat that platform behavior as an
+    approval requirement even when the artifact card itself does not request
+    remote code. This keeps model truth separate from the runner's current
+    implementation boundary while failing closed.
+    """
+    return card.registry_card_id is not None and (
+        card.trust_remote_code or card.vision is not None
+    )
+
+
 def remote_code_approval_required(card: ModelCard) -> bool:
     """Return whether a registry card is blocked on this node's approval."""
     return (
-        card.registry_card_id is not None
-        and card.trust_remote_code
+        remote_code_execution_requires_approval(card)
+        and card.registry_card_id is not None
         and not REMOTE_CODE_APPROVALS.is_approved(card.registry_card_id)
     )
 
@@ -88,3 +104,36 @@ def require_remote_code_approval(card: ModelCard) -> None:
             "model card requires node-local remote-code approval: "
             f"{card.registry_card_id}"
         )
+
+
+def remote_code_approval_mutation_allowed(
+    client_host: str | None, origin: str | None
+) -> bool:
+    """Return whether an HTTP peer may mutate this node's approval file.
+
+    The socket peer must be loopback. Browser requests must additionally come
+    from a loopback origin so permissive inference CORS cannot turn a remote
+    webpage into a localhost approval authority. Forwarded headers are ignored.
+    """
+
+    def _is_loopback(host: str | None) -> bool:
+        if host == "localhost":
+            return True
+        if host is None:
+            return False
+        try:
+            return ip_address(host).is_loopback
+        except ValueError:
+            return False
+
+    if not _is_loopback(client_host):
+        return False
+    if origin is None:
+        return True
+    try:
+        parsed_origin = urlsplit(origin)
+    except ValueError:
+        return False
+    return parsed_origin.scheme in {"http", "https"} and _is_loopback(
+        parsed_origin.hostname
+    )

@@ -401,7 +401,11 @@ last-known-good cache during outages, and retains bundled cards only as the
 transition fallback. `model_id` may be an artifact alias while
 `source_repository` is the byte origin. Registry cards with
 `trust_remote_code=true` require an immutable-card approval on every serving
-node; registry publication cannot grant it.
+node; registry vision cards require the same approval while the MLX processor
+path can enable repository code internally. The gate runs before download and
+before every runner-type dispatch, and approval mutations require a loopback
+socket peer plus a loopback browser origin. Registry publication cannot grant
+approval.
 TTS cards may declare `audio.voices`, optional ordered `audio.voice_catalog`
 display/preferred-language metadata, optional checksummed bundled
 `reference_profile` identifiers, and a validated `audio.default_voice`, which

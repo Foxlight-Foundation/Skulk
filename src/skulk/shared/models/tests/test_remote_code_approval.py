@@ -8,9 +8,11 @@ import pytest
 
 import skulk.shared.models.remote_code_approval as approval_module
 from skulk.download.shard_downloader import NoopShardDownloader
-from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.models.model_cards import ModelCard, ModelTask, VisionCardConfig
 from skulk.shared.models.remote_code_approval import (
     RemoteCodeApprovalStore,
+    remote_code_approval_mutation_allowed,
+    remote_code_execution_requires_approval,
     require_remote_code_approval,
 )
 from skulk.shared.types.common import ModelId
@@ -63,6 +65,42 @@ def test_local_cards_do_not_enter_registry_approval_policy() -> None:
         update={"registry_card_id": None, "registry_snapshot_id": None}
     )
     require_remote_code_approval(card)
+
+
+def test_registry_vision_card_requires_approval_for_platform_loader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vision loader that enables remote code cannot bypass card approval."""
+    monkeypatch.setattr(
+        approval_module,
+        "REMOTE_CODE_APPROVALS",
+        RemoteCodeApprovalStore(tmp_path / "approvals.json"),
+    )
+    card = _registry_card().model_copy(
+        update={"trust_remote_code": False, "vision": VisionCardConfig()}
+    )
+
+    assert remote_code_execution_requires_approval(card)
+    with pytest.raises(PermissionError, match=card.registry_card_id or ""):
+        require_remote_code_approval(card)
+
+
+@pytest.mark.parametrize(
+    ("client_host", "origin", "allowed"),
+    [
+        ("127.0.0.1", None, True),
+        ("::1", "https://[::1]:52415", True),
+        ("127.0.0.1", "http://localhost:52415", True),
+        ("192.0.2.10", None, False),
+        ("127.0.0.1", "https://example.com", False),
+        ("127.0.0.1", "null", False),
+    ],
+)
+def test_approval_mutations_require_loopback_peer_and_browser_origin(
+    client_host: str, origin: str | None, allowed: bool
+) -> None:
+    """Network peers and cross-origin webpages cannot mutate approvals."""
+    assert remote_code_approval_mutation_allowed(client_host, origin) is allowed
 
 
 @pytest.mark.asyncio

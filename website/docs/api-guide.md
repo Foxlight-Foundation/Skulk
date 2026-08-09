@@ -1209,15 +1209,20 @@ Python on this API node.
 **POST** `/models/remote-code-approvals/{card_id}`
 
 Approves an existing signed-registry card that declares
-`trust_remote_code=true`. Approval is keyed to the immutable card ID, stored in
-an owner-only local file, and applies only to this node. Repeat it on every node
-that may download or serve the artifact. Skulk fails closed before both
-download and runner startup when a required approval is absent.
+`trust_remote_code=true`, or a vision card whose current platform loader may
+enable repository code internally. Approval is keyed to the immutable card ID,
+stored in an owner-only local file, and applies only to this node. Repeat it on
+every node that may download or serve the artifact. Skulk fails closed before
+both download and every runner-type dispatch when a required approval is
+absent. This mutation is accepted only from a loopback socket peer; browser
+requests must also have a loopback `Origin`. Forwarded client headers are not
+trusted.
 
 **DELETE** `/models/remote-code-approvals/{card_id}`
 
 Revokes that node-local approval. Revocation prevents future downloads and
-runner starts; it does not delete already downloaded bytes.
+runner starts; it does not delete already downloaded bytes. The same loopback
+peer and browser-origin restriction applies.
 
 ### Search Hugging Face
 
@@ -1574,7 +1579,7 @@ Important fields:
 | `catalog_source` | string | `registry`, `bundled`, or `custom` |
 | `registry_card_id` | string or null | Immutable content-derived card identity from the signed registry |
 | `registry_snapshot_id` | string or null | Signed catalog snapshot that supplied the card |
-| `remote_code_approval_required` | boolean | Whether the registry artifact executes repository Python and needs local approval |
+| `remote_code_approval_required` | boolean | Whether the registry artifact or its selected platform loader can execute repository Python and needs local approval |
 | `remote_code_approved_on_this_node` | boolean | Whether that immutable card is approved on the responding node |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
 | `resolved_capabilities.supports_speech_synthesis` | boolean | Whether clients should treat the model as a text-to-speech model |

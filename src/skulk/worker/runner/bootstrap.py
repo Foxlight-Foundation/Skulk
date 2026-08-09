@@ -457,6 +457,10 @@ def entrypoint(
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(max(soft, 2048), hard), hard))
 
     shard = bound_instance.bound_shard
+    # This guard belongs before runner-type dispatch: image and embedding
+    # runners do not pass through text-engine resolution, and revoking an
+    # approval must prevent every future runner process from starting.
+    require_remote_code_approval(shard.model_card)
     fast_synch_enabled = resolve_metal_fast_synch(shard.model_card.runtime)
     os.environ["MLX_METAL_FAST_SYNCH"] = "1" if fast_synch_enabled else "0"
     logger.info(
