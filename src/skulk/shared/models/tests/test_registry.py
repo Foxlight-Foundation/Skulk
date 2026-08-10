@@ -401,6 +401,50 @@ async def test_registry_refresh_helper_throttles_repeated_cache_misses(
 
 
 @pytest.mark.asyncio
+async def test_registry_id_miss_forces_one_serialized_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A store can bridge snapshot skew without allowing refresh storms."""
+    refreshes = 0
+    requested_id = f"card_{'z' * 52}"
+
+    async def refresh() -> None:
+        nonlocal refreshes
+        refreshes += 1
+
+    original_cache = dict(model_cards_module._card_cache)
+    model_cards_module._card_cache.clear()
+    catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    model_cards_module._card_cache.update(
+        {card.model_id: card for card in registry_model_cards(catalog)}
+    )
+    monkeypatch.setattr(model_cards_module, "_registry_enabled", lambda: True)
+    monkeypatch.setattr(model_cards_module, "_last_registry_refresh", 100.0)
+    monkeypatch.setattr(model_cards_module, "_last_registry_miss_refresh", 0.0)
+    monkeypatch.setattr(model_cards_module.time, "monotonic", lambda: 101.0)
+    monkeypatch.setattr(model_cards_module, "_refresh_card_cache", refresh)
+    try:
+        assert (
+            await model_cards_module.get_registry_card_by_id(
+                requested_id,
+                refresh_on_miss=True,
+            )
+            is None
+        )
+        assert (
+            await model_cards_module.get_registry_card_by_id(
+                requested_id,
+                refresh_on_miss=True,
+            )
+            is None
+        )
+        assert refreshes == 1
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+
+
+@pytest.mark.asyncio
 async def test_downloader_fetches_source_repository_under_alias_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

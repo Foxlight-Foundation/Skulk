@@ -211,8 +211,16 @@ class RemoteCodeApprovalView(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    card_id: str = Field(pattern=r"^card_[a-z2-7]{52}$")
-    approved_on_this_node: bool
+    card_id: str = Field(
+        pattern=r"^card_[a-z2-7]{52}$",
+        description="Immutable content-derived identifier of the signed registry card.",
+    )
+    approved_on_this_node: bool = Field(
+        description=(
+            "Whether this API node's local approval file permits the card to "
+            "download or execute repository code."
+        )
+    )
 
 
 class ResolvedModelCapabilities(BaseModel):

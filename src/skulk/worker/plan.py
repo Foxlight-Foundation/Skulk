@@ -60,6 +60,30 @@ def _is_rpc_donor(runner: RunnerSupervisor) -> bool:
     return isinstance(runner.bound_instance.bound_shard, RpcDonorShardMetadata)
 
 
+def _same_download_identity(
+    existing: ShardMetadata,
+    expected: ShardMetadata,
+) -> bool:
+    """Return whether completed bytes belong to the expected artifact card.
+
+    Signed registry card IDs cover the complete immutable card contents, so an
+    alias retained across a registry replacement must not reuse the prior
+    completion. Legacy and custom cards lack that identity and therefore use
+    strict card equality.
+    """
+    existing_card = existing.model_card
+    expected_card = expected.model_card
+    if (
+        existing_card.registry_card_id is not None
+        or expected_card.registry_card_id is not None
+    ):
+        return (
+            existing_card.registry_card_id is not None
+            and existing_card.registry_card_id == expected_card.registry_card_id
+        )
+    return existing_card == expected_card
+
+
 def plan(
     node_id: NodeId,
     # Runners is expected to be FRESH and so should not come from state
@@ -147,9 +171,6 @@ def _model_needs_download(
     global_download_status: Mapping[NodeId, Sequence[DownloadProgress]],
 ) -> DownloadModel | None:
     local_downloads = global_download_status.get(node_id, [])
-    download_status = {
-        dp.shard_metadata.model_card.model_id: dp for dp in local_downloads
-    }
 
     for runner in runners.values():
         # An RPC donor never touches the model file: the driver reads the GGUF
@@ -157,13 +178,18 @@ def _model_needs_download(
         # RunnerIdle window would plan a multi-GB download for nothing (#328).
         if _is_rpc_donor(runner):
             continue
-        model_id = runner.bound_instance.bound_shard.model_card.model_id
-        if isinstance(runner.status, RunnerIdle) and (
-            model_id not in download_status
-            or not isinstance(
-                download_status[model_id],
-                (DownloadOngoing, DownloadCompleted, DownloadFailed),
-            )
+        expected_shard = runner.bound_instance.bound_shard
+        matching_status = next(
+            (
+                progress
+                for progress in local_downloads
+                if _same_download_identity(progress.shard_metadata, expected_shard)
+            ),
+            None,
+        )
+        if isinstance(runner.status, RunnerIdle) and not isinstance(
+            matching_status,
+            (DownloadOngoing, DownloadCompleted, DownloadFailed),
         ):
             # We don't invalidate download_status randomly in case a file gets deleted on disk
             return DownloadModel(
@@ -248,7 +274,10 @@ def _load_model(
             driver_node = runner.bound_instance.bound_node_id
             driver_download_complete = driver_node in global_download_status and any(
                 isinstance(dp, DownloadCompleted)
-                and dp.shard_metadata.model_card.model_id == shard_assignments.model_id
+                and _same_download_identity(
+                    dp.shard_metadata,
+                    runner.bound_instance.bound_shard,
+                )
                 for dp in global_download_status[driver_node]
             )
             donors_ready = all(
@@ -268,7 +297,12 @@ def _load_model(
             nid in global_download_status
             and any(
                 isinstance(dp, DownloadCompleted)
-                and dp.shard_metadata.model_card.model_id == shard_assignments.model_id
+                and _same_download_identity(
+                    dp.shard_metadata,
+                    shard_assignments.runner_to_shard[
+                        shard_assignments.node_to_runner[nid]
+                    ],
+                )
                 for dp in global_download_status[nid]
             )
             for nid in shard_assignments.node_to_runner

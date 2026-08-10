@@ -72,7 +72,11 @@ import aiofiles.os as aios
 import aiohttp.web as web
 from loguru import logger
 
-from skulk.shared.models.model_cards import ModelCard, get_all_model_cards
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    get_all_model_cards,
+    get_registry_card_by_id,
+)
 from skulk.shared.models.remote_code_approval import require_remote_code_approval
 from skulk.store.config import DEFAULT_MODEL_STORE_PORT
 from skulk.store.model_store import ModelStore
@@ -449,6 +453,11 @@ class ModelStoreServer:
                 ),
                 None,
             )
+            if card is None:
+                card = await get_registry_card_by_id(
+                    registry_card_id,
+                    refresh_on_miss=True,
+                )
         else:
             card = next(
                 (

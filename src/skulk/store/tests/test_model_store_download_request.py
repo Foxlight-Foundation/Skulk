@@ -133,6 +133,44 @@ async def test_store_host_rejects_unverifiable_registry_identity(
 
 
 @pytest.mark.anyio
+async def test_store_host_refreshes_once_for_new_registry_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Independent store/API refresh intervals do not reject a rollout."""
+    card = _registry_card().model_copy(update={"trust_remote_code": False})
+    refreshes: list[str] = []
+
+    async def stale_cards() -> list[ModelCard]:
+        return []
+
+    async def refreshed_card(
+        card_id: str,
+        *,
+        refresh_on_miss: bool = False,
+    ) -> ModelCard | None:
+        assert refresh_on_miss
+        refreshes.append(card_id)
+        return card
+
+    monkeypatch.setattr(model_store_server_module, "get_all_model_cards", stale_cards)
+    monkeypatch.setattr(
+        model_store_server_module,
+        "get_registry_card_by_id",
+        refreshed_card,
+    )
+
+    await ModelStoreServer._require_remote_code_download_approval(
+        str(card.model_id),
+        card.registry_card_id,
+        source_repository=None,
+        source_revision=card.source_revision,
+        pinned_gguf=None,
+    )
+
+    assert refreshes == [card.registry_card_id]
+
+
+@pytest.mark.anyio
 async def test_store_host_binds_approval_to_exact_artifact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

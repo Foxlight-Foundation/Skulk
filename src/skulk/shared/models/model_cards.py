@@ -76,6 +76,8 @@ _BUILTIN_CARD_DIRS = [
 _card_cache: dict[ModelId, "ModelCard"] = {}
 _registry_refresh_lock = asyncio.Lock()
 _last_registry_refresh = 0.0
+_last_registry_miss_refresh = 0.0
+_REGISTRY_MISS_REFRESH_SECONDS: Final[float] = 1.0
 _registry_client = TufRegistryClient(
     base_url=SKULK_MODEL_REGISTRY_URL,
     cache_dir=SKULK_MODEL_REGISTRY_CACHE_DIR,
@@ -305,6 +307,56 @@ async def get_all_model_cards() -> list["ModelCard"]:
     """Return the complete verified/custom catalog without UI task filtering."""
     await _refresh_card_cache_if_due()
     return list(_card_cache.values())
+
+
+async def get_registry_card_by_id(
+    card_id: str,
+    *,
+    refresh_on_miss: bool = False,
+) -> "ModelCard | None":
+    """Resolve one signed card, optionally forcing a throttled refresh on a miss.
+
+    Args:
+        card_id: Immutable registry card identifier to resolve.
+        refresh_on_miss: Whether an absent identifier should trigger one
+            serialized refresh outside the normal catalog interval.
+
+    Returns:
+        The matching signed card, or ``None`` when it remains unknown.
+
+    Side effects:
+        May refresh the signed registry and rebuild the process card cache.
+    """
+    global _last_registry_miss_refresh  # noqa: PLW0603
+    await _refresh_card_cache_if_due()
+    card = next(
+        (candidate for candidate in _card_cache.values() if candidate.registry_card_id == card_id),
+        None,
+    )
+    if card is not None or not refresh_on_miss or not _registry_enabled():
+        return card
+    async with _registry_refresh_lock:
+        card = next(
+            (
+                candidate
+                for candidate in _card_cache.values()
+                if candidate.registry_card_id == card_id
+            ),
+            None,
+        )
+        now = time.monotonic()
+        if card is not None or now - _last_registry_miss_refresh < _REGISTRY_MISS_REFRESH_SECONDS:
+            return card
+        _last_registry_miss_refresh = now
+        await _refresh_card_cache()
+        return next(
+            (
+                candidate
+                for candidate in _card_cache.values()
+                if candidate.registry_card_id == card_id
+            ),
+            None,
+        )
 
 
 async def get_model_cards() -> list["ModelCard"]:
