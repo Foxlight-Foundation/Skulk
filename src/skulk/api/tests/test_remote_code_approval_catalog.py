@@ -4,10 +4,12 @@
 from typing import cast
 
 import pytest
+from fastapi import HTTPException
 from starlette.requests import Request
 
 from skulk.api import main as api_main
 from skulk.api.main import API
+from skulk.api.types.api import AddCustomModelParams
 from skulk.shared.models.model_cards import ModelCard, ModelTask, VisionCardConfig
 from skulk.shared.models.remote_code_approval import RemoteCodeApprovalStore
 from skulk.shared.types.common import ModelId
@@ -23,6 +25,30 @@ class _RecordingApprovalStore:
     def approve(self, card_id: str) -> None:
         """Record one approved card ID."""
         self.approved.append(card_id)
+
+
+@pytest.mark.asyncio
+async def test_remote_client_cannot_add_custom_remote_code_card() -> None:
+    """Custom-card generation shares the node-local approval boundary."""
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/models/add",
+            "headers": [],
+            "client": ("192.0.2.10", 12345),
+            "scheme": "http",
+            "server": ("192.0.2.20", 52415),
+        }
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        await object.__new__(API).add_custom_model(
+            AddCustomModelParams(model_id=ModelId("org/custom-model")),
+            request,
+        )
+
+    assert raised.value.status_code == 403
 
 
 @pytest.mark.asyncio

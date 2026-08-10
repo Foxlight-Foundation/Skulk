@@ -1841,7 +1841,9 @@ class API:
             description=(
                 "Add a custom model card to Skulk's model catalog so it becomes "
                 "searchable and launchable. An optional gguf_file selects one exact "
-                "quant from a multi-quant GGUF repository."
+                "quant from a multi-quant GGUF repository. This mutation accepts "
+                "only loopback clients and loopback browser origins because generated "
+                "cards may execute repository code."
             ),
         )(self.add_custom_model)
         self.app.delete(
@@ -7254,7 +7256,23 @@ class API:
     async def approve_remote_code(
         self, card_id: str, request: Request
     ) -> RemoteCodeApprovalView:
-        """Approve one existing remote-code registry card on this API node."""
+        """Persist approval for one immutable registry card on this API node.
+
+        Args:
+            card_id: Immutable content-derived registry card identifier.
+            request: Incoming request whose peer, origin, and forwarding headers
+                establish the node-local mutation boundary.
+
+        Returns:
+            The node-local approval view for the newly approved card.
+
+        Raises:
+            HTTPException: If the caller is not node-local, the identifier is
+                malformed or unknown, or the card needs no repository-code approval.
+
+        Side effects:
+            Atomically adds the card identifier to this node's durable approval file.
+        """
         self._require_node_local_remote_code_mutation(request)
         if not re.fullmatch(r"card_[a-z2-7]{52}", card_id):
             raise HTTPException(status_code=422, detail="Invalid registry card id")
@@ -7311,8 +7329,25 @@ class API:
                 ),
             )
 
-    async def add_custom_model(self, payload: AddCustomModelParams) -> ModelListModel:
-        """Fetch a Hugging Face model card, optionally pinning one GGUF file."""
+    async def add_custom_model(
+        self, payload: AddCustomModelParams, request: Request
+    ) -> ModelListModel:
+        """Fetch and persist a custom card from a node-local control request.
+
+        Args:
+            payload: Hugging Face repository, optional quant file, and revision.
+            request: Incoming request used to enforce the node-local mutation boundary.
+
+        Returns:
+            The generated custom model entry added to the cluster catalog.
+
+        Raises:
+            HTTPException: If the caller is not node-local or card generation fails.
+
+        Side effects:
+            Fetches Hub metadata and broadcasts a persistent custom-card mutation.
+        """
+        self._require_node_local_remote_code_mutation(request)
         # Load curated truth before generating the override. A generated card
         # is a metadata cache, not operator-authored placement policy, and must
         # retain architecture safety constraints from an exact bundled match.

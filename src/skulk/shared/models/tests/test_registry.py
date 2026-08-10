@@ -29,9 +29,7 @@ def _catalog_payload() -> bytes:
             "generated_at": "2026-08-08T12:00:00Z",
             "published_by": "validator@example.com",
             "note": "test",
-            "card_metadata": {
-                f"card_{'a' * 52}": {"provenance": "foxlight"}
-            },
+            "card_metadata": {f"card_{'a' * 52}": {"provenance": "foxlight"}},
             "cards": [
                 {
                     "schema_version": 1,
@@ -231,15 +229,25 @@ def test_client_uses_hash_bound_last_known_good(
         timeout_seconds=1,
         max_stale_days=30,
     )
-    assert client.load_catalog().snapshot_id == "snapshot_1_test"
+    assert client.load_catalog(registry_model_cards).snapshot_id == "snapshot_1_test"
     assert observed_trusted_roots == [embedded_root.read_bytes()]
+
+    malformed_payload = cast("dict[str, object]", json.loads(_catalog_payload()))
+    malformed_cards = cast("list[dict[str, object]]", malformed_payload["cards"])
+    malformed_card = cast("dict[str, object]", malformed_cards[0]["card"])
+    malformed_card["n_layers"] = "not-an-integer"
+    payload_path.write_text(json.dumps(malformed_payload))
+    assert client.load_catalog(registry_model_cards).snapshot_id == "snapshot_1_test"
+    assert (tmp_path / "cache/last-known-good-catalog.json").read_bytes() == (
+        _catalog_payload()
+    )
 
     class FailingUpdater(WorkingUpdater):
         def refresh(self) -> None:
             raise OSError("offline")
 
     monkeypatch.setattr(registry_module, "Updater", FailingUpdater)
-    assert client.load_catalog().snapshot_id == "snapshot_1_test"
+    assert client.load_catalog(registry_model_cards).snapshot_id == "snapshot_1_test"
 
     (tmp_path / "cache/last-known-good-catalog.json").write_bytes(b"tampered")
     with pytest.raises(RegistryUnavailableError):
@@ -273,7 +281,7 @@ async def test_failed_refresh_removes_previous_registry_cards(
     )
 
     class FailingClient:
-        def load_catalog(self) -> RegistryCatalog:
+        def load_catalog(self, _catalog_validator: object = None) -> RegistryCatalog:
             raise OSError("registry offline and LKG expired")
 
     original_cache = dict(model_cards_module._card_cache)
@@ -312,7 +320,7 @@ async def test_successful_refresh_excludes_unlisted_bundled_cards(
     )
 
     class WorkingClient:
-        def load_catalog(self) -> RegistryCatalog:
+        def load_catalog(self, _catalog_validator: object = None) -> RegistryCatalog:
             return catalog
 
     original_cache = dict(model_cards_module._card_cache)

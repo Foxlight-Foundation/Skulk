@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -117,22 +118,45 @@ class TufRegistryClient:
         self._cache_record_path = cache_dir / "last-known-good.json"
         self._lock = FileLock(str(cache_dir / "refresh.lock"))
 
-    def load_catalog(self) -> RegistryCatalog:
-        """Refresh from the signed repository or return a bounded verified cache."""
+    def load_catalog(
+        self,
+        catalog_validator: Callable[[RegistryCatalog], object] | None = None,
+    ) -> RegistryCatalog:
+        """Refresh and validate a signed catalog or return a bounded valid cache.
+
+        Args:
+            catalog_validator: Optional consumer-level validator applied before a
+                newly verified target replaces the last-known-good catalog and
+                whenever cached bytes are recovered.
+
+        Returns:
+            A TUF-verified catalog accepted by both the wire schema and the
+            supplied runtime validator.
+
+        Raises:
+            RegistryUnavailableError: When neither the network target nor the
+                bounded last-known-good catalog passes validation.
+
+        Side effects:
+            Persists newly verified target bytes only after complete validation.
+        """
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         with self._lock:
             try:
-                return self._refresh()
+                return self._refresh(catalog_validator)
             except Exception as error:  # noqa: BLE001 - security fallback boundary
                 try:
-                    return self._load_last_known_good()
+                    return self._load_last_known_good(catalog_validator)
                 except (OSError, ValueError):
                     raise RegistryUnavailableError(
                         "signed model registry is unavailable and no acceptable "
                         "last-known-good catalog exists"
                     ) from error
 
-    def _refresh(self) -> RegistryCatalog:
+    def _refresh(
+        self,
+        catalog_validator: Callable[[RegistryCatalog], object] | None,
+    ) -> RegistryCatalog:
         """Perform a normal python-tuf refresh and persist verified target bytes."""
         self._metadata_dir.mkdir(parents=True, exist_ok=True)
         self._targets_dir.mkdir(parents=True, exist_ok=True)
@@ -157,6 +181,8 @@ class TufRegistryClient:
         downloaded = Path(updater.download_target(target))
         payload = downloaded.read_bytes()
         catalog = RegistryCatalog.model_validate_json(payload, strict=False)
+        if catalog_validator is not None:
+            catalog_validator(catalog)
         self._write_verified_cache(payload, catalog)
         return catalog
 
@@ -175,7 +201,10 @@ class TufRegistryClient:
             record.model_dump_json().encode(),
         )
 
-    def _load_last_known_good(self) -> RegistryCatalog:
+    def _load_last_known_good(
+        self,
+        catalog_validator: Callable[[RegistryCatalog], object] | None,
+    ) -> RegistryCatalog:
         """Load only hash-bound, previously verified, sufficiently fresh bytes."""
         if self._max_stale_days == 0:
             raise ValueError("last-known-good registry fallback is disabled")
@@ -192,6 +221,8 @@ class TufRegistryClient:
         catalog = RegistryCatalog.model_validate_json(payload, strict=False)
         if catalog.snapshot_id != record.snapshot_id:
             raise ValueError("last-known-good snapshot identity mismatch")
+        if catalog_validator is not None:
+            catalog_validator(catalog)
         return catalog
 
     @staticmethod

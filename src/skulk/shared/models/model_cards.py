@@ -142,7 +142,10 @@ async def _load_cards_from_registry() -> bool:
     if not _registry_enabled():
         return False
     try:
-        catalog = await to_thread.run_sync(_registry_client.load_catalog)
+        catalog = await to_thread.run_sync(
+            _registry_client.load_catalog,
+            registry_model_cards,
+        )
         cards = registry_model_cards(catalog)
     except Exception as error:  # noqa: BLE001 - transition fallback boundary
         logger.warning(

@@ -1304,8 +1304,12 @@ opened.
 }
 ```
 
-Fetches metadata and adds a custom model card to the cluster catalog. A
-generated GGUF card is compatible with both llama.cpp engines and prefers
+Fetches metadata and adds a custom model card to the cluster catalog. The
+request must come directly from a loopback peer with no proxy forwarding
+headers; browser requests must also carry a loopback origin. Generated cards
+may execute repository code, so this endpoint shares the node-local mutation
+boundary used by remote-code approvals. A generated GGUF card is compatible
+with both llama.cpp engines and prefers
 the served `llama_server` tags, so on a node running llama-server it gets
 that engine's concurrency slots and is eligible for multi-node pooling via
 RPC; nodes without a served binary fall through to the in-process engine.
