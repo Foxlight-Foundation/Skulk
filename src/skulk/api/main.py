@@ -10913,7 +10913,9 @@ class API:
         try:
             client_address = ipaddress.ip_address(client.host.split("%", 1)[0])
         except ValueError as error:
-            raise HTTPException(status_code=403, detail="Invalid caller address") from error
+            raise HTTPException(
+                status_code=403, detail="Invalid caller address"
+            ) from error
         allowed_addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
         if target_node_id == str(self.node_id):
             allowed_addresses.update(
@@ -11290,22 +11292,29 @@ class API:
         if self._store_client is None:
             raise HTTPException(status_code=503, detail="Store not configured")
         requested_model_id = ModelId(model_id)
-        card = get_card(requested_model_id)
+        card = get_current_registry_card(requested_model_id) or get_card(
+            requested_model_id
+        )
         if card is None:
             await get_model_cards()
-            card = get_card(requested_model_id)
+            card = get_current_registry_card(requested_model_id) or get_card(
+                requested_model_id
+            )
         gguf_file = payload.gguf_file if payload is not None else None
         source_revision = payload.source_revision if payload is not None else None
         source_repository: str | None = None
         registry_card_id: str | None = None
         requested_card_id = payload.registry_card_id if payload is not None else None
         if requested_card_id is not None:
+            current_card = get_current_registry_card(requested_model_id)
+            installed_card = get_card(requested_model_id)
             card = next(
                 (
                     candidate
-                    for candidate in await get_all_model_cards()
-                    if candidate.registry_card_id == requested_card_id
-                    and str(candidate.model_id) == model_id
+                    for candidate in (current_card, installed_card)
+                    if candidate is not None
+                    and candidate.registry_card_id == requested_card_id
+                    and candidate.model_id == requested_model_id
                 ),
                 None,
             )

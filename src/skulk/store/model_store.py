@@ -89,6 +89,7 @@ from skulk.store.installed_cards import (
     build_installed_card_record,
     manifest_sha256,
     read_installed_card,
+    verify_installed_card,
     write_installed_card,
 )
 from skulk.store.staging_eviction import MINIMUM_STAGING_FREE_DISK_BYTES
@@ -697,6 +698,12 @@ class ModelStore:
                 continue
             if record is None:
                 continue
+            if not verify_installed_card(model_directory, record):
+                logger.warning(
+                    f"ModelStore: ignoring incomplete installed artifact at "
+                    f"{model_directory} while rebuilding the registry"
+                )
+                continue
             files = [
                 *(entry.path for entry in record.files),
                 INSTALLED_CARD_RELATIVE_PATH.as_posix(),
@@ -841,6 +848,16 @@ class ModelStore:
             artifact_repository=entry.source_repository or entry.model_id,
             artifact_revision=entry.source_revision,
             artifact_file=artifact_file,
+            file_manifest=(
+                entry.installed_card.files
+                if entry.installed_card is not None
+                and entry.installed_card.artifact_repository
+                == (entry.source_repository or entry.model_id)
+                and entry.installed_card.artifact_revision == entry.source_revision
+                and entry.installed_card.artifact_file == artifact_file
+                and verify_installed_card(model_path, entry.installed_card)
+                else None
+            ),
         )
         refreshed = entry.model_copy(update={"installed_card": record})
         write_installed_card(model_path, record)
@@ -934,6 +951,10 @@ class ModelStore:
                     or missing_companion
                     or existing.source_revision != source_revision
                     or existing_repository != requested_repository
+                    or not self._same_requested_card(existing.model_card, model_card)
+                    or existing.artifact_role != artifact_role
+                    or existing.owner_model_id != owner_model_id
+                    or existing.owner_card_id != owner_card_id
                     or not self.is_in_store(model_id)
                 )
                 if existing.status in ("failed", "cancelled") or stale_complete:

@@ -275,10 +275,16 @@ def build_installed_card_record(
     artifact_revision: str | None = None,
     artifact_file: str | None = None,
     artifact_format: str | None = None,
+    file_manifest: tuple[InstalledFileManifestEntry, ...] | None = None,
 ) -> InstalledCardRecord:
-    """Create an honest installed-card record from local bytes and card truth."""
+    """Create an honest installed-card record from local bytes and card truth.
 
-    files = build_file_manifest(model_directory)
+    ``file_manifest`` may reuse a previously verified size-complete manifest
+    during a metadata-only card refresh. New downloads and imports omit it and
+    hash the artifact bytes before first publication.
+    """
+
+    files = file_manifest or build_file_manifest(model_directory)
     digest = manifest_sha256(files)
     effective_repository = artifact_repository or str(model_card.artifact_repository)
     effective_revision = (

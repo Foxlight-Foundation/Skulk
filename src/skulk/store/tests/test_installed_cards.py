@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 """Installed model cards remain bound to local artifact bytes."""
 
 from pathlib import Path
@@ -17,7 +18,11 @@ from skulk.store.installed_cards import (
     write_installed_card,
     write_installed_card_with_fallback,
 )
-from skulk.store.model_store import ModelStore, StoreRegistryIndex
+from skulk.store.model_store import (
+    ModelStore,
+    StoreDownloadStatus,
+    StoreRegistryIndex,
+)
 
 
 def _card(*, registry: bool = True, custom: bool = False) -> ModelCard:
@@ -218,3 +223,65 @@ def test_corrupt_registry_rebuilds_from_installed_sidecar(tmp_path: Path) -> Non
         (store_root / "registry.json").read_bytes(), strict=False
     )
     assert index.schema_version == 1
+
+
+def test_registry_rebuild_ignores_incomplete_installed_artifact(
+    tmp_path: Path,
+) -> None:
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    artifact = _artifact(store_root)
+    record = build_installed_card_record(artifact, _card())
+    write_installed_card(artifact, record)
+    (artifact / "model.safetensors").unlink()
+
+    entry = ModelStore(store_root).get_entry(str(record.model_card.model_id))
+
+    assert entry is None
+
+
+async def test_completed_download_refreshes_card_without_rehashing_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ModelStore(tmp_path)
+    artifact = _artifact(tmp_path)
+    old_card = _card()
+    old_record = build_installed_card_record(artifact, old_card)
+    write_installed_card(artifact, old_record)
+    store.register_model(
+        "org/model",
+        artifact,
+        [entry.path for entry in old_record.files],
+        sum(entry.size_bytes for entry in old_record.files),
+        source_revision=old_card.source_revision,
+        source_repository=str(old_card.artifact_repository),
+        installed_card=old_record,
+    )
+    store._active_downloads["org/model"] = StoreDownloadStatus(  # noqa: SLF001
+        model_id="org/model",
+        source_revision=old_card.source_revision,
+        source_repository=str(old_card.artifact_repository),
+        status="complete",
+        progress=1.0,
+        model_card=old_card,
+    )
+    new_card = old_card.model_copy(update={"registry_card_id": f"card_{'b' * 52}"})
+
+    def reject_rehash(_directory: Path) -> object:
+        raise AssertionError("metadata-only refresh rehashed artifact bytes")
+
+    monkeypatch.setattr(installed_cards, "build_file_manifest", reject_rehash)
+
+    status = await store.request_download(
+        "org/model",
+        source_revision=new_card.source_revision,
+        source_repository=str(new_card.artifact_repository),
+        model_card=new_card,
+    )
+
+    refreshed = store.get_entry("org/model")
+    assert status.model_card == new_card
+    assert refreshed is not None and refreshed.installed_card is not None
+    assert refreshed.installed_card.model_card == new_card
+    assert refreshed.installed_card.files == old_record.files
