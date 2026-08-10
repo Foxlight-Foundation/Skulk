@@ -95,6 +95,7 @@ from skulk.shared.types.worker.downloads import RepoDownloadProgress
 from skulk.shared.types.worker.shards import ShardMetadata
 from skulk.store.config import DEFAULT_MODEL_STORE_PORT, StagingNodeConfig
 from skulk.store.installed_cards import (
+    INSTALLED_CARD_RELATIVE_PATH,
     InstalledArtifactRole,
     build_installed_card_record,
     companion_artifact_role,
@@ -1281,6 +1282,20 @@ class ModelStoreClient:
             dst_file = dest_path / rel
             dst_file.parent.mkdir(parents=True, exist_ok=True)
             source_size = file_sizes[src_file]
+            if rel == INSTALLED_CARD_RELATIVE_PATH:
+                # The full card can change while immutable model bytes retain
+                # the same sizes and revision. Always replace this tiny source
+                # of installed truth through a temporary file so the old or
+                # new generation is visible, never a torn JSON document.
+                await asyncio.to_thread(
+                    self._replace_metadata_file_atomically,
+                    src_file,
+                    dst_file,
+                )
+                staged_bytes += source_size
+                if on_progress is not None:
+                    await on_progress(staged_bytes, total_bytes)
+                continue
             # Skip copy if destination already matches source size.
             # Run on a thread to avoid blocking the async event loop
             # during multi-GB safetensor copies.
@@ -1305,6 +1320,14 @@ class ModelStoreClient:
             f"({total_bytes:,} bytes)"
         )
         return dest_path
+
+    @staticmethod
+    def _replace_metadata_file_atomically(src_file: Path, dst_file: Path) -> None:
+        """Copy one metadata file and atomically replace its staged version."""
+
+        temporary = dst_file.with_name(f".{dst_file.name}.staging")
+        shutil.copy2(src_file, temporary)
+        temporary.replace(dst_file)
 
     # ------------------------------------------------------------------
     # HTTP staging path (worker → store host)
@@ -1355,6 +1378,8 @@ class ModelStoreClient:
         total_bytes_offset: int,
         grand_total: int,
         source_revision: str | None = None,
+        *,
+        replace_existing: bool = False,
     ) -> int:
         """Download a single file from the store to ``dest_path / file_path``.
 
@@ -1366,13 +1391,18 @@ class ModelStoreClient:
             Number of bytes written (for progress accumulation).
         """
 
+        if replace_existing:
+            stale_partial = dest_path / f"{file_path}.partial"
+            if stale_partial.exists():
+                await aios.remove(stale_partial)
+
         async def _request() -> int:
             target = dest_path / file_path
             target.parent.mkdir(parents=True, exist_ok=True)
             partial = dest_path / f"{file_path}.partial"
 
             # Already fully downloaded — skip
-            if target.exists():
+            if target.exists() and not replace_existing:
                 return target.stat().st_size
 
             # Recompute the partial length on every retry so a mid-stream
@@ -1461,7 +1491,10 @@ class ModelStoreClient:
             for file_path in file_list:
                 target = dest_path / file_path
                 partial = dest_path / f"{file_path}.partial"
-                if target.exists():
+                replace_existing = (
+                    Path(file_path) == INSTALLED_CARD_RELATIVE_PATH
+                )
+                if target.exists() and not replace_existing:
                     already_staged_bytes += target.stat().st_size
                 elif partial.exists():
                     already_staged_bytes += partial.stat().st_size
@@ -1471,13 +1504,15 @@ class ModelStoreClient:
         staged_offset = 0
         for file_path in file_list:
             target = dest_path / file_path
-            if target.exists():
+            replace_existing = Path(file_path) == INSTALLED_CARD_RELATIVE_PATH
+            if target.exists() and not replace_existing:
                 size = target.stat().st_size
                 staged_offset += size
 
         bytes_done = staged_offset
         for file_path in file_list:
-            if (dest_path / file_path).exists():
+            replace_existing = Path(file_path) == INSTALLED_CARD_RELATIVE_PATH
+            if (dest_path / file_path).exists() and not replace_existing:
                 continue
             file_bytes = await self._download_store_file(
                 model_id,
@@ -1487,6 +1522,7 @@ class ModelStoreClient:
                 total_bytes_offset=bytes_done,
                 grand_total=grand_total,
                 source_revision=source_revision,
+                replace_existing=replace_existing,
             )
             bytes_done += file_bytes
 

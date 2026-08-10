@@ -251,6 +251,36 @@ def test_registry_rebuild_ignores_incomplete_installed_artifact(
     assert entry is None
 
 
+def test_registry_rebuild_removes_corrupted_indexed_generation(
+    tmp_path: Path,
+) -> None:
+    """A stale index cannot hide a healthy peer from reconciliation."""
+
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    store = ModelStore(store_root)
+    artifact = _artifact(store_root)
+    record = build_installed_card_record(artifact, _card())
+    write_installed_card(artifact, record)
+    store.register_model(
+        "org/model",
+        artifact,
+        [entry.path for entry in record.files],
+        sum(entry.size_bytes for entry in record.files),
+        source_revision=record.artifact_revision,
+        installed_card=record,
+    )
+    (artifact / "model.safetensors").write_bytes(b"truncated")
+
+    recovered = ModelStore(store_root)
+
+    assert recovered.get_entry("org/model") is None
+    index = StoreRegistryIndex.model_validate_json(
+        (store_root / "registry.json").read_bytes(), strict=False
+    )
+    assert "org/model" not in index.entries
+
+
 def test_registry_rebuild_preserves_previously_selected_generation(
     tmp_path: Path,
 ) -> None:

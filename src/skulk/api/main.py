@@ -282,6 +282,7 @@ from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.routing.trace_data import TraceDataPacket
 from skulk.routing.vision_media import VisionMediaPacket
+from skulk.shared import constants as shared_constants
 from skulk.shared.apply import apply
 from skulk.shared.backends import engine_of
 from skulk.shared.constants import (
@@ -463,9 +464,14 @@ from skulk.worker.engines.mlx.constants import (
 if TYPE_CHECKING:
     from skulk.store.config import SkulkConfig
     from skulk.store.model_store_client import ModelStoreClient
-from skulk.store.installed_cards import ensure_installed_cards
+from skulk.store.installed_cards import (
+    InstalledCardRecord,
+    ensure_installed_cards,
+    read_installed_card,
+    verify_installed_card,
+)
 from skulk.store.peer_exports import ArtifactExportManager
-from skulk.store.staging_eviction import list_staged_models
+from skulk.store.staging_eviction import StagedModelInfo, list_staged_models
 
 JsonObject = dict[str, object]
 _DEFAULT_OPTIMIZER_CANDIDATE_BITS = [4, 8]
@@ -676,6 +682,63 @@ def _combined_model_advisories(
         for advisory in get_model_advisories(model_card)
     }
     return tuple(advisories_by_id.values())
+
+
+def _installed_artifact_roots(staging_root: Path | None) -> tuple[Path, ...]:
+    """Return every node-local root that may contain launchable artifacts."""
+
+    candidates = [
+        *((staging_root,) if staging_root is not None else ()),
+        shared_constants.SKULK_MODELS_DIR,
+        *(shared_constants.SKULK_MODELS_PATH or ()),
+    ]
+    roots_by_path: dict[Path, Path] = {}
+    for candidate in candidates:
+        expanded = candidate.expanduser()
+        roots_by_path.setdefault(expanded.resolve(), expanded)
+    return tuple(roots_by_path.values())
+
+
+def _inventory_installed_artifacts(
+    roots: Iterable[Path],
+    cards: Iterable[ModelCard],
+    in_use_model_ids: frozenset[str] = frozenset(),
+) -> list[StagedModelInfo]:
+    """Inventory complete and unresolved artifacts across all local roots."""
+
+    inventory_by_directory: dict[Path, StagedModelInfo] = {}
+    card_list = tuple(cards)
+    for root in roots:
+        ensure_installed_cards(root, card_list)
+        for item in list_staged_models(root, in_use_model_ids):
+            inventory_by_directory.setdefault(Path(item.directory).resolve(), item)
+    return list(inventory_by_directory.values())
+
+
+def _complete_canonical_identities(
+    store_root: Path,
+    registry: Iterable[dict[str, object]],
+) -> set[str]:
+    """Return identities whose indexed canonical sidecars and bytes are complete."""
+
+    resolved_root = store_root.expanduser().resolve()
+    identities: set[str] = set()
+    for entry in registry:
+        installed_raw = entry.get("installed_card")
+        store_path = entry.get("store_path")
+        if not isinstance(installed_raw, dict) or not isinstance(store_path, str):
+            continue
+        try:
+            record = InstalledCardRecord.model_validate(installed_raw, strict=False)
+            canonical_directory = (resolved_root / store_path).resolve()
+            if not canonical_directory.is_relative_to(resolved_root):
+                continue
+            adjacent = read_installed_card(canonical_directory)
+        except (OSError, ValueError):
+            continue
+        if adjacent == record and verify_installed_card(canonical_directory, record):
+            identities.add(record.installed_identity)
+    return identities
 
 
 def _validate_audio_upload_metadata(file: StarletteUploadFile) -> None:
@@ -8735,11 +8798,11 @@ class API:
         cards = await get_all_model_cards()
 
         def _collect() -> NodeStorageSummary:
-            if staging_root is not None:
-                ensure_installed_cards(staging_root, cards)
-                staged = list_staged_models(staging_root, in_use)
-            else:
-                staged = []
+            staged = _inventory_installed_artifacts(
+                _installed_artifact_roots(staging_root),
+                cards,
+                in_use,
+            )
             event_log_bytes = 0
             for file_path in SKULK_EVENT_LOG_DIR.rglob("*"):
                 # Best-effort: archives rotate and files vanish mid-walk; a
@@ -10949,11 +11012,12 @@ class API:
 
         self._require_artifact_export_target(request, payload.target_node_id)
         staging_root = self._configured_staging_root()
-        if staging_root is None:
-            raise HTTPException(status_code=404, detail="Staging is not enabled")
         cards = await get_all_model_cards()
-        await to_thread.run_sync(ensure_installed_cards, staging_root, cards)
-        staged = await to_thread.run_sync(list_staged_models, staging_root)
+        staged = await to_thread.run_sync(
+            _inventory_installed_artifacts,
+            _installed_artifact_roots(staging_root),
+            cards,
+        )
         selected = next(
             (
                 item
@@ -11110,17 +11174,11 @@ class API:
                     except (httpx.HTTPError, ValueError) as error:
                         failures.append(f"Could not inventory node {node_id}: {error}")
                 registry = await self._store_client.fetch_registry()
-                existing_identities = {
-                    identity
-                    for entry in registry
-                    if isinstance((installed := entry.get("installed_card")), dict)
-                    and isinstance(
-                        identity := cast("dict[str, object]", installed).get(
-                            "installed_identity"
-                        ),
-                        str,
-                    )
-                }
+                existing_identities = await to_thread.run_sync(
+                    _complete_canonical_identities,
+                    self._store_client.local_store_path,
+                    registry,
+                )
                 replicas: dict[
                     tuple[str, str], list[tuple[str, str, dict[str, object]]]
                 ] = {}

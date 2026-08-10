@@ -694,6 +694,33 @@ class ModelStore:
         if not self._store_path.is_dir():
             return
         registry = self._read_registry()
+        changed = False
+        for model_id, entry in tuple(registry.items()):
+            retained = entry.installed_card
+            if retained is None:
+                continue
+            model_directory = _resolve_store_child_path(
+                self._store_path, entry.store_path
+            )
+            try:
+                adjacent = (
+                    read_installed_card(model_directory)
+                    if model_directory is not None
+                    else None
+                )
+            except (OSError, ValueError):
+                adjacent = None
+            if (
+                model_directory is None
+                or adjacent != retained
+                or not verify_installed_card(model_directory, retained)
+            ):
+                logger.warning(
+                    f"ModelStore: removing incomplete installed index entry "
+                    f"for {model_id}; reconciliation may recover a healthy replica"
+                )
+                del registry[model_id]
+                changed = True
         recovered_by_model: dict[str, list[StoreModelEntry]] = {}
         for model_directory in self._store_path.iterdir():
             if not model_directory.is_dir() or model_directory.name.startswith("."):
@@ -742,7 +769,6 @@ class ModelStore:
             recovered_by_model.setdefault(record.artifact_model_id, []).append(
                 recovered
             )
-        changed = False
         from skulk.shared.models.model_cards import get_current_registry_card
         from skulk.shared.types.common import ModelId
 

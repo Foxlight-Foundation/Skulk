@@ -1330,13 +1330,14 @@ artifact downloads are pinned to that immutable revision.
 
 **GET** `/store/storage`
 
-Returns the local node's storage picture: every staged model with its size,
-last-use time, and whether a live instance (or one of its companion repos:
+Returns the local node's storage picture: every installed artifact across the
+configured staging cache, `SKULK_MODELS_DIR`, and read-only model search roots,
+with its size, last-use time, and whether a live instance (or one of its companion repos:
 MTP sidecar, assistant, vision weights) currently depends on it, plus
 event-log usage and free disk on the models volume. Cluster-wide views query
 each node's API.
 
-Each staged entry also reports `installedIdentity`, `manifestSha256`,
+Each artifact entry also reports `installedIdentity`, `manifestSha256`,
 `verificationState`, `manifestComplete`, `artifactRole`, and `ownerModelId`.
 `registryCardId` identifies the full card retained with the bytes, while a
 companion additionally reports its immutable `ownerCardId`; reconciliation

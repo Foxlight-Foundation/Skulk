@@ -100,3 +100,26 @@ async def test_stage_local_replaces_stale_partial_destination(tmp_path: Path) ->
     await client._stage_local("org/model", dest, on_progress=None)  # pyright: ignore[reportPrivateUsage]
 
     assert (dest / "weights.gguf").read_bytes() == b"g" * 4096
+
+
+async def test_stage_local_replaces_same_size_installed_card(tmp_path: Path) -> None:
+    """Metadata refresh cannot be skipped merely because JSON sizes match."""
+
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    model_dir = _make_store_model(store_root, "org--model")
+    source_sidecar = model_dir / ".skulk" / "installed-card.json"
+    source_sidecar.parent.mkdir()
+    source_sidecar.write_text("new")
+    client = ModelStoreClient("localhost", local_store_path=store_root)
+
+    destination = tmp_path / "staging" / "org--model"
+    staged_sidecar = destination / ".skulk" / "installed-card.json"
+    staged_sidecar.parent.mkdir(parents=True)
+    staged_sidecar.write_text("old")
+
+    await client._stage_local(  # pyright: ignore[reportPrivateUsage]
+        "org/model", destination, on_progress=None
+    )
+
+    assert staged_sidecar.read_text() == "new"

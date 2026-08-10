@@ -92,6 +92,10 @@ model_store:
 Inspect `GET /store/reconciliation`, then set `inventory_only: false` to enable
 automatic imports. `POST /store/reconciliation/rescan` is a loopback-only
 operator retry; periodic reconciliation remains the normal path.
+Inventory and capability-bound export cover the staging cache, direct-download
+fallbacks in `SKULK_MODELS_DIR`, and configured read-only model roots. A
+canonical index entry suppresses import only while its adjacent sidecar and
+complete manifest still validate.
 
 ### GGUF repositories download only the pinned quantization
 

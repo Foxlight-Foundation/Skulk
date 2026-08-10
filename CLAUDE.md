@@ -388,8 +388,11 @@ while complete. A registry replacement is reported as an update and becomes
 active only after its new generation commits atomically.
 
 The authoritative store host periodically reconciles node caches through
-bounded `/store/storage` inventories and capability-bound range exports. These
-inventories and transfer metadata never enter State or the event log. Signed
+bounded `/store/storage` inventories and capability-bound range exports.
+Inventory covers staging, direct-download, and configured read-only model
+roots; a canonical identity counts as present only while its adjacent sidecar
+and manifest remain complete. These inventories and transfer metadata never
+enter State or the event log. Signed
 `v1/advisories.json` notices are warning-only and must never block downloads,
 placement, active instances, or user-owned workloads.
 
