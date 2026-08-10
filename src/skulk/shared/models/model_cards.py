@@ -366,6 +366,28 @@ def get_installed_card_record(model_id: ModelId) -> "InstalledCardRecord | None"
     return _installed_card_cache.get(model_id)
 
 
+def register_installed_card_record(record: "InstalledCardRecord") -> None:
+    """Converge process-local installed truth after an atomic stage completes."""
+
+    if record.artifact_role != "base":
+        return
+    model_id = ModelId(record.owner_model_id or record.artifact_model_id)
+    _installed_card_cache[model_id] = record
+    current_card = _registry_current_cards.get(model_id)
+    _installed_current_registry_ids[model_id] = (
+        current_card.registry_card_id if current_card is not None else None
+    )
+    existing = _card_cache.get(model_id)
+    if existing is None or not existing.is_custom or record.verification == "custom":
+        _card_cache[model_id] = record.model_card
+
+
+def get_current_registry_cards() -> tuple["ModelCard", ...]:
+    """Return current TUF catalog cards already verified in this process."""
+
+    return tuple(_registry_current_cards.values())
+
+
 def get_current_registry_card_id(model_id: ModelId) -> str | None:
     """Return the current signed identity observed beside an installed model."""
 

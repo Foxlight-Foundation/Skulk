@@ -15,6 +15,7 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 from skulk.store.config import StagingNodeConfig
 from skulk.store.installed_cards import (
+    InstalledCardRecord,
     build_installed_card_record,
     read_installed_card,
     write_installed_card,
@@ -324,10 +325,12 @@ async def test_staging_disabled_direct_load_does_not_probe_http(
         "request_and_wait_for_download",
         refresh_through_authoritative_store,
     )
+    installed_records: list[InstalledCardRecord] = []
     downloader = ModelStoreDownloader(
         inner=_UnusedInnerDownloader(),
         store_client=client,
         staging_config=StagingNodeConfig(enabled=False),
+        installed_card_callback=installed_records.append,
     )
 
     path = await downloader.ensure_shard(_shard("model-IQ3_XXS.gguf"))
@@ -336,3 +339,4 @@ async def test_staging_disabled_direct_load_does_not_probe_http(
     refreshed = read_installed_card(direct_path)
     assert refreshed is not None
     assert refreshed.model_card == requested_card
+    assert installed_records == [refreshed]

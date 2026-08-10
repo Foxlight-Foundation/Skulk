@@ -682,7 +682,28 @@ class ModelStore:
         )
         temporary.replace(self._registry_path)
 
-    def _rebuild_registry_from_sidecars(self) -> None:
+    def refresh_recovered_generations(
+        self,
+        current_registry_cards: Iterable[ModelCard],
+    ) -> None:
+        """Re-select recovered generations after signed catalog discovery.
+
+        Store construction intentionally recovers installed sidecars before any
+        registry access. Once TUF discovery completes, this second pass makes
+        current signed identity outrank a preserved prior index selection.
+        """
+
+        current_registry_ids = {
+            str(card.model_id): card.registry_card_id
+            for card in current_registry_cards
+            if card.registry_card_id is not None
+        }
+        self._rebuild_registry_from_sidecars(current_registry_ids)
+
+    def _rebuild_registry_from_sidecars(
+        self,
+        current_registry_ids: dict[str, str] | None = None,
+    ) -> None:
         """Recover missing index entries from artifact-owned sidecars.
 
         The index is intentionally rebuildable: a torn or removed
@@ -769,14 +790,12 @@ class ModelStore:
             recovered_by_model.setdefault(record.artifact_model_id, []).append(
                 recovered
             )
-        from skulk.shared.models.model_cards import get_current_registry_card
-        from skulk.shared.types.common import ModelId
-
         for model_id, candidates in recovered_by_model.items():
             previous = registry.get(model_id)
-            current_card = get_current_registry_card(ModelId(model_id))
             current_card_id = (
-                current_card.registry_card_id if current_card is not None else None
+                current_registry_ids.get(model_id)
+                if current_registry_ids is not None
+                else None
             )
             previous_identity = (
                 previous.installed_card.installed_identity
@@ -790,7 +809,7 @@ class ModelStore:
                 previous_identity: str | None = previous_identity,
                 previous_path: str | None = previous_path,
                 current_card_id: str | None = current_card_id,
-            ) -> tuple[bool, bool, bool, str]:
+            ) -> tuple[bool, bool, bool, float, str]:
                 installed = candidate.installed_card
                 assert installed is not None
                 matches_previous = (
@@ -803,9 +822,10 @@ class ModelStore:
                     and installed.model_card.registry_card_id == current_card_id
                 )
                 return (
+                    not matches_current if current_card_id is not None else False,
                     not matches_previous,
-                    not matches_current,
                     installed.verification != "registry_verified",
+                    -installed.captured_at.timestamp(),
                     candidate.store_path,
                 )
 

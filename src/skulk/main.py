@@ -15,7 +15,7 @@ from typing import Final, Self
 
 import anyio
 import psutil
-from anyio import BrokenResourceError, ClosedResourceError
+from anyio import BrokenResourceError, ClosedResourceError, to_thread
 from loguru import logger
 from pydantic import PositiveInt
 
@@ -40,6 +40,11 @@ from skulk.shared.logging import (
     external_log_pipe_enabled,
     logger_cleanup,
     logger_setup,
+)
+from skulk.shared.models.model_cards import (
+    get_all_model_cards,
+    get_current_registry_cards,
+    register_installed_card_record,
 )
 from skulk.shared.session_carryover import seed_state_for_new_session
 from skulk.shared.types.audio import RealtimeAudioInputFrame
@@ -652,6 +657,7 @@ class Node:
                     store_client=store_client,
                     staging_config=staging_cfg,
                     allow_hf_fallback=ms.download.allow_hf_fallback,
+                    installed_card_callback=register_installed_card_record,
                 )
             else:
                 shard_downloader = base_downloader
@@ -825,6 +831,12 @@ class Node:
         )
 
     async def run(self):
+        if self.store_server is not None:
+            await get_all_model_cards()
+            await to_thread.run_sync(
+                self.store_server.refresh_recovered_generations,
+                get_current_registry_cards(),
+            )
         async with self._tg as tg:
             signal.signal(signal.SIGINT, lambda _, __: self.shutdown())
             signal.signal(signal.SIGTERM, lambda _, __: self.shutdown())
@@ -979,6 +991,11 @@ class Node:
                 previous_store_server
                 if previous_store_server is not None
                 else new_store_server
+            )
+            await get_all_model_cards()
+            await to_thread.run_sync(
+                self.store_server.refresh_recovered_generations,
+                get_current_registry_cards(),
             )
         if self.api is not None:
             self.api.set_model_store_runtime(
@@ -1183,6 +1200,9 @@ class Node:
                                 store_client=self.store_client,
                                 staging_config=elect_staging,
                                 allow_hf_fallback=ms.download.allow_hf_fallback,
+                                installed_card_callback=(
+                                    register_installed_card_record
+                                ),
                             )
                         else:
                             elect_downloader = base_dl

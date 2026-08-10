@@ -317,6 +317,41 @@ def test_registry_rebuild_preserves_previously_selected_generation(
     assert recovered.installed_card == current_record
 
 
+def test_registry_rebuild_reselects_current_signed_generation(
+    tmp_path: Path,
+) -> None:
+    """Post-TUF recovery replaces a deterministic pre-registry selection."""
+
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    current_path = store_root / "z-current"
+    stale_path = store_root / "a-stale"
+    for artifact in (current_path, stale_path):
+        artifact.mkdir()
+        (artifact / "model.safetensors").write_bytes(artifact.name.encode())
+        (artifact / ".skulk-source-revision").write_text(f"{'a' * 40}\n")
+    current_card = _card()
+    stale_card = current_card.model_copy(
+        update={"registry_card_id": f"card_{'b' * 52}"}
+    )
+    current_record = build_installed_card_record(current_path, current_card)
+    stale_record = build_installed_card_record(stale_path, stale_card)
+    write_installed_card(current_path, current_record)
+    write_installed_card(stale_path, stale_record)
+
+    recovered = ModelStore(store_root)
+    initial = recovered.get_entry("org/model")
+    assert initial is not None
+    assert initial.installed_card == stale_record
+
+    recovered.refresh_recovered_generations([current_card])
+
+    selected = recovered.get_entry("org/model")
+    assert selected is not None
+    assert selected.store_path == "z-current"
+    assert selected.installed_card == current_record
+
+
 async def test_completed_download_refreshes_card_without_rehashing_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

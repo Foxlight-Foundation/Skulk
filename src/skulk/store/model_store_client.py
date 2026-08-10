@@ -97,6 +97,7 @@ from skulk.store.config import DEFAULT_MODEL_STORE_PORT, StagingNodeConfig
 from skulk.store.installed_cards import (
     INSTALLED_CARD_RELATIVE_PATH,
     InstalledArtifactRole,
+    InstalledCardRecord,
     build_installed_card_record,
     companion_artifact_role,
     installed_card_matches,
@@ -1584,6 +1585,7 @@ class ModelStoreDownloader(ShardDownloader):
         store_client: ModelStoreClient,
         staging_config: StagingNodeConfig,
         allow_hf_fallback: bool = True,
+        installed_card_callback: Callable[[InstalledCardRecord], None] | None = None,
     ) -> None:
         """
         Args:
@@ -1593,11 +1595,14 @@ class ModelStoreDownloader(ShardDownloader):
             allow_hf_fallback: When ``True``, models not in the store are
                 downloaded from HuggingFace via *inner*.  When ``False``,
                 :class:`ModelNotInStoreError` is raised instead.
+            installed_card_callback: Optional process-local convergence hook
+                invoked after a complete base artifact owns its durable card.
         """
         self._inner = inner
         self._store_client = store_client
         self._staging_config = staging_config
         self._allow_hf_fallback = allow_hf_fallback
+        self._installed_card_callback = installed_card_callback
         self._staging_transfer_lock = asyncio.Lock()
         self._staging_capacity_callback: StagingCapacityCallback | None = None
         self._active_staging_model_ids: dict[str, int] = {}
@@ -1706,6 +1711,34 @@ class ModelStoreDownloader(ShardDownloader):
             )
             if not config_only:
                 await self._ensure_companion_shards(shard)
+                if (
+                    installed_owner_card is None
+                    and self._installed_card_callback is not None
+                ):
+                    model_directory = path.parent if path.is_file() else path
+                    record = await asyncio.to_thread(
+                        read_installed_card_with_fallback,
+                        model_directory,
+                    )
+                    if record is None or not installed_card_matches(
+                        model_directory, shard.model_card
+                    ):
+                        record = await asyncio.to_thread(
+                            build_installed_card_record,
+                            model_directory,
+                            shard.model_card,
+                            artifact_repository=str(
+                                shard.model_card.artifact_repository
+                            ),
+                            artifact_revision=shard.model_card.source_revision,
+                            artifact_file=shard.model_card.gguf_file,
+                        )
+                        await asyncio.to_thread(
+                            write_installed_card_with_fallback,
+                            model_directory,
+                            record,
+                        )
+                    self._installed_card_callback(record)
             # Terminal progress is emitted HERE, after companions: the
             # "complete" status becomes cluster-visible DownloadCompleted state
             # the moment it fires, and the planner dispatches LoadModel off
