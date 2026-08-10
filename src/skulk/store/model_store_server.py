@@ -160,6 +160,9 @@ class ModelStoreServer:
         self._app.router.add_post(
             "/models/{model_id}/download", self._handle_download_request
         )
+        self._app.router.add_delete(
+            "/models/{model_id}/download", self._handle_download_cancellation
+        )
         self._app.router.add_get(
             "/models/{model_id}/download/status", self._handle_download_status
         )
@@ -420,5 +423,24 @@ class ModelStoreServer:
                 "status": status.status,
                 "progress": status.progress,
                 "error": status.error,
+            }
+        )
+
+    async def _handle_download_cancellation(
+        self, request: web.Request
+    ) -> web.Response:
+        """``DELETE /models/{model_id}/download`` — cancel one store transfer."""
+
+        model_id = _sanitize_model_id(request.match_info["model_id"])
+        status = await self._store.cancel_download(model_id)
+        if status is None:
+            raise web.HTTPConflict(reason=f"No active download for {model_id}")
+        return web.json_response(
+            {
+                "modelId": status.model_id,
+                "sourceRevision": status.source_revision,
+                "status": status.status,
+                "progress": status.progress,
+                "cancelled": True,
             }
         )

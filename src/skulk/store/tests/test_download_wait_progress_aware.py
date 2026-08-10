@@ -119,6 +119,23 @@ async def test_wait_times_out_on_a_genuine_stall(
         )
 
 
+async def test_wait_fails_immediately_when_operator_cancels_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(
+        monkeypatch,
+        [{"status": "cancelled", "progress": 0.25}],
+    )
+    client = ModelStoreClient(store_host="h", store_port=1)
+
+    with pytest.raises(RuntimeError, match="org/cancelled was cancelled"):
+        await client.request_and_wait_for_download(
+            "org/cancelled",
+            timeout=7200,
+            poll_interval=0.0,
+        )
+
+
 async def test_wait_rejects_immediate_completion_for_other_revision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

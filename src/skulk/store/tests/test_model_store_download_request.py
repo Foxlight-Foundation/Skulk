@@ -46,6 +46,10 @@ class _Session:
         self.requests.append((url, json))
         return _Response()
 
+    def delete(self, url: str) -> _Response:
+        self.requests.append((url, None))
+        return _Response()
+
 
 @pytest.mark.anyio
 async def test_store_client_sends_requested_gguf_pin(
@@ -78,4 +82,28 @@ async def test_store_client_sends_requested_gguf_pin(
                 "source_revision": "0123456789abcdef0123456789abcdef01234567",
             },
         )
+    ]
+
+
+@pytest.mark.anyio
+async def test_store_client_cancels_the_canonical_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _Session()
+
+    def fake_session_factory(**_kwargs: object) -> _Session:
+        return session
+
+    monkeypatch.setattr(
+        model_store_client,
+        "create_http_session",
+        fake_session_factory,
+    )
+    client = ModelStoreClient(store_host="store.local", store_port=58080)
+
+    cancelled = await client.cancel_store_download("org/model")
+
+    assert cancelled
+    assert session.requests == [
+        ("http://store.local:58080/models/org%2Fmodel/download", None)
     ]

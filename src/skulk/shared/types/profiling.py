@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal, Self, cast, final
 
 import psutil
-from pydantic import BaseModel, field_serializer, field_validator
+from pydantic import UUID4, BaseModel, Field, field_serializer, field_validator
 
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.node_facts import CapabilityConflict
@@ -263,6 +263,13 @@ class NetworkInterfaceInfo(CamelCaseModel):
 class NodeIdentity(CamelCaseModel):
     """Static and slow-changing node identification data."""
 
+    node_install_id: UUID4 | None = Field(
+        default=None,
+        description=(
+            "Stable per-installation operator identity, independent of the current "
+            "runtime libp2p node ID."
+        ),
+    )
     model_id: str = "Unknown"
     chip_id: str = "Unknown"
     friendly_name: str = "Unknown"
@@ -294,9 +301,10 @@ class NodeResources(CamelCaseModel):
 
     Mixes probed capability (``backends``) with operator-declared policy
     (``participation``) and the startup-resolved ``data_transport``; all ride the
-    same node-info telemetry path. The planner reads capability and policy to
-    hard-filter placement candidates, while cluster health compares transport
-    facts across live nodes. Defaults describe a normal Apple-Silicon
+    same node-info telemetry path. The planner reads capability, policy, and
+    positive data-plane isolation evidence to hard-filter placement candidates,
+    while cluster health also projects transport faults for operators. Defaults
+    describe a normal Apple-Silicon
     full-participation node so pre-upgrade telemetry stays non-breaking.
     """
 

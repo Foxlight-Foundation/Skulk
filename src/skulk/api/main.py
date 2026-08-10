@@ -56,7 +56,7 @@ from fastapi.staticfiles import StaticFiles
 from hypercorn.config import Config
 from hypercorn.typing import ASGIFramework
 from loguru import logger
-from pydantic import ValidationError
+from pydantic import UUID4, ValidationError
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 import skulk.shared.types.tasks as task_types
@@ -2447,12 +2447,6 @@ class API:
             summary="List active store downloads",
             description="List in-progress downloads being managed by the shared model store.",
         )(self.get_store_downloads)
-        self.app.delete(
-            "/store/models/{model_id:path}",
-            tags=["Store"],
-            summary="Delete a model from the store",
-            description="Delete a model and its shared-store artifacts from the configured model store.",
-        )(self.delete_store_model)
         self.app.post(
             "/store/models/{model_id:path}/download",
             tags=["Store"],
@@ -2464,12 +2458,27 @@ class API:
                 "from a bundled model card when declared."
             ),
         )(self.request_store_download)
+        self.app.delete(
+            "/store/models/{model_id:path}/download",
+            tags=["Store"],
+            summary="Cancel a store download",
+            description=(
+                "Cancel one pending or active shared-store model download. "
+                "Partial files remain available for a later resumable request."
+            ),
+        )(self.cancel_store_download)
         self.app.get(
             "/store/models/{model_id:path}/download/status",
             tags=["Store"],
             summary="Get store download status",
             description="Return current status for a shared-store download request for one model.",
         )(self.get_store_download_status)
+        self.app.delete(
+            "/store/models/{model_id:path}",
+            tags=["Store"],
+            summary="Delete a model from the store",
+            description="Delete a model and its shared-store artifacts from the configured model store.",
+        )(self.delete_store_model)
         self.app.post(
             "/store/purge-staging",
             tags=["Downloads"],
@@ -2503,7 +2512,9 @@ class API:
             summary="Restart a node",
             description=(
                 "Restart the Skulk process on this or a remote node. "
-                "Pass node_id query param to target a specific node. "
+                "Pass node_install_id to resolve a stable installation identity "
+                "to its current live runtime node, or node_id for a legacy "
+                "session-scoped target. "
                 "Active inference is interrupted, and the process is replaced; "
                 "the node rejoins the cluster automatically on startup."
             ),
@@ -10793,6 +10804,38 @@ class API:
         result = await self._store_client.get_store_download_status(model_id)
         return JSONResponse(result)
 
+    async def cancel_store_download(self, model_id: str) -> JSONResponse:
+        """Cancel one pending or active canonical-store download.
+
+        Args:
+            model_id: HuggingFace-style model identifier from the route.
+
+        Returns:
+            A confirmation naming the cancelled model and terminal state.
+
+        Raises:
+            HTTPException: If the store is unavailable or no cancellable
+                transfer exists.
+
+        The store retains partial files so a later download can resume.
+        """
+
+        if self._store_client is None:
+            raise HTTPException(status_code=503, detail="Store not configured")
+        cancelled = await self._store_client.cancel_store_download(model_id)
+        if not cancelled:
+            raise HTTPException(
+                status_code=409,
+                detail=f"No active store download for {model_id}",
+            )
+        return JSONResponse(
+            {
+                "modelId": model_id,
+                "status": "cancelled",
+                "cancelled": True,
+            }
+        )
+
     async def delete_store_model(self, model_id: str) -> JSONResponse:
         if self._store_client is None:
             raise HTTPException(status_code=503, detail="Store not configured")
@@ -13183,13 +13226,56 @@ class API:
                     break
         return transcript_chunks
 
-    async def restart_node(self, node_id: NodeId | None = None) -> JSONResponse:
+    async def restart_node(
+        self,
+        node_id: Annotated[
+            NodeId | None,
+            Query(
+                description=(
+                    "Legacy session-scoped runtime node ID. Prefer node_install_id "
+                    "for operator actions."
+                )
+            ),
+        ] = None,
+        node_install_id: Annotated[
+            UUID4 | None,
+            Query(
+                description=(
+                    "Stable per-installation node identity resolved against current "
+                    "live cluster truth."
+                )
+            ),
+        ] = None,
+    ) -> JSONResponse:
         """Restart the Skulk process on this or a remote node.
 
-        If node_id is omitted or matches this node, replaces the current
-        process image via os.execv (in-place restart, same PID). Otherwise,
-        sends a RestartNode command via pub/sub to the target node."""
-        target = node_id or self.node_id
+        Args:
+            node_id: Legacy session-scoped runtime target. Omit for this API node.
+            node_install_id: Stable installation identity resolved to one live
+                runtime node before command dispatch.
+
+        Returns:
+            Accepted local or remote restart status and the resolved runtime node.
+
+        Raises:
+            HTTPException: Both target forms are supplied, or the stable target
+                is missing or ambiguous in current live cluster truth.
+        """
+        if node_id is not None and node_install_id is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="provide either node_id or node_install_id, not both",
+            )
+        target = (
+            self._runtime_node_for_installation(node_install_id)
+            if node_install_id is not None
+            else node_id or self.node_id
+        )
+        response_identity = (
+            {"node_install_id": str(node_install_id)}
+            if node_install_id is not None
+            else {}
+        )
 
         if target == self.node_id:
             from skulk.utils.restart import schedule_restart
@@ -13200,14 +13286,62 @@ class API:
             scheduled = schedule_restart()
             if not scheduled:
                 return JSONResponse(
-                    {"status": "restart_already_pending", "node_id": str(self.node_id)},
+                    {
+                        "status": "restart_already_pending",
+                        "node_id": str(self.node_id),
+                        **response_identity,
+                    },
                     status_code=409,
                 )
-            return JSONResponse({"status": "restarting", "node_id": str(self.node_id)})
+            return JSONResponse(
+                {
+                    "status": "restarting",
+                    "node_id": str(self.node_id),
+                    **response_identity,
+                }
+            )
 
         # Remote restart — send command via download commands channel
         from skulk.shared.types.commands import RestartNode
 
         logger.info(f"Remote node restart requested for {target}")
         await self._send_download(RestartNode(target_node_id=target))
-        return JSONResponse({"status": "restart_sent", "node_id": str(target)})
+        return JSONResponse(
+            {
+                "status": "restart_sent",
+                "node_id": str(target),
+                **response_identity,
+            }
+        )
+
+    def _runtime_node_for_installation(self, node_install_id: UUID4) -> NodeId:
+        """Resolve one stable installation identity to its live runtime node.
+
+        Args:
+            node_install_id: Persistent per-host identity reported in node telemetry.
+
+        Returns:
+            The current session-scoped runtime node ID.
+
+        Raises:
+            HTTPException: No live node or more than one live node reports the
+                requested installation identity.
+        """
+        live_nodes = self._live_node_timestamps()
+        matches = [
+            runtime_node_id
+            for runtime_node_id, identity in self._telemetry_view.node_identities.items()
+            if runtime_node_id in live_nodes
+            and identity.node_install_id == node_install_id
+        ]
+        if not matches:
+            raise HTTPException(
+                status_code=404,
+                detail="stable node identity is not present in current live cluster truth",
+            )
+        if len(matches) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail="stable node identity is ambiguous in current live cluster truth",
+            )
+        return matches[0]
