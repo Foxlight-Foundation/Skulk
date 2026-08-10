@@ -1217,7 +1217,9 @@ enable repository code internally. Approval is keyed to the immutable card ID,
 stored in an owner-only local file, and applies only to this node. Repeat it on
 every node that may download or serve the artifact. Skulk fails closed before
 both download and every runner-type dispatch when a required approval is
-absent. This mutation is accepted only from a loopback socket peer; browser
+absent. Approval lookup uses the complete signed catalog, independent of this
+node's image-model visibility setting. This mutation is accepted only from a
+loopback socket peer; browser
 requests must also have a loopback `Origin`. Requests carrying proxy or
 forwarding headers are rejected outright, because a local reverse proxy's
 socket would otherwise be indistinguishable from a direct loopback client.

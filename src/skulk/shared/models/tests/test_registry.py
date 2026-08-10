@@ -24,7 +24,7 @@ from skulk.shared.types.worker.shards import PipelineShardMetadata
 def _catalog_payload() -> bytes:
     return json.dumps(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "snapshot_id": "snapshot_1_test",
             "generated_at": "2026-08-08T12:00:00Z",
             "published_by": "validator@example.com",
@@ -74,6 +74,20 @@ def test_registry_alias_is_separate_from_artifact_repository() -> None:
     assert card.gguf_file == "model-Q4_K_M.gguf"
     assert card.registry_snapshot_id == "snapshot_1_test"
     assert card.registry_provenance == "foxlight"
+
+
+@pytest.mark.parametrize("location", ["catalog", "card"])
+def test_registry_rejects_unknown_schema_versions(location: str) -> None:
+    """A client never interprets a future signed schema with v1 semantics."""
+    payload = cast("dict[str, object]", json.loads(_catalog_payload()))
+    if location == "catalog":
+        payload["schema_version"] = 3
+    else:
+        cards = cast("list[dict[str, object]]", payload["cards"])
+        cards[0]["schema_version"] = 2
+
+    with pytest.raises(ValueError, match="schema_version"):
+        RegistryCatalog.model_validate(payload, strict=False)
 
 
 @pytest.mark.parametrize("alias", [".", "..", "org/..", "../model", "org\\model"])

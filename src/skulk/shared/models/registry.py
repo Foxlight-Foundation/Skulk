@@ -36,7 +36,7 @@ class RegistryCard(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    schema_version: int = Field(ge=1)
+    schema_version: Literal[1]
     card_id: str = Field(pattern=r"^card_[a-z2-7]{52}$")
     alias: str = Field(min_length=1, max_length=512)
     model_ref: str = Field(min_length=1, max_length=512)
@@ -74,7 +74,7 @@ class RegistryCatalog(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    schema_version: int = Field(ge=1)
+    schema_version: Literal[2]
     snapshot_id: str = Field(min_length=1, max_length=120)
     generated_at: datetime
     published_by: str = Field(min_length=1, max_length=320)

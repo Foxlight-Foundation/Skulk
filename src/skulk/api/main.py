@@ -300,6 +300,7 @@ from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
     ModelTask,
+    get_all_model_cards,
     get_bundled_card,
     get_card,
     get_model_cards,
@@ -7260,7 +7261,7 @@ class API:
         card = next(
             (
                 candidate
-                for candidate in await get_model_cards()
+                for candidate in await get_all_model_cards()
                 if candidate.registry_card_id == card_id
             ),
             None,
