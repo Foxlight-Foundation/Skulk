@@ -310,6 +310,12 @@ function ModelGroupInfo({ group, title }: { group: ModelGroup; title: string }) 
             <code title={v.registry_card_id}>{`${v.registry_card_id.slice(0, 15)}…`}</code>
           </>
         )}
+        {v.registry_provenance && (
+          <>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.provenance', 'Provenance')}</span>
+            <span>{v.registry_provenance}</span>
+          </>
+        )}
         {v.remote_code_approval_required && (
           <>
             <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.remoteCode', 'Repository code')}</span>

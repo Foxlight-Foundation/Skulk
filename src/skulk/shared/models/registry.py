@@ -4,7 +4,7 @@ import hashlib
 import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from filelock import FileLock
 from pydantic import BaseModel, ConfigDict, Field
@@ -44,6 +44,14 @@ class RegistryCard(BaseModel):
     card: dict[str, Any]
 
 
+class RegistryCardMetadata(BaseModel):
+    """Mutable catalog metadata that must not alter immutable card identity."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    provenance: Literal["foxlight", "agent", "community"]
+
+
 class RegistryCatalog(BaseModel):
     """Complete published model-card catalog verified as one TUF target."""
 
@@ -55,6 +63,7 @@ class RegistryCatalog(BaseModel):
     published_by: str = Field(min_length=1, max_length=320)
     note: str
     cards: tuple[RegistryCard, ...]
+    card_metadata: dict[str, RegistryCardMetadata]
 
 
 class _VerifiedCacheRecord(BaseModel):

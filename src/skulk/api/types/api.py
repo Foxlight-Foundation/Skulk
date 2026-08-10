@@ -142,6 +142,12 @@ class ModelListModel(BaseModel):
         default=None,
         description="Signed snapshot that supplied this card, or null for local cards.",
     )
+    registry_provenance: Literal["foxlight", "agent", "community"] | None = Field(
+        default=None,
+        description=(
+            "Audited signed-registry origin, or null for bundled and custom cards."
+        ),
+    )
     catalog_source: Literal["registry", "bundled", "custom"] = Field(
         default="bundled",
         description="Trust and precedence source for this catalog entry.",

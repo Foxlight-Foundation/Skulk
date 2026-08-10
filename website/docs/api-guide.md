@@ -1590,6 +1590,7 @@ Important fields:
 | `catalog_source` | string | `registry`, `bundled`, or `custom` |
 | `registry_card_id` | string or null | Immutable content-derived card identity from the signed registry |
 | `registry_snapshot_id` | string or null | Signed catalog snapshot that supplied the card |
+| `registry_provenance` | string or null | Audited signed-registry origin (`foxlight`, `agent`, or `community`); null for bundled/custom cards |
 | `remote_code_approval_required` | boolean | Whether the registry artifact or its selected platform loader can execute repository Python and needs local approval |
 | `remote_code_approved_on_this_node` | boolean | Whether that immutable card is approved on the responding node |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |

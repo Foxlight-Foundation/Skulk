@@ -90,7 +90,9 @@ node in a cluster must run the same Skulk version.
 
 ### Catalog metadata
 
-- `registry_card_id` / `registry_snapshot_id`
+- `registry_card_id` / `registry_snapshot_id` / `registry_provenance`
+  - provenance is signed catalog metadata (`foxlight`, `agent`, or `community`)
+    and is deliberately excluded from the content-derived card identity
   - runtime provenance attached by the verified external catalog; these are absent from bundled and custom cards
 
 - `family`

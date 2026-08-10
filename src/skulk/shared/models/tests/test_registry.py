@@ -3,6 +3,7 @@
 
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -28,6 +29,9 @@ def _catalog_payload() -> bytes:
             "generated_at": "2026-08-08T12:00:00Z",
             "published_by": "validator@example.com",
             "note": "test",
+            "card_metadata": {
+                f"card_{'a' * 52}": {"provenance": "foxlight"}
+            },
             "cards": [
                 {
                     "schema_version": 1,
@@ -69,6 +73,17 @@ def test_registry_alias_is_separate_from_artifact_repository() -> None:
     assert str(card.artifact_repository) == "org/multi-gguf"
     assert card.gguf_file == "model-Q4_K_M.gguf"
     assert card.registry_snapshot_id == "snapshot_1_test"
+    assert card.registry_provenance == "foxlight"
+
+
+def test_registry_rejects_catalog_metadata_outside_card_identity() -> None:
+    """Every published card has exactly one signed provenance record."""
+    payload = cast("dict[str, object]", json.loads(_catalog_payload()))
+    payload["card_metadata"] = {}
+    catalog = RegistryCatalog.model_validate(payload, strict=False)
+
+    with pytest.raises(ValueError, match="metadata does not match"):
+        registry_model_cards(catalog)
 
 
 def test_offline_mode_disables_registry_network_refresh(

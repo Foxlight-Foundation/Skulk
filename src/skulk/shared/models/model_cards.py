@@ -98,6 +98,9 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
     """Convert one verified registry snapshot to Skulk runtime cards atomically."""
     cards: list[ModelCard] = []
     aliases: set[ModelId] = set()
+    card_ids = {envelope.card_id for envelope in catalog.cards}
+    if set(catalog.card_metadata) != card_ids:
+        raise ValueError("registry catalog metadata does not match its card set")
     for envelope in catalog.cards:
         alias = ModelId(envelope.alias)
         if alias in aliases:
@@ -112,12 +115,18 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
             raise ValueError(
                 f"registry envelope file disagrees with card {envelope.card_id}"
             )
+        metadata = catalog.card_metadata.get(envelope.card_id)
+        if metadata is None:
+            raise ValueError(
+                f"registry catalog omits provenance for {envelope.card_id}"
+            )
         payload.update(
             {
                 "model_id": alias,
                 "source_repository": ModelId(envelope.artifact.repository),
                 "registry_card_id": envelope.card_id,
                 "registry_snapshot_id": catalog.snapshot_id,
+                "registry_provenance": metadata.provenance,
             }
         )
         cards.append(ModelCard.model_validate(payload))
@@ -1181,6 +1190,8 @@ class ModelCard(CamelCaseModel):
     """Immutable content-derived registry card id, or ``None`` for local cards."""
     registry_snapshot_id: str | None = None
     """Signed registry snapshot that supplied this runtime card."""
+    registry_provenance: Literal["foxlight", "agent", "community"] | None = None
+    """Audited registry origin, kept separate from immutable artifact identity."""
 
     @property
     def artifact_repository(self) -> ModelId:

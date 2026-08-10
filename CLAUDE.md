@@ -397,9 +397,11 @@ entries, and worker staging must preserve that revision. Never collapse a
 pinned artifact back onto mutable `main`, and never treat a staged directory
 from another revision as a cache hit.
 
-The external card registry is the curated catalog source. Only separately
-runtime-qualified candidates are published; structural schema checks do not
-mean “supported.” Skulk verifies its static TUF feed from the package-embedded
+The external card registry is the curated catalog source. Provenance-stamped,
+structurally valid cards are activated independently of runtime qualification;
+qualification evidence governs verified and recommended policy. Each card uses a
+content-derived immutable identity; signed provenance metadata does not alter
+that identity. Skulk verifies its static TUF feed from the package-embedded
 root, refreshes at most every 60 seconds, uses a hash-bound 30-day
 last-known-good cache during outages, and retains bundled cards only as the
 transition fallback. `SKULK_OFFLINE=true` suppresses registry network refreshes

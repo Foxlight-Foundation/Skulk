@@ -7197,6 +7197,7 @@ class API:
             artifact_file=card.gguf_file,
             registry_card_id=card.registry_card_id,
             registry_snapshot_id=card.registry_snapshot_id,
+            registry_provenance=card.registry_provenance,
             catalog_source=(
                 "custom"
                 if card.is_custom

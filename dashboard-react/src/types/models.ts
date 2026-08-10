@@ -79,6 +79,7 @@ export interface ModelInfo {
   artifact_file?: string | null;
   registry_card_id?: string | null;
   registry_snapshot_id?: string | null;
+  registry_provenance?: 'foxlight' | 'agent' | 'community' | null;
   catalog_source?: 'registry' | 'bundled' | 'custom';
   remote_code_approval_required?: boolean;
   remote_code_approved_on_this_node?: boolean;

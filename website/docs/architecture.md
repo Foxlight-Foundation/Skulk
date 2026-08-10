@@ -1054,8 +1054,12 @@ A registry card separates its selectable `model_id` alias from
 `source_repository`. The alias is the fabric/store identity; metadata and byte
 requests use the source repository. This allows one exact card per quant or
 selected file even when several artifacts share a Hugging Face repository.
-The external registry publishes only cards that passed separate runtime
-qualification; structural validation alone cannot make a card “supported.”
+The external registry publishes provenance-stamped cards that pass deterministic
+structural validation. Runtime qualification remains separate evidence for an
+exact artifact, engine build, hardware class, and capability; it governs
+verification and recommendation policy rather than global catalog existence.
+Catalog provenance (`foxlight`, `agent`, or `community`) is signed metadata and
+does not participate in the content-derived `registry_card_id`.
 
 Repository code remains a node-local security decision. A signed card with
 `trust_remote_code=true` is blocked before download and again before every
