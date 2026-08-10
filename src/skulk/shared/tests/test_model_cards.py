@@ -113,6 +113,57 @@ async def test_custom_card_overrides_bundled(
     assert restored.quantization == "fp16"
 
 
+@pytest.mark.anyio
+async def test_custom_card_deletion_restores_signed_registry_authority(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting an override cannot resurrect an unlisted bundled card."""
+    custom_dir = tmp_path / "custom"
+    custom_dir.mkdir()
+    custom_path = custom_dir / "testorg--override-model.toml"
+    custom_path.write_text(_MINIMAL_CARD.format(quantization="int4"))
+    registry_card = ModelCard.model_validate(
+        {
+            "model_id": "testorg/override-model",
+            "storage_size": {"in_bytes": 1024},
+            "n_layers": 4,
+            "hidden_size": 64,
+            "supports_tensor": False,
+            "tasks": ["TextGeneration"],
+            "quantization": "registry-fp8",
+            "registry_card_id": f"card_{'a' * 52}",
+            "registry_snapshot_id": "snapshot_test",
+        }
+    )
+    revoked_bundled = registry_card.model_copy(
+        update={
+            "model_id": ModelId("testorg/revoked-bundled"),
+            "registry_card_id": None,
+            "registry_snapshot_id": None,
+        }
+    )
+    monkeypatch.setattr(model_cards_module, "_card_cache", {})
+    monkeypatch.setattr(model_cards_module, "_custom_cards_dir", Path(str(custom_dir)))
+    model_cards_module._card_cache[registry_card.model_id] = registry_card
+    model_cards_module._card_cache[revoked_bundled.model_id] = revoked_bundled
+    await model_cards_module._load_cards_from_dir(
+        Path(str(custom_dir)), is_custom=True
+    )
+
+    async def load_registry() -> bool:
+        for cached_model_id, card in tuple(model_cards_module._card_cache.items()):
+            if not card.is_custom:
+                del model_cards_module._card_cache[cached_model_id]
+        model_cards_module._card_cache[registry_card.model_id] = registry_card
+        return True
+
+    monkeypatch.setattr(model_cards_module, "_load_cards_from_registry", load_registry)
+
+    assert await model_cards_module.delete_custom_card(registry_card.model_id)
+    assert model_cards_module._card_cache[registry_card.model_id] == registry_card
+    assert revoked_bundled.model_id not in model_cards_module._card_cache
+
+
 _STAMPED_CARD = """\
 model_id = "testorg/override-model"
 n_layers = 4
