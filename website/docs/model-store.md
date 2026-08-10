@@ -47,10 +47,11 @@ repo.
 ### Qualified cards can pin immutable artifacts
 
 A model card may set `source_revision` to a full Hugging Face commit hash. The
-store records that revision with its registry entry and treats a different
-revision as a different artifact generation. If a card's pin changes, Skulk
-downloads and registers the replacement before removing the previous canonical
-copy.
+store records both that revision and the effective source repository with its
+registry entry. Either mismatch identifies a different artifact generation,
+even when the selectable alias is unchanged. If either identity field changes,
+Skulk downloads and registers the replacement before removing the previous
+canonical copy; concurrent downloads deduplicate only when both fields match.
 
 Worker staging enforces the same discipline: each staged directory records the
 revision it was staged from, and a staging request checks that record before

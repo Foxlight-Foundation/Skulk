@@ -89,6 +89,7 @@ from skulk.download.download_utils import (
     same_repo_served_draft_files,
 )
 from skulk.download.shard_downloader import ShardDownloader
+from skulk.shared.models.remote_code_approval import require_remote_code_approval
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.downloads import RepoDownloadProgress
 from skulk.shared.types.worker.shards import ShardMetadata
@@ -240,7 +241,14 @@ def _write_staged_source_revision_staging(
 
 def _staging_dir(node_cache_path: str, model_id: str) -> Path:
     """Resolve the staging directory for *model_id* on this node."""
-    return Path(node_cache_path).expanduser() / _sanitize_model_id(model_id)
+    staging_root = Path(node_cache_path).expanduser()
+    directory_name = _sanitize_model_id(model_id)
+    if directory_name in {"", ".", ".."} or "\\" in directory_name:
+        raise ValueError("model id does not resolve to a safe staging directory")
+    destination = staging_root / directory_name
+    if destination.resolve().parent != staging_root.resolve():
+        raise ValueError("model staging directory escapes the configured root")
+    return destination
 
 
 async def _retry_store_http(
@@ -812,8 +820,10 @@ class ModelStoreClient:
         model_id: str,
         gguf_file: str | None = None,
         source_revision: str | None = None,
+        source_repository: str | None = None,
+        registry_card_id: str | None = None,
     ) -> dict[str, object]:
-        """Request a store download with optional file and revision pins."""
+        """Request a store download with artifact pins and signed identity."""
         url = _make_store_url(
             self._store_host,
             self._store_port,
@@ -826,6 +836,10 @@ class ModelStoreClient:
                     body["gguf_file"] = gguf_file
                 if source_revision is not None:
                     body["source_revision"] = source_revision
+                if source_repository is not None and source_repository != model_id:
+                    body["source_repository"] = source_repository
+                if registry_card_id is not None:
+                    body["registry_card_id"] = registry_card_id
                 request = session.post(url, json=body) if body else session.post(url)
                 async with request as resp:
                     if resp.status not in (200, 201):
@@ -913,6 +927,8 @@ class ModelStoreClient:
         pinned_gguf: str | None = None,
         extra_pinned_gguf: list[str] | None = None,
         source_revision: str | None = None,
+        source_repository: str | None = None,
+        registry_card_id: str | None = None,
     ) -> bool:
         """Request the store host download a model from HuggingFace, then wait.
 
@@ -941,6 +957,10 @@ class ModelStoreClient:
                 companion. An older store host ignores the unknown field.
             source_revision: Immutable Hugging Face commit required by the card,
                 or ``None`` to follow mutable ``main``.
+            source_repository: Upstream Hugging Face repository containing the
+                bytes. ``None`` means it is identical to the store identity.
+            registry_card_id: Immutable signed-card identity whose node-local
+                approval policy the store host must independently enforce.
 
         Returns:
             ``True`` if download completed successfully.
@@ -976,9 +996,14 @@ class ModelStoreClient:
             download_body["extra_gguf_files"] = extra_pinned_gguf
         if source_revision:
             download_body["source_revision"] = source_revision
+        if source_repository and source_repository != model_id:
+            download_body["source_repository"] = source_repository
+        if registry_card_id:
+            download_body["registry_card_id"] = registry_card_id
         post_kwargs: dict[str, object] = (
             {"json": download_body} if download_body else {}
         )
+
         async def _post_download_request() -> bool:
             async with (
                 create_http_session(timeout_profile="short") as session,
@@ -1535,6 +1560,7 @@ class ModelStoreDownloader(ShardDownloader):
         best-effort — the runner degrades to run-without-speculation, so
         their failures log loudly without failing a loadable base model.
         """
+        require_remote_code_approval(shard.model_card)
         protected_model_ids = {
             str(shard.model_card.model_id),
             *(
@@ -1703,6 +1729,8 @@ class ModelStoreDownloader(ShardDownloader):
                         pinned_gguf=shard.model_card.gguf_file,
                         extra_pinned_gguf=same_repo_drafts,
                         source_revision=shard.model_card.source_revision,
+                        source_repository=str(shard.model_card.artifact_repository),
+                        registry_card_id=shard.model_card.registry_card_id,
                     )
                 logger.info(
                     f"ModelStoreDownloader: staging {model_id} from store → {dest_path}"
@@ -1745,6 +1773,8 @@ class ModelStoreDownloader(ShardDownloader):
                     pinned_gguf=shard.model_card.gguf_file,
                     extra_pinned_gguf=same_repo_drafts,
                     source_revision=shard.model_card.source_revision,
+                    source_repository=str(shard.model_card.artifact_repository),
+                    registry_card_id=shard.model_card.registry_card_id,
                 )
             except StoreUnreachableError as exc:
                 # The store became unreachable between the probe and the

@@ -14,6 +14,7 @@ from skulk.shared.models.model_cards import (
     RuntimeCapabilityCardConfig,
     card_serves_speech,
 )
+from skulk.shared.models.remote_code_approval import require_remote_code_approval
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.diagnostics import (
     RunnerDiagnosticContext,
@@ -408,6 +409,7 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
         resolve_node_engine,
     )
     shard = bound_instance.bound_shard
+    require_remote_code_approval(shard.model_card)
     if shard.resolved_backend is not None:
         return engine_of(shard.resolved_backend)
 
@@ -455,6 +457,10 @@ def entrypoint(
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(max(soft, 2048), hard), hard))
 
     shard = bound_instance.bound_shard
+    # This guard belongs before runner-type dispatch: image and embedding
+    # runners do not pass through text-engine resolution, and revoking an
+    # approval must prevent every future runner process from starting.
+    require_remote_code_approval(shard.model_card)
     fast_synch_enabled = resolve_metal_fast_synch(shard.model_card.runtime)
     os.environ["MLX_METAL_FAST_SYNCH"] = "1" if fast_synch_enabled else "0"
     logger.info(

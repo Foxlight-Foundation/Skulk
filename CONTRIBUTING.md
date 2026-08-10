@@ -137,7 +137,11 @@ For the React dashboard:
 
 ## Model Cards
 
-Skulk uses TOML-based model cards to define model metadata and capabilities. Model cards are stored in:
+Skulk uses TOML-based model cards to define model metadata and capabilities.
+The signed external registry is the curated source of truth; bundled cards are
+retained only as a transition fallback, and local custom cards remain explicit
+operator overrides. Model-card locations are:
+- `Foxlight-Foundation/foxlight-model-registry/seed/cards/` for the pinned migration seed and registry candidate workflow
 - `resources/inference_model_cards/` for text generation models
 - `resources/image_model_cards/` for image generation models
 - `resources/embedding_model_cards/` for embedding models
@@ -145,6 +149,13 @@ Skulk uses TOML-based model cards to define model metadata and capabilities. Mod
 - `~/.skulk/custom_model_cards/` for user-added custom models
 
 ### Adding a Model Card
+
+Do not add a new curated card only to Skulk's bundled resources. Submit it to
+the private registry as one exact artifact (one card per quant/file), pin a full
+40-character source revision and exact GGUF file where applicable, then attach
+runtime qualification evidence. Structural validation alone must leave it a
+candidate. Bundled edits during the transition must mirror the registry and
+state why fallback compatibility requires them.
 
 To add a new model, create a TOML file with the following structure:
 

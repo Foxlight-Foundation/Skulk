@@ -40,6 +40,7 @@ model_type = "qwen3_5"
 mtp_heads = true
 mtp_max_depth = 1
 mtp_sidecar_repo = "FoxlightAI/qwen3-5-9b-base-mtp"
+mtp_sidecar_revision = "06c840b3529f5695648807d993b1cb48b576a988"
 
 [storage_size]
 in_bytes = 5950062560

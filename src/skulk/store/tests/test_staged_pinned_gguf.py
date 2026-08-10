@@ -4,6 +4,7 @@
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import cast
+from unittest.mock import ANY
 
 import pytest
 
@@ -68,9 +69,13 @@ class _RecordingStoreClient:
         pinned_gguf: str | None = None,
         extra_pinned_gguf: list[str] | None = None,
         source_revision: str | None = None,
+        source_repository: str | None = None,
+        registry_card_id: str | None = None,
     ) -> bool:
         assert not extra_pinned_gguf
         assert source_revision is None
+        assert source_repository is None or "/" in source_repository
+        assert registry_card_id is None
         self.download_requests.append((model_id, pinned_gguf))
         return True
 
@@ -103,6 +108,30 @@ def _shard(gguf_file: str) -> PipelineShardMetadata:
             supports_tensor=False,
             tasks=[ModelTask.TextGeneration],
             gguf_file=gguf_file,
+        ),
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=1,
+        n_layers=1,
+    )
+
+
+def _aliased_shard() -> PipelineShardMetadata:
+    return PipelineShardMetadata(
+        model_card=ModelCard(
+            model_id=ModelId("org/multi-quant@iq3-xxs"),
+            source_repository=ModelId(_MODEL_ID),
+            source_revision="a" * 40,
+            storage_size=Memory.from_bytes(8),
+            n_layers=1,
+            hidden_size=1,
+            supports_tensor=False,
+            tasks=[ModelTask.TextGeneration],
+            gguf_file="model-IQ3_XXS.gguf",
+            trust_remote_code=False,
+            registry_card_id=f"card_{'a' * 52}",
+            registry_snapshot_id="snapshot_1_test",
         ),
         device_rank=0,
         world_size=1,
@@ -146,6 +175,71 @@ async def test_different_staged_quant_is_replaced_from_store(tmp_path: Path) -> 
     assert store.download_requests == [(_MODEL_ID, "model-IQ3_XXS.gguf")]
     assert store.stage_calls == 1
     assert (staged / "model-IQ3_XXS.gguf").is_file()
+
+
+@pytest.mark.anyio
+async def test_store_download_keeps_alias_but_fetches_artifact_repository(
+    tmp_path: Path,
+) -> None:
+    """Store identity and upstream byte source remain independent."""
+    observed: dict[str, object] = {}
+
+    class AliasStoreClient(_RecordingStoreClient):
+        async def is_model_available(
+            self, model_id: str, source_revision: str | None = None
+        ) -> bool:
+            observed["availability"] = (model_id, source_revision)
+            return False
+
+        async def request_and_wait_for_download(
+            self,
+            model_id: str,
+            **kwargs: object,
+        ) -> bool:
+            observed["download"] = (model_id, kwargs)
+            return True
+
+        async def stage_shard(
+            self,
+            model_id: str,
+            staging_root: Path,
+            on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+            source_revision: str | None = None,
+            capacity_preflight: Callable[[int], Awaitable[None]] | None = None,
+        ) -> Path:
+            del on_progress, source_revision, capacity_preflight
+            observed["stage"] = model_id
+            path = staging_root / model_id.replace("/", "--")
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "model-IQ3_XXS.gguf").write_bytes(b"selected")
+            return path
+
+    store = AliasStoreClient()
+    downloader = ModelStoreDownloader(
+        inner=_UnusedInnerDownloader(),
+        store_client=cast(ModelStoreClient, cast(object, store)),
+        staging_config=StagingNodeConfig(
+            enabled=True,
+            node_cache_path=str(tmp_path),
+        ),
+    )
+
+    await downloader.ensure_shard(_aliased_shard())
+
+    alias = "org/multi-quant@iq3-xxs"
+    assert observed["availability"] == (alias, "a" * 40)
+    assert observed["stage"] == alias
+    assert observed["download"] == (
+        alias,
+        {
+            "on_progress": ANY,
+            "pinned_gguf": "model-IQ3_XXS.gguf",
+            "extra_pinned_gguf": [],
+            "source_revision": "a" * 40,
+            "source_repository": _MODEL_ID,
+            "registry_card_id": f"card_{'a' * 52}",
+        },
+    )
 
 
 @pytest.mark.anyio

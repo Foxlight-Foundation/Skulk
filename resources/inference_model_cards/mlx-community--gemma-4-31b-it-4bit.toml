@@ -34,6 +34,7 @@ output_parser = "gemma4"
 # acceptance, #201 Track 2b last-rank drafting, asymmetric splits not
 # required at 30/30 with the wired limit set).
 assistant_model_repo = "mlx-community/gemma-4-31B-it-assistant-bf16"
+assistant_model_revision = "28e92270316e89288579ec59c17939541d9ca433"
 mtp_max_depth = 2
 # Same FAST_SYNCH wedge guard as the other gemma4 cards.
 metal_fast_synch = false

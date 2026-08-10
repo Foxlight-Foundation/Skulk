@@ -298,7 +298,7 @@ def _draft_model_args(
     misconfiguration and still raise loudly. Pure except for the on-disk path
     resolution, so the validation branches are unit-testable. A draft sharing
     the base repository inherits the base card's immutable source revision;
-    separate-repository drafts retain their own unpinned lookup contract.
+    separate-repository drafts use their card-declared immutable revision.
 
     Args:
         runtime: Resolved runtime capability section from the base model card.
@@ -328,7 +328,7 @@ def _draft_model_args(
         draft_revision = (
             source_revision
             if base_model_id is not None and draft_repo == str(base_model_id)
-            else None
+            else getattr(runtime, "served_spec_draft_revision", None)
         )
         try:
             draft_dir = build_model_path(ModelId(draft_repo), draft_revision)

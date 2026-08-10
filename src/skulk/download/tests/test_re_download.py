@@ -37,6 +37,9 @@ MODEL_ID = ModelId("test-org/test-model")
 def _make_shard(
     model_id: ModelId = MODEL_ID,
     source_revision: str | None = None,
+    *,
+    gguf_file: str | None = None,
+    registry_card_id: str | None = None,
 ) -> ShardMetadata:
     return PipelineShardMetadata(
         model_card=ModelCard(
@@ -47,6 +50,8 @@ def _make_shard(
             supports_tensor=False,
             tasks=[ModelTask.TextGeneration],
             source_revision=source_revision,
+            gguf_file=gguf_file,
+            registry_card_id=registry_card_id,
         ),
         device_rank=0,
         world_size=1,
@@ -191,6 +196,44 @@ async def test_revision_change_restarts_failed_download_state() -> None:
     status = coordinator.download_status[MODEL_ID]
     assert isinstance(status, DownloadFailed)
     assert status.shard_metadata.model_card.source_revision == "1" * 40
+
+
+async def test_registry_identity_change_restarts_same_revision_status() -> None:
+    """A new signed quant cannot inherit stale same-alias completion state."""
+    _command_send, command_receive = channel[ForwarderDownloadCommand]()
+    event_send, _event_receive = channel[Event]()
+    telemetry_send, _telemetry_receive = channel[NodeTelemetry]()
+    coordinator = DownloadCoordinator(
+        node_id=NODE_ID,
+        shard_downloader=FakeShardDownloader(),
+        download_command_receiver=command_receive,
+        event_sender=event_send,
+        telemetry_sender=telemetry_send,
+        offline=True,
+    )
+    old_shard = _make_shard(
+        source_revision="a" * 40,
+        gguf_file="model-q4.gguf",
+        registry_card_id=f"card_{'a' * 52}",
+    )
+    new_shard = _make_shard(
+        source_revision="a" * 40,
+        gguf_file="model-q5.gguf",
+        registry_card_id=f"card_{'b' * 52}",
+    )
+    coordinator.download_status[MODEL_ID] = DownloadFailed(
+        shard_metadata=old_shard,
+        node_id=NODE_ID,
+        error_message="old artifact failed",
+        model_directory="/missing",
+    )
+
+    await coordinator._start_download(new_shard)
+
+    status = coordinator.download_status[MODEL_ID]
+    assert isinstance(status, DownloadFailed)
+    assert status.shard_metadata.model_card.registry_card_id == f"card_{'b' * 52}"
+    assert status.shard_metadata.model_card.gguf_file == "model-q5.gguf"
 
 
 async def test_revision_change_replaces_active_download_after_cleanup() -> None:

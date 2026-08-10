@@ -24,7 +24,9 @@ _QUALIFIED_REVISION = "3374b395f6a01379f0dd4997b37aacaab77a3596"
 
 class _RecordingStoreClient:
     def __init__(self) -> None:
-        self.requests: list[tuple[str, str | None, str | None]] = []
+        self.requests: list[
+            tuple[str, str | None, str | None, str | None, str | None]
+        ] = []
         self.cancelled_models: list[str] = []
         self.cancellation_succeeds = True
 
@@ -33,8 +35,18 @@ class _RecordingStoreClient:
         model_id: str,
         gguf_file: str | None = None,
         source_revision: str | None = None,
+        source_repository: str | None = None,
+        registry_card_id: str | None = None,
     ) -> dict[str, object]:
-        self.requests.append((model_id, gguf_file, source_revision))
+        self.requests.append(
+            (
+                model_id,
+                gguf_file,
+                source_revision,
+                source_repository,
+                registry_card_id,
+            )
+        )
         return {"status": "pending"}
 
     async def cancel_store_download(self, model_id: str) -> bool:
@@ -68,6 +80,8 @@ async def test_store_download_inherits_bundled_card_revision(
         return SimpleNamespace(
             gguf_file="gemma-4-31B_q4_0-it.gguf",
             source_revision=_QUALIFIED_REVISION,
+            artifact_repository=ModelId(_MODEL_ID),
+            registry_card_id=None,
         )
 
     monkeypatch.setattr(
@@ -82,7 +96,13 @@ async def test_store_download_inherits_bundled_card_revision(
     await api.request_store_download(_MODEL_ID)
 
     assert store_client.requests == [
-        (_MODEL_ID, "gemma-4-31B_q4_0-it.gguf", _QUALIFIED_REVISION)
+        (
+            _MODEL_ID,
+            "gemma-4-31B_q4_0-it.gguf",
+            _QUALIFIED_REVISION,
+            _MODEL_ID,
+            None,
+        )
     ]
 
 
@@ -92,6 +112,8 @@ async def test_store_download_populates_card_cache_before_inheriting_pins(
     card = SimpleNamespace(
         gguf_file="gemma-4-31B_q4_0-it.gguf",
         source_revision=_QUALIFIED_REVISION,
+        artifact_repository=ModelId(_MODEL_ID),
+        registry_card_id=None,
     )
     lookups = 0
 
@@ -113,7 +135,13 @@ async def test_store_download_populates_card_cache_before_inheriting_pins(
 
     assert lookups == 2
     assert store_client.requests == [
-        (_MODEL_ID, "gemma-4-31B_q4_0-it.gguf", _QUALIFIED_REVISION)
+        (
+            _MODEL_ID,
+            "gemma-4-31B_q4_0-it.gguf",
+            _QUALIFIED_REVISION,
+            _MODEL_ID,
+            None,
+        )
     ]
 
 

@@ -21,7 +21,11 @@ from skulk.download.download_utils import (
 from skulk.download.shard_downloader import ShardDownloader
 from skulk.routing.router import TelemetrySender
 from skulk.shared.constants import SKULK_MODELS_DIR
-from skulk.shared.models.model_cards import ModelId, get_model_cards
+from skulk.shared.models.model_cards import (
+    ModelId,
+    get_model_cards,
+    same_model_artifact,
+)
 from skulk.shared.types.commands import (
     CancelDownload,
     DeleteDownload,
@@ -456,10 +460,12 @@ class DownloadCoordinator:
     async def _start_download(self, shard: ShardMetadata) -> None:
         model_id = shard.model_card.model_id
         status = self.download_status.get(model_id)
-        revision_changed = (
+        artifact_changed = (
             status is not None
-            and status.shard_metadata.model_card.source_revision
-            != shard.model_card.source_revision
+            and not same_model_artifact(
+                status.shard_metadata.model_card,
+                shard.model_card,
+            )
         )
 
         active_scope = self.active_downloads.get(model_id)
@@ -474,13 +480,13 @@ class DownloadCoordinator:
                     "the cancelled download task finishes"
                 )
                 return
-            if revision_changed:
+            if artifact_changed:
                 self._begin_reset(model_id)
                 self._pending_download_starts[model_id] = shard
                 active_scope.cancel()
                 logger.info(
                     f"DownloadCoordinator: replacing active download for {model_id} "
-                    "because its source revision changed"
+                    "because its immutable artifact identity changed"
                 )
                 return
             logger.info(
@@ -490,10 +496,10 @@ class DownloadCoordinator:
 
         # Check if already downloading, complete, or recently failed
         if status is not None:
-            if revision_changed:
+            if artifact_changed:
                 logger.info(
                     f"DownloadCoordinator: {model_id} has stale "
-                    f"{type(status).__name__} state from another source revision; "
+                    f"{type(status).__name__} state from another artifact; "
                     "starting a fresh download"
                 )
                 del self.download_status[model_id]

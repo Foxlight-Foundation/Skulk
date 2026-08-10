@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import shutil
 from collections.abc import Iterable
@@ -282,6 +283,9 @@ class StoreModelEntry(BaseModel):
     total_bytes: int
     source_revision: str | None = None
     """Immutable Hugging Face commit that produced this entry, when pinned."""
+    source_repository: str | None = None
+    """Upstream repository that supplied the bytes; ``None`` means ``model_id``
+    for entries written before repository-aware artifact identity."""
     # Whether the upstream repo ships a multimodal projector, recorded at
     # registration so the availability hot path can decide a vision GGUF's
     # completeness without an HF repo-list probe (#346). ``None`` on entries
@@ -296,6 +300,9 @@ class StoreDownloadStatus:
 
     model_id: str
     source_revision: str | None = None
+    source_repository: str | None = None
+    pinned_gguf: str | None = None
+    extra_pinned_gguf: tuple[str, ...] = ()
     status: Literal[
         "pending", "downloading", "complete", "failed", "cancelled"
     ] = "pending"
@@ -404,6 +411,20 @@ class ModelStore:
         entry = self.get_entry(model_id)
         return entry is not None and entry.source_revision == source_revision
 
+    def entry_matches_artifact(
+        self,
+        model_id: str,
+        source_revision: str | None,
+        source_repository: str | None,
+    ) -> bool:
+        """Return whether the canonical entry matches the complete byte source."""
+        entry = self.get_entry(model_id)
+        if entry is None or entry.source_revision != source_revision:
+            return False
+        registered_repository = entry.source_repository or entry.model_id
+        requested_repository = source_repository or model_id
+        return registered_repository == requested_repository
+
     def list_models(self) -> list[StoreModelEntry]:
         """Return all :class:`StoreModelEntry` objects currently in the registry
         whose directories still exist on disk.
@@ -479,6 +500,7 @@ class ModelStore:
         total_bytes: int,
         repo_has_projector: bool | None = None,
         source_revision: str | None = None,
+        source_repository: str | None = None,
     ) -> None:
         """Add or update *model_id* in the registry.
 
@@ -497,6 +519,8 @@ class ModelStore:
                 this entry, or ``None`` for mutable ``main``. Registration
                 writes the matching filesystem marker before publishing the
                 registry entry so revision-aware runners resolve the same path.
+            source_repository: Upstream Hugging Face repository that supplied
+                the bytes, or ``None`` when it is identical to ``model_id``.
         """
         from skulk.download.download_utils import write_source_revision_marker
 
@@ -515,6 +539,7 @@ class ModelStore:
             total_bytes=total_bytes,
             repo_has_projector=repo_has_projector,
             source_revision=source_revision,
+            source_repository=source_repository,
         )
         write_source_revision_marker(resolved_model_path, source_revision)
         self._write_registry_entry(entry)
@@ -645,6 +670,7 @@ class ModelStore:
         pinned_gguf: str | None = None,
         extra_pinned_gguf: list[str] | None = None,
         source_revision: str | None = None,
+        source_repository: str | None = None,
     ) -> StoreDownloadStatus:
         """Request that the store download a model from HuggingFace.
 
@@ -663,7 +689,11 @@ class ModelStore:
         immutable Hugging Face commit. A different registered revision is
         replaced only after the requested revision has downloaded and
         registered successfully.
+        ``source_repository`` names the upstream byte source when ``model_id``
+        is a distinct store and runtime alias.
         """
+        requested_repository = source_repository or model_id
+        requested_companions = tuple(sorted(extra_pinned_gguf or []))
         # Checked outside the lock: it may do a (cached) repo file-list fetch, and
         # holding the download lock across network I/O would serialize unrelated
         # requests.
@@ -676,12 +706,19 @@ class ModelStore:
         async with self._download_lock:
             existing = self._active_downloads.get(model_id)
             if existing is not None:
+                existing_repository = existing.source_repository or model_id
                 if (
                     existing.status in ("pending", "downloading")
-                    and existing.source_revision != source_revision
+                    and (
+                        existing.source_revision != source_revision
+                        or existing_repository != requested_repository
+                        or existing.pinned_gguf != pinned_gguf
+                        or existing.extra_pinned_gguf != requested_companions
+                    )
                 ):
                     raise ValueError(
-                        f"{model_id} is already downloading revision "
+                        f"{model_id} is already downloading a different artifact "
+                        f"selection from {existing_repository}@"
                         f"{existing.source_revision or 'main'}"
                     )
                 # A failed entry retries. A cached-complete entry is stale when:
@@ -705,25 +742,31 @@ class ModelStore:
                     or missing_pinned_gguf
                     or missing_companion
                     or existing.source_revision != source_revision
+                    or existing_repository != requested_repository
                     or not self.is_in_store(model_id)
                 )
                 if existing.status in ("failed", "cancelled") or stale_complete:
                     del self._active_downloads[model_id]
                 else:
                     return existing
-            revision_mismatch = self.is_in_store(
+            artifact_mismatch = self.is_in_store(
                 model_id
-            ) and not self.entry_matches_revision(model_id, source_revision)
+            ) and not self.entry_matches_artifact(
+                model_id,
+                source_revision,
+                source_repository,
+            )
             if (
                 self.is_in_store(model_id)
                 and not missing_projector
                 and not missing_pinned_gguf
                 and not missing_companion
-                and not revision_mismatch
+                and not artifact_mismatch
             ):
                 return StoreDownloadStatus(
                     model_id=model_id,
                     source_revision=source_revision,
+                    source_repository=requested_repository,
                     status="complete",
                     progress=1.0,
                 )
@@ -745,15 +788,30 @@ class ModelStore:
                     f"missing a requested companion GGUF ({extra_pinned_gguf}); "
                     "re-downloading to recover it (existing weights are reused)."
                 )
-            if revision_mismatch:
+            if artifact_mismatch:
+                current = self.get_entry(model_id)
+                current_repository = (
+                    current.source_repository or current.model_id
+                    if current is not None
+                    else "unknown"
+                )
+                current_revision = (
+                    current.source_revision or "main"
+                    if current is not None
+                    else "unknown"
+                )
                 logger.warning(
-                    f"ModelStore: {model_id} is pinned to revision "
-                    f"{source_revision or 'main'}, but the canonical entry has a "
-                    "different source revision; downloading a qualified replacement."
+                    f"ModelStore: {model_id} requests "
+                    f"{requested_repository}@{source_revision or 'main'}, but the "
+                    f"canonical entry identifies {current_repository}@"
+                    f"{current_revision}; downloading a qualified replacement."
                 )
             status = StoreDownloadStatus(
                 model_id=model_id,
                 source_revision=source_revision,
+                source_repository=requested_repository,
+                pinned_gguf=pinned_gguf,
+                extra_pinned_gguf=requested_companions,
                 status="pending",
             )
             self._active_downloads[model_id] = status
@@ -763,6 +821,7 @@ class ModelStore:
                     pinned_gguf,
                     extra_pinned_gguf,
                     source_revision,
+                    source_repository,
                 )
             )
             self._download_tasks.add(task)
@@ -812,6 +871,7 @@ class ModelStore:
             return StoreDownloadStatus(
                 model_id=model_id,
                 source_revision=entry.source_revision,
+                source_repository=entry.source_repository or entry.model_id,
                 status="complete",
                 progress=1.0,
             )
@@ -831,6 +891,7 @@ class ModelStore:
         pinned_gguf: str | None = None,
         extra_pinned_gguf: list[str] | None = None,
         source_revision: str | None = None,
+        source_repository: str | None = None,
     ) -> None:
         """Download a model from HuggingFace into the store and register it.
 
@@ -838,6 +899,8 @@ class ModelStore:
         GGUF quant's shard group to fetch, honoring a custom pin (#344).
         ``extra_pinned_gguf`` names same-repo companion GGUFs (a served-engine
         draft bundled with the base) co-fetched in the same store download.
+        ``source_repository`` is the upstream repository when ``model_id`` is
+        a distinct immutable-artifact alias used for store identity.
         """
         from skulk.download.download_utils import (
             download_file_with_retry,
@@ -848,14 +911,21 @@ class ModelStore:
 
         status = self._active_downloads[model_id]
         revision = source_revision or "main"
+        artifact_repository = source_repository or model_id
         sanitized = model_id.replace("/", "--")
         if source_revision is not None:
             sanitized = f"{sanitized}--revision-{source_revision}"
+        if source_repository is not None:
+            repository_digest = hashlib.sha256(source_repository.encode()).hexdigest()[
+                :12
+            ]
+            sanitized = f"{sanitized}--source-{repository_digest}"
         target_dir = self._store_path / sanitized
         previous_entry = self.get_entry(model_id)
         transfer_lock_acquired = False
         logger.info(
-            f"ModelStore: downloading {model_id} from HuggingFace to {target_dir}"
+            f"ModelStore: downloading {model_id} from HuggingFace repository "
+            f"{artifact_repository} to {target_dir}"
         )
 
         try:
@@ -874,7 +944,7 @@ class ModelStore:
             await aios.makedirs(str(target_dir), exist_ok=True)
 
             repo_file_list = await fetch_file_list_with_cache(
-                ModelId(model_id), revision, recursive=True
+                ModelId(artifact_repository), revision, recursive=True
             )
             # A vision GGUF (LLaVA/Qwen-VL/Gemma-VLM style) ships its multimodal
             # projector as a separate ``*mmproj*.gguf`` alongside the LM weights;
@@ -948,7 +1018,7 @@ class ModelStore:
                     return cb
 
                 await download_file_with_retry(
-                    ModelId(model_id),
+                    ModelId(artifact_repository),
                     revision,
                     f.path,
                     target_dir,
@@ -1009,6 +1079,7 @@ class ModelStore:
                 total,
                 repo_has_projector=repo_ships_projector,
                 source_revision=source_revision,
+                source_repository=artifact_repository,
             )
             if (
                 previous_entry is not None

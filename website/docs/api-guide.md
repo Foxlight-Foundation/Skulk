@@ -1194,7 +1194,41 @@ curl http://localhost:52415/v1/models
 
 This returns known model cards, not just running instances. `GET /models`
 serves the same catalog through the same handler; prefer the `/v1/models` path
-for OpenAI-compatible clients.
+for OpenAI-compatible clients. The transition release prefers the external
+TUF-signed registry and refreshes it every 60 seconds. A successful signed
+catalog is authoritative; bundled cards are used only when the registry is
+disabled or no acceptable live/last-known-good catalog is available. A
+previously verified catalog may be used for up to 30 days during an outage.
+Registry entries include their immutable card and snapshot identities; local
+custom cards retain final override precedence.
+
+### Approve repository code on one node
+
+**GET** `/models/remote-code-approvals`
+
+Lists immutable registry card IDs approved to execute repository-supplied
+Python on this API node.
+
+**POST** `/models/remote-code-approvals/{card_id}`
+
+Approves an existing signed-registry card that declares
+`trust_remote_code=true`, or a vision card whose current platform loader may
+enable repository code internally. Approval is keyed to the immutable card ID,
+stored in an owner-only local file, and applies only to this node. Repeat it on
+every node that may download or serve the artifact. Skulk fails closed before
+both download and every runner-type dispatch when a required approval is
+absent. Approval lookup uses the complete signed catalog, independent of this
+node's image-model visibility setting. This mutation is accepted only from a
+loopback socket peer; browser
+requests must also have a loopback `Origin`. Requests carrying proxy or
+forwarding headers are rejected outright, because a local reverse proxy's
+socket would otherwise be indistinguishable from a direct loopback client.
+
+**DELETE** `/models/remote-code-approvals/{card_id}`
+
+Revokes that node-local approval. Revocation prevents future downloads and
+runner starts; it does not delete already downloaded bytes. The same loopback
+peer and browser-origin restriction applies.
 
 ### Search Hugging Face
 
@@ -1270,8 +1304,12 @@ opened.
 }
 ```
 
-Fetches metadata and adds a custom model card to the cluster catalog. A
-generated GGUF card is compatible with both llama.cpp engines and prefers
+Fetches metadata and adds a custom model card to the cluster catalog. The
+request must come directly from a loopback peer with no proxy forwarding
+headers; browser requests must also carry a loopback origin. Generated cards
+may execute repository code, so this endpoint shares the node-local mutation
+boundary used by remote-code approvals. A generated GGUF card is compatible
+with both llama.cpp engines and prefers
 the served `llama_server` tags, so on a node running llama-server it gets
 that engine's concurrency slots and is eligible for multi-node pooling via
 RPC; nodes without a served binary fall through to the in-process engine.
@@ -1467,6 +1505,10 @@ Use this to confirm whether the store is configured and reachable.
 
 Use this to inspect which models the shared store knows about.
 
+Each registry entry records nullable `source_revision` and `source_repository`
+metadata. Cache hits require the effective repository and revision to match, so
+an unchanged alias cannot reuse bytes from a different signed source.
+
 The dashboard combines registry results with `GET /v1/models` metadata so it can
 display derived tags such as `vision`, `thinking`, `embedding`, `tensor`, and
 `optiq` in the Store list.
@@ -1482,6 +1524,11 @@ Use this to inspect in-progress shared-store download activity.
 **POST** `/store/models/{model_id}/download`
 
 Use this when you want the store host to fetch and register a model.
+
+For signed-registry artifacts, Skulk's internal request also carries the
+immutable card ID. The store host verifies that identity against its own signed
+catalog and applies its own node-local repository-code approval before fetching
+bytes; approval on the requesting worker does not grant approval on the store.
 
 The optional JSON body accepts `gguf_file` and `source_revision`:
 
@@ -1556,6 +1603,14 @@ Important fields:
 | `tags` | array | UI-friendly derived labels such as `vision`, `thinking`, `embedding`, `tts`, `stt`, `tensor`, and `optiq` |
 | `supports_tensor` | boolean | Whether tensor parallel launch is supported |
 | `base_model` | string | Base family or upstream source model when known |
+| `artifact_repository` | string | Upstream repository containing the artifact bytes; may differ from `id` when several exact files or quants share one repository |
+| `artifact_file` | string or null | Exact selected file for file-addressed artifacts such as GGUF |
+| `catalog_source` | string | `registry`, `bundled`, or `custom` |
+| `registry_card_id` | string or null | Immutable content-derived card identity from the signed registry |
+| `registry_snapshot_id` | string or null | Signed catalog snapshot that supplied the card |
+| `registry_provenance` | string or null | Audited signed-registry origin (`foxlight`, `agent`, or `community`); null for bundled/custom cards |
+| `remote_code_approval_required` | boolean | Whether the registry artifact or its selected platform loader can execute repository Python and needs local approval |
+| `remote_code_approved_on_this_node` | boolean | Whether that immutable card is approved on the responding node |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
 | `resolved_capabilities.supports_speech_synthesis` | boolean | Whether clients should treat the model as a text-to-speech model |
 | `resolved_capabilities.supports_transcription` | boolean | Whether clients should treat the model as a speech-to-text model |
@@ -1564,8 +1619,13 @@ Important fields:
 | `resolved_capabilities.supports_realtime_audio` | boolean | Whether the model declares realtime audio support |
 | `resolved_capabilities.audio_response_formats` | array | Encoded audio formats the model can produce for speech synthesis |
 | `runtime.mtp_sidecar_repo` | string | Repo of this model's MTP sidecar (prediction heads), when it declares one |
+| `runtime.mtp_sidecar_revision` | string | Immutable commit of a separately hosted MTP sidecar |
 | `runtime.assistant_model_repo` | string | Repo of this model's speculative-decoding assistant (drafter), when it declares one |
+| `runtime.assistant_model_revision` | string | Immutable commit of a separately hosted assistant model |
 | `runtime.served_spec_draft_repo` | string | Repo of this model's separate served-engine draft GGUF, when it declares one |
+| `runtime.served_spec_draft_revision` | string | Immutable commit of a separately hosted served-engine draft |
+| `runtime.vllm_spec_draft_repo` | string | Repo of this model's separate vLLM drafter, when it declares one |
+| `runtime.vllm_spec_draft_revision` | string | Immutable commit of a separately hosted vLLM drafter |
 
 The dashboard uses `tags` for compact badges and `capabilities` for filtering
 and richer tooltips. The `audio` and `resolved_capabilities.*speech*` fields
@@ -1577,12 +1637,15 @@ for ready mounted speech models. Browser microphone capture is a browser
 security feature, so STT recording controls require a secure origin such as
 HTTPS or localhost even though the API endpoint itself is ordinary multipart
 HTTP. Speech translation metadata remains reserved for later audio endpoints.
-The three `runtime.*_repo` fields name a model's
+The four `runtime.*_repo` fields name a model's
 speculative-decoding companions (a draft model or an MTP-head sidecar). Those
 companion repos are downloaded and loaded automatically with their parent and
 are not independently placeable, so the dashboard marks any store entry matching
 one of these repos as a companion (a "Drafter" or "Sidecar" badge) rather than
 offering it launch, placement, or optimize actions.
+For signed cards, every separately hosted companion has a matching full commit
+revision; companions stored in the base artifact repository inherit the base
+card's `source_revision`.
 
 ## Configuration Endpoints
 

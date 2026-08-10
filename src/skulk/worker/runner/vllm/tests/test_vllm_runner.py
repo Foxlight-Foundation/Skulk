@@ -615,12 +615,14 @@ def test_build_vllm_serve_args_speculative_config() -> None:
         spec_method="dflash",
         spec_num_tokens=15,
         spec_draft_repo="poolside/Laguna-XS-2.1-DFlash-FP8",
+        spec_draft_revision="a" * 40,
     )
     payload = args[args.index("--speculative-config") + 1]
     assert _json.loads(payload) == {
         "method": "dflash",
         "num_speculative_tokens": 15,
         "model": "poolside/Laguna-XS-2.1-DFlash-FP8",
+        "revision": "a" * 40,
     }
     # Deep depths must raise the scheduler's batched-token budget: vLLM's
     # defaults (2048 batched, 256 seqs) go negative at depth 15 and engine

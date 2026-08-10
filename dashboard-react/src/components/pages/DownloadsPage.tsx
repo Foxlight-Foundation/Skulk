@@ -67,8 +67,8 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
         const cards: Record<string, ModelCardInfo> = {};
         // A model's runtime section names the companion repos it pulls in: an
         // MTP sidecar (prediction heads) and/or a separate draft model (MLX
-        // assistant or served draft GGUF). Those repos land in the store but are
-        // not independently placeable, so map them to a role for the store UI.
+        // assistant, served draft GGUF, or vLLM drafter). Those repos land in
+        // the store but are not independently placeable, so map them to a role.
         // Skip self-references (same-repo co-fetch) so the parent isn't hidden.
         const companions: Record<string, CompanionInfo> = {};
         for (const m of data.data ?? []) {
@@ -77,10 +77,11 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
           const sidecar = rt.mtp_sidecar_repo as string | undefined;
           const assistant = rt.assistant_model_repo as string | undefined;
           const draft = rt.served_spec_draft_repo as string | undefined;
+          const vllmDraft = rt.vllm_spec_draft_repo as string | undefined;
           if (sidecar && sidecar !== m.id) {
             companions[sidecar] = { role: 'sidecar', parent: m.id };
           }
-          for (const d of [assistant, draft]) {
+          for (const d of [assistant, draft, vllmDraft]) {
             if (d && d !== m.id && !companions[d]) {
               companions[d] = { role: 'drafter', parent: m.id };
             }

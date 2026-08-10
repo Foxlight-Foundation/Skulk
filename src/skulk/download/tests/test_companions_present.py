@@ -14,11 +14,16 @@ import pytest
 
 import skulk.download.download_utils as download_utils_module
 import skulk.shared.constants as constants_module
-from skulk.download.download_utils import model_companions_present_on_disk
+from skulk.download.download_utils import (
+    companion_artifact_location,
+    companion_download_specs,
+    model_companions_present_on_disk,
+)
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelTask,
     RuntimeCapabilityCardConfig,
+    VisionCardConfig,
 )
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
@@ -48,6 +53,66 @@ def models_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def test_bare_card_has_no_missing_companions(models_dir: Path) -> None:
     assert model_companions_present_on_disk(_card(None))
+
+
+def test_companion_download_specs_preserve_immutable_revisions() -> None:
+    """Synthesized companion shards retain every signed source pin."""
+    revisions = {
+        "test-org/vision": "1" * 40,
+        _SIDECAR_REPO: "2" * 40,
+        _ASSISTANT_REPO: "3" * 40,
+        "test-org/draft": "4" * 40,
+    }
+    card = _card(
+        RuntimeCapabilityCardConfig(
+            mtp_heads=True,
+            mtp_sidecar_repo=_SIDECAR_REPO,
+            mtp_sidecar_revision=revisions[_SIDECAR_REPO],
+            assistant_model_repo=_ASSISTANT_REPO,
+            assistant_model_revision=revisions[_ASSISTANT_REPO],
+            served_spec_draft_repo="test-org/draft",
+            served_spec_draft_revision=revisions["test-org/draft"],
+            served_spec_draft_file="draft.gguf",
+        )
+    ).model_copy(
+        update={
+            "vision": VisionCardConfig(
+                weights_repo="test-org/vision",
+                weights_revision=revisions["test-org/vision"],
+            )
+        }
+    )
+
+    specs = companion_download_specs(card)
+
+    assert {
+        str(shard.model_card.model_id): shard.model_card.source_revision
+        for shard, _patterns, _required in specs
+    } == revisions
+
+
+def test_same_repository_companion_inherits_base_identity() -> None:
+    """An aliased card stages a same-repo companion under its pinned alias."""
+    repository = ModelId("test-org/source")
+    revision = "a" * 40
+    card = _card(
+        RuntimeCapabilityCardConfig(
+            mtp_heads=True,
+            mtp_sidecar_repo=str(repository),
+        )
+    ).model_copy(
+        update={
+            "model_id": ModelId("registry/test-alias"),
+            "source_repository": repository,
+            "source_revision": revision,
+        }
+    )
+
+    assert companion_download_specs(card) == []
+    assert companion_artifact_location(card, str(repository), None) == (
+        ModelId("registry/test-alias"),
+        revision,
+    )
 
 
 def test_declared_sidecar_missing_on_disk(models_dir: Path) -> None:

@@ -122,6 +122,48 @@ class ModelListModel(BaseModel):
     family: str = Field(default="")
     quantization: str = Field(default="")
     base_model: str = Field(default="")
+    artifact_repository: str = Field(
+        default="",
+        description=(
+            "Upstream repository containing the exact artifact; distinct from id "
+            "when multiple registry cards select files from one repository."
+        ),
+    )
+    artifact_file: str | None = Field(
+        default=None,
+        description="Exact selected repository file for file-addressed artifacts.",
+    )
+    registry_card_id: str | None = Field(
+        default=None,
+        pattern=r"^card_[a-z2-7]{52}$",
+        description="Immutable signed-registry card id, or null for local cards.",
+    )
+    registry_snapshot_id: str | None = Field(
+        default=None,
+        description="Signed snapshot that supplied this card, or null for local cards.",
+    )
+    registry_provenance: Literal["foxlight", "agent", "community"] | None = Field(
+        default=None,
+        description=(
+            "Audited signed-registry origin, or null for bundled and custom cards."
+        ),
+    )
+    catalog_source: Literal["registry", "bundled", "custom"] = Field(
+        default="bundled",
+        description="Trust and precedence source for this catalog entry.",
+    )
+    remote_code_approval_required: bool = Field(
+        default=False,
+        description=(
+            "Whether this signed registry artifact or its selected platform loader "
+            "can execute repository Python and therefore requires an explicit "
+            "approval on each serving node."
+        ),
+    )
+    remote_code_approved_on_this_node: bool = Field(
+        default=False,
+        description="Whether the required immutable card id is approved locally.",
+    )
     source_revision: str | None = Field(
         default=None,
         pattern=r"^[0-9a-f]{40}$",
@@ -161,6 +203,23 @@ class ModelListModel(BaseModel):
             "model-family defaults for the default tool-free request path. "
             "Request-specific options such as tools may change some resolved values."
         ),
+    )
+
+
+class RemoteCodeApprovalView(BaseModel):
+    """Node-local approval state for one immutable signed-registry card."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    card_id: str = Field(
+        pattern=r"^card_[a-z2-7]{52}$",
+        description="Immutable content-derived identifier of the signed registry card.",
+    )
+    approved_on_this_node: bool = Field(
+        description=(
+            "Whether this API node's local approval file permits the card to "
+            "download or execute repository code."
+        )
     )
 
 
@@ -446,6 +505,10 @@ class RuntimeCapabilitySection(BaseModel):
             "sidecar repo as a companion rather than a launchable entry."
         ),
     )
+    mtp_sidecar_revision: str | None = Field(
+        default=None,
+        description="Immutable commit of the MTP sidecar repository.",
+    )
     assistant_model_repo: str | None = Field(
         default=None,
         description=(
@@ -454,6 +517,10 @@ class RuntimeCapabilitySection(BaseModel):
             "independently placeable."
         ),
     )
+    assistant_model_revision: str | None = Field(
+        default=None,
+        description="Immutable commit of the assistant-model repository.",
+    )
     served_spec_draft_repo: str | None = Field(
         default=None,
         description=(
@@ -461,6 +528,22 @@ class RuntimeCapabilitySection(BaseModel):
             "separate one. A companion loaded with the base model, not "
             "independently placeable."
         ),
+    )
+    served_spec_draft_revision: str | None = Field(
+        default=None,
+        description="Immutable commit of the served-engine draft repository.",
+    )
+    vllm_spec_draft_repo: str | None = Field(
+        default=None,
+        description=(
+            "Repo of this model's vLLM speculative-decoding drafter, when it "
+            "declares one. A companion loaded with the base model, not "
+            "independently placeable."
+        ),
+    )
+    vllm_spec_draft_revision: str | None = Field(
+        default=None,
+        description="Immutable commit of the vLLM drafter repository.",
     )
 
     @classmethod
@@ -478,8 +561,13 @@ class RuntimeCapabilitySection(BaseModel):
                 config.output_parser.value if config.output_parser is not None else None
             ),
             mtp_sidecar_repo=config.mtp_sidecar_repo,
+            mtp_sidecar_revision=config.mtp_sidecar_revision,
             assistant_model_repo=config.assistant_model_repo,
+            assistant_model_revision=config.assistant_model_revision,
             served_spec_draft_repo=config.served_spec_draft_repo,
+            served_spec_draft_revision=config.served_spec_draft_revision,
+            vllm_spec_draft_repo=config.vllm_spec_draft_repo,
+            vllm_spec_draft_revision=config.vllm_spec_draft_revision,
         )
 
 
