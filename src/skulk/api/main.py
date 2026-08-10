@@ -7297,7 +7297,24 @@ class API:
     async def revoke_remote_code(
         self, card_id: str, request: Request
     ) -> RemoteCodeApprovalView:
-        """Revoke one immutable registry card approval on this API node."""
+        """Persist revocation for one immutable registry card on this API node.
+
+        Args:
+            card_id: Immutable content-derived registry card identifier.
+            request: Incoming request whose peer, origin, and forwarding headers
+                establish the node-local mutation boundary.
+
+        Returns:
+            The node-local approval view showing the card as revoked.
+
+        Raises:
+            HTTPException: If the caller is not node-local or the identifier is
+                malformed.
+
+        Side effects:
+            Atomically removes the card identifier from this node's durable
+            approval file, preventing future downloads and runner starts.
+        """
         self._require_node_local_remote_code_mutation(request)
         if not re.fullmatch(r"card_[a-z2-7]{52}", card_id):
             raise HTTPException(status_code=422, detail="Invalid registry card id")

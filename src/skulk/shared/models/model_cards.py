@@ -279,6 +279,22 @@ def get_card(model_id: ModelId) -> "ModelCard | None":
     return _card_cache.get(model_id)
 
 
+def same_model_artifact(existing: "ModelCard", expected: "ModelCard") -> bool:
+    """Return whether two cards identify the same downloadable artifact.
+
+    Signed registry card IDs cover the complete immutable card contents, so an
+    alias retained across a registry replacement must not reuse prior download
+    state. Legacy and custom cards lack that identity and use strict card
+    equality instead.
+    """
+    if existing.registry_card_id is not None or expected.registry_card_id is not None:
+        return (
+            existing.registry_card_id is not None
+            and existing.registry_card_id == expected.registry_card_id
+        )
+    return existing == expected
+
+
 async def _refresh_card_cache_if_due() -> None:
     """Refresh catalog state at most once per configured interval."""
     refresh_due = (
