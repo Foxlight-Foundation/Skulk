@@ -215,6 +215,7 @@ def build_vllm_serve_args(
     spec_method: str | None = None,
     spec_num_tokens: int | None = None,
     spec_draft_repo: str | None = None,
+    spec_draft_revision: str | None = None,
 ) -> list[str]:
     """Build the ``vllm serve`` command line. Pure, so it is unit-testable.
 
@@ -264,6 +265,8 @@ def build_vllm_serve_args(
             speculative["num_speculative_tokens"] = spec_num_tokens
         if spec_draft_repo is not None:
             speculative["model"] = spec_draft_repo
+        if spec_draft_revision is not None:
+            speculative["revision"] = spec_draft_revision
         args.extend(["--speculative-config", json.dumps(speculative)])
         if (
             spec_num_tokens is not None
@@ -620,6 +623,11 @@ class Runner(ServedConcurrentDispatch):
             ),
             spec_draft_repo=(
                 card_runtime.vllm_spec_draft_repo
+                if card_runtime is not None
+                else None
+            ),
+            spec_draft_revision=(
+                card_runtime.vllm_spec_draft_revision
                 if card_runtime is not None
                 else None
             ),

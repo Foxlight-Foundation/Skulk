@@ -274,7 +274,8 @@ def get_card(model_id: ModelId) -> "ModelCard | None":
     return _card_cache.get(model_id)
 
 
-async def get_model_cards() -> list["ModelCard"]:
+async def _refresh_card_cache_if_due() -> None:
+    """Refresh catalog state at most once per configured interval."""
     refresh_due = (
         not _card_cache
         or (
@@ -295,9 +296,20 @@ async def get_model_cards() -> list["ModelCard"]:
             )
             if refresh_still_due:
                 await _refresh_card_cache()
+
+
+async def get_all_model_cards() -> list["ModelCard"]:
+    """Return the complete verified/custom catalog without UI task filtering."""
+    await _refresh_card_cache_if_due()
+    return list(_card_cache.values())
+
+
+async def get_model_cards() -> list["ModelCard"]:
+    """Return model cards visible under this node's feature configuration."""
+    cards = await get_all_model_cards()
     if SKULK_ENABLE_IMAGE_MODELS:
-        return list(_card_cache.values())
-    return [c for c in _card_cache.values() if not _is_image_card(c)]
+        return cards
+    return [card for card in cards if not _is_image_card(card)]
 
 
 async def get_bundled_card(model_id: ModelId) -> "ModelCard | None":
@@ -450,6 +462,10 @@ class VisionCardConfig(CamelCaseModel):
     weights_repo: str = ""
     """Repo holding the vision-tower weights when separate from the LM; empty if
     bundled with the main weights."""
+    weights_revision: Annotated[
+        str, Field(pattern=r"^[0-9a-f]{40}$")
+    ] | None = None
+    """Immutable commit for a separate ``weights_repo``."""
     image_token: str | None = None
     """The literal image placeholder string, when distinct from ``image_token_id``."""
     processor_repo: str | None = None
@@ -883,6 +899,10 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     The sidecar is downloaded alongside the base model weights and loaded
     into the runner for speculative decoding. Produced by SWP.
     """
+    mtp_sidecar_revision: Annotated[
+        str, Field(pattern=r"^[0-9a-f]{40}$")
+    ] | None = None
+    """Immutable commit for a separate ``mtp_sidecar_repo``."""
     mtp_norm_convention: Literal["zero_centered", "actual_scale"] | None = None
     """How the sidecar stores its RMSNorm weights.
 
@@ -933,6 +953,10 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     the runner — declaring it here only pre-downloads it. See the Gemma 4 MTP
     initiative in the foxlight-docs hub (Phase C).
     """
+    assistant_model_revision: Annotated[
+        str, Field(pattern=r"^[0-9a-f]{40}$")
+    ] | None = None
+    """Immutable commit for a separate ``assistant_model_repo``."""
     served_spec_type: (
         Literal[
             "none",
@@ -977,6 +1001,10 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     ``draft_mtp`` leave this unset (heads are in the base GGUF). When set, the
     draft GGUF is downloaded as a companion alongside the base and passed as
     ``--model-draft``. Pairs with ``served_spec_draft_file``."""
+    served_spec_draft_revision: Annotated[
+        str, Field(pattern=r"^[0-9a-f]{40}$")
+    ] | None = None
+    """Immutable commit for a separate ``served_spec_draft_repo``."""
     served_spec_draft_file: str | None = None
     """Repo-relative GGUF filename of the served draft model (in
     ``served_spec_draft_repo``), e.g. ``"mtp-gemma-4-31B-it.gguf"``. Required when
@@ -1016,6 +1044,10 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     from its own Hugging Face cache at engine start (the target model still
     stages through the Skulk model store; staging the draft through the
     store as a pinned companion is a follow-up)."""
+    vllm_spec_draft_revision: Annotated[
+        str, Field(pattern=r"^[0-9a-f]{40}$")
+    ] | None = None
+    """Immutable commit supplied to vLLM for ``vllm_spec_draft_repo``."""
 
     @model_validator(mode="after")
     def _validate_vllm_spec_pairing(self) -> "RuntimeCapabilityCardConfig":
@@ -1205,18 +1237,59 @@ class ModelCard(CamelCaseModel):
     """Audited registry origin, kept separate from immutable artifact identity."""
 
     @model_validator(mode="after")
-    def _require_registry_processor_revision(self) -> "ModelCard":
-        """Reject signed cards whose separate processor code is not immutable."""
-        if (
-            self.registry_card_id is not None
-            and self.vision is not None
-            and self.vision.processor_repo is not None
-            and self.vision.processor_revision is None
-        ):
-            raise ValueError(
-                "signed registry cards with vision.processor_repo require "
-                "vision.processor_revision"
+    def _require_registry_companion_revisions(self) -> "ModelCard":
+        """Reject signed cards whose separate companion sources are mutable."""
+        if self.registry_card_id is None:
+            return self
+        base_repository = str(self.artifact_repository)
+        companions: list[tuple[str, str | None, str | None]] = []
+        if self.vision is not None:
+            companions.extend(
+                (
+                    (
+                        "vision.weights_repo",
+                        self.vision.weights_repo,
+                        self.vision.weights_revision,
+                    ),
+                    (
+                        "vision.processor_repo",
+                        self.vision.processor_repo,
+                        self.vision.processor_revision,
+                    ),
+                )
             )
+        if self.runtime is not None:
+            companions.extend(
+                (
+                    (
+                        "runtime.mtp_sidecar_repo",
+                        self.runtime.mtp_sidecar_repo,
+                        self.runtime.mtp_sidecar_revision,
+                    ),
+                    (
+                        "runtime.assistant_model_repo",
+                        self.runtime.assistant_model_repo,
+                        self.runtime.assistant_model_revision,
+                    ),
+                    (
+                        "runtime.served_spec_draft_repo",
+                        self.runtime.served_spec_draft_repo,
+                        self.runtime.served_spec_draft_revision,
+                    ),
+                    (
+                        "runtime.vllm_spec_draft_repo",
+                        self.runtime.vllm_spec_draft_repo,
+                        self.runtime.vllm_spec_draft_revision,
+                    ),
+                )
+            )
+        for field_name, repository, revision in companions:
+            if repository and repository != base_repository and revision is None:
+                revision_field = f"{field_name.removesuffix('_repo')}_revision"
+                raise ValueError(
+                    f"signed registry cards with {field_name} require immutable "
+                    f"{revision_field}"
+                )
         return self
 
     @property
@@ -1259,7 +1332,7 @@ class ModelCard(CamelCaseModel):
     @staticmethod
     async def load(model_id: ModelId) -> "ModelCard":
         if model_id not in _card_cache:
-            await _refresh_card_cache()
+            await _refresh_card_cache_if_due()
         if (mc := _card_cache.get(model_id)) is not None:
             return mc
 

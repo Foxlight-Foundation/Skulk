@@ -34,6 +34,7 @@ output_parser = "gemma4"
 # Track 2b, last-rank drafting): 16.5 tok/s — 95% of single-node
 # throughput. gemma4_unified loads via mlx-vlm.
 assistant_model_repo = "mlx-community/gemma-4-12B-it-assistant-bf16"
+assistant_model_revision = "f36a4c8077baaeca534c5eb38a287fc3b2178ad3"
 mtp_max_depth = 2
 # Same FAST_SYNCH wedge guard as the other gemma4 cards — GPU command
 # queue stalls under the ring backend in pipeline-parallel paths.

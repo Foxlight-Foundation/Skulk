@@ -913,15 +913,18 @@ class VisionEncoder:
         config: VisionCardConfig,
         model_id: ModelId,
         source_revision: str | None = None,
+        source_repository: ModelId | None = None,
     ):
         self._config = config
+        self._source_revision = source_revision
+        self._source_repository = source_repository or model_id
         self._main_model_path = build_model_path(model_id, source_revision)
-        weights_revision = (
-            source_revision if config.weights_repo == str(model_id) else None
-        )
-        self._model_path = build_model_path(
-            ModelId(config.weights_repo), weights_revision
-        )
+        if config.weights_repo == str(self._source_repository):
+            self._model_path = self._main_model_path
+        else:
+            self._model_path = build_model_path(
+                ModelId(config.weights_repo), config.weights_revision
+            )
         self._vision_tower: nn.Module | None = None
         self._projector: nn.Module | None = None
         self._processor: _ImageProcessorProtocol | None = None
@@ -1073,7 +1076,9 @@ class VisionEncoder:
         processor_repo = self._config.processor_repo
         repo = processor_repo or str(self._model_path)
         processor_revision = (
-            self._config.processor_revision if processor_repo is not None else None
+            self._source_revision
+            if processor_repo == str(self._source_repository)
+            else self._config.processor_revision
         )
         loader_options: dict[str, object] = (
             {"revision": processor_revision}
@@ -1631,9 +1636,15 @@ class VisionProcessor:
         config: VisionCardConfig,
         model_id: ModelId,
         source_revision: str | None = None,
+        source_repository: ModelId | None = None,
     ):
         self.vision_config = config
-        self._encoder = VisionEncoder(config, model_id, source_revision)
+        self._encoder = VisionEncoder(
+            config,
+            model_id,
+            source_revision,
+            source_repository,
+        )
         self._feature_cache: dict[str, tuple[mx.array, list[int]]] = {}
         self._feature_cache_max = 32
 

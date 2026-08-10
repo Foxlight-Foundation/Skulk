@@ -113,6 +113,55 @@ def test_registry_rejects_unpinned_separate_processor_repository() -> None:
         registry_model_cards(catalog)
 
 
+@pytest.mark.parametrize(
+    ("section", "expected_field"),
+    [
+        (
+            {"vision": {"model_type": "vlm", "weights_repo": "org/vision"}},
+            "vision.weights_repo",
+        ),
+        (
+            {"runtime": {"mtp_heads": True, "mtp_sidecar_repo": "org/mtp"}},
+            "runtime.mtp_sidecar_repo",
+        ),
+        (
+            {"runtime": {"assistant_model_repo": "org/assistant"}},
+            "runtime.assistant_model_repo",
+        ),
+        (
+            {
+                "runtime": {
+                    "served_spec_draft_repo": "org/draft",
+                    "served_spec_draft_file": "draft.gguf",
+                }
+            },
+            "runtime.served_spec_draft_repo",
+        ),
+        (
+            {
+                "runtime": {
+                    "vllm_spec_method": "dflash",
+                    "vllm_spec_draft_repo": "org/dflash",
+                }
+            },
+            "runtime.vllm_spec_draft_repo",
+        ),
+    ],
+)
+def test_registry_rejects_unpinned_separate_companion_repository(
+    section: dict[str, object], expected_field: str
+) -> None:
+    """Every companion source participates in signed artifact identity."""
+    payload = cast("dict[str, object]", json.loads(_catalog_payload()))
+    cards = cast("list[dict[str, object]]", payload["cards"])
+    card_payload = cast("dict[str, object]", cards[0]["card"])
+    card_payload.update(section)
+    catalog = RegistryCatalog.model_validate(payload, strict=False)
+
+    with pytest.raises(ValueError, match=expected_field):
+        registry_model_cards(catalog)
+
+
 def test_registry_rejects_catalog_metadata_outside_card_identity() -> None:
     """Every published card has exactly one signed provenance record."""
     payload = cast("dict[str, object]", json.loads(_catalog_payload()))
@@ -263,6 +312,67 @@ async def test_successful_refresh_excludes_unlisted_bundled_cards(
         assert bundled_card.model_id not in model_cards_module._card_cache
         assert model_cards_module._card_cache[registry_card.model_id] == registry_card
         assert model_cards_module._card_cache[custom_card.model_id] == custom_card
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+
+
+@pytest.mark.asyncio
+async def test_complete_catalog_is_available_without_image_ui_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Store authority can resolve signed image cards on a non-image host."""
+    catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    text_card = registry_model_cards(catalog)[0]
+    image_card = text_card.model_copy(
+        update={
+            "model_id": ModelId("org/image"),
+            "tasks": [model_cards_module.ModelTask.TextToImage],
+        }
+    )
+    original_cache = dict(model_cards_module._card_cache)
+    model_cards_module._card_cache.clear()
+    model_cards_module._card_cache[text_card.model_id] = text_card
+    model_cards_module._card_cache[image_card.model_id] = image_card
+    monkeypatch.setattr(model_cards_module, "SKULK_ENABLE_IMAGE_MODELS", False)
+    monkeypatch.setattr(model_cards_module, "_last_registry_refresh", 100.0)
+    monkeypatch.setattr(model_cards_module.time, "monotonic", lambda: 101.0)
+    try:
+        assert await model_cards_module.get_all_model_cards() == [
+            text_card,
+            image_card,
+        ]
+        assert await model_cards_module.get_model_cards() == [text_card]
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+
+
+@pytest.mark.asyncio
+async def test_registry_refresh_helper_throttles_repeated_cache_misses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown model requests cannot refresh TUF more than once per interval."""
+    refreshes = 0
+
+    async def refresh() -> None:
+        nonlocal refreshes
+        refreshes += 1
+        monkeypatch.setattr(model_cards_module, "_last_registry_refresh", 100.0)
+
+    original_cache = dict(model_cards_module._card_cache)
+    model_cards_module._card_cache.clear()
+    catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    card = registry_model_cards(catalog)[0]
+    model_cards_module._card_cache[card.model_id] = card
+    monkeypatch.setattr(model_cards_module, "_registry_enabled", lambda: True)
+    monkeypatch.setattr(model_cards_module, "_last_registry_refresh", 0.0)
+    monkeypatch.setattr(model_cards_module.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(model_cards_module, "_refresh_card_cache", refresh)
+    try:
+        await model_cards_module._refresh_card_cache_if_due()
+        await model_cards_module._refresh_card_cache_if_due()
+        assert refreshes == 1
     finally:
         model_cards_module._card_cache.clear()
         model_cards_module._card_cache.update(original_cache)

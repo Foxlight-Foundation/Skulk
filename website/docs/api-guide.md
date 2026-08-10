@@ -1613,8 +1613,13 @@ Important fields:
 | `resolved_capabilities.supports_realtime_audio` | boolean | Whether the model declares realtime audio support |
 | `resolved_capabilities.audio_response_formats` | array | Encoded audio formats the model can produce for speech synthesis |
 | `runtime.mtp_sidecar_repo` | string | Repo of this model's MTP sidecar (prediction heads), when it declares one |
+| `runtime.mtp_sidecar_revision` | string | Immutable commit of a separately hosted MTP sidecar |
 | `runtime.assistant_model_repo` | string | Repo of this model's speculative-decoding assistant (drafter), when it declares one |
+| `runtime.assistant_model_revision` | string | Immutable commit of a separately hosted assistant model |
 | `runtime.served_spec_draft_repo` | string | Repo of this model's separate served-engine draft GGUF, when it declares one |
+| `runtime.served_spec_draft_revision` | string | Immutable commit of a separately hosted served-engine draft |
+| `runtime.vllm_spec_draft_repo` | string | Repo of this model's separate vLLM drafter, when it declares one |
+| `runtime.vllm_spec_draft_revision` | string | Immutable commit of a separately hosted vLLM drafter |
 
 The dashboard uses `tags` for compact badges and `capabilities` for filtering
 and richer tooltips. The `audio` and `resolved_capabilities.*speech*` fields
@@ -1626,12 +1631,15 @@ for ready mounted speech models. Browser microphone capture is a browser
 security feature, so STT recording controls require a secure origin such as
 HTTPS or localhost even though the API endpoint itself is ordinary multipart
 HTTP. Speech translation metadata remains reserved for later audio endpoints.
-The three `runtime.*_repo` fields name a model's
+The four `runtime.*_repo` fields name a model's
 speculative-decoding companions (a draft model or an MTP-head sidecar). Those
 companion repos are downloaded and loaded automatically with their parent and
 are not independently placeable, so the dashboard marks any store entry matching
 one of these repos as a companion (a "Drafter" or "Sidecar" badge) rather than
 offering it launch, placement, or optimize actions.
+For signed cards, every separately hosted companion has a matching full commit
+revision; companions stored in the base artifact repository inherit the base
+card's `source_revision`.
 
 ## Configuration Endpoints
 

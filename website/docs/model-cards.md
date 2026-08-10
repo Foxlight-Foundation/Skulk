@@ -120,13 +120,15 @@ Fields include:
   - MLX-VLM model family identifier such as `gemma4`
 - `weights_repo`
   - optional alternate weights repository for the vision tower
+- `weights_revision`
+  - full immutable commit for a separate `weights_repo`; required for signed-registry cards
 - `image_token`
   - optional literal image token string
 - `processor_repo`
   - optional alternate processor repository
 - `processor_revision`
-  - full immutable commit for `processor_repo`; required for signed-registry
-    cards because processor loaders may execute repository Python
+  - full immutable commit for a separate `processor_repo`; required for
+    signed-registry cards because processor loaders may execute repository Python
 - `boi_token_id`
   - optional begin-of-image token id
 - `eoi_token_id`
@@ -261,6 +263,8 @@ Declares runtime integration preferences:
   - maximum draft depth the MTP heads support; start at `1` for Apple Silicon (deeper values rarely amortize on Metal due to near-linear verify-pass scaling)
 - `mtp_sidecar_repo`
   - Hugging Face repo ID containing the published `mtp.safetensors` sidecar (e.g. `"FoxlightAI/qwen3-5-9b-base-mtp"`); produced by SWP (Skulk Weights Publisher) from the original BF16 checkpoint
+- `mtp_sidecar_revision`
+  - full immutable commit for a separately hosted MTP sidecar; required for signed-registry cards
 - `mtp_norm_convention`
   - how the MTP heads normalize hidden states (`zero_centered` or `actual_scale`); must match how the sidecar was produced
 - `mtp_concat_order`
@@ -269,6 +273,12 @@ Declares runtime integration preferences:
   - set to `false` to forbid speculative decoding when the model is sharded across multiple nodes (it stays single-node speculative); the runner and the generation loop read this to make the same rank-symmetric decision
 - `assistant_model_repo`
   - Hugging Face repo of a small companion model used as an external drafter for speculative decoding (the Gemma 4 path), as opposed to native MTP heads
+- `assistant_model_revision`
+  - full immutable commit for a separately hosted assistant; required for signed-registry cards
+
+Separate `served_spec_draft_repo` and `vllm_spec_draft_repo` companions likewise
+require `served_spec_draft_revision` and `vllm_spec_draft_revision`. A companion
+in the base artifact repository inherits the card's `source_revision`.
 
 ## MTP Speculative Decoding
 
@@ -309,6 +319,7 @@ Gemma 4 does **not** use native MTP heads; it uses an external drafter model (`a
 mtp_heads = true
 mtp_max_depth = 1
 mtp_sidecar_repo = "FoxlightAI/qwen3-5-9b-base-mtp"
+mtp_sidecar_revision = "06c840b3529f5695648807d993b1cb48b576a988"
 ```
 
 The sidecar repo must be published by SWP before adding these fields. See the [SWP documentation](https://foxlight-foundation.github.io/skulk-weights-publisher/) for how sidecars are produced and published.

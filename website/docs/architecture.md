@@ -1070,10 +1070,13 @@ runner-type dispatch until its immutable `registry_card_id` appears in that
 node's owner-only approval file. Registry vision cards are gated as well while
 the MLX vision processor path contains loaders that enable repository code
 internally; that is platform truth and does not rewrite the artifact card.
-When a card names a separate `vision.processor_repo`, its signed content must
-also name the full immutable `vision.processor_revision`, and every processor
-loader receives that pin. Approval therefore authorizes one immutable processor
-source, not whatever code its repository serves later.
+When a card names any separately hosted companion—vision weights or processor,
+an MTP sidecar, an assistant model, or a served-engine/vLLM draft—its signed
+content must also name that repository's full immutable revision. Every download
+and loader receives the corresponding pin; a companion in the base artifact
+repository inherits `source_revision`. Approval therefore authorizes immutable
+processor code, not whatever its repository serves later, and qualification
+continues to identify exact companion bytes.
 Approval mutations accept only a direct loopback socket peer with no proxy or
 forwarding headers and, for browser calls, a loopback origin, so the inference
 API's permissive CORS policy and a co-located reverse proxy cannot grant

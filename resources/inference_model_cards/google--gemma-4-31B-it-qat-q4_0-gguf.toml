@@ -40,6 +40,7 @@ tool_call_format = "generic"
 served_spec_type = "draft_mtp"
 served_spec_n_max = 4
 served_spec_draft_repo = "FoxlightAI/gemma-4-31B-it-qat-mtp-draft-GGUF"
+served_spec_draft_revision = "63bef42993899cfbdb6edc71e64c3f11d21aaf22"
 served_spec_draft_file = "gemma-4-31B-it-qat-q4_0-unquantized-assistant-Q8_0.gguf"
 # Gemma 4 emits <|channel> reasoning markers as literal text; the served runner
 # strips them and splits reasoning from content (llama-server can't parse them).

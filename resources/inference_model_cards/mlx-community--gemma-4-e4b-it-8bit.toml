@@ -36,6 +36,7 @@ output_parser = "gemma4"
 # the earlier "chain acceptance decays on quantized targets" depth law
 # was a pre-cadence-loop artifact and stays retracted.)
 assistant_model_repo = "mlx-community/gemma-4-E4B-it-assistant-bf16"
+assistant_model_revision = "844e008e06ef5562bdb89428d851d0634d119dcd"
 mtp_max_depth = 2
 # Same FAST_SYNCH wedge as the 26b card — GPU command queue stalls in the
 # pipeline-parallel inference path, kernel watchdog panics the box. Disable

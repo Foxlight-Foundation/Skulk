@@ -29,6 +29,7 @@ disabled_effort = "none"
 mtp_heads = true
 mtp_max_depth = 1
 mtp_sidecar_repo = "FoxlightAI/qwen3-6-27b-mtp"
+mtp_sidecar_revision = "62af6426df9acde8d794f9cad5421137f467f37e"
 
 # Qwen3.6-27B is a natively multimodal VLM (arch Qwen3_5ForConditionalGeneration,
 # vision_config model_type qwen3_5). The MLX vision path splices image embeddings

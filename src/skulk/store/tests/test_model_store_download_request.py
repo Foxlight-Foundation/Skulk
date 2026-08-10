@@ -88,7 +88,7 @@ async def test_store_host_requires_its_own_remote_code_approval(
         return [card]
 
     approvals = RemoteCodeApprovalStore(tmp_path / "approvals.json")
-    monkeypatch.setattr(model_store_server_module, "get_model_cards", cards)
+    monkeypatch.setattr(model_store_server_module, "get_all_model_cards", cards)
     monkeypatch.setattr(approval_module, "REMOTE_CODE_APPROVALS", approvals)
 
     with pytest.raises(web.HTTPForbidden, match=card.registry_card_id or ""):
@@ -120,7 +120,7 @@ async def test_store_host_rejects_unverifiable_registry_identity(
     async def cards() -> list[ModelCard]:
         return [_registry_card()]
 
-    monkeypatch.setattr(model_store_server_module, "get_model_cards", cards)
+    monkeypatch.setattr(model_store_server_module, "get_all_model_cards", cards)
 
     with pytest.raises(web.HTTPConflict, match="immutable registry artifact"):
         await ModelStoreServer._require_remote_code_download_approval(
@@ -142,7 +142,7 @@ async def test_store_host_binds_approval_to_exact_artifact(
     async def cards() -> list[ModelCard]:
         return [card]
 
-    monkeypatch.setattr(model_store_server_module, "get_model_cards", cards)
+    monkeypatch.setattr(model_store_server_module, "get_all_model_cards", cards)
 
     with pytest.raises(web.HTTPConflict, match="immutable registry artifact"):
         await ModelStoreServer._require_remote_code_download_approval(

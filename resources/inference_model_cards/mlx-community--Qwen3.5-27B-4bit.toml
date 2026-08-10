@@ -29,6 +29,7 @@ disabled_effort = "none"
 mtp_heads = true
 mtp_max_depth = 1
 mtp_sidecar_repo = "FoxlightAI/qwen3-5-27b-mtp"
+mtp_sidecar_revision = "facd76d54a6ba6cef3406529b2116b6614d4c1e2"
 
 # Qwen3.5 is a natively multimodal (early-fusion) VLM: config.json ships a
 # vision_config and the repo is tagged image-text-to-text /

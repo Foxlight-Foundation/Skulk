@@ -497,6 +497,10 @@ class RuntimeCapabilitySection(BaseModel):
             "sidecar repo as a companion rather than a launchable entry."
         ),
     )
+    mtp_sidecar_revision: str | None = Field(
+        default=None,
+        description="Immutable commit of the MTP sidecar repository.",
+    )
     assistant_model_repo: str | None = Field(
         default=None,
         description=(
@@ -505,6 +509,10 @@ class RuntimeCapabilitySection(BaseModel):
             "independently placeable."
         ),
     )
+    assistant_model_revision: str | None = Field(
+        default=None,
+        description="Immutable commit of the assistant-model repository.",
+    )
     served_spec_draft_repo: str | None = Field(
         default=None,
         description=(
@@ -512,6 +520,22 @@ class RuntimeCapabilitySection(BaseModel):
             "separate one. A companion loaded with the base model, not "
             "independently placeable."
         ),
+    )
+    served_spec_draft_revision: str | None = Field(
+        default=None,
+        description="Immutable commit of the served-engine draft repository.",
+    )
+    vllm_spec_draft_repo: str | None = Field(
+        default=None,
+        description=(
+            "Repo of this model's vLLM speculative-decoding drafter, when it "
+            "declares one. A companion loaded with the base model, not "
+            "independently placeable."
+        ),
+    )
+    vllm_spec_draft_revision: str | None = Field(
+        default=None,
+        description="Immutable commit of the vLLM drafter repository.",
     )
 
     @classmethod
@@ -529,8 +553,13 @@ class RuntimeCapabilitySection(BaseModel):
                 config.output_parser.value if config.output_parser is not None else None
             ),
             mtp_sidecar_repo=config.mtp_sidecar_repo,
+            mtp_sidecar_revision=config.mtp_sidecar_revision,
             assistant_model_repo=config.assistant_model_repo,
+            assistant_model_revision=config.assistant_model_revision,
             served_spec_draft_repo=config.served_spec_draft_repo,
+            served_spec_draft_revision=config.served_spec_draft_revision,
+            vllm_spec_draft_repo=config.vllm_spec_draft_repo,
+            vllm_spec_draft_revision=config.vllm_spec_draft_revision,
         )
 
 

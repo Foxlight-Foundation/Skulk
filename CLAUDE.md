@@ -415,7 +415,10 @@ node; registry vision cards require the same approval while the MLX processor
 path can enable repository code internally. The gate runs before download and
 before every runner-type dispatch, and approval mutations require a loopback
 socket peer plus a loopback browser origin. Registry publication cannot grant
-approval.
+approval. Every separately hosted companion artifact (vision weights or
+processor, MTP sidecar, assistant model, served GGUF draft, or vLLM drafter)
+must carry its own full revision; companions in the base artifact repository
+inherit `source_revision`.
 TTS cards may declare `audio.voices`, optional ordered `audio.voice_catalog`
 display/preferred-language metadata, optional checksummed bundled
 `reference_profile` identifiers, and a validated `audio.default_voice`, which

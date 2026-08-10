@@ -414,6 +414,38 @@ def test_separate_processor_repository_is_loaded_at_pinned_revision(
     }
 
 
+def test_separate_vision_weights_use_their_immutable_revision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A split vision tower cannot silently resolve from mutable main."""
+    calls: list[tuple[ModelId, str | None]] = []
+
+    def _model_path(model_id: ModelId, revision: str | None = None) -> Path:
+        calls.append((model_id, revision))
+        return tmp_path
+
+    monkeypatch.setattr(vision_module, "build_model_path", _model_path)
+    revision = "b" * 40
+
+    VisionEncoder(
+        VisionCardConfig(
+            image_token_id=1,
+            model_type="external",
+            weights_repo="org/vision",
+            weights_revision=revision,
+        ),
+        ModelId("registry/alias"),
+        "a" * 40,
+        ModelId("org/base"),
+    )
+
+    assert calls == [
+        (ModelId("registry/alias"), "a" * 40),
+        (ModelId("org/vision"), revision),
+    ]
+
+
 def test_gemma3n_processor_uses_configured_pil_backend_without_torchvision(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

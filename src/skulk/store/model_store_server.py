@@ -72,7 +72,7 @@ import aiofiles.os as aios
 import aiohttp.web as web
 from loguru import logger
 
-from skulk.shared.models.model_cards import ModelCard, get_model_cards
+from skulk.shared.models.model_cards import ModelCard, get_all_model_cards
 from skulk.shared.models.remote_code_approval import require_remote_code_approval
 from skulk.store.config import DEFAULT_MODEL_STORE_PORT
 from skulk.store.model_store import ModelStore
@@ -438,7 +438,7 @@ class ModelStoreServer:
         pinned_gguf: str | None,
     ) -> None:
         """Verify artifact identity and host approval before fetching bytes."""
-        cards = await get_model_cards()
+        cards = await get_all_model_cards()
         card: ModelCard | None
         if registry_card_id is not None:
             card = next(

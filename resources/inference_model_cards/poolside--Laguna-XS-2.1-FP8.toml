@@ -56,6 +56,7 @@ format = "token_delimited"
 vllm_spec_method = "dflash"
 vllm_spec_num_tokens = 15
 vllm_spec_draft_repo = "poolside/Laguna-XS-2.1-DFlash-FP8"
+vllm_spec_draft_revision = "546b72f86fc6733913fec0cb8a5d6c1cd4ce2895"
 
 [tooling]
 supports_tool_calling = false
