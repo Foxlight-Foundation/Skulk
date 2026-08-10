@@ -14,6 +14,7 @@ so a newly added card is held to the same bar automatically.
 
 import tomllib
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -128,7 +129,6 @@ def test_bundled_card_invariants(kind: str, path: Path) -> None:
     assert not missing_preference, (
         f"backend_preference not in compatible_backends: {missing_preference}"
     )
-
     engines = {engine for tag in compatible if (engine := engine_of(tag))}
     is_gguf = card.gguf_file is not None or "gguf" in str(card.model_id).lower()
     if kind == "inference":
@@ -205,6 +205,19 @@ def test_bundled_card_invariants(kind: str, path: Path) -> None:
         # The method/draft-repo pairing itself (dflash requires a draft repo,
         # mtp forbids one) is enforced by the card model validator, so an
         # inconsistent bundled card already fails at parse above.
+
+
+def test_nonempty_placement_tables_declare_model_backend_truth() -> None:
+    """Keep serialized cards complete for external registry validation."""
+    for _, path in _CARD_FILES:
+        raw = cast("dict[str, object]", tomllib.loads(path.read_text()))
+        placement = raw.get("placement")
+        if isinstance(placement, dict):
+            typed_placement = cast("dict[str, object]", placement)
+            compatible = typed_placement.get("compatible_backends")
+            assert isinstance(compatible, list) and compatible, (
+                f"{path.name} has a placement table without compatible_backends"
+            )
 
 
 @pytest.mark.parametrize(
