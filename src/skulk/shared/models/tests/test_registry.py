@@ -105,10 +105,14 @@ def test_client_uses_hash_bound_last_known_good(
     payload_path.write_bytes(_catalog_payload())
     embedded_root = tmp_path / "embedded-root.json"
     embedded_root.write_text("{}")
+    cached_root = tmp_path / "cache/metadata/root.json"
+    cached_root.parent.mkdir(parents=True)
+    cached_root.write_text('{"attacker":"preseeded"}')
+    observed_trusted_roots: list[bytes] = []
 
     class WorkingUpdater:
         def __init__(self, **_: object) -> None:
-            pass
+            observed_trusted_roots.append(cached_root.read_bytes())
 
         def refresh(self) -> None:
             pass
@@ -128,6 +132,7 @@ def test_client_uses_hash_bound_last_known_good(
         max_stale_days=30,
     )
     assert client.load_catalog().snapshot_id == "snapshot_1_test"
+    assert observed_trusted_roots == [embedded_root.read_bytes()]
 
     class FailingUpdater(WorkingUpdater):
         def refresh(self) -> None:

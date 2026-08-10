@@ -120,8 +120,10 @@ class TufRegistryClient:
         self._metadata_dir.mkdir(parents=True, exist_ok=True)
         self._targets_dir.mkdir(parents=True, exist_ok=True)
         trusted_root = self._metadata_dir / "root.json"
-        if not trusted_root.exists():
-            shutil.copyfile(self._embedded_root, trusted_root)
+        # Every process starts root rotation from the release trust anchor. TUF
+        # then replays legitimate versioned rotations, while cache pre-seeding
+        # can never substitute a different initial root.
+        shutil.copyfile(self._embedded_root, trusted_root)
         updater = Updater(
             metadata_dir=str(self._metadata_dir),
             metadata_base_url=f"{self._base_url}metadata/",
