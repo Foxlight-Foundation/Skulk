@@ -1,12 +1,13 @@
 """TUF-verified external model-card catalog with bounded offline fallback."""
 
 import hashlib
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 from filelock import FileLock
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from tuf.ngclient.updater import Updater
 from tuf.ngclient.urllib3_fetcher import Urllib3Fetcher
 
@@ -41,6 +42,23 @@ class RegistryCard(BaseModel):
     model_ref: str = Field(min_length=1, max_length=512)
     artifact: RegistryArtifact
     card: dict[str, Any]
+
+    @field_validator("alias")
+    @classmethod
+    def validate_alias(cls, alias: str) -> str:
+        """Require a path-safe repository-style runtime identity.
+
+        The alias becomes a staging-directory name after the single repository
+        separator is normalized. Restricting the signed input here keeps dot
+        segments and platform path separators away from destructive cache
+        replacement operations.
+        """
+        if re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._+@-]*",
+            alias,
+        ) is None:
+            raise ValueError("registry alias must be a safe repository identifier")
+        return alias
 
 
 class RegistryCardMetadata(BaseModel):

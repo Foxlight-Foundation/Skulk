@@ -384,6 +384,9 @@ of truth; a store that cannot be reached at the transport level
 detection) falls back to DIRECT Hugging Face download on the node when
 `allow_hf_fallback` is on, preserving revision/GGUF pinning. The expected
 shape for store-unreachable remote members; a loud log cue elsewhere.
+For signed cards, the store request carries the immutable card ID and the
+store host independently verifies its own node-local remote-code approval
+before downloading; worker approval never grants store-host approval.
 Installer-generated configs begin as local bootstrap stores. On cluster
 formation, followers retry state-sync config bootstrap, receive the elected
 master's routable store address, stop superseded local store servers, and

@@ -1054,6 +1054,9 @@ A registry card separates its selectable `model_id` alias from
 `source_repository`. The alias is the fabric/store identity; metadata and byte
 requests use the source repository. This allows one exact card per quant or
 selected file even when several artifacts share a Hugging Face repository.
+Signed aliases are restricted to path-safe repository identifiers, and signed
+payloads are always forced to non-custom cards so they cannot survive catalog
+replacement or revocation using operator-owned override semantics.
 The external registry publishes provenance-stamped cards that pass deterministic
 structural validation. Runtime qualification remains separate evidence for an
 exact artifact, engine build, hardware class, and capability; it governs
@@ -1067,10 +1070,13 @@ runner-type dispatch until its immutable `registry_card_id` appears in that
 node's owner-only approval file. Registry vision cards are gated as well while
 the MLX vision processor path contains loaders that enable repository code
 internally; that is platform truth and does not rewrite the artifact card.
-Approval mutations accept only a loopback socket peer and, for browser calls,
-a loopback origin, so the inference API's permissive CORS policy cannot grant
-approval. Registry publication can describe the requirement but cannot grant
-it.
+Approval mutations accept only a direct loopback socket peer with no proxy or
+forwarding headers and, for browser calls, a loopback origin, so the inference
+API's permissive CORS policy and a co-located reverse proxy cannot grant
+approval. A worker requesting a canonical-store download forwards the immutable
+card ID; the store host verifies it against its own signed catalog and requires
+its own node-local approval before fetching bytes. Registry publication can
+describe the requirement but cannot grant it.
 
 Model discovery feeds this card system. `GET /models/search` searches Hugging Face repositories, and `POST /models/add` builds a custom card from repository metadata, detecting GGUF repositories (which `mlx-lm` cannot load) and giving them a llama.cpp card instead of the MLX default. Hugging Face's search indexes repository metadata, not file manifests, so a pasted GGUF filename can come back empty even when the file exists somewhere on the Hub. Filename-shaped queries therefore get a bounded fallback: Skulk progressively broadens the model-name prefix, inspects a capped set of candidate repositories' file manifests, keeps only repositories containing the exact basename, and returns the matched repo-relative path alongside each result. Adding such a result pins that exact quant file on the generated card instead of applying the default quant preference, and the pin is honored end to end: the store download request names the pinned file, a staged directory that lacks the pinned quant (or its complete shard group) is not treated as a cache hit, and the store recovers a missing selected file before staging.
 

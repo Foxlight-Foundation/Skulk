@@ -1216,8 +1216,9 @@ stored in an owner-only local file, and applies only to this node. Repeat it on
 every node that may download or serve the artifact. Skulk fails closed before
 both download and every runner-type dispatch when a required approval is
 absent. This mutation is accepted only from a loopback socket peer; browser
-requests must also have a loopback `Origin`. Forwarded client headers are not
-trusted.
+requests must also have a loopback `Origin`. Requests carrying proxy or
+forwarding headers are rejected outright, because a local reverse proxy's
+socket would otherwise be indistinguishable from a direct loopback client.
 
 **DELETE** `/models/remote-code-approvals/{card_id}`
 
@@ -1511,6 +1512,11 @@ Use this to inspect in-progress shared-store download activity.
 **POST** `/store/models/{model_id}/download`
 
 Use this when you want the store host to fetch and register a model.
+
+For signed-registry artifacts, Skulk's internal request also carries the
+immutable card ID. The store host verifies that identity against its own signed
+catalog and applies its own node-local repository-code approval before fetching
+bytes; approval on the requesting worker does not grant approval on the store.
 
 The optional JSON body accepts `gguf_file` and `source_revision`:
 

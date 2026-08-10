@@ -107,13 +107,18 @@ def require_remote_code_approval(card: ModelCard) -> None:
 
 
 def remote_code_approval_mutation_allowed(
-    client_host: str | None, origin: str | None
+    client_host: str | None,
+    origin: str | None,
+    *,
+    forwarding_headers_present: bool = False,
 ) -> bool:
     """Return whether an HTTP peer may mutate this node's approval file.
 
     The socket peer must be loopback. Browser requests must additionally come
     from a loopback origin so permissive inference CORS cannot turn a remote
-    webpage into a localhost approval authority. Forwarded headers are ignored.
+    webpage into a localhost approval authority. A local reverse proxy also
+    appears as a loopback peer, so any forwarding header makes the mutation
+    ineligible rather than attempting to trust or interpret proxy identity.
     """
 
     def _is_loopback(host: str | None) -> bool:
@@ -126,7 +131,7 @@ def remote_code_approval_mutation_allowed(
         except ValueError:
             return False
 
-    if not _is_loopback(client_host):
+    if forwarding_headers_present or not _is_loopback(client_host):
         return False
     if origin is None:
         return True

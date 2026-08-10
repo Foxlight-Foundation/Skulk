@@ -76,6 +76,28 @@ def test_registry_alias_is_separate_from_artifact_repository() -> None:
     assert card.registry_provenance == "foxlight"
 
 
+@pytest.mark.parametrize("alias", [".", "..", "org/..", "../model", "org\\model"])
+def test_registry_rejects_path_like_aliases(alias: str) -> None:
+    """Signed aliases can never address a staging root or its parent."""
+    payload = cast("dict[str, object]", json.loads(_catalog_payload()))
+    cards = cast("list[dict[str, object]]", payload["cards"])
+    cards[0]["alias"] = alias
+
+    with pytest.raises(ValueError, match="safe repository identifier"):
+        RegistryCatalog.model_validate(payload, strict=False)
+
+
+def test_registry_forces_signed_cards_to_non_custom() -> None:
+    """Signed payload content cannot acquire local override semantics."""
+    payload = cast("dict[str, object]", json.loads(_catalog_payload()))
+    cards = cast("list[dict[str, object]]", payload["cards"])
+    card_payload = cast("dict[str, object]", cards[0]["card"])
+    card_payload["is_custom"] = True
+    catalog = RegistryCatalog.model_validate(payload, strict=False)
+
+    assert not registry_model_cards(catalog)[0].is_custom
+
+
 def test_registry_rejects_catalog_metadata_outside_card_identity() -> None:
     """Every published card has exactly one signed provenance record."""
     payload = cast("dict[str, object]", json.loads(_catalog_payload()))

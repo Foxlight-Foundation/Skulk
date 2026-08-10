@@ -7289,14 +7289,24 @@ class API:
     def _require_node_local_remote_code_mutation(request: Request) -> None:
         """Reject approval writes not made through a loopback control surface."""
         client_host = request.client.host if request.client is not None else None
+        forwarding_headers_present = any(
+            raw_name.lower() == b"forwarded"
+            or raw_name.lower().startswith(b"x-forwarded-")
+            or raw_name.lower()
+            in {b"x-real-ip", b"cf-connecting-ip", b"true-client-ip"}
+            for raw_name, _raw_value in request.headers.raw
+        )
         if not remote_code_approval_mutation_allowed(
-            client_host, request.headers.get("origin")
+            client_host,
+            request.headers.get("origin"),
+            forwarding_headers_present=forwarding_headers_present,
         ):
             raise HTTPException(
                 status_code=403,
                 detail=(
                     "Remote-code approvals may be changed only from a loopback "
-                    "client and, for browsers, a loopback origin"
+                    "client with no proxy forwarding headers and, for browsers, "
+                    "a loopback origin"
                 ),
             )
 
@@ -10789,13 +10799,19 @@ class API:
             card = get_card(requested_model_id)
         gguf_file = payload.gguf_file if payload is not None else None
         source_revision = payload.source_revision if payload is not None else None
+        source_repository: str | None = None
+        registry_card_id: str | None = None
         if card is not None:
             gguf_file = gguf_file or card.gguf_file
             source_revision = source_revision or card.source_revision
+            source_repository = str(card.artifact_repository)
+            registry_card_id = card.registry_card_id
         result = await self._store_client.request_store_download(
             model_id,
             gguf_file=gguf_file,
             source_revision=source_revision,
+            source_repository=source_repository,
+            registry_card_id=registry_card_id,
         )
         return JSONResponse(result)
 

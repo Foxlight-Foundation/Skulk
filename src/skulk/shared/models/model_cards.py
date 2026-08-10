@@ -127,6 +127,10 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
                 "registry_card_id": envelope.card_id,
                 "registry_snapshot_id": catalog.snapshot_id,
                 "registry_provenance": metadata.provenance,
+                # Only cards loaded from the operator-owned custom directory
+                # receive override semantics. Signed content cannot opt itself
+                # out of registry replacement or revocation.
+                "is_custom": False,
             }
         )
         cards.append(ModelCard.model_validate(payload))

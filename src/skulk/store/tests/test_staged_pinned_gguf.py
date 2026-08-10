@@ -70,10 +70,12 @@ class _RecordingStoreClient:
         extra_pinned_gguf: list[str] | None = None,
         source_revision: str | None = None,
         source_repository: str | None = None,
+        registry_card_id: str | None = None,
     ) -> bool:
         assert not extra_pinned_gguf
         assert source_revision is None
         assert source_repository is None or "/" in source_repository
+        assert registry_card_id is None
         self.download_requests.append((model_id, pinned_gguf))
         return True
 
@@ -235,6 +237,7 @@ async def test_store_download_keeps_alias_but_fetches_artifact_repository(
             "extra_pinned_gguf": [],
             "source_revision": "a" * 40,
             "source_repository": _MODEL_ID,
+            "registry_card_id": f"card_{'a' * 52}",
         },
     )
 

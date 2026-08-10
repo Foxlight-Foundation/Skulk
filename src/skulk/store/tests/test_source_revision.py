@@ -16,10 +16,20 @@ from skulk.store.model_store import ModelStore, StoreDownloadStatus
 from skulk.store.model_store_client import (
     ModelStoreClient,
     _staged_source_revision_matches,
+    _staging_dir,
 )
 
 _OLD_REVISION = "0" * 40
 _NEW_REVISION = "1" * 40
+
+
+@pytest.mark.parametrize("model_id", ["", ".", "..", "org\\..\\model"])
+def test_staging_directory_rejects_path_like_model_ids(
+    tmp_path: Path, model_id: str
+) -> None:
+    """Revision replacement can only delete a child of the staging root."""
+    with pytest.raises(ValueError, match="safe staging directory"):
+        _staging_dir(str(tmp_path / "staging"), model_id)
 
 
 async def test_store_alias_download_reads_from_artifact_repository(

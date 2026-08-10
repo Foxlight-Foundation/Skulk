@@ -106,6 +106,18 @@ def test_approval_mutations_require_loopback_peer_and_browser_origin(
     assert remote_code_approval_mutation_allowed(client_host, origin) is allowed
 
 
+@pytest.mark.parametrize("client_host", ["127.0.0.1", "::1", "localhost"])
+def test_approval_mutations_reject_forwarded_loopback_requests(
+    client_host: str,
+) -> None:
+    """A reverse proxy's loopback socket cannot become approval authority."""
+    assert not remote_code_approval_mutation_allowed(
+        client_host,
+        None,
+        forwarding_headers_present=True,
+    )
+
+
 @pytest.mark.asyncio
 async def test_store_backed_download_fails_before_any_store_access(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -72,11 +72,14 @@ import aiofiles.os as aios
 import aiohttp.web as web
 from loguru import logger
 
+from skulk.shared.models.model_cards import ModelCard, get_model_cards
+from skulk.shared.models.remote_code_approval import require_remote_code_approval
 from skulk.store.config import DEFAULT_MODEL_STORE_PORT
 from skulk.store.model_store import ModelStore
 
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB per streaming chunk
 _SOURCE_REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+_REGISTRY_CARD_ID_PATTERN = re.compile(r"^card_[a-z2-7]{52}$")
 
 
 def _sanitize_model_id(model_id: str) -> str:
@@ -356,6 +359,7 @@ class ModelStoreServer:
         extra_pinned_gguf: list[str] | None = None
         source_revision: str | None = None
         source_repository: str | None = None
+        registry_card_id: str | None = None
         if request.can_read_body:
             try:
                 body: object = cast("object", await request.json())
@@ -391,6 +395,20 @@ class ModelStoreServer:
                             reason="source_repository must be a repository identifier"
                         )
                     source_repository = raw_repository
+                raw_card_id = body_dict.get("registry_card_id")
+                if isinstance(raw_card_id, str) and raw_card_id:
+                    if _REGISTRY_CARD_ID_PATTERN.fullmatch(raw_card_id) is None:
+                        raise web.HTTPBadRequest(
+                            reason="registry_card_id must be an immutable card id"
+                        )
+                    registry_card_id = raw_card_id
+        await self._require_remote_code_download_approval(
+            model_id,
+            registry_card_id,
+            source_repository=source_repository,
+            source_revision=source_revision,
+            pinned_gguf=pinned_gguf,
+        )
         try:
             status = await self._store.request_download(
                 model_id,
@@ -409,6 +427,62 @@ class ModelStoreServer:
                 "progress": status.progress,
             }
         )
+
+    @staticmethod
+    async def _require_remote_code_download_approval(
+        model_id: str,
+        registry_card_id: str | None,
+        *,
+        source_repository: str | None,
+        source_revision: str | None,
+        pinned_gguf: str | None,
+    ) -> None:
+        """Verify artifact identity and host approval before fetching bytes."""
+        cards = await get_model_cards()
+        card: ModelCard | None
+        if registry_card_id is not None:
+            card = next(
+                (
+                    candidate
+                    for candidate in cards
+                    if candidate.registry_card_id == registry_card_id
+                ),
+                None,
+            )
+        else:
+            card = next(
+                (
+                    candidate
+                    for candidate in cards
+                    if str(candidate.model_id) == model_id
+                    and candidate.registry_card_id is not None
+                ),
+                None,
+            )
+        if card is None:
+            if registry_card_id is None:
+                return
+            raise web.HTTPConflict(
+                reason="store host cannot verify the requested registry card"
+            )
+        if registry_card_id is None:
+            raise web.HTTPConflict(
+                reason="signed registry downloads require an immutable card id"
+            )
+        artifact_repository = source_repository or model_id
+        if (
+            str(card.model_id) != model_id
+            or str(card.artifact_repository) != artifact_repository
+            or card.source_revision != source_revision
+            or card.gguf_file != pinned_gguf
+        ):
+            raise web.HTTPConflict(
+                reason="store request disagrees with immutable registry artifact"
+            )
+        try:
+            require_remote_code_approval(card)
+        except PermissionError as error:
+            raise web.HTTPForbidden(reason=str(error)) from error
 
     async def _handle_download_status(self, request: web.Request) -> web.Response:
         """``GET /models/{model_id}/download/status`` — poll download progress."""
