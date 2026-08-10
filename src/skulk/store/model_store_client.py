@@ -820,6 +820,44 @@ class ModelStoreClient:
             raise RuntimeError(f"Store registry path escaped its root for {model_id}")
         return candidate
 
+    async def refresh_local_installed_card(
+        self,
+        model_id: str,
+        *,
+        model_card: ModelCard,
+        artifact_role: InstalledArtifactRole,
+        owner_model_id: str | None,
+        owner_card_id: str | None,
+        artifact_repository: str,
+        artifact_revision: str | None,
+        artifact_file: str | None,
+    ) -> None:
+        """Refresh canonical card truth on a store host without moving bytes.
+
+        The normal store download transaction performs the refresh so it is
+        serialized with downloads and generation replacement for the alias.
+        """
+
+        if self._local_store_path is None:
+            raise RuntimeError("local installed cards exist only on the store host")
+        from skulk.store.model_store import ModelStore
+
+        local_store = ModelStore(self._local_store_path)
+        status = await local_store.request_download(
+            model_id,
+            pinned_gguf=artifact_file,
+            source_revision=artifact_revision,
+            source_repository=artifact_repository,
+            model_card=model_card,
+            artifact_role=artifact_role,
+            owner_model_id=owner_model_id,
+            owner_card_id=owner_card_id,
+        )
+        if status.status != "complete":
+            raise RuntimeError(
+                f"local installed-card refresh did not complete for {model_id}"
+            )
+
     async def _fetch_model_total_bytes(
         self, model_id: str, source_revision: str | None = None
     ) -> int:
@@ -1842,6 +1880,16 @@ class ModelStoreDownloader(ShardDownloader):
                     and not _staged_vision_projector_missing(shard, direct_path)
                     and not _staged_same_repo_draft_missing(shard, direct_path)
                 ):
+                    await self._store_client.refresh_local_installed_card(
+                        model_id,
+                        model_card=retained_card,
+                        artifact_role=installed_artifact_role,
+                        owner_model_id=owner_model_id,
+                        owner_card_id=owner_card_id,
+                        artifact_repository=str(shard.model_card.artifact_repository),
+                        artifact_revision=shard.model_card.source_revision,
+                        artifact_file=shard.model_card.gguf_file,
+                    )
                     logger.info(
                         f"ModelStoreDownloader: staging disabled — loading {model_id} directly from store at {direct_path}"
                     )

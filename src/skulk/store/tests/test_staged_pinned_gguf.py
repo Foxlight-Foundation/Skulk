@@ -16,6 +16,7 @@ from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadat
 from skulk.store.config import StagingNodeConfig
 from skulk.store.installed_cards import (
     build_installed_card_record,
+    read_installed_card,
     write_installed_card,
 )
 from skulk.store.model_store import ModelStore
@@ -282,11 +283,14 @@ async def test_staging_disabled_direct_load_does_not_probe_http(
     direct_path = tmp_path / "canonical"
     direct_path.mkdir()
     (direct_path / "model-IQ3_XXS.gguf").write_bytes(b"weights")
+    requested_card = _shard("model-IQ3_XXS.gguf").model_card
+    old_card = requested_card.model_copy(update={"family": "stale-family"})
     ModelStore(tmp_path).register_model(
         _MODEL_ID,
         direct_path,
         ["model-IQ3_XXS.gguf"],
         len(b"weights"),
+        installed_card=build_installed_card_record(direct_path, old_card),
     )
     client = ModelStoreClient("localhost", local_store_path=tmp_path)
 
@@ -309,3 +313,6 @@ async def test_staging_disabled_direct_load_does_not_probe_http(
     path = await downloader.ensure_shard(_shard("model-IQ3_XXS.gguf"))
 
     assert path == direct_path
+    refreshed = read_installed_card(direct_path)
+    assert refreshed is not None
+    assert refreshed.model_card == requested_card

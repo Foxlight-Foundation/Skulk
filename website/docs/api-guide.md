@@ -1597,6 +1597,29 @@ Serves only paths in the granted manifest, requires the bound target-node
 header, and supports HTTP byte ranges for restart recovery. These endpoints are
 internal reconciliation transport, not a public model-download API.
 
+**POST** `/imports` (internal model-store transport port)
+
+Asks the authoritative store to pull and atomically publish one artifact from a
+node cache. This endpoint is internal reconciliation transport and accepts only
+a loopback socket peer; remote callers receive `403`. The JSON body contains:
+
+- `record`: the complete versioned `InstalledCardRecord`, including its full
+  card and canonical file manifest.
+- `source_base_url`: the selected source node's internal export URL.
+- `capability_token`: the short-lived token issued by that source for this
+  manifest and target store node.
+- `target_node_id`: the store node identity bound into the capability.
+
+The store resumes individual files with HTTP ranges, enforces its capacity
+floor, verifies every size and SHA-256 digest, writes the installed-card
+sidecar, and publishes the new generation and rebuildable registry entry only
+after complete verification. A successful response is the resulting store
+registry entry. Malformed records or missing fields return `400`; invalid or
+expired capabilities, unsafe manifest paths, insufficient capacity, source
+loss, or digest mismatch fail the import without replacing the active
+generation. Operators do not call this endpoint directly; the reconciler uses
+it after `POST /store/internal/exports` grants a transfer.
+
 ### Store download status
 
 **GET** `/store/models/{model_id}/download/status`

@@ -555,7 +555,10 @@ class ModelStoreServer:
                     (
                         candidate
                         for candidate in cards
-                        if candidate.is_custom
+                        if (
+                            candidate.is_custom
+                            or candidate.registry_card_id is None
+                        )
                         and str(candidate.model_id) == owner_model_id
                     ),
                     None,
