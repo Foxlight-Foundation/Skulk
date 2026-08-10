@@ -1294,6 +1294,13 @@ class ModelStore:
                     if offset > manifest_entry.size_bytes:
                         partial.unlink()
                         offset = 0
+                    elif offset == manifest_entry.size_bytes:
+                        digest = await asyncio.to_thread(_sha256_path, partial)
+                        if digest == manifest_entry.sha256:
+                            partial.replace(destination)
+                            continue
+                        partial.unlink()
+                        offset = 0
                     request_headers = dict(headers)
                     if offset:
                         request_headers["Range"] = f"bytes={offset}-"

@@ -107,6 +107,41 @@ async def test_peer_import_resumes_and_verifies_before_publish(tmp_path: Path) -
     assert duplicate.store_path == entry.store_path
 
 
+async def test_peer_import_promotes_complete_partial_without_network(
+    tmp_path: Path,
+) -> None:
+    """A crash after the final write but before rename resumes locally."""
+
+    source = tmp_path / "source" / "org--model"
+    source.mkdir(parents=True)
+    payload = b"complete-before-rename"
+    (source / "model.safetensors").write_bytes(payload)
+    record = build_installed_card_record(source, _card())
+
+    store_root = tmp_path / "store"
+    store = ModelStore(store_root)
+    partial = (
+        store_root
+        / ".imports"
+        / f"{record.installed_identity}.partial"
+        / "model.safetensors.partial"
+    )
+    partial.parent.mkdir(parents=True)
+    partial.write_bytes(payload)
+
+    entry = await store.import_peer_artifact(
+        record,
+        source_base_url="http://127.0.0.1:1",
+        capability_token="unused-because-no-request-is-needed",
+        target_node_id="store-node",
+    )
+
+    canonical = store.get_store_path("org/model")
+    assert entry.installed_card == record
+    assert canonical is not None
+    assert (canonical / "model.safetensors").read_bytes() == payload
+
+
 async def test_failed_peer_replacement_preserves_old_generation(
     tmp_path: Path,
 ) -> None:
