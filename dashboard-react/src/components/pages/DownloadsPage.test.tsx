@@ -44,6 +44,19 @@ function jsonResponse(payload: object): Response {
   });
 }
 
+function reconciliationResponse(state = 'complete'): Response {
+  return jsonResponse({
+    state,
+    inventory_only: false,
+    scanned_nodes: 2,
+    discovered_artifacts: 1,
+    pending_imports: 0,
+    imported_artifacts: 1,
+    failures: [],
+    last_verified_at: '2026-08-10T12:00:00Z',
+  });
+}
+
 async function renderModelStore(): Promise<void> {
   container = document.createElement('div');
   document.body.append(container);
@@ -88,6 +101,7 @@ describe('ModelStorePage registry convergence', () => {
       const path = String(input);
       if (path === '/models') return jsonResponse({ data: [] });
       if (path === '/store/downloads') return jsonResponse({ downloads: [] });
+      if (path === '/store/reconciliation') return reconciliationResponse();
       if (path === '/store/registry') {
         registryRequests += 1;
         if (registryRequests === 1) throw new TypeError('connection reset');
@@ -130,6 +144,7 @@ describe('ModelStorePage registry convergence', () => {
           downloads: downloadRequests === 1 ? [{ model_id: 'org/new-model' }] : [],
         });
       }
+      if (path === '/store/reconciliation') return reconciliationResponse();
       if (path === '/store/registry') {
         registryRequests += 1;
         if (registryRequests === 2) throw new TypeError('empty response');
@@ -175,6 +190,7 @@ describe('ModelStorePage registry convergence', () => {
       const path = String(input);
       if (path === '/models') return jsonResponse({ data: [] });
       if (path === '/store/downloads') return jsonResponse({ downloads: [] });
+      if (path === '/store/reconciliation') return reconciliationResponse();
       if (path === '/store/registry') {
         registryRequests += 1;
         return pendingRegistry;
@@ -194,5 +210,47 @@ describe('ModelStorePage registry convergence', () => {
     });
 
     expect(registryRequests).toBe(1);
+  });
+
+  it('keeps polling while reconciliation is still importing', async () => {
+    vi.useFakeTimers();
+    let registryRequests = 0;
+    let reconciliationRequests = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/models') return jsonResponse({ data: [] });
+      if (path === '/store/downloads') return jsonResponse({ downloads: [] });
+      if (path === '/store/reconciliation') {
+        reconciliationRequests += 1;
+        return reconciliationResponse(
+          reconciliationRequests === 1 ? 'importing' : 'complete',
+        );
+      }
+      if (path === '/store/registry') {
+        registryRequests += 1;
+        return jsonResponse({
+          entries: registryRequests >= 2 ? [{
+            model_id: 'org/imported-model',
+            total_bytes: 4096,
+            files: ['model.gguf'],
+            downloaded_at: '2026-08-10T12:00:00Z',
+          }] : [],
+        });
+      }
+      throw new Error(`unexpected fetch: ${path}`);
+    }));
+
+    await renderModelStore();
+    await flushEffects();
+    expect(container?.textContent).not.toContain('org/imported-model');
+    expect(registryRequests).toBe(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await flushEffects();
+
+    expect(container?.textContent).toContain('org/imported-model');
+    expect(registryRequests).toBe(2);
   });
 });

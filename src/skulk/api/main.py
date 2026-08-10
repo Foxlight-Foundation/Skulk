@@ -315,6 +315,7 @@ from skulk.shared.models.model_cards import (
     get_model_cards,
     preserve_generated_card_constraints,
 )
+from skulk.shared.models.registry import RegistryAdvisory
 from skulk.shared.models.remote_code_approval import (
     REMOTE_CODE_APPROVALS,
     remote_code_approval_mutation_allowed,
@@ -662,6 +663,19 @@ def _select_reconciliation_generations(
         generation = min(generations, key=generation_rank)
         selected[generation] = replicas[generation]
     return selected
+
+
+def _combined_model_advisories(
+    model_cards: Iterable[ModelCard],
+) -> tuple[RegistryAdvisory, ...]:
+    """Return deduplicated warnings across installed and current generations."""
+
+    advisories_by_id = {
+        advisory.advisory_id: advisory
+        for model_card in model_cards
+        for advisory in get_model_advisories(model_card)
+    }
+    return tuple(advisories_by_id.values())
 
 
 def _validate_audio_upload_metadata(file: StarletteUploadFile) -> None:
@@ -10893,14 +10907,19 @@ class API:
                 current_identity is None or update_available
             )
             entry["update_available"] = update_available
-            entry["advisories"] = (
-                [
-                    advisory.model_dump(mode="json")
-                    for advisory in get_model_advisories(current_card)
-                ]
-                if current_card is not None
-                else []
-            )
+            advisory_cards: list[ModelCard] = []
+            if installed_dict is not None:
+                installed_model_card = installed_dict.get("model_card")
+                if isinstance(installed_model_card, dict):
+                    advisory_cards.append(
+                        ModelCard.model_validate(installed_model_card, strict=False)
+                    )
+            if current_card is not None:
+                advisory_cards.append(current_card)
+            entry["advisories"] = [
+                advisory.model_dump(mode="json")
+                for advisory in _combined_model_advisories(advisory_cards)
+            ]
             entry["reconciliation_state"] = self._reconciliation_status.state
             entry["last_verified_at"] = self._reconciliation_status.last_verified_at
             enriched.append(entry)

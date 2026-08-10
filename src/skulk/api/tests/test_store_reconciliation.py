@@ -1,7 +1,18 @@
 # pyright: reportPrivateUsage=false
 """Generation-selection invariants for cache-to-store reconciliation."""
 
-from skulk.api.main import _select_reconciliation_generations
+from datetime import UTC, datetime
+from typing import cast
+
+import pytest
+
+import skulk.api.main as api_main
+from skulk.api.main import (
+    _combined_model_advisories,
+    _select_reconciliation_generations,
+)
+from skulk.shared.models.model_cards import ModelCard
+from skulk.shared.models.registry import RegistryAdvisory
 
 
 def _replica(
@@ -84,3 +95,45 @@ def test_reconciliation_prefers_verified_generation_without_current_card() -> No
     selected = _select_reconciliation_generations(replicas, {})
 
     assert set(selected) == {("zzz_verified", "2" * 64)}
+
+
+def test_advisories_cover_installed_and_current_generations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older active generation keeps its warning after a registry update."""
+
+    installed_card = cast("ModelCard", object())
+    current_card = cast("ModelCard", object())
+    now = datetime.now(UTC)
+
+    def advisory(advisory_id: str) -> RegistryAdvisory:
+        return RegistryAdvisory(
+            schema_version=1,
+            advisory_id=advisory_id,
+            severity="critical",
+            title="Installed generation warning",
+            description="The retained artifact needs operator attention.",
+            active=True,
+            created_at=now,
+            updated_at=now,
+            enforcement="warn",
+        )
+
+    installed_warning = advisory("FLA-2026-1001")
+    shared_warning = advisory("FLA-2026-1002")
+    current_warning = advisory("FLA-2026-1003")
+
+    def advisories_for(card: ModelCard) -> tuple[RegistryAdvisory, ...]:
+        if card is installed_card:
+            return installed_warning, shared_warning
+        return shared_warning, current_warning
+
+    monkeypatch.setattr(api_main, "get_model_advisories", advisories_for)
+
+    combined = _combined_model_advisories((installed_card, current_card))
+
+    assert [item.advisory_id for item in combined] == [
+        "FLA-2026-1001",
+        "FLA-2026-1002",
+        "FLA-2026-1003",
+    ]

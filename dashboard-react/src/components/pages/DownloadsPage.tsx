@@ -214,7 +214,10 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
     // user permanently looking at "0 models in store" until a manual refresh.
     return registryEntries !== null
       && downloadEntries !== null
-      && downloadEntries.length === 0;
+      && reconciliationStatus !== null
+      && downloadEntries.length === 0
+      && reconciliationStatus.state !== 'scanning'
+      && reconciliationStatus.state !== 'importing';
   }, [fetchDownloads, fetchReconciliation, fetchRegistry]);
 
   const scheduleStoreRefresh = useCallback(() => {

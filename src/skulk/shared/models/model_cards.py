@@ -308,16 +308,29 @@ def _load_cards_from_installed_artifacts() -> None:
     roots = [constants.SKULK_MODELS_DIR]
     roots.extend(constants.SKULK_MODELS_PATH or ())
     discovered = discover_installed_cards(roots)
-    _installed_card_cache.clear()
-    _installed_current_registry_ids.clear()
+    selected_records: dict[ModelId, InstalledCardRecord] = {}
     for record in discovered:
-        model_id = ModelId(record.owner_model_id or record.artifact_model_id)
         if record.artifact_role != "base":
             continue
+        model_id = ModelId(record.owner_model_id or record.artifact_model_id)
+        current_card = _registry_current_cards.get(model_id)
+        current_card_id = (
+            current_card.registry_card_id if current_card is not None else None
+        )
+
+        previous = selected_records.get(model_id)
+        if previous is None or _installed_record_rank(
+            record, current_card_id
+        ) < _installed_record_rank(previous, current_card_id):
+            selected_records[model_id] = record
+    _installed_card_cache.clear()
+    _installed_current_registry_ids.clear()
+    for model_id, record in selected_records.items():
         existing = _card_cache.get(model_id)
         _installed_card_cache[model_id] = record
+        current_card = _registry_current_cards.get(model_id)
         _installed_current_registry_ids[model_id] = (
-            existing.registry_card_id if existing is not None else None
+            current_card.registry_card_id if current_card is not None else None
         )
         if existing is not None and existing.is_custom:
             continue
@@ -328,6 +341,23 @@ def _load_cards_from_installed_artifacts() -> None:
         ):
             continue
         _card_cache[model_id] = record.model_card
+
+
+def _installed_record_rank(
+    record: "InstalledCardRecord", current_card_id: str | None
+) -> tuple[bool, bool, bool, float, str]:
+    """Rank competing complete generations for deterministic startup selection."""
+
+    return (
+        record.verification != "custom",
+        not (
+            current_card_id is not None
+            and record.model_card.registry_card_id == current_card_id
+        ),
+        record.verification != "registry_verified",
+        -record.captured_at.timestamp(),
+        record.installed_identity,
+    )
 
 
 def get_installed_card_record(model_id: ModelId) -> "InstalledCardRecord | None":

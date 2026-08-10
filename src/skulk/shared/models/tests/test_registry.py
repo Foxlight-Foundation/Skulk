@@ -527,6 +527,63 @@ async def test_current_registry_id_is_visible_behind_installed_generation(
         model_cards_module._registry_current_cards.update(original_current)
 
 
+def test_installed_startup_selects_current_generation_deterministically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Directory order cannot replace current installed truth with stale bytes."""
+
+    catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    current = registry_model_cards(catalog)[0]
+    stale = current.model_copy(
+        update={"registry_card_id": f"card_{'z' * 52}"}
+    )
+    for directory_name, card in (("aaa-current", current), ("zzz-stale", stale)):
+        artifact = tmp_path / directory_name
+        artifact.mkdir()
+        (artifact / "model-Q4_K_M.gguf").write_bytes(directory_name.encode())
+        (artifact / ".skulk-source-revision").write_text(
+            f"{card.source_revision}\n"
+        )
+        write_installed_card(artifact, build_installed_card_record(artifact, card))
+
+    original_cache = dict(model_cards_module._card_cache)
+    original_installed = dict(model_cards_module._installed_card_cache)
+    original_installed_current = dict(
+        model_cards_module._installed_current_registry_ids
+    )
+    original_current = dict(model_cards_module._registry_current_cards)
+    model_cards_module._card_cache.clear()
+    model_cards_module._installed_card_cache.clear()
+    model_cards_module._installed_current_registry_ids.clear()
+    model_cards_module._registry_current_cards.clear()
+    model_cards_module._registry_current_cards[current.model_id] = current
+    monkeypatch.setattr(constants_module, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(constants_module, "SKULK_MODELS_PATH", None)
+    try:
+        model_cards_module._load_cards_from_installed_artifacts()
+
+        assert model_cards_module.get_card(current.model_id) == current
+        installed = model_cards_module.get_installed_card_record(current.model_id)
+        assert installed is not None
+        assert installed.installed_identity == current.registry_card_id
+        assert (
+            model_cards_module.get_current_registry_card_id(current.model_id)
+            == current.registry_card_id
+        )
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+        model_cards_module._installed_card_cache.clear()
+        model_cards_module._installed_card_cache.update(original_installed)
+        model_cards_module._installed_current_registry_ids.clear()
+        model_cards_module._installed_current_registry_ids.update(
+            original_installed_current
+        )
+        model_cards_module._registry_current_cards.clear()
+        model_cards_module._registry_current_cards.update(original_current)
+
+
 @pytest.mark.asyncio
 async def test_downloader_fetches_source_repository_under_alias_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
