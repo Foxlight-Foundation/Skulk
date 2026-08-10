@@ -251,6 +251,42 @@ def test_registry_rebuild_ignores_incomplete_installed_artifact(
     assert entry is None
 
 
+def test_registry_rebuild_preserves_previously_selected_generation(
+    tmp_path: Path,
+) -> None:
+    store_root = tmp_path / "store"
+    store = ModelStore(store_root)
+    store_root.mkdir()
+    current_path = store_root / "a-current"
+    stale_path = store_root / "z-stale"
+    for artifact in (current_path, stale_path):
+        artifact.mkdir()
+        (artifact / "model.safetensors").write_bytes(artifact.name.encode())
+        (artifact / ".skulk-source-revision").write_text(f"{'a' * 40}\n")
+    current_card = _card()
+    stale_card = current_card.model_copy(
+        update={"registry_card_id": f"card_{'b' * 52}"}
+    )
+    current_record = build_installed_card_record(current_path, current_card)
+    stale_record = build_installed_card_record(stale_path, stale_card)
+    write_installed_card(current_path, current_record)
+    write_installed_card(stale_path, stale_record)
+    store.register_model(
+        "org/model",
+        current_path,
+        [entry.path for entry in current_record.files],
+        sum(entry.size_bytes for entry in current_record.files),
+        source_revision=current_card.source_revision,
+        installed_card=current_record,
+    )
+
+    recovered = ModelStore(store_root).get_entry("org/model")
+
+    assert recovered is not None
+    assert recovered.store_path == "a-current"
+    assert recovered.installed_card == current_record
+
+
 async def test_completed_download_refreshes_card_without_rehashing_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

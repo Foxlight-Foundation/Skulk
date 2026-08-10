@@ -428,25 +428,11 @@ async def get_registry_card_by_id(
     """
     global _last_registry_miss_refresh  # noqa: PLW0603
     await _refresh_card_cache_if_due()
-    card = next(
-        (
-            candidate
-            for candidate in _card_cache.values()
-            if candidate.registry_card_id == card_id
-        ),
-        None,
-    )
+    card = _cached_registry_card_by_id(card_id)
     if card is not None or not refresh_on_miss or not _registry_enabled():
         return card
     async with _registry_refresh_lock:
-        card = next(
-            (
-                candidate
-                for candidate in _card_cache.values()
-                if candidate.registry_card_id == card_id
-            ),
-            None,
-        )
+        card = _cached_registry_card_by_id(card_id)
         now = time.monotonic()
         if (
             card is not None
@@ -455,14 +441,23 @@ async def get_registry_card_by_id(
             return card
         _last_registry_miss_refresh = now
         await _refresh_card_cache()
-        return next(
-            (
-                candidate
-                for candidate in _card_cache.values()
-                if candidate.registry_card_id == card_id
-            ),
-            None,
-        )
+        return _cached_registry_card_by_id(card_id)
+
+
+def _cached_registry_card_by_id(card_id: str) -> "ModelCard | None":
+    """Resolve signed identity without letting an installed alias hide current truth."""
+
+    return next(
+        (
+            candidate
+            for candidate in (
+                *_registry_current_cards.values(),
+                *_card_cache.values(),
+            )
+            if candidate.registry_card_id == card_id
+        ),
+        None,
+    )
 
 
 async def get_model_cards() -> list["ModelCard"]:

@@ -122,11 +122,17 @@ async def test_failed_peer_replacement_preserves_old_generation(
         target_node_id="store-node",
     )
 
-    async def corrupt_export(_request: web.Request) -> web.Response:
-        return web.Response(body=b"corrupt-bytes!")
+    serve_corrupt_bytes = True
+
+    async def corrupt_then_healthy_export(_request: web.Request) -> web.Response:
+        return web.Response(
+            body=(b"corrupt-bytes!" if serve_corrupt_bytes else b"new-generation")
+        )
 
     app = web.Application()
-    app.router.add_get("/store/internal/exports/{token}/{path:.*}", corrupt_export)
+    app.router.add_get(
+        "/store/internal/exports/{token}/{path:.*}", corrupt_then_healthy_export
+    )
     runner = web.AppRunner(app)
     await runner.setup()
     with socket.socket() as probe:
@@ -154,12 +160,22 @@ async def test_failed_peer_replacement_preserves_old_generation(
                 capability_token=grant.token,
                 target_node_id="store-node",
             )
+        assert store.get_store_path("org/model") == old
+        assert (old / "model.safetensors").read_bytes() == b"old-generation"
+        serve_corrupt_bytes = False
+        imported = await store.import_peer_artifact(
+            record,
+            source_base_url=f"http://127.0.0.1:{port}",
+            capability_token=grant.token,
+            target_node_id="store-node",
+        )
     finally:
         await runner.cleanup()
 
     canonical = store.get_store_path("org/model")
-    assert canonical == old
-    assert (old / "model.safetensors").read_bytes() == b"old-generation"
+    assert imported.installed_card == record
+    assert canonical is not None and canonical != old
+    assert (canonical / "model.safetensors").read_bytes() == b"new-generation"
 
 
 def test_export_capability_is_target_and_manifest_bound(tmp_path: Path) -> None:

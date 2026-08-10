@@ -496,6 +496,38 @@ async def test_registry_id_miss_forces_one_serialized_refresh(
 
 
 @pytest.mark.asyncio
+async def test_current_registry_id_is_visible_behind_installed_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Store authorization can resolve an update hidden by installed alias truth."""
+
+    catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    current = registry_model_cards(catalog)[0]
+    installed = current.model_copy(
+        update={"registry_card_id": f"card_{'z' * 52}"}
+    )
+    original_cache = dict(model_cards_module._card_cache)
+    original_current = dict(model_cards_module._registry_current_cards)
+    model_cards_module._card_cache.clear()
+    model_cards_module._registry_current_cards.clear()
+    model_cards_module._card_cache[current.model_id] = installed
+    model_cards_module._registry_current_cards[current.model_id] = current
+    monkeypatch.setattr(model_cards_module, "_registry_enabled", lambda: False)
+    try:
+        assert (
+            await model_cards_module.get_registry_card_by_id(
+                str(current.registry_card_id)
+            )
+            == current
+        )
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+        model_cards_module._registry_current_cards.clear()
+        model_cards_module._registry_current_cards.update(original_current)
+
+
+@pytest.mark.asyncio
 async def test_downloader_fetches_source_repository_under_alias_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

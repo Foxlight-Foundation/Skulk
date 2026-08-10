@@ -138,6 +138,16 @@ def _remaining_store_download_bytes(
     return remaining_bytes
 
 
+def _sha256_path(path: Path) -> str:
+    """Hash one artifact path without loading multi-gigabyte files into memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(8 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def select_store_gguf_download_files(
     file_list: list[FileListEntry],
     pinned_gguf: str | None = None,
@@ -684,7 +694,7 @@ class ModelStore:
         if not self._store_path.is_dir():
             return
         registry = self._read_registry()
-        changed = False
+        recovered_by_model: dict[str, list[StoreModelEntry]] = {}
         for model_directory in self._store_path.iterdir():
             if not model_directory.is_dir() or model_directory.name.startswith("."):
                 continue
@@ -729,8 +739,53 @@ class ModelStore:
                 ),
                 installed_card=record,
             )
+            recovered_by_model.setdefault(record.artifact_model_id, []).append(
+                recovered
+            )
+        changed = False
+        from skulk.shared.models.model_cards import get_current_registry_card
+        from skulk.shared.types.common import ModelId
+
+        for model_id, candidates in recovered_by_model.items():
+            previous = registry.get(model_id)
+            current_card = get_current_registry_card(ModelId(model_id))
+            current_card_id = (
+                current_card.registry_card_id if current_card is not None else None
+            )
+            previous_identity = (
+                previous.installed_card.installed_identity
+                if previous is not None and previous.installed_card is not None
+                else None
+            )
+            previous_path = previous.store_path if previous is not None else None
+
+            def recovery_rank(
+                candidate: StoreModelEntry,
+                previous_identity: str | None = previous_identity,
+                previous_path: str | None = previous_path,
+                current_card_id: str | None = current_card_id,
+            ) -> tuple[bool, bool, bool, str]:
+                installed = candidate.installed_card
+                assert installed is not None
+                matches_previous = (
+                    installed.installed_identity == previous_identity
+                    if previous_identity is not None
+                    else candidate.store_path == previous_path
+                )
+                matches_current = (
+                    current_card_id is not None
+                    and installed.model_card.registry_card_id == current_card_id
+                )
+                return (
+                    not matches_previous,
+                    not matches_current,
+                    installed.verification != "registry_verified",
+                    candidate.store_path,
+                )
+
+            recovered = min(candidates, key=recovery_rank)
             if recovered != previous:
-                registry[record.artifact_model_id] = recovered
+                registry[model_id] = recovered
                 changed = True
         if not changed:
             return
@@ -1153,13 +1208,23 @@ class ModelStore:
             await aios.makedirs(str(import_root), exist_ok=True)
             temporary = import_root / f"{record.installed_identity}.partial"
             await aios.makedirs(str(temporary), exist_ok=True)
+            verified_destinations: set[Path] = set()
+            for entry in record.files:
+                destination = temporary / entry.path
+                if not (
+                    destination.is_file()
+                    and destination.stat().st_size == entry.size_bytes
+                ):
+                    continue
+                digest = await asyncio.to_thread(_sha256_path, destination)
+                if digest == entry.sha256:
+                    verified_destinations.add(destination)
+                    continue
+                await aios.remove(str(destination))
             remaining = sum(
                 entry.size_bytes
                 for entry in record.files
-                if not (
-                    (temporary / entry.path).is_file()
-                    and (temporary / entry.path).stat().st_size == entry.size_bytes
-                )
+                if temporary / entry.path not in verified_destinations
             )
             if remaining > 0:
                 free_bytes = await asyncio.to_thread(
@@ -1178,10 +1243,7 @@ class ModelStore:
                     await aios.makedirs(str(destination.parent), exist_ok=True)
                     partial = destination.with_name(f"{destination.name}.partial")
                     offset = partial.stat().st_size if partial.is_file() else 0
-                    if (
-                        destination.is_file()
-                        and destination.stat().st_size == manifest_entry.size_bytes
-                    ):
+                    if destination in verified_destinations:
                         continue
                     if offset > manifest_entry.size_bytes:
                         partial.unlink()
