@@ -151,9 +151,7 @@ def _source_revision_matches(path: Path, source_revision: str | None) -> bool:
     return actual_revision == source_revision
 
 
-def _source_revision_staging_matches(
-    path: Path, source_revision: str | None
-) -> bool:
+def _source_revision_staging_matches(path: Path, source_revision: str | None) -> bool:
     """Return whether ``path`` is an interrupted download of the revision."""
 
     if source_revision is None:
@@ -384,7 +382,9 @@ def companion_download_specs(
     """
 
     def _bare_shard(
-        repo: str, source_revision: str | None
+        repo: str,
+        source_revision: str | None,
+        gguf_file: str | None = None,
     ) -> PipelineShardMetadata:
         companion_model_id, effective_revision = companion_artifact_location(
             model_card,
@@ -396,6 +396,7 @@ def companion_download_specs(
                 model_id=companion_model_id,
                 source_repository=ModelId(repo),
                 source_revision=effective_revision,
+                gguf_file=gguf_file,
                 storage_size=Memory.from_bytes(0),
                 n_layers=1,
                 hidden_size=1,
@@ -410,9 +411,8 @@ def companion_download_specs(
         )
 
     specs: list[tuple[PipelineShardMetadata, list[str], bool]] = []
-    if (
-        model_card.vision
-        and model_card.vision.weights_repo != str(model_card.artifact_repository)
+    if model_card.vision and model_card.vision.weights_repo != str(
+        model_card.artifact_repository
     ):
         specs.append(
             (
@@ -479,6 +479,7 @@ def companion_download_specs(
                 _bare_shard(
                     runtime.served_spec_draft_repo,
                     runtime.served_spec_draft_revision,
+                    runtime.served_spec_draft_file,
                 ),
                 [runtime.served_spec_draft_file],
                 False,
@@ -522,9 +523,8 @@ def model_companions_present_on_disk(
     model complete after ensure_shard returns, so the gate cannot loop
     within a session.
     """
-    if (
-        model_card.vision
-        and model_card.vision.weights_repo != str(model_card.artifact_repository)
+    if model_card.vision and model_card.vision.weights_repo != str(
+        model_card.artifact_repository
     ):
         vision_repo = ModelId(model_card.vision.weights_repo)
         # Probe BOTH search roots: SKULK_MODELS_PATH (staging/store) and
@@ -534,9 +534,7 @@ def model_companions_present_on_disk(
         import skulk.shared.constants as _constants
 
         vision_present = (
-            build_companion_model_path(
-                vision_repo, model_card.vision.weights_revision
-            )
+            build_companion_model_path(vision_repo, model_card.vision.weights_revision)
             is not None
         )
         if not vision_present:
@@ -567,10 +565,7 @@ def model_companions_present_on_disk(
     runtime = model_card.runtime
     if runtime is None:
         return True
-    if (
-        runtime.mtp_sidecar_repo
-        and runtime.mtp_heads
-    ):
+    if runtime.mtp_sidecar_repo and runtime.mtp_heads:
         sidecar_model_id, sidecar_revision = companion_artifact_location(
             model_card,
             runtime.mtp_sidecar_repo,
@@ -597,9 +592,8 @@ def model_companions_present_on_disk(
     # base's directory or live in its own repo dir).
     if runtime.served_spec_draft_repo and runtime.served_spec_draft_file:
         try:
-            draft_shares_repository = (
-                runtime.served_spec_draft_repo
-                == str(model_card.artifact_repository)
+            draft_shares_repository = runtime.served_spec_draft_repo == str(
+                model_card.artifact_repository
             )
             draft_revision = (
                 model_card.source_revision
@@ -619,9 +613,7 @@ def model_companions_present_on_disk(
     return True
 
 
-def build_model_path(
-    model_id: ModelId, source_revision: str | None = None
-) -> Path:
+def build_model_path(model_id: ModelId, source_revision: str | None = None) -> Path:
     """Resolve a local filesystem path for *model_id*.
 
     Checks ``SKULK_MODELS_PATH`` (staging, store, etc.) first, then falls
@@ -648,18 +640,24 @@ def build_model_path(
     # must be accepted here or a bare GGUF model that downloaded fine would fail
     # to load with FileNotFoundError (#327).
     default = SKULK_MODELS_DIR / model_id.normalize()
-    if default.is_dir() and (
-        (default / "config.json").exists() or directory_has_gguf_weights(default)
-    ) and _source_revision_matches(default, source_revision):
+    if (
+        default.is_dir()
+        and ((default / "config.json").exists() or directory_has_gguf_weights(default))
+        and _source_revision_matches(default, source_revision)
+    ):
         return default
     # Fallback: check the default staging directory directly.
     # This covers cases where the staging path wasn't registered in
     # SKULK_MODELS_PATH (e.g., config not yet synced) but files exist.
     staging_fallback = Path.home() / ".skulk" / "staging" / model_id.normalize()
-    if staging_fallback.is_dir() and (
-        (staging_fallback / "config.json").exists()
-        or directory_has_gguf_weights(staging_fallback)
-    ) and _source_revision_matches(staging_fallback, source_revision):
+    if (
+        staging_fallback.is_dir()
+        and (
+            (staging_fallback / "config.json").exists()
+            or directory_has_gguf_weights(staging_fallback)
+        )
+        and _source_revision_matches(staging_fallback, source_revision)
+    ):
         return staging_fallback
     raise FileNotFoundError(
         f"Model {model_id} not found on disk. "
@@ -1149,9 +1147,7 @@ async def range_read(
                 await _build_auth_error_message(r.status, model_id)
             )
         if r.status == 404:
-            raise FileNotFoundError(
-                f"File {path} not found in {model_id}@{revision}"
-            )
+            raise FileNotFoundError(f"File {path} not found in {model_id}@{revision}")
         # A range starting at/after EOF yields 416; surface it as an empty read
         # so callers see a clean end-of-file instead of an HTTP error.
         if r.status == 416:
@@ -1442,13 +1438,9 @@ async def download_shard(
     revision = shard.model_card.source_revision or "main"
     canonical_target_dir = await ensure_models_dir() / str(
         shard.model_card.model_id
-    ).replace(
-        "/", "--"
-    )
+    ).replace("/", "--")
     if not skip_download:
-        await asyncio.to_thread(
-            _recover_interrupted_model_swap, canonical_target_dir
-        )
+        await asyncio.to_thread(_recover_interrupted_model_swap, canonical_target_dir)
     resuming_staged_revision = (
         canonical_target_dir.exists()
         and _source_revision_staging_matches(
@@ -1524,11 +1516,7 @@ async def download_shard(
             for f in filtered_file_list
             if "/" in f.path or not f.path.endswith(".safetensors")
         ]
-    if (
-        not skip_download
-        and not skip_internet
-        and capacity_preflight is not None
-    ):
+    if not skip_download and not skip_internet and capacity_preflight is not None:
         await capacity_preflight(target_dir, filtered_file_list)
     file_progress: dict[str, RepoFileDownloadProgress] = {}
 

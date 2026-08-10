@@ -377,6 +377,22 @@ Skulk now treats model capability handling as two layers:
 
 This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, speech/TTS/STT metadata, and additive `/v1/models` metadata consumed by the dashboard.
 
+### Installed model-card records
+
+Complete canonical and staged artifacts carry a strict
+`.skulk/installed-card.json` sidecar with the full card, exact artifact role and
+owner, verification state, and SHA-256 file manifest. Sidecars are durable
+installed truth; the central `registry.json` is a rebuildable index. Installed
+generations load before registry access and remain usable in `SKULK_OFFLINE=true`
+while complete. A registry replacement is reported as an update and becomes
+active only after its new generation commits atomically.
+
+The authoritative store host periodically reconciles node caches through
+bounded `/store/storage` inventories and capability-bound range exports. These
+inventories and transfer metadata never enter State or the event log. Signed
+`v1/advisories.json` notices are warning-only and must never block downloads,
+placement, active instances, or user-owned workloads.
+
 Store staging is reachability-aware (#657): "model not in store" (the
 store answered) fetches via the store host, keeping the store the source
 of truth; a store that cannot be reached at the transport level

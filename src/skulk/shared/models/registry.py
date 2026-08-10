@@ -54,10 +54,13 @@ class RegistryCard(BaseModel):
         segments and platform path separators away from destructive cache
         replacement operations.
         """
-        if re.fullmatch(
-            r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._+@-]*",
-            alias,
-        ) is None:
+        if (
+            re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._+@-]*",
+                alias,
+            )
+            is None
+        ):
             raise ValueError("registry alias must be a safe repository identifier")
         return alias
 
@@ -82,6 +85,36 @@ class RegistryCatalog(BaseModel):
     note: str
     cards: tuple[RegistryCard, ...]
     card_metadata: dict[str, RegistryCardMetadata]
+
+
+class RegistryAdvisory(BaseModel):
+    """One signed warn-only security notice."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    schema_version: Literal[1]
+    advisory_id: str = Field(pattern=r"^FLA-[0-9]{4}-[0-9]{4,}$")
+    severity: Literal["low", "moderate", "high", "critical"]
+    title: str = Field(min_length=3, max_length=300)
+    description: str = Field(min_length=3, max_length=4000)
+    affected_card_ids: tuple[str, ...] = ()
+    affected_model_aliases: tuple[str, ...] = ()
+    reference_url: str | None = Field(default=None, max_length=2048)
+    active: bool
+    created_at: datetime
+    updated_at: datetime
+    enforcement: Literal["warn"]
+
+
+class RegistryAdvisories(BaseModel):
+    """Signed advisory target; enforcement is structurally warn-only."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    schema_version: Literal[1]
+    generated_at: datetime
+    enforcement: Literal["warn"]
+    advisories: tuple[RegistryAdvisory, ...]
 
 
 class _VerifiedCacheRecord(BaseModel):
@@ -153,6 +186,38 @@ class TufRegistryClient:
                         "last-known-good catalog exists"
                     ) from error
 
+    def load_advisories(self) -> RegistryAdvisories:
+        """Refresh and verify the signed warn-only advisory target."""
+
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            self._metadata_dir.mkdir(parents=True, exist_ok=True)
+            self._targets_dir.mkdir(parents=True, exist_ok=True)
+            updater = Updater(
+                metadata_dir=str(self._metadata_dir),
+                metadata_base_url=f"{self._base_url}metadata/",
+                target_dir=str(self._targets_dir),
+                target_base_url=f"{self._base_url}targets/",
+                fetcher=Urllib3Fetcher(
+                    socket_timeout=self._timeout_seconds,
+                    app_user_agent="Skulk model-registry client",
+                ),
+                bootstrap=self._embedded_root.read_bytes(),
+            )
+            updater.refresh()
+            target = updater.get_targetinfo("v1/advisories.json")
+            if target is None:
+                return RegistryAdvisories(
+                    schema_version=1,
+                    generated_at=datetime.now(UTC),
+                    enforcement="warn",
+                    advisories=(),
+                )
+            downloaded = Path(updater.download_target(target))
+            return RegistryAdvisories.model_validate_json(
+                downloaded.read_bytes(), strict=False
+            )
+
     def _refresh(
         self,
         catalog_validator: Callable[[RegistryCatalog], object] | None,
@@ -186,9 +251,7 @@ class TufRegistryClient:
         self._write_verified_cache(payload, catalog)
         return catalog
 
-    def _write_verified_cache(
-        self, payload: bytes, catalog: RegistryCatalog
-    ) -> None:
+    def _write_verified_cache(self, payload: bytes, catalog: RegistryCatalog) -> None:
         """Atomically retain bytes that the updater just verified."""
         record = _VerifiedCacheRecord(
             sha256=hashlib.sha256(payload).hexdigest(),

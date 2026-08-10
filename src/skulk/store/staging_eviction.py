@@ -32,6 +32,10 @@ from pathlib import Path
 from loguru import logger
 from pydantic import Field
 
+from skulk.store.installed_cards import (
+    read_installed_card_with_fallback,
+    verify_installed_card,
+)
 from skulk.utils.pydantic_ext import CamelCaseModel
 
 LAST_USED_MARKER_FILENAME = ".last_used"
@@ -75,6 +79,24 @@ class StagedModelInfo(CamelCaseModel):
     in_use: bool = False
     """True when a live runner currently uses this model (directly or as a
     companion). In-use models are never eviction candidates."""
+
+    installed_identity: str | None = None
+    """Durable installed generation identity, when a sidecar is present."""
+
+    manifest_sha256: str | None = None
+    """Canonical file-manifest digest used for replica deduplication."""
+
+    verification_state: str | None = None
+    """Evidence level binding this copy to its retained card."""
+
+    manifest_complete: bool = False
+    """Whether every sidecar manifest path and size is present."""
+
+    artifact_role: str | None = None
+    """Base or companion role represented by this cache directory."""
+
+    owner_model_id: str | None = None
+    """Owning base model for companion artifacts."""
 
 
 def model_id_from_staging_directory_name(directory_name: str) -> str:
@@ -155,6 +177,13 @@ def list_staged_models(
         if not entry.is_dir():
             continue
         model_id = model_id_from_staging_directory_name(entry.name)
+        try:
+            installed = read_installed_card_with_fallback(entry)
+        except (OSError, ValueError):
+            installed = None
+        manifest_complete = (
+            verify_installed_card(entry, installed) if installed is not None else False
+        )
         staged.append(
             StagedModelInfo(
                 model_id=model_id,
@@ -162,6 +191,22 @@ def list_staged_models(
                 size_bytes=_directory_size_bytes(entry),
                 last_used_epoch_seconds=_last_used_epoch_seconds(entry),
                 in_use=entry.name in in_use_directory_names,
+                installed_identity=(
+                    installed.installed_identity if installed is not None else None
+                ),
+                manifest_sha256=(
+                    installed.manifest_sha256 if installed is not None else None
+                ),
+                verification_state=(
+                    installed.verification if installed is not None else "unresolved"
+                ),
+                manifest_complete=manifest_complete,
+                artifact_role=(
+                    installed.artifact_role if installed is not None else None
+                ),
+                owner_model_id=(
+                    installed.owner_model_id if installed is not None else None
+                ),
             )
         )
     staged.sort(key=lambda info: info.last_used_epoch_seconds, reverse=True)

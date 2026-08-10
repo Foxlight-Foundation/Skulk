@@ -196,6 +196,15 @@ class DownloadStoreConfig(FrozenModel):
 
 
 @final
+class ReconciliationStoreConfig(FrozenModel):
+    """Automatic node-cache inventory and canonical-store import policy."""
+
+    enabled: bool = True
+    inventory_only: bool = False
+    interval_seconds: int = Field(default=300, ge=30)
+
+
+@final
 class NodeOverrideConfig(FrozenModel):
     """Per-node configuration overrides.
 
@@ -258,6 +267,7 @@ class ModelStoreConfig(FrozenModel):
     store_path: str
     download: DownloadStoreConfig = DownloadStoreConfig()
     staging: StagingNodeConfig = StagingNodeConfig()
+    reconciliation: ReconciliationStoreConfig = ReconciliationStoreConfig()
     node_overrides: dict[str, NodeOverrideConfig] = {}
 
 
@@ -279,7 +289,9 @@ class TailscaleConnectivityConfig(FrozenModel):
             ``SKULK_BOOTSTRAP_PEERS``.
     """
 
-    enabled: bool = Field(default=True, description="Master switch for Tailscale-aware behaviour.")
+    enabled: bool = Field(
+        default=True, description="Master switch for Tailscale-aware behaviour."
+    )
     bootstrap_peers: list[str] = Field(
         default_factory=list,
         description="libp2p multiaddrs with Tailscale IPs, e.g. /ip4/100.x.x.x/tcp/52416.",
@@ -552,10 +564,7 @@ def resolve_node_staging(
     for key, override in config.node_overrides.items():
         key_matches_node = key == node_id
         key_matches_hostname = _normalize_hostname(key) in local_hostname_aliases
-        if (
-            override.staging is not None
-            and (key_matches_node or key_matches_hostname)
-        ):
+        if override.staging is not None and (key_matches_node or key_matches_hostname):
             # Merge: start from the base config and overlay only the fields
             # that the override explicitly sets, so a partial override like
             # ``cleanup_on_deactivate: false`` inherits node_cache_path etc.

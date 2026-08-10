@@ -1336,6 +1336,11 @@ MTP sidecar, assistant, vision weights) currently depends on it, plus
 event-log usage and free disk on the models volume. Cluster-wide views query
 each node's API.
 
+Each staged entry also reports `installedIdentity`, `manifestSha256`,
+`verificationState`, `manifestComplete`, `artifactRole`, and `ownerModelId`.
+Directories that cannot be associated with trusted card truth appear with an
+`unresolved` verification state and are not imported or launched automatically.
+
 ```bash
 curl http://localhost:52415/store/storage
 ```
@@ -1509,6 +1514,13 @@ Each registry entry records nullable `source_revision` and `source_repository`
 metadata. Cache hits require the effective repository and revision to match, so
 an unchanged alias cannot reuse bytes from a different signed source.
 
+Entries also include the full `installed_card` record, verification state,
+artifact role and owning card, `current_registry_identity`,
+`installed_not_current`, `update_available`, active signed `advisories`,
+`cached_on_nodes` (identity, completeness, bytes, last use, and in-use state),
+and reconciliation state plus last verification time. Companion artifacts are
+first-class entries grouped under their owning base card by the dashboard.
+
 The dashboard combines registry results with `GET /v1/models` metadata so it can
 display derived tags such as `vision`, `thinking`, `embedding`, `tensor`, and
 `optiq` in the Store list.
@@ -1530,12 +1542,14 @@ immutable card ID. The store host verifies that identity against its own signed
 catalog and applies its own node-local repository-code approval before fetching
 bytes; approval on the requesting worker does not grant approval on the store.
 
-The optional JSON body accepts `gguf_file` and `source_revision`:
+The optional JSON body accepts `gguf_file`, `source_revision`, and an immutable
+`registry_card_id`:
 
 ```json
 {
   "gguf_file": "<repo-relative path>",
-  "source_revision": "0123456789abcdef0123456789abcdef01234567"
+  "source_revision": "0123456789abcdef0123456789abcdef01234567",
+  "registry_card_id": "card_<content-derived-id>"
 }
 ```
 
@@ -1547,6 +1561,37 @@ omitting `source_revision` follows mutable `main`. A GGUF pin naming a file not
 present in the selected revision falls back to the default at the store protocol
 layer; the `/models/add` card-building endpoint validates exact pins before
 requesting a download.
+
+When `registry_card_id` is omitted, Skulk selects the current card for backward
+compatibility. Supplying it requests that exact immutable generation.
+
+### Reconciliation status
+
+**GET** `/store/reconciliation`
+
+Returns `state`, `inventory_only`, scanned node and discovered/imported artifact
+counts, pending identities, failures, and `last_verified_at`.
+
+**POST** `/store/reconciliation/rescan`
+
+Runs one immediate retry. This mutation accepts only a loopback socket peer,
+rejects proxy forwarding headers, and requires a loopback browser origin when
+an `Origin` header is present.
+
+### Internal cache export
+
+**POST** `/store/internal/exports`
+
+Creates a random short-lived capability bound to one installed identity,
+manifest digest, target store node, byte ceiling, and expiry. The caller's
+socket address must also match an advertised interface of the claimed store
+node; the node-id field and header are not accepted as self-asserted identity.
+
+**GET** `/store/internal/exports/{capability_token}/{relative_path}`
+
+Serves only paths in the granted manifest, requires the bound target-node
+header, and supports HTTP byte ranges for restart recovery. These endpoints are
+internal reconciliation transport, not a public model-download API.
 
 ### Store download status
 
@@ -1609,6 +1654,12 @@ Important fields:
 | `registry_card_id` | string or null | Immutable content-derived card identity from the signed registry |
 | `registry_snapshot_id` | string or null | Signed catalog snapshot that supplied the card |
 | `registry_provenance` | string or null | Audited signed-registry origin (`foxlight`, `agent`, or `community`); null for bundled/custom cards |
+| `installed` | boolean | Whether this node has a complete active installed generation |
+| `active_installed_identity` | string or null | Durable generation identity this node will launch |
+| `installed_verification` | string or null | `registry_verified`, `local_legacy`, `custom`, or `unresolved` |
+| `current_registry_identity` | string or null | Current signed identity for the alias, which may differ from the active install |
+| `update_available` | boolean | A newer signed generation exists but is not active until transfer commits |
+| `advisories` | array | Active signed warn-only security notices affecting the installed or current card |
 | `remote_code_approval_required` | boolean | Whether the registry artifact or its selected platform loader can execute repository Python and needs local approval |
 | `remote_code_approved_on_this_node` | boolean | Whether that immutable card is approved on the responding node |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |

@@ -193,6 +193,39 @@ async def test_store_host_binds_approval_to_exact_artifact(
 
 
 @pytest.mark.anyio
+async def test_store_host_binds_companion_to_full_owning_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A companion repository retains and is authorized by its owning card."""
+    payload = _registry_card().model_dump(mode="json")
+    payload["trust_remote_code"] = False
+    payload["runtime"] = {
+        "mtp_sidecar_repo": "org/model-mtp",
+        "mtp_sidecar_revision": "c" * 40,
+        "mtp_heads": True,
+    }
+    owner = ModelCard.model_validate(payload)
+
+    async def cards() -> list[ModelCard]:
+        return [owner]
+
+    monkeypatch.setattr(model_store_server_module, "get_all_model_cards", cards)
+
+    retained = await ModelStoreServer._require_remote_code_download_approval(
+        "org/model-mtp",
+        None,
+        source_repository="org/model-mtp",
+        source_revision="c" * 40,
+        pinned_gguf=None,
+        owner_model_id=str(owner.model_id),
+        owner_registry_card_id=owner.registry_card_id,
+        artifact_role="mtp_sidecar",
+    )
+
+    assert retained == owner
+
+
+@pytest.mark.anyio
 async def test_store_client_sends_requested_gguf_pin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

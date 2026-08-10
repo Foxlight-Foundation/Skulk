@@ -6,7 +6,7 @@ import struct
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from enum import Enum
-from typing import Annotated, Any, Final, Literal, NamedTuple, cast
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NamedTuple, cast
 
 import aiofiles
 import aiofiles.os as aios
@@ -42,6 +42,7 @@ from skulk.shared.constants import (
 )
 from skulk.shared.models.registry import (
     EMBEDDED_REGISTRY_ROOT,
+    RegistryAdvisory,
     RegistryCatalog,
     TufRegistryClient,
 )
@@ -49,6 +50,9 @@ from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import ReasoningEffort
 from skulk.utils.pydantic_ext import CamelCaseModel, FrozenModel
+
+if TYPE_CHECKING:
+    from skulk.store.installed_cards import InstalledCardRecord
 
 # Revision of the machine card generator (`fetch_from_hf`). Bump whenever the
 # GENERATED output changes in a way that makes previously generated cards
@@ -74,6 +78,10 @@ _BUILTIN_CARD_DIRS = [
 ]
 
 _card_cache: dict[ModelId, "ModelCard"] = {}
+_installed_card_cache: dict[ModelId, "InstalledCardRecord"] = {}
+_installed_current_registry_ids: dict[ModelId, str | None] = {}
+_registry_advisories: tuple[RegistryAdvisory, ...] = ()
+_registry_current_cards: dict[ModelId, "ModelCard"] = {}
 _registry_refresh_lock = asyncio.Lock()
 _last_registry_refresh = 0.0
 _last_registry_miss_refresh = 0.0
@@ -141,6 +149,7 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
 
 async def _load_cards_from_registry() -> bool:
     """Refresh a complete registry snapshot and report whether it is authoritative."""
+    _registry_current_cards.clear()
     if not _registry_enabled():
         return False
     try:
@@ -157,16 +166,24 @@ async def _load_cards_from_registry() -> bool:
             if card.registry_card_id is not None and not card.is_custom:
                 del _card_cache[model_id]
         return False
+    global _registry_advisories  # noqa: PLW0603
+    try:
+        advisories = await to_thread.run_sync(_registry_client.load_advisories)
+        _registry_advisories = tuple(
+            advisory for advisory in advisories.advisories if advisory.active
+        )
+    except Exception as error:  # noqa: BLE001 - warning channel fallback
+        logger.warning(f"signed model advisories unavailable ({error})")
     for model_id, card in tuple(_card_cache.items()):
         if not card.is_custom:
             del _card_cache[model_id]
     for card in cards:
+        _registry_current_cards[card.model_id] = card
         existing = _card_cache.get(card.model_id)
         if existing is None or not existing.is_custom:
             _card_cache[card.model_id] = card
     logger.info(
-        f"loaded {len(cards)} cards from signed registry snapshot "
-        f"{catalog.snapshot_id}"
+        f"loaded {len(cards)} cards from signed registry snapshot {catalog.snapshot_id}"
     )
     return True
 
@@ -262,12 +279,84 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
 
 async def _refresh_card_cache() -> None:
     global _last_registry_refresh  # noqa: PLW0603
+    # Installed truth is made available before any network/TUF work so an
+    # air-gapped restart never depends on registry freshness. It is applied
+    # again after catalog discovery to keep the installed generation active
+    # while retaining the newer signed card as update information.
+    await to_thread.run_sync(_load_cards_from_installed_artifacts)
     registry_loaded = await _load_cards_from_registry()
     if not registry_loaded:
         for path in _BUILTIN_CARD_DIRS:
             await _load_cards_from_dir(path, is_custom=False)
+    await to_thread.run_sync(_load_cards_from_installed_artifacts)
     await _load_cards_from_dir(_custom_cards_dir, is_custom=True)
     _last_registry_refresh = time.monotonic()
+
+
+def _load_cards_from_installed_artifacts() -> None:
+    """Load complete artifact-owned cards after catalog discovery.
+
+    An installed generation remains the active generation until its replacement
+    has been completely staged.  Consequently a newer registry card is update
+    information, not permission to reinterpret existing bytes.  Custom cards
+    still load last and preserve their explicit operator precedence.
+    """
+
+    from skulk.shared import constants
+    from skulk.store.installed_cards import discover_installed_cards
+
+    roots = [constants.SKULK_MODELS_DIR]
+    roots.extend(constants.SKULK_MODELS_PATH or ())
+    discovered = discover_installed_cards(roots)
+    _installed_card_cache.clear()
+    _installed_current_registry_ids.clear()
+    for record in discovered:
+        model_id = ModelId(record.owner_model_id or record.artifact_model_id)
+        if record.artifact_role != "base":
+            continue
+        existing = _card_cache.get(model_id)
+        _installed_card_cache[model_id] = record
+        _installed_current_registry_ids[model_id] = (
+            existing.registry_card_id if existing is not None else None
+        )
+        if existing is not None and existing.is_custom:
+            continue
+        if (
+            existing is not None
+            and existing.registry_card_id is not None
+            and existing.registry_card_id == record.model_card.registry_card_id
+        ):
+            continue
+        _card_cache[model_id] = record.model_card
+
+
+def get_installed_card_record(model_id: ModelId) -> "InstalledCardRecord | None":
+    """Return the active installed record for ``model_id``, when discovered."""
+
+    return _installed_card_cache.get(model_id)
+
+
+def get_current_registry_card_id(model_id: ModelId) -> str | None:
+    """Return the current signed identity observed beside an installed model."""
+
+    return _installed_current_registry_ids.get(model_id)
+
+
+def get_current_registry_card(model_id: ModelId) -> "ModelCard | None":
+    """Return signed current truth even when an older install remains active."""
+
+    return _registry_current_cards.get(model_id)
+
+
+def get_model_advisories(model_card: "ModelCard") -> tuple[RegistryAdvisory, ...]:
+    """Return active signed warnings affecting one card or alias."""
+
+    return tuple(
+        advisory
+        for advisory in _registry_advisories
+        if model_card.registry_card_id in advisory.affected_card_ids
+        or str(model_card.model_id) in advisory.affected_model_aliases
+    )
 
 
 def _is_image_card(card: "ModelCard") -> bool:
@@ -297,23 +386,17 @@ def same_model_artifact(existing: "ModelCard", expected: "ModelCard") -> bool:
 
 async def _refresh_card_cache_if_due() -> None:
     """Refresh catalog state at most once per configured interval."""
-    refresh_due = (
-        not _card_cache
-        or (
-            _registry_enabled()
-            and time.monotonic() - _last_registry_refresh
-            >= SKULK_MODEL_REGISTRY_REFRESH_SECONDS
-        )
+    refresh_due = not _card_cache or (
+        _registry_enabled()
+        and time.monotonic() - _last_registry_refresh
+        >= SKULK_MODEL_REGISTRY_REFRESH_SECONDS
     )
     if refresh_due:
         async with _registry_refresh_lock:
-            refresh_still_due = (
-                not _card_cache
-                or (
-                    _registry_enabled()
-                    and time.monotonic() - _last_registry_refresh
-                    >= SKULK_MODEL_REGISTRY_REFRESH_SECONDS
-                )
+            refresh_still_due = not _card_cache or (
+                _registry_enabled()
+                and time.monotonic() - _last_registry_refresh
+                >= SKULK_MODEL_REGISTRY_REFRESH_SECONDS
             )
             if refresh_still_due:
                 await _refresh_card_cache()
@@ -346,7 +429,11 @@ async def get_registry_card_by_id(
     global _last_registry_miss_refresh  # noqa: PLW0603
     await _refresh_card_cache_if_due()
     card = next(
-        (candidate for candidate in _card_cache.values() if candidate.registry_card_id == card_id),
+        (
+            candidate
+            for candidate in _card_cache.values()
+            if candidate.registry_card_id == card_id
+        ),
         None,
     )
     if card is not None or not refresh_on_miss or not _registry_enabled():
@@ -361,7 +448,10 @@ async def get_registry_card_by_id(
             None,
         )
         now = time.monotonic()
-        if card is not None or now - _last_registry_miss_refresh < _REGISTRY_MISS_REFRESH_SECONDS:
+        if (
+            card is not None
+            or now - _last_registry_miss_refresh < _REGISTRY_MISS_REFRESH_SECONDS
+        ):
             return card
         _last_registry_miss_refresh = now
         await _refresh_card_cache()
@@ -533,17 +623,13 @@ class VisionCardConfig(CamelCaseModel):
     weights_repo: str = ""
     """Repo holding the vision-tower weights when separate from the LM; empty if
     bundled with the main weights."""
-    weights_revision: Annotated[
-        str, Field(pattern=r"^[0-9a-f]{40}$")
-    ] | None = None
+    weights_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")] | None = None
     """Immutable commit for a separate ``weights_repo``."""
     image_token: str | None = None
     """The literal image placeholder string, when distinct from ``image_token_id``."""
     processor_repo: str | None = None
     """Repo providing the image processor/preprocessor config, if not the main repo."""
-    processor_revision: Annotated[
-        str, Field(pattern=r"^[0-9a-f]{40}$")
-    ] | None = None
+    processor_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")] | None = None
     """Immutable commit for ``processor_repo``. Signed registry cards require
     this whenever a separate processor repository can supply executable code."""
     boi_token_id: int | None = None
@@ -748,9 +834,7 @@ class AudioCardConfig(CamelCaseModel):
             return ()
         if not isinstance(value, Iterable) or isinstance(value, (str, bytes)):
             raise ValueError("voices must be a list of non-empty identifiers")
-        voices = tuple(
-            str(item).strip() for item in cast("Iterable[object]", value)
-        )
+        voices = tuple(str(item).strip() for item in cast("Iterable[object]", value))
         if any(not voice for voice in voices):
             raise ValueError("voices must contain only non-empty identifiers")
         if len(set(voices)) != len(voices):
@@ -970,9 +1054,7 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     The sidecar is downloaded alongside the base model weights and loaded
     into the runner for speculative decoding. Produced by SWP.
     """
-    mtp_sidecar_revision: Annotated[
-        str, Field(pattern=r"^[0-9a-f]{40}$")
-    ] | None = None
+    mtp_sidecar_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")] | None = None
     """Immutable commit for a separate ``mtp_sidecar_repo``."""
     mtp_norm_convention: Literal["zero_centered", "actual_scale"] | None = None
     """How the sidecar stores its RMSNorm weights.
@@ -1024,9 +1106,9 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     the runner — declaring it here only pre-downloads it. See the Gemma 4 MTP
     initiative in the foxlight-docs hub (Phase C).
     """
-    assistant_model_revision: Annotated[
-        str, Field(pattern=r"^[0-9a-f]{40}$")
-    ] | None = None
+    assistant_model_revision: (
+        Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")] | None
+    ) = None
     """Immutable commit for a separate ``assistant_model_repo``."""
     served_spec_type: (
         Literal[
@@ -1072,9 +1154,9 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     ``draft_mtp`` leave this unset (heads are in the base GGUF). When set, the
     draft GGUF is downloaded as a companion alongside the base and passed as
     ``--model-draft``. Pairs with ``served_spec_draft_file``."""
-    served_spec_draft_revision: Annotated[
-        str, Field(pattern=r"^[0-9a-f]{40}$")
-    ] | None = None
+    served_spec_draft_revision: (
+        Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")] | None
+    ) = None
     """Immutable commit for a separate ``served_spec_draft_repo``."""
     served_spec_draft_file: str | None = None
     """Repo-relative GGUF filename of the served draft model (in
@@ -1115,9 +1197,9 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     from its own Hugging Face cache at engine start (the target model still
     stages through the Skulk model store; staging the draft through the
     store as a pinned companion is a follow-up)."""
-    vllm_spec_draft_revision: Annotated[
-        str, Field(pattern=r"^[0-9a-f]{40}$")
-    ] | None = None
+    vllm_spec_draft_revision: (
+        Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")] | None
+    ) = None
     """Immutable commit supplied to vLLM for ``vllm_spec_draft_repo``."""
 
     @model_validator(mode="after")
@@ -1133,17 +1215,11 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
         custom cards deserve the same loud failure at load (PR #649 review).
         """
         if self.vllm_spec_num_tokens is not None and self.vllm_spec_method is None:
-            raise ValueError(
-                "vllm_spec_num_tokens requires vllm_spec_method"
-            )
+            raise ValueError("vllm_spec_num_tokens requires vllm_spec_method")
         if self.vllm_spec_method == "dflash" and self.vllm_spec_draft_repo is None:
-            raise ValueError(
-                "vllm_spec_method 'dflash' requires vllm_spec_draft_repo"
-            )
+            raise ValueError("vllm_spec_method 'dflash' requires vllm_spec_draft_repo")
         if self.vllm_spec_draft_repo is not None and self.vllm_spec_method != "dflash":
-            raise ValueError(
-                "vllm_spec_draft_repo requires vllm_spec_method 'dflash'"
-            )
+            raise ValueError("vllm_spec_draft_repo requires vllm_spec_method 'dflash'")
         return self
 
     @field_validator("prompt_renderer", mode="before")
@@ -1227,10 +1303,13 @@ class ModelCard(CamelCaseModel):
     (preferring a quant over BF16) so the download fetches only that quant and the
     runner loads deterministically, instead of each layer re-globbing/guessing.
     ``None`` for non-GGUF (safetensors/MLX) cards."""
-    source_revision: Annotated[
-        str,
-        Field(pattern=r"^[0-9a-f]{40}$"),
-    ] | None = None
+    source_revision: (
+        Annotated[
+            str,
+            Field(pattern=r"^[0-9a-f]{40}$"),
+        ]
+        | None
+    ) = None
     """Immutable Hugging Face commit for this card's model artifacts.
 
     ``None`` preserves the historical behavior of resolving the repository's
@@ -1298,9 +1377,9 @@ class ModelCard(CamelCaseModel):
             )
         return self
 
-    registry_card_id: Annotated[
-        str, Field(pattern=r"^card_[a-z2-7]{52}$")
-    ] | None = None
+    registry_card_id: Annotated[str, Field(pattern=r"^card_[a-z2-7]{52}$")] | None = (
+        None
+    )
     """Immutable content-derived registry card id, or ``None`` for local cards."""
     registry_snapshot_id: str | None = None
     """Signed registry snapshot that supplied this runtime card."""
@@ -1535,8 +1614,10 @@ class ModelCard(CamelCaseModel):
         except (FileNotFoundError, ValidationError):
             config_data = None
 
-        if config_data is not None and config_data.layer_count and (
-            config_data.hidden_size
+        if (
+            config_data is not None
+            and config_data.layer_count
+            and (config_data.hidden_size)
         ):
             n_layers = config_data.layer_count
             hidden_size = config_data.hidden_size
@@ -1577,7 +1658,9 @@ class ModelCard(CamelCaseModel):
         # and never needs image_token_id, and an empty model_type routes it to the
         # general multimodal handler. The mmproj weights are fetched via the
         # projector glob in gguf_allow_patterns, not from config.json.
-        vision = getattr(config_data, "vision", None) if config_data is not None else None
+        vision = (
+            getattr(config_data, "vision", None) if config_data is not None else None
+        )
         if vision is None and gguf_repo_has_projector(model_id, source_revision):
             logger.info(
                 f"GGUF repo {model_id} ships an mmproj projector but no vision "
@@ -1665,9 +1748,7 @@ def preserve_generated_card_constraints(
     ):
         return generated
     placement = generated.placement.model_copy(
-        update={
-            "max_pipeline_split_layer": bundled.placement.max_pipeline_split_layer
-        }
+        update={"max_pipeline_split_layer": bundled.placement.max_pipeline_split_layer}
     )
     return generated.model_copy(update={"placement": placement})
 
@@ -1862,9 +1943,7 @@ def gguf_repo_has_projector(
     """
     try:
         info = (
-            model_info(
-                model_id, revision=source_revision, files_metadata=True
-            )
+            model_info(model_id, revision=source_revision, files_metadata=True)
             if source_revision is not None
             else model_info(model_id, files_metadata=True)
         )
@@ -2022,9 +2101,7 @@ def select_requested_gguf(
     # Backends open the first shard and discover the remaining files from it.
     # Preserve the selected quant group while normalizing a pasted later shard
     # to the same entrypoint used by automatic GGUF selection.
-    return min(
-        name for name in available if _gguf_shard_base(name) == requested_group
-    )
+    return min(name for name in available if _gguf_shard_base(name) == requested_group)
 
 
 # Glob for the multimodal projector a vision GGUF repo ships alongside the LM

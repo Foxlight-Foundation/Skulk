@@ -158,8 +158,11 @@ async def test_direct_download_admission_and_transfer_are_serialized(
         maximum_active_transfers = max(maximum_active_transfers, active_transfers)
         await asyncio.sleep(0.01)
         active_transfers -= 1
+        model_path = tmp_path / str(shard.model_card.model_id).replace("/", "--")
+        model_path.mkdir(parents=True, exist_ok=True)
+        (model_path / "weights.bin").write_bytes(b"complete")
         return (
-            tmp_path / str(shard.model_card.model_id).replace("/", "--"),
+            model_path,
             RepoDownloadProgress(
                 repo_id=shard.model_card.model_id,
                 repo_revision="main",

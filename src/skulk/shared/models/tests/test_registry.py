@@ -8,6 +8,7 @@ from typing import cast
 import pytest
 
 import skulk.download.download_utils as download_utils
+import skulk.shared.constants as constants_module
 import skulk.shared.models.model_cards as model_cards_module
 import skulk.shared.models.registry as registry_module
 from skulk.shared.models.model_cards import ModelCard, ModelTask, registry_model_cards
@@ -19,6 +20,10 @@ from skulk.shared.models.registry import (
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.shards import PipelineShardMetadata
+from skulk.store.installed_cards import (
+    build_installed_card_record,
+    write_installed_card,
+)
 
 
 def _catalog_payload() -> bytes:
@@ -193,6 +198,52 @@ def test_offline_mode_disables_registry_network_refresh(
     monkeypatch.setattr(model_cards_module, "SKULK_OFFLINE", True)
 
     assert not model_cards_module._registry_enabled()
+
+
+@pytest.mark.asyncio
+async def test_air_gap_restart_loads_installed_card_without_registry_lkg(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Complete installed bytes remain usable after registry cache expiry."""
+    card = registry_model_cards(
+        RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    )[0]
+    artifact = tmp_path / card.model_id.normalize()
+    artifact.mkdir()
+    (artifact / "model-Q4_K_M.gguf").write_bytes(b"weights")
+    (artifact / ".skulk-source-revision").write_text(f"{card.source_revision}\n")
+    write_installed_card(
+        artifact,
+        build_installed_card_record(artifact, card),
+    )
+
+    async def _registry_unavailable() -> bool:
+        return False
+
+    async def _no_cards(_path: object, *, is_custom: bool) -> None:
+        del is_custom
+
+    original_cache = dict(model_cards_module._card_cache)
+    original_installed = dict(model_cards_module._installed_card_cache)
+    model_cards_module._card_cache.clear()
+    monkeypatch.setattr(constants_module, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(constants_module, "SKULK_MODELS_PATH", None)
+    monkeypatch.setattr(
+        model_cards_module, "_load_cards_from_registry", _registry_unavailable
+    )
+    monkeypatch.setattr(model_cards_module, "_load_cards_from_dir", _no_cards)
+    try:
+        await model_cards_module._refresh_card_cache()
+        assert model_cards_module.get_card(card.model_id) == card
+        installed = model_cards_module.get_installed_card_record(card.model_id)
+        assert installed is not None
+        assert installed.installed_identity == card.registry_card_id
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+        model_cards_module._installed_card_cache.clear()
+        model_cards_module._installed_card_cache.update(original_installed)
 
 
 def test_client_uses_hash_bound_last_known_good(

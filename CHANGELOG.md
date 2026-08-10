@@ -9,6 +9,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Model artifacts are now self-describing and air-gap durable: canonical and
+  staged copies retain their complete model card, immutable selection,
+  verification state, companion ownership, and SHA-256 manifest in an atomic
+  installed-card sidecar. The authoritative store automatically inventories
+  existing node caches and can import missing artifacts through resumable,
+  capability-bound peer transfers without returning to Hugging Face. The Model
+  Store dashboard exposes cache placement, verified versus local-legacy truth,
+  reconciliation progress, available updates, and signed warn-only advisories.
+
 - The dashboard voice loop now narrates code blocks: when a fenced code block
   streams during live generation, the assistant voice speaks a short opener,
   occasional fillers while the block streams, and a closer when it ends,

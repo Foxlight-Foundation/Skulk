@@ -25,6 +25,11 @@ from skulk.shared.types.worker.shards import (
     PipelineShardMetadata,
     ShardMetadata,
 )
+from skulk.store.installed_cards import (
+    build_installed_card_record,
+    companion_artifact_role,
+    write_installed_card,
+)
 from skulk.store.staging_eviction import MINIMUM_STAGING_FREE_DISK_BYTES
 
 
@@ -181,9 +186,7 @@ class ResumableShardDownloader(ShardDownloader):
         free_bytes = await asyncio.to_thread(
             lambda: shutil.disk_usage(target_directory).free
         )
-        required_free_bytes = (
-            additional_bytes + MINIMUM_STAGING_FREE_DISK_BYTES
-        )
+        required_free_bytes = additional_bytes + MINIMUM_STAGING_FREE_DISK_BYTES
         if free_bytes < required_free_bytes:
             raise DirectDownloadCapacityError(
                 f"Insufficient Hugging Face model-cache disk capacity: need "
@@ -201,9 +204,7 @@ class ResumableShardDownloader(ShardDownloader):
     ) -> tuple[Path, RepoDownloadProgress]:
         """Serialize exact capacity admission with one direct transfer."""
 
-        preflight: DownloadCapacityPreflight = (
-            self._ensure_direct_download_capacity
-        )
+        preflight: DownloadCapacityPreflight = self._ensure_direct_download_capacity
         async with self._direct_transfer_lock:
             return await download_shard(
                 shard,
@@ -246,7 +247,10 @@ class ResumableShardDownloader(ShardDownloader):
                 shard.model_card
             ):
                 try:
-                    _, companion_progress = await self._download_with_capacity(
+                    (
+                        companion_path,
+                        companion_progress,
+                    ) = await self._download_with_capacity(
                         companion_shard,
                         allow_patterns=allow,
                     )
@@ -261,6 +265,30 @@ class ResumableShardDownloader(ShardDownloader):
                             f"download (status="
                             f"{companion_progress.status!r})"
                         )
+                    if companion_progress.status == "complete":
+                        repository = str(companion_shard.model_card.model_id)
+                        role = companion_artifact_role(shard.model_card, repository)
+                        companion_directory = (
+                            companion_path.parent
+                            if companion_path.is_file()
+                            else companion_path
+                        )
+                        record = await asyncio.to_thread(
+                            build_installed_card_record,
+                            companion_directory,
+                            shard.model_card,
+                            artifact_role=role,
+                            artifact_model_id=repository,
+                            owner_model_id=str(shard.model_card.model_id),
+                            owner_card_id=shard.model_card.registry_card_id,
+                            artifact_repository=repository,
+                            artifact_revision=companion_shard.model_card.source_revision,
+                        )
+                        await asyncio.to_thread(
+                            write_installed_card,
+                            companion_directory,
+                            record,
+                        )
                 except Exception as error:
                     if required:
                         # Split vision weights are load-bearing: a vision
@@ -273,10 +301,19 @@ class ResumableShardDownloader(ShardDownloader):
                         "will be unavailable on this node."
                     )
 
-        target_dir, _ = await self._download_with_capacity(
+        target_dir, base_progress = await self._download_with_capacity(
             shard,
             allow_patterns=allow_patterns,
         )
+
+        if not config_only and base_progress.status == "complete":
+            artifact_directory = target_dir.parent if target_dir.is_file() else target_dir
+            record = await asyncio.to_thread(
+                build_installed_card_record,
+                artifact_directory,
+                shard.model_card,
+            )
+            await asyncio.to_thread(write_installed_card, artifact_directory, record)
 
         return target_dir
 

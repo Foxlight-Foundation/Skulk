@@ -1024,6 +1024,23 @@ Models live under `SKULK_MODELS_DIR`: by default that resolves to `SKULK_DATA_HO
 
 For multi-node deployments, a model store hosts canonical model artifacts on one machine. Other nodes stage from the store (rsync-like) rather than each downloading from Hugging Face independently. A fresh install initially configures its local node as a bootstrap store so one-node operation works immediately. When independently installed nodes form a cluster, the elected master's state-sync response carries its routable store address; followers retry through the startup window, persist that authoritative config, stop superseded local store servers, and atomically repoint their API and worker store clients. This turns several bootstrap stores into one source of truth without installer-time inventory. An explicit shared `store_host` on every node overrides which machine election starts from.
 
+Every complete canonical and staged artifact is self-describing through a
+versioned `.skulk/installed-card.json` sidecar containing the full card and a
+SHA-256 manifest. Startup resolves installed generations before registry
+access, so air-gapped nodes keep serving complete local artifacts indefinitely.
+Registry changes are update information: the active installed generation does
+not switch until the replacement generation has transferred, verified, and
+published atomically.
+
+The store host runs a background reconciler that polls bounded per-node cache
+inventories outside event-sourced State. Missing canonical artifacts are pulled
+from healthy node caches with target-bound, expiring capability tokens and
+range-capable per-file HTTP. Imports share the normal store publication lock,
+verify the complete manifest in a temporary directory, and preserve both the
+source cache and old canonical generation until commit. Signed registry
+advisories ride as `v1/advisories.json`; they are operator warnings only and
+never participate in download, placement, or runner enforcement.
+
 On the store host itself, staging hardlinks the store's files into the staging directory instead of copying them (store files are immutable once registered, and staged files are never mutated in place), so a model staged on the same filesystem as its canonical copy costs no extra disk; a filesystem that cannot link falls back to a real copy. When a model is missing from the store, the node asks the store host to fetch it from Hugging Face and then stages from the store, keeping the store the single source of truth. A node that cannot reach the store at all is handled differently: rather than starving with a working internet path, it downloads directly from Hugging Face (preserving any pinned source revision) and logs the topology problem loudly. That is the expected shape for a remote fabric member whose route to the home store does not exist; on a node that should reach the store, the same log line is the cue to fix the route. See [Model Store](model-store) for setup details.
 
 A model card can bind its artifacts to an immutable Hugging Face commit through `source_revision`, and the repository plus pin are artifact identity rather than download hints. Metadata probes and byte downloads read from exactly that source, the store registry persists both values, and every staged copy records the revision in an on-disk marker; a staged or canonical directory carrying a different source identity is the wrong artifact and is replaced rather than reused, with the replacement landing only after the requested artifact has fully downloaded so a failed fetch never destroys the previous copy. Pinned models load from revision- and source-qualified canonical directories, so pinned bytes never occupy the mutable-`main` path and a changed upstream `main` can never silently substitute different weights for a qualified artifact.

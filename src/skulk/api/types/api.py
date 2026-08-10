@@ -7,11 +7,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from skulk.shared.models.capabilities import ResolvedCapabilityProfile
 from skulk.shared.models.model_cards import AudioResponseFormat, ModelCard, ModelId
+from skulk.shared.models.registry import RegistryAdvisory
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import ReasoningEffort
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from skulk.shared.types.worker.shards import Sharding, ShardMetadata
+from skulk.store.installed_cards import InstalledCardRecord
 from skulk.store.staging_eviction import StagedModelInfo
 from skulk.utils.pydantic_ext import CamelCaseModel
 
@@ -148,6 +150,32 @@ class ModelListModel(BaseModel):
             "Audited signed-registry origin, or null for bundled and custom cards."
         ),
     )
+    installed: bool = Field(
+        default=False,
+        description="Whether this node has an active complete installed generation.",
+    )
+    active_installed_identity: str | None = Field(
+        default=None,
+        description="Durable identity of the generation this node will launch.",
+    )
+    installed_verification: (
+        Literal["registry_verified", "local_legacy", "custom", "unresolved"] | None
+    ) = Field(
+        default=None,
+        description="Evidence level binding the active card to local artifact bytes.",
+    )
+    current_registry_identity: str | None = Field(
+        default=None,
+        description="Current signed card identity for this alias, when available.",
+    )
+    update_available: bool = Field(
+        default=False,
+        description="Whether registry truth names a newer generation than the active installation.",
+    )
+    advisories: list[RegistryAdvisory] = Field(
+        default_factory=list,
+        description="Active signed warnings affecting this installed or current card.",
+    )
     catalog_source: Literal["registry", "bundled", "custom"] = Field(
         default="bundled",
         description="Trust and precedence source for this catalog entry.",
@@ -226,7 +254,10 @@ class RemoteCodeApprovalView(BaseModel):
 class ResolvedModelCapabilities(BaseModel):
     """Normalized runtime behavior that UI and API consumers can safely inspect."""
 
-    family: str = Field(default="", description="Resolved model family used for runtime behavior decisions.")
+    family: str = Field(
+        default="",
+        description="Resolved model family used for runtime behavior decisions.",
+    )
     supports_thinking: bool = Field(
         default=False,
         description="Whether the runtime expects the model to expose a reasoning or thinking mode.",
@@ -359,7 +390,9 @@ class ReasoningCapabilitySection(BaseModel):
     disabled_effort: ReasoningEffort | None = None
 
     @classmethod
-    def from_model_card(cls, model_card: ModelCard) -> "ReasoningCapabilitySection | None":
+    def from_model_card(
+        cls, model_card: ModelCard
+    ) -> "ReasoningCapabilitySection | None":
         config = model_card.reasoning
         if config is None:
             return None
@@ -379,7 +412,9 @@ class ModalitiesCapabilitySection(BaseModel):
     supports_native_multimodal: bool | None = None
 
     @classmethod
-    def from_model_card(cls, model_card: ModelCard) -> "ModalitiesCapabilitySection | None":
+    def from_model_card(
+        cls, model_card: ModelCard
+    ) -> "ModalitiesCapabilitySection | None":
         config = model_card.modalities
         if config is None:
             return None
@@ -472,7 +507,9 @@ class ToolingCapabilitySection(BaseModel):
     tool_call_format: str | None = None
 
     @classmethod
-    def from_model_card(cls, model_card: ModelCard) -> "ToolingCapabilitySection | None":
+    def from_model_card(
+        cls, model_card: ModelCard
+    ) -> "ToolingCapabilitySection | None":
         config = model_card.tooling
         if config is None:
             return None
@@ -547,7 +584,9 @@ class RuntimeCapabilitySection(BaseModel):
     )
 
     @classmethod
-    def from_model_card(cls, model_card: ModelCard) -> "RuntimeCapabilitySection | None":
+    def from_model_card(
+        cls, model_card: ModelCard
+    ) -> "RuntimeCapabilitySection | None":
         config = model_card.runtime
         if config is None:
             return None
@@ -651,9 +690,7 @@ class OpenUrlToolResponse(BaseModel):
     """Structured response returned by the generic URL-open tool endpoint."""
 
     url: str = Field(description="Original URL requested by the caller.")
-    final_url: str = Field(
-        description="Final URL after redirects were followed."
-    )
+    final_url: str = Field(description="Final URL after redirects were followed.")
     title: str | None = Field(
         default=None,
         description="Best-effort page title when one could be determined.",
@@ -689,9 +726,7 @@ class ExtractPageToolResponse(BaseModel):
     """Structured response returned by the generic page-extraction tool endpoint."""
 
     url: str = Field(description="Original URL requested by the caller.")
-    final_url: str = Field(
-        description="Final URL after redirects were followed."
-    )
+    final_url: str = Field(description="Final URL after redirects were followed.")
     title: str | None = Field(
         default=None,
         description="Best-effort page title when one could be determined.",
@@ -1029,9 +1064,13 @@ class GgufQuantOption(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True)
 
-    gguf_file: str = Field(description="Repo-relative first shard of the quant's group; pin this to download it.")
+    gguf_file: str = Field(
+        description="Repo-relative first shard of the quant's group; pin this to download it."
+    )
     label: str = Field(description="Human quant label, e.g. Q4_K_M or UD-Q2_K_XL.")
-    total_bytes: int = Field(description="Exact total bytes of the quant's shard group.")
+    total_bytes: int = Field(
+        description="Exact total bytes of the quant's shard group."
+    )
     shard_count: int = Field(description="Number of GGUF shards in the group.")
 
 
@@ -1075,6 +1114,53 @@ class StoreDownloadRequest(BaseModel):
             "repository's mutable main branch."
         ),
     )
+    registry_card_id: str | None = Field(
+        default=None,
+        pattern=r"^card_[a-z2-7]{52}$",
+        description=(
+            "Optional immutable signed card identity. Omit to select the current "
+            "card for the model alias."
+        ),
+    )
+
+
+class ArtifactExportRequest(BaseModel):
+    """Request a short-lived capability for one exact staged artifact."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    installed_identity: str = Field(description="Installed generation to export.")
+    manifest_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+        description="Exact manifest digest the store intends to import.",
+    )
+    target_node_id: str = Field(description="Store node allowed to redeem the token.")
+
+
+class ArtifactExportResponse(BaseModel):
+    """Issued artifact export capability and immutable manifest."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    capability_token: str
+    expires_at_epoch_seconds: float
+    byte_ceiling: int = Field(ge=0)
+    record: InstalledCardRecord
+
+
+class ReconciliationStatus(BaseModel):
+    """Fleet cache-to-store reconciliation progress."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    state: Literal["idle", "scanning", "importing", "complete", "failed"] = "idle"
+    inventory_only: bool = True
+    scanned_nodes: int = Field(default=0, ge=0)
+    discovered_artifacts: int = Field(default=0, ge=0)
+    imported_artifacts: int = Field(default=0, ge=0)
+    pending_imports: tuple[str, ...] = ()
+    failures: tuple[str, ...] = ()
+    last_verified_at: str | None = None
 
 
 class PlaceInstanceParams(BaseModel):
@@ -1595,9 +1681,7 @@ class TraceEventResponse(CamelCaseModel):
     model_id: str | None = None
     task_kind: TraceTaskKind | None = None
     tags: list[str] = Field(default_factory=list)
-    attrs: dict[str, str | int | float | bool | list[str]] = Field(
-        default_factory=dict
-    )
+    attrs: dict[str, str | int | float | bool | list[str]] = Field(default_factory=dict)
 
 
 class TraceResponse(CamelCaseModel):
