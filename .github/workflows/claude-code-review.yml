@@ -10,6 +10,12 @@ on:
     #   - "src/**/*.js"
     #   - "src/**/*.jsx"
 
+# A new push to a PR obsoletes the in-flight review (it reviews stale code and
+# spends real Claude usage), so superseded review runs are cancelled.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   claude-review:
     # Optional: Filter by PR author

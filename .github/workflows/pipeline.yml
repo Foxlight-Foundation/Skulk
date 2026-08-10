@@ -12,6 +12,14 @@ on:
       - main
       - dev
 
+# A new push to a PR obsoletes the in-flight run's verdict, so superseded PR
+# runs are cancelled instead of running to completion. Pushes to long-lived
+# branches keep unique groups (keyed by sha) so every merge commit still gets
+# its full run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   wire-compat-guard:
     # Any PR touching the networking crate's wire surfaces must either bump
