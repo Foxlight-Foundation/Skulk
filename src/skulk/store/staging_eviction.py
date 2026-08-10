@@ -98,6 +98,12 @@ class StagedModelInfo(CamelCaseModel):
     owner_model_id: str | None = None
     """Owning base model for companion artifacts."""
 
+    owner_card_id: str | None = None
+    """Immutable owning card identity for a companion artifact."""
+
+    registry_card_id: str | None = None
+    """Registry identity retained by the artifact's full effective card."""
+
 
 def model_id_from_staging_directory_name(directory_name: str) -> str:
     """Best-effort inverse of the ``org--name`` directory sanitization.
@@ -176,7 +182,7 @@ def list_staged_models(
     for entry in staging_root.iterdir():
         if not entry.is_dir():
             continue
-        model_id = model_id_from_staging_directory_name(entry.name)
+        inferred_model_id = model_id_from_staging_directory_name(entry.name)
         try:
             installed = read_installed_card_with_fallback(entry)
         except (OSError, ValueError):
@@ -186,7 +192,11 @@ def list_staged_models(
         )
         staged.append(
             StagedModelInfo(
-                model_id=model_id,
+                model_id=(
+                    installed.artifact_model_id
+                    if installed is not None
+                    else inferred_model_id
+                ),
                 directory=str(entry),
                 size_bytes=_directory_size_bytes(entry),
                 last_used_epoch_seconds=_last_used_epoch_seconds(entry),
@@ -206,6 +216,14 @@ def list_staged_models(
                 ),
                 owner_model_id=(
                     installed.owner_model_id if installed is not None else None
+                ),
+                owner_card_id=(
+                    installed.owner_card_id if installed is not None else None
+                ),
+                registry_card_id=(
+                    installed.model_card.registry_card_id
+                    if installed is not None
+                    else None
                 ),
             )
         )

@@ -89,6 +89,17 @@ def test_custom_card_keeps_custom_verification(tmp_path: Path) -> None:
     assert record.verification == "custom"
 
 
+def test_custom_card_metadata_change_invalidates_installed_match(
+    tmp_path: Path,
+) -> None:
+    artifact = _artifact(tmp_path)
+    card = _card(registry=False, custom=True)
+    write_installed_card(artifact, build_installed_card_record(artifact, card))
+    changed_card = card.model_copy(update={"hidden_size": 2})
+
+    assert not installed_card_matches(artifact, changed_card)
+
+
 def test_sidecar_is_not_part_of_its_own_manifest(tmp_path: Path) -> None:
     artifact = _artifact(tmp_path)
     first = build_installed_card_record(artifact, _card())

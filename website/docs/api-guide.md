@@ -1338,6 +1338,9 @@ each node's API.
 
 Each staged entry also reports `installedIdentity`, `manifestSha256`,
 `verificationState`, `manifestComplete`, `artifactRole`, and `ownerModelId`.
+`registryCardId` identifies the full card retained with the bytes, while a
+companion additionally reports its immutable `ownerCardId`; reconciliation
+uses those fields to select one current generation per artifact alias.
 Directories that cannot be associated with trusted card truth appear with an
 `unresolved` verification state and are not imported or launched automatically.
 

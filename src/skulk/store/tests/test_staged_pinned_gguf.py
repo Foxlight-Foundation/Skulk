@@ -14,10 +14,15 @@ from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 from skulk.store.config import StagingNodeConfig
+from skulk.store.installed_cards import (
+    build_installed_card_record,
+    write_installed_card,
+)
 from skulk.store.model_store import ModelStore
 from skulk.store.model_store_client import (
     ModelStoreClient,
     ModelStoreDownloader,
+    _staged_generation_matches,
     _staged_pinned_gguf_missing,
 )
 
@@ -151,6 +156,31 @@ def test_pinned_shard_group_requires_every_sibling(tmp_path: Path) -> None:
 
     (weights / "model-IQ3-00002-of-00002.gguf").write_bytes(b"two")
     assert _staged_pinned_gguf_missing(shard, tmp_path) is False
+
+
+def test_sidecar_mismatch_cannot_fall_back_to_matching_revision(
+    tmp_path: Path,
+) -> None:
+    requested = _aliased_shard().model_card
+    staged = tmp_path / "org--multi-quant@iq3-xxs"
+    staged.mkdir()
+    (staged / "model-IQ3_XXS.gguf").write_bytes(b"old-generation")
+    (staged / ".skulk-source-revision").write_text(f"{'a' * 40}\n")
+    old_card = requested.model_copy(
+        update={"registry_card_id": f"card_{'b' * 52}"}
+    )
+    write_installed_card(
+        staged,
+        build_installed_card_record(staged, old_card),
+    )
+
+    assert not _staged_generation_matches(
+        staged,
+        artifact_model_id=str(requested.model_id),
+        requested_card=requested,
+        owner_card=None,
+        artifact_role="base",
+    )
 
 
 @pytest.mark.anyio

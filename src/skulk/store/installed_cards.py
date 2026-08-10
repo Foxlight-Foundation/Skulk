@@ -451,12 +451,11 @@ def installed_card_matches(
     requested_id = model_card.registry_card_id
     if requested_id is not None and record.model_card.registry_card_id == requested_id:
         return True
-    return (
-        requested_id is None
-        and record.model_card.model_id == model_card.model_id
-        and record.model_card.source_revision == model_card.source_revision
-        and record.model_card.gguf_file == model_card.gguf_file
-    )
+    # Custom cards have no content-derived registry identity, so their complete
+    # declarative contents are the generation identity. Reusing a sidecar after
+    # an operator changes runtime or capability policy would otherwise restore
+    # stale launch truth on the next air-gapped restart.
+    return requested_id is None and record.model_card == model_card
 
 
 def installed_companion_matches(

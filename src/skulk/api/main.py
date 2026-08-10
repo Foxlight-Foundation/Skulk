@@ -600,6 +600,70 @@ def _normalize_upload_content_type(content_type: str | None) -> str | None:
     return normalized or None
 
 
+def _select_reconciliation_generations(
+    replicas: dict[
+        tuple[str, str],
+        list[tuple[str, str, dict[str, object]]],
+    ],
+    current_registry_ids: dict[str, str | None],
+) -> dict[
+    tuple[str, str],
+    list[tuple[str, str, dict[str, object]]],
+]:
+    """Select exactly one deterministic cache generation per artifact alias.
+
+    Current signed card ownership wins when present. Otherwise reconciliation
+    prefers revision-verified bytes and finally the lexical installed identity
+    and manifest digest. Source-node preference is applied later within the
+    selected generation so replica health cannot change generation truth.
+    """
+
+    generations_by_artifact: dict[str, list[tuple[str, str]]] = {}
+    for generation, candidates in replicas.items():
+        if not candidates:
+            continue
+        artifact_model_id = candidates[0][2].get("modelId")
+        if isinstance(artifact_model_id, str):
+            generations_by_artifact.setdefault(artifact_model_id, []).append(
+                generation
+            )
+
+    def generation_rank(generation: tuple[str, str]) -> tuple[bool, bool, str, str]:
+        identity, digest = generation
+        candidates = replicas[generation]
+        item = candidates[0][2]
+        artifact_model_id = cast("str", item["modelId"])
+        owner_model_id = item.get("ownerModelId")
+        owner_alias = (
+            owner_model_id if isinstance(owner_model_id, str) else artifact_model_id
+        )
+        current_registry_id = current_registry_ids.get(owner_alias)
+        artifact_role = item.get("artifactRole")
+        retained_registry_id = (
+            item.get("registryCardId")
+            if artifact_role == "base" or not isinstance(artifact_role, str)
+            else item.get("ownerCardId")
+        )
+        is_current = (
+            current_registry_id is not None
+            and retained_registry_id == current_registry_id
+        )
+        is_registry_verified = any(
+            candidate[2].get("verificationState") == "registry_verified"
+            for candidate in candidates
+        )
+        return (not is_current, not is_registry_verified, identity, digest)
+
+    selected: dict[
+        tuple[str, str],
+        list[tuple[str, str, dict[str, object]]],
+    ] = {}
+    for generations in generations_by_artifact.values():
+        generation = min(generations, key=generation_rank)
+        selected[generation] = replicas[generation]
+    return selected
+
+
 def _validate_audio_upload_metadata(file: StarletteUploadFile) -> None:
     """Reject uploads whose metadata is clearly not an audio container."""
     content_type = _normalize_upload_content_type(file.content_type)
@@ -11067,9 +11131,33 @@ class API:
                                 }
                             )
                 self._cached_artifact_locations = cached_locations
+                current_registry_ids: dict[str, str | None] = {}
+                for candidates in replicas.values():
+                    if not candidates:
+                        continue
+                    item = candidates[0][2]
+                    artifact_model_id = item.get("modelId")
+                    owner_model_id = item.get("ownerModelId")
+                    owner_alias = (
+                        owner_model_id
+                        if isinstance(owner_model_id, str)
+                        else artifact_model_id
+                    )
+                    if not isinstance(owner_alias, str):
+                        continue
+                    current_card = get_current_registry_card(ModelId(owner_alias))
+                    current_registry_ids[owner_alias] = (
+                        current_card.registry_card_id
+                        if current_card is not None
+                        else None
+                    )
+                selected_replicas = _select_reconciliation_generations(
+                    replicas,
+                    current_registry_ids,
+                )
                 pending = sorted(
                     identity
-                    for identity, _digest in replicas
+                    for identity, _digest in selected_replicas
                     if identity not in existing_identities
                 )
                 imported = 0
@@ -11078,15 +11166,15 @@ class API:
                         state="importing",
                         inventory_only=False,
                         scanned_nodes=len(sources),
-                        discovered_artifacts=len(replicas),
+                        discovered_artifacts=len(selected_replicas),
                         pending_imports=tuple(pending),
                         failures=tuple(failures),
                     )
-                    for identity, digest in sorted(replicas):
+                    for identity, digest in sorted(selected_replicas):
                         if identity in existing_identities:
                             continue
                         candidates = sorted(
-                            replicas[(identity, digest)],
+                            selected_replicas[(identity, digest)],
                             key=lambda candidate: (
                                 candidate[0] != str(self.node_id),
                                 candidate[2].get("verificationState")
@@ -11143,7 +11231,7 @@ class API:
                 state=state,
                 inventory_only=inventory_only,
                 scanned_nodes=len(sources),
-                discovered_artifacts=len(replicas),
+                discovered_artifacts=len(selected_replicas),
                 imported_artifacts=imported,
                 pending_imports=remaining if not inventory_only else tuple(pending),
                 failures=tuple(failures),

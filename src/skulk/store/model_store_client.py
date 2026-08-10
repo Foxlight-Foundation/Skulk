@@ -100,6 +100,7 @@ from skulk.store.installed_cards import (
     companion_artifact_role,
     installed_card_matches,
     installed_companion_matches,
+    read_installed_card_with_fallback,
     write_installed_card_with_fallback,
 )
 from skulk.store.staging_eviction import touch_last_used
@@ -145,6 +146,39 @@ StagingCapacityPreflight = Callable[[int], Awaitable[None]]
 
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
 _SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
+
+
+def _staged_generation_matches(
+    model_directory: Path,
+    *,
+    artifact_model_id: str,
+    requested_card: ModelCard,
+    owner_card: ModelCard | None,
+    artifact_role: InstalledArtifactRole,
+) -> bool:
+    """Return whether local bytes carry the requested durable generation.
+
+    A valid installed-card sidecar is authoritative even when an older and a
+    newer card share one immutable source revision. Revision-marker matching is
+    retained only for legacy directories that genuinely predate sidecars.
+    """
+
+    try:
+        installed = read_installed_card_with_fallback(model_directory)
+    except (OSError, ValueError):
+        return False
+    if installed is not None:
+        if owner_card is not None:
+            return installed_companion_matches(
+                model_directory,
+                artifact_model_id=artifact_model_id,
+                owner_card=owner_card,
+                artifact_role=artifact_role,
+            )
+        return installed_card_matches(model_directory, requested_card)
+    return _staged_source_revision_matches(
+        model_directory, requested_card.source_revision
+    )
 
 
 class ModelNotInStoreError(Exception):
@@ -1793,20 +1827,12 @@ class ModelStoreDownloader(ShardDownloader):
             and not _staged_pinned_gguf_missing(shard, dest_path)
             and not _staged_vision_projector_missing(shard, dest_path)
             and not _staged_same_repo_draft_missing(shard, dest_path)
-            and (
-                (
-                    installed_companion_matches(
-                        dest_path,
-                        artifact_model_id=model_id,
-                        owner_card=retained_card,
-                        artifact_role=installed_artifact_role,
-                    )
-                    if installed_owner_card is not None
-                    else installed_card_matches(dest_path, shard.model_card)
-                )
-                or _staged_source_revision_matches(
-                    dest_path, shard.model_card.source_revision
-                )
+            and _staged_generation_matches(
+                dest_path,
+                artifact_model_id=model_id,
+                requested_card=shard.model_card,
+                owner_card=installed_owner_card,
+                artifact_role=installed_artifact_role,
             )
         ):
             logger.info(
