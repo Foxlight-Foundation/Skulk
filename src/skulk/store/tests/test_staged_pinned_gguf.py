@@ -285,7 +285,8 @@ async def test_staging_disabled_direct_load_does_not_probe_http(
     (direct_path / "model-IQ3_XXS.gguf").write_bytes(b"weights")
     requested_card = _shard("model-IQ3_XXS.gguf").model_card
     old_card = requested_card.model_copy(update={"family": "stale-family"})
-    ModelStore(tmp_path).register_model(
+    store = ModelStore(tmp_path)
+    store.register_model(
         _MODEL_ID,
         direct_path,
         ["model-IQ3_XXS.gguf"],
@@ -304,6 +305,25 @@ async def test_staging_disabled_direct_load_does_not_probe_http(
 
     monkeypatch.setattr(client, "fetch_registry", unexpected_registry_fetch)
     monkeypatch.setattr(client, "is_model_available", unexpected_availability_probe)
+
+    async def refresh_through_authoritative_store(
+        model_id: str,
+        **request: object,
+    ) -> bool:
+        status = await store.request_download(
+            model_id,
+            pinned_gguf=cast(str | None, request["pinned_gguf"]),
+            source_revision=cast(str | None, request["source_revision"]),
+            source_repository=cast(str | None, request["source_repository"]),
+            model_card=requested_card,
+        )
+        return status.status == "complete"
+
+    monkeypatch.setattr(
+        client,
+        "request_and_wait_for_download",
+        refresh_through_authoritative_store,
+    )
     downloader = ModelStoreDownloader(
         inner=_UnusedInnerDownloader(),
         store_client=client,

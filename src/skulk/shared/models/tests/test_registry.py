@@ -66,6 +66,33 @@ def _catalog_payload() -> bytes:
     ).encode()
 
 
+def _advisories_payload() -> bytes:
+    """Build one active signed-warning target for cache recovery tests."""
+
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "generated_at": "2026-08-10T12:00:00Z",
+            "enforcement": "warn",
+            "advisories": [
+                {
+                "schema_version": 1,
+                "advisory_id": "FLA-2026-0001",
+                "severity": "critical",
+                "title": "Test model warning",
+                "description": "Retain this warning during a registry outage.",
+                "affected_card_ids": (f"card_{'a' * 52}",),
+                "affected_model_aliases": (),
+                "active": True,
+                "created_at": "2026-08-10T12:00:00Z",
+                "updated_at": "2026-08-10T12:00:00Z",
+                "enforcement": "warn",
+                }
+            ],
+        }
+    ).encode()
+
+
 def test_registry_alias_is_separate_from_artifact_repository() -> None:
     """Two quants can use distinct runtime ids while sharing one Hub repo."""
     catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
@@ -303,6 +330,52 @@ def test_client_uses_hash_bound_last_known_good(
     (tmp_path / "cache/last-known-good-catalog.json").write_bytes(b"tampered")
     with pytest.raises(RegistryUnavailableError):
         client.load_catalog()
+
+
+def test_client_uses_hash_bound_last_known_good_advisories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verified warnings survive restart outages but not cache tampering."""
+
+    payload_path = tmp_path / "advisories.json"
+    payload_path.write_bytes(_advisories_payload())
+    embedded_root = tmp_path / "embedded-root.json"
+    embedded_root.write_text("{}")
+
+    class WorkingUpdater:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def refresh(self) -> None:
+            pass
+
+        def get_targetinfo(self, target_path: str) -> object:
+            assert target_path == "v1/advisories.json"
+            return object()
+
+        def download_target(self, _target: object) -> str:
+            return str(payload_path)
+
+    monkeypatch.setattr(registry_module, "Updater", WorkingUpdater)
+    client = TufRegistryClient(
+        base_url="https://registry.example/",
+        cache_dir=tmp_path / "cache",
+        embedded_root=embedded_root,
+        timeout_seconds=1,
+        max_stale_days=30,
+    )
+    assert client.load_advisories().advisories[0].advisory_id == "FLA-2026-0001"
+
+    class FailingUpdater(WorkingUpdater):
+        def refresh(self) -> None:
+            raise OSError("offline")
+
+    monkeypatch.setattr(registry_module, "Updater", FailingUpdater)
+    assert client.load_advisories().advisories[0].severity == "critical"
+
+    (tmp_path / "cache/last-known-good-advisories.json").write_bytes(b"tampered")
+    with pytest.raises(RegistryUnavailableError):
+        client.load_advisories()
 
 
 def test_embedded_roots_match_release_resources() -> None:

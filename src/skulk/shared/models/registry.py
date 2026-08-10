@@ -127,6 +127,15 @@ class _VerifiedCacheRecord(BaseModel):
     snapshot_id: str
 
 
+class _VerifiedAdvisoryCacheRecord(BaseModel):
+    """Local proof that cached advisory bytes passed TUF verification."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    verified_at: datetime
+
+
 class TufRegistryClient:
     """Load a signed catalog and retain a hash-bound last-known-good copy."""
 
@@ -149,6 +158,12 @@ class TufRegistryClient:
         self._targets_dir = cache_dir / "targets"
         self._last_known_good_path = cache_dir / "last-known-good-catalog.json"
         self._cache_record_path = cache_dir / "last-known-good.json"
+        self._last_known_good_advisories_path = (
+            cache_dir / "last-known-good-advisories.json"
+        )
+        self._advisory_cache_record_path = (
+            cache_dir / "last-known-good-advisories-metadata.json"
+        )
         self._lock = FileLock(str(cache_dir / "refresh.lock"))
 
     def load_catalog(
@@ -187,36 +202,55 @@ class TufRegistryClient:
                     ) from error
 
     def load_advisories(self) -> RegistryAdvisories:
-        """Refresh and verify the signed warn-only advisory target."""
+        """Refresh signed advisories or recover their bounded verified cache."""
 
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         with self._lock:
-            self._metadata_dir.mkdir(parents=True, exist_ok=True)
-            self._targets_dir.mkdir(parents=True, exist_ok=True)
-            updater = Updater(
-                metadata_dir=str(self._metadata_dir),
-                metadata_base_url=f"{self._base_url}metadata/",
-                target_dir=str(self._targets_dir),
-                target_base_url=f"{self._base_url}targets/",
-                fetcher=Urllib3Fetcher(
-                    socket_timeout=self._timeout_seconds,
-                    app_user_agent="Skulk model-registry client",
-                ),
-                bootstrap=self._embedded_root.read_bytes(),
+            try:
+                return self._refresh_advisories()
+            except Exception as error:  # noqa: BLE001 - security fallback boundary
+                try:
+                    return self._load_last_known_good_advisories()
+                except (OSError, ValueError):
+                    raise RegistryUnavailableError(
+                        "signed model advisories are unavailable and no acceptable "
+                        "last-known-good advisory target exists"
+                    ) from error
+
+    def _refresh_advisories(self) -> RegistryAdvisories:
+        """Perform a TUF refresh and retain the verified advisory target."""
+
+        self._metadata_dir.mkdir(parents=True, exist_ok=True)
+        self._targets_dir.mkdir(parents=True, exist_ok=True)
+        updater = Updater(
+            metadata_dir=str(self._metadata_dir),
+            metadata_base_url=f"{self._base_url}metadata/",
+            target_dir=str(self._targets_dir),
+            target_base_url=f"{self._base_url}targets/",
+            fetcher=Urllib3Fetcher(
+                socket_timeout=self._timeout_seconds,
+                app_user_agent="Skulk model-registry client",
+            ),
+            bootstrap=self._embedded_root.read_bytes(),
+        )
+        updater.refresh()
+        target = updater.get_targetinfo("v1/advisories.json")
+        if target is None:
+            advisories = RegistryAdvisories(
+                schema_version=1,
+                generated_at=datetime.now(UTC),
+                enforcement="warn",
+                advisories=(),
             )
-            updater.refresh()
-            target = updater.get_targetinfo("v1/advisories.json")
-            if target is None:
-                return RegistryAdvisories(
-                    schema_version=1,
-                    generated_at=datetime.now(UTC),
-                    enforcement="warn",
-                    advisories=(),
-                )
+            payload = advisories.model_dump_json().encode()
+        else:
             downloaded = Path(updater.download_target(target))
-            return RegistryAdvisories.model_validate_json(
-                downloaded.read_bytes(), strict=False
+            payload = downloaded.read_bytes()
+            advisories = RegistryAdvisories.model_validate_json(
+                payload, strict=False
             )
+        self._write_verified_advisory_cache(payload)
+        return advisories
 
     def _refresh(
         self,
@@ -264,6 +298,19 @@ class TufRegistryClient:
             record.model_dump_json().encode(),
         )
 
+    def _write_verified_advisory_cache(self, payload: bytes) -> None:
+        """Atomically retain advisory bytes that the updater just verified."""
+
+        record = _VerifiedAdvisoryCacheRecord(
+            sha256=hashlib.sha256(payload).hexdigest(),
+            verified_at=datetime.now(UTC),
+        )
+        self._atomic_write(self._last_known_good_advisories_path, payload)
+        self._atomic_write(
+            self._advisory_cache_record_path,
+            record.model_dump_json().encode(),
+        )
+
     def _load_last_known_good(
         self,
         catalog_validator: Callable[[RegistryCatalog], object] | None,
@@ -287,6 +334,23 @@ class TufRegistryClient:
         if catalog_validator is not None:
             catalog_validator(catalog)
         return catalog
+
+    def _load_last_known_good_advisories(self) -> RegistryAdvisories:
+        """Load hash-bound, previously verified, sufficiently fresh warnings."""
+
+        if self._max_stale_days == 0:
+            raise ValueError("last-known-good registry fallback is disabled")
+        record = _VerifiedAdvisoryCacheRecord.model_validate_json(
+            self._advisory_cache_record_path.read_bytes(), strict=False
+        )
+        now = datetime.now(UTC)
+        verified_at = record.verified_at.astimezone(UTC)
+        if now - verified_at > timedelta(days=self._max_stale_days):
+            raise ValueError("last-known-good model advisories are too old")
+        payload = self._last_known_good_advisories_path.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != record.sha256:
+            raise ValueError("last-known-good model advisories hash mismatch")
+        return RegistryAdvisories.model_validate_json(payload, strict=False)
 
     @staticmethod
     def _atomic_write(path: Path, payload: bytes) -> None:
