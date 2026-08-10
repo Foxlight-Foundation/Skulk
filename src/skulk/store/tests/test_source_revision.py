@@ -422,6 +422,40 @@ async def test_active_download_dedup_rejects_different_repository(
         )
 
 
+@pytest.mark.parametrize(
+    ("pinned_gguf", "extra_pinned_gguf"),
+    [
+        ("model-Q5_K_M.gguf", ["draft-Q4_K_M.gguf"]),
+        ("model-Q4_K_M.gguf", ["draft-Q5_K_M.gguf"]),
+    ],
+)
+async def test_active_download_dedup_rejects_different_file_selection(
+    tmp_path: Path,
+    pinned_gguf: str,
+    extra_pinned_gguf: list[str],
+) -> None:
+    """Concurrent requests may not reuse bytes selected by another card."""
+    store = ModelStore(tmp_path)
+    model_id = "org/model@quant"
+    store._active_downloads[model_id] = StoreDownloadStatus(
+        model_id=model_id,
+        source_revision=_NEW_REVISION,
+        source_repository="org/model",
+        pinned_gguf="model-Q4_K_M.gguf",
+        extra_pinned_gguf=("draft-Q4_K_M.gguf",),
+        status="downloading",
+    )
+
+    with pytest.raises(ValueError, match="different artifact selection"):
+        await store.request_download(
+            model_id,
+            pinned_gguf=pinned_gguf,
+            extra_pinned_gguf=extra_pinned_gguf,
+            source_revision=_NEW_REVISION,
+            source_repository="org/model",
+        )
+
+
 async def test_staging_replaces_files_from_another_revision(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -301,6 +301,8 @@ class StoreDownloadStatus:
     model_id: str
     source_revision: str | None = None
     source_repository: str | None = None
+    pinned_gguf: str | None = None
+    extra_pinned_gguf: tuple[str, ...] = ()
     status: Literal[
         "pending", "downloading", "complete", "failed", "cancelled"
     ] = "pending"
@@ -691,6 +693,7 @@ class ModelStore:
         is a distinct store and runtime alias.
         """
         requested_repository = source_repository or model_id
+        requested_companions = tuple(sorted(extra_pinned_gguf or []))
         # Checked outside the lock: it may do a (cached) repo file-list fetch, and
         # holding the download lock across network I/O would serialize unrelated
         # requests.
@@ -709,11 +712,14 @@ class ModelStore:
                     and (
                         existing.source_revision != source_revision
                         or existing_repository != requested_repository
+                        or existing.pinned_gguf != pinned_gguf
+                        or existing.extra_pinned_gguf != requested_companions
                     )
                 ):
                     raise ValueError(
-                        f"{model_id} is already downloading "
-                        f"{existing_repository}@{existing.source_revision or 'main'}"
+                        f"{model_id} is already downloading a different artifact "
+                        f"selection from {existing_repository}@"
+                        f"{existing.source_revision or 'main'}"
                     )
                 # A failed entry retries. A cached-complete entry is stale when:
                 #  - it is missing a newly-requested companion (or projector) --
@@ -804,6 +810,8 @@ class ModelStore:
                 model_id=model_id,
                 source_revision=source_revision,
                 source_repository=requested_repository,
+                pinned_gguf=pinned_gguf,
+                extra_pinned_gguf=requested_companions,
                 status="pending",
             )
             self._active_downloads[model_id] = status
