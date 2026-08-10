@@ -73,7 +73,9 @@ async def test_store_alias_download_reads_from_artifact_repository(
     await store._do_download(alias, source_repository=str(repository))
 
     assert observed == [repository, repository]
-    assert store.get_entry(alias) is not None
+    entry = store.get_entry(alias)
+    assert entry is not None
+    assert entry.source_repository == str(repository)
     assert store.get_entry(str(repository)) is None
 
 
@@ -364,6 +366,60 @@ async def test_store_redownloads_when_registered_revision_differs(
     for task in tuple(store._download_tasks):
         task.cancel()
     await asyncio.gather(*store._download_tasks, return_exceptions=True)
+
+
+async def test_store_redownloads_when_registered_repository_differs(
+    tmp_path: Path,
+) -> None:
+    """A matching commit cannot make a different signed repository a cache hit."""
+    store = ModelStore(tmp_path)
+    model_id = "org/model@q4"
+    model_dir = tmp_path / "org--model@q4"
+    model_dir.mkdir()
+    (model_dir / "model.gguf").write_bytes(b"old")
+    store.register_model(
+        model_id,
+        model_dir,
+        ["model.gguf"],
+        3,
+        source_revision=_NEW_REVISION,
+        source_repository="org/old-source",
+    )
+
+    status = await store.request_download(
+        model_id,
+        pinned_gguf="model.gguf",
+        source_revision=_NEW_REVISION,
+        source_repository="org/new-source",
+    )
+
+    assert status.status in {"pending", "downloading"}
+    assert status.source_revision == _NEW_REVISION
+    assert status.source_repository == "org/new-source"
+    for task in tuple(store._download_tasks):
+        task.cancel()
+    await asyncio.gather(*store._download_tasks, return_exceptions=True)
+
+
+async def test_active_download_dedup_rejects_different_repository(
+    tmp_path: Path,
+) -> None:
+    """Concurrent requests may deduplicate only the same complete artifact."""
+    store = ModelStore(tmp_path)
+    model_id = "org/model@q4"
+    store._active_downloads[model_id] = StoreDownloadStatus(
+        model_id=model_id,
+        source_revision=_NEW_REVISION,
+        source_repository="org/old-source",
+        status="downloading",
+    )
+
+    with pytest.raises(ValueError, match="org/old-source"):
+        await store.request_download(
+            model_id,
+            source_revision=_NEW_REVISION,
+            source_repository="org/new-source",
+        )
 
 
 async def test_staging_replaces_files_from_another_revision(

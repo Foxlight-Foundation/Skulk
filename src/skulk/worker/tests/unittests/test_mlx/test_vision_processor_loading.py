@@ -354,6 +354,66 @@ def test_processor_loader_reports_transformers_torchvision_failure(
         encoder.ensure_processor_loaded()
 
 
+def test_separate_processor_repository_is_loaded_at_pinned_revision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Every Hugging Face processor fallback must preserve signed identity."""
+    (tmp_path / "config.json").write_text(
+        '{"vision_config": {"model_type": "external"}}',
+        encoding="utf-8",
+    )
+    processor_revision = "a" * 40
+    observed: dict[str, object] = {}
+
+    def _model_path(*_args: object) -> Path:
+        return tmp_path
+
+    def _no_upstream_processor(_repo: str, **_kwargs: object) -> None:
+        return None
+
+    def _no_processor_modules(_model_type: str) -> list[object]:
+        return []
+
+    def _auto_processor(repo: str, **kwargs: object) -> _FakeImageProcessor:
+        observed["repo"] = repo
+        observed["kwargs"] = kwargs
+        return _FakeImageProcessor()
+
+    monkeypatch.setattr(vision_module, "build_model_path", _model_path)
+    monkeypatch.setattr(vision_module, "load_image_processor", _no_upstream_processor)
+    monkeypatch.setattr(
+        vision_module,
+        "_mlx_vlm_processor_modules",
+        _no_processor_modules,
+    )
+    monkeypatch.setattr(
+        vision_module,
+        "AutoImageProcessor",
+        SimpleNamespace(from_pretrained=_auto_processor),
+    )
+    encoder = VisionEncoder(
+        VisionCardConfig(
+            image_token_id=1,
+            model_type="external",
+            weights_repo="org/model",
+            processor_repo="org/processor",
+            processor_revision=processor_revision,
+        ),
+        ModelId("org/model"),
+    )
+
+    encoder.ensure_processor_loaded()
+
+    assert observed == {
+        "repo": "org/processor",
+        "kwargs": {
+            "trust_remote_code": True,
+            "revision": processor_revision,
+        },
+    }
+
+
 def test_gemma3n_processor_uses_configured_pil_backend_without_torchvision(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

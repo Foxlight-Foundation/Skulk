@@ -160,7 +160,7 @@ def _filter_config(cls: type, d: JsonDict) -> JsonDict:
 
 
 def _load_mlx_vlm_image_processor_from_pretrained(
-    proc_mod: object, repo: str
+    proc_mod: object, repo: str, revision: str | None = None
 ) -> _ImageProcessorProtocol | None:
     """Load an MLX-VLM processor via ``from_pretrained`` and extract its image processor.
 
@@ -191,14 +191,12 @@ def _load_mlx_vlm_image_processor_from_pretrained(
                     or parameter.kind is inspect.Parameter.VAR_KEYWORD
                     for parameter in parameters
                 )
-                processor = from_pretrained(
-                    repo,
-                    **(
-                        {"trust_remote_code": True}
-                        if supports_trust_remote_code
-                        else {}
-                    ),
-                )
+                loader_options: dict[str, object] = {}
+                if supports_trust_remote_code:
+                    loader_options["trust_remote_code"] = True
+                if revision is not None:
+                    loader_options["revision"] = revision
+                processor = from_pretrained(repo, **loader_options)
             except Exception as exc:
                 logger.info(
                     f"mlx_vlm {attr_name}.from_pretrained failed for {repo}: {exc}"
@@ -256,7 +254,9 @@ def _instantiate_mlx_vlm_image_processor(
     return None
 
 
-def _load_gemma3n_pil_image_processor(repo: str) -> _ImageProcessorProtocol:
+def _load_gemma3n_pil_image_processor(
+    repo: str, revision: str | None = None
+) -> _ImageProcessorProtocol:
     """Load Gemma 3n's configured SigLIP processor without torchvision.
 
     Transformers 5 exposes ``AutoImageProcessor`` as a torchvision-gated dummy
@@ -273,7 +273,10 @@ def _load_gemma3n_pil_image_processor(repo: str) -> _ImageProcessorProtocol:
     factory = cast(_ImageProcessorFactory, cast(object, SiglipImageProcessorPil))
     return cast(
         _ImageProcessorProtocol,
-        factory.from_pretrained(repo),
+        factory.from_pretrained(
+            repo,
+            **({"revision": revision} if revision is not None else {}),
+        ),
     )
 
 
@@ -1069,12 +1072,20 @@ class VisionEncoder:
 
         processor_repo = self._config.processor_repo
         repo = processor_repo or str(self._model_path)
+        processor_revision = (
+            self._config.processor_revision if processor_repo is not None else None
+        )
+        loader_options: dict[str, object] = (
+            {"revision": processor_revision}
+            if processor_revision is not None
+            else {}
+        )
         image_proc: _ImageProcessorProtocol | None = None
         load_failures: list[str] = []
         try:
             image_proc = cast(
                 _ImageProcessorProtocol | None,
-                load_image_processor(repo),
+                load_image_processor(repo, **loader_options),
             )
         except (ImportError, OSError, ValueError) as exc:
             load_failures.append(f"mlx_vlm.utils.load_image_processor: {exc}")
@@ -1082,7 +1093,9 @@ class VisionEncoder:
 
         if image_proc is None and self._config.model_type == "gemma3n":
             try:
-                image_proc = _load_gemma3n_pil_image_processor(repo)
+                image_proc = _load_gemma3n_pil_image_processor(
+                    repo, processor_revision
+                )
                 logger.info("Using Transformers PIL SigLIP image processor")
             except (ImportError, OSError, TypeError, ValueError) as exc:
                 load_failures.append(f"Transformers PIL SigLIP processor: {exc}")
@@ -1096,6 +1109,7 @@ class VisionEncoder:
                 image_proc = _load_mlx_vlm_image_processor_from_pretrained(
                     proc_mod,
                     repo,
+                    processor_revision,
                 )
                 if image_proc is not None:
                     break
@@ -1108,7 +1122,11 @@ class VisionEncoder:
                 )
                 image_proc = cast(
                     _ImageProcessorProtocol,
-                    auto_from_pretrained(repo, trust_remote_code=True),
+                    auto_from_pretrained(
+                        repo,
+                        trust_remote_code=True,
+                        **loader_options,
+                    ),
                 )
             except (ImportError, OSError, ValueError) as exc:
                 load_failures.append(f"transformers.AutoImageProcessor: {exc}")

@@ -18,6 +18,7 @@ image_token_id = 163605
 model_type = "kimi_vl"
 weights_repo = "davehind/Kimi-K2.5-vision"
 processor_repo = "moonshotai/Kimi-K2.5"
+processor_revision = "4d01dfe0332d63057c186e0b262165819efb6611"
 
 # Kimi K2.5 thinking is toggleable ({"thinking": {"type": "disabled"}} in the
 # official API / chat_template_kwargs), unlike Kimi K2 Thinking. Reasoning

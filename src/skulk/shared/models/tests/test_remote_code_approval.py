@@ -88,6 +88,25 @@ def test_registry_vision_card_requires_approval_for_platform_loader(
         require_remote_code_approval(card)
 
 
+def test_approval_cannot_authorize_unpinned_processor_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Approval of a card id cannot make mutable external processor code safe."""
+    store = RemoteCodeApprovalStore(tmp_path / "approvals.json")
+    monkeypatch.setattr(approval_module, "REMOTE_CODE_APPROVALS", store)
+    card = _registry_card().model_copy(
+        update={
+            "trust_remote_code": False,
+            "vision": VisionCardConfig(processor_repo="org/processor"),
+        }
+    )
+    assert card.registry_card_id is not None
+    store.approve(card.registry_card_id)
+
+    with pytest.raises(PermissionError, match="unpinned vision processor"):
+        require_remote_code_approval(card)
+
+
 @pytest.mark.parametrize(
     ("client_host", "origin", "allowed"),
     [

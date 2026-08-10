@@ -124,6 +124,9 @@ Fields include:
   - optional literal image token string
 - `processor_repo`
   - optional alternate processor repository
+- `processor_revision`
+  - full immutable commit for `processor_repo`; required for signed-registry
+    cards because processor loaders may execute repository Python
 - `boi_token_id`
   - optional begin-of-image token id
 - `eoi_token_id`

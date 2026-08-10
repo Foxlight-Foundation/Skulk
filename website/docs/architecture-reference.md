@@ -596,7 +596,9 @@ Note: there is no `master_node_id` field on `State`. Master identity lives outsi
 - `context_length`, `storage_size`, `supports_tensor`, `trust_remote_code`, `is_custom`
 - `source_revision: str | None`: full immutable Hugging Face commit used for qualified artifacts; `None` follows mutable `main`
 - `gguf_file: str | None`: repo-relative GGUF weight path this card serves (GGUF cards only). Default selection is `select_preferred_gguf` (quant preference order); a caller-pinned file uses `select_requested_gguf` (repo-membership-verified, #515). Shard-group co-download and staged-directory completeness checks key off this path.
-- `vision: VisionCardConfig | None`: image_token_id, model_type, BOI/EOI tokens
+- `vision: VisionCardConfig | None`: image_token_id, model_type, BOI/EOI tokens,
+  optional processor_repo, and its required immutable processor_revision for
+  signed external cards
 - `reasoning: ReasoningCardConfig | None`: supports_toggle, supports_budget, format, default_effort
 - `modalities: ModalitiesCardConfig | None`: supports_native_multimodal, supports_audio_input
 - `audio: AudioCardConfig | None`: kind (`tts`/`stt`), default_response_format, response_formats, supports_streaming, supports_realtime, supports_voice_listing, voices, ordered voice_catalog metadata (including optional bundled `reference_profile`), default_voice, supports_reference_audio, supports_translation, sample_rates. TTS `supports_streaming=true` enables the stable chunked HTTP/provider path without an experiment gate.

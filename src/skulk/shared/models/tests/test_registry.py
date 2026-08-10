@@ -98,6 +98,21 @@ def test_registry_forces_signed_cards_to_non_custom() -> None:
     assert not registry_model_cards(catalog)[0].is_custom
 
 
+def test_registry_rejects_unpinned_separate_processor_repository() -> None:
+    """A signed card cannot approve code that remains mutable upstream."""
+    payload = cast("dict[str, object]", json.loads(_catalog_payload()))
+    cards = cast("list[dict[str, object]]", payload["cards"])
+    card_payload = cast("dict[str, object]", cards[0]["card"])
+    card_payload["vision"] = {
+        "model_type": "test_vlm",
+        "processor_repo": "org/processor",
+    }
+    catalog = RegistryCatalog.model_validate(payload, strict=False)
+
+    with pytest.raises(ValueError, match="processor_revision"):
+        registry_model_cards(catalog)
+
+
 def test_registry_rejects_catalog_metadata_outside_card_identity() -> None:
     """Every published card has exactly one signed provenance record."""
     payload = cast("dict[str, object]", json.loads(_catalog_payload()))

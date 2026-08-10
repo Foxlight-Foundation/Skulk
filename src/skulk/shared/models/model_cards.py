@@ -454,6 +454,11 @@ class VisionCardConfig(CamelCaseModel):
     """The literal image placeholder string, when distinct from ``image_token_id``."""
     processor_repo: str | None = None
     """Repo providing the image processor/preprocessor config, if not the main repo."""
+    processor_revision: Annotated[
+        str, Field(pattern=r"^[0-9a-f]{40}$")
+    ] | None = None
+    """Immutable commit for ``processor_repo``. Signed registry cards require
+    this whenever a separate processor repository can supply executable code."""
     boi_token_id: int | None = None
     """Begin-of-image token id, for families that bracket image spans."""
     eoi_token_id: int | None = None
@@ -1198,6 +1203,21 @@ class ModelCard(CamelCaseModel):
     """Signed registry snapshot that supplied this runtime card."""
     registry_provenance: Literal["foxlight", "agent", "community"] | None = None
     """Audited registry origin, kept separate from immutable artifact identity."""
+
+    @model_validator(mode="after")
+    def _require_registry_processor_revision(self) -> "ModelCard":
+        """Reject signed cards whose separate processor code is not immutable."""
+        if (
+            self.registry_card_id is not None
+            and self.vision is not None
+            and self.vision.processor_repo is not None
+            and self.vision.processor_revision is None
+        ):
+            raise ValueError(
+                "signed registry cards with vision.processor_repo require "
+                "vision.processor_revision"
+            )
+        return self
 
     @property
     def artifact_repository(self) -> ModelId:

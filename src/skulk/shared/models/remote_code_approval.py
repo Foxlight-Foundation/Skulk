@@ -99,6 +99,16 @@ def remote_code_approval_required(card: ModelCard) -> bool:
 
 def require_remote_code_approval(card: ModelCard) -> None:
     """Fail closed before downloading or executing unapproved repository code."""
+    if (
+        card.registry_card_id is not None
+        and card.vision is not None
+        and card.vision.processor_repo is not None
+        and card.vision.processor_revision is None
+    ):
+        raise PermissionError(
+            "signed model card references an unpinned vision processor repository: "
+            f"{card.registry_card_id}"
+        )
     if remote_code_approval_required(card):
         raise PermissionError(
             "model card requires node-local remote-code approval: "

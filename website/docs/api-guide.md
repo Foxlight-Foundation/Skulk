@@ -1195,10 +1195,12 @@ curl http://localhost:52415/v1/models
 This returns known model cards, not just running instances. `GET /models`
 serves the same catalog through the same handler; prefer the `/v1/models` path
 for OpenAI-compatible clients. The transition release prefers the external
-TUF-signed registry, refreshes it every 60 seconds, and fills missing entries
-from bundled cards. A previously verified catalog may be used for up to 30 days
-during an outage. Registry entries include their immutable card and snapshot
-identities; local custom cards retain final override precedence.
+TUF-signed registry and refreshes it every 60 seconds. A successful signed
+catalog is authoritative; bundled cards are used only when the registry is
+disabled or no acceptable live/last-known-good catalog is available. A
+previously verified catalog may be used for up to 30 days during an outage.
+Registry entries include their immutable card and snapshot identities; local
+custom cards retain final override precedence.
 
 ### Approve repository code on one node
 
@@ -1496,6 +1498,10 @@ Use this to confirm whether the store is configured and reachable.
 **GET** `/store/registry`
 
 Use this to inspect which models the shared store knows about.
+
+Each registry entry records nullable `source_revision` and `source_repository`
+metadata. Cache hits require the effective repository and revision to match, so
+an unchanged alias cannot reuse bytes from a different signed source.
 
 The dashboard combines registry results with `GET /v1/models` metadata so it can
 display derived tags such as `vision`, `thinking`, `embedding`, `tensor`, and
