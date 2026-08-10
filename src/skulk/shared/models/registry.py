@@ -1,7 +1,6 @@
 """TUF-verified external model-card catalog with bounded offline fallback."""
 
 import hashlib
-import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -119,11 +118,6 @@ class TufRegistryClient:
         """Perform a normal python-tuf refresh and persist verified target bytes."""
         self._metadata_dir.mkdir(parents=True, exist_ok=True)
         self._targets_dir.mkdir(parents=True, exist_ok=True)
-        trusted_root = self._metadata_dir / "root.json"
-        # Every process starts root rotation from the release trust anchor. TUF
-        # then replays legitimate versioned rotations, while cache pre-seeding
-        # can never substitute a different initial root.
-        shutil.copyfile(self._embedded_root, trusted_root)
         updater = Updater(
             metadata_dir=str(self._metadata_dir),
             metadata_base_url=f"{self._base_url}metadata/",
@@ -133,6 +127,10 @@ class TufRegistryClient:
                 socket_timeout=self._timeout_seconds,
                 app_user_agent="Skulk model-registry client",
             ),
+            # Supplying an explicit bootstrap ignores an arbitrary cached
+            # root.json. python-tuf then replays its verified local root_history
+            # before consulting the network, preserving legitimate rotations.
+            bootstrap=self._embedded_root.read_bytes(),
         )
         updater.refresh()
         target = updater.get_targetinfo("v1/catalog.json")

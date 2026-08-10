@@ -133,10 +133,10 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
     return cards
 
 
-async def _load_cards_from_registry() -> None:
-    """Refresh and install a complete verified registry snapshot."""
+async def _load_cards_from_registry() -> bool:
+    """Refresh a complete registry snapshot and report whether it is authoritative."""
     if not _registry_enabled():
-        return
+        return False
     try:
         catalog = await to_thread.run_sync(_registry_client.load_catalog)
         cards = registry_model_cards(catalog)
@@ -147,9 +147,9 @@ async def _load_cards_from_registry() -> None:
         for model_id, card in tuple(_card_cache.items()):
             if card.registry_card_id is not None and not card.is_custom:
                 del _card_cache[model_id]
-        return
+        return False
     for model_id, card in tuple(_card_cache.items()):
-        if card.registry_card_id is not None and not card.is_custom:
+        if not card.is_custom:
             del _card_cache[model_id]
     for card in cards:
         existing = _card_cache.get(card.model_id)
@@ -159,6 +159,7 @@ async def _load_cards_from_registry() -> None:
         f"loaded {len(cards)} cards from signed registry snapshot "
         f"{catalog.snapshot_id}"
     )
+    return True
 
 
 def _detect_vision_from_config(model_id: ModelId) -> "VisionCardConfig | None":
@@ -252,9 +253,10 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
 
 async def _refresh_card_cache() -> None:
     global _last_registry_refresh  # noqa: PLW0603
-    await _load_cards_from_registry()
-    for path in _BUILTIN_CARD_DIRS:
-        await _load_cards_from_dir(path, is_custom=False)
+    registry_loaded = await _load_cards_from_registry()
+    if not registry_loaded:
+        for path in _BUILTIN_CARD_DIRS:
+            await _load_cards_from_dir(path, is_custom=False)
     await _load_cards_from_dir(_custom_cards_dir, is_custom=True)
     _last_registry_refresh = time.monotonic()
 

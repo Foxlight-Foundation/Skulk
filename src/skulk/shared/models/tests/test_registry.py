@@ -111,8 +111,8 @@ def test_client_uses_hash_bound_last_known_good(
     observed_trusted_roots: list[bytes] = []
 
     class WorkingUpdater:
-        def __init__(self, **_: object) -> None:
-            observed_trusted_roots.append(cached_root.read_bytes())
+        def __init__(self, **kwargs: object) -> None:
+            observed_trusted_roots.append(cast("bytes", kwargs["bootstrap"]))
 
         def refresh(self) -> None:
             pass
@@ -186,6 +186,46 @@ async def test_failed_refresh_removes_previous_registry_cards(
         await model_cards_module._load_cards_from_registry()
         assert registry_card.model_id not in model_cards_module._card_cache
         assert model_cards_module._card_cache[bundled_card.model_id] == bundled_card
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+
+
+@pytest.mark.asyncio
+async def test_successful_refresh_excludes_unlisted_bundled_cards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signed snapshot can revoke a card that the distribution once bundled."""
+    catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    registry_card = registry_model_cards(catalog)[0]
+    bundled_card = registry_card.model_copy(
+        update={
+            "model_id": ModelId("org/revoked-bundled"),
+            "source_repository": None,
+            "registry_card_id": None,
+            "registry_snapshot_id": None,
+            "registry_provenance": None,
+        }
+    )
+    custom_card = bundled_card.model_copy(
+        update={"model_id": ModelId("org/custom"), "is_custom": True}
+    )
+
+    class WorkingClient:
+        def load_catalog(self) -> RegistryCatalog:
+            return catalog
+
+    original_cache = dict(model_cards_module._card_cache)
+    model_cards_module._card_cache.clear()
+    model_cards_module._card_cache[bundled_card.model_id] = bundled_card
+    model_cards_module._card_cache[custom_card.model_id] = custom_card
+    monkeypatch.setattr(model_cards_module, "_registry_enabled", lambda: True)
+    monkeypatch.setattr(model_cards_module, "_registry_client", WorkingClient())
+    try:
+        assert await model_cards_module._load_cards_from_registry()
+        assert bundled_card.model_id not in model_cards_module._card_cache
+        assert model_cards_module._card_cache[registry_card.model_id] == registry_card
+        assert model_cards_module._card_cache[custom_card.model_id] == custom_card
     finally:
         model_cards_module._card_cache.clear()
         model_cards_module._card_cache.update(original_cache)
