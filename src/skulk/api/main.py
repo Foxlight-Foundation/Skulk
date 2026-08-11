@@ -11025,7 +11025,10 @@ class API:
         if self._telemetry_sender is None:
             return
         while True:
-            await self._publish_artifact_inventory()
+            try:
+                await self._publish_artifact_inventory()
+            except Exception as error:  # noqa: BLE001 - lifetime service boundary
+                logger.exception(f"Artifact-inventory telemetry scan failed: {error}")
             triggered = False
             with anyio.move_on_after(ARTIFACT_INVENTORY_REFRESH_SECONDS):
                 try:

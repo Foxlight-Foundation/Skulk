@@ -271,6 +271,38 @@ async def test_inventory_loop_publishes_at_startup_periodically_and_after_a_hint
     assert len(publications) >= 3
 
 
+async def test_inventory_loop_contains_scan_failure_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient filesystem failure cannot cancel the API lifetime group."""
+
+    api = object.__new__(API)
+    api._telemetry_sender = _RecordingTelemetrySender()
+    (
+        api._artifact_inventory_trigger_sender,
+        api._artifact_inventory_trigger_receiver,
+    ) = channel[None](1)
+    attempts = 0
+
+    async def fail_then_publish(_self: API) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("temporary model root failure")
+
+    api._publish_artifact_inventory = MethodType(fail_then_publish, api)
+    monkeypatch.setattr(api_main, "ARTIFACT_INVENTORY_REFRESH_SECONDS", 0.01)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(api._artifact_inventory_loop)
+        with anyio.fail_after(0.25):
+            while attempts < 2:
+                await anyio.sleep(0.001)
+        task_group.cancel_scope.cancel()
+
+    assert attempts >= 2
+
+
 async def test_inventory_publisher_excludes_canonical_store_catalog(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
