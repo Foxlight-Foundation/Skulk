@@ -37,7 +37,9 @@ All endpoints return JSON unless noted.
 ``GET /registry``
     Full store index as a JSON array of
     :class:`~skulk.store.model_store.StoreModelEntry` objects.  Useful for
-    management scripts and future dashboard integration.
+    management scripts and future dashboard integration. The internal
+    ``recover_installed_cards=true`` query first adopts complete adjacent
+    sidecars under the store publication lock.
 
 ``GET /models``
     JSON array of model ID strings currently in the store.
@@ -63,8 +65,11 @@ Example requests::
 
 from __future__ import annotations
 
+import ipaddress
+import json
 import re
 import shutil
+from collections.abc import Iterable, Mapping
 from typing import cast, final
 
 import aiofiles
@@ -74,16 +79,168 @@ from loguru import logger
 
 from skulk.shared.models.model_cards import (
     ModelCard,
+    ModelId,
     get_all_model_cards,
+    get_current_registry_card,
+    get_current_registry_cards,
     get_registry_card_by_id,
 )
 from skulk.shared.models.remote_code_approval import require_remote_code_approval
 from skulk.store.config import DEFAULT_MODEL_STORE_PORT
+from skulk.store.installed_cards import (
+    InstalledArtifactRole,
+    InstalledCardRecord,
+    companion_artifact_role,
+)
 from skulk.store.model_store import ModelStore
 
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB per streaming chunk
 _SOURCE_REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+_PROXY_FORWARDING_HEADERS = frozenset(
+    {"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Real-IP"}
+)
+
+
+def _require_loopback_peer_import(
+    remote: str | None,
+    headers: Mapping[str, str],
+) -> None:
+    """Reject peer-import mutations not originating directly on loopback."""
+
+    if any(header in headers for header in _PROXY_FORWARDING_HEADERS):
+        raise web.HTTPForbidden(
+            reason="peer imports reject proxy forwarding headers"
+        )
+    try:
+        remote_address = ipaddress.ip_address(remote or "")
+    except ValueError as error:
+        raise web.HTTPForbidden(reason="peer imports are loopback-only") from error
+    if not remote_address.is_loopback:
+        raise web.HTTPForbidden(reason="peer imports are loopback-only")
+
+
+def _immutable_registry_card_payload(card: ModelCard) -> dict[str, object]:
+    """Return card fields covered by one immutable registry identity.
+
+    Snapshot membership and provenance are mutable catalog metadata rather than
+    part of the card envelope's identity. Every executable and artifact field
+    remains in the comparison so a peer cannot alter runtime behavior while
+    retaining a trusted card ID.
+    """
+
+    return cast(
+        "dict[str, object]",
+        card.model_dump(
+            mode="json",
+            exclude={"registry_snapshot_id", "registry_provenance"},
+        ),
+    )
+
+
+async def _require_trusted_registry_peer_record(
+    record: InstalledCardRecord,
+) -> None:
+    """Bind a peer's verified claim to this host's TUF-verified card truth.
+
+    Locally retained legacy and custom records honestly make no signed-byte
+    claim. A record labelled ``registry_verified`` is stronger: before the
+    canonical store accepts it, the local host independently resolves its
+    immutable card ID and validates the complete card plus artifact role,
+    repository, revision, selected file, alias, and companion ownership.
+    """
+
+    if record.verification != "registry_verified":
+        return
+    registry_card_id = record.model_card.registry_card_id
+    if registry_card_id is None:
+        raise web.HTTPConflict(reason="registry-verified import omits its card id")
+    await get_registry_card_by_id(
+        registry_card_id,
+        refresh_on_miss=True,
+    )
+    trusted_card = next(
+        (
+            card
+            for card in get_current_registry_cards()
+            if card.registry_card_id == registry_card_id
+        ),
+        None,
+    )
+    if trusted_card is None:
+        raise web.HTTPConflict(
+            reason="store host cannot verify the peer's immutable registry card"
+        )
+    if _immutable_registry_card_payload(record.model_card) != (
+        _immutable_registry_card_payload(trusted_card)
+    ):
+        raise web.HTTPConflict(
+            reason="peer card disagrees with the TUF-verified registry card"
+        )
+
+    expected_repository: str
+    expected_revision: str | None
+    expected_file: str | None
+    if record.artifact_role == "base":
+        expected_repository = str(trusted_card.artifact_repository)
+        expected_revision = trusted_card.source_revision
+        expected_file = trusted_card.gguf_file
+        identity_matches = (
+            record.artifact_model_id == str(trusted_card.model_id)
+            and record.installed_identity == registry_card_id
+            and record.owner_model_id is None
+            and record.owner_card_id is None
+        )
+    else:
+        expected_repository = record.artifact_repository
+        try:
+            declared_role = companion_artifact_role(
+                trusted_card,
+                expected_repository,
+            )
+        except ValueError as error:
+            raise web.HTTPConflict(reason=str(error)) from error
+        runtime = trusted_card.runtime
+        expected_revision = None
+        expected_file = None
+        if record.artifact_role == "vision_weights" and trusted_card.vision is not None:
+            expected_revision = trusted_card.vision.weights_revision
+        elif runtime is not None:
+            if record.artifact_role == "mtp_sidecar":
+                expected_revision = runtime.mtp_sidecar_revision
+            elif record.artifact_role == "assistant":
+                expected_revision = runtime.assistant_model_revision
+            elif record.artifact_role == "served_draft":
+                expected_revision = runtime.served_spec_draft_revision
+                expected_file = runtime.served_spec_draft_file
+            elif record.artifact_role == "vllm_draft":
+                expected_revision = runtime.vllm_spec_draft_revision
+        identity_matches = (
+            declared_role == record.artifact_role
+            and record.artifact_model_id == expected_repository
+            and record.owner_model_id == str(trusted_card.model_id)
+            and record.owner_card_id == registry_card_id
+        )
+    if not identity_matches or (
+        record.artifact_repository != expected_repository
+        or record.artifact_revision != expected_revision
+        or record.artifact_file != expected_file
+    ):
+        raise web.HTTPConflict(
+            reason="peer artifact identity disagrees with the immutable registry card"
+        )
+
+
 _REGISTRY_CARD_ID_PATTERN = re.compile(r"^card_[a-z2-7]{52}$")
+_ARTIFACT_ROLES: frozenset[str] = frozenset(
+    {
+        "base",
+        "vision_weights",
+        "mtp_sidecar",
+        "assistant",
+        "served_draft",
+        "vllm_draft",
+    }
+)
 
 
 def _sanitize_model_id(model_id: str) -> str:
@@ -174,8 +331,17 @@ class ModelStoreServer:
             "/models/{model_id}/download/status", self._handle_download_status
         )
         self._app.router.add_get("/downloads", self._handle_list_downloads)
+        self._app.router.add_post("/imports", self._handle_peer_import)
         self._app.router.add_delete("/models/{model_id}", self._handle_delete_model)
         self._app.router.add_get("/models/{model_id}/{path:.*}", self._handle_file)
+
+    async def refresh_recovered_generations(
+        self,
+        current_registry_cards: Iterable[ModelCard],
+    ) -> None:
+        """Apply post-TUF generation selection to the authoritative store."""
+
+        await self._store.refresh_recovered_generations(current_registry_cards)
 
     async def start(self) -> None:
         """Start the HTTP server.  Blocks until the server is stopped."""
@@ -214,6 +380,8 @@ class ModelStoreServer:
 
     async def _handle_registry(self, _request: web.Request) -> web.Response:
         """``GET /registry`` — full store index."""
+        if _request.query.get("recover_installed_cards") == "true":
+            await self._store.recover_installed_cards_serialized()
         models = self._store.list_models()
         return web.json_response([m.model_dump() for m in models])
 
@@ -221,6 +389,41 @@ class ModelStoreServer:
         """``GET /models`` — list of model IDs in the store."""
         models = self._store.list_models()
         return web.json_response([m.model_id for m in models])
+
+    async def _handle_peer_import(self, request: web.Request) -> web.Response:
+        """``POST /imports`` — pull and commit one capability-bound peer artifact."""
+
+        _require_loopback_peer_import(request.remote, request.headers)
+        try:
+            raw = cast("object", json.loads(await request.text()))
+            if not isinstance(raw, dict):
+                raise ValueError("request must be an object")
+            body = cast("dict[str, object]", raw)
+            record = InstalledCardRecord.model_validate(
+                body.get("record"), strict=False
+            )
+            source_base_url = body.get("source_base_url")
+            capability_token = body.get("capability_token")
+            target_node_id = body.get("target_node_id")
+            if not all(
+                isinstance(value, str) and value
+                for value in (
+                    source_base_url,
+                    capability_token,
+                    target_node_id,
+                )
+            ):
+                raise ValueError("source, capability and target are required")
+        except (ValueError, TypeError) as error:
+            raise web.HTTPBadRequest(reason=str(error)) from error
+        await _require_trusted_registry_peer_record(record)
+        entry = await self._store.import_peer_artifact(
+            record,
+            source_base_url=cast("str", source_base_url),
+            capability_token=cast("str", capability_token),
+            target_node_id=cast("str", target_node_id),
+        )
+        return web.json_response(entry.model_dump(mode="json"))
 
     async def _handle_model_files(self, request: web.Request) -> web.Response:
         """``GET /models/{model_id}/files`` — file list for a model."""
@@ -339,7 +542,7 @@ class ModelStoreServer:
     async def _handle_delete_model(self, request: web.Request) -> web.Response:
         """``DELETE /models/{model_id}`` — remove model from store."""
         model_id = _sanitize_model_id(request.match_info["model_id"])
-        deleted = self._store.delete_model(model_id)
+        deleted = await self._store.delete_model_serialized(model_id)
         if not deleted:
             raise web.HTTPNotFound(reason=f"Model {model_id} not in store")
         return web.json_response({"modelId": model_id, "deleted": True})
@@ -364,6 +567,9 @@ class ModelStoreServer:
         source_revision: str | None = None
         source_repository: str | None = None
         registry_card_id: str | None = None
+        owner_model_id: str | None = None
+        owner_registry_card_id: str | None = None
+        artifact_role: InstalledArtifactRole = "base"
         if request.can_read_body:
             try:
                 body: object = cast("object", await request.json())
@@ -387,9 +593,7 @@ class ModelStoreServer:
                 if isinstance(raw_revision, str) and raw_revision:
                     if _SOURCE_REVISION_PATTERN.fullmatch(raw_revision) is None:
                         raise web.HTTPBadRequest(
-                            reason=(
-                                "source_revision must be a 40-character commit"
-                            )
+                            reason=("source_revision must be a 40-character commit")
                         )
                     source_revision = raw_revision
                 raw_repository = body_dict.get("source_repository")
@@ -406,12 +610,34 @@ class ModelStoreServer:
                             reason="registry_card_id must be an immutable card id"
                         )
                     registry_card_id = raw_card_id
-        await self._require_remote_code_download_approval(
+                raw_owner_model_id = body_dict.get("owner_model_id")
+                if isinstance(raw_owner_model_id, str) and raw_owner_model_id:
+                    if len(raw_owner_model_id) > 512 or "/" not in raw_owner_model_id:
+                        raise web.HTTPBadRequest(
+                            reason="owner_model_id must be a model identifier"
+                        )
+                    owner_model_id = raw_owner_model_id
+                raw_owner_card_id = body_dict.get("owner_registry_card_id")
+                if isinstance(raw_owner_card_id, str) and raw_owner_card_id:
+                    if _REGISTRY_CARD_ID_PATTERN.fullmatch(raw_owner_card_id) is None:
+                        raise web.HTTPBadRequest(
+                            reason="owner_registry_card_id must be an immutable card id"
+                        )
+                    owner_registry_card_id = raw_owner_card_id
+                raw_role = body_dict.get("artifact_role")
+                if isinstance(raw_role, str):
+                    if raw_role not in _ARTIFACT_ROLES:
+                        raise web.HTTPBadRequest(reason="invalid artifact_role")
+                    artifact_role = cast("InstalledArtifactRole", raw_role)
+        verified_card = await self._require_remote_code_download_approval(
             model_id,
             registry_card_id,
             source_repository=source_repository,
             source_revision=source_revision,
             pinned_gguf=pinned_gguf,
+            owner_model_id=owner_model_id,
+            owner_registry_card_id=owner_registry_card_id,
+            artifact_role=artifact_role,
         )
         try:
             status = await self._store.request_download(
@@ -420,6 +646,10 @@ class ModelStoreServer:
                 extra_pinned_gguf=extra_pinned_gguf,
                 source_revision=source_revision,
                 source_repository=source_repository,
+                model_card=verified_card,
+                artifact_role=artifact_role,
+                owner_model_id=owner_model_id,
+                owner_card_id=owner_registry_card_id,
             )
         except ValueError as exc:
             raise web.HTTPConflict(reason=str(exc)) from exc
@@ -440,9 +670,88 @@ class ModelStoreServer:
         source_repository: str | None,
         source_revision: str | None,
         pinned_gguf: str | None,
-    ) -> None:
-        """Verify artifact identity and host approval before fetching bytes."""
+        owner_model_id: str | None = None,
+        owner_registry_card_id: str | None = None,
+        artifact_role: InstalledArtifactRole = "base",
+    ) -> ModelCard | None:
+        """Verify artifact identity and return the full card retained locally."""
         cards = await get_all_model_cards()
+        if artifact_role != "base":
+            if owner_model_id is None:
+                raise web.HTTPConflict(
+                    reason="companion downloads require an owning model"
+                )
+            if owner_registry_card_id is not None:
+                card = next(
+                    (
+                        candidate
+                        for candidate in cards
+                        if candidate.registry_card_id == owner_registry_card_id
+                        and str(candidate.model_id) == owner_model_id
+                    ),
+                    None,
+                )
+                if card is None:
+                    refreshed_card = await get_registry_card_by_id(
+                        owner_registry_card_id,
+                        refresh_on_miss=True,
+                    )
+                    card = (
+                        refreshed_card
+                        if refreshed_card is not None
+                        and str(refreshed_card.model_id) == owner_model_id
+                        else None
+                    )
+            else:
+                card = next(
+                    (
+                        candidate
+                        for candidate in cards
+                        if (
+                            candidate.is_custom
+                            or candidate.registry_card_id is None
+                        )
+                        and str(candidate.model_id) == owner_model_id
+                    ),
+                    None,
+                )
+            if card is None:
+                raise web.HTTPConflict(
+                    reason="store host cannot verify the companion's owning card"
+                )
+            repository = source_repository or model_id
+            try:
+                declared_role = companion_artifact_role(card, repository)
+            except ValueError as error:
+                raise web.HTTPConflict(reason=str(error)) from error
+            if declared_role != artifact_role:
+                raise web.HTTPConflict(
+                    reason="companion role disagrees with the owning card"
+                )
+            expected_revision: str | None = None
+            expected_file: str | None = None
+            if artifact_role == "vision_weights" and card.vision is not None:
+                expected_revision = card.vision.weights_revision
+            elif card.runtime is not None:
+                runtime = card.runtime
+                if artifact_role == "mtp_sidecar":
+                    expected_revision = runtime.mtp_sidecar_revision
+                elif artifact_role == "assistant":
+                    expected_revision = runtime.assistant_model_revision
+                elif artifact_role == "served_draft":
+                    expected_revision = runtime.served_spec_draft_revision
+                    expected_file = runtime.served_spec_draft_file
+                elif artifact_role == "vllm_draft":
+                    expected_revision = runtime.vllm_spec_draft_revision
+            if source_revision != expected_revision or pinned_gguf != expected_file:
+                raise web.HTTPConflict(
+                    reason="companion request disagrees with immutable owning card"
+                )
+            try:
+                require_remote_code_approval(card)
+            except PermissionError as error:
+                raise web.HTTPForbidden(reason=str(error)) from error
+            return card
         card: ModelCard | None
         if registry_card_id is not None:
             card = next(
@@ -459,24 +768,23 @@ class ModelStoreServer:
                     refresh_on_miss=True,
                 )
         else:
-            card = next(
+            card = get_current_registry_card(ModelId(model_id)) or next(
                 (
                     candidate
                     for candidate in cards
                     if str(candidate.model_id) == model_id
-                    and candidate.registry_card_id is not None
                 ),
                 None,
             )
         if card is None:
             if registry_card_id is None:
-                return
+                # Hugging Face search has always allowed operators to acquire
+                # uncatalogued artifacts. With no asserted signed identity,
+                # retain the entry as unverified instead of treating absence as
+                # a failed identity check.
+                return None
             raise web.HTTPConflict(
                 reason="store host cannot verify the requested registry card"
-            )
-        if registry_card_id is None:
-            raise web.HTTPConflict(
-                reason="signed registry downloads require an immutable card id"
             )
         artifact_repository = source_repository or model_id
         if (
@@ -492,6 +800,7 @@ class ModelStoreServer:
             require_remote_code_approval(card)
         except PermissionError as error:
             raise web.HTTPForbidden(reason=str(error)) from error
+        return card
 
     async def _handle_download_status(self, request: web.Request) -> web.Response:
         """``GET /models/{model_id}/download/status`` — poll download progress."""
@@ -509,9 +818,7 @@ class ModelStoreServer:
             }
         )
 
-    async def _handle_download_cancellation(
-        self, request: web.Request
-    ) -> web.Response:
+    async def _handle_download_cancellation(self, request: web.Request) -> web.Response:
         """``DELETE /models/{model_id}/download`` — cancel one store transfer."""
 
         model_id = _sanitize_model_id(request.match_info["model_id"])

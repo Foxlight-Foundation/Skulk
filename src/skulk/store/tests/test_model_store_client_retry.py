@@ -244,3 +244,36 @@ async def test_store_file_download_restarts_when_range_is_ignored(
     assert (tmp_path / "weights.safetensors").read_bytes() == b"abcd"
     assert not partial.exists()
     assert factory.requests == [{"Range": "bytes=2-"}]
+
+
+@pytest.mark.anyio
+async def test_store_file_download_replaces_metadata_without_stale_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new card never resumes partial JSON from the prior generation."""
+
+    sidecar = tmp_path / ".skulk" / "installed-card.json"
+    sidecar.parent.mkdir()
+    sidecar.write_bytes(b"old")
+    partial = sidecar.with_name("installed-card.json.partial")
+    partial.write_bytes(b"stale-")
+    factory = _FakeClientSessionFactory([_FakeFileResponse(200, [b"new"])])
+    monkeypatch.setattr(model_store_client.aiohttp, "ClientSession", factory)
+    monkeypatch.setattr(model_store_client.asyncio, "sleep", _no_sleep)
+    client = ModelStoreClient(store_host="store.local", store_port=58080)
+
+    written = await client._download_store_file(
+        "org/model",
+        ".skulk/installed-card.json",
+        tmp_path,
+        on_progress=None,
+        total_bytes_offset=0,
+        grand_total=3,
+        replace_existing=True,
+    )
+
+    assert written == 3
+    assert sidecar.read_bytes() == b"new"
+    assert not partial.exists()
+    assert factory.requests == [{}]

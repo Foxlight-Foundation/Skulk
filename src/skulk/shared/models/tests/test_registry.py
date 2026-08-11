@@ -1,13 +1,17 @@
 # pyright: reportPrivateUsage=false
 """Tests for signed registry loading and artifact identity separation."""
 
+import asyncio
 import json
+import threading
 from pathlib import Path
 from typing import cast
 
 import pytest
+from anyio import Path as AsyncPath
 
 import skulk.download.download_utils as download_utils
+import skulk.shared.constants as constants_module
 import skulk.shared.models.model_cards as model_cards_module
 import skulk.shared.models.registry as registry_module
 from skulk.shared.models.model_cards import ModelCard, ModelTask, registry_model_cards
@@ -19,6 +23,11 @@ from skulk.shared.models.registry import (
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.shards import PipelineShardMetadata
+from skulk.store.installed_cards import (
+    InstalledCardRecord,
+    build_installed_card_record,
+    write_installed_card,
+)
 
 
 def _catalog_payload() -> bytes:
@@ -55,6 +64,33 @@ def _catalog_payload() -> bytes:
                         "quantization": "Q4_K_M",
                         "placement": {"compatible_backends": ["llama_server"]},
                     },
+                }
+            ],
+        }
+    ).encode()
+
+
+def _advisories_payload() -> bytes:
+    """Build one active signed-warning target for cache recovery tests."""
+
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "generated_at": "2026-08-10T12:00:00Z",
+            "enforcement": "warn",
+            "advisories": [
+                {
+                "schema_version": 1,
+                "advisory_id": "FLA-2026-0001",
+                "severity": "critical",
+                "title": "Test model warning",
+                "description": "Retain this warning during a registry outage.",
+                "affected_card_ids": (f"card_{'a' * 52}",),
+                "affected_model_aliases": (),
+                "active": True,
+                "created_at": "2026-08-10T12:00:00Z",
+                "updated_at": "2026-08-10T12:00:00Z",
+                "enforcement": "warn",
                 }
             ],
         }
@@ -195,6 +231,182 @@ def test_offline_mode_disables_registry_network_refresh(
     assert not model_cards_module._registry_enabled()
 
 
+@pytest.mark.asyncio
+async def test_air_gap_restart_loads_installed_card_without_registry_lkg(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Complete installed bytes remain usable after registry cache expiry."""
+    card = registry_model_cards(
+        RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    )[0]
+    artifact = tmp_path / card.model_id.normalize()
+    artifact.mkdir()
+    (artifact / "model-Q4_K_M.gguf").write_bytes(b"weights")
+    (artifact / ".skulk-source-revision").write_text(f"{card.source_revision}\n")
+    write_installed_card(
+        artifact,
+        build_installed_card_record(artifact, card),
+    )
+
+    async def _registry_unavailable() -> bool:
+        return False
+
+    async def _no_cards(_path: object, *, is_custom: bool) -> None:
+        del is_custom
+
+    original_cache = dict(model_cards_module._card_cache)
+    original_installed = dict(model_cards_module._installed_card_cache)
+    model_cards_module._card_cache.clear()
+    monkeypatch.setattr(constants_module, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(constants_module, "SKULK_MODELS_PATH", None)
+    monkeypatch.setattr(
+        model_cards_module, "_load_cards_from_registry", _registry_unavailable
+    )
+    monkeypatch.setattr(model_cards_module, "_load_cards_from_dir", _no_cards)
+    try:
+        await model_cards_module._refresh_card_cache()
+        assert model_cards_module.get_card(card.model_id) == card
+        installed = model_cards_module.get_installed_card_record(card.model_id)
+        assert installed is not None
+        assert installed.installed_identity == card.registry_card_id
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+        model_cards_module._installed_card_cache.clear()
+        model_cards_module._installed_card_cache.update(original_installed)
+
+
+def test_completed_stage_converges_installed_cache_without_registry_refresh(
+    tmp_path: Path,
+) -> None:
+    """Offline model metadata changes immediately after durable staging."""
+
+    card = registry_model_cards(
+        RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    )[0]
+    artifact = tmp_path / card.model_id.normalize()
+    artifact.mkdir()
+    (artifact / "model-Q4_K_M.gguf").write_bytes(b"weights")
+    (artifact / ".skulk-source-revision").write_text(f"{card.source_revision}\n")
+    record = build_installed_card_record(artifact, card)
+
+    original_cache = dict(model_cards_module._card_cache)
+    original_installed = dict(model_cards_module._installed_card_cache)
+    original_installed_current = dict(
+        model_cards_module._installed_current_registry_ids
+    )
+    model_cards_module._card_cache.clear()
+    model_cards_module._installed_card_cache.clear()
+    model_cards_module._installed_current_registry_ids.clear()
+    try:
+        model_cards_module.register_installed_card_record(record)
+
+        assert model_cards_module.get_installed_card_record(card.model_id) == record
+        assert model_cards_module.get_card(card.model_id) == card
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+        model_cards_module._installed_card_cache.clear()
+        model_cards_module._installed_card_cache.update(original_installed)
+        model_cards_module._installed_current_registry_ids.clear()
+        model_cards_module._installed_current_registry_ids.update(
+            original_installed_current
+        )
+
+
+@pytest.mark.asyncio
+async def test_installed_snapshot_preserves_registration_after_scan_started(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale background scan cannot erase a newly completed installation."""
+
+    card = registry_model_cards(
+        RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    )[0]
+    artifact = tmp_path / card.model_id.normalize()
+    artifact.mkdir()
+    (artifact / "model-Q4_K_M.gguf").write_bytes(b"weights")
+    record = build_installed_card_record(artifact, card)
+    original_cache = dict(model_cards_module._card_cache)
+    original_installed = dict(model_cards_module._installed_card_cache)
+    original_installed_current = dict(
+        model_cards_module._installed_current_registry_ids
+    )
+    scan_started = asyncio.Event()
+    release_scan = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def stale_scan() -> list[InstalledCardRecord]:
+        loop.call_soon_threadsafe(scan_started.set)
+        release_scan.wait(timeout=5)
+        return []
+
+    monkeypatch.setattr(model_cards_module, "_discover_installed_cards", stale_scan)
+    model_cards_module._card_cache.clear()
+    model_cards_module._installed_card_cache.clear()
+    model_cards_module._installed_current_registry_ids.clear()
+    try:
+        refresh = asyncio.create_task(model_cards_module._refresh_installed_cards())
+        await scan_started.wait()
+        model_cards_module.register_installed_card_record(record)
+        release_scan.set()
+        await refresh
+
+        assert model_cards_module.get_installed_card_record(card.model_id) == record
+        assert model_cards_module.get_card(card.model_id) == card
+    finally:
+        release_scan.set()
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+        model_cards_module._installed_card_cache.clear()
+        model_cards_module._installed_card_cache.update(original_installed)
+        model_cards_module._installed_current_registry_ids.clear()
+        model_cards_module._installed_current_registry_ids.update(
+            original_installed_current
+        )
+
+
+def test_artifact_eviction_unregisters_installed_generation(tmp_path: Path) -> None:
+    """Deleted local bytes stop being active installed truth immediately."""
+
+    card = registry_model_cards(
+        RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    )[0]
+    artifact = tmp_path / card.model_id.normalize()
+    artifact.mkdir()
+    (artifact / "model-Q4_K_M.gguf").write_bytes(b"weights")
+    record = build_installed_card_record(artifact, card)
+
+    original_cache = dict(model_cards_module._card_cache)
+    original_installed = dict(model_cards_module._installed_card_cache)
+    original_installed_current = dict(
+        model_cards_module._installed_current_registry_ids
+    )
+    original_dirty = model_cards_module._card_cache_dirty
+    model_cards_module._card_cache.clear()
+    model_cards_module._installed_card_cache.clear()
+    model_cards_module._installed_current_registry_ids.clear()
+    try:
+        model_cards_module.register_installed_card_record(record)
+        model_cards_module.unregister_installed_card_record(card.model_id)
+
+        assert model_cards_module.get_installed_card_record(card.model_id) is None
+        assert model_cards_module.get_card(card.model_id) is None
+        assert model_cards_module._card_cache_dirty
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+        model_cards_module._installed_card_cache.clear()
+        model_cards_module._installed_card_cache.update(original_installed)
+        model_cards_module._installed_current_registry_ids.clear()
+        model_cards_module._installed_current_registry_ids.update(
+            original_installed_current
+        )
+        model_cards_module._card_cache_dirty = original_dirty
+
+
 def test_client_uses_hash_bound_last_known_good(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -252,6 +464,52 @@ def test_client_uses_hash_bound_last_known_good(
     (tmp_path / "cache/last-known-good-catalog.json").write_bytes(b"tampered")
     with pytest.raises(RegistryUnavailableError):
         client.load_catalog()
+
+
+def test_client_uses_hash_bound_last_known_good_advisories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verified warnings survive restart outages but not cache tampering."""
+
+    payload_path = tmp_path / "advisories.json"
+    payload_path.write_bytes(_advisories_payload())
+    embedded_root = tmp_path / "embedded-root.json"
+    embedded_root.write_text("{}")
+
+    class WorkingUpdater:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def refresh(self) -> None:
+            pass
+
+        def get_targetinfo(self, target_path: str) -> object:
+            assert target_path == "v1/advisories.json"
+            return object()
+
+        def download_target(self, _target: object) -> str:
+            return str(payload_path)
+
+    monkeypatch.setattr(registry_module, "Updater", WorkingUpdater)
+    client = TufRegistryClient(
+        base_url="https://registry.example/",
+        cache_dir=tmp_path / "cache",
+        embedded_root=embedded_root,
+        timeout_seconds=1,
+        max_stale_days=30,
+    )
+    assert client.load_advisories().advisories[0].advisory_id == "FLA-2026-0001"
+
+    class FailingUpdater(WorkingUpdater):
+        def refresh(self) -> None:
+            raise OSError("offline")
+
+    monkeypatch.setattr(registry_module, "Updater", FailingUpdater)
+    assert client.load_advisories().advisories[0].severity == "critical"
+
+    (tmp_path / "cache/last-known-good-advisories.json").write_bytes(b"tampered")
+    with pytest.raises(RegistryUnavailableError):
+        client.load_advisories()
 
 
 def test_embedded_roots_match_release_resources() -> None:
@@ -334,6 +592,43 @@ async def test_successful_refresh_excludes_unlisted_bundled_cards(
         assert bundled_card.model_id not in model_cards_module._card_cache
         assert model_cards_module._card_cache[registry_card.model_id] == registry_card
         assert model_cards_module._card_cache[custom_card.model_id] == custom_card
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+
+
+@pytest.mark.asyncio
+async def test_current_custom_file_supersedes_retained_custom_sidecar(
+    tmp_path: Path,
+) -> None:
+    """Operator edits remain authoritative after installed-card recovery."""
+
+    catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    base = registry_model_cards(catalog)[0].model_copy(
+        update={
+            "registry_card_id": None,
+            "registry_snapshot_id": None,
+            "registry_provenance": None,
+            "is_custom": True,
+        }
+    )
+    retained = base.model_copy(update={"hidden_size": 64})
+    edited = base.model_copy(update={"hidden_size": 128})
+    custom_directory = AsyncPath(tmp_path)
+    await edited.save(custom_directory / "edited.toml")
+
+    original_cache = dict(model_cards_module._card_cache)
+    model_cards_module._card_cache.clear()
+    model_cards_module._card_cache[retained.model_id] = retained
+    try:
+        await model_cards_module._load_cards_from_dir(
+            custom_directory,
+            is_custom=True,
+        )
+
+        selected = model_cards_module._card_cache[retained.model_id]
+        assert selected.hidden_size == 128
+        assert selected.is_custom
     finally:
         model_cards_module._card_cache.clear()
         model_cards_module._card_cache.update(original_cache)
@@ -442,6 +737,95 @@ async def test_registry_id_miss_forces_one_serialized_refresh(
     finally:
         model_cards_module._card_cache.clear()
         model_cards_module._card_cache.update(original_cache)
+
+
+@pytest.mark.asyncio
+async def test_current_registry_id_is_visible_behind_installed_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Store authorization can resolve an update hidden by installed alias truth."""
+
+    catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    current = registry_model_cards(catalog)[0]
+    installed = current.model_copy(
+        update={"registry_card_id": f"card_{'z' * 52}"}
+    )
+    original_cache = dict(model_cards_module._card_cache)
+    original_current = dict(model_cards_module._registry_current_cards)
+    model_cards_module._card_cache.clear()
+    model_cards_module._registry_current_cards.clear()
+    model_cards_module._card_cache[current.model_id] = installed
+    model_cards_module._registry_current_cards[current.model_id] = current
+    monkeypatch.setattr(model_cards_module, "_registry_enabled", lambda: False)
+    try:
+        assert (
+            await model_cards_module.get_registry_card_by_id(
+                str(current.registry_card_id)
+            )
+            == current
+        )
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+        model_cards_module._registry_current_cards.clear()
+        model_cards_module._registry_current_cards.update(original_current)
+
+
+async def test_installed_startup_selects_current_generation_deterministically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Directory order cannot replace current installed truth with stale bytes."""
+
+    catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    current = registry_model_cards(catalog)[0]
+    stale = current.model_copy(
+        update={"registry_card_id": f"card_{'z' * 52}"}
+    )
+    for directory_name, card in (("aaa-current", current), ("zzz-stale", stale)):
+        artifact = tmp_path / directory_name
+        artifact.mkdir()
+        (artifact / "model-Q4_K_M.gguf").write_bytes(directory_name.encode())
+        (artifact / ".skulk-source-revision").write_text(
+            f"{card.source_revision}\n"
+        )
+        write_installed_card(artifact, build_installed_card_record(artifact, card))
+
+    original_cache = dict(model_cards_module._card_cache)
+    original_installed = dict(model_cards_module._installed_card_cache)
+    original_installed_current = dict(
+        model_cards_module._installed_current_registry_ids
+    )
+    original_current = dict(model_cards_module._registry_current_cards)
+    model_cards_module._card_cache.clear()
+    model_cards_module._installed_card_cache.clear()
+    model_cards_module._installed_current_registry_ids.clear()
+    model_cards_module._registry_current_cards.clear()
+    model_cards_module._registry_current_cards[current.model_id] = current
+    monkeypatch.setattr(constants_module, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(constants_module, "SKULK_MODELS_PATH", None)
+    try:
+        await model_cards_module._refresh_installed_cards()
+
+        assert model_cards_module.get_card(current.model_id) == current
+        installed = model_cards_module.get_installed_card_record(current.model_id)
+        assert installed is not None
+        assert installed.installed_identity == current.registry_card_id
+        assert (
+            model_cards_module.get_current_registry_card_id(current.model_id)
+            == current.registry_card_id
+        )
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+        model_cards_module._installed_card_cache.clear()
+        model_cards_module._installed_card_cache.update(original_installed)
+        model_cards_module._installed_current_registry_ids.clear()
+        model_cards_module._installed_current_registry_ids.update(
+            original_installed_current
+        )
+        model_cards_module._registry_current_cards.clear()
+        model_cards_module._registry_current_cards.update(original_current)
 
 
 @pytest.mark.asyncio

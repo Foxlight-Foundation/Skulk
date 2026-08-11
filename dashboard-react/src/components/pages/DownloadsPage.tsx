@@ -5,7 +5,7 @@ import { detectDeviceModel } from '../../types/topology';
 import type { RawDownloads, RawInstances, RawRunners } from '../../hooks/useClusterState';
 import type { RawNodeResources } from '../../store/endpoints/cluster';
 import type { FleetServingSummary } from '../models/burst';
-import { StoreRegistryTable, type StoreRegistryEntry, type StoreDownloadProgress, type ModelCardInfo, type CompanionInfo } from '../layout/StoreRegistryTable';
+import { StoreRegistryTable, type StoreRegistryEntry, type StoreDownloadProgress, type ModelCardInfo, type CompanionInfo, type StoreReconciliationStatus } from '../layout/StoreRegistryTable';
 import type { ClusterCardProps, ClusterCardNode } from '../cluster/ClusterCard';
 import { ModelSearchModal } from './ModelSearchModal';
 import { FiTrash2, FiSearch } from 'react-icons/fi';
@@ -46,6 +46,7 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
   const { t } = useSkulkTranslation();
   const [storeEntries, setStoreEntries] = useState<StoreRegistryEntry[]>([]);
   const [storeDownloads, setStoreDownloads] = useState<StoreDownloadProgress[]>([]);
+  const [reconciliation, setReconciliation] = useState<StoreReconciliationStatus | null>(null);
   const [storeLoading, setStoreLoading] = useState(false);
   const [placementModelId, setPlacementModelId] = useState<string | null>(null);
   const [apiModelCards, setApiModelCards] = useState<Record<string, ModelCardInfo>>({});
@@ -188,14 +189,24 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
     } catch { return null; }
   }, []);
 
+  const fetchReconciliation = useCallback(async (): Promise<StoreReconciliationStatus | null> => {
+    try {
+      const response = await fetch('/store/reconciliation');
+      if (!response.ok) return null;
+      return await response.json() as StoreReconciliationStatus;
+    } catch { return null; }
+  }, []);
+
   const refreshStore = useCallback(async (): Promise<boolean> => {
-    const [registryEntries, downloadEntries] = await Promise.all([
+    const [registryEntries, downloadEntries, reconciliationStatus] = await Promise.all([
       fetchRegistry(),
       fetchDownloads(),
+      fetchReconciliation(),
     ]);
     if (storePollingDisposedRef.current) return true;
     if (registryEntries !== null) setStoreEntries(registryEntries);
     if (downloadEntries !== null) setStoreDownloads(downloadEntries);
+    if (reconciliationStatus !== null) setReconciliation(reconciliationStatus);
 
     // A transient failure must keep the convergence loop alive. In particular,
     // the store can finish a download just as the dashboard reloads; stopping on
@@ -203,8 +214,11 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
     // user permanently looking at "0 models in store" until a manual refresh.
     return registryEntries !== null
       && downloadEntries !== null
-      && downloadEntries.length === 0;
-  }, [fetchDownloads, fetchRegistry]);
+      && reconciliationStatus !== null
+      && downloadEntries.length === 0
+      && reconciliationStatus.state !== 'scanning'
+      && reconciliationStatus.state !== 'importing';
+  }, [fetchDownloads, fetchReconciliation, fetchRegistry]);
 
   const scheduleStoreRefresh = useCallback(() => {
     if (storePollingDisposedRef.current || pollRef.current) return;
@@ -557,6 +571,7 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
           activeModelIds={activeModelIds}
           modelCards={modelCards}
           companions={companionRoles}
+          reconciliation={reconciliation}
           actions={
             <>
               <Button variant="danger" size="sm" onClick={() => setPurgeConfirm(true)}>

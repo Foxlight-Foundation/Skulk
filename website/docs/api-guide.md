@@ -1330,11 +1330,20 @@ artifact downloads are pinned to that immutable revision.
 
 **GET** `/store/storage`
 
-Returns the local node's storage picture: every staged model with its size,
-last-use time, and whether a live instance (or one of its companion repos:
+Returns the local node's storage picture: every installed artifact across the
+configured staging cache, `SKULK_MODELS_DIR`, and read-only model search roots,
+with its size, last-use time, and whether a live instance (or one of its companion repos:
 MTP sidecar, assistant, vision weights) currently depends on it, plus
 event-log usage and free disk on the models volume. Cluster-wide views query
 each node's API.
+
+Each artifact entry also reports `installedIdentity`, `manifestSha256`,
+`verificationState`, `manifestComplete`, `artifactRole`, and `ownerModelId`.
+`registryCardId` identifies the full card retained with the bytes, while a
+companion additionally reports its immutable `ownerCardId`; reconciliation
+uses those fields to select one current generation per artifact alias.
+Directories that cannot be associated with trusted card truth appear with an
+`unresolved` verification state and are not imported or launched automatically.
 
 ```bash
 curl http://localhost:52415/store/storage
@@ -1509,6 +1518,13 @@ Each registry entry records nullable `source_revision` and `source_repository`
 metadata. Cache hits require the effective repository and revision to match, so
 an unchanged alias cannot reuse bytes from a different signed source.
 
+Entries also include the full `installed_card` record, verification state,
+artifact role and owning card, `current_registry_identity`,
+`installed_not_current`, `update_available`, active signed `advisories`,
+`cached_on_nodes` (identity, completeness, bytes, last use, and in-use state),
+and reconciliation state plus last verification time. Companion artifacts are
+first-class entries grouped under their owning base card by the dashboard.
+
 The dashboard combines registry results with `GET /v1/models` metadata so it can
 display derived tags such as `vision`, `thinking`, `embedding`, `tensor`, and
 `optiq` in the Store list.
@@ -1530,12 +1546,38 @@ immutable card ID. The store host verifies that identity against its own signed
 catalog and applies its own node-local repository-code approval before fetching
 bytes; approval on the requesting worker does not grant approval on the store.
 
-The optional JSON body accepts `gguf_file` and `source_revision`:
+The optional JSON body accepts the following fields:
+
+- `gguf_file`: non-empty repo-relative GGUF path selecting the base or companion
+  quant.
+- `extra_gguf_files`: list of non-empty repo-relative GGUF paths to co-fetch from
+  the same repository, such as a same-repo served draft.
+- `source_revision`: full 40-character immutable Hugging Face commit.
+- `source_repository`: upstream `owner/repository` containing the bytes when the
+  store entry's `model_id` is an alias; identifiers longer than 512 characters
+  are rejected.
+- `registry_card_id`: immutable `card_<content-derived-id>` selecting the signed
+  base-card generation.
+- `owner_model_id`: owning base-model alias for a companion artifact. It is
+  required for non-`base` roles and must be an `owner/model` identifier no longer
+  than 512 characters.
+- `owner_registry_card_id`: immutable signed identity of that owning base card.
+  Omit it only for bundled or custom owner cards without a registry identity.
+- `artifact_role`: one of `base`, `vision_weights`, `mtp_sidecar`, `assistant`,
+  `served_draft`, or `vllm_draft`; defaults to `base`.
+
+A complete companion request names the companion repository and immutable
+revision, its role, and its owning card:
 
 ```json
 {
-  "gguf_file": "<repo-relative path>",
-  "source_revision": "0123456789abcdef0123456789abcdef01234567"
+  "gguf_file": "draft.gguf",
+  "extra_gguf_files": [],
+  "source_revision": "0123456789abcdef0123456789abcdef01234567",
+  "source_repository": "owner/draft-repository",
+  "owner_model_id": "owner/base-model-alias",
+  "owner_registry_card_id": "card_<content-derived-id>",
+  "artifact_role": "served_draft"
 }
 ```
 
@@ -1547,6 +1589,76 @@ omitting `source_revision` follows mutable `main`. A GGUF pin naming a file not
 present in the selected revision falls back to the default at the store protocol
 layer; the `/models/add` card-building endpoint validates exact pins before
 requesting a download.
+
+When `registry_card_id` is omitted, Skulk selects the current card when one
+exists. A Hugging Face search result absent from the catalog may still be
+downloaded with no card ID; the store records it as unverified rather than
+claiming signed registry provenance. Supplying `registry_card_id` requests that
+exact immutable generation and returns `409 Conflict` when the store host cannot
+verify it.
+Companion requests instead bind `owner_registry_card_id` to `owner_model_id` and
+require the repository, revision, selected file, and `artifact_role` to match
+that owning card's signed companion declaration. A mismatched alias, role, or
+artifact selection returns `409 Conflict`; malformed identifiers and roles
+return `400 Bad Request`.
+
+### Reconciliation status
+
+**GET** `/store/reconciliation`
+
+Returns `state`, `inventory_only`, scanned node and discovered/imported artifact
+counts, pending identities, failures, and `last_verified_at`.
+
+**POST** `/store/reconciliation/rescan`
+
+Runs one immediate retry. This mutation accepts only a loopback socket peer,
+rejects proxy forwarding headers, and requires a loopback browser origin when
+an `Origin` header is present.
+
+### Internal cache export
+
+**POST** `/store/internal/exports`
+
+Creates a random short-lived capability bound to one installed identity,
+manifest digest, target store node, byte ceiling, and expiry. The caller's
+socket address must also match an advertised interface of the claimed store
+node; the node-id field and header are not accepted as self-asserted identity.
+
+**GET** `/store/internal/exports/{capability_token}/{relative_path}`
+
+Serves only paths in the granted manifest, requires the bound target-node
+header, rejects files changed after capability issuance, supports HTTP byte
+ranges for restart recovery, and enforces the capability's cumulative byte
+ceiling across requests. These endpoints are internal reconciliation transport,
+not a public model-download API.
+
+**POST** `/imports` (internal model-store transport port)
+
+Asks the authoritative store to pull and atomically publish one artifact from a
+node cache. This endpoint is internal reconciliation transport and accepts only
+a direct loopback socket peer with no proxy-forwarding headers; remote or
+forwarded callers receive `403`. The JSON body contains:
+
+- `record`: the complete versioned `InstalledCardRecord`, including its full
+  card and canonical file manifest.
+- `source_base_url`: the selected source node's internal export URL.
+- `capability_token`: the short-lived token issued by that source for this
+  manifest and target store node.
+- `target_node_id`: the store node identity bound into the capability.
+
+The store resumes individual files with HTTP ranges, enforces its capacity
+floor, verifies every size and SHA-256 digest, writes the installed-card
+sidecar, and publishes the new generation and rebuildable registry entry only
+after complete verification. A peer record claiming `registry_verified` is
+also rebound to the store host's independently TUF-verified card: its full
+immutable card payload, alias, repository, revision, selected file, artifact
+role, and companion ownership must agree before any transfer starts. A
+successful response is the resulting store registry entry. Malformed records
+or missing fields return `400`; invalid or expired capabilities, unsafe
+manifest paths, insufficient capacity, source loss, digest mismatch, or signed
+card disagreement fail the import without replacing the active generation.
+Operators do not call this endpoint directly; the reconciler uses it after
+`POST /store/internal/exports` grants a transfer.
 
 ### Store download status
 
@@ -1571,6 +1683,12 @@ disk fleet-wide instead of leaving worker copies until they age out under
 staging pressure. Returns `404` if the model is not registered in the store. (To
 clear staged copies without deleting the store copy, use
 `POST /store/purge-staging`.)
+
+Before deleting bytes, the store durably tombstones the alias against automatic
+reconciliation. A stale node cache that missed eviction remains visible in
+`cached_on_nodes` but cannot recreate the base artifact or its owned companions.
+The tombstone survives restarts and is cleared only after a later explicit store
+download for that alias completes successfully.
 
 ### Purge staging caches
 
@@ -1609,6 +1727,12 @@ Important fields:
 | `registry_card_id` | string or null | Immutable content-derived card identity from the signed registry |
 | `registry_snapshot_id` | string or null | Signed catalog snapshot that supplied the card |
 | `registry_provenance` | string or null | Audited signed-registry origin (`foxlight`, `agent`, or `community`); null for bundled/custom cards |
+| `installed` | boolean | Whether this node has a complete active installed generation |
+| `active_installed_identity` | string or null | Durable generation identity this node will launch |
+| `installed_verification` | string or null | `registry_verified`, `local_legacy`, `custom`, or `unresolved` |
+| `current_registry_identity` | string or null | Current signed identity for the alias, which may differ from the active install |
+| `update_available` | boolean | A newer signed generation exists but is not active until transfer commits |
+| `advisories` | array | Active signed warn-only security notices affecting the installed or current card |
 | `remote_code_approval_required` | boolean | Whether the registry artifact or its selected platform loader can execute repository Python and needs local approval |
 | `remote_code_approved_on_this_node` | boolean | Whether that immutable card is approved on the responding node |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |

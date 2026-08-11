@@ -2,16 +2,20 @@
 """Immutable source-revision behavior for store downloads and staging."""
 
 import asyncio
+import threading
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 import skulk.shared.constants as constants
 from skulk.download import download_utils
-from skulk.shared.models.model_cards import ModelId
+from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.downloads import FileListEntry
 from skulk.store import model_store as model_store_module
+from skulk.store.installed_cards import InstalledCardRecord
 from skulk.store.model_store import ModelStore, StoreDownloadStatus
 from skulk.store.model_store_client import (
     ModelStoreClient,
@@ -285,7 +289,7 @@ def test_external_pinned_registration_writes_loadable_revision_marker(
     )
 
 
-async def test_pinned_store_download_writes_revision_marker(
+async def test_pinned_store_download_writes_revision_marker_and_offloads_hashing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -297,6 +301,25 @@ async def test_pinned_store_download_writes_revision_marker(
         model_id=model_id,
         source_revision=_NEW_REVISION,
     )
+    card = ModelCard(
+        model_id=ModelId(model_id),
+        storage_size=Memory.from_bytes(7),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        source_revision=_NEW_REVISION,
+    )
+    event_loop_thread_id = threading.get_ident()
+    hashing_thread_ids: list[int] = []
+    original_builder = cast(
+        "Callable[..., InstalledCardRecord]",
+        model_store_module.build_installed_card_record,
+    )
+
+    def tracked_builder(*args: object, **kwargs: object) -> InstalledCardRecord:
+        hashing_thread_ids.append(threading.get_ident())
+        return original_builder(*args, **kwargs)
 
     async def file_list(
         _model_id: ModelId,
@@ -325,11 +348,17 @@ async def test_pinned_store_download_writes_revision_marker(
 
     monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", file_list)
     monkeypatch.setattr(download_utils, "download_file_with_retry", download_file)
+    monkeypatch.setattr(
+        model_store_module,
+        "build_installed_card_record",
+        tracked_builder,
+    )
 
     await store._do_download(
         model_id,
         pinned_gguf="model.gguf",
         source_revision=_NEW_REVISION,
+        model_card=card,
     )
 
     entry = store.get_entry(model_id)
@@ -337,6 +366,8 @@ async def test_pinned_store_download_writes_revision_marker(
     model_dir = tmp_path / entry.store_path
     assert entry.source_revision == _NEW_REVISION
     assert (model_dir / ".skulk-source-revision").read_text().strip() == _NEW_REVISION
+    assert hashing_thread_ids
+    assert all(thread_id != event_loop_thread_id for thread_id in hashing_thread_ids)
 
 
 async def test_store_redownloads_when_registered_revision_differs(

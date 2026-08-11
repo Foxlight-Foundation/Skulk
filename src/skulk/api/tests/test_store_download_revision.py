@@ -9,12 +9,13 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from skulk.api import main as api_main
-from skulk.api.main import API
+from skulk.api.main import API, StoreDownloadRequest
 from skulk.shared.election import ElectionMessage
-from skulk.shared.models.model_cards import ModelId
+from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import IndexedEvent
+from skulk.shared.types.memory import Memory
 from skulk.store.model_store_client import ModelStoreClient
 from skulk.utils.channels import channel
 
@@ -25,7 +26,17 @@ _QUALIFIED_REVISION = "3374b395f6a01379f0dd4997b37aacaab77a3596"
 class _RecordingStoreClient:
     def __init__(self) -> None:
         self.requests: list[
-            tuple[str, str | None, str | None, str | None, str | None]
+            tuple[
+                str,
+                str | None,
+                list[str] | None,
+                str | None,
+                str | None,
+                str | None,
+                str | None,
+                str | None,
+                str,
+            ]
         ] = []
         self.cancelled_models: list[str] = []
         self.cancellation_succeeds = True
@@ -34,17 +45,25 @@ class _RecordingStoreClient:
         self,
         model_id: str,
         gguf_file: str | None = None,
+        extra_gguf_files: list[str] | None = None,
         source_revision: str | None = None,
         source_repository: str | None = None,
         registry_card_id: str | None = None,
+        owner_model_id: str | None = None,
+        owner_registry_card_id: str | None = None,
+        artifact_role: str = "base",
     ) -> dict[str, object]:
         self.requests.append(
             (
                 model_id,
                 gguf_file,
+                extra_gguf_files,
                 source_revision,
                 source_repository,
                 registry_card_id,
+                owner_model_id,
+                owner_registry_card_id,
+                artifact_role,
             )
         )
         return {"status": "pending"}
@@ -99,9 +118,13 @@ async def test_store_download_inherits_bundled_card_revision(
         (
             _MODEL_ID,
             "gemma-4-31B_q4_0-it.gguf",
+            [],
             _QUALIFIED_REVISION,
             _MODEL_ID,
             None,
+            None,
+            None,
+            "base",
         )
     ]
 
@@ -138,9 +161,117 @@ async def test_store_download_populates_card_cache_before_inheriting_pins(
         (
             _MODEL_ID,
             "gemma-4-31B_q4_0-it.gguf",
+            [],
             _QUALIFIED_REVISION,
             _MODEL_ID,
             None,
+            None,
+            None,
+            "base",
+        )
+    ]
+
+
+async def test_store_download_selects_current_registry_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An installed generation does not hide the current downloadable card."""
+
+    installed = ModelCard(
+        model_id=ModelId(_MODEL_ID),
+        storage_size=Memory.from_mb(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="old.gguf",
+        source_revision="a" * 40,
+        registry_card_id=f"card_{'a' * 52}",
+        registry_snapshot_id="snapshot_1_old",
+        registry_provenance="foxlight",
+    )
+    current = ModelCard(
+        model_id=ModelId(_MODEL_ID),
+        storage_size=Memory.from_mb(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="current.gguf",
+        source_revision="b" * 40,
+        registry_card_id=f"card_{'b' * 52}",
+        registry_snapshot_id="snapshot_2_current",
+        registry_provenance="foxlight",
+    )
+
+    def installed_card(_model_id: ModelId) -> ModelCard:
+        return installed
+
+    def current_card(_model_id: ModelId) -> ModelCard:
+        return current
+
+    monkeypatch.setattr(api_main, "get_card", installed_card)
+    monkeypatch.setattr(
+        api_main,
+        "get_current_registry_card",
+        current_card,
+    )
+    store_client = _RecordingStoreClient()
+    api = object.__new__(API)
+    api._store_client = cast(ModelStoreClient, cast(object, store_client))
+
+    await api.request_store_download(
+        _MODEL_ID,
+        StoreDownloadRequest(registry_card_id=current.registry_card_id),
+    )
+
+    assert store_client.requests == [
+        (
+            _MODEL_ID,
+            "current.gguf",
+            [],
+            "b" * 40,
+            _MODEL_ID,
+            current.registry_card_id,
+            None,
+            None,
+            "base",
+        )
+    ]
+
+
+async def test_store_download_forwards_complete_companion_identity() -> None:
+    """The public route must preserve every documented companion field."""
+
+    store_client = _RecordingStoreClient()
+    api = object.__new__(API)
+    api._store_client = cast(ModelStoreClient, cast(object, store_client))
+    owner_card_id = f"card_{'c' * 52}"
+
+    await api.request_store_download(
+        "org/draft",
+        StoreDownloadRequest(
+            gguf_file="draft.gguf",
+            extra_gguf_files=["draft-00002.gguf"],
+            source_revision="d" * 40,
+            source_repository="org/draft-repository",
+            owner_model_id=_MODEL_ID,
+            owner_registry_card_id=owner_card_id,
+            artifact_role="served_draft",
+        ),
+    )
+
+    assert store_client.requests == [
+        (
+            "org/draft",
+            "draft.gguf",
+            ["draft-00002.gguf"],
+            "d" * 40,
+            "org/draft-repository",
+            None,
+            _MODEL_ID,
+            owner_card_id,
+            "served_draft",
         )
     ]
 

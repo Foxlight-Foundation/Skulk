@@ -377,6 +377,38 @@ Skulk now treats model capability handling as two layers:
 
 This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, speech/TTS/STT metadata, and additive `/v1/models` metadata consumed by the dashboard.
 
+### Installed model-card records
+
+Complete canonical and staged artifacts carry a strict
+`.skulk/installed-card.json` sidecar with the full card, exact artifact role and
+owner, verification state, and SHA-256 file manifest. Sidecars are durable
+installed truth; the central `registry.json` is a rebuildable index. Installed
+generations load before registry access and remain usable in `SKULK_OFFLINE=true`
+while complete. A registry replacement is reported as an update and becomes
+active only after its new generation commits atomically.
+
+The authoritative store host periodically reconciles node caches through
+bounded `/store/storage` inventories and capability-bound range exports.
+Inventory covers staging, direct-download, and configured read-only model
+roots; a canonical identity counts as present only while its adjacent sidecar
+and manifest remain complete. These inventories and transfer metadata never
+enter State or the event log. Store deletion serializes with publication and
+persists `.skulk/reconciliation-tombstones.json`; stale replicas and companions
+owned by a deleted alias remain visible but cannot be imported until an explicit
+store download completes and clears the tombstone. Signed
+`v1/advisories.json` notices are warning-only and must never block downloads,
+placement, active instances, or user-owned workloads.
+Legacy association requires complete model bytes before sidecar creation, and
+every staging eviction, purge, explicit delete, or generation replacement must
+unregister the removed installed alias so offline model truth cannot outlive
+its artifact.
+The scheduled startup reconciliation delay reports `scanning`, and companion
+generation recovery compares `owner_model_id` against current registry card
+identity.
+The internal `/imports` mutation rejects proxy-forwarding headers as well as
+non-loopback peers. Store download callers may omit `registry_card_id` to select
+the current card; explicit IDs remain exact-generation requests.
+
 Store staging is reachability-aware (#657): "model not in store" (the
 store answered) fetches via the store host, keeping the store the source
 of truth; a store that cannot be reached at the transport level

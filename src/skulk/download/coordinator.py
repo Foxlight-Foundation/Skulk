@@ -25,6 +25,7 @@ from skulk.shared.models.model_cards import (
     ModelId,
     get_model_cards,
     same_model_artifact,
+    unregister_installed_card_record,
 )
 from skulk.shared.types.commands import (
     CancelDownload,
@@ -63,6 +64,20 @@ def _coerce_json_object(value: object) -> JsonObject:
         return {}
     raw_dict = cast(dict[object, object], value)
     return {str(key): item for key, item in raw_dict.items()}
+
+
+def _installed_artifact_model_id(model_directory: Path) -> ModelId | None:
+    """Return the installed artifact alias retained beside a model directory."""
+
+    from skulk.store.installed_cards import read_installed_card_with_fallback
+
+    try:
+        record = read_installed_card_with_fallback(model_directory)
+    except (OSError, ValueError):
+        return None
+    if record is None:
+        return None
+    return ModelId(record.artifact_model_id)
 
 
 @dataclass
@@ -376,8 +391,11 @@ class DownloadCoordinator:
         purged = 0
         for entry in path.iterdir():
             if entry.is_dir():
+                installed_model_id = _installed_artifact_model_id(entry)
                 logger.info(f"PurgeStagingCache: removing {entry} ({label})")
                 await asyncio.to_thread(shutil.rmtree, entry, True)
+                if installed_model_id is not None and not entry.exists():
+                    unregister_installed_card_record(installed_model_id)
                 purged += 1
         return purged
 
@@ -414,6 +432,7 @@ class DownloadCoordinator:
                     await asyncio.to_thread(shutil.rmtree, norm_dir, True)
                     found = True
             if found and model_id in self.download_status:
+                unregister_installed_card_record(model_id)
                 current = self.download_status[model_id]
                 self._begin_reset(model_id)
                 pending = DownloadPending(
@@ -425,6 +444,8 @@ class DownloadCoordinator:
                 del self.download_status[model_id]
             elif not found:
                 logger.info(f"PurgeStagingCache: model {model_id} not found")
+            elif found:
+                unregister_installed_card_record(model_id)
         else:
             # Purge all models from all directories
             # Cancel all active downloads first
@@ -695,6 +716,7 @@ class DownloadCoordinator:
         # Delete from disk
         logger.info(f"Deleting model files for {model_id}")
         deleted = await delete_model(model_id)
+        staged_deleted = False
 
         if deleted:
             logger.info(f"Successfully deleted model {model_id}")
@@ -713,6 +735,10 @@ class DownloadCoordinator:
                 if staging_dir != standard_dir and staging_dir.exists():
                     logger.info(f"Deleting staged model files at {staging_dir}")
                     await asyncio.to_thread(shutil.rmtree, staging_dir, True)
+                    staged_deleted = not staging_dir.exists()
+
+        if deleted or staged_deleted:
+            unregister_installed_card_record(model_id)
 
         # Emit pending status to reset UI state, then remove from local tracking
         if model_id in self.download_status:

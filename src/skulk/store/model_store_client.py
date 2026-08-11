@@ -70,12 +70,14 @@ file already exists (from a previous complete run), the file is skipped.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import os
 import shutil
 from collections.abc import Awaitable
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, AsyncIterator, Callable, TypeVar, final
+from typing import TYPE_CHECKING, AsyncIterator, Callable, TypeVar, cast, final
 from urllib.parse import quote, urlencode
 
 import aiofiles
@@ -94,6 +96,17 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.downloads import RepoDownloadProgress
 from skulk.shared.types.worker.shards import ShardMetadata
 from skulk.store.config import DEFAULT_MODEL_STORE_PORT, StagingNodeConfig
+from skulk.store.installed_cards import (
+    INSTALLED_CARD_RELATIVE_PATH,
+    InstalledArtifactRole,
+    InstalledCardRecord,
+    build_installed_card_record,
+    companion_artifact_role,
+    installed_card_matches,
+    installed_companion_matches,
+    read_installed_card_with_fallback,
+    write_installed_card_with_fallback,
+)
 from skulk.store.staging_eviction import touch_last_used
 
 if TYPE_CHECKING:
@@ -137,6 +150,126 @@ StagingCapacityPreflight = Callable[[int], Awaitable[None]]
 
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
 _SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
+
+
+def _staged_generation_matches(
+    model_directory: Path,
+    *,
+    artifact_model_id: str,
+    requested_card: ModelCard,
+    owner_card: ModelCard | None,
+    artifact_role: InstalledArtifactRole,
+) -> bool:
+    """Return whether local bytes carry the requested durable generation.
+
+    A valid installed-card sidecar is authoritative even when an older and a
+    newer card share one immutable source revision. Revision-marker matching is
+    retained only for legacy directories that genuinely predate sidecars.
+    """
+
+    try:
+        installed = read_installed_card_with_fallback(model_directory)
+    except (OSError, ValueError):
+        return False
+    if installed is not None:
+        if owner_card is not None:
+            return installed_companion_matches(
+                model_directory,
+                artifact_model_id=artifact_model_id,
+                owner_card=owner_card,
+                artifact_role=artifact_role,
+            )
+        return installed_card_matches(model_directory, requested_card)
+    return _staged_source_revision_matches(
+        model_directory, requested_card.source_revision
+    )
+
+
+def _completed_staged_generation_differs(
+    model_directory: Path,
+    *,
+    artifact_model_id: str,
+    requested_card: ModelCard,
+    owner_card: ModelCard | None,
+    artifact_role: InstalledArtifactRole,
+) -> bool:
+    """Return whether a completed local generation must be transactionally replaced."""
+
+    try:
+        installed = read_installed_card_with_fallback(model_directory)
+    except (OSError, ValueError):
+        return True
+    if installed is not None:
+        return not _staged_generation_matches(
+            model_directory,
+            artifact_model_id=artifact_model_id,
+            requested_card=requested_card,
+            owner_card=owner_card,
+            artifact_role=artifact_role,
+        )
+    # An in-progress directory has no final marker and remains resumable. A
+    # completed legacy generation with a different revision must retain its
+    # old bytes until the replacement transfer has finished.
+    return (
+        model_directory / _SOURCE_REVISION_MARKER
+    ).is_file() and not _staged_source_revision_matches(
+        model_directory, requested_card.source_revision
+    )
+
+
+def _staging_generation_key(
+    *,
+    artifact_model_id: str,
+    requested_card: ModelCard,
+    owner_card: ModelCard | None,
+    artifact_role: InstalledArtifactRole,
+) -> str:
+    """Build a stable private-directory key for one requested generation."""
+
+    owner_identity = (
+        owner_card.model_dump_json(exclude_none=False)
+        if owner_card is not None
+        else ""
+    )
+    material = "\0".join(
+        (
+            artifact_model_id,
+            artifact_role,
+            requested_card.model_dump_json(exclude_none=False),
+            owner_identity,
+        )
+    )
+    return hashlib.sha256(material.encode()).hexdigest()[:16]
+
+
+def _publish_staged_generation(replacement: Path, destination: Path) -> None:
+    """Switch a complete replacement into place and restore the old tree on error."""
+
+    if not replacement.is_dir():
+        raise FileNotFoundError(f"replacement generation is missing: {replacement}")
+    backup = destination.with_name(f".{destination.name}.previous")
+    if backup.exists():
+        if destination.exists():
+            shutil.rmtree(backup)
+        else:
+            os.replace(backup, destination)
+    moved_previous = False
+    if destination.exists():
+        os.replace(destination, backup)
+        moved_previous = True
+    try:
+        os.replace(replacement, destination)
+    except OSError:
+        if moved_previous and backup.exists() and not destination.exists():
+            os.replace(backup, destination)
+        raise
+    if backup.exists():
+        shutil.rmtree(backup)
+    # Publication has committed once ``replacement`` is moved into the live
+    # destination. Other interrupted generations may still share this private
+    # parent, so cleanup cannot turn a successful atomic switch into failure.
+    with contextlib.suppress(OSError):
+        replacement.parent.rmdir()
 
 
 class ModelNotInStoreError(Exception):
@@ -330,9 +463,7 @@ def _staged_directory_looks_complete(directory: Path) -> bool:
     return (directory / "mtp.safetensors").is_file()
 
 
-def _staged_vision_projector_missing(
-    shard: ShardMetadata, directory: Path
-) -> bool:
+def _staged_vision_projector_missing(shard: ShardMetadata, directory: Path) -> bool:
     """True when a GGUF vision model's staged dir is missing its ``mmproj``.
 
     The generic completeness probe (``_staged_directory_looks_complete``)
@@ -397,10 +528,7 @@ def _staged_pinned_gguf_missing(shard: ShardMetadata, directory: Path) -> bool:
     return any(
         not (
             selected_path.parent
-            / (
-                f"{base}-{index:0{len(index_token)}d}-of-"
-                f"{total_token}.gguf"
-            )
+            / (f"{base}-{index:0{len(index_token)}d}-of-{total_token}.gguf")
         ).is_file()
         for index in range(1, total_shards + 1)
     )
@@ -486,6 +614,41 @@ class ModelStoreClient:
     def local_store_path(self) -> Path | None:
         """The local store path, or ``None`` if this is not the store host."""
         return self._local_store_path
+
+    async def request_peer_import(
+        self,
+        *,
+        record: dict[str, object],
+        source_base_url: str,
+        capability_token: str,
+        target_node_id: str,
+    ) -> dict[str, object]:
+        """Ask the local authoritative store server to pull a peer artifact."""
+
+        if self._local_store_path is None:
+            raise RuntimeError("peer imports may only be initiated on the store host")
+        url = _make_store_url("127.0.0.1", self._store_port, "/imports")
+        async with (
+            create_http_session(timeout_profile="long") as session,
+            session.post(
+                url,
+                json={
+                    "record": record,
+                    "source_base_url": source_base_url,
+                    "capability_token": capability_token,
+                    "target_node_id": target_node_id,
+                },
+            ) as response,
+        ):
+            if response.status != 200:
+                detail = await response.text()
+                raise RuntimeError(
+                    f"store peer import failed ({response.status}): {detail}"
+                )
+            raw: object = await response.json()
+            if not isinstance(raw, dict):
+                raise RuntimeError("store peer import returned invalid metadata")
+            return cast("dict[str, object]", raw)
 
     # ------------------------------------------------------------------
     # Public API
@@ -624,14 +787,19 @@ class ModelStoreClient:
             final_revision_matches = _staged_source_revision_matches(
                 dest_path, source_revision
             )
-            resumable_staging_matches = (
-                not (dest_path / _SOURCE_REVISION_MARKER).exists()
-                and _staged_source_revision_staging_matches(
-                    dest_path, source_revision
-                )
+            resumable_staging_matches = not (
+                dest_path / _SOURCE_REVISION_MARKER
+            ).exists() and _staged_source_revision_staging_matches(
+                dest_path, source_revision
             )
             if not final_revision_matches and not resumable_staging_matches:
                 await asyncio.to_thread(shutil.rmtree, dest_path)
+                from skulk.shared.models.model_cards import (
+                    ModelId,
+                    unregister_installed_card_record,
+                )
+
+                unregister_installed_card_record(ModelId(model_id))
         await aios.makedirs(dest_path, exist_ok=True)
         if source_revision is not None:
             await asyncio.to_thread(
@@ -680,6 +848,12 @@ class ModelStoreClient:
             return
         try:
             shutil.rmtree(staged_dir)
+            from skulk.shared.models.model_cards import (
+                ModelId,
+                unregister_installed_card_record,
+            )
+
+            unregister_installed_card_record(ModelId(model_id))
             logger.info(
                 f"ModelStoreClient: evicted staged shard for {model_id} from {staged_dir}"
             )
@@ -709,12 +883,23 @@ class ModelStoreClient:
             logger.debug(f"ModelStoreClient: list_models failed: {exc}")
             return []
 
-    async def fetch_registry(self) -> list[dict[str, object]]:
+    async def fetch_registry(
+        self,
+        *,
+        recover_installed_cards: bool = False,
+    ) -> list[dict[str, object]]:
         """Fetch the full store registry from the store server.
+
+        Args:
+            recover_installed_cards: Ask a local authoritative store to adopt
+                complete adjacent sidecars before returning its index. Used by
+                reconciliation after it inventories pre-upgrade canonical data.
 
         Returns a list of registry entry dicts, or an empty list on error.
         """
         url = _make_store_url(self._store_host, self._store_port, "/registry")
+        if recover_installed_cards:
+            url = f"{url}?recover_installed_cards=true"
         try:
             async with (
                 create_http_session(timeout_profile="short") as session,
@@ -739,7 +924,13 @@ class ModelStoreClient:
             return None
         from skulk.store.model_store import ModelStore
 
-        local_store = ModelStore(self._local_store_path)
+        # The authoritative ModelStoreServer owns sidecar recovery and index
+        # writes. This transient view exists only to resolve an already indexed
+        # path and must not race publication or synchronously scan model bytes.
+        local_store = ModelStore(
+            self._local_store_path,
+            recover_installed_cards=False,
+        )
         entry = await asyncio.to_thread(local_store.get_entry, model_id)
         if entry is None or entry.source_revision != source_revision:
             return None
@@ -819,11 +1010,15 @@ class ModelStoreClient:
         self,
         model_id: str,
         gguf_file: str | None = None,
+        extra_gguf_files: list[str] | None = None,
         source_revision: str | None = None,
         source_repository: str | None = None,
         registry_card_id: str | None = None,
+        owner_model_id: str | None = None,
+        owner_registry_card_id: str | None = None,
+        artifact_role: InstalledArtifactRole = "base",
     ) -> dict[str, object]:
-        """Request a store download with artifact pins and signed identity."""
+        """Request a store download with complete base or companion identity."""
         url = _make_store_url(
             self._store_host,
             self._store_port,
@@ -834,12 +1029,20 @@ class ModelStoreClient:
                 body: dict[str, object] = {}
                 if gguf_file is not None:
                     body["gguf_file"] = gguf_file
+                if extra_gguf_files:
+                    body["extra_gguf_files"] = extra_gguf_files
                 if source_revision is not None:
                     body["source_revision"] = source_revision
                 if source_repository is not None and source_repository != model_id:
                     body["source_repository"] = source_repository
                 if registry_card_id is not None:
                     body["registry_card_id"] = registry_card_id
+                if owner_model_id is not None:
+                    body["owner_model_id"] = owner_model_id
+                if owner_registry_card_id is not None:
+                    body["owner_registry_card_id"] = owner_registry_card_id
+                if artifact_role != "base":
+                    body["artifact_role"] = artifact_role
                 request = session.post(url, json=body) if body else session.post(url)
                 async with request as resp:
                     if resp.status not in (200, 201):
@@ -893,8 +1096,7 @@ class ModelStoreClient:
                 return resp.status == 200
         except Exception as exc:
             logger.warning(
-                f"ModelStoreClient: cancel_store_download failed for "
-                f"{model_id}: {exc}"
+                f"ModelStoreClient: cancel_store_download failed for {model_id}: {exc}"
             )
             return False
 
@@ -929,6 +1131,9 @@ class ModelStoreClient:
         source_revision: str | None = None,
         source_repository: str | None = None,
         registry_card_id: str | None = None,
+        owner_model_id: str | None = None,
+        owner_registry_card_id: str | None = None,
+        artifact_role: InstalledArtifactRole = "base",
     ) -> bool:
         """Request the store host download a model from HuggingFace, then wait.
 
@@ -961,6 +1166,9 @@ class ModelStoreClient:
                 bytes. ``None`` means it is identical to the store identity.
             registry_card_id: Immutable signed-card identity whose node-local
                 approval policy the store host must independently enforce.
+            owner_model_id: Owning base-model alias for a companion artifact.
+            owner_registry_card_id: Immutable owning card for a companion.
+            artifact_role: Base or declared companion role retained locally.
 
         Returns:
             ``True`` if download completed successfully.
@@ -1000,6 +1208,12 @@ class ModelStoreClient:
             download_body["source_repository"] = source_repository
         if registry_card_id:
             download_body["registry_card_id"] = registry_card_id
+        if owner_model_id:
+            download_body["owner_model_id"] = owner_model_id
+        if owner_registry_card_id:
+            download_body["owner_registry_card_id"] = owner_registry_card_id
+        if artifact_role != "base":
+            download_body["artifact_role"] = artifact_role
         post_kwargs: dict[str, object] = (
             {"json": download_body} if download_body else {}
         )
@@ -1109,10 +1323,7 @@ class ModelStoreClient:
                 # not unreachability — so those stay on the stall clock
                 # with the generic handler below (third review round).
                 consecutive_transport_failures += 1
-                if (
-                    consecutive_transport_failures
-                    >= _STORE_POLL_UNREACHABLE_THRESHOLD
-                ):
+                if consecutive_transport_failures >= _STORE_POLL_UNREACHABLE_THRESHOLD:
                     raise StoreUnreachableError(
                         f"store host stopped answering download status polls "
                         f"for {model_id} ({consecutive_transport_failures} "
@@ -1188,9 +1399,7 @@ class ModelStoreClient:
             if not same_filesystem:
                 for src_file, source_size in file_sizes.items():
                     dst_file = dest_path / src_file.relative_to(source_dir)
-                    existing_size = (
-                        dst_file.stat().st_size if dst_file.exists() else 0
-                    )
+                    existing_size = dst_file.stat().st_size if dst_file.exists() else 0
                     if existing_size != source_size:
                         additional_bytes += max(0, source_size - existing_size)
             # Same-filesystem hardlinks add no file data blocks. If an
@@ -1204,6 +1413,20 @@ class ModelStoreClient:
             dst_file = dest_path / rel
             dst_file.parent.mkdir(parents=True, exist_ok=True)
             source_size = file_sizes[src_file]
+            if rel == INSTALLED_CARD_RELATIVE_PATH:
+                # The full card can change while immutable model bytes retain
+                # the same sizes and revision. Always replace this tiny source
+                # of installed truth through a temporary file so the old or
+                # new generation is visible, never a torn JSON document.
+                await asyncio.to_thread(
+                    self._replace_metadata_file_atomically,
+                    src_file,
+                    dst_file,
+                )
+                staged_bytes += source_size
+                if on_progress is not None:
+                    await on_progress(staged_bytes, total_bytes)
+                continue
             # Skip copy if destination already matches source size.
             # Run on a thread to avoid blocking the async event loop
             # during multi-GB safetensor copies.
@@ -1228,6 +1451,14 @@ class ModelStoreClient:
             f"({total_bytes:,} bytes)"
         )
         return dest_path
+
+    @staticmethod
+    def _replace_metadata_file_atomically(src_file: Path, dst_file: Path) -> None:
+        """Copy one metadata file and atomically replace its staged version."""
+
+        temporary = dst_file.with_name(f".{dst_file.name}.staging")
+        shutil.copy2(src_file, temporary)
+        temporary.replace(dst_file)
 
     # ------------------------------------------------------------------
     # HTTP staging path (worker → store host)
@@ -1278,6 +1509,8 @@ class ModelStoreClient:
         total_bytes_offset: int,
         grand_total: int,
         source_revision: str | None = None,
+        *,
+        replace_existing: bool = False,
     ) -> int:
         """Download a single file from the store to ``dest_path / file_path``.
 
@@ -1288,13 +1521,19 @@ class ModelStoreClient:
         Returns:
             Number of bytes written (for progress accumulation).
         """
+
+        if replace_existing:
+            stale_partial = dest_path / f"{file_path}.partial"
+            if stale_partial.exists():
+                await aios.remove(stale_partial)
+
         async def _request() -> int:
             target = dest_path / file_path
             target.parent.mkdir(parents=True, exist_ok=True)
             partial = dest_path / f"{file_path}.partial"
 
             # Already fully downloaded — skip
-            if target.exists():
+            if target.exists() and not replace_existing:
                 return target.stat().st_size
 
             # Recompute the partial length on every retry so a mid-stream
@@ -1383,7 +1622,10 @@ class ModelStoreClient:
             for file_path in file_list:
                 target = dest_path / file_path
                 partial = dest_path / f"{file_path}.partial"
-                if target.exists():
+                replace_existing = (
+                    Path(file_path) == INSTALLED_CARD_RELATIVE_PATH
+                )
+                if target.exists() and not replace_existing:
                     already_staged_bytes += target.stat().st_size
                 elif partial.exists():
                     already_staged_bytes += partial.stat().st_size
@@ -1393,13 +1635,15 @@ class ModelStoreClient:
         staged_offset = 0
         for file_path in file_list:
             target = dest_path / file_path
-            if target.exists():
+            replace_existing = Path(file_path) == INSTALLED_CARD_RELATIVE_PATH
+            if target.exists() and not replace_existing:
                 size = target.stat().st_size
                 staged_offset += size
 
         bytes_done = staged_offset
         for file_path in file_list:
-            if (dest_path / file_path).exists():
+            replace_existing = Path(file_path) == INSTALLED_CARD_RELATIVE_PATH
+            if (dest_path / file_path).exists() and not replace_existing:
                 continue
             file_bytes = await self._download_store_file(
                 model_id,
@@ -1409,6 +1653,7 @@ class ModelStoreClient:
                 total_bytes_offset=bytes_done,
                 grand_total=grand_total,
                 source_revision=source_revision,
+                replace_existing=replace_existing,
             )
             bytes_done += file_bytes
 
@@ -1470,6 +1715,7 @@ class ModelStoreDownloader(ShardDownloader):
         store_client: ModelStoreClient,
         staging_config: StagingNodeConfig,
         allow_hf_fallback: bool = True,
+        installed_card_callback: Callable[[InstalledCardRecord], None] | None = None,
     ) -> None:
         """
         Args:
@@ -1479,11 +1725,14 @@ class ModelStoreDownloader(ShardDownloader):
             allow_hf_fallback: When ``True``, models not in the store are
                 downloaded from HuggingFace via *inner*.  When ``False``,
                 :class:`ModelNotInStoreError` is raised instead.
+            installed_card_callback: Optional process-local convergence hook
+                invoked after a complete base artifact owns its durable card.
         """
         self._inner = inner
         self._store_client = store_client
         self._staging_config = staging_config
         self._allow_hf_fallback = allow_hf_fallback
+        self._installed_card_callback = installed_card_callback
         self._staging_transfer_lock = asyncio.Lock()
         self._staging_capacity_callback: StagingCapacityCallback | None = None
         self._active_staging_model_ids: dict[str, int] = {}
@@ -1502,6 +1751,10 @@ class ModelStoreDownloader(ShardDownloader):
         self,
         shard: ShardMetadata,
         model_id: str,
+        *,
+        replace_existing_generation: bool = False,
+        owner_card: ModelCard | None = None,
+        artifact_role: InstalledArtifactRole = "base",
     ) -> Path:
         """Serialize capacity admission and byte transfer for one repository.
 
@@ -1519,10 +1772,27 @@ class ModelStoreDownloader(ShardDownloader):
                     additional_bytes,
                 )
 
+        staging_root = Path(self._staging_config.node_cache_path)
+        destination = _staging_dir(str(staging_root), model_id)
+        transfer_root = staging_root
+        if replace_existing_generation:
+            generation_key = _staging_generation_key(
+                artifact_model_id=model_id,
+                requested_card=shard.model_card,
+                owner_card=owner_card,
+                artifact_role=artifact_role,
+            )
+            transfer_root = (
+                staging_root
+                / ".skulk"
+                / "replacement-generations"
+                / f"{_sanitize_model_id(model_id)}-{generation_key}"
+            )
+
         async with self._staging_transfer_lock:
-            return await self._store_client.stage_shard(
+            staged_path = await self._store_client.stage_shard(
                 model_id,
-                Path(self._staging_config.node_cache_path),
+                transfer_root,
                 on_progress=lambda downloaded, total: self._emit_progress(
                     shard,
                     status="in_progress",
@@ -1532,6 +1802,14 @@ class ModelStoreDownloader(ShardDownloader):
                 source_revision=shard.model_card.source_revision,
                 capacity_preflight=_capacity_preflight,
             )
+            if not replace_existing_generation:
+                return staged_path
+            await asyncio.to_thread(
+                _publish_staged_generation,
+                staged_path,
+                destination,
+            )
+            return destination
 
     def on_progress(
         self,
@@ -1542,7 +1820,12 @@ class ModelStoreDownloader(ShardDownloader):
         self._inner.on_progress(callback)
 
     async def ensure_shard(
-        self, shard: ShardMetadata, config_only: bool = False
+        self,
+        shard: ShardMetadata,
+        config_only: bool = False,
+        *,
+        installed_owner_card: ModelCard | None = None,
+        installed_artifact_role: InstalledArtifactRole = "base",
     ) -> Path:
         """Ensure the shard AND its companion repos are available locally.
 
@@ -1579,9 +1862,42 @@ class ModelStoreDownloader(ShardDownloader):
                     self._active_staging_model_ids.get(model_id, 0) + 1
                 )
         try:
-            path = await self._ensure_base_shard(shard, config_only)
+            path = await self._ensure_base_shard(
+                shard,
+                config_only,
+                installed_owner_card=installed_owner_card,
+                installed_artifact_role=installed_artifact_role,
+            )
             if not config_only:
                 await self._ensure_companion_shards(shard)
+                if (
+                    installed_owner_card is None
+                    and self._installed_card_callback is not None
+                ):
+                    model_directory = path.parent if path.is_file() else path
+                    record = await asyncio.to_thread(
+                        read_installed_card_with_fallback,
+                        model_directory,
+                    )
+                    if record is None or not installed_card_matches(
+                        model_directory, shard.model_card
+                    ):
+                        record = await asyncio.to_thread(
+                            build_installed_card_record,
+                            model_directory,
+                            shard.model_card,
+                            artifact_repository=str(
+                                shard.model_card.artifact_repository
+                            ),
+                            artifact_revision=shard.model_card.source_revision,
+                            artifact_file=shard.model_card.gguf_file,
+                        )
+                        await asyncio.to_thread(
+                            write_installed_card_with_fallback,
+                            model_directory,
+                            record,
+                        )
+                    self._installed_card_callback(record)
             # Terminal progress is emitted HERE, after companions: the
             # "complete" status becomes cluster-visible DownloadCompleted state
             # the moment it fires, and the planner dispatches LoadModel off
@@ -1619,7 +1935,42 @@ class ModelStoreDownloader(ShardDownloader):
         ):
             companion_id = companion_shard.model_card.model_id
             try:
-                await self.ensure_shard(companion_shard)
+                role = companion_artifact_role(
+                    shard.model_card,
+                    str(companion_shard.model_card.artifact_repository),
+                )
+                companion_path = await self.ensure_shard(
+                    companion_shard,
+                    installed_owner_card=shard.model_card,
+                    installed_artifact_role=role,
+                )
+                companion_directory = (
+                    companion_path.parent if companion_path.is_file() else companion_path
+                )
+                if not installed_companion_matches(
+                    companion_directory,
+                    artifact_model_id=str(companion_id),
+                    owner_card=shard.model_card,
+                    artifact_role=role,
+                ):
+                    record = await asyncio.to_thread(
+                        build_installed_card_record,
+                        companion_directory,
+                        shard.model_card,
+                        artifact_role=role,
+                        artifact_model_id=str(companion_id),
+                        owner_model_id=str(shard.model_card.model_id),
+                        owner_card_id=shard.model_card.registry_card_id,
+                        artifact_repository=str(
+                            companion_shard.model_card.artifact_repository
+                        ),
+                        artifact_revision=companion_shard.model_card.source_revision,
+                    )
+                    await asyncio.to_thread(
+                        write_installed_card_with_fallback,
+                        companion_directory,
+                        record,
+                    )
             except Exception as error:
                 if required:
                     # Split vision weights are load-bearing: a vision model
@@ -1633,7 +1984,12 @@ class ModelStoreDownloader(ShardDownloader):
                 )
 
     async def _ensure_base_shard(
-        self, shard: ShardMetadata, config_only: bool = False
+        self,
+        shard: ShardMetadata,
+        config_only: bool = False,
+        *,
+        installed_owner_card: ModelCard | None = None,
+        installed_artifact_role: InstalledArtifactRole = "base",
     ) -> Path:
         """Ensure the base model is available locally, staging from the store if needed.
 
@@ -1655,6 +2011,13 @@ class ModelStoreDownloader(ShardDownloader):
             Absolute path to the local directory containing the model files.
         """
         model_id = str(shard.model_card.model_id)
+        retained_card = installed_owner_card or shard.model_card
+        owner_model_id = (
+            str(retained_card.model_id) if installed_owner_card is not None else None
+        )
+        owner_card_id = (
+            retained_card.registry_card_id if installed_owner_card is not None else None
+        )
 
         if not self._staging_config.enabled:
             # When staging is disabled but the store client has a local store
@@ -1671,6 +2034,61 @@ class ModelStoreDownloader(ShardDownloader):
                     and not _staged_vision_projector_missing(shard, direct_path)
                     and not _staged_same_repo_draft_missing(shard, direct_path)
                 ):
+                    if not _staged_generation_matches(
+                        direct_path,
+                        artifact_model_id=model_id,
+                        requested_card=shard.model_card,
+                        owner_card=installed_owner_card,
+                        artifact_role=installed_artifact_role,
+                    ):
+                        await self._store_client.request_and_wait_for_download(
+                            model_id,
+                            pinned_gguf=shard.model_card.gguf_file,
+                            extra_pinned_gguf=_same_repo_draft_files(
+                                shard.model_card
+                            ),
+                            source_revision=shard.model_card.source_revision,
+                            source_repository=str(
+                                shard.model_card.artifact_repository
+                            ),
+                            registry_card_id=(
+                                shard.model_card.registry_card_id
+                                if installed_owner_card is None
+                                else None
+                            ),
+                            owner_model_id=owner_model_id,
+                            owner_registry_card_id=owner_card_id,
+                            artifact_role=installed_artifact_role,
+                        )
+                        replacement_path = await self._store_client.local_model_path(
+                            model_id,
+                            shard.model_card.source_revision,
+                        )
+                        if (
+                            replacement_path is None
+                            or not _staged_directory_looks_complete(replacement_path)
+                            or _staged_pinned_gguf_missing(shard, replacement_path)
+                            or _staged_vision_projector_missing(
+                                shard,
+                                replacement_path,
+                            )
+                            or _staged_same_repo_draft_missing(
+                                shard,
+                                replacement_path,
+                            )
+                            or not _staged_generation_matches(
+                                replacement_path,
+                                artifact_model_id=model_id,
+                                requested_card=shard.model_card,
+                                owner_card=installed_owner_card,
+                                artifact_role=installed_artifact_role,
+                            )
+                        ):
+                            raise ModelNotInStoreError(
+                                f"Model {model_id} replacement is not complete in "
+                                "the canonical store"
+                            )
+                        direct_path = replacement_path
                     logger.info(
                         f"ModelStoreDownloader: staging disabled — loading {model_id} directly from store at {direct_path}"
                     )
@@ -1686,14 +2104,28 @@ class ModelStoreDownloader(ShardDownloader):
         # broken model, so incomplete dirs fall through to re-staging
         # (which resumes partial files via HTTP Range).
         dest_path = _staging_dir(self._staging_config.node_cache_path, model_id)
+        replace_staged_generation = (
+            dest_path.exists()
+            and _completed_staged_generation_differs(
+                dest_path,
+                artifact_model_id=model_id,
+                requested_card=shard.model_card,
+                owner_card=installed_owner_card,
+                artifact_role=installed_artifact_role,
+            )
+        )
         if (
             dest_path.exists()
             and _staged_directory_looks_complete(dest_path)
             and not _staged_pinned_gguf_missing(shard, dest_path)
             and not _staged_vision_projector_missing(shard, dest_path)
             and not _staged_same_repo_draft_missing(shard, dest_path)
-            and _staged_source_revision_matches(
-                dest_path, shard.model_card.source_revision
+            and _staged_generation_matches(
+                dest_path,
+                artifact_model_id=model_id,
+                requested_card=shard.model_card,
+                owner_card=installed_owner_card,
+                artifact_role=installed_artifact_role,
             )
         ):
             logger.info(
@@ -1724,18 +2156,36 @@ class ModelStoreDownloader(ShardDownloader):
                     # selected by this card before staging; the request is idempotent
                     # when the entry is already complete. Workers never fetch these
                     # files directly from Hugging Face.
-                    await self._store_client.request_and_wait_for_download(
-                        model_id,
-                        pinned_gguf=shard.model_card.gguf_file,
-                        extra_pinned_gguf=same_repo_drafts,
-                        source_revision=shard.model_card.source_revision,
-                        source_repository=str(shard.model_card.artifact_repository),
-                        registry_card_id=shard.model_card.registry_card_id,
-                    )
+                    if installed_owner_card is None:
+                        await self._store_client.request_and_wait_for_download(
+                            model_id,
+                            pinned_gguf=shard.model_card.gguf_file,
+                            extra_pinned_gguf=same_repo_drafts,
+                            source_revision=shard.model_card.source_revision,
+                            source_repository=str(shard.model_card.artifact_repository),
+                            registry_card_id=shard.model_card.registry_card_id,
+                        )
+                    else:
+                        await self._store_client.request_and_wait_for_download(
+                            model_id,
+                            pinned_gguf=shard.model_card.gguf_file,
+                            extra_pinned_gguf=same_repo_drafts,
+                            source_revision=shard.model_card.source_revision,
+                            source_repository=str(shard.model_card.artifact_repository),
+                            owner_model_id=owner_model_id,
+                            owner_registry_card_id=owner_card_id,
+                            artifact_role=installed_artifact_role,
+                        )
                 logger.info(
                     f"ModelStoreDownloader: staging {model_id} from store → {dest_path}"
                 )
-                path = await self._stage_from_store(shard, model_id)
+                path = await self._stage_from_store(
+                    shard,
+                    model_id,
+                    replace_existing_generation=replace_staged_generation,
+                    owner_card=installed_owner_card,
+                    artifact_role=installed_artifact_role,
+                )
                 touch_last_used(path)
                 return path
             except StoreUnreachableError as exc:
@@ -1762,20 +2212,35 @@ class ModelStoreDownloader(ShardDownloader):
             )
             await self._emit_progress(shard, status="in_progress")
             try:
-                await self._store_client.request_and_wait_for_download(
-                    model_id,
-                    on_progress=lambda _p: self._emit_progress(
-                        shard, status="in_progress"
-                    ),
-                    # Forward the card's pinned quant so the store fetches it
-                    # rather than its default preference (#344), plus any same-repo
-                    # draft GGUF bundled with the base so it is co-fetched.
-                    pinned_gguf=shard.model_card.gguf_file,
-                    extra_pinned_gguf=same_repo_drafts,
-                    source_revision=shard.model_card.source_revision,
-                    source_repository=str(shard.model_card.artifact_repository),
-                    registry_card_id=shard.model_card.registry_card_id,
-                )
+                if installed_owner_card is None:
+                    await self._store_client.request_and_wait_for_download(
+                        model_id,
+                        on_progress=lambda _p: self._emit_progress(
+                            shard, status="in_progress"
+                        ),
+                        # Forward the card's pinned quant so the store fetches it
+                        # rather than its default preference (#344), plus any
+                        # same-repo draft GGUF bundled with the base.
+                        pinned_gguf=shard.model_card.gguf_file,
+                        extra_pinned_gguf=same_repo_drafts,
+                        source_revision=shard.model_card.source_revision,
+                        source_repository=str(shard.model_card.artifact_repository),
+                        registry_card_id=shard.model_card.registry_card_id,
+                    )
+                else:
+                    await self._store_client.request_and_wait_for_download(
+                        model_id,
+                        on_progress=lambda _p: self._emit_progress(
+                            shard, status="in_progress"
+                        ),
+                        pinned_gguf=shard.model_card.gguf_file,
+                        extra_pinned_gguf=same_repo_drafts,
+                        source_revision=shard.model_card.source_revision,
+                        source_repository=str(shard.model_card.artifact_repository),
+                        owner_model_id=owner_model_id,
+                        owner_registry_card_id=owner_card_id,
+                        artifact_role=installed_artifact_role,
+                    )
             except StoreUnreachableError as exc:
                 # The store became unreachable between the probe and the
                 # download request (or a same-fleet route flapped out): the
@@ -1789,7 +2254,13 @@ class ModelStoreDownloader(ShardDownloader):
                 ) from exc
             # Model now in store — stage it
             try:
-                path = await self._stage_from_store(shard, model_id)
+                path = await self._stage_from_store(
+                    shard,
+                    model_id,
+                    replace_existing_generation=replace_staged_generation,
+                    owner_card=installed_owner_card,
+                    artifact_role=installed_artifact_role,
+                )
             except StoreUnreachableError as exc:
                 return await self._fallback_for_unreachable_store(
                     shard, config_only, cause=exc

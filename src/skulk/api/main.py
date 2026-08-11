@@ -1,8 +1,10 @@
+import asyncio
 import base64
 import binascii
 import contextlib
 import copy
 import hashlib
+import ipaddress
 import json
 import os
 import platform
@@ -126,6 +128,8 @@ from skulk.api.realtime import (
 from skulk.api.types import (
     AddCustomModelParams,
     AdvancedImageParams,
+    ArtifactExportRequest,
+    ArtifactExportResponse,
     AudioCapabilitySection,
     AudioSpeechRequest,
     AudioTranscriptionCompletedEvent,
@@ -184,6 +188,7 @@ from skulk.api.types import (
     PurgeStagingRequest,
     PurgeStagingResponse,
     ReasoningCapabilitySection,
+    ReconciliationStatus,
     RemoteCodeApprovalView,
     ResolvedModelCapabilities,
     RuntimeCapabilitySection,
@@ -277,6 +282,7 @@ from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.routing.trace_data import TraceDataPacket
 from skulk.routing.vision_media import VisionMediaPacket
+from skulk.shared import constants as shared_constants
 from skulk.shared.apply import apply
 from skulk.shared.backends import engine_of
 from skulk.shared.constants import (
@@ -303,9 +309,14 @@ from skulk.shared.models.model_cards import (
     get_all_model_cards,
     get_bundled_card,
     get_card,
+    get_current_registry_card,
+    get_current_registry_card_id,
+    get_installed_card_record,
+    get_model_advisories,
     get_model_cards,
     preserve_generated_card_constraints,
 )
+from skulk.shared.models.registry import RegistryAdvisory
 from skulk.shared.models.remote_code_approval import (
     REMOTE_CODE_APPROVALS,
     remote_code_approval_mutation_allowed,
@@ -453,7 +464,15 @@ from skulk.worker.engines.mlx.constants import (
 if TYPE_CHECKING:
     from skulk.store.config import SkulkConfig
     from skulk.store.model_store_client import ModelStoreClient
-from skulk.store.staging_eviction import list_staged_models
+from skulk.store.installed_cards import (
+    InstalledCardRecord,
+    ensure_installed_cards,
+    read_installed_card,
+    verify_installed_card,
+)
+from skulk.store.model_store import read_reconciliation_tombstones
+from skulk.store.peer_exports import ArtifactExportManager
+from skulk.store.staging_eviction import StagedModelInfo, list_staged_models
 
 JsonObject = dict[str, object]
 _DEFAULT_OPTIMIZER_CANDIDATE_BITS = [4, 8]
@@ -589,6 +608,166 @@ def _normalize_upload_content_type(content_type: str | None) -> str | None:
     return normalized or None
 
 
+def _select_reconciliation_generations(
+    replicas: dict[
+        tuple[str, str],
+        list[tuple[str, str, dict[str, object]]],
+    ],
+    current_registry_ids: dict[str, str | None],
+) -> dict[
+    tuple[str, str],
+    list[tuple[str, str, dict[str, object]]],
+]:
+    """Select exactly one deterministic cache generation per artifact alias.
+
+    Current signed card ownership wins when present. Otherwise reconciliation
+    prefers revision-verified bytes and finally the lexical installed identity
+    and manifest digest. Source-node preference is applied later within the
+    selected generation so replica health cannot change generation truth.
+    """
+
+    generations_by_artifact: dict[str, list[tuple[str, str]]] = {}
+    for generation, candidates in replicas.items():
+        if not candidates:
+            continue
+        artifact_model_id = candidates[0][2].get("modelId")
+        if isinstance(artifact_model_id, str):
+            generations_by_artifact.setdefault(artifact_model_id, []).append(
+                generation
+            )
+
+    def generation_rank(generation: tuple[str, str]) -> tuple[bool, bool, str, str]:
+        identity, digest = generation
+        candidates = replicas[generation]
+        item = candidates[0][2]
+        artifact_model_id = cast("str", item["modelId"])
+        owner_model_id = item.get("ownerModelId")
+        owner_alias = (
+            owner_model_id if isinstance(owner_model_id, str) else artifact_model_id
+        )
+        current_registry_id = current_registry_ids.get(owner_alias)
+        artifact_role = item.get("artifactRole")
+        retained_registry_id = (
+            item.get("registryCardId")
+            if artifact_role == "base" or not isinstance(artifact_role, str)
+            else item.get("ownerCardId")
+        )
+        is_current = (
+            current_registry_id is not None
+            and retained_registry_id == current_registry_id
+        )
+        is_registry_verified = any(
+            candidate[2].get("verificationState") == "registry_verified"
+            for candidate in candidates
+        )
+        return (not is_current, not is_registry_verified, identity, digest)
+
+    selected: dict[
+        tuple[str, str],
+        list[tuple[str, str, dict[str, object]]],
+    ] = {}
+    for generations in generations_by_artifact.values():
+        generation = min(generations, key=generation_rank)
+        selected[generation] = replicas[generation]
+    return selected
+
+
+def _combined_model_advisories(
+    model_cards: Iterable[ModelCard],
+) -> tuple[RegistryAdvisory, ...]:
+    """Return deduplicated warnings across installed and current generations."""
+
+    advisories_by_id = {
+        advisory.advisory_id: advisory
+        for model_card in model_cards
+        for advisory in get_model_advisories(model_card)
+    }
+    return tuple(advisories_by_id.values())
+
+
+def _installed_artifact_roots(staging_root: Path | None) -> tuple[Path, ...]:
+    """Return every node-local root that may contain launchable artifacts."""
+
+    candidates = [
+        *((staging_root,) if staging_root is not None else ()),
+        shared_constants.SKULK_MODELS_DIR,
+        *(shared_constants.SKULK_MODELS_PATH or ()),
+    ]
+    roots_by_path: dict[Path, Path] = {}
+    for candidate in candidates:
+        expanded = candidate.expanduser()
+        roots_by_path.setdefault(expanded.resolve(), expanded)
+    return tuple(roots_by_path.values())
+
+
+def _inventory_installed_artifacts(
+    roots: Iterable[Path],
+    cards: Iterable[ModelCard],
+    in_use_model_ids: frozenset[str] = frozenset(),
+) -> list[StagedModelInfo]:
+    """Inventory complete and unresolved artifacts across all local roots."""
+
+    inventory_by_directory: dict[Path, StagedModelInfo] = {}
+    card_list = tuple(cards)
+    for root in roots:
+        ensure_installed_cards(root, card_list)
+        for item in list_staged_models(root, in_use_model_ids):
+            inventory_by_directory.setdefault(Path(item.directory).resolve(), item)
+    return list(inventory_by_directory.values())
+
+
+def _complete_canonical_generations(
+    store_root: Path,
+    registry: Iterable[dict[str, object]],
+) -> set[tuple[str, str]]:
+    """Return identity and manifest pairs complete in the canonical store."""
+
+    resolved_root = store_root.expanduser().resolve()
+    generations: set[tuple[str, str]] = set()
+    for entry in registry:
+        installed_raw = entry.get("installed_card")
+        store_path = entry.get("store_path")
+        if not isinstance(installed_raw, dict) or not isinstance(store_path, str):
+            continue
+        try:
+            record = InstalledCardRecord.model_validate(installed_raw, strict=False)
+            canonical_directory = (resolved_root / store_path).resolve()
+            if not canonical_directory.is_relative_to(resolved_root):
+                continue
+            adjacent = read_installed_card(canonical_directory)
+        except (OSError, ValueError):
+            continue
+        if adjacent == record and verify_installed_card(canonical_directory, record):
+            generations.add((record.installed_identity, record.manifest_sha256))
+    return generations
+
+
+def _artifact_inventory_is_tombstoned(
+    item: dict[str, object],
+    tombstones: frozenset[str],
+) -> bool:
+    """Return whether an inventory item belongs to an operator-deleted alias.
+
+    Companion artifacts inherit suppression from their owning base-card alias,
+    while independently deleted artifact aliases are suppressed directly.
+
+    Args:
+        item: Camel-case node inventory entry.
+        tombstones: Durable aliases excluded from automatic imports.
+
+    Returns:
+        ``True`` when reconciliation must retain but not import this replica.
+    """
+
+    model_id = item.get("modelId")
+    owner_model_id = item.get("ownerModelId")
+    return (
+        isinstance(model_id, str) and model_id in tombstones
+    ) or (
+        isinstance(owner_model_id, str) and owner_model_id in tombstones
+    )
+
+
 def _validate_audio_upload_metadata(file: StarletteUploadFile) -> None:
     """Reject uploads whose metadata is clearly not an audio container."""
     content_type = _normalize_upload_content_type(file.content_type)
@@ -686,7 +865,9 @@ def _format_transcript_srt(
     text: str, segments: list[dict[str, str | int | float | bool | None]]
 ) -> str:
     blocks: list[str] = []
-    for index, segment in enumerate(_transcript_segments_or_fallback(text, segments), 1):
+    for index, segment in enumerate(
+        _transcript_segments_or_fallback(text, segments), 1
+    ):
         segment_text = segment.get("text")
         if not isinstance(segment_text, str):
             segment_text = ""
@@ -707,14 +888,15 @@ def _format_transcript_vtt(
 ) -> str:
     body = _format_transcript_srt(text, segments)
     lines = body.splitlines()
-    cleaned_lines = [
-        line
-        for line in lines
-        if not line.isdigit()
-    ]
-    return "WEBVTT\n\n" + "\n".join(
-        line.replace(",", ".") if " --> " in line else line for line in cleaned_lines
-    ) + ("\n" if cleaned_lines else "")
+    cleaned_lines = [line for line in lines if not line.isdigit()]
+    return (
+        "WEBVTT\n\n"
+        + "\n".join(
+            line.replace(",", ".") if " --> " in line else line
+            for line in cleaned_lines
+        )
+        + ("\n" if cleaned_lines else "")
+    )
 
 
 def _transcription_chunk_payload(chunk: TranscriptionChunk) -> dict[str, object]:
@@ -775,6 +957,7 @@ def _encode_audio_transcription_sse(
     """Encode one typed transcription event as an SSE record."""
 
     return f"event: {event.type}\ndata: {event.model_dump_json()}\n\n"
+
 
 # How long the reorder buffer waits for a missing sequence before giving up on
 # it and releasing the chunks behind the gap (#279 Phase 2b). A genuine mesh
@@ -1187,12 +1370,8 @@ def _json_request_body(schema: dict[str, object]) -> dict[str, object]:
 def _audio_speech_request_body() -> dict[str, object]:
     """Describe the JSON and multipart forms accepted by the speech route."""
 
-    json_schema = cast(
-        dict[str, object], AudioSpeechRequest.model_json_schema()
-    )
-    multipart_schema = cast(
-        dict[str, object], json.loads(json.dumps(json_schema))
-    )
+    json_schema = cast(dict[str, object], AudioSpeechRequest.model_json_schema())
+    multipart_schema = cast(dict[str, object], json.loads(json.dumps(json_schema)))
     properties = cast(dict[str, object], multipart_schema.get("properties", {}))
     properties["reference_audio"] = {
         "type": "string",
@@ -1295,7 +1474,9 @@ class API:
             self._extensions = extensions
         # (timestamp, result) of the last tailscale diagnostics probe; see
         # _tailscale_diagnostics for the TTL rationale.
-        self._tailscale_diag_cache: tuple[float, NodeTailscaleDiagnostics | None] | None = None
+        self._tailscale_diag_cache: (
+            tuple[float, NodeTailscaleDiagnostics | None] | None
+        ) = None
         self._extension_context = ExtensionContext(
             node_id=node_id,
             skulk_version=resolve_skulk_version(),
@@ -1351,9 +1532,7 @@ class API:
         self._vision_media_models: dict[CommandId, ModelId] = {}
         self._vision_media_failures: dict[CommandId, ErrorChunk] = {}
         self._data_plane_zenoh = data_plane_zenoh
-        self._provider_stream_receivers: dict[
-            str, _ProviderStreamReceiveState
-        ] = {}
+        self._provider_stream_receivers: dict[str, _ProviderStreamReceiveState] = {}
         # Data plane (#279 Phase 2): per-token output chunks arrive here direct
         # from the serving worker (DATA topic), not as ChunkGenerated events off
         # the master. Demuxed by command_id into the per-command stream queues.
@@ -1386,6 +1565,21 @@ class API:
         self.port = port
         self._skulk_config = skulk_config
         self._store_client = store_client
+        self._artifact_exports = ArtifactExportManager()
+        reconciliation_config = (
+            skulk_config.model_store.reconciliation
+            if skulk_config is not None and skulk_config.model_store is not None
+            else None
+        )
+        self._reconciliation_status = ReconciliationStatus(
+            inventory_only=(
+                reconciliation_config.inventory_only
+                if reconciliation_config is not None
+                else True
+            )
+        )
+        self._reconciliation_lock = asyncio.Lock()
+        self._cached_artifact_locations: dict[str, list[dict[str, object]]] = {}
         self._config_path = resolve_config_path()
         # Field telemetry (opt-in, consent-gated in skulk.yaml). The config
         # provider re-reads the file per check so dashboard consent changes
@@ -1421,7 +1615,11 @@ class API:
         ) = None
         self._sent_image_hashes: set[str] = set()
         # Initialize optimizer if store path is available
-        if skulk_config and skulk_config.model_store and skulk_config.model_store.enabled:
+        if (
+            skulk_config
+            and skulk_config.model_store
+            and skulk_config.model_store.enabled
+        ):
             from skulk.store.model_optimizer import ModelOptimizer
 
             self._model_optimizer = ModelOptimizer(
@@ -1499,9 +1697,7 @@ class API:
         self._embedding_queues: dict[
             CommandId, Sender[EmbeddingChunk | ErrorChunk]
         ] = {}
-        self._audio_speech_queues: dict[
-            CommandId, Sender[AudioChunk | ErrorChunk]
-        ] = {}
+        self._audio_speech_queues: dict[CommandId, Sender[AudioChunk | ErrorChunk]] = {}
         self._audio_transcription_queues: dict[
             CommandId, Sender[TranscriptionChunk | ErrorChunk]
         ] = {}
@@ -1532,7 +1728,9 @@ class API:
         # dispatch as they arrive (validated: 20/20 buffer-off coherence on a 3-node
         # sampled-MTP matrix). SKULK_DATA_REORDER_BUFFER overrides the transport
         # default explicitly (`1`/`0`) for testing or belt-and-suspenders.
-        _reorder_override = os.environ.get("SKULK_DATA_REORDER_BUFFER", "").strip().lower()
+        _reorder_override = (
+            os.environ.get("SKULK_DATA_REORDER_BUFFER", "").strip().lower()
+        )
         if _reorder_override in ("1", "true", "yes", "on"):
             self._reorder_buffer_enabled: bool = True
         elif _reorder_override in ("0", "false", "no", "off"):
@@ -1606,8 +1804,7 @@ class API:
                 "active_api_commands": len(self._active_vision_media_bytes),
                 "active_api_bytes": self._active_vision_media_total_bytes,
                 "pending_worker_acknowledgements": sum(
-                    len(targets)
-                    for targets in self._vision_media_pending_acks.values()
+                    len(targets) for targets in self._vision_media_pending_acks.values()
                 ),
             }
         )
@@ -2455,10 +2652,10 @@ class API:
             tags=["Store"],
             summary="Request a store download",
             description=(
-                "Ask the shared model store to download and register a model by model ID. "
-                "Optional gguf_file and source_revision fields pin one exact "
-                "quant and immutable Hugging Face commit; omitted values inherit "
-                "from a bundled model card when declared."
+                "Ask the shared model store to download and register a base or "
+                "companion artifact. Optional repository, revision, file, immutable "
+                "card, ownership, and artifact-role fields bind the exact requested "
+                "generation; omitted base fields inherit from the current model card."
             ),
         )(self.request_store_download)
         self.app.delete(
@@ -2500,6 +2697,42 @@ class API:
                 "should query each node's API."
             ),
         )(self.get_node_storage_summary)
+        self.app.get(
+            "/store/reconciliation",
+            tags=["Store"],
+            summary="Get model-store reconciliation status",
+            description=(
+                "Return fleet inventory progress, pending cache imports, and "
+                "the most recent reconciliation failures."
+            ),
+        )(self.get_store_reconciliation)
+        self.app.post(
+            "/store/reconciliation/rescan",
+            tags=["Store"],
+            summary="Retry model-store reconciliation",
+            description=(
+                "Run an immediate node-local operator rescan. The endpoint is "
+                "loopback-only; automatic periodic reconciliation remains enabled."
+            ),
+        )(self.rescan_store_reconciliation)
+        self.app.post(
+            "/store/internal/exports",
+            tags=["Store Internal"],
+            summary="Create a bounded artifact export capability",
+            description=(
+                "Internal fleet endpoint used by the authoritative store to bind "
+                "one short-lived token to an exact local manifest and target node."
+            ),
+        )(self.create_artifact_export)
+        self.app.get(
+            "/store/internal/exports/{capability_token}/{relative_path:path}",
+            tags=["Store Internal"],
+            summary="Read a capability-bound artifact file",
+            description=(
+                "Internal range-capable file export. The bearer capability, target "
+                "node header, path, byte ceiling, manifest, and expiry are validated."
+            ),
+        )(self.read_artifact_export)
         self.app.post(
             "/store/models/{model_id:path}/optimize",
             tags=["Store"],
@@ -3307,9 +3540,7 @@ class API:
             ],
             # The explicit benchmark surface exposes only non-identifying
             # batching truth; node and backend attribution remain private.
-            generation_stats=(
-                stats.redacted_for_benchmark_client() if stats else None
-            ),
+            generation_stats=(stats.redacted_for_benchmark_client() if stats else None),
             power_usage=sampler.result(),
         )
 
@@ -3673,7 +3904,8 @@ class API:
         if (
             len(self._pending_vision_media) + len(self._active_vision_media_bytes)
             >= _VISION_MEDIA_PENDING_COMMANDS
-            or self._pending_vision_media_bytes + pending.byte_count
+            or self._pending_vision_media_bytes
+            + pending.byte_count
             + self._active_vision_media_total_bytes
             > _VISION_MEDIA_PENDING_TOTAL_BYTES
         ):
@@ -3733,9 +3965,7 @@ class API:
                 "The selected model instance disappeared before image upload",
             )
             return
-        targets = tuple(
-            sorted(instance.shard_assignments.node_to_runner, key=str)
-        )
+        targets = tuple(sorted(instance.shard_assignments.node_to_runner, key=str))
         if not targets:
             self._tg.start_soon(
                 self._fail_vision_media_command,
@@ -4162,14 +4392,10 @@ class API:
     def _model_card_for_instance(instance: Instance) -> ModelCard | None:
         """Return the replicated model card carried by one mounted instance."""
 
-        runner_to_shard = getattr(
-            instance.shard_assignments, "runner_to_shard", None
-        )
+        runner_to_shard = getattr(instance.shard_assignments, "runner_to_shard", None)
         if isinstance(runner_to_shard, dict):
             for shard in cast(dict[object, object], runner_to_shard).values():
-                shard_model_card = cast(
-                    object, getattr(shard, "model_card", None)
-                )
+                shard_model_card = cast(object, getattr(shard, "model_card", None))
                 if isinstance(shard_model_card, ModelCard):
                     return shard_model_card
         fallback_card = cast(
@@ -4246,9 +4472,7 @@ class API:
         ):
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    f"Model {resolved} does not declare streaming speech support"
-                ),
+                detail=(f"Model {resolved} does not declare streaming speech support"),
             )
         if not any(
             instance.shard_assignments.model_id == resolved
@@ -4278,7 +4502,10 @@ class API:
                     f"{resolved_response_format.value}; supported formats: {supported}"
                 ),
             )
-        if stream and resolved_response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
+        if (
+            stream
+            and resolved_response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS
+        ):
             supported = ", ".join(
                 audio_format.value
                 for audio_format in sorted(
@@ -4393,7 +4620,10 @@ class API:
     def _has_mounted_streaming_tts_model(self) -> bool:
         """Return whether core serving currently exposes eligible TTS capacity."""
 
-        return self._builtin_speech_provider_enabled and self._streaming_tts_model_is_ready()
+        return (
+            self._builtin_speech_provider_enabled
+            and self._streaming_tts_model_is_ready()
+        )
 
     def _realtime_stt_instance(
         self,
@@ -4404,12 +4634,9 @@ class API:
     ) -> tuple[InstanceId, ModelCard, NodeId] | None:
         """Return eligible cluster realtime STT capacity and its hosting node."""
 
-        if (
-            not self._builtin_speech_provider_enabled
-            or (
-                self._realtime_audio_sender is None
-                and self._realtime_audio_packet_sender is None
-            )
+        if not self._builtin_speech_provider_enabled or (
+            self._realtime_audio_sender is None
+            and self._realtime_audio_packet_sender is None
         ):
             return None
         candidates: list[tuple[bool, str, str, InstanceId, ModelCard, NodeId]] = []
@@ -4441,10 +4668,7 @@ class API:
                 )
             ):
                 continue
-            if (
-                model_id is not None
-                and instance.shard_assignments.model_id != model_id
-            ):
+            if model_id is not None and instance.shard_assignments.model_id != model_id:
                 continue
             card = self._model_card_for_instance(instance)
             if card is None or card.audio is None:
@@ -4458,9 +4682,10 @@ class API:
                 and card.audio.supports_streaming is True
                 and card.audio.supports_realtime is True
             ):
-                for target_node, runner_id in (
-                    instance.shard_assignments.node_to_runner.items()
-                ):
+                for (
+                    target_node,
+                    runner_id,
+                ) in instance.shard_assignments.node_to_runner.items():
                     if not isinstance(
                         self.state.runners.get(runner_id),
                         (RunnerReady, RunnerRunning),
@@ -4521,7 +4746,10 @@ class API:
             )
 
         if model_id is None:
-            return any(instance_is_ready(instance) for instance in self.state.instances.values())
+            return any(
+                instance_is_ready(instance)
+                for instance in self.state.instances.values()
+            )
         matching_instances = tuple(
             instance
             for instance in self.state.instances.values()
@@ -4687,9 +4915,7 @@ class API:
         """
         tag = capability.strip()
         if not tag:
-            logger.warning(
-                "Extension advertised an empty capability tag; ignoring it"
-            )
+            logger.warning("Extension advertised an empty capability tag; ignoring it")
             return
         self._telemetry_view.local_advertised_capabilities.add(tag)
 
@@ -4766,9 +4992,7 @@ class API:
         """
         return await self._dispatch_capability_call(call)
 
-    async def _dispatch_capability_call(
-        self, call: CapabilityCall
-    ) -> CapabilityResult:
+    async def _dispatch_capability_call(self, call: CapabilityCall) -> CapabilityResult:
         """Run one capability call against this node's providers, guarded.
 
         Guard order (each failure is a typed error, never an exception):
@@ -4860,9 +5084,7 @@ class API:
                     call.payload, descriptor.input_schema, what="payload"
                 )
                 if schema_error is not None:
-                    return call_failure(
-                        call.call_id, "invalid_payload", schema_error
-                    )
+                    return call_failure(call.call_id, "invalid_payload", schema_error)
                 try:
                     result_payload = await handler.handle_call(
                         self._extension_context, call
@@ -4925,8 +5147,7 @@ class API:
             return call_failure(
                 call.call_id,
                 "payload_too_large",
-                f"result is {result_bytes} bytes "
-                f"(limit {MAX_CALL_PAYLOAD_BYTES})",
+                f"result is {result_bytes} bytes (limit {MAX_CALL_PAYLOAD_BYTES})",
             )
         if descriptor.output_schema is not None:
             schema_error = validate_against_schema(
@@ -4936,9 +5157,7 @@ class API:
                 return call_failure(call.call_id, "invalid_result", schema_error)
         return CapabilityResult(call_id=call.call_id, ok=True, result=result_payload)
 
-    async def serve_capability_stream(
-        self, call: CapabilityCall
-    ) -> CapabilityResult:
+    async def serve_capability_stream(self, call: CapabilityCall) -> CapabilityResult:
         """Admit one streaming provider call on this node.
 
         The response covers only opening validation and admission. Once
@@ -5038,10 +5257,7 @@ class API:
                 "invalid_payload",
                 "call_id already names an active provider stream",
             )
-        if (
-            len(self._active_capability_streams)
-            >= _MAX_CONCURRENT_CAPABILITY_STREAMS
-        ):
+        if len(self._active_capability_streams) >= _MAX_CONCURRENT_CAPABILITY_STREAMS:
             self._provider_observer.record_rejected(qualified_id, overloaded=True)
             return call_failure(
                 call.call_id,
@@ -5085,9 +5301,7 @@ class API:
                 )
                 if schema_error is not None:
                     self._provider_observer.record_rejected(qualified_id)
-                    return call_failure(
-                        call.call_id, "invalid_payload", schema_error
-                    )
+                    return call_failure(call.call_id, "invalid_payload", schema_error)
 
                 input_sender: Sender[CapabilityStreamFrame] | None = None
                 input_receiver: Receiver[CapabilityStreamFrame] | None = None
@@ -5301,9 +5515,7 @@ class API:
                                 "client_streaming",
                                 "bidirectional",
                             ):
-                                assert isinstance(
-                                    handler, CapabilityInputStreamHandler
-                                )
+                                assert isinstance(handler, CapabilityInputStreamHandler)
                                 assert active.input_receiver is not None
                                 stream = handler.handle_input_stream(
                                     self._extension_context,
@@ -5491,9 +5703,7 @@ class API:
                     )
                     terminal_sent = True
         except (BrokenResourceError, ClosedResourceError):
-            logger.warning(
-                f"provider DATA transport closed during {call.call_id}"
-            )
+            logger.warning(f"provider DATA transport closed during {call.call_id}")
         except Exception as exc:  # noqa: BLE001 - plugin/transport must not escape
             logger.exception(
                 f"capability stream handler '{extension_name}' for "
@@ -5501,9 +5711,7 @@ class API:
             )
             if not terminal_sent:
                 with anyio.CancelScope(shield=True):
-                    with contextlib.suppress(
-                        BrokenResourceError, ClosedResourceError
-                    ):
+                    with contextlib.suppress(BrokenResourceError, ClosedResourceError):
                         if active.input_failure is not None:
                             await fail(
                                 active.input_failure.code,
@@ -5595,19 +5803,16 @@ class API:
             )
         try:
             payload_bytes = len(
-                json.dumps(
-                    payload, separators=(",", ":"), allow_nan=False
-                ).encode("utf-8")
+                json.dumps(payload, separators=(",", ":"), allow_nan=False).encode(
+                    "utf-8"
+                )
             )
         except (TypeError, ValueError, RecursionError, OverflowError) as exc:
-            return failed(
-                "invalid_payload", f"payload is not JSON-serializable: {exc}"
-            )
+            return failed("invalid_payload", f"payload is not JSON-serializable: {exc}")
         if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
             return failed(
                 "payload_too_large",
-                f"payload is {payload_bytes} bytes "
-                f"(limit {MAX_CALL_PAYLOAD_BYTES})",
+                f"payload is {payload_bytes} bytes (limit {MAX_CALL_PAYLOAD_BYTES})",
             )
         try:
             call = CapabilityCall(
@@ -5621,9 +5826,7 @@ class API:
                 payload=payload,
             )
         except ValidationError as exc:
-            return failed(
-                "invalid_payload", f"invalid stream call envelope: {exc}"
-            )
+            return failed("invalid_payload", f"invalid stream call envelope: {exc}")
         if self._provider_stream_receiver is None:
             return failed(
                 "unreachable",
@@ -5673,9 +5876,7 @@ class API:
                         f"target {node_id} resolved, but no stream budget remains",
                     )
                 else:
-                    remote_call = call.model_copy(
-                        update={"timeout_seconds": remaining}
-                    )
+                    remote_call = call.model_copy(update={"timeout_seconds": remaining})
                     try:
                         async with httpx.AsyncClient(
                             timeout=httpx.Timeout(
@@ -5756,6 +5957,7 @@ class API:
                     "unreachable",
                     f"provider input stream could not start: {exc}",
                 )
+
         async def cancel_output() -> None:
             if receive_state.cancellation_scheduled:
                 return
@@ -5993,8 +6195,7 @@ class API:
             return call_failure(
                 call_id,
                 "payload_too_large",
-                f"payload is {payload_bytes} bytes "
-                f"(limit {MAX_CALL_PAYLOAD_BYTES})",
+                f"payload is {payload_bytes} bytes (limit {MAX_CALL_PAYLOAD_BYTES})",
             )
 
         # Validate the FULL envelope before any network work: a violation from
@@ -6044,8 +6245,7 @@ class API:
             return call_failure(
                 call_id,
                 "timeout",
-                f"target {node_id} resolved, but no budget remains for the "
-                f"call itself",
+                f"target {node_id} resolved, but no budget remains for the call itself",
             )
         # Re-stamp the envelope with the remaining budget. model_copy skips
         # validation, which is safe here: remaining is bounded by the already
@@ -6056,9 +6256,7 @@ class API:
         # timeout.
         http_timeout = httpx.Timeout(timeout=remaining + 5.0, connect=2.0)
         try:
-            async with httpx.AsyncClient(
-                timeout=http_timeout, verify=False
-            ) as client:
+            async with httpx.AsyncClient(timeout=http_timeout, verify=False) as client:
                 response = await client.post(
                     f"{base_url}/v1/capabilities/call",
                     json=call.model_dump(mode="json"),
@@ -6177,9 +6375,7 @@ class API:
                 with recv as chunks:
                     async for chunk in chunks:
                         if isinstance(chunk, ErrorChunk):
-                            logger.warning(
-                                f"embed_texts failed: {chunk.error_message}"
-                            )
+                            logger.warning(f"embed_texts failed: {chunk.error_message}")
                             return None
                         return [list(embedding) for embedding in chunk.embeddings]
             return None
@@ -7148,8 +7344,7 @@ class API:
             "tts" in card.capabilities
             or ModelTask.TextToSpeech in card.tasks
             or (
-                card.audio is not None
-                and card.audio.kind == AudioCardKind.TextToSpeech
+                card.audio is not None and card.audio.kind == AudioCardKind.TextToSpeech
             )
         ):
             tags.append("tts")
@@ -7158,8 +7353,7 @@ class API:
             or ModelTask.SpeechToText in card.tasks
             or ModelTask.SpeechTranslation in card.tasks
             or (
-                card.audio is not None
-                and card.audio.kind == AudioCardKind.SpeechToText
+                card.audio is not None and card.audio.kind == AudioCardKind.SpeechToText
             )
         ):
             tags.append("stt")
@@ -7183,6 +7377,20 @@ class API:
             "request-specific options such as tools may change prompt rendering "
             "and related resolved capability values."
         )
+        installed_record = get_installed_card_record(card.model_id)
+        current_registry_identity = get_current_registry_card_id(card.model_id)
+        current_registry_card = get_current_registry_card(card.model_id)
+        advisories_by_id = {
+            advisory.advisory_id: advisory
+            for advisory in [
+                *get_model_advisories(card),
+                *(
+                    get_model_advisories(current_registry_card)
+                    if current_registry_card is not None
+                    else ()
+                ),
+            ]
+        }
         return ModelListModel(
             id=card.model_id,
             hugging_face_id=card.artifact_repository,
@@ -7201,6 +7409,23 @@ class API:
             registry_card_id=card.registry_card_id,
             registry_snapshot_id=card.registry_snapshot_id,
             registry_provenance=card.registry_provenance,
+            installed=installed_record is not None,
+            active_installed_identity=(
+                installed_record.installed_identity
+                if installed_record is not None
+                else None
+            ),
+            installed_verification=(
+                installed_record.verification if installed_record is not None else None
+            ),
+            current_registry_identity=current_registry_identity,
+            update_available=(
+                installed_record is not None
+                and current_registry_identity is not None
+                and current_registry_identity
+                != installed_record.model_card.registry_card_id
+            ),
+            advisories=list(advisories_by_id.values()),
             catalog_source=(
                 "custom"
                 if card.is_custom
@@ -7497,6 +7722,7 @@ class API:
                 tg.start_soon(self._prune_old_traces)
                 # Opt-in field telemetry: consent-gated, fail-silent, bounded.
                 tg.start_soon(self._field_telemetry.flush_loop)
+                tg.start_soon(self._store_reconciliation_loop)
                 print_startup_banner(self.port)
                 tg.start_soon(self.run_api, shutdown_ev)
                 if (
@@ -7594,8 +7820,7 @@ class API:
             # Do not include exception text: relay paths and lower-level
             # transport errors can contain private deployment metadata.
             logger.warning(
-                "Operator remote access is unavailable; "
-                "the local API remains available"
+                "Operator remote access is unavailable; the local API remains available"
             )
 
     def _maybe_compact_event_log(self) -> None:
@@ -7640,17 +7865,12 @@ class API:
                 released_task: task_types.Task | None = None
                 if isinstance(event, TaskDeleted):
                     released_task = previous_tasks.get(event.task_id)
-                elif (
-                    isinstance(event, TaskFailed)
-                    or (
-                        isinstance(event, TaskStatusUpdated)
-                        and event.task_status in _TERMINAL_TASK_STATUSES
-                    )
+                elif isinstance(event, TaskFailed) or (
+                    isinstance(event, TaskStatusUpdated)
+                    and event.task_status in _TERMINAL_TASK_STATUSES
                 ):
                     released_task = self.state.tasks.get(event.task_id)
-                if isinstance(
-                    released_task, task_types.RealtimeAudioTranscription
-                ):
+                if isinstance(released_task, task_types.RealtimeAudioTranscription):
                     self._mark_realtime_task_released(released_task.command_id)
 
                 if isinstance(
@@ -7694,6 +7914,7 @@ class API:
                         event.task_id,
                         "The request was cancelled because its instance was deleted",
                     )
+
     async def _apply_data(self) -> None:
         """Consume the data plane (#279 Phase 2): per-command output chunks.
 
@@ -7789,9 +8010,7 @@ class API:
                     with contextlib.suppress(
                         WouldBlock, BrokenResourceError, ClosedResourceError
                     ):
-                        state.output_sender.send_nowait(
-                            batch.synthesized_terminal
-                        )
+                        state.output_sender.send_nowait(batch.synthesized_terminal)
                     queue_failed = True
                 if queue_failed or state.receiver.terminal is not None:
                     if queue_failed:
@@ -7820,8 +8039,7 @@ class API:
                     ErrorChunk(
                         model=ModelId("unknown"),
                         error_message=(
-                            packet.error_message
-                            or "realtime audio transport failed"
+                            packet.error_message or "realtime audio transport failed"
                         ),
                     ),
                 )
@@ -8192,8 +8410,7 @@ class API:
             )
             await self._fail_data_stream_transport(
                 command_id,
-                f"DATA reorder window exceeded waiting for sequence "
-                f"{state.next_seq}",
+                f"DATA reorder window exceeded waiting for sequence {state.next_seq}",
             )
             self._chunk_reorder.pop(command_id, None)
             return
@@ -8605,12 +8822,13 @@ class API:
                 staging_root = Path(staging.node_cache_path).expanduser()
 
         in_use = self._store_models_in_use()
+        cards = await get_all_model_cards()
 
         def _collect() -> NodeStorageSummary:
-            staged = (
-                list_staged_models(staging_root, in_use)
-                if staging_root is not None
-                else []
+            staged = _inventory_installed_artifacts(
+                _installed_artifact_roots(staging_root),
+                cards,
+                in_use,
             )
             event_log_bytes = 0
             for file_path in SKULK_EVENT_LOG_DIR.rglob("*"):
@@ -9470,8 +9688,7 @@ class API:
                     url=None,
                     ok=False,
                     error=(
-                        "no reachable API route among the node's advertised "
-                        "addresses"
+                        "no reachable API route among the node's advertised addresses"
                     ),
                 )
             )
@@ -9775,9 +9992,7 @@ class API:
                 status_code=response.status_code,
                 detail=self._proxy_error_detail(response),
             )
-        return DiagnosticCaptureResponse.model_validate(
-            response.json(), extra="ignore"
-        )
+        return DiagnosticCaptureResponse.model_validate(response.json(), extra="ignore")
 
     async def get_cluster_diagnostics(self) -> ClusterDiagnostics:
         """Return read-only diagnostics for every topology member.
@@ -9853,8 +10068,7 @@ class API:
                     url=None,
                     ok=False,
                     error=(
-                        "no reachable API route among the node's advertised "
-                        "addresses"
+                        "no reachable API route among the node's advertised addresses"
                     ),
                 )
             )
@@ -10484,9 +10698,7 @@ class API:
                         )
                         if tps is not None:
                             decode_tps = float(tps)
-                        node = cast(
-                            "str | None", getattr(stats, "serving_node", None)
-                        )
+                        node = cast("str | None", getattr(stats, "serving_node", None))
                         if node is not None:
                             serving_node = node
                             serving_backend = cast(
@@ -10724,7 +10936,508 @@ class API:
         if self._store_client is None:
             raise HTTPException(status_code=503, detail="Store not configured")
         entries = await self._store_client.fetch_registry()
-        return JSONResponse({"entries": entries})
+        cards_by_id = {str(card.model_id): card for card in await get_all_model_cards()}
+        enriched: list[dict[str, object]] = []
+        for raw_entry in entries:
+            entry = dict(raw_entry)
+            installed = entry.get("installed_card")
+            identity = (
+                cast("dict[str, object]", installed).get("installed_identity")
+                if isinstance(installed, dict)
+                else None
+            )
+            entry["cached_on_nodes"] = (
+                self._cached_artifact_locations.get(identity, [])
+                if isinstance(identity, str)
+                else []
+            )
+            installed_dict = (
+                cast("dict[str, object]", installed)
+                if isinstance(installed, dict)
+                else None
+            )
+            owner_model_id = (
+                installed_dict.get("owner_model_id")
+                if installed_dict is not None
+                else None
+            )
+            model_alias = (
+                owner_model_id
+                if isinstance(owner_model_id, str)
+                else entry.get("model_id")
+            )
+            current_card = (
+                get_current_registry_card(ModelId(model_alias))
+                if isinstance(model_alias, str)
+                else None
+            )
+            if current_card is None and isinstance(model_alias, str):
+                current_card = cards_by_id.get(model_alias)
+            current_identity = (
+                get_current_registry_card_id(ModelId(model_alias))
+                if isinstance(model_alias, str)
+                else None
+            )
+            if current_identity is None and current_card is not None:
+                current_identity = current_card.registry_card_id
+            installed_registry_identity: object = None
+            if installed_dict is not None:
+                model_card = installed_dict.get("model_card")
+                if isinstance(model_card, dict):
+                    installed_registry_identity = cast(
+                        "dict[str, object]", model_card
+                    ).get("registry_card_id")
+            update_available = (
+                current_identity is not None
+                and installed_registry_identity is not None
+                and current_identity != installed_registry_identity
+            )
+            entry["current_registry_identity"] = current_identity
+            entry["installed_not_current"] = (
+                current_identity is None or update_available
+            )
+            entry["update_available"] = update_available
+            advisory_cards: list[ModelCard] = []
+            if installed_dict is not None:
+                installed_model_card = installed_dict.get("model_card")
+                if isinstance(installed_model_card, dict):
+                    advisory_cards.append(
+                        ModelCard.model_validate(installed_model_card, strict=False)
+                    )
+            if current_card is not None:
+                advisory_cards.append(current_card)
+            entry["advisories"] = [
+                advisory.model_dump(mode="json")
+                for advisory in _combined_model_advisories(advisory_cards)
+            ]
+            entry["reconciliation_state"] = self._reconciliation_status.state
+            entry["last_verified_at"] = self._reconciliation_status.last_verified_at
+            enriched.append(entry)
+        return JSONResponse({"entries": enriched})
+
+    def _configured_staging_root(self) -> Path | None:
+        """Return this node's configured cache root when staging is enabled."""
+
+        if (
+            self._skulk_config is None
+            or self._skulk_config.model_store is None
+            or not self._skulk_config.model_store.enabled
+        ):
+            return None
+        staging = resolve_node_staging(
+            self._skulk_config.model_store,
+            str(self.node_id),
+        )
+        return Path(staging.node_cache_path).expanduser() if staging.enabled else None
+
+    async def create_artifact_export(
+        self,
+        payload: ArtifactExportRequest,
+        request: Request,
+    ) -> ArtifactExportResponse:
+        """Create a target-bound capability for one complete local artifact."""
+
+        self._require_artifact_export_target(request, payload.target_node_id)
+        staging_root = self._configured_staging_root()
+        cards = await get_all_model_cards()
+        staged = await to_thread.run_sync(
+            _inventory_installed_artifacts,
+            _installed_artifact_roots(staging_root),
+            cards,
+        )
+        selected = next(
+            (
+                item
+                for item in staged
+                if item.installed_identity == payload.installed_identity
+                and item.manifest_sha256 == payload.manifest_sha256
+                and item.manifest_complete
+            ),
+            None,
+        )
+        if selected is None:
+            raise HTTPException(status_code=404, detail="Installed artifact not found")
+        try:
+            grant = await to_thread.run_sync(
+                lambda: self._artifact_exports.issue(
+                    Path(selected.directory),
+                    manifest_sha256=payload.manifest_sha256,
+                    target_node_id=payload.target_node_id,
+                )
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return ArtifactExportResponse(
+            capability_token=grant.token,
+            expires_at_epoch_seconds=grant.expires_at,
+            byte_ceiling=grant.byte_ceiling,
+            record=grant.record,
+        )
+
+    def _require_artifact_export_target(
+        self,
+        request: Request,
+        target_node_id: str,
+    ) -> None:
+        """Require the caller socket to belong to the claimed store node."""
+
+        client = request.client
+        if client is None:
+            raise HTTPException(status_code=403, detail="Missing caller identity")
+        try:
+            client_address = ipaddress.ip_address(client.host.split("%", 1)[0])
+        except ValueError as error:
+            raise HTTPException(
+                status_code=403, detail="Invalid caller address"
+            ) from error
+        allowed_addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+        if target_node_id == str(self.node_id):
+            allowed_addresses.update(
+                {ipaddress.ip_address("127.0.0.1"), ipaddress.ip_address("::1")}
+            )
+        network = self.state.node_network.get(NodeId(target_node_id))
+        if network is not None:
+            for interface in network.interfaces:
+                try:
+                    allowed_addresses.add(
+                        ipaddress.ip_address(interface.ip_address.split("%", 1)[0])
+                    )
+                except ValueError:
+                    continue
+        if client_address not in allowed_addresses:
+            raise HTTPException(
+                status_code=403,
+                detail="Caller address does not belong to the target store node",
+            )
+
+    async def read_artifact_export(
+        self,
+        capability_token: str,
+        relative_path: str,
+        request: Request,
+    ) -> StreamingResponse:
+        """Serve one range-capable file authorized by an export capability."""
+
+        target_node_id = request.headers.get("x-skulk-store-node")
+        if target_node_id is None:
+            raise HTTPException(status_code=403, detail="Missing target node binding")
+        self._require_artifact_export_target(request, target_node_id)
+        range_header = request.headers.get("range")
+        try:
+            authorized = self._artifact_exports.resolve(
+                capability_token,
+                target_node_id=target_node_id,
+                relative_path=relative_path,
+                range_header=range_header,
+            )
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+        async def stream_authorized_range() -> AsyncIterator[bytes]:
+            remaining = authorized.byte_count
+            with authorized.path.open("rb") as source:
+                source.seek(authorized.start_offset)
+                while remaining:
+                    chunk = await to_thread.run_sync(
+                        source.read,
+                        min(1024 * 1024, remaining),
+                    )
+                    if not chunk:
+                        raise RuntimeError("artifact export ended before its range")
+                    remaining -= len(chunk)
+                    yield chunk
+                    # StreamingResponse resumes the generator only after the
+                    # preceding ASGI send completes. Charging here preserves
+                    # the unused ceiling when a connection drops mid-transfer.
+                    self._artifact_exports.consume(capability_token, len(chunk))
+
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(authorized.byte_count),
+        }
+        status_code = 200
+        if range_header is not None:
+            status_code = 206
+            headers["Content-Range"] = (
+                f"bytes {authorized.start_offset}-{authorized.end_offset}/"
+                f"{authorized.path.stat().st_size}"
+            )
+        return StreamingResponse(
+            stream_authorized_range(),
+            status_code=status_code,
+            headers=headers,
+            media_type="application/octet-stream",
+        )
+
+    async def get_store_reconciliation(self) -> ReconciliationStatus:
+        """Return the latest automatic reconciliation status."""
+
+        return self._reconciliation_status
+
+    async def rescan_store_reconciliation(
+        self,
+        request: Request,
+    ) -> ReconciliationStatus:
+        """Run an immediate loopback-only fleet reconciliation pass."""
+
+        self._require_node_local_remote_code_mutation(request)
+        return await self._run_store_reconciliation()
+
+    async def _run_store_reconciliation(self) -> ReconciliationStatus:
+        """Inventory reachable node caches and import each missing identity once."""
+
+        if self._store_client is None or self._store_client.local_store_path is None:
+            self._reconciliation_status = ReconciliationStatus(
+                state="failed",
+                inventory_only=True,
+                failures=("This node is not the authoritative store host",),
+            )
+            return self._reconciliation_status
+        async with self._reconciliation_lock:
+            config = self._skulk_config
+            assert config is not None and config.model_store is not None
+            inventory_only = config.model_store.reconciliation.inventory_only
+            self._reconciliation_status = ReconciliationStatus(
+                state="scanning",
+                inventory_only=inventory_only,
+            )
+            sources: dict[str, tuple[str, list[dict[str, object]]]] = {}
+            local_summary = await self.get_node_storage_summary()
+            sources[str(self.node_id)] = (
+                f"http://127.0.0.1:{self.port}",
+                [
+                    cast(
+                        "dict[str, object]", item.model_dump(mode="json", by_alias=True)
+                    )
+                    for item in local_summary.staged_models
+                ],
+            )
+            peer_urls = await self._reachable_peer_api_urls(fail_fast=True)
+            failures: list[str] = []
+            timeout = httpx.Timeout(timeout=30.0, connect=3.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                for node_id, base_url in sorted(peer_urls.items()):
+                    try:
+                        response = await client.get(f"{base_url}/store/storage")
+                        response.raise_for_status()
+                        payload = cast("object", json.loads(response.text))
+                        if not isinstance(payload, dict):
+                            raise ValueError("storage response is not an object")
+                        staged_raw = cast("dict[str, object]", payload).get(
+                            "stagedModels", []
+                        )
+                        if not isinstance(staged_raw, list):
+                            raise ValueError("stagedModels is not an array")
+                        staged_items: list[dict[str, object]] = []
+                        for raw_item in cast("list[object]", staged_raw):
+                            if isinstance(raw_item, dict):
+                                staged_items.append(cast("dict[str, object]", raw_item))
+                        sources[node_id] = (base_url, staged_items)
+                    except (httpx.HTTPError, ValueError) as error:
+                        failures.append(f"Could not inventory node {node_id}: {error}")
+                registry = await self._store_client.fetch_registry(
+                    recover_installed_cards=True
+                )
+                existing_generations = await to_thread.run_sync(
+                    _complete_canonical_generations,
+                    self._store_client.local_store_path,
+                    registry,
+                )
+                tombstone_metadata_valid = True
+                reconciliation_tombstones: frozenset[str]
+                try:
+                    reconciliation_tombstones = await to_thread.run_sync(
+                        read_reconciliation_tombstones,
+                        self._store_client.local_store_path,
+                    )
+                except (OSError, ValueError) as error:
+                    tombstone_metadata_valid = False
+                    failures.append(
+                        "Could not read reconciliation deletion tombstones: "
+                        f"{error}"
+                    )
+                    reconciliation_tombstones = frozenset()
+                replicas: dict[
+                    tuple[str, str], list[tuple[str, str, dict[str, object]]]
+                ] = {}
+                cached_locations: dict[str, list[dict[str, object]]] = {}
+                for node_id, (base_url, items) in sources.items():
+                    for item in items:
+                        identity = item.get("installedIdentity")
+                        digest = item.get("manifestSha256")
+                        if (
+                            isinstance(identity, str)
+                            and isinstance(digest, str)
+                            and item.get("manifestComplete") is True
+                        ):
+                            cached_locations.setdefault(identity, []).append(
+                                {
+                                    "node_id": node_id,
+                                    "complete": True,
+                                    "installed_identity": identity,
+                                    "bytes": item.get("sizeBytes", 0),
+                                    "last_use_epoch_seconds": item.get(
+                                        "lastUsedEpochSeconds", 0
+                                    ),
+                                    "in_use": item.get("inUse", False),
+                                }
+                            )
+                            if (
+                                not tombstone_metadata_valid
+                                or _artifact_inventory_is_tombstoned(
+                                    item, reconciliation_tombstones
+                                )
+                            ):
+                                continue
+                            replicas.setdefault((identity, digest), []).append(
+                                (node_id, base_url, item)
+                            )
+                self._cached_artifact_locations = cached_locations
+                current_registry_ids: dict[str, str | None] = {}
+                for candidates in replicas.values():
+                    if not candidates:
+                        continue
+                    item = candidates[0][2]
+                    artifact_model_id = item.get("modelId")
+                    owner_model_id = item.get("ownerModelId")
+                    owner_alias = (
+                        owner_model_id
+                        if isinstance(owner_model_id, str)
+                        else artifact_model_id
+                    )
+                    if not isinstance(owner_alias, str):
+                        continue
+                    current_card = get_current_registry_card(ModelId(owner_alias))
+                    current_registry_ids[owner_alias] = (
+                        current_card.registry_card_id
+                        if current_card is not None
+                        else None
+                    )
+                selected_replicas = _select_reconciliation_generations(
+                    replicas,
+                    current_registry_ids,
+                )
+                pending = sorted(
+                    identity
+                    for identity, digest in selected_replicas
+                    if (identity, digest) not in existing_generations
+                )
+                imported = 0
+                if not inventory_only:
+                    self._reconciliation_status = ReconciliationStatus(
+                        state="importing",
+                        inventory_only=False,
+                        scanned_nodes=len(sources),
+                        discovered_artifacts=len(selected_replicas),
+                        pending_imports=tuple(pending),
+                        failures=tuple(failures),
+                    )
+                    for identity, digest in sorted(selected_replicas):
+                        if (identity, digest) in existing_generations:
+                            continue
+                        candidates = sorted(
+                            selected_replicas[(identity, digest)],
+                            key=lambda candidate: (
+                                candidate[0] != str(self.node_id),
+                                candidate[2].get("verificationState")
+                                != "registry_verified",
+                                candidate[0],
+                            ),
+                        )
+                        imported_this_identity = False
+                        for source_node_id, base_url, _item in candidates:
+                            try:
+                                export_response = await client.post(
+                                    f"{base_url}/store/internal/exports",
+                                    json={
+                                        "installed_identity": identity,
+                                        "manifest_sha256": digest,
+                                        "target_node_id": str(self.node_id),
+                                    },
+                                )
+                                export_response.raise_for_status()
+                                grant = cast("object", json.loads(export_response.text))
+                                if not isinstance(grant, dict):
+                                    raise ValueError("export grant is not an object")
+                                grant_dict = cast("dict[str, object]", grant)
+                                token = grant_dict.get("capability_token")
+                                record = grant_dict.get("record")
+                                if not isinstance(token, str) or not isinstance(
+                                    record, dict
+                                ):
+                                    raise ValueError("export grant is incomplete")
+                                await self._store_client.request_peer_import(
+                                    record=cast("dict[str, object]", record),
+                                    source_base_url=base_url,
+                                    capability_token=token,
+                                    target_node_id=str(self.node_id),
+                                )
+                                imported += 1
+                                imported_this_identity = True
+                                existing_generations.add((identity, digest))
+                                break
+                            except (httpx.HTTPError, RuntimeError, ValueError) as error:
+                                failures.append(
+                                    f"Import {identity} from node {source_node_id} failed: {error}"
+                                )
+                        if not imported_this_identity:
+                            continue
+            now = datetime.now(tz=timezone.utc).isoformat()
+            remaining = tuple(
+                identity
+                for identity, digest in selected_replicas
+                if identity in pending
+                and (identity, digest) not in existing_generations
+            )
+            state: Literal["complete", "failed"] = (
+                "failed"
+                if failures and (remaining or not tombstone_metadata_valid)
+                else "complete"
+            )
+            self._reconciliation_status = ReconciliationStatus(
+                state=state,
+                inventory_only=inventory_only,
+                scanned_nodes=len(sources),
+                discovered_artifacts=len(selected_replicas),
+                imported_artifacts=imported,
+                pending_imports=remaining if not inventory_only else tuple(pending),
+                failures=tuple(failures),
+                last_verified_at=now,
+            )
+            return self._reconciliation_status
+
+    async def _store_reconciliation_loop(self) -> None:
+        """Run startup and periodic reconciliation on the store host."""
+
+        if (
+            self._store_client is None
+            or self._store_client.local_store_path is None
+            or self._skulk_config is None
+            or self._skulk_config.model_store is None
+            or not self._skulk_config.model_store.reconciliation.enabled
+        ):
+            return
+        # The API becomes reachable after this lifetime task is scheduled but
+        # before its intentional convergence delay expires. Represent that
+        # scheduled first pass as active so dashboard clients do not mistake
+        # the initial ``idle`` value for terminal convergence.
+        self._reconciliation_status = ReconciliationStatus(
+            state="scanning",
+            inventory_only=(
+                self._skulk_config.model_store.reconciliation.inventory_only
+            ),
+        )
+        await anyio.sleep(10)
+        while True:
+            try:
+                await self._run_store_reconciliation()
+            except Exception as error:  # noqa: BLE001 - lifetime service boundary
+                logger.exception(f"Model-store reconciliation failed: {error}")
+            await anyio.sleep(
+                self._skulk_config.model_store.reconciliation.interval_seconds
+            )
 
     _ALLOWED_BROWSE_ROOTS = ["/Volumes", "/home", "/mnt", "/tmp", "/opt"]
 
@@ -10842,29 +11555,69 @@ class API:
         model_id: str,
         payload: StoreDownloadRequest | None = None,
     ) -> JSONResponse:
-        """Request a store download with optional GGUF and source-revision pins."""
+        """Request a store download with optional base or companion pins."""
         if self._store_client is None:
             raise HTTPException(status_code=503, detail="Store not configured")
         requested_model_id = ModelId(model_id)
-        card = get_card(requested_model_id)
-        if card is None:
+        artifact_role = payload.artifact_role if payload is not None else "base"
+        card = (
+            get_current_registry_card(requested_model_id)
+            or get_card(requested_model_id)
+            if artifact_role == "base"
+            else None
+        )
+        if card is None and artifact_role == "base":
             await get_model_cards()
-            card = get_card(requested_model_id)
+            card = get_current_registry_card(requested_model_id) or get_card(
+                requested_model_id
+            )
         gguf_file = payload.gguf_file if payload is not None else None
+        extra_gguf_files = (
+            payload.extra_gguf_files if payload is not None else []
+        )
         source_revision = payload.source_revision if payload is not None else None
-        source_repository: str | None = None
-        registry_card_id: str | None = None
+        source_repository = (
+            payload.source_repository if payload is not None else None
+        )
+        registry_card_id = payload.registry_card_id if payload is not None else None
+        owner_model_id = payload.owner_model_id if payload is not None else None
+        owner_registry_card_id = (
+            payload.owner_registry_card_id if payload is not None else None
+        )
+        requested_card_id = payload.registry_card_id if payload is not None else None
+        if requested_card_id is not None and artifact_role == "base":
+            current_card = get_current_registry_card(requested_model_id)
+            installed_card = get_card(requested_model_id)
+            card = next(
+                (
+                    candidate
+                    for candidate in (current_card, installed_card)
+                    if candidate is not None
+                    and candidate.registry_card_id == requested_card_id
+                    and candidate.model_id == requested_model_id
+                ),
+                None,
+            )
+            if card is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Requested immutable card is not available for this alias",
+                )
         if card is not None:
             gguf_file = gguf_file or card.gguf_file
             source_revision = source_revision or card.source_revision
-            source_repository = str(card.artifact_repository)
+            source_repository = source_repository or str(card.artifact_repository)
             registry_card_id = card.registry_card_id
         result = await self._store_client.request_store_download(
             model_id,
             gguf_file=gguf_file,
+            extra_gguf_files=extra_gguf_files,
             source_revision=source_revision,
             source_repository=source_repository,
             registry_card_id=registry_card_id,
+            owner_model_id=owner_model_id,
+            owner_registry_card_id=owner_registry_card_id,
+            artifact_role=artifact_role,
         )
         return JSONResponse(result)
 
@@ -11009,7 +11762,7 @@ class API:
                 model=model_id,
                 input_texts=texts,
                 encoding_format=request.encoding_format,
-            )
+            ),
         )
         command_id = command.command_id
 
@@ -11261,9 +12014,7 @@ class API:
                         source_node=self.node_id,
                         target_node=target_node,
                         command_id=command_id,
-                        sequence=(
-                            len(reference_audio) + _SPEECH_MEDIA_CHUNK_BYTES - 1
-                        )
+                        sequence=(len(reference_audio) + _SPEECH_MEDIA_CHUNK_BYTES - 1)
                         // _SPEECH_MEDIA_CHUNK_BYTES,
                         kind="completed",
                         filename=task_params.reference_audio_filename,
@@ -11382,7 +12133,9 @@ class API:
         try:
             task_params = await self._prepare_builtin_tts_task(call)
         except (ValidationError, HTTPException) as exc:
-            raise RuntimeError(f"TTS availability changed after admission: {exc}") from exc
+            raise RuntimeError(
+                f"TTS availability changed after admission: {exc}"
+            ) from exc
         command_id, recv = await self._start_speech_synthesis(task_params)
         sequence = 1
         received_audio = False
@@ -11445,10 +12198,7 @@ class API:
                         )
                         return
         finally:
-            if (
-                not terminal_received
-                and not self._command_task_is_terminal(command_id)
-            ):
+            if not terminal_received and not self._command_task_is_terminal(command_id):
                 await self._cancel_audio_speech_command(command_id)
             await self._finalize_command_stream(
                 command_id,
@@ -11522,8 +12272,7 @@ class API:
             return CapabilityError(
                 code="overloaded",
                 message=(
-                    f"no ready batch STT runner for requested model "
-                    f"{task_params.model}"
+                    f"no ready batch STT runner for requested model {task_params.model}"
                 ),
             )
         return None
@@ -11698,9 +12447,7 @@ class API:
         if self._realtime_stt_instance(params.model) is None:
             raise HTTPException(
                 status_code=404,
-                detail=(
-                    f"No reachable realtime STT instance for model {params.model}"
-                ),
+                detail=(f"No reachable realtime STT instance for model {params.model}"),
             )
         selected = self._realtime_stt_instance(
             params.model,
@@ -11793,9 +12540,7 @@ class API:
         if release_event is not None:
             release_event.set()
 
-    async def _cancel_audio_transcription_command(
-        self, command_id: CommandId
-    ) -> None:
+    async def _cancel_audio_transcription_command(self, command_id: CommandId) -> None:
         """Cancel one core STT command while preserving cleanup ordering."""
 
         if command_id in self._cancelled_command_ids:
@@ -11893,7 +12638,7 @@ class API:
                         sequence=frame.sequence,
                         kind="chunk",
                         data=media.data,
-                    )
+                    ),
                 )
                 continue
             if frame.kind == "failed":
@@ -11906,7 +12651,7 @@ class API:
                     command_id=command_id,
                     sequence=frame.sequence,
                     kind=kind,
-                )
+                ),
             )
             terminal_sent = True
             return
@@ -11921,16 +12666,20 @@ class API:
         """Bridge provider PCM input to a true incremental core STT session."""
 
         try:
-            params, instance_id, target_node = (
-                await self._prepare_builtin_realtime_stt_task(call)
-            )
+            (
+                params,
+                instance_id,
+                target_node,
+            ) = await self._prepare_builtin_realtime_stt_task(call)
         except (ValidationError, HTTPException) as exc:
             raise RuntimeError(
                 f"realtime STT availability changed after admission: {exc}"
             ) from exc
-        command_id, output_sender, output_receiver = (
-            await self._start_realtime_audio_transcription(params, instance_id)
-        )
+        (
+            command_id,
+            output_sender,
+            output_receiver,
+        ) = await self._start_realtime_audio_transcription(params, instance_id)
         input_cancel_scope = anyio.CancelScope()
         input_done = anyio.Event()
 
@@ -11946,9 +12695,7 @@ class API:
                 except anyio.get_cancelled_exc_class():
                     raise
                 except Exception as exc:
-                    with contextlib.suppress(
-                        BrokenResourceError, ClosedResourceError
-                    ):
+                    with contextlib.suppress(BrokenResourceError, ClosedResourceError):
                         await output_sender.send(
                             ErrorChunk(
                                 model=params.model,
@@ -11988,8 +12735,7 @@ class API:
                     if isinstance(chunk, ErrorChunk):
                         terminal_received = True
                         raise RuntimeError(
-                            f"Core realtime transcription failed: "
-                            f"{chunk.error_message}"
+                            f"Core realtime transcription failed: {chunk.error_message}"
                         )
                     if chunk.finish_reason is not None:
                         terminal_received = True
@@ -12023,9 +12769,8 @@ class API:
                 with anyio.CancelScope(shield=True):
                     with anyio.move_on_after(1.0):
                         await input_done.wait()
-                    if (
-                        not terminal_received
-                        and not self._command_task_is_terminal(command_id)
+                    if not terminal_received and not self._command_task_is_terminal(
+                        command_id
                     ):
                         await self._cancel_audio_transcription_command(command_id)
                     await self._finalize_command_stream(
@@ -12035,9 +12780,7 @@ class API:
                             self._audio_transcription_queues,
                         ),
                     )
-                    release_event = self._realtime_task_release_events.get(
-                        command_id
-                    )
+                    release_event = self._realtime_task_release_events.get(command_id)
                     if terminal_received and release_event is not None:
                         with anyio.move_on_after(
                             _REALTIME_TASK_RELEASE_TIMEOUT_SECONDS
@@ -12330,9 +13073,7 @@ class API:
         if request.streaming_interval is not None and not request.stream:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "`streaming_interval` is only supported with `stream=true`"
-                ),
+                detail=("`streaming_interval` is only supported with `stream=true`"),
             )
         if request.reference_audio is not None:
             raise HTTPException(
@@ -12367,11 +13108,9 @@ class API:
         reference_voice_profile: str | None = None
         if reference_audio_file is None:
             request = await self._apply_default_speech_voice(request, model_id)
-            reference_voice_profile = (
-                await self._bundled_reference_profile_for_voice(
-                    model_id,
-                    request.voice,
-                )
+            reference_voice_profile = await self._bundled_reference_profile_for_voice(
+                model_id,
+                request.voice,
             )
         if request.stream and response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
             supported = ", ".join(
@@ -12489,9 +13228,11 @@ class API:
             )
 
         try:
-            audio_bytes, response_format, sample_rate = await self._collect_audio_speech_chunks(
-                command_id, recv
-            )
+            (
+                audio_bytes,
+                response_format,
+                sample_rate,
+            ) = await self._collect_audio_speech_chunks(command_id, recv)
             if response_format == AudioResponseFormat.Pcm and sample_rate is None:
                 raise HTTPException(
                     status_code=500,
@@ -12547,9 +13288,7 @@ class API:
                             if audio_parts
                             else "No speech audio response received"
                         )
-                        raise HTTPException(
-                            status_code=500, detail=detail
-                        ) from exc
+                        raise HTTPException(status_code=500, detail=detail) from exc
                 if scope.cancelled_caught:
                     if self._command_task_is_terminal(command_id):
                         detail = (
@@ -12656,8 +13395,7 @@ class API:
                 raise HTTPException(
                     status_code=500,
                     detail=(
-                        "Speech synthesis completed, but no audio response "
-                        "was received"
+                        "Speech synthesis completed, but no audio response was received"
                     ),
                 )
             return chunk
@@ -12702,8 +13440,7 @@ class API:
                                 ) from exc
                             await self._cancel_audio_speech_command(command_id)
                             raise RuntimeError(
-                                "Speech stream closed before receiving "
-                                "a terminal chunk"
+                                "Speech stream closed before receiving a terminal chunk"
                             ) from exc
                     if scope.cancelled_caught:
                         self._data_plane_observer.record_idle_timeout()
@@ -12735,9 +13472,7 @@ class API:
                         expected_format = chunk.format
                     elif chunk.format != expected_format:
                         await self._cancel_audio_speech_command(command_id)
-                        raise RuntimeError(
-                            "Speech synthesis changed format mid-stream"
-                        )
+                        raise RuntimeError("Speech synthesis changed format mid-stream")
                     if (
                         expected_pcm_sample_rate is not None
                         and chunk.sample_rate != expected_pcm_sample_rate
@@ -12882,9 +13617,7 @@ class API:
         _validate_audio_upload_metadata(file)
         audio_bytes = await _read_audio_upload(file)
         model_id = (
-            await self._validate_audio_transcription_model(
-                ModelId(model), stream=True
-            )
+            await self._validate_audio_transcription_model(ModelId(model), stream=True)
             if stream
             else await self._validate_audio_transcription_model(ModelId(model))
         )
@@ -12923,9 +13656,7 @@ class API:
             )
             return StreamingResponse(
                 body if ndjson else with_sse_keepalive(body),
-                media_type=(
-                    "application/x-ndjson" if ndjson else "text/event-stream"
-                ),
+                media_type=("application/x-ndjson" if ndjson else "text/event-stream"),
                 headers=(
                     {}
                     if ndjson
@@ -13033,9 +13764,7 @@ class API:
                 status_code=400,
                 detail=f"Model {resolved} does not support voice listing",
             )
-        catalog_by_id = {
-            voice.id: voice for voice in model_card.audio.voice_catalog
-        }
+        catalog_by_id = {voice.id: voice for voice in model_card.audio.voice_catalog}
         return AudioVoiceList(
             data=tuple(
                 AudioVoice(

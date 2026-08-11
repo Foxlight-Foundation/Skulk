@@ -35,6 +35,82 @@ With the model store:
 - other nodes stage needed files from that host
 - Skulk keeps the same cluster and inference architecture, but changes where model artifacts come from
 
+## Installed Cards and Existing Caches
+
+Every complete canonical or staged artifact carries an atomic
+`.skulk/installed-card.json` sidecar. The versioned record retains the full
+model card, immutable registry identity and provenance when available, exact
+artifact selection, base or companion role, owning base card, and a canonical
+SHA-256 file manifest. The sidecar is durable truth; `registry.json` is a
+rebuildable index.
+When a model root is mounted read-only, Skulk stores the same strict record
+under its data directory, keyed by the resolved artifact path and manifest
+digest. This fallback changes only metadata placement; the model bytes remain
+untouched in their mounted root.
+
+On startup, Skulk reads installed cards before contacting the registry. In
+`SKULK_OFFLINE=true` mode, an installed model remains usable indefinitely while
+its manifest is complete; the registry client's bounded last-known-good window
+does not expire installed artifacts. Custom cards retain precedence. If the
+registry removes or replaces a card, the installed generation remains active
+and the dashboard reports `installed_not_current` or `update_available` until a
+complete replacement commits.
+
+Pre-existing caches are associated only with trusted card sources: an existing
+sidecar, persisted download state, custom card, bundled card, or signed catalog.
+A matching directory name never creates signed verification by itself. A full
+immutable revision marker plus matching artifact selection is
+`registry_verified`; complete bytes without that proof are `local_legacy` and
+remain usable under their retained effective card. Unmatched directories are
+inventoried as `unresolved` and are not launched or imported automatically.
+Interrupted or partial directories never receive a legacy installed-card
+sidecar merely because their directory name matches a trusted card.
+
+## Automatic Reconciliation
+
+The authoritative store host periodically inventories bounded node-local cache
+summaries outside replicated State and the event log. Replicas deduplicate by
+installed identity and manifest digest. When the store is missing an artifact,
+it prefers a same-host copy, then a revision-verified copy, then a deterministic
+healthy source node.
+
+The source issues a random short-lived capability bound to the source, target
+store node, manifest digest, byte ceiling, and expiry. The store pulls files
+with HTTP ranges into a resumable temporary generation, verifies every size and
+SHA-256 digest, writes the sidecar, and atomically publishes the generation.
+Failed replacement transfers leave the previous generation intact. Source node
+caches are never removed during migration. Capacity admission credits bytes
+already retained in valid partial files, while the export capability enforces
+its manifest-bound cumulative byte ceiling and rejects source files changed
+after issuance.
+The internal store import mutation accepts only a direct loopback peer and
+rejects proxy-forwarding headers, so a local reverse proxy cannot turn it into
+a remote mutation surface.
+
+Set the rollout to inventory-only before importing a pre-existing fleet:
+
+```yaml
+model_store:
+  reconciliation:
+    enabled: true
+    inventory_only: true
+    interval_seconds: 300
+```
+
+Inspect `GET /store/reconciliation`, then set `inventory_only: false` to enable
+automatic imports. `POST /store/reconciliation/rescan` is a loopback-only
+operator retry; periodic reconciliation remains the normal path.
+Inventory and capability-bound export cover the staging cache, direct-download
+fallbacks in `SKULK_MODELS_DIR`, and configured read-only model roots. A
+canonical index entry suppresses import only while its adjacent sidecar and
+complete manifest still validate.
+
+An operator store deletion writes a durable alias tombstone before removing
+the canonical generation. Reconciliation continues to report any node caches
+that missed the best-effort eviction, but it will not import the deleted base
+artifact or companions owned by that base card. The tombstone remains through
+restarts; a later explicit, successfully completed store download clears it.
+
 ### GGUF repositories download only the pinned quantization
 
 A GGUF repository often ships several quantizations of the same model (for
@@ -163,6 +239,11 @@ model_store:
     cleanup_on_deactivate: true
     staging_keep_recent_gb: 40
 
+  reconciliation:
+    enabled: true
+    inventory_only: false
+    interval_seconds: 300
+
   node_overrides:
     mac-studio-1:
       # The store host loads directly from the store path, so it makes no
@@ -239,6 +320,11 @@ what is in use). Raise it on nodes with large disks to keep more models warm.
 The in-use set rides on top of the budget rather than inside it: a node always
 keeps everything its live runners need, plus up to 40 GiB of the most recently
 used idle copies.
+
+Before any store probe or copy, staging checks the installed identity and local
+manifest. An exact complete cache is used immediately, including while
+air-gapped. A stale generation is replaced atomically from the central store,
+and missing required companions disable the fast path.
 
 ### Pre-download capacity safety
 

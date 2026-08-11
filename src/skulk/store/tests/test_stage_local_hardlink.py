@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from skulk.store.model_store import ModelStore
 from skulk.store.model_store_client import ModelStoreClient
 
 
@@ -21,6 +22,28 @@ def _make_store_model(store_root: Path, sanitized_id: str) -> Path:
     (model_dir / "weights.gguf").write_bytes(b"g" * 4096)
     (model_dir / "sub" / "config.json").write_bytes(b"{}")
     return model_dir
+
+
+async def test_local_path_lookup_never_runs_authoritative_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient client lookup must remain read-only and bounded."""
+
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+
+    def reject_recovery(
+        _self: ModelStore,
+        _current_registry_ids: dict[str, str] | None = None,
+    ) -> None:
+        raise AssertionError("transient client attempted authoritative recovery")
+
+    monkeypatch.setattr(ModelStore, "_rebuild_registry_from_sidecars", reject_recovery)
+    client = ModelStoreClient("localhost", local_store_path=store_root)
+
+    assert await client.local_model_path("org/model", None) is None
+    assert not (store_root / "registry.json").exists()
 
 
 async def test_stage_local_hardlinks_on_same_filesystem(tmp_path: Path) -> None:
@@ -100,3 +123,26 @@ async def test_stage_local_replaces_stale_partial_destination(tmp_path: Path) ->
     await client._stage_local("org/model", dest, on_progress=None)  # pyright: ignore[reportPrivateUsage]
 
     assert (dest / "weights.gguf").read_bytes() == b"g" * 4096
+
+
+async def test_stage_local_replaces_same_size_installed_card(tmp_path: Path) -> None:
+    """Metadata refresh cannot be skipped merely because JSON sizes match."""
+
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    model_dir = _make_store_model(store_root, "org--model")
+    source_sidecar = model_dir / ".skulk" / "installed-card.json"
+    source_sidecar.parent.mkdir()
+    source_sidecar.write_text("new")
+    client = ModelStoreClient("localhost", local_store_path=store_root)
+
+    destination = tmp_path / "staging" / "org--model"
+    staged_sidecar = destination / ".skulk" / "installed-card.json"
+    staged_sidecar.parent.mkdir(parents=True)
+    staged_sidecar.write_text("old")
+
+    await client._stage_local(  # pyright: ignore[reportPrivateUsage]
+        "org/model", destination, on_progress=None
+    )
+
+    assert staged_sidecar.read_text() == "new"
