@@ -29,6 +29,22 @@ class ArtifactExportGrant:
     expires_at: float
 
 
+@dataclass(frozen=True)
+class AuthorizedArtifactRead:
+    """One validated byte interval within an export capability."""
+
+    path: Path
+    grant: ArtifactExportGrant
+    start_offset: int
+    end_offset: int
+
+    @property
+    def byte_count(self) -> int:
+        """Number of file bytes selected by this read."""
+
+        return self.end_offset - self.start_offset + 1
+
+
 @final
 class ArtifactExportManager:
     """Issue and validate process-local artifact export capabilities."""
@@ -81,7 +97,7 @@ class ArtifactExportManager:
         target_node_id: str,
         relative_path: str,
         range_header: str | None = None,
-    ) -> tuple[Path, ArtifactExportGrant]:
+    ) -> AuthorizedArtifactRead:
         """Authorize one bounded read without crossing the artifact boundary.
 
         Args:
@@ -91,11 +107,8 @@ class ArtifactExportManager:
             range_header: Optional single HTTP ``bytes`` range for resumption.
 
         Returns:
-            The authorized local path and immutable grant metadata.
-
-        Side effects:
-            Reserves the response bytes against the capability's cumulative
-            transfer ceiling before the file response begins.
+            The authorized path, grant, and inclusive byte interval. Call
+            :meth:`consume` as chunks are actually emitted.
         """
 
         now = time.time()
@@ -118,15 +131,34 @@ class ArtifactExportManager:
         issued_snapshot = self._file_snapshots.get(token, {}).get(relative_path)
         if issued_snapshot is None or _file_snapshot(candidate) != issued_snapshot:
             raise PermissionError("granted artifact file changed")
-        response_bytes = _range_response_bytes(
+        start_offset, end_offset = _range_bounds(
             manifest_entry.size_bytes,
             range_header,
         )
         remaining = self._remaining_bytes.get(token, 0)
+        response_bytes = end_offset - start_offset + 1
         if response_bytes > remaining:
             raise PermissionError("artifact export byte ceiling exhausted")
-        self._remaining_bytes[token] = remaining - response_bytes
-        return candidate, grant
+        return AuthorizedArtifactRead(
+            path=candidate,
+            grant=grant,
+            start_offset=start_offset,
+            end_offset=end_offset,
+        )
+
+    def consume(self, token: str, delivered_bytes: int) -> None:
+        """Charge bytes actually emitted by one authorized response chunk."""
+
+        if delivered_bytes <= 0:
+            raise ValueError("delivered_bytes must be positive")
+        now = time.time()
+        self._discard_expired(now)
+        if token not in self._grants:
+            raise PermissionError("invalid artifact export capability")
+        remaining = self._remaining_bytes.get(token, 0)
+        if delivered_bytes > remaining:
+            raise PermissionError("artifact export byte ceiling exhausted")
+        self._remaining_bytes[token] = remaining - delivered_bytes
 
     def _discard_expired(self, now: float) -> None:
         for token, grant in tuple(self._grants.items()):
@@ -143,11 +175,11 @@ def _file_snapshot(path: Path) -> FileSnapshot:
     return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
 
-def _range_response_bytes(file_size: int, range_header: str | None) -> int:
-    """Return bytes selected by one HTTP range, rejecting ambiguous requests."""
+def _range_bounds(file_size: int, range_header: str | None) -> tuple[int, int]:
+    """Return inclusive HTTP range bounds, rejecting ambiguous requests."""
 
     if range_header is None:
-        return file_size
+        return (0, file_size - 1)
     if not range_header.startswith("bytes=") or "," in range_header:
         raise PermissionError("unsupported artifact export range")
     bounds = range_header.removeprefix("bytes=").split("-", 1)
@@ -158,4 +190,4 @@ def _range_response_bytes(file_size: int, range_header: str | None) -> int:
     end = int(end_text) if end_text.isdigit() else file_size - 1
     if start >= file_size or end < start or end >= file_size:
         raise PermissionError("artifact export range is outside the granted file")
-    return end - start + 1
+    return (start, end)

@@ -12,7 +12,7 @@ import skulk.api.main as api_main
 from skulk.api.main import (
     _artifact_inventory_is_tombstoned,
     _combined_model_advisories,
-    _complete_canonical_identities,
+    _complete_canonical_generations,
     _installed_artifact_roots,
     _inventory_installed_artifacts,
     _select_reconciliation_generations,
@@ -236,7 +236,7 @@ def test_inventory_includes_direct_and_read_only_model_roots(
     assert inventory[0].manifest_complete
 
 
-def test_canonical_identity_requires_adjacent_complete_manifest(
+def test_canonical_generation_requires_adjacent_complete_manifest(
     tmp_path: Path,
 ) -> None:
     """A corrupt canonical generation stays eligible for peer recovery."""
@@ -252,13 +252,17 @@ def test_canonical_identity_requires_adjacent_complete_manifest(
         }
     ]
 
-    assert _complete_canonical_identities(store_root, registry) == {
-        installed_record.installed_identity
+    assert _complete_canonical_generations(store_root, registry) == {
+        (installed_record.installed_identity, installed_record.manifest_sha256)
     }
+    assert (
+        installed_record.installed_identity,
+        "f" * 64,
+    ) not in _complete_canonical_generations(store_root, registry)
 
     (artifact / "model.safetensors").write_bytes(b"truncated")
 
-    assert _complete_canonical_identities(store_root, registry) == set()
+    assert _complete_canonical_generations(store_root, registry) == set()
 
 
 async def test_scheduled_startup_reconciliation_is_not_reported_idle(

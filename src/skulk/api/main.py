@@ -716,14 +716,14 @@ def _inventory_installed_artifacts(
     return list(inventory_by_directory.values())
 
 
-def _complete_canonical_identities(
+def _complete_canonical_generations(
     store_root: Path,
     registry: Iterable[dict[str, object]],
-) -> set[str]:
-    """Return identities whose indexed canonical sidecars and bytes are complete."""
+) -> set[tuple[str, str]]:
+    """Return identity and manifest pairs complete in the canonical store."""
 
     resolved_root = store_root.expanduser().resolve()
-    identities: set[str] = set()
+    generations: set[tuple[str, str]] = set()
     for entry in registry:
         installed_raw = entry.get("installed_card")
         store_path = entry.get("store_path")
@@ -738,8 +738,8 @@ def _complete_canonical_identities(
         except (OSError, ValueError):
             continue
         if adjacent == record and verify_installed_card(canonical_directory, record):
-            identities.add(record.installed_identity)
-    return identities
+            generations.add((record.installed_identity, record.manifest_sha256))
+    return generations
 
 
 def _artifact_inventory_is_tombstoned(
@@ -11115,25 +11115,61 @@ class API:
         capability_token: str,
         relative_path: str,
         request: Request,
-    ) -> FileResponse:
+    ) -> StreamingResponse:
         """Serve one range-capable file authorized by an export capability."""
 
         target_node_id = request.headers.get("x-skulk-store-node")
         if target_node_id is None:
             raise HTTPException(status_code=403, detail="Missing target node binding")
         self._require_artifact_export_target(request, target_node_id)
+        range_header = request.headers.get("range")
         try:
-            path, _grant = self._artifact_exports.resolve(
+            authorized = self._artifact_exports.resolve(
                 capability_token,
                 target_node_id=target_node_id,
                 relative_path=relative_path,
-                range_header=request.headers.get("range"),
+                range_header=range_header,
             )
         except PermissionError as error:
             raise HTTPException(status_code=403, detail=str(error)) from error
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
-        return FileResponse(path, media_type="application/octet-stream")
+
+        async def stream_authorized_range() -> AsyncIterator[bytes]:
+            remaining = authorized.byte_count
+            with authorized.path.open("rb") as source:
+                source.seek(authorized.start_offset)
+                while remaining:
+                    chunk = await to_thread.run_sync(
+                        source.read,
+                        min(1024 * 1024, remaining),
+                    )
+                    if not chunk:
+                        raise RuntimeError("artifact export ended before its range")
+                    remaining -= len(chunk)
+                    yield chunk
+                    # StreamingResponse resumes the generator only after the
+                    # preceding ASGI send completes. Charging here preserves
+                    # the unused ceiling when a connection drops mid-transfer.
+                    self._artifact_exports.consume(capability_token, len(chunk))
+
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(authorized.byte_count),
+        }
+        status_code = 200
+        if range_header is not None:
+            status_code = 206
+            headers["Content-Range"] = (
+                f"bytes {authorized.start_offset}-{authorized.end_offset}/"
+                f"{authorized.path.stat().st_size}"
+            )
+        return StreamingResponse(
+            stream_authorized_range(),
+            status_code=status_code,
+            headers=headers,
+            media_type="application/octet-stream",
+        )
 
     async def get_store_reconciliation(self) -> ReconciliationStatus:
         """Return the latest automatic reconciliation status."""
@@ -11204,8 +11240,8 @@ class API:
                 registry = await self._store_client.fetch_registry(
                     recover_installed_cards=True
                 )
-                existing_identities = await to_thread.run_sync(
-                    _complete_canonical_identities,
+                existing_generations = await to_thread.run_sync(
+                    _complete_canonical_generations,
                     self._store_client.local_store_path,
                     registry,
                 )
@@ -11285,8 +11321,8 @@ class API:
                 )
                 pending = sorted(
                     identity
-                    for identity, _digest in selected_replicas
-                    if identity not in existing_identities
+                    for identity, digest in selected_replicas
+                    if (identity, digest) not in existing_generations
                 )
                 imported = 0
                 if not inventory_only:
@@ -11299,7 +11335,7 @@ class API:
                         failures=tuple(failures),
                     )
                     for identity, digest in sorted(selected_replicas):
-                        if identity in existing_identities:
+                        if (identity, digest) in existing_generations:
                             continue
                         candidates = sorted(
                             selected_replicas[(identity, digest)],
@@ -11340,7 +11376,7 @@ class API:
                                 )
                                 imported += 1
                                 imported_this_identity = True
-                                existing_identities.add(identity)
+                                existing_generations.add((identity, digest))
                                 break
                             except (httpx.HTTPError, RuntimeError, ValueError) as error:
                                 failures.append(
@@ -11350,7 +11386,10 @@ class API:
                             continue
             now = datetime.now(tz=timezone.utc).isoformat()
             remaining = tuple(
-                identity for identity in pending if identity not in existing_identities
+                identity
+                for identity, digest in selected_replicas
+                if identity in pending
+                and (identity, digest) not in existing_generations
             )
             state: Literal["complete", "failed"] = (
                 "failed"

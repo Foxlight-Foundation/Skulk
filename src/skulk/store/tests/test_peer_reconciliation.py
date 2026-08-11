@@ -53,18 +53,21 @@ async def test_peer_import_resumes_and_verifies_before_publish(tmp_path: Path) -
     )
 
     async def export(request: web.Request) -> web.Response:
-        path, _ = manager.resolve(
+        authorized = manager.resolve(
             request.match_info["token"],
             target_node_id=request.headers["X-Skulk-Store-Node"],
             relative_path=request.match_info["path"],
             range_header=request.headers.get("Range"),
         )
-        data = path.read_bytes()
+        data = authorized.path.read_bytes()
         range_header = request.headers.get("Range")
         if range_header is None:
+            manager.consume(request.match_info["token"], len(data))
             return web.Response(body=data)
         offset = int(range_header.removeprefix("bytes=").removesuffix("-"))
-        return web.Response(status=206, body=data[offset:])
+        ranged_data = data[offset:]
+        manager.consume(request.match_info["token"], len(ranged_data))
+        return web.Response(status=206, body=ranged_data)
 
     app = web.Application()
     app.router.add_get("/store/internal/exports/{token}/{path:.*}", export)
@@ -133,14 +136,16 @@ async def test_peer_import_capacity_credits_resumable_partial_bytes(
     )
 
     async def export(request: web.Request) -> web.Response:
-        path, _ = manager.resolve(
+        authorized = manager.resolve(
             request.match_info["token"],
             target_node_id=request.headers["X-Skulk-Store-Node"],
             relative_path=request.match_info["path"],
             range_header=request.headers.get("Range"),
         )
         offset = int(request.headers["Range"].removeprefix("bytes=").removesuffix("-"))
-        return web.Response(status=206, body=path.read_bytes()[offset:])
+        data = authorized.path.read_bytes()[offset:]
+        manager.consume(request.match_info["token"], len(data))
+        return web.Response(status=206, body=data)
 
     app = web.Application()
     app.router.add_get("/store/internal/exports/{token}/{path:.*}", export)
@@ -242,12 +247,14 @@ async def test_peer_import_repairs_corrupt_matching_canonical_generation(
     )
 
     async def export(request: web.Request) -> web.Response:
-        path, _ = manager.resolve(
+        authorized = manager.resolve(
             request.match_info["token"],
             target_node_id=request.headers["X-Skulk-Store-Node"],
             relative_path=request.match_info["path"],
         )
-        return web.Response(body=path.read_bytes())
+        data = authorized.path.read_bytes()
+        manager.consume(request.match_info["token"], len(data))
+        return web.Response(body=data)
 
     app = web.Application()
     app.router.add_get("/store/internal/exports/{token}/{path:.*}", export)
@@ -425,18 +432,20 @@ def test_export_capability_enforces_file_snapshot_and_byte_ceiling(
         target_node_id="store-node",
     )
 
-    manager.resolve(
+    suffix = manager.resolve(
         grant.token,
         target_node_id="store-node",
         relative_path="model.safetensors",
         range_header="bytes=5-",
     )
-    manager.resolve(
+    manager.consume(grant.token, suffix.byte_count)
+    prefix = manager.resolve(
         grant.token,
         target_node_id="store-node",
         relative_path="model.safetensors",
         range_header="bytes=0-4",
     )
+    manager.consume(grant.token, prefix.byte_count)
     with pytest.raises(PermissionError, match="byte ceiling"):
         manager.resolve(
             grant.token,
@@ -456,4 +465,44 @@ def test_export_capability_enforces_file_snapshot_and_byte_ceiling(
             replacement_grant.token,
             target_node_id="store-node",
             relative_path="model.safetensors",
+        )
+
+
+def test_export_capability_charges_only_delivered_range_bytes(tmp_path: Path) -> None:
+    """A dropped full response can resume its undelivered suffix on one grant."""
+
+    source = tmp_path / "org--model"
+    source.mkdir()
+    (source / "model.safetensors").write_bytes(b"weights")
+    record = build_installed_card_record(source, _card())
+    write_installed_card(source, record)
+    manager = ArtifactExportManager()
+    grant = manager.issue(
+        source,
+        manifest_sha256=record.manifest_sha256,
+        target_node_id="store-node",
+    )
+
+    initial = manager.resolve(
+        grant.token,
+        target_node_id="store-node",
+        relative_path="model.safetensors",
+    )
+    assert initial.byte_count == len(b"weights")
+    manager.consume(grant.token, 3)
+
+    resumed = manager.resolve(
+        grant.token,
+        target_node_id="store-node",
+        relative_path="model.safetensors",
+        range_header="bytes=3-",
+    )
+    manager.consume(grant.token, resumed.byte_count)
+
+    with pytest.raises(PermissionError, match="byte ceiling"):
+        manager.resolve(
+            grant.token,
+            target_node_id="store-node",
+            relative_path="model.safetensors",
+            range_header="bytes=0-0",
         )
