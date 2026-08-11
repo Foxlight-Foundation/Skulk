@@ -286,7 +286,6 @@ from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.routing.trace_data import TraceDataPacket
 from skulk.routing.vision_media import VisionMediaPacket
-from skulk.shared import constants as shared_constants
 from skulk.shared.apply import apply
 from skulk.shared.backends import engine_of
 from skulk.shared.constants import (
@@ -333,11 +332,7 @@ from skulk.shared.tracing import (
     load_trace_file,
 )
 from skulk.shared.types.artifact_inventory import (
-    ARTIFACT_INVENTORY_DEBOUNCE_SECONDS,
-    ARTIFACT_INVENTORY_ENTRY_LIMIT,
-    ARTIFACT_INVENTORY_REFRESH_SECONDS,
     ARTIFACT_INVENTORY_STALE_SECONDS,
-    NodeArtifactAvailability,
     NodeArtifactInventory,
 )
 from skulk.shared.types.audio import (
@@ -417,10 +412,8 @@ from skulk.shared.types.events import (
     IndexedEvent,
     InstanceCreated,
     InstanceDeleted,
-    NodeDownloadProgress,
     NodeTimedOut,
     RunnerStatusUpdated,
-    StagedModelEvicted,
     StateSnapshotHydrated,
     TaskCreated,
     TaskDeleted,
@@ -479,15 +472,19 @@ from skulk.worker.engines.mlx.constants import (
 if TYPE_CHECKING:
     from skulk.store.config import SkulkConfig
     from skulk.store.model_store_client import ModelStoreClient
+from skulk.store.artifact_inventory import (
+    installed_artifact_roots as _installed_artifact_roots,
+)
+from skulk.store.artifact_inventory import (
+    inventory_installed_artifacts as _inventory_installed_artifacts,
+)
 from skulk.store.installed_cards import (
     InstalledCardRecord,
-    ensure_installed_cards,
     read_installed_card,
     verify_installed_card,
 )
 from skulk.store.model_store import read_reconciliation_tombstones
 from skulk.store.peer_exports import ArtifactExportManager
-from skulk.store.staging_eviction import StagedModelInfo, list_staged_models
 
 JsonObject = dict[str, object]
 _DEFAULT_OPTIMIZER_CANDIDATE_BITS = [4, 8]
@@ -706,63 +703,6 @@ def _combined_model_advisories(
         for advisory in get_model_advisories(model_card)
     }
     return tuple(advisories_by_id.values())
-
-
-def _installed_artifact_roots(staging_root: Path | None) -> tuple[Path, ...]:
-    """Return every node-local root that may contain launchable artifacts."""
-
-    candidates = [
-        *((staging_root,) if staging_root is not None else ()),
-        shared_constants.SKULK_MODELS_DIR,
-        *(shared_constants.SKULK_MODELS_PATH or ()),
-    ]
-    roots_by_path: dict[Path, Path] = {}
-    for candidate in candidates:
-        expanded = candidate.expanduser()
-        roots_by_path.setdefault(expanded.resolve(), expanded)
-    return tuple(roots_by_path.values())
-
-
-def _inventory_installed_artifacts(
-    roots: Iterable[Path],
-    cards: Iterable[ModelCard],
-    in_use_model_ids: frozenset[str] = frozenset(),
-    canonical_store_root: Path | None = None,
-) -> list[StagedModelInfo]:
-    """Inventory complete and unresolved artifacts across all local roots.
-
-    Args:
-        roots: Launchable local roots to inspect.
-        cards: Current cards used to recover safe installed identities.
-        in_use_model_ids: Models protected by a live runner on this node.
-        canonical_store_root: Authoritative root whose entries are store-local
-            rather than node-cache copies.
-
-    Returns:
-        Deduplicated local artifacts with explicit location provenance.
-    """
-
-    inventory_by_directory: dict[Path, StagedModelInfo] = {}
-    card_list = tuple(cards)
-    canonical_root = (
-        canonical_store_root.expanduser().resolve()
-        if canonical_store_root is not None
-        else None
-    )
-    for root in roots:
-        ensure_installed_cards(root, card_list)
-        for item in list_staged_models(root, in_use_model_ids):
-            directory = Path(item.directory).resolve()
-            location_kind: Literal["store_local", "node_cache"] = (
-                "store_local"
-                if canonical_root is not None and directory.is_relative_to(canonical_root)
-                else "node_cache"
-            )
-            inventory_by_directory.setdefault(
-                directory,
-                item.model_copy(update={"location_kind": location_kind}),
-            )
-    return list(inventory_by_directory.values())
 
 
 def _complete_canonical_generations(
@@ -1594,10 +1534,6 @@ class API:
             telemetry_view if telemetry_view is not None else TelemetryView()
         )
         self._telemetry_sender = telemetry_sender
-        (
-            self._artifact_inventory_trigger_sender,
-            self._artifact_inventory_trigger_receiver,
-        ) = channel[None](1)
         self._artifact_inventory_expected_since: dict[NodeId, float] = {}
         self._artifact_inventory_nodes_seen: set[NodeId] = set()
         # Provider extensions (fabric-citizenship Phase 2a): auto-advertise
@@ -4887,7 +4823,6 @@ class API:
         self._skulk_config = skulk_config
         self._store_client = store_client
         self.refresh_config_dependent_capabilities()
-        self._mark_artifact_inventory_dirty()
 
     async def _validate_audio_transcription_model(
         self,
@@ -7796,7 +7731,6 @@ class API:
                 tg.start_soon(self._prune_old_traces)
                 # Opt-in field telemetry: consent-gated, fail-silent, bounded.
                 tg.start_soon(self._field_telemetry.flush_loop)
-                tg.start_soon(self._artifact_inventory_loop)
                 tg.start_soon(self._store_reconciliation_loop)
                 print_startup_banner(self.port)
                 tg.start_soon(self.run_api, shutdown_ev)
@@ -7963,19 +7897,6 @@ class API:
                 # Prune telemetry for timed-out nodes from the API applier too,
                 # so a --no-worker node still tracks live membership (#279).
                 record_membership_from_event(self._telemetry_view, event)
-
-                if isinstance(
-                    event,
-                    (
-                        InstanceCreated,
-                        InstanceDeleted,
-                        NodeDownloadProgress,
-                        RunnerStatusUpdated,
-                        StagedModelEvicted,
-                        StateSnapshotHydrated,
-                    ),
-                ):
-                    self._mark_artifact_inventory_dirty()
 
                 if isinstance(event, TaskCreated):
                     self._dispatch_pending_speech_media(event.task)
@@ -11008,125 +10929,6 @@ class API:
             }
         )
 
-    def _mark_artifact_inventory_dirty(self) -> None:
-        """Schedule one debounced local artifact rescan.
-
-        Event application must never wait for a filesystem walk. The bounded
-        trigger coalesces clustered placement/download transitions while the
-        periodic repair pass guarantees eventual recovery from a missed hint.
-        """
-
-        with contextlib.suppress(WouldBlock, ClosedResourceError):
-            self._artifact_inventory_trigger_sender.send_nowait(None)
-
-    async def _artifact_inventory_loop(self) -> None:
-        """Publish startup, change-triggered, and periodic availability readings."""
-
-        if self._telemetry_sender is None:
-            return
-        while True:
-            try:
-                await self._publish_artifact_inventory()
-            except Exception as error:  # noqa: BLE001 - lifetime service boundary
-                logger.exception(f"Artifact-inventory telemetry scan failed: {error}")
-            triggered = False
-            with anyio.move_on_after(ARTIFACT_INVENTORY_REFRESH_SECONDS):
-                try:
-                    await self._artifact_inventory_trigger_receiver.receive()
-                except EndOfStream:
-                    return
-                triggered = True
-            if not triggered:
-                continue
-            # Filesystem and state transitions settle asynchronously. A short
-            # debounce also collapses multi-rank instance events into one scan.
-            await anyio.sleep(ARTIFACT_INVENTORY_DEBOUNCE_SECONDS)
-            while True:
-                try:
-                    self._artifact_inventory_trigger_receiver.receive_nowait()
-                except WouldBlock:
-                    break
-                except EndOfStream:
-                    return
-
-    async def _publish_artifact_inventory(self) -> None:
-        """Scan compact node-cache truth and offer one telemetry snapshot."""
-
-        sender = self._telemetry_sender
-        config = self._skulk_config
-        if (
-            sender is None
-            or config is None
-            or config.model_store is None
-            or not config.model_store.enabled
-        ):
-            return
-        staging_root = self._configured_staging_root()
-        canonical_root = (
-            self._store_client.local_store_path
-            if self._store_client is not None
-            else None
-        )
-        canonical_resolved = (
-            canonical_root.expanduser().resolve()
-            if canonical_root is not None
-            else None
-        )
-        roots = tuple(
-            root
-            for root in _installed_artifact_roots(staging_root)
-            if canonical_resolved is None
-            or not root.expanduser().resolve().is_relative_to(canonical_resolved)
-        )
-        cards = await get_all_model_cards()
-        in_use = self._store_models_in_use()
-        discovered = await to_thread.run_sync(
-            _inventory_installed_artifacts,
-            roots,
-            cards,
-            in_use,
-        )
-        cache_items = [
-            item
-            for item in discovered
-            if item.installed_identity is not None
-            and (
-                canonical_resolved is None
-                or not Path(item.directory).resolve().is_relative_to(canonical_resolved)
-            )
-        ]
-        cache_items.sort(
-            key=lambda item: (
-                not item.in_use,
-                not item.manifest_complete,
-                -item.last_used_epoch_seconds,
-                item.model_id,
-                item.installed_identity or "",
-            )
-        )
-        truncated = len(cache_items) > ARTIFACT_INVENTORY_ENTRY_LIMIT
-        artifacts = [
-            NodeArtifactAvailability(
-                model_id=item.model_id,
-                installed_identity=cast(str, item.installed_identity),
-                size_bytes=item.size_bytes,
-                last_used_epoch_seconds=item.last_used_epoch_seconds,
-                in_use=item.in_use,
-                manifest_complete=item.manifest_complete,
-            )
-            for item in cache_items[:ARTIFACT_INVENTORY_ENTRY_LIMIT]
-        ]
-        await sender.send(
-            NodeTelemetry(
-                node_id=self.node_id,
-                info=NodeArtifactInventory(
-                    artifacts=artifacts,
-                    store_host=canonical_root is not None,
-                    truncated=truncated,
-                ),
-            )
-        )
-
     def _model_in_use_on_node(self, model_id: str, node_id: NodeId) -> bool:
         """Return whether current runtime truth places one model on one node."""
 
@@ -11147,6 +10949,10 @@ class API:
 
         expected_nodes = set(self.state.topology.list_nodes())
         expected_nodes.add(self.node_id)
+        # Membership pruning makes a later rejoin a new convergence window;
+        # retaining historical "seen" state would mislabel it degraded before
+        # the rejoined node has had one publication interval to answer.
+        self._artifact_inventory_nodes_seen.intersection_update(expected_nodes)
         now = datetime.now(tz=timezone.utc)
         now_monotonic = time.monotonic()
         self._artifact_inventory_expected_since = {

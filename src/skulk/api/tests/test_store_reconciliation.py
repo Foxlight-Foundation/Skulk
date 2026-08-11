@@ -9,6 +9,7 @@ from typing import cast
 import pytest
 
 import skulk.api.main as api_main
+import skulk.store.artifact_inventory as artifact_inventory
 from skulk.api.main import (
     _artifact_inventory_is_tombstoned,
     _combined_model_advisories,
@@ -221,9 +222,13 @@ def test_inventory_includes_direct_and_read_only_model_roots(
     direct_root.mkdir()
     read_only_root.mkdir()
     artifact, _record = _write_artifact(direct_root)
-    monkeypatch.setattr(api_main.shared_constants, "SKULK_MODELS_DIR", direct_root)
     monkeypatch.setattr(
-        api_main.shared_constants,
+        artifact_inventory.shared_constants,
+        "SKULK_MODELS_DIR",
+        direct_root,
+    )
+    monkeypatch.setattr(
+        artifact_inventory.shared_constants,
         "SKULK_MODELS_PATH",
         (read_only_root, direct_root),
     )

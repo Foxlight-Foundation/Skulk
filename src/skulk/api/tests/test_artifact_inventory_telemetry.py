@@ -4,13 +4,18 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MethodType
+from typing import cast
 
 import anyio
 import pytest
 
 import skulk.api.main as api_main
+import skulk.main as skulk_main
+import skulk.store.artifact_inventory as artifact_inventory
 from skulk.api.main import API
 from skulk.api.types.api import ReconciliationStatus
+from skulk.main import Node
+from skulk.routing.router import Router
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.topology import Topology
 from skulk.shared.types.artifact_inventory import (
@@ -19,6 +24,7 @@ from skulk.shared.types.artifact_inventory import (
     NodeArtifactInventory,
 )
 from skulk.shared.types.common import NodeId
+from skulk.shared.types.events import IndexedEvent, StagedModelEvicted
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
@@ -42,6 +48,36 @@ class _RecordingTelemetrySender:
         """Record one offered telemetry message."""
 
         self.messages.append(item)
+
+
+class _RecordingRouter:
+    """Expose one stable sender through the node's router-shaped surface."""
+
+    def __init__(self, sender: _RecordingTelemetrySender) -> None:
+        self.sender = sender
+
+    def telemetry_sender(self) -> _RecordingTelemetrySender:
+        """Return the sender used by the node-owned publisher."""
+
+        return self.sender
+
+
+def _publisher_node(sender: _RecordingTelemetrySender) -> Node:
+    """Build the node fields required by inventory publication tests."""
+
+    node = object.__new__(Node)
+    node.router = cast(Router, cast(object, _RecordingRouter(sender)))
+    node.node_id = NodeId("cache-node")
+    node.worker = None
+    node.api = None
+    node.master = None
+    node.skulk_config = None
+    node.store_client = None
+    (
+        node._artifact_inventory_trigger_sender,
+        node._artifact_inventory_trigger_receiver,
+    ) = channel[None](1)
+    return node
 
 
 def _model_card() -> ModelCard:
@@ -180,6 +216,28 @@ def test_registry_inventory_syncs_while_a_new_node_has_not_published() -> None:
     assert [location.node_id for location in locations["generation"]] == ["node-a"]
 
 
+def test_registry_inventory_treats_a_rejoined_node_as_new_convergence() -> None:
+    """Membership pruning forgets prior publication history for a later rejoin."""
+
+    api = _projection_api("node-a", "node-b")
+    _apply_inventory(api, "node-a", _inventory("generation"))
+    _apply_inventory(api, "node-b", _inventory("generation"))
+    assert api._cache_inventory_projection()[0].state == "current"
+
+    local_only = Topology()
+    local_only.add_node(NodeId("node-a"))
+    api.state = api.state.model_copy(update={"topology": local_only})
+    api._telemetry_view.prune(NodeId("node-b"))
+    assert api._cache_inventory_projection()[0].state == "current"
+
+    rejoined = Topology()
+    rejoined.add_node(NodeId("node-a"))
+    rejoined.add_node(NodeId("node-b"))
+    api.state = api.state.model_copy(update={"topology": rejoined})
+
+    assert api._cache_inventory_projection()[0].state == "syncing"
+
+
 def test_registry_inventory_keeps_stale_locations_as_degraded_partial_truth() -> None:
     """Staleness changes confidence without erasing the last known location."""
 
@@ -242,27 +300,22 @@ async def test_inventory_loop_publishes_at_startup_periodically_and_after_a_hint
 ) -> None:
     """The repair cadence and debounced mutation path both publish readings."""
 
-    api = object.__new__(API)
-    api._telemetry_sender = _RecordingTelemetrySender()
-    (
-        api._artifact_inventory_trigger_sender,
-        api._artifact_inventory_trigger_receiver,
-    ) = channel[None](1)
+    node = _publisher_node(_RecordingTelemetrySender())
     publications: list[int] = []
 
-    async def record_publication(_self: API) -> None:
+    async def record_publication(_self: Node) -> None:
         publications.append(len(publications) + 1)
 
-    api._publish_artifact_inventory = MethodType(record_publication, api)
-    monkeypatch.setattr(api_main, "ARTIFACT_INVENTORY_REFRESH_SECONDS", 0.02)
-    monkeypatch.setattr(api_main, "ARTIFACT_INVENTORY_DEBOUNCE_SECONDS", 0.001)
+    node._publish_artifact_inventory = MethodType(record_publication, node)
+    monkeypatch.setattr(skulk_main, "ARTIFACT_INVENTORY_REFRESH_SECONDS", 0.02)
+    monkeypatch.setattr(skulk_main, "ARTIFACT_INVENTORY_DEBOUNCE_SECONDS", 0.001)
 
     async with anyio.create_task_group() as task_group:
-        task_group.start_soon(api._artifact_inventory_loop)
+        task_group.start_soon(node._artifact_inventory_loop)
         with anyio.fail_after(0.25):
             while len(publications) < 2:
                 await anyio.sleep(0.001)
-        api._mark_artifact_inventory_dirty()
+        node._mark_artifact_inventory_dirty()
         with anyio.fail_after(0.25):
             while len(publications) < 3:
                 await anyio.sleep(0.001)
@@ -274,27 +327,22 @@ async def test_inventory_loop_publishes_at_startup_periodically_and_after_a_hint
 async def test_inventory_loop_contains_scan_failure_and_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A transient filesystem failure cannot cancel the API lifetime group."""
+    """A transient filesystem failure cannot cancel the node lifetime group."""
 
-    api = object.__new__(API)
-    api._telemetry_sender = _RecordingTelemetrySender()
-    (
-        api._artifact_inventory_trigger_sender,
-        api._artifact_inventory_trigger_receiver,
-    ) = channel[None](1)
+    node = _publisher_node(_RecordingTelemetrySender())
     attempts = 0
 
-    async def fail_then_publish(_self: API) -> None:
+    async def fail_then_publish(_self: Node) -> None:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             raise OSError("temporary model root failure")
 
-    api._publish_artifact_inventory = MethodType(fail_then_publish, api)
-    monkeypatch.setattr(api_main, "ARTIFACT_INVENTORY_REFRESH_SECONDS", 0.01)
+    node._publish_artifact_inventory = MethodType(fail_then_publish, node)
+    monkeypatch.setattr(skulk_main, "ARTIFACT_INVENTORY_REFRESH_SECONDS", 0.01)
 
     async with anyio.create_task_group() as task_group:
-        task_group.start_soon(api._artifact_inventory_loop)
+        task_group.start_soon(node._artifact_inventory_loop)
         with anyio.fail_after(0.25):
             while attempts < 2:
                 await anyio.sleep(0.001)
@@ -315,9 +363,13 @@ async def test_inventory_publisher_excludes_canonical_store_catalog(
     cache_root.mkdir()
     card = _model_card()
     _write_artifact(store_root, card)
-    monkeypatch.setattr(api_main.shared_constants, "SKULK_MODELS_DIR", store_root)
     monkeypatch.setattr(
-        api_main.shared_constants,
+        artifact_inventory.shared_constants,
+        "SKULK_MODELS_DIR",
+        store_root,
+    )
+    monkeypatch.setattr(
+        artifact_inventory.shared_constants,
         "SKULK_MODELS_PATH",
         (store_root,),
     )
@@ -325,31 +377,49 @@ async def test_inventory_publisher_excludes_canonical_store_catalog(
     async def cards() -> tuple[ModelCard, ...]:
         return (card,)
 
-    monkeypatch.setattr(api_main, "get_all_model_cards", cards)
-    api = object.__new__(API)
+    monkeypatch.setattr(skulk_main, "get_all_model_cards", cards)
     sender = _RecordingTelemetrySender()
-    api._telemetry_sender = sender
-    api.node_id = NodeId("store-node")
-    api.state = State()
-    api._skulk_config = SkulkConfig(
+    node = _publisher_node(sender)
+    node.node_id = NodeId("store-node")
+    node.skulk_config = SkulkConfig(
         model_store=ModelStoreConfig(
             store_host="store-node",
             store_path=str(store_root),
             staging=StagingNodeConfig(node_cache_path=str(cache_root)),
         )
     )
-    api._store_client = ModelStoreClient(
+    node.store_client = ModelStoreClient(
         store_host="store-node",
         local_store_path=store_root,
     )
 
-    await api._publish_artifact_inventory()
+    await node._publish_artifact_inventory()
 
     assert len(sender.messages) == 1
     published = sender.messages[0].info
     assert isinstance(published, NodeArtifactInventory)
     assert published.store_host
     assert published.artifacts == []
+
+
+async def test_node_event_tap_requests_inventory_refresh_without_an_api() -> None:
+    """A no-API node still turns storage transitions into publication hints."""
+
+    node = _publisher_node(_RecordingTelemetrySender())
+    event_sender, event_receiver = channel[IndexedEvent](1)
+    node.artifact_inventory_event_receiver = event_receiver
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(node._observe_artifact_inventory_events)
+        await event_sender.send(
+            IndexedEvent(
+                idx=1,
+                event=StagedModelEvicted(model_id=ModelId("org/model")),
+            )
+        )
+        with anyio.fail_after(0.25):
+            await node._artifact_inventory_trigger_receiver.receive()
+        task_group.cancel_scope.cancel()
 
 
 async def test_registry_synthesizes_store_local_and_keeps_node_cache_distinct(
