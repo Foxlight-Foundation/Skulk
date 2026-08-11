@@ -144,6 +144,8 @@ from skulk.api.types import (
     BenchChatCompletionResponse,
     BenchImageGenerationResponse,
     BenchImageGenerationTaskParams,
+    CachedArtifactLocation,
+    CacheInventoryStatus,
     CancelCommandResponse,
     ChatCompletionChoice,
     ChatCompletionMessage,
@@ -284,7 +286,6 @@ from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.routing.speech_media import SpeechMediaPacket
 from skulk.routing.trace_data import TraceDataPacket
 from skulk.routing.vision_media import VisionMediaPacket
-from skulk.shared import constants as shared_constants
 from skulk.shared.apply import apply
 from skulk.shared.backends import engine_of
 from skulk.shared.constants import (
@@ -329,6 +330,10 @@ from skulk.shared.tracing import (
     compute_stats,
     export_trace,
     load_trace_file,
+)
+from skulk.shared.types.artifact_inventory import (
+    ARTIFACT_INVENTORY_STALE_SECONDS,
+    NodeArtifactInventory,
 )
 from skulk.shared.types.audio import (
     AudioTranscriptionTaskParams,
@@ -425,6 +430,7 @@ from skulk.shared.types.profiling import (
 from skulk.shared.types.state import State
 from skulk.shared.types.telemetry import (
     NODE_LIVENESS_TIMEOUT,
+    NodeTelemetry,
     TelemetryView,
     record_membership_from_event,
 )
@@ -466,15 +472,19 @@ from skulk.worker.engines.mlx.constants import (
 if TYPE_CHECKING:
     from skulk.store.config import SkulkConfig
     from skulk.store.model_store_client import ModelStoreClient
+from skulk.store.artifact_inventory import (
+    installed_artifact_roots as _installed_artifact_roots,
+)
+from skulk.store.artifact_inventory import (
+    inventory_installed_artifacts as _inventory_installed_artifacts,
+)
 from skulk.store.installed_cards import (
     InstalledCardRecord,
-    ensure_installed_cards,
     read_installed_card,
     verify_installed_card,
 )
 from skulk.store.model_store import read_reconciliation_tombstones
 from skulk.store.peer_exports import ArtifactExportManager
-from skulk.store.staging_eviction import StagedModelInfo, list_staged_models
 
 JsonObject = dict[str, object]
 _DEFAULT_OPTIMIZER_CANDIDATE_BITS = [4, 8]
@@ -495,6 +505,14 @@ class _HypercornServe(Protocol):
         shutdown_trigger: Callable[[], Awaitable[object]] | None = None,
         mode: Literal["asgi", "wsgi"] | None = None,
     ) -> Awaitable[None]: ...
+
+
+class _TelemetrySender(Protocol):
+    """Minimal telemetry publication surface used by the API lifetime task."""
+
+    async def send(self, item: NodeTelemetry) -> None:
+        """Offer one latest-value telemetry reading without transport backpressure."""
+        ...
 
 
 serve = cast(_HypercornServe, hypercorn_asyncio.serve)
@@ -685,37 +703,6 @@ def _combined_model_advisories(
         for advisory in get_model_advisories(model_card)
     }
     return tuple(advisories_by_id.values())
-
-
-def _installed_artifact_roots(staging_root: Path | None) -> tuple[Path, ...]:
-    """Return every node-local root that may contain launchable artifacts."""
-
-    candidates = [
-        *((staging_root,) if staging_root is not None else ()),
-        shared_constants.SKULK_MODELS_DIR,
-        *(shared_constants.SKULK_MODELS_PATH or ()),
-    ]
-    roots_by_path: dict[Path, Path] = {}
-    for candidate in candidates:
-        expanded = candidate.expanduser()
-        roots_by_path.setdefault(expanded.resolve(), expanded)
-    return tuple(roots_by_path.values())
-
-
-def _inventory_installed_artifacts(
-    roots: Iterable[Path],
-    cards: Iterable[ModelCard],
-    in_use_model_ids: frozenset[str] = frozenset(),
-) -> list[StagedModelInfo]:
-    """Inventory complete and unresolved artifacts across all local roots."""
-
-    inventory_by_directory: dict[Path, StagedModelInfo] = {}
-    card_list = tuple(cards)
-    for root in roots:
-        ensure_installed_cards(root, card_list)
-        for item in list_staged_models(root, in_use_model_ids):
-            inventory_by_directory.setdefault(Path(item.directory).resolve(), item)
-    return list(inventory_by_directory.values())
 
 
 def _complete_canonical_generations(
@@ -1408,6 +1395,7 @@ class API:
         enable_event_log: bool = True,
         mount_dashboard: bool = True,
         telemetry_view: "TelemetryView | None" = None,
+        telemetry_sender: _TelemetrySender | None = None,
         data_receiver: "Receiver[DataChunk] | None" = None,
         provider_stream_sender: "Sender[ProviderStreamPacket] | None" = None,
         provider_stream_receiver: "Receiver[ProviderStreamPacket] | None" = None,
@@ -1545,6 +1533,9 @@ class API:
         self._telemetry_view = (
             telemetry_view if telemetry_view is not None else TelemetryView()
         )
+        self._telemetry_sender = telemetry_sender
+        self._artifact_inventory_expected_since: dict[NodeId, float] = {}
+        self._artifact_inventory_nodes_seen: set[NodeId] = set()
         # Provider extensions (fabric-citizenship Phase 2a): auto-advertise
         # each served capability's id as its telemetry discovery tag, then run
         # the extensions' startup hooks with the live context (a pure provider
@@ -1581,7 +1572,6 @@ class API:
             )
         )
         self._reconciliation_lock = asyncio.Lock()
-        self._cached_artifact_locations: dict[str, list[dict[str, object]]] = {}
         self._config_path = resolve_config_path()
         # Field telemetry (opt-in, consent-gated in skulk.yaml). The config
         # provider re-reads the file per check so dashboard consent changes
@@ -2655,7 +2645,8 @@ class API:
             description=(
                 "Return canonical store artifacts with their complete installed-card "
                 "records, verification and companion ownership, current registry and "
-                "advisory status, fleet cache locations, and reconciliation state."
+                "advisory status, telemetry-derived fleet cache locations and coverage, "
+                "and reconciliation state."
             ),
         )(self.get_store_registry)
         self.app.get(
@@ -2710,8 +2701,9 @@ class API:
                 "Return the local node's artifact inventory across staging, direct "
                 "download, and configured read-only roots. Every entry includes "
                 "installed identity, verification and manifest state, companion "
-                "ownership, size, last use, and live-runner use, plus event-log and "
-                "filesystem capacity. Cluster-wide views query each node's API."
+                "ownership, location kind, size, last use, and live-runner use, plus "
+                "event-log and filesystem capacity. Reconciliation queries each node "
+                "directly; operator views use fabric telemetry."
             ),
         )(self.get_node_storage_summary)
         self.app.get(
@@ -8846,6 +8838,9 @@ class API:
                 _installed_artifact_roots(staging_root),
                 cards,
                 in_use,
+                self._store_client.local_store_path
+                if self._store_client is not None
+                else None,
             )
             event_log_bytes = 0
             for file_path in SKULK_EVENT_LOG_DIR.rglob("*"):
@@ -10934,6 +10929,116 @@ class API:
             }
         )
 
+    def _model_in_use_on_node(self, model_id: str, node_id: NodeId) -> bool:
+        """Return whether current runtime truth places one model on one node."""
+
+        return any(
+            str(instance.shard_assignments.model_id) == model_id
+            and node_id in instance.shard_assignments.node_to_runner
+            for instance in self.state.instances.values()
+        )
+
+    def _cache_inventory_projection(
+        self,
+    ) -> tuple[
+        CacheInventoryStatus,
+        dict[str, list[CachedArtifactLocation]],
+        tuple[NodeId, ...],
+    ]:
+        """Project per-node telemetry and its freshness into cache locations."""
+
+        expected_nodes = set(self.state.topology.list_nodes())
+        expected_nodes.add(self.node_id)
+        # Membership pruning makes a later rejoin a new convergence window;
+        # retaining historical "seen" state would mislabel it degraded before
+        # the rejoined node has had one publication interval to answer.
+        self._artifact_inventory_nodes_seen.intersection_update(expected_nodes)
+        now = datetime.now(tz=timezone.utc)
+        now_monotonic = time.monotonic()
+        self._artifact_inventory_expected_since = {
+            node_id: self._artifact_inventory_expected_since.get(
+                node_id, now_monotonic
+            )
+            for node_id in expected_nodes
+        }
+        usable: dict[NodeId, NodeArtifactInventory] = {}
+        fresh: dict[NodeId, NodeArtifactInventory] = {}
+        for node_id in sorted(expected_nodes, key=str):
+            reading = self._telemetry_view.node_artifact_inventories.get(node_id)
+            received_at = self._telemetry_view.node_artifact_inventory_received_at.get(
+                node_id
+            )
+            if reading is None or received_at is None:
+                continue
+            usable[node_id] = reading
+            self._artifact_inventory_nodes_seen.add(node_id)
+            normalized_receipt = (
+                received_at
+                if received_at.tzinfo is not None
+                else received_at.replace(tzinfo=timezone.utc)
+            )
+            if (now - normalized_receipt).total_seconds() <= ARTIFACT_INVENTORY_STALE_SECONDS:
+                fresh[node_id] = reading
+
+        observed_nodes = len(usable)
+        expected_count = len(expected_nodes)
+        any_truncated = any(reading.truncated for reading in usable.values())
+        missing_nodes = expected_nodes - usable.keys()
+        has_stale_reading = usable.keys() != fresh.keys()
+        first_reading_pending = any(
+            node_id not in self._artifact_inventory_nodes_seen
+            and now_monotonic
+            - self._artifact_inventory_expected_since.get(node_id, now_monotonic)
+            < ARTIFACT_INVENTORY_STALE_SECONDS
+            for node_id in missing_nodes
+        )
+        if self._telemetry_sender is None:
+            state: Literal["syncing", "current", "degraded", "unavailable"] = (
+                "unavailable"
+            )
+        elif len(fresh) == expected_count and not any_truncated:
+            state = "current"
+        elif observed_nodes == 0 and first_reading_pending:
+            state = "syncing"
+        elif observed_nodes == 0:
+            state = "unavailable"
+        elif any_truncated or has_stale_reading:
+            state = "degraded"
+        elif first_reading_pending:
+            state = "syncing"
+        else:
+            state = "degraded"
+
+        locations: dict[str, list[CachedArtifactLocation]] = {}
+        for node_id, reading in usable.items():
+            for artifact in reading.artifacts:
+                locations.setdefault(artifact.installed_identity, []).append(
+                    CachedArtifactLocation(
+                        node_id=str(node_id),
+                        complete=artifact.manifest_complete,
+                        installed_identity=artifact.installed_identity,
+                        bytes=artifact.size_bytes,
+                        last_use_epoch_seconds=artifact.last_used_epoch_seconds,
+                        in_use=artifact.in_use,
+                        location_kind="node_cache",
+                    )
+                )
+        store_hosts = tuple(
+            sorted(
+                (node_id for node_id, reading in usable.items() if reading.store_host),
+                key=str,
+            )
+        )
+        return (
+            CacheInventoryStatus(
+                state=state,
+                observed_nodes=observed_nodes,
+                expected_nodes=expected_count,
+            ),
+            locations,
+            store_hosts,
+        )
+
     async def get_store_health(self) -> JSONResponse:
         if self._store_client is None:
             raise HTTPException(status_code=503, detail="Store not configured")
@@ -10955,6 +11060,9 @@ class API:
         if self._store_client is None:
             raise HTTPException(status_code=503, detail="Store not configured")
         entries = await self._store_client.fetch_registry()
+        cache_inventory, cached_locations, store_hosts = (
+            self._cache_inventory_projection()
+        )
         cards_by_id = {str(card.model_id): card for card in await get_all_model_cards()}
         enriched: list[dict[str, object]] = []
         for raw_entry in entries:
@@ -10965,11 +11073,35 @@ class API:
                 if isinstance(installed, dict)
                 else None
             )
-            entry["cached_on_nodes"] = (
-                self._cached_artifact_locations.get(identity, [])
-                if isinstance(identity, str)
-                else []
-            )
+            locations_by_node = {
+                location.node_id: location
+                for location in (
+                    cached_locations.get(identity, [])
+                    if isinstance(identity, str)
+                    else []
+                )
+            }
+            model_id = entry.get("model_id")
+            total_bytes = entry.get("total_bytes")
+            if (
+                isinstance(identity, str)
+                and isinstance(model_id, str)
+                and isinstance(total_bytes, int)
+            ):
+                for store_host in store_hosts:
+                    locations_by_node[str(store_host)] = CachedArtifactLocation(
+                        node_id=str(store_host),
+                        complete=True,
+                        installed_identity=identity,
+                        bytes=total_bytes,
+                        last_use_epoch_seconds=0,
+                        in_use=self._model_in_use_on_node(model_id, store_host),
+                        location_kind="store_local",
+                    )
+            entry["cached_on_nodes"] = [
+                location.model_dump(mode="json", by_alias=False)
+                for _, location in sorted(locations_by_node.items())
+            ]
             installed_dict = (
                 cast("dict[str, object]", installed)
                 if isinstance(installed, dict)
@@ -11033,7 +11165,12 @@ class API:
             entry["last_verified_at"] = self._reconciliation_status.last_verified_at
             enriched.append(entry)
         return StoreRegistryResponse.model_validate(
-            {"entries": enriched},
+            {
+                "entries": enriched,
+                "cache_inventory": cache_inventory.model_dump(
+                    mode="json", by_alias=False
+                ),
+            },
             strict=False,
         )
 
@@ -11284,7 +11421,6 @@ class API:
                 replicas: dict[
                     tuple[str, str], list[tuple[str, str, dict[str, object]]]
                 ] = {}
-                cached_locations: dict[str, list[dict[str, object]]] = {}
                 for node_id, (base_url, items) in sources.items():
                     for item in items:
                         identity = item.get("installedIdentity")
@@ -11294,18 +11430,6 @@ class API:
                             and isinstance(digest, str)
                             and item.get("manifestComplete") is True
                         ):
-                            cached_locations.setdefault(identity, []).append(
-                                {
-                                    "node_id": node_id,
-                                    "complete": True,
-                                    "installed_identity": identity,
-                                    "bytes": item.get("sizeBytes", 0),
-                                    "last_use_epoch_seconds": item.get(
-                                        "lastUsedEpochSeconds", 0
-                                    ),
-                                    "in_use": item.get("inUse", False),
-                                }
-                            )
                             if (
                                 not tombstone_metadata_valid
                                 or _artifact_inventory_is_tombstoned(
@@ -11316,7 +11440,6 @@ class API:
                             replicas.setdefault((identity, digest), []).append(
                                 (node_id, base_url, item)
                             )
-                self._cached_artifact_locations = cached_locations
                 current_registry_ids: dict[str, str | None] = {}
                 for candidates in replicas.values():
                     if not candidates:

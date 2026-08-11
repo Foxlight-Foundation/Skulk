@@ -11,6 +11,7 @@ from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.memory import Memory
 from skulk.store.installed_cards import (
     InstalledCardRecord,
+    VerifiedDetachedInstalledCardCache,
     associate_installed_card,
     build_installed_card_record,
     installed_card_matches,
@@ -310,6 +311,68 @@ def test_read_only_artifact_uses_path_and_manifest_bound_fallback(
         read_installed_card_with_fallback(artifact, fallback_root=fallback_root)
         == record
     )
+
+
+def test_detached_record_cache_rehashes_only_after_file_metadata_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Periodic inventory reuses trust only while artifact stats are unchanged."""
+
+    artifact = _artifact(tmp_path)
+    record = build_installed_card_record(artifact, _card())
+    fallback_root = tmp_path / "data" / "installed-cards"
+
+    def _deny_adjacent_write(_directory: Path, _record: InstalledCardRecord) -> Path:
+        raise PermissionError("read-only model root")
+
+    monkeypatch.setattr(installed_cards, "write_installed_card", _deny_adjacent_write)
+    write_installed_card_with_fallback(
+        artifact,
+        record,
+        fallback_root=fallback_root,
+    )
+    original_sha256_file = installed_cards._sha256_file
+    hashed_paths: list[Path] = []
+
+    def _record_hash(path: Path) -> str:
+        hashed_paths.append(path)
+        return original_sha256_file(path)
+
+    monkeypatch.setattr(installed_cards, "_sha256_file", _record_hash)
+    cache = VerifiedDetachedInstalledCardCache()
+
+    assert (
+        read_installed_card_with_fallback(
+            artifact,
+            fallback_root=fallback_root,
+            verified_detached_cache=cache,
+        )
+        == record
+    )
+    first_hash_count = len(hashed_paths)
+    assert first_hash_count == len(record.files)
+    assert (
+        read_installed_card_with_fallback(
+            artifact,
+            fallback_root=fallback_root,
+            verified_detached_cache=cache,
+        )
+        == record
+    )
+    assert len(hashed_paths) == first_hash_count
+
+    (artifact / "model.safetensors").write_bytes(b"WEIGHTS")
+
+    assert (
+        read_installed_card_with_fallback(
+            artifact,
+            fallback_root=fallback_root,
+            verified_detached_cache=cache,
+        )
+        is None
+    )
+    assert len(hashed_paths) > first_hash_count
 
 
 async def test_existing_companion_store_entry_retains_full_owner_card(

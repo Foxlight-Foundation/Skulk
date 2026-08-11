@@ -11,11 +11,17 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final, Self
+from typing import Final, Self, cast
 
 import anyio
 import psutil
-from anyio import BrokenResourceError, ClosedResourceError
+from anyio import (
+    BrokenResourceError,
+    ClosedResourceError,
+    EndOfStream,
+    WouldBlock,
+    to_thread,
+)
 from loguru import logger
 from pydantic import PositiveInt
 
@@ -47,13 +53,34 @@ from skulk.shared.models.model_cards import (
     register_installed_card_record,
 )
 from skulk.shared.session_carryover import seed_state_for_new_session
+from skulk.shared.types.artifact_inventory import (
+    ARTIFACT_INVENTORY_DEBOUNCE_SECONDS,
+    ARTIFACT_INVENTORY_ENTRY_LIMIT,
+    ARTIFACT_INVENTORY_REFRESH_SECONDS,
+    NodeArtifactAvailability,
+    NodeArtifactInventory,
+)
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.commands import ForwarderDownloadCommand, SyncConfig
 from skulk.shared.types.common import NodeId, SessionId, SystemId
+from skulk.shared.types.events import (
+    IndexedEvent,
+    InstanceCreated,
+    InstanceDeleted,
+    NodeDownloadProgress,
+    RunnerStatusUpdated,
+    StagedModelEvicted,
+    StateSnapshotHydrated,
+)
 from skulk.shared.types.profiling import NodeDataTransport, NodeResources
+from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
 from skulk.startup_recovery import preflight_api_port
+from skulk.store.artifact_inventory import (
+    installed_artifact_roots,
+    inventory_installed_artifacts,
+)
 from skulk.store.config import (
     SkulkConfig,
     load_skulk_config,
@@ -61,6 +88,7 @@ from skulk.store.config import (
     resolve_config_path,
     resolve_node_staging,
 )
+from skulk.store.installed_cards import VerifiedDetachedInstalledCardCache
 from skulk.store.model_store import ModelStore
 from skulk.store.model_store_client import ModelStoreClient, ModelStoreDownloader
 from skulk.store.model_store_server import ModelStoreServer
@@ -493,12 +521,29 @@ class Node:
     # master re-election; the subscriber feeds it, the master/API read it.
     telemetry_view: TelemetryView
     telemetry_receiver: Receiver[NodeTelemetry]
+    # A node-level event tap drives cache rescans even when this process was
+    # intentionally launched without an HTTP API.
+    artifact_inventory_event_receiver: Receiver[IndexedEvent] | None = None
     data_plane_zenoh: bool = False
     # Samples the router's live Zenoh peer-transport count for NodeResources
     # advertisement and the local isolation warning. None only in tests that
     # construct Node without create().
     zenoh_peer_sampler: ZenohPeerSampler | None = None
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
+    _artifact_inventory_trigger_sender: Sender[None] = field(init=False)
+    _artifact_inventory_trigger_receiver: Receiver[None] = field(init=False)
+    _artifact_inventory_detached_cache: VerifiedDetachedInstalledCardCache = field(
+        init=False,
+        default_factory=VerifiedDetachedInstalledCardCache,
+    )
+
+    def __post_init__(self) -> None:
+        """Create the bounded coalescing trigger used by artifact rescans."""
+
+        (
+            self._artifact_inventory_trigger_sender,
+            self._artifact_inventory_trigger_receiver,
+        ) = channel[None](1)
 
     @classmethod
     async def create(cls, args: "Args") -> Self:
@@ -696,6 +741,7 @@ class Node:
                 skulk_config=skulk_config,
                 store_client=store_client,
                 telemetry_view=telemetry_view,
+                telemetry_sender=router.telemetry_sender(),
                 data_receiver=router.receiver(topics.DATA),
                 provider_stream_sender=router.sender(topics.PROVIDER_DATA),
                 provider_stream_receiver=router.receiver(topics.PROVIDER_DATA),
@@ -826,6 +872,7 @@ class Node:
             store_server,
             telemetry_view,
             router.receiver(topics.TELEMETRY),
+            event_router.receiver(),
             _zenoh_on,
             zenoh_peer_sampler,
         )
@@ -843,6 +890,9 @@ class Node:
             tg.start_soon(self.event_router.run)
             tg.start_soon(self.election.run)
             tg.start_soon(self._run_telemetry)
+            tg.start_soon(self._artifact_inventory_loop)
+            if self.artifact_inventory_event_receiver is not None:
+                tg.start_soon(self._observe_artifact_inventory_events)
             if self.worker is None:
                 tg.start_soon(
                     _publish_management_node_resources,
@@ -863,6 +913,186 @@ class Node:
             if self.api:
                 tg.start_soon(self.api.run)
             tg.start_soon(self._elect_loop)
+
+    def _mark_artifact_inventory_dirty(self) -> None:
+        """Schedule one debounced local artifact rescan without blocking events."""
+
+        try:
+            self._artifact_inventory_trigger_sender.send_nowait(None)
+        except (WouldBlock, ClosedResourceError):
+            return
+
+    async def _observe_artifact_inventory_events(self) -> None:
+        """Translate relevant replicated transitions into local rescan hints."""
+
+        receiver = self.artifact_inventory_event_receiver
+        if receiver is None:
+            return
+        with receiver as events:
+            async for indexed_event in events:
+                if isinstance(
+                    indexed_event.event,
+                    (
+                        InstanceCreated,
+                        InstanceDeleted,
+                        NodeDownloadProgress,
+                        RunnerStatusUpdated,
+                        StagedModelEvicted,
+                        StateSnapshotHydrated,
+                    ),
+                ):
+                    self._mark_artifact_inventory_dirty()
+
+    def _current_artifact_inventory_state(self) -> State:
+        """Return this node's freshest replicated runtime view."""
+
+        if self.worker is not None:
+            return self.worker.state
+        if self.api is not None:
+            return self.api.state
+        if self.master is not None:
+            return self.master.state
+        return State()
+
+    def _artifact_models_in_use(self) -> frozenset[str]:
+        """Return model and companion repositories used by local live shards."""
+
+        in_use: set[str] = set()
+        for instance in self._current_artifact_inventory_state().instances.values():
+            if self.node_id not in instance.shard_assignments.node_to_runner:
+                continue
+            for shard in instance.shard_assignments.runner_to_shard.values():
+                card = shard.model_card
+                in_use.add(str(card.model_id))
+                if card.vision and card.vision.weights_repo:
+                    in_use.add(card.vision.weights_repo)
+                if card.runtime is not None:
+                    if card.runtime.mtp_sidecar_repo:
+                        in_use.add(card.runtime.mtp_sidecar_repo)
+                    if card.runtime.assistant_model_repo:
+                        in_use.add(card.runtime.assistant_model_repo)
+        return frozenset(in_use)
+
+    def _configured_artifact_cache_root(self) -> Path | None:
+        """Return this node's configured cache root when staging is enabled."""
+
+        config = self.skulk_config
+        if (
+            config is None
+            or config.model_store is None
+            or not config.model_store.enabled
+        ):
+            return None
+        staging = resolve_node_staging(config.model_store, str(self.node_id))
+        return Path(staging.node_cache_path).expanduser() if staging.enabled else None
+
+    async def _artifact_inventory_loop(self) -> None:
+        """Publish startup, change-triggered, and periodic availability readings."""
+
+        while True:
+            try:
+                await self._publish_artifact_inventory()
+            except Exception as error:  # noqa: BLE001 - lifetime service boundary
+                logger.exception(f"Artifact-inventory telemetry scan failed: {error}")
+            triggered = False
+            with anyio.move_on_after(ARTIFACT_INVENTORY_REFRESH_SECONDS):
+                try:
+                    await self._artifact_inventory_trigger_receiver.receive()
+                except EndOfStream:
+                    return
+                triggered = True
+            if not triggered:
+                continue
+            await anyio.sleep(ARTIFACT_INVENTORY_DEBOUNCE_SECONDS)
+            while True:
+                try:
+                    self._artifact_inventory_trigger_receiver.receive_nowait()
+                except WouldBlock:
+                    break
+                except EndOfStream:
+                    return
+
+    async def _publish_artifact_inventory(self) -> None:
+        """Scan compact node-cache truth and offer one telemetry snapshot."""
+
+        config = self.skulk_config
+        store_enabled = (
+            config is not None
+            and config.model_store is not None
+            and config.model_store.enabled
+        )
+        canonical_root = (
+            self.store_client.local_store_path
+            if self.store_client is not None
+            else None
+        )
+        artifacts: list[NodeArtifactAvailability] = []
+        truncated = False
+        if store_enabled:
+            canonical_resolved = (
+                canonical_root.expanduser().resolve()
+                if canonical_root is not None
+                else None
+            )
+            roots = tuple(
+                root
+                for root in installed_artifact_roots(
+                    self._configured_artifact_cache_root()
+                )
+                if canonical_resolved is None
+                or not root.expanduser().resolve().is_relative_to(canonical_resolved)
+            )
+            cards = await get_all_model_cards()
+            discovered = await to_thread.run_sync(
+                inventory_installed_artifacts,
+                roots,
+                cards,
+                self._artifact_models_in_use(),
+                None,
+                self._artifact_inventory_detached_cache,
+            )
+            cache_items = [
+                item
+                for item in discovered
+                if item.installed_identity is not None
+                and (
+                    canonical_resolved is None
+                    or not Path(item.directory)
+                    .resolve()
+                    .is_relative_to(canonical_resolved)
+                )
+            ]
+            cache_items.sort(
+                key=lambda item: (
+                    not item.in_use,
+                    not item.manifest_complete,
+                    -item.last_used_epoch_seconds,
+                    item.model_id,
+                    item.installed_identity or "",
+                )
+            )
+            truncated = len(cache_items) > ARTIFACT_INVENTORY_ENTRY_LIMIT
+            artifacts = [
+                NodeArtifactAvailability(
+                    model_id=item.model_id,
+                    installed_identity=cast(str, item.installed_identity),
+                    size_bytes=item.size_bytes,
+                    last_used_epoch_seconds=item.last_used_epoch_seconds,
+                    in_use=item.in_use,
+                    manifest_complete=item.manifest_complete,
+                )
+                for item in cache_items[:ARTIFACT_INVENTORY_ENTRY_LIMIT]
+            ]
+        await self.router.telemetry_sender().send(
+            NodeTelemetry(
+                node_id=self.node_id,
+                info=NodeArtifactInventory(
+                    artifacts=artifacts,
+                    store_host=canonical_root is not None,
+                    truncated=truncated,
+                ),
+            )
+        )
 
     async def _run_telemetry(self) -> None:
         """Maintain the node-owned TelemetryView from the telemetry plane (#279).
@@ -1000,6 +1230,7 @@ class Node:
                 self.skulk_config,
                 self.store_client,
             )
+        self._mark_artifact_inventory_dirty()
 
     async def _broadcast_config_if_store_host(self) -> None:
         """If this node is the store host, broadcast a valid config to all nodes.
@@ -1098,6 +1329,9 @@ class Node:
                         ),
                         external_inbound=self.router.receiver(topics.GLOBAL_EVENTS),
                         external_outbound=self.router.sender(topics.LOCAL_EVENTS),
+                    )
+                    self.artifact_inventory_event_receiver = (
+                        self.event_router.receiver()
                     )
                     # Wait to bootstrap the replacement event router until the
                     # replacement worker/API receivers are attached. Otherwise,
@@ -1324,6 +1558,9 @@ class Node:
                             result.session_id.master_node_id,
                         )
                     if start_replacement_event_router:
+                        self._tg.start_soon(
+                            self._observe_artifact_inventory_events
+                        )
                         self._tg.start_soon(self.event_router.run)
                     # Broadcast config to cluster so worker nodes get the right store address
                     await self._broadcast_config_if_store_host()

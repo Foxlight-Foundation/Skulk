@@ -28,6 +28,7 @@ import contextlib
 import shutil
 import time
 from pathlib import Path
+from typing import Literal
 
 from loguru import logger
 from pydantic import Field
@@ -37,6 +38,7 @@ from skulk.shared.models.model_cards import (
     unregister_installed_card_record,
 )
 from skulk.store.installed_cards import (
+    VerifiedDetachedInstalledCardCache,
     read_installed_card_with_fallback,
     verify_installed_card,
 )
@@ -108,6 +110,9 @@ class StagedModelInfo(CamelCaseModel):
     registry_card_id: str | None = None
     """Registry identity retained by the artifact's full effective card."""
 
+    location_kind: Literal["store_local", "node_cache"] = "node_cache"
+    """Whether this directory is canonical-store-local or a node cache."""
+
 
 def model_id_from_staging_directory_name(directory_name: str) -> str:
     """Best-effort inverse of the ``org--name`` directory sanitization.
@@ -167,12 +172,14 @@ def _last_used_epoch_seconds(directory: Path) -> float:
 def list_staged_models(
     staging_root: Path,
     in_use_model_ids: frozenset[str] = frozenset(),
+    verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
 ) -> list[StagedModelInfo]:
     """Inventory the staging directory, newest-used first.
 
     ``in_use_model_ids`` are repo-form IDs (``org/name``) of models a live
     runner currently depends on — including companion repos of active
-    models.
+    models. ``verified_detached_cache`` avoids rehashing stable read-only
+    artifacts for periodic operator telemetry after their initial full check.
     """
     if not staging_root.is_dir():
         return []
@@ -188,7 +195,10 @@ def list_staged_models(
             continue
         inferred_model_id = model_id_from_staging_directory_name(entry.name)
         try:
-            installed = read_installed_card_with_fallback(entry)
+            installed = read_installed_card_with_fallback(
+                entry,
+                verified_detached_cache=verified_detached_cache,
+            )
         except (OSError, ValueError):
             installed = None
         manifest_complete = (
