@@ -66,8 +66,8 @@ def _coerce_json_object(value: object) -> JsonObject:
     return {str(key): item for key, item in raw_dict.items()}
 
 
-def _installed_owner_model_id(model_directory: Path) -> ModelId | None:
-    """Return the installed base alias retained beside an artifact directory."""
+def _installed_artifact_model_id(model_directory: Path) -> ModelId | None:
+    """Return the installed artifact alias retained beside a model directory."""
 
     from skulk.store.installed_cards import read_installed_card_with_fallback
 
@@ -77,7 +77,7 @@ def _installed_owner_model_id(model_directory: Path) -> ModelId | None:
         return None
     if record is None:
         return None
-    return ModelId(record.owner_model_id or record.artifact_model_id)
+    return ModelId(record.artifact_model_id)
 
 
 @dataclass
@@ -391,7 +391,7 @@ class DownloadCoordinator:
         purged = 0
         for entry in path.iterdir():
             if entry.is_dir():
-                installed_model_id = _installed_owner_model_id(entry)
+                installed_model_id = _installed_artifact_model_id(entry)
                 logger.info(f"PurgeStagingCache: removing {entry} ({label})")
                 await asyncio.to_thread(shutil.rmtree, entry, True)
                 if installed_model_id is not None and not entry.exists():
