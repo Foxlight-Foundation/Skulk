@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path, PurePosixPath
@@ -209,6 +210,75 @@ class ExternalInstalledCardRecord(BaseModel):
     artifact_path: str = Field(min_length=1, max_length=4096)
     manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     record: InstalledCardRecord
+
+
+@dataclass(frozen=True)
+class _VerifiedDetachedInstalledCard:
+    """One detached record verified against an unchanged file-stat signature."""
+
+    external_record: ExternalInstalledCardRecord
+    file_signature: tuple[tuple[str, int, int, int, int, int], ...]
+
+
+@final
+class VerifiedDetachedInstalledCardCache:
+    """Process-local cache for expensive detached installed-card verification.
+
+    Detached records receive full hash verification before admission. Later
+    operator-inventory scans may reuse that result only while every manifest
+    file retains the same path, device, inode, size, modification time, and
+    change time. Transfer and reconciliation callers do not use this cache.
+    """
+
+    def __init__(self) -> None:
+        """Create an empty verified-record cache."""
+
+        self._entries: dict[Path, _VerifiedDetachedInstalledCard] = {}
+
+    def get(
+        self,
+        model_directory: Path,
+        external_record: ExternalInstalledCardRecord,
+        file_signature: tuple[tuple[str, int, int, int, int, int], ...],
+    ) -> InstalledCardRecord | None:
+        """Return a previously verified record when metadata is unchanged."""
+
+        cached = self._entries.get(model_directory.resolve())
+        if (
+            cached is None
+            or cached.external_record != external_record
+            or cached.file_signature != file_signature
+        ):
+            return None
+        return cached.external_record.record
+
+    def remember(
+        self,
+        model_directory: Path,
+        external_record: ExternalInstalledCardRecord,
+        file_signature: tuple[tuple[str, int, int, int, int, int], ...],
+    ) -> None:
+        """Remember one detached record after full hash verification."""
+
+        self._entries[model_directory.resolve()] = _VerifiedDetachedInstalledCard(
+            external_record=external_record,
+            file_signature=file_signature,
+        )
+
+    def discard(self, model_directory: Path) -> None:
+        """Forget cached trust for one artifact directory."""
+
+        self._entries.pop(model_directory.resolve(), None)
+
+    def retain(self, model_directories: Iterable[Path]) -> None:
+        """Prune entries for directories absent from the latest inventory scan."""
+
+        retained = {directory.resolve() for directory in model_directories}
+        self._entries = {
+            directory: cached
+            for directory, cached in self._entries.items()
+            if directory in retained
+        }
 
 
 def _sha256_file(path: Path) -> str:
@@ -464,17 +534,65 @@ def read_installed_card(model_directory: Path) -> InstalledCardRecord | None:
     return InstalledCardRecord.model_validate_json(path.read_bytes(), strict=False)
 
 
+def _installed_file_stat_signature(
+    model_directory: Path,
+    record: InstalledCardRecord,
+) -> tuple[tuple[str, int, int, int, int, int], ...] | None:
+    """Return cheap change evidence for every file bound by one record."""
+
+    resolved_root = model_directory.resolve()
+    signature: list[tuple[str, int, int, int, int, int]] = []
+    for entry in record.files:
+        candidate = (resolved_root / entry.path).resolve()
+        if not candidate.is_relative_to(resolved_root) or not candidate.is_file():
+            return None
+        try:
+            metadata = candidate.stat()
+        except OSError:
+            return None
+        if metadata.st_size != entry.size_bytes:
+            return None
+        signature.append(
+            (
+                entry.path,
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+            )
+        )
+    return tuple(signature) if signature else None
+
+
 def read_installed_card_with_fallback(
     model_directory: Path,
     *,
     fallback_root: Path = SKULK_INSTALLED_CARD_RECORDS_DIR,
+    verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
 ) -> InstalledCardRecord | None:
-    """Load an adjacent sidecar or its path-and-manifest-bound fallback."""
+    """Load an adjacent sidecar or its path-and-manifest-bound fallback.
+
+    Args:
+        model_directory: Artifact directory whose installed identity is needed.
+        fallback_root: Process-level directory containing detached records.
+        verified_detached_cache: Optional process-local cache used only by
+            lossy operator inventory. A detached record is admitted only after
+            a full hash pass and is invalidated by file-stat changes.
+
+    Returns:
+        The trusted installed-card record, or ``None`` when no complete record
+        can be verified.
+    """
 
     adjacent = read_installed_card(model_directory)
     if adjacent is not None:
+        if verified_detached_cache is not None:
+            verified_detached_cache.discard(model_directory)
         return adjacent
     if not fallback_root.is_dir():
+        if verified_detached_cache is not None:
+            verified_detached_cache.discard(model_directory)
         return None
     resolved_directory = str(model_directory.resolve())
     for path in fallback_root.glob("*.json"):
@@ -487,16 +605,38 @@ def read_installed_card_with_fallback(
         if (
             external.artifact_path == resolved_directory
             and external.manifest_sha256 == external.record.manifest_sha256
+        ):
+            file_signature = _installed_file_stat_signature(
+                model_directory,
+                external.record,
+            )
+            if file_signature is None:
+                continue
+            if verified_detached_cache is not None:
+                cached = verified_detached_cache.get(
+                    model_directory,
+                    external,
+                    file_signature,
+                )
+                if cached is not None:
+                    return cached
             # A detached record cannot rely on the artifact directory and
             # sidecar being moved together. Re-hash the bytes before trusting
-            # that path-bound fallback as installed truth.
-            and verify_installed_card(
+            # a new or metadata-changed path-bound fallback as installed truth.
+            if verify_installed_card(
                 model_directory,
                 external.record,
                 verify_hashes=True,
-            )
-        ):
-            return external.record
+            ):
+                if verified_detached_cache is not None:
+                    verified_detached_cache.remember(
+                        model_directory,
+                        external,
+                        file_signature,
+                    )
+                return external.record
+    if verified_detached_cache is not None:
+        verified_detached_cache.discard(model_directory)
     return None
 
 
@@ -775,8 +915,16 @@ def _legacy_companion_artifact_is_complete(
 def ensure_installed_cards(
     root: Path,
     cards: Iterable[ModelCard],
+    verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
 ) -> None:
-    """Materialize missing sidecars for trusted, complete legacy directories."""
+    """Materialize missing sidecars for trusted, complete legacy directories.
+
+    Args:
+        root: Launchable model-search root to inspect.
+        cards: Trusted cards used to associate complete legacy artifacts.
+        verified_detached_cache: Optional operator-inventory cache for detached
+            records on read-only roots.
+    """
 
     if not root.is_dir():
         return
@@ -785,7 +933,10 @@ def ensure_installed_cards(
         if not model_directory.is_dir() or model_directory.name.startswith("."):
             continue
         try:
-            existing = read_installed_card_with_fallback(model_directory)
+            existing = read_installed_card_with_fallback(
+                model_directory,
+                verified_detached_cache=verified_detached_cache,
+            )
             if existing is not None and verify_installed_card(
                 model_directory, existing
             ):

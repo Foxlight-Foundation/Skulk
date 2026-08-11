@@ -31,6 +31,7 @@ from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
 from skulk.store.config import ModelStoreConfig, SkulkConfig, StagingNodeConfig
 from skulk.store.installed_cards import (
     InstalledCardRecord,
+    VerifiedDetachedInstalledCardCache,
     build_installed_card_record,
     write_installed_card,
 )
@@ -73,6 +74,7 @@ def _publisher_node(sender: _RecordingTelemetrySender) -> Node:
     node.master = None
     node.skulk_config = None
     node.store_client = None
+    node._artifact_inventory_detached_cache = VerifiedDetachedInstalledCardCache()
     (
         node._artifact_inventory_trigger_sender,
         node._artifact_inventory_trigger_receiver,

@@ -88,6 +88,7 @@ from skulk.store.config import (
     resolve_config_path,
     resolve_node_staging,
 )
+from skulk.store.installed_cards import VerifiedDetachedInstalledCardCache
 from skulk.store.model_store import ModelStore
 from skulk.store.model_store_client import ModelStoreClient, ModelStoreDownloader
 from skulk.store.model_store_server import ModelStoreServer
@@ -531,6 +532,10 @@ class Node:
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
     _artifact_inventory_trigger_sender: Sender[None] = field(init=False)
     _artifact_inventory_trigger_receiver: Receiver[None] = field(init=False)
+    _artifact_inventory_detached_cache: VerifiedDetachedInstalledCardCache = field(
+        init=False,
+        default_factory=VerifiedDetachedInstalledCardCache,
+    )
 
     def __post_init__(self) -> None:
         """Create the bounded coalescing trigger used by artifact rescans."""
@@ -1043,6 +1048,8 @@ class Node:
                 roots,
                 cards,
                 self._artifact_models_in_use(),
+                None,
+                self._artifact_inventory_detached_cache,
             )
             cache_items = [
                 item
