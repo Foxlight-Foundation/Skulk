@@ -210,8 +210,9 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
     """Load all TOML model cards from a directory into the cache.
 
     Within a load pass the first card for a model id wins (duplicate ids in
-    the builtin dirs, or among custom files, keep their existing precedence),
-    but a CUSTOM card replaces a bundled card for the same id: the custom
+    the builtin dirs, or among custom files, keep their existing precedence).
+    A current CUSTOM file replaces both a bundled card and retained custom
+    sidecar metadata for the same id: the custom
     directory exists for operator override, and the previous first-wins
     behavior silently ignored the override because the builtin dirs load
     first (#652). One exception: a MACHINE-GENERATED custom card (stamped
@@ -224,11 +225,15 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
     logged, since a silently dropped operator card reads as "my card is
     live" while the bundled card actually serves.
     """
+    loaded_in_this_pass: set[ModelId] = set()
     async for toml_file in directory.rglob("*.toml"):
         try:
             card = await ModelCard.load_from_path(toml_file)
             if is_custom:
                 card = card.model_copy(update={"is_custom": True})
+                if card.model_id in loaded_in_this_pass:
+                    continue
+                loaded_in_this_pass.add(card.model_id)
             if card.vision is None:
                 vision = _detect_vision_from_config(card.model_id)
                 if vision is not None:
@@ -253,6 +258,12 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
                         f"re-add the model to regenerate it with current "
                         f"engine selection"
                     )
+                _card_cache[card.model_id] = card
+            elif is_custom and existing.is_custom:
+                logger.info(
+                    f"current custom model card {toml_file} replaces retained "
+                    f"custom metadata for {card.model_id}"
+                )
                 _card_cache[card.model_id] = card
             elif is_custom and not existing.is_custom:
                 if stale_generated:

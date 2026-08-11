@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from anyio import Path as AsyncPath
 
 import skulk.download.download_utils as download_utils
 import skulk.shared.constants as constants_module
@@ -535,6 +536,43 @@ async def test_successful_refresh_excludes_unlisted_bundled_cards(
         assert bundled_card.model_id not in model_cards_module._card_cache
         assert model_cards_module._card_cache[registry_card.model_id] == registry_card
         assert model_cards_module._card_cache[custom_card.model_id] == custom_card
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+
+
+@pytest.mark.asyncio
+async def test_current_custom_file_supersedes_retained_custom_sidecar(
+    tmp_path: Path,
+) -> None:
+    """Operator edits remain authoritative after installed-card recovery."""
+
+    catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    base = registry_model_cards(catalog)[0].model_copy(
+        update={
+            "registry_card_id": None,
+            "registry_snapshot_id": None,
+            "registry_provenance": None,
+            "is_custom": True,
+        }
+    )
+    retained = base.model_copy(update={"hidden_size": 64})
+    edited = base.model_copy(update={"hidden_size": 128})
+    custom_directory = AsyncPath(tmp_path)
+    await edited.save(custom_directory / "edited.toml")
+
+    original_cache = dict(model_cards_module._card_cache)
+    model_cards_module._card_cache.clear()
+    model_cards_module._card_cache[retained.model_id] = retained
+    try:
+        await model_cards_module._load_cards_from_dir(
+            custom_directory,
+            is_custom=True,
+        )
+
+        selected = model_cards_module._card_cache[retained.model_id]
+        assert selected.hidden_size == 128
+        assert selected.is_custom
     finally:
         model_cards_module._card_cache.clear()
         model_cards_module._card_cache.update(original_cache)
