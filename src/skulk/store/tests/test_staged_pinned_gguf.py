@@ -210,6 +210,133 @@ async def test_different_staged_quant_is_replaced_from_store(tmp_path: Path) -> 
 
 
 @pytest.mark.anyio
+async def test_same_revision_card_change_replaces_staged_bytes_transactionally(
+    tmp_path: Path,
+) -> None:
+    requested_card = _aliased_shard().model_card.model_copy(
+        update={"source_repository": ModelId("org/new-artifact")}
+    )
+    old_card = requested_card.model_copy(
+        update={
+            "source_repository": ModelId("org/old-artifact"),
+            "registry_card_id": f"card_{'b' * 52}",
+        }
+    )
+    staged = tmp_path / "org--multi-quant@iq3-xxs"
+    staged.mkdir()
+    (staged / "model-IQ3_XXS.gguf").write_bytes(b"old-generation")
+    write_installed_card(staged, build_installed_card_record(staged, old_card))
+
+    class GenerationStoreClient(_RecordingStoreClient):
+        async def is_model_available(
+            self, model_id: str, source_revision: str | None = None
+        ) -> bool:
+            del model_id, source_revision
+            return True
+
+        async def request_and_wait_for_download(
+            self, model_id: str, **kwargs: object
+        ) -> bool:
+            del model_id, kwargs
+            return True
+
+        async def stage_shard(
+            self,
+            model_id: str,
+            staging_root: Path,
+            on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+            source_revision: str | None = None,
+            capacity_preflight: Callable[[int], Awaitable[None]] | None = None,
+        ) -> Path:
+            del on_progress, source_revision, capacity_preflight
+            destination = staging_root / model_id.replace("/", "--")
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / "model-IQ3_XXS.gguf").write_bytes(b"new-generation")
+            write_installed_card(
+                destination,
+                build_installed_card_record(destination, requested_card),
+            )
+            return destination
+
+    downloader = ModelStoreDownloader(
+        inner=_UnusedInnerDownloader(),
+        store_client=cast(
+            ModelStoreClient,
+            cast(object, GenerationStoreClient()),
+        ),
+        staging_config=StagingNodeConfig(
+            enabled=True,
+            node_cache_path=str(tmp_path),
+        ),
+    )
+    requested_shard = _aliased_shard().model_copy(
+        update={"model_card": requested_card}
+    )
+
+    path = await downloader.ensure_shard(requested_shard)
+
+    assert path == staged
+    assert (staged / "model-IQ3_XXS.gguf").read_bytes() == b"new-generation"
+    assert not any(tmp_path.glob(".org--multi-quant@iq3-xxs.previous"))
+
+
+@pytest.mark.anyio
+async def test_failed_same_revision_replacement_preserves_old_generation(
+    tmp_path: Path,
+) -> None:
+    requested_card = _aliased_shard().model_card.model_copy(
+        update={"source_repository": ModelId("org/new-artifact")}
+    )
+    old_card = requested_card.model_copy(
+        update={
+            "source_repository": ModelId("org/old-artifact"),
+            "registry_card_id": f"card_{'b' * 52}",
+        }
+    )
+    staged = tmp_path / "org--multi-quant@iq3-xxs"
+    staged.mkdir()
+    (staged / "model-IQ3_XXS.gguf").write_bytes(b"old-generation")
+    write_installed_card(staged, build_installed_card_record(staged, old_card))
+
+    class FailingGenerationStoreClient(_RecordingStoreClient):
+        async def is_model_available(
+            self, model_id: str, source_revision: str | None = None
+        ) -> bool:
+            del model_id, source_revision
+            return True
+
+        async def request_and_wait_for_download(
+            self, model_id: str, **kwargs: object
+        ) -> bool:
+            del model_id, kwargs
+            return True
+
+        async def stage_shard(self, *args: object, **kwargs: object) -> Path:
+            del args, kwargs
+            raise RuntimeError("transfer interrupted")
+
+    downloader = ModelStoreDownloader(
+        inner=_UnusedInnerDownloader(),
+        store_client=cast(
+            ModelStoreClient,
+            cast(object, FailingGenerationStoreClient()),
+        ),
+        staging_config=StagingNodeConfig(
+            enabled=True,
+            node_cache_path=str(tmp_path),
+        ),
+    )
+    requested_shard = _aliased_shard().model_copy(
+        update={"model_card": requested_card}
+    )
+
+    with pytest.raises(RuntimeError, match="transfer interrupted"):
+        await downloader.ensure_shard(requested_shard)
+
+    assert (staged / "model-IQ3_XXS.gguf").read_bytes() == b"old-generation"
+
+
+@pytest.mark.anyio
 async def test_store_download_keeps_alias_but_fetches_artifact_repository(
     tmp_path: Path,
 ) -> None:

@@ -261,6 +261,36 @@ def test_registry_rebuild_ignores_incomplete_installed_artifact(
     assert entry is None
 
 
+def test_registry_rebuild_honors_operator_deletion_tombstone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed byte cleanup cannot resurrect an operator-deleted alias."""
+
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    artifact = _artifact(store_root)
+    record = build_installed_card_record(artifact, _card())
+    write_installed_card(artifact, record)
+    store = ModelStore(store_root)
+    store.register_model(
+        "org/model",
+        artifact,
+        [entry.path for entry in record.files],
+        sum(entry.size_bytes for entry in record.files),
+        installed_card=record,
+    )
+
+    def retain_directory(_path: str | Path, ignore_errors: bool = False) -> None:
+        del ignore_errors
+
+    monkeypatch.setattr("shutil.rmtree", retain_directory)
+
+    assert store.delete_model("org/model")
+    assert artifact.is_dir()
+    assert ModelStore(store_root).get_entry("org/model") is None
+
+
 def test_registry_rebuild_removes_corrupted_indexed_generation(
     tmp_path: Path,
 ) -> None:

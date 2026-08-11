@@ -830,9 +830,19 @@ class ModelStore:
         if not self._store_path.is_dir():
             return
         registry = self._read_registry()
+        tombstoned_aliases = frozenset(
+            self._read_reconciliation_tombstone_index().deleted_aliases
+        )
         changed = False
         for model_id, entry in tuple(registry.items()):
             retained = entry.installed_card
+            if model_id in tombstoned_aliases or (
+                retained is not None
+                and retained.owner_model_id in tombstoned_aliases
+            ):
+                del registry[model_id]
+                changed = True
+                continue
             if retained is None:
                 continue
             model_directory = _resolve_store_child_path(
@@ -870,6 +880,15 @@ class ModelStore:
                 )
                 continue
             if record is None:
+                continue
+            if record.artifact_model_id in tombstoned_aliases or (
+                record.owner_model_id is not None
+                and record.owner_model_id in tombstoned_aliases
+            ):
+                logger.info(
+                    "ModelStore: suppressing sidecar recovery for "
+                    f"operator-deleted alias {record.artifact_model_id}"
+                )
                 continue
             if not verify_installed_card(model_directory, record):
                 logger.warning(

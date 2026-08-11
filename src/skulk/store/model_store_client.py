@@ -70,6 +70,7 @@ file already exists (from a previous complete run), the file is skipped.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import shutil
 from collections.abc import Awaitable
@@ -181,6 +182,89 @@ def _staged_generation_matches(
     return _staged_source_revision_matches(
         model_directory, requested_card.source_revision
     )
+
+
+def _completed_staged_generation_differs(
+    model_directory: Path,
+    *,
+    artifact_model_id: str,
+    requested_card: ModelCard,
+    owner_card: ModelCard | None,
+    artifact_role: InstalledArtifactRole,
+) -> bool:
+    """Return whether a completed local generation must be transactionally replaced."""
+
+    try:
+        installed = read_installed_card_with_fallback(model_directory)
+    except (OSError, ValueError):
+        return True
+    if installed is not None:
+        return not _staged_generation_matches(
+            model_directory,
+            artifact_model_id=artifact_model_id,
+            requested_card=requested_card,
+            owner_card=owner_card,
+            artifact_role=artifact_role,
+        )
+    # An in-progress directory has no final marker and remains resumable. A
+    # completed legacy generation with a different revision must retain its
+    # old bytes until the replacement transfer has finished.
+    return (
+        model_directory / _SOURCE_REVISION_MARKER
+    ).is_file() and not _staged_source_revision_matches(
+        model_directory, requested_card.source_revision
+    )
+
+
+def _staging_generation_key(
+    *,
+    artifact_model_id: str,
+    requested_card: ModelCard,
+    owner_card: ModelCard | None,
+    artifact_role: InstalledArtifactRole,
+) -> str:
+    """Build a stable private-directory key for one requested generation."""
+
+    owner_identity = (
+        owner_card.model_dump_json(exclude_none=False)
+        if owner_card is not None
+        else ""
+    )
+    material = "\0".join(
+        (
+            artifact_model_id,
+            artifact_role,
+            requested_card.model_dump_json(exclude_none=False),
+            owner_identity,
+        )
+    )
+    return hashlib.sha256(material.encode()).hexdigest()[:16]
+
+
+def _publish_staged_generation(replacement: Path, destination: Path) -> None:
+    """Switch a complete replacement into place and restore the old tree on error."""
+
+    if not replacement.is_dir():
+        raise FileNotFoundError(f"replacement generation is missing: {replacement}")
+    backup = destination.with_name(f".{destination.name}.previous")
+    if backup.exists():
+        if destination.exists():
+            shutil.rmtree(backup)
+        else:
+            os.replace(backup, destination)
+    moved_previous = False
+    if destination.exists():
+        os.replace(destination, backup)
+        moved_previous = True
+    try:
+        os.replace(replacement, destination)
+    except OSError:
+        if moved_previous and backup.exists() and not destination.exists():
+            os.replace(backup, destination)
+        raise
+    if backup.exists():
+        shutil.rmtree(backup)
+    replacement.parent.rmdir()
 
 
 class ModelNotInStoreError(Exception):
@@ -1633,6 +1717,10 @@ class ModelStoreDownloader(ShardDownloader):
         self,
         shard: ShardMetadata,
         model_id: str,
+        *,
+        replace_existing_generation: bool = False,
+        owner_card: ModelCard | None = None,
+        artifact_role: InstalledArtifactRole = "base",
     ) -> Path:
         """Serialize capacity admission and byte transfer for one repository.
 
@@ -1650,10 +1738,27 @@ class ModelStoreDownloader(ShardDownloader):
                     additional_bytes,
                 )
 
+        staging_root = Path(self._staging_config.node_cache_path)
+        destination = _staging_dir(str(staging_root), model_id)
+        transfer_root = staging_root
+        if replace_existing_generation:
+            generation_key = _staging_generation_key(
+                artifact_model_id=model_id,
+                requested_card=shard.model_card,
+                owner_card=owner_card,
+                artifact_role=artifact_role,
+            )
+            transfer_root = (
+                staging_root
+                / ".skulk"
+                / "replacement-generations"
+                / f"{_sanitize_model_id(model_id)}-{generation_key}"
+            )
+
         async with self._staging_transfer_lock:
-            return await self._store_client.stage_shard(
+            staged_path = await self._store_client.stage_shard(
                 model_id,
-                Path(self._staging_config.node_cache_path),
+                transfer_root,
                 on_progress=lambda downloaded, total: self._emit_progress(
                     shard,
                     status="in_progress",
@@ -1663,6 +1768,14 @@ class ModelStoreDownloader(ShardDownloader):
                 source_revision=shard.model_card.source_revision,
                 capacity_preflight=_capacity_preflight,
             )
+            if not replace_existing_generation:
+                return staged_path
+            await asyncio.to_thread(
+                _publish_staged_generation,
+                staged_path,
+                destination,
+            )
+            return destination
 
     def on_progress(
         self,
@@ -1928,6 +2041,16 @@ class ModelStoreDownloader(ShardDownloader):
         # broken model, so incomplete dirs fall through to re-staging
         # (which resumes partial files via HTTP Range).
         dest_path = _staging_dir(self._staging_config.node_cache_path, model_id)
+        replace_staged_generation = (
+            dest_path.exists()
+            and _completed_staged_generation_differs(
+                dest_path,
+                artifact_model_id=model_id,
+                requested_card=shard.model_card,
+                owner_card=installed_owner_card,
+                artifact_role=installed_artifact_role,
+            )
+        )
         if (
             dest_path.exists()
             and _staged_directory_looks_complete(dest_path)
@@ -1993,7 +2116,13 @@ class ModelStoreDownloader(ShardDownloader):
                 logger.info(
                     f"ModelStoreDownloader: staging {model_id} from store → {dest_path}"
                 )
-                path = await self._stage_from_store(shard, model_id)
+                path = await self._stage_from_store(
+                    shard,
+                    model_id,
+                    replace_existing_generation=replace_staged_generation,
+                    owner_card=installed_owner_card,
+                    artifact_role=installed_artifact_role,
+                )
                 touch_last_used(path)
                 return path
             except StoreUnreachableError as exc:
@@ -2062,7 +2191,13 @@ class ModelStoreDownloader(ShardDownloader):
                 ) from exc
             # Model now in store — stage it
             try:
-                path = await self._stage_from_store(shard, model_id)
+                path = await self._stage_from_store(
+                    shard,
+                    model_id,
+                    replace_existing_generation=replace_staged_generation,
+                    owner_card=installed_owner_card,
+                    artifact_role=installed_artifact_role,
+                )
             except StoreUnreachableError as exc:
                 return await self._fallback_for_unreachable_store(
                     shard, config_only, cause=exc
