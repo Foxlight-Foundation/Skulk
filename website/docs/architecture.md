@@ -1049,9 +1049,14 @@ The reconciler reports its first scheduled pass as scanning during the startup
 convergence delay, so operator clients continue polling until inventory has
 actually completed.
 The store's internal import mutation accepts only direct loopback sockets and
-rejects proxy-forwarding headers. Store download requests that omit an
-immutable card ID select the current card for backward compatibility; explicit
-IDs continue to bind the exact requested generation.
+rejects proxy-forwarding headers. Registry-verified peer records are compared
+with the store host's independently TUF-verified immutable card and exact
+artifact/companion identity before transfer. During upgrades, reconciliation
+first adopts a complete sidecar beside an already-canonical legacy entry under
+the publication lock, avoiding a copy of the store's own model back into
+itself. Store download requests that omit an immutable card ID select the
+current card for backward compatibility; explicit IDs continue to bind the
+exact requested generation.
 
 Store deletion shares that publication lock and first persists an alias
 tombstone under the canonical store's `.skulk` metadata. A stale node cache is

@@ -15,6 +15,7 @@ from skulk.shared.models.remote_code_approval import RemoteCodeApprovalStore
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.store import model_store_client
+from skulk.store.installed_cards import build_installed_card_record
 from skulk.store.model_store_client import ModelStoreClient
 from skulk.store.model_store_server import ModelStoreServer
 
@@ -194,6 +195,102 @@ def test_peer_import_loopback_guard_rejects_forwarding_headers() -> None:
         model_store_server_module._require_loopback_peer_import(
             "203.0.113.10",
             {},
+        )
+
+
+@pytest.mark.anyio
+async def test_peer_import_revalidates_registry_card_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A peer cannot alter card behavior while retaining a signed card ID."""
+
+    trusted_card = _registry_card()
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "model.safetensors").write_bytes(b"weights")
+    (artifact / ".skulk-source-revision").write_text(
+        f"{trusted_card.source_revision}\n"
+    )
+    trusted_record = build_installed_card_record(artifact, trusted_card)
+    tampered_record = trusted_record.model_copy(
+        update={
+            "model_card": trusted_card.model_copy(update={"hidden_size": 128})
+        }
+    )
+
+    async def card_by_id(
+        _card_id: str,
+        *,
+        refresh_on_miss: bool = False,
+    ) -> ModelCard:
+        assert refresh_on_miss
+        return trusted_card
+
+    monkeypatch.setattr(model_store_server_module, "get_registry_card_by_id", card_by_id)
+    monkeypatch.setattr(
+        model_store_server_module,
+        "get_current_registry_cards",
+        lambda: (trusted_card,),
+    )
+
+    await model_store_server_module._require_trusted_registry_peer_record(
+        trusted_record
+    )
+    with pytest.raises(web.HTTPConflict, match="TUF-verified registry card"):
+        await model_store_server_module._require_trusted_registry_peer_record(
+            tampered_record
+        )
+
+
+@pytest.mark.anyio
+async def test_peer_import_revalidates_registry_companion_ownership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verified companion imports must match the owning signed declaration."""
+
+    trusted_payload = _registry_card().model_dump(mode="json")
+    trusted_payload["runtime"] = {
+        "mtp_sidecar_repo": "org/model-mtp",
+        "mtp_sidecar_revision": "c" * 40,
+    }
+    trusted_card = ModelCard.model_validate(trusted_payload)
+    artifact = tmp_path / "companion"
+    artifact.mkdir()
+    (artifact / "mtp.safetensors").write_bytes(b"weights")
+    (artifact / ".skulk-source-revision").write_text(f"{'c' * 40}\n")
+    record = build_installed_card_record(
+        artifact,
+        trusted_card,
+        artifact_role="mtp_sidecar",
+        artifact_model_id="org/model-mtp",
+        owner_model_id=str(trusted_card.model_id),
+        owner_card_id=trusted_card.registry_card_id,
+        artifact_repository="org/model-mtp",
+        artifact_revision="c" * 40,
+        artifact_file=None,
+    )
+
+    async def card_by_id(
+        _card_id: str,
+        *,
+        refresh_on_miss: bool = False,
+    ) -> ModelCard:
+        assert refresh_on_miss
+        return trusted_card
+
+    monkeypatch.setattr(model_store_server_module, "get_registry_card_by_id", card_by_id)
+    monkeypatch.setattr(
+        model_store_server_module,
+        "get_current_registry_cards",
+        lambda: (trusted_card,),
+    )
+
+    await model_store_server_module._require_trusted_registry_peer_record(record)
+    with pytest.raises(web.HTTPConflict, match="artifact identity"):
+        await model_store_server_module._require_trusted_registry_peer_record(
+            record.model_copy(update={"owner_model_id": "org/different"})
         )
 
 

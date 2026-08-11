@@ -878,12 +878,23 @@ class ModelStoreClient:
             logger.debug(f"ModelStoreClient: list_models failed: {exc}")
             return []
 
-    async def fetch_registry(self) -> list[dict[str, object]]:
+    async def fetch_registry(
+        self,
+        *,
+        recover_installed_cards: bool = False,
+    ) -> list[dict[str, object]]:
         """Fetch the full store registry from the store server.
+
+        Args:
+            recover_installed_cards: Ask a local authoritative store to adopt
+                complete adjacent sidecars before returning its index. Used by
+                reconciliation after it inventories pre-upgrade canonical data.
 
         Returns a list of registry entry dicts, or an empty list on error.
         """
         url = _make_store_url(self._store_host, self._store_port, "/registry")
+        if recover_installed_cards:
+            url = f"{url}?recover_installed_cards=true"
         try:
             async with (
                 create_http_session(timeout_profile="short") as session,

@@ -271,6 +271,41 @@ def test_corrupt_registry_rebuilds_from_installed_sidecar(tmp_path: Path) -> Non
     assert index.schema_version == 1
 
 
+@pytest.mark.anyio
+async def test_running_store_adopts_new_canonical_sidecar_in_place(
+    tmp_path: Path,
+) -> None:
+    """A pre-upgrade canonical entry is not imported back into itself."""
+
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    store = ModelStore(store_root)
+    artifact = _artifact(store_root)
+    store.register_model(
+        "org/model",
+        artifact,
+        [
+            str(path.relative_to(artifact))
+            for path in artifact.rglob("*")
+            if path.is_file()
+        ],
+        sum(path.stat().st_size for path in artifact.rglob("*") if path.is_file()),
+        source_revision="a" * 40,
+    )
+    assert store.get_entry("org/model") is not None
+    assert store.get_entry("org/model").installed_card is None  # type: ignore[union-attr]
+
+    record = build_installed_card_record(artifact, _card())
+    write_installed_card(artifact, record)
+
+    await store.recover_installed_cards_serialized()
+
+    recovered = store.get_entry("org/model")
+    assert recovered is not None
+    assert recovered.store_path == artifact.name
+    assert recovered.installed_card == record
+
+
 def test_registry_rebuild_ignores_incomplete_installed_artifact(
     tmp_path: Path,
 ) -> None:

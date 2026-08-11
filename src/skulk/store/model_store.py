@@ -815,6 +815,18 @@ class ModelStore:
         }
         self._rebuild_registry_from_sidecars(current_registry_ids)
 
+    async def recover_installed_cards_serialized(self) -> None:
+        """Adopt complete adjacent sidecars without transferring model bytes.
+
+        Reconciliation can create a sidecar for a canonical pre-upgrade entry
+        after this process constructed the store. Refresh the rebuildable index
+        under the publication lock so the existing generation becomes complete
+        in place and is never selected as its own peer-import source.
+        """
+
+        async with self._download_transfer_lock:
+            await asyncio.to_thread(self._rebuild_registry_from_sidecars)
+
     def _rebuild_registry_from_sidecars(
         self,
         current_registry_ids: dict[str, str] | None = None,

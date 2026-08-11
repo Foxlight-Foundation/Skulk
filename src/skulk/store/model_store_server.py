@@ -37,7 +37,9 @@ All endpoints return JSON unless noted.
 ``GET /registry``
     Full store index as a JSON array of
     :class:`~skulk.store.model_store.StoreModelEntry` objects.  Useful for
-    management scripts and future dashboard integration.
+    management scripts and future dashboard integration. The internal
+    ``recover_installed_cards=true`` query first adopts complete adjacent
+    sidecars under the store publication lock.
 
 ``GET /models``
     JSON array of model ID strings currently in the store.
@@ -80,6 +82,7 @@ from skulk.shared.models.model_cards import (
     ModelId,
     get_all_model_cards,
     get_current_registry_card,
+    get_current_registry_cards,
     get_registry_card_by_id,
 )
 from skulk.shared.models.remote_code_approval import require_remote_code_approval
@@ -114,6 +117,119 @@ def _require_loopback_peer_import(
         raise web.HTTPForbidden(reason="peer imports are loopback-only") from error
     if not remote_address.is_loopback:
         raise web.HTTPForbidden(reason="peer imports are loopback-only")
+
+
+def _immutable_registry_card_payload(card: ModelCard) -> dict[str, object]:
+    """Return card fields covered by one immutable registry identity.
+
+    Snapshot membership and provenance are mutable catalog metadata rather than
+    part of the card envelope's identity. Every executable and artifact field
+    remains in the comparison so a peer cannot alter runtime behavior while
+    retaining a trusted card ID.
+    """
+
+    return cast(
+        "dict[str, object]",
+        card.model_dump(
+            mode="json",
+            exclude={"registry_snapshot_id", "registry_provenance"},
+        ),
+    )
+
+
+async def _require_trusted_registry_peer_record(
+    record: InstalledCardRecord,
+) -> None:
+    """Bind a peer's verified claim to this host's TUF-verified card truth.
+
+    Locally retained legacy and custom records honestly make no signed-byte
+    claim. A record labelled ``registry_verified`` is stronger: before the
+    canonical store accepts it, the local host independently resolves its
+    immutable card ID and validates the complete card plus artifact role,
+    repository, revision, selected file, alias, and companion ownership.
+    """
+
+    if record.verification != "registry_verified":
+        return
+    registry_card_id = record.model_card.registry_card_id
+    if registry_card_id is None:
+        raise web.HTTPConflict(reason="registry-verified import omits its card id")
+    await get_registry_card_by_id(
+        registry_card_id,
+        refresh_on_miss=True,
+    )
+    trusted_card = next(
+        (
+            card
+            for card in get_current_registry_cards()
+            if card.registry_card_id == registry_card_id
+        ),
+        None,
+    )
+    if trusted_card is None:
+        raise web.HTTPConflict(
+            reason="store host cannot verify the peer's immutable registry card"
+        )
+    if _immutable_registry_card_payload(record.model_card) != (
+        _immutable_registry_card_payload(trusted_card)
+    ):
+        raise web.HTTPConflict(
+            reason="peer card disagrees with the TUF-verified registry card"
+        )
+
+    expected_repository: str
+    expected_revision: str | None
+    expected_file: str | None
+    if record.artifact_role == "base":
+        expected_repository = str(trusted_card.artifact_repository)
+        expected_revision = trusted_card.source_revision
+        expected_file = trusted_card.gguf_file
+        identity_matches = (
+            record.artifact_model_id == str(trusted_card.model_id)
+            and record.installed_identity == registry_card_id
+            and record.owner_model_id is None
+            and record.owner_card_id is None
+        )
+    else:
+        expected_repository = record.artifact_repository
+        try:
+            declared_role = companion_artifact_role(
+                trusted_card,
+                expected_repository,
+            )
+        except ValueError as error:
+            raise web.HTTPConflict(reason=str(error)) from error
+        runtime = trusted_card.runtime
+        expected_revision = None
+        expected_file = None
+        if record.artifact_role == "vision_weights" and trusted_card.vision is not None:
+            expected_revision = trusted_card.vision.weights_revision
+        elif runtime is not None:
+            if record.artifact_role == "mtp_sidecar":
+                expected_revision = runtime.mtp_sidecar_revision
+            elif record.artifact_role == "assistant":
+                expected_revision = runtime.assistant_model_revision
+            elif record.artifact_role == "served_draft":
+                expected_revision = runtime.served_spec_draft_revision
+                expected_file = runtime.served_spec_draft_file
+            elif record.artifact_role == "vllm_draft":
+                expected_revision = runtime.vllm_spec_draft_revision
+        identity_matches = (
+            declared_role == record.artifact_role
+            and record.artifact_model_id == expected_repository
+            and record.owner_model_id == str(trusted_card.model_id)
+            and record.owner_card_id == registry_card_id
+        )
+    if not identity_matches or (
+        record.artifact_repository != expected_repository
+        or record.artifact_revision != expected_revision
+        or record.artifact_file != expected_file
+    ):
+        raise web.HTTPConflict(
+            reason="peer artifact identity disagrees with the immutable registry card"
+        )
+
+
 _REGISTRY_CARD_ID_PATTERN = re.compile(r"^card_[a-z2-7]{52}$")
 _ARTIFACT_ROLES: frozenset[str] = frozenset(
     {
@@ -264,6 +380,8 @@ class ModelStoreServer:
 
     async def _handle_registry(self, _request: web.Request) -> web.Response:
         """``GET /registry`` — full store index."""
+        if _request.query.get("recover_installed_cards") == "true":
+            await self._store.recover_installed_cards_serialized()
         models = self._store.list_models()
         return web.json_response([m.model_dump() for m in models])
 
@@ -298,6 +416,7 @@ class ModelStoreServer:
                 raise ValueError("source, capability and target are required")
         except (ValueError, TypeError) as error:
             raise web.HTTPBadRequest(reason=str(error)) from error
+        await _require_trusted_registry_peer_record(record)
         entry = await self._store.import_peer_artifact(
             record,
             source_base_url=cast("str", source_base_url),

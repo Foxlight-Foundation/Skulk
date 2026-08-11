@@ -11201,7 +11201,9 @@ class API:
                         sources[node_id] = (base_url, staged_items)
                     except (httpx.HTTPError, ValueError) as error:
                         failures.append(f"Could not inventory node {node_id}: {error}")
-                registry = await self._store_client.fetch_registry()
+                registry = await self._store_client.fetch_registry(
+                    recover_installed_cards=True
+                )
                 existing_identities = await to_thread.run_sync(
                     _complete_canonical_identities,
                     self._store_client.local_store_path,

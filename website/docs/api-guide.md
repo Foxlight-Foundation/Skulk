@@ -1616,12 +1616,16 @@ forwarded callers receive `403`. The JSON body contains:
 The store resumes individual files with HTTP ranges, enforces its capacity
 floor, verifies every size and SHA-256 digest, writes the installed-card
 sidecar, and publishes the new generation and rebuildable registry entry only
-after complete verification. A successful response is the resulting store
-registry entry. Malformed records or missing fields return `400`; invalid or
-expired capabilities, unsafe manifest paths, insufficient capacity, source
-loss, or digest mismatch fail the import without replacing the active
-generation. Operators do not call this endpoint directly; the reconciler uses
-it after `POST /store/internal/exports` grants a transfer.
+after complete verification. A peer record claiming `registry_verified` is
+also rebound to the store host's independently TUF-verified card: its full
+immutable card payload, alias, repository, revision, selected file, artifact
+role, and companion ownership must agree before any transfer starts. A
+successful response is the resulting store registry entry. Malformed records
+or missing fields return `400`; invalid or expired capabilities, unsafe
+manifest paths, insufficient capacity, source loss, digest mismatch, or signed
+card disagreement fail the import without replacing the active generation.
+Operators do not call this endpoint directly; the reconciler uses it after
+`POST /store/internal/exports` grants a transfer.
 
 ### Store download status
 
