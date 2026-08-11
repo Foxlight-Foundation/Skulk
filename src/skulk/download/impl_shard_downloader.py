@@ -19,6 +19,7 @@ from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
     get_model_cards,
+    register_installed_card_record,
 )
 from skulk.shared.types.worker.downloads import FileListEntry
 from skulk.shared.types.worker.shards import (
@@ -289,6 +290,7 @@ class ResumableShardDownloader(ShardDownloader):
                             companion_directory,
                             record,
                         )
+                        register_installed_card_record(record)
                 except Exception as error:
                     if required:
                         # Split vision weights are load-bearing: a vision
@@ -314,6 +316,7 @@ class ResumableShardDownloader(ShardDownloader):
                 shard.model_card,
             )
             await asyncio.to_thread(write_installed_card, artifact_directory, record)
+            register_installed_card_record(record)
 
         return target_dir
 

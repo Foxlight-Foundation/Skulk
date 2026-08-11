@@ -21,6 +21,7 @@ from skulk.shared.types.worker.downloads import (
     RepoDownloadProgress,
 )
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
+from skulk.store.installed_cards import InstalledCardRecord
 
 
 def _shard(model_id: str) -> PipelineShardMetadata:
@@ -125,6 +126,10 @@ async def test_direct_download_admission_and_transfer_are_serialized(
     downloader = ResumableShardDownloader()
     active_transfers = 0
     maximum_active_transfers = 0
+    registered_model_ids: list[ModelId] = []
+
+    def register_installed_card(record: InstalledCardRecord) -> None:
+        registered_model_ids.append(record.model_card.model_id)
 
     async def fake_download_shard(
         shard: ShardMetadata,
@@ -180,6 +185,11 @@ async def test_direct_download_admission_and_transfer_are_serialized(
         )
 
     monkeypatch.setattr(impl_shard_downloader, "download_shard", fake_download_shard)
+    monkeypatch.setattr(
+        impl_shard_downloader,
+        "register_installed_card_record",
+        register_installed_card,
+    )
 
     await asyncio.gather(
         downloader.ensure_shard(_shard("org/first")),
@@ -187,3 +197,4 @@ async def test_direct_download_admission_and_transfer_are_serialized(
     )
 
     assert maximum_active_transfers == 1
+    assert registered_model_ids == [ModelId("org/first"), ModelId("org/second")]
