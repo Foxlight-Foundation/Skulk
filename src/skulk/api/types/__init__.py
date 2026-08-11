@@ -79,6 +79,9 @@ from .api import RuntimeCapabilitySection as RuntimeCapabilitySection
 from .api import StartDownloadParams as StartDownloadParams
 from .api import StartDownloadResponse as StartDownloadResponse
 from .api import StoreDownloadRequest as StoreDownloadRequest
+from .api import StoreDownloadResponse as StoreDownloadResponse
+from .api import StoreRegistryEntry as StoreRegistryEntry
+from .api import StoreRegistryResponse as StoreRegistryResponse
 from .api import StreamingChoiceResponse as StreamingChoiceResponse
 from .api import ToolCall as ToolCall
 from .api import ToolCallItem as ToolCallItem

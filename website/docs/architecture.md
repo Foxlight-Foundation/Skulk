@@ -1074,21 +1074,24 @@ Companion repos follow a single download contract: `companion_download_specs()` 
 
 ### Custom model cards
 
-User-added model cards live under `SKULK_CUSTOM_MODEL_CARDS_DIR` (default `SKULK_DATA_HOME/custom_model_cards`) as TOML files. On Linux that resolves to `~/.local/share/skulk/custom_model_cards`; on macOS/Windows to `~/.skulk/custom_model_cards`. Built-in cards live in `resources/inference_model_cards/`. The capability resolver reads both; custom cards override built-ins for the same `model_id`.
+User-added model cards live under `SKULK_CUSTOM_MODEL_CARDS_DIR` (default `SKULK_DATA_HOME/custom_model_cards`) as TOML files. On Linux that resolves to `~/.local/share/skulk/custom_model_cards`; on macOS/Windows to `~/.skulk/custom_model_cards`. They load after installed, registry, and bundled sources and therefore remain the final operator-owned override for the same `model_id`.
 
 ### Signed external model-card registry
 
-Skulk's supported catalog is remote-first during the transition away from
-shipping curated cards in the distribution. `TufRegistryClient`
+Skulk's current supported catalog is the signed external registry.
+`TufRegistryClient`
 (`src/skulk/shared/models/registry.py`) starts from the public root embedded in
 the Python package, verifies standard TUF metadata, and downloads the complete
 `v1/catalog.json` target. Refresh is serialized across callers and runs at most
 once per 60 seconds. A successful refresh also writes a hash-bound
 last-known-good copy; when the registry is unreachable, that copy is accepted
-for at most 30 days. If no acceptable remote catalog exists, the transition
-release loads bundled cards instead. `SKULK_OFFLINE=true` suppresses registry
-network refreshes entirely and uses the bundled catalog. Custom cards still
-override either source.
+for at most 30 days. Complete installed-card sidecars load before any registry
+work and remain active indefinitely while their manifests verify, so that age
+limit never expires an installed artifact. If registry access and its acceptable
+cache are unavailable, bundled cards fill the non-installed fallback catalog.
+`SKULK_OFFLINE=true` suppresses registry network refreshes entirely, retaining
+complete installed generations and using bundled cards only for the remaining
+catalog. Custom cards still load last and override every other source.
 
 A registry card separates its selectable `model_id` alias from
 `source_repository`. The alias is the fabric/store identity; metadata and byte

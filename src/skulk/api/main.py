@@ -195,6 +195,8 @@ from skulk.api.types import (
     StartDownloadParams,
     StartDownloadResponse,
     StoreDownloadRequest,
+    StoreDownloadResponse,
+    StoreRegistryResponse,
     ToolCall,
     ToolingCapabilitySection,
     TraceCategoryStats,
@@ -1993,13 +1995,24 @@ class API:
             "/models",
             tags=["Models"],
             summary="List known models",
-            description="Return known model cards, including metadata Skulk uses for placement and compatibility decisions.",
+            description=(
+                "Return the effective model catalog: complete installed cards, "
+                "the current signed registry snapshot, bundled fallback cards, "
+                "and final operator-owned custom overrides. Entries expose active "
+                "installed identity, current registry identity, update availability, "
+                "verification state, and warn-only advisories."
+            ),
         )(self.get_models)
         self.app.get(
             "/v1/models",
             tags=["Models"],
             summary="List known models",
-            description="OpenAI-style model listing endpoint backed by Skulk's model catalog rather than only currently running instances.",
+            description=(
+                "OpenAI-style listing of Skulk's effective model catalog rather "
+                "than only running instances. Entries distinguish the active "
+                "installed generation from current signed registry truth and "
+                "report updates, verification, advisories, and local remote-code approval."
+            ),
         )(self.get_models)
         self.app.get(
             "/models/remote-code-approvals",
@@ -2639,7 +2652,11 @@ class API:
             "/store/registry",
             tags=["Store"],
             summary="Get model-store registry",
-            description="List models and metadata known to the shared store registry.",
+            description=(
+                "Return canonical store artifacts with their complete installed-card "
+                "records, verification and companion ownership, current registry and "
+                "advisory status, fleet cache locations, and reconciliation state."
+            ),
         )(self.get_store_registry)
         self.app.get(
             "/store/downloads",
@@ -2690,11 +2707,11 @@ class API:
             tags=["Store"],
             summary="Per-node storage breakdown (local node)",
             description=(
-                "Return the local node's storage picture: every staged model with "
-                "its size, last-use time, and whether a live instance (or one of "
-                "its companion repos) currently depends on it, plus event-log "
-                "usage and free disk on the models volume. Cluster-wide views "
-                "should query each node's API."
+                "Return the local node's artifact inventory across staging, direct "
+                "download, and configured read-only roots. Every entry includes "
+                "installed identity, verification and manifest state, companion "
+                "ownership, size, last use, and live-runner use, plus event-log and "
+                "filesystem capacity. Cluster-wide views query each node's API."
             ),
         )(self.get_node_storage_summary)
         self.app.get(
@@ -10932,7 +10949,9 @@ class API:
             }
         )
 
-    async def get_store_registry(self) -> JSONResponse:
+    async def get_store_registry(self) -> StoreRegistryResponse:
+        """Return canonical artifacts enriched with fleet and registry status."""
+
         if self._store_client is None:
             raise HTTPException(status_code=503, detail="Store not configured")
         entries = await self._store_client.fetch_registry()
@@ -11013,7 +11032,10 @@ class API:
             entry["reconciliation_state"] = self._reconciliation_status.state
             entry["last_verified_at"] = self._reconciliation_status.last_verified_at
             enriched.append(entry)
-        return JSONResponse({"entries": enriched})
+        return StoreRegistryResponse.model_validate(
+            {"entries": enriched},
+            strict=False,
+        )
 
     def _configured_staging_root(self) -> Path | None:
         """Return this node's configured cache root when staging is enabled."""
@@ -11554,7 +11576,7 @@ class API:
         self,
         model_id: str,
         payload: StoreDownloadRequest | None = None,
-    ) -> JSONResponse:
+    ) -> StoreDownloadResponse:
         """Request a store download with optional base or companion pins."""
         if self._store_client is None:
             raise HTTPException(status_code=503, detail="Store not configured")
@@ -11619,7 +11641,7 @@ class API:
             owner_registry_card_id=owner_registry_card_id,
             artifact_role=artifact_role,
         )
-        return JSONResponse(result)
+        return StoreDownloadResponse.model_validate(result, strict=False)
 
     async def get_store_download_status(self, model_id: str) -> JSONResponse:
         if self._store_client is None:

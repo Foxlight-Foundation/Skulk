@@ -310,3 +310,33 @@ def test_store_download_cancellation_route_precedes_model_deletion() -> None:
 
     assert response.status_code == 200
     assert store_client.cancelled_models == [_MODEL_ID]
+
+
+def test_store_card_endpoints_have_typed_openapi_responses() -> None:
+    """Mobile clients receive concrete store schemas instead of arbitrary JSON."""
+
+    schema = cast(dict[str, object], _build_api().app.openapi())
+    paths = cast(dict[str, object], schema["paths"])
+
+    registry_path = cast(dict[str, object], paths["/store/registry"])
+    registry_get = cast(dict[str, object], registry_path["get"])
+    registry_responses = cast(dict[str, object], registry_get["responses"])
+    registry_ok = cast(dict[str, object], registry_responses["200"])
+    registry_content = cast(dict[str, object], registry_ok["content"])
+    registry_json = cast(dict[str, object], registry_content["application/json"])
+    assert registry_json["schema"] == {
+        "$ref": "#/components/schemas/StoreRegistryResponse"
+    }
+
+    download_path = cast(
+        dict[str, object],
+        paths["/store/models/{model_id}/download"],
+    )
+    download_post = cast(dict[str, object], download_path["post"])
+    download_responses = cast(dict[str, object], download_post["responses"])
+    download_ok = cast(dict[str, object], download_responses["200"])
+    download_content = cast(dict[str, object], download_ok["content"])
+    download_json = cast(dict[str, object], download_content["application/json"])
+    assert download_json["schema"] == {
+        "$ref": "#/components/schemas/StoreDownloadResponse"
+    }

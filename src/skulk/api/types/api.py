@@ -1161,6 +1161,115 @@ class StoreDownloadRequest(BaseModel):
     )
 
 
+class StoreDownloadResponse(CamelCaseModel):
+    """Current state returned after requesting a canonical-store download."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    model_id: str | None = Field(
+        default=None,
+        description="Store artifact alias accepted for download, when available.",
+    )
+    source_revision: str | None = Field(
+        default=None,
+        description="Immutable source commit selected for this transfer, or null for mutable main.",
+    )
+    status: str = Field(
+        description="Current store transfer state, or error when the store rejected the request."
+    )
+    progress: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Completed transfer fraction when the store supplied one.",
+    )
+    error: str | None = Field(
+        default=None,
+        description="Operator-readable store error when status is error.",
+    )
+
+
+class CachedArtifactLocation(BaseModel):
+    """One complete node-local replica reported for a store artifact."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    node_id: str = Field(description="Fabric node retaining this exact generation.")
+    complete: bool = Field(description="Whether the node reported a complete manifest.")
+    installed_identity: str = Field(description="Durable installed generation identity.")
+    bytes: int = Field(ge=0, description="Artifact bytes retained on the node.")
+    last_use_epoch_seconds: float = Field(
+        ge=0,
+        description="Unix time of the node's most recent artifact use.",
+    )
+    in_use: bool = Field(description="Whether a live runner currently depends on the replica.")
+
+
+class StoreRegistryEntry(BaseModel):
+    """Canonical store entry enriched with fleet cache and registry status."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    model_id: str = Field(description="Canonical store artifact alias.")
+    store_path: str = Field(description="Artifact directory relative to the store root.")
+    files: list[str] = Field(description="Registered files relative to the artifact directory.")
+    downloaded_at: str = Field(description="ISO 8601 UTC registration time.")
+    total_bytes: int = Field(ge=0, description="Registered artifact byte total.")
+    source_revision: str | None = Field(
+        default=None,
+        description="Immutable Hugging Face source commit, or null for mutable main.",
+    )
+    source_repository: str | None = Field(
+        default=None,
+        description="Upstream byte repository when different from the store alias.",
+    )
+    repo_has_projector: bool | None = Field(
+        default=None,
+        description="Whether the registered repository contains a multimodal projector.",
+    )
+    installed_card: InstalledCardRecord | None = Field(
+        default=None,
+        description="Complete durable card, artifact identity, ownership, and manifest.",
+    )
+
+    cached_on_nodes: list[CachedArtifactLocation] = Field(
+        default_factory=list,
+        description="Complete replicas of this installed identity reported across the fleet.",
+    )
+    current_registry_identity: str | None = Field(
+        default=None,
+        description="Current signed card identity for the owning model alias.",
+    )
+    installed_not_current: bool = Field(
+        description="Whether the installed generation is absent from or superseded by the current registry."
+    )
+    update_available: bool = Field(
+        description="Whether a different signed generation is available for installation."
+    )
+    advisories: list[RegistryAdvisory] = Field(
+        default_factory=list,
+        description="Active signed warn-only advisories affecting the installed or current card.",
+    )
+    reconciliation_state: Literal[
+        "idle", "scanning", "importing", "complete", "failed"
+    ] = Field(description="Current fleet reconciliation state.")
+    last_verified_at: str | None = Field(
+        default=None,
+        description="ISO 8601 UTC completion time of the latest reconciliation pass.",
+    )
+
+
+class StoreRegistryResponse(BaseModel):
+    """Public model-store registry and fleet cache-placement view."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    entries: list[StoreRegistryEntry] = Field(
+        default_factory=list,
+        description="Canonical artifacts known to the authoritative model store.",
+    )
+
+
 class ArtifactExportRequest(BaseModel):
     """Request a short-lived capability for one exact staged artifact."""
 
