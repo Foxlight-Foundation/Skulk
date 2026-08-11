@@ -62,6 +62,8 @@ async function renderBrowser(
   onSelect = vi.fn(),
   getBurstInfo?: (variantId: string) => BurstInfo | null,
   mode: PickerMode = 'store-download',
+  models: ModelInfo[] = MODELS,
+  getModelFitStatus: () => 'fits_now' | 'fits_cluster_capacity' = () => 'fits_now',
 ): Promise<ReturnType<typeof vi.fn>> {
   container = document.createElement('div');
   document.body.append(container);
@@ -70,11 +72,11 @@ async function renderBrowser(
     root?.render(
       <ThemeProvider theme={darkTheme}>
         <ModelBrowser
-          models={MODELS}
+          models={models}
           selectedModelId={null}
           favorites={new Set()}
           canModelFit={() => true}
-          getModelFitStatus={() => 'fits_now'}
+          getModelFitStatus={getModelFitStatus}
           onSelect={onSelect}
           onToggleFavorite={vi.fn()}
           hfTrendingModels={HUB_MODELS}
@@ -182,6 +184,40 @@ describe('ModelBrowser store discovery taxonomy', () => {
 
     expect(container?.textContent).toContain('Fits this cluster');
     expect(container?.textContent).not.toContain('Recommended');
+  });
+
+  it('includes models that fit total cluster capacity under the fit heading', async () => {
+    await renderBrowser(
+      vi.fn(),
+      undefined,
+      'launch',
+      MODELS,
+      () => 'fits_cluster_capacity',
+    );
+
+    expect(container?.textContent).toContain('Fits this cluster');
+    expect(container?.textContent).not.toContain('Other');
+  });
+
+  it('does not apply registry provenance to an unprovenanced grouped variant', async () => {
+    const mixedModels = [
+      MODELS[0],
+      {
+        ...MODELS[0],
+        id: 'local/Qwen3-4B-8bit',
+        name: 'Qwen3-4B-8bit',
+        quantization: '8bit',
+        catalog_source: 'bundled' as const,
+        registry_provenance: null,
+      },
+    ];
+    await renderBrowser(vi.fn(), undefined, 'launch', mixedModels);
+
+    expect(container?.textContent).not.toContain('Foxlight');
+    const rowTitle = Array.from(container?.querySelectorAll('span') ?? [])
+      .find((element) => element.textContent === 'Qwen3 4B');
+    await act(async () => rowTitle?.click());
+    expect(container?.textContent).toContain('Foxlight');
   });
 
   it('partitions burst models after placeable ones and keeps them interactive', async () => {

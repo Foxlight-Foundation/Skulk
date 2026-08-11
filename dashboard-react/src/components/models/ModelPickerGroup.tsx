@@ -416,10 +416,10 @@ export function ModelPickerGroup({
   const chips = group.capabilities.filter((c) => CHIP_CAPABILITIES.has(c));
   const contextLength = group.smallestVariant.context_length;
   const provenanceValues = new Set(
-    variants.map((variant) => variant.registry_provenance).filter(Boolean),
+    variants.map((variant) => variant.registry_provenance),
   );
   const uniformProvenance = provenanceValues.size === 1
-    ? variants.find((variant) => variant.registry_provenance)?.registry_provenance ?? null
+    ? variants[0]?.registry_provenance ?? null
     : null;
   const provenanceLabel = (value: NonNullable<ModelInfo['registry_provenance']>) => ({
     foxlight: t('modelInfo.provenanceFoxlight', 'Foxlight'),
