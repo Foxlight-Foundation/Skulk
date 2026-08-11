@@ -924,7 +924,13 @@ class ModelStoreClient:
             return None
         from skulk.store.model_store import ModelStore
 
-        local_store = ModelStore(self._local_store_path)
+        # The authoritative ModelStoreServer owns sidecar recovery and index
+        # writes. This transient view exists only to resolve an already indexed
+        # path and must not race publication or synchronously scan model bytes.
+        local_store = ModelStore(
+            self._local_store_path,
+            recover_installed_cards=False,
+        )
         entry = await asyncio.to_thread(local_store.get_entry, model_id)
         if entry is None or entry.source_revision != source_revision:
             return None
@@ -1004,11 +1010,15 @@ class ModelStoreClient:
         self,
         model_id: str,
         gguf_file: str | None = None,
+        extra_gguf_files: list[str] | None = None,
         source_revision: str | None = None,
         source_repository: str | None = None,
         registry_card_id: str | None = None,
+        owner_model_id: str | None = None,
+        owner_registry_card_id: str | None = None,
+        artifact_role: InstalledArtifactRole = "base",
     ) -> dict[str, object]:
-        """Request a store download with artifact pins and signed identity."""
+        """Request a store download with complete base or companion identity."""
         url = _make_store_url(
             self._store_host,
             self._store_port,
@@ -1019,12 +1029,20 @@ class ModelStoreClient:
                 body: dict[str, object] = {}
                 if gguf_file is not None:
                     body["gguf_file"] = gguf_file
+                if extra_gguf_files:
+                    body["extra_gguf_files"] = extra_gguf_files
                 if source_revision is not None:
                     body["source_revision"] = source_revision
                 if source_repository is not None and source_repository != model_id:
                     body["source_repository"] = source_repository
                 if registry_card_id is not None:
                     body["registry_card_id"] = registry_card_id
+                if owner_model_id is not None:
+                    body["owner_model_id"] = owner_model_id
+                if owner_registry_card_id is not None:
+                    body["owner_registry_card_id"] = owner_registry_card_id
+                if artifact_role != "base":
+                    body["artifact_role"] = artifact_role
                 request = session.post(url, json=body) if body else session.post(url)
                 async with request as resp:
                     if resp.status not in (200, 201):

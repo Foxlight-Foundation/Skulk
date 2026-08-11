@@ -421,12 +421,21 @@ class ModelStore:
         store.register_model("mlx-community/Qwen3-30B-A3B-4bit", model_path, files, total)
     """
 
-    def __init__(self, store_path: Path) -> None:
+    def __init__(
+        self,
+        store_path: Path,
+        *,
+        recover_installed_cards: bool = True,
+    ) -> None:
         """
         Args:
             store_path: Absolute path to the model store root directory on the
                 store host.  This directory must be readable by the Skulk process
                 and writable for registry updates.
+            recover_installed_cards: Rebuild the registry index from complete
+                adjacent sidecars. Authoritative store construction enables this;
+                transient read-only clients must disable it so ordinary path
+                resolution cannot scan or rewrite the store.
         """
         self._store_path = store_path
         self._registry_path = store_path / "registry.json"
@@ -441,7 +450,8 @@ class ModelStore:
         self._download_transfer_lock = asyncio.Lock()
         self._download_tasks: set[asyncio.Task[None]] = set()
         self._download_tasks_by_model: dict[str, asyncio.Task[None]] = {}
-        self._rebuild_registry_from_sidecars()
+        if recover_installed_cards:
+            self._rebuild_registry_from_sidecars()
 
     @property
     def store_path(self) -> Path:

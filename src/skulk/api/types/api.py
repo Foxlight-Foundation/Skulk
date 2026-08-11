@@ -13,7 +13,7 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import ReasoningEffort
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from skulk.shared.types.worker.shards import Sharding, ShardMetadata
-from skulk.store.installed_cards import InstalledCardRecord
+from skulk.store.installed_cards import InstalledArtifactRole, InstalledCardRecord
 from skulk.store.staging_eviction import StagedModelInfo
 from skulk.utils.pydantic_ext import CamelCaseModel
 
@@ -1095,15 +1095,26 @@ class HuggingFaceCardSummary(BaseModel):
 
 
 class StoreDownloadRequest(BaseModel):
-    """Optional file selection for a shared-store model download."""
+    """Optional artifact selection for a shared-store model download."""
 
-    model_config = ConfigDict(frozen=True, strict=True)
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     gguf_file: str | None = Field(
         default=None,
+        min_length=1,
+        max_length=2048,
         description=(
             "Exact repo-relative GGUF file whose shard group the store should "
             "download. Omit to use the repository's default quant selection."
+        ),
+    )
+    extra_gguf_files: list[
+        Annotated[str, Field(min_length=1, max_length=2048)]
+    ] = Field(
+        default_factory=list,
+        description=(
+            "Same-repository companion GGUF paths to fetch with the selected "
+            "base quant."
         ),
     )
     source_revision: str | None = Field(
@@ -1121,6 +1132,32 @@ class StoreDownloadRequest(BaseModel):
             "Optional immutable signed card identity. Omit to select the current "
             "card for the model alias."
         ),
+    )
+    source_repository: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=512,
+        pattern=r"^[^/]+/.+$",
+        description=(
+            "Upstream owner/repository containing the bytes when model_id is "
+            "a distinct store alias."
+        ),
+    )
+    owner_model_id: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=512,
+        pattern=r"^[^/]+/.+$",
+        description="Owning base-model alias for a companion artifact.",
+    )
+    owner_registry_card_id: str | None = Field(
+        default=None,
+        pattern=r"^card_[a-z2-7]{52}$",
+        description="Immutable signed identity of the owning base card.",
+    )
+    artifact_role: InstalledArtifactRole = Field(
+        default="base",
+        description="Base or declared companion role retained in installed truth.",
     )
 
 

@@ -2652,10 +2652,10 @@ class API:
             tags=["Store"],
             summary="Request a store download",
             description=(
-                "Ask the shared model store to download and register a model by model ID. "
-                "Optional gguf_file and source_revision fields pin one exact "
-                "quant and immutable Hugging Face commit; omitted values inherit "
-                "from a bundled model card when declared."
+                "Ask the shared model store to download and register a base or "
+                "companion artifact. Optional repository, revision, file, immutable "
+                "card, ownership, and artifact-role fields bind the exact requested "
+                "generation; omitted base fields inherit from the current model card."
             ),
         )(self.request_store_download)
         self.app.delete(
@@ -11516,24 +11516,37 @@ class API:
         model_id: str,
         payload: StoreDownloadRequest | None = None,
     ) -> JSONResponse:
-        """Request a store download with optional GGUF and source-revision pins."""
+        """Request a store download with optional base or companion pins."""
         if self._store_client is None:
             raise HTTPException(status_code=503, detail="Store not configured")
         requested_model_id = ModelId(model_id)
-        card = get_current_registry_card(requested_model_id) or get_card(
-            requested_model_id
+        artifact_role = payload.artifact_role if payload is not None else "base"
+        card = (
+            get_current_registry_card(requested_model_id)
+            or get_card(requested_model_id)
+            if artifact_role == "base"
+            else None
         )
-        if card is None:
+        if card is None and artifact_role == "base":
             await get_model_cards()
             card = get_current_registry_card(requested_model_id) or get_card(
                 requested_model_id
             )
         gguf_file = payload.gguf_file if payload is not None else None
+        extra_gguf_files = (
+            payload.extra_gguf_files if payload is not None else []
+        )
         source_revision = payload.source_revision if payload is not None else None
-        source_repository: str | None = None
-        registry_card_id: str | None = None
+        source_repository = (
+            payload.source_repository if payload is not None else None
+        )
+        registry_card_id = payload.registry_card_id if payload is not None else None
+        owner_model_id = payload.owner_model_id if payload is not None else None
+        owner_registry_card_id = (
+            payload.owner_registry_card_id if payload is not None else None
+        )
         requested_card_id = payload.registry_card_id if payload is not None else None
-        if requested_card_id is not None:
+        if requested_card_id is not None and artifact_role == "base":
             current_card = get_current_registry_card(requested_model_id)
             installed_card = get_card(requested_model_id)
             card = next(
@@ -11554,14 +11567,18 @@ class API:
         if card is not None:
             gguf_file = gguf_file or card.gguf_file
             source_revision = source_revision or card.source_revision
-            source_repository = str(card.artifact_repository)
+            source_repository = source_repository or str(card.artifact_repository)
             registry_card_id = card.registry_card_id
         result = await self._store_client.request_store_download(
             model_id,
             gguf_file=gguf_file,
+            extra_gguf_files=extra_gguf_files,
             source_revision=source_revision,
             source_repository=source_repository,
             registry_card_id=registry_card_id,
+            owner_model_id=owner_model_id,
+            owner_registry_card_id=owner_registry_card_id,
+            artifact_role=artifact_role,
         )
         return JSONResponse(result)
 

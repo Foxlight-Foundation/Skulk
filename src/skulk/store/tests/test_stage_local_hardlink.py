@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from skulk.store.model_store import ModelStore
 from skulk.store.model_store_client import ModelStoreClient
 
 
@@ -21,6 +22,28 @@ def _make_store_model(store_root: Path, sanitized_id: str) -> Path:
     (model_dir / "weights.gguf").write_bytes(b"g" * 4096)
     (model_dir / "sub" / "config.json").write_bytes(b"{}")
     return model_dir
+
+
+async def test_local_path_lookup_never_runs_authoritative_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient client lookup must remain read-only and bounded."""
+
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+
+    def reject_recovery(
+        _self: ModelStore,
+        _current_registry_ids: dict[str, str] | None = None,
+    ) -> None:
+        raise AssertionError("transient client attempted authoritative recovery")
+
+    monkeypatch.setattr(ModelStore, "_rebuild_registry_from_sidecars", reject_recovery)
+    client = ModelStoreClient("localhost", local_store_path=store_root)
+
+    assert await client.local_model_path("org/model", None) is None
+    assert not (store_root / "registry.json").exists()
 
 
 async def test_stage_local_hardlinks_on_same_filesystem(tmp_path: Path) -> None:
