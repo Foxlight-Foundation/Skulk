@@ -405,7 +405,7 @@ class ModelStoreServer:
     async def _handle_delete_model(self, request: web.Request) -> web.Response:
         """``DELETE /models/{model_id}`` — remove model from store."""
         model_id = _sanitize_model_id(request.match_info["model_id"])
-        deleted = self._store.delete_model(model_id)
+        deleted = await self._store.delete_model_serialized(model_id)
         if not deleted:
             raise web.HTTPNotFound(reason=f"Model {model_id} not in store")
         return web.json_response({"modelId": model_id, "deleted": True})

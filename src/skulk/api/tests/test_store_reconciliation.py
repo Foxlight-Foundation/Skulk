@@ -9,6 +9,7 @@ import pytest
 
 import skulk.api.main as api_main
 from skulk.api.main import (
+    _artifact_inventory_is_tombstoned,
     _combined_model_advisories,
     _complete_canonical_identities,
     _installed_artifact_roots,
@@ -132,6 +133,33 @@ def test_reconciliation_prefers_verified_generation_without_current_card() -> No
     selected = _select_reconciliation_generations(replicas, {})
 
     assert set(selected) == {("zzz_verified", "2" * 64)}
+
+
+def test_reconciliation_suppresses_deleted_alias_and_owned_companions() -> None:
+    """Stale node replicas cannot resurrect an operator-deleted model."""
+
+    tombstones = frozenset({"org/base", "org/independent"})
+
+    assert _artifact_inventory_is_tombstoned(
+        {"modelId": "org/base", "artifactRole": "base"},
+        tombstones,
+    )
+    assert _artifact_inventory_is_tombstoned(
+        {
+            "modelId": "org/sidecar",
+            "ownerModelId": "org/base",
+            "artifactRole": "mtp_sidecar",
+        },
+        tombstones,
+    )
+    assert _artifact_inventory_is_tombstoned(
+        {"modelId": "org/independent", "artifactRole": "base"},
+        tombstones,
+    )
+    assert not _artifact_inventory_is_tombstoned(
+        {"modelId": "org/other", "artifactRole": "base"},
+        tombstones,
+    )
 
 
 def test_advisories_cover_installed_and_current_generations(

@@ -99,6 +99,9 @@ if TYPE_CHECKING:
 
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
 _SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
+_RECONCILIATION_TOMBSTONES_RELATIVE_PATH = (
+    Path(".skulk") / "reconciliation-tombstones.json"
+)
 
 
 def _remaining_store_download_bytes(
@@ -334,6 +337,44 @@ class StoreRegistryIndex(BaseModel):
     entries: dict[str, StoreModelEntry]
 
 
+@final
+class StoreReconciliationTombstones(BaseModel):
+    """Durable aliases that automatic cache reconciliation must not restore."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    schema_version: Literal[1] = 1
+    deleted_aliases: dict[str, str]
+    """Model aliases mapped to the UTC time their operator deletion committed."""
+
+
+def read_reconciliation_tombstones(store_path: Path) -> frozenset[str]:
+    """Return aliases suppressed from automatic peer-cache reconciliation.
+
+    A malformed tombstone file raises instead of silently treating every alias
+    as eligible for import. Losing deletion intent is less safe than pausing
+    reconciliation until the operator repairs the small metadata file.
+
+    Args:
+        store_path: Canonical model-store root.
+
+    Returns:
+        The aliases retained as operator-deletion tombstones.
+
+    Raises:
+        ValueError: If the durable tombstone file is malformed.
+        OSError: If the file exists but cannot be read.
+    """
+
+    path = store_path / _RECONCILIATION_TOMBSTONES_RELATIVE_PATH
+    if not path.exists():
+        return frozenset()
+    index = StoreReconciliationTombstones.model_validate_json(
+        path.read_bytes(), strict=False
+    )
+    return frozenset(index.deleted_aliases)
+
+
 @dataclass
 class StoreDownloadStatus:
     """Tracks the progress of a store-side HuggingFace download."""
@@ -389,6 +430,9 @@ class ModelStore:
         """
         self._store_path = store_path
         self._registry_path = store_path / "registry.json"
+        self._reconciliation_tombstones_path = (
+            store_path / _RECONCILIATION_TOMBSTONES_RELATIVE_PATH
+        )
         self._legacy_registry_backup_path = (
             store_path / "registry.pre-installed-cards.json"
         )
@@ -506,6 +550,11 @@ class ModelStore:
         entry = registry.pop(model_id, None)
         if entry is None:
             return False
+        # Persist deletion intent before removing either the canonical bytes or
+        # the index entry. A node that missed the best-effort staged eviction may
+        # otherwise advertise its retained copy and cause reconciliation to
+        # resurrect the model immediately after this method reports success.
+        self._record_reconciliation_tombstone(model_id)
         # Remove files from disk
         model_path = _resolve_store_child_path(self._store_path, entry.store_path)
         if model_path is None:
@@ -536,6 +585,23 @@ class ModelStore:
         ):
             del self._active_downloads[model_id]
         return True
+
+    async def delete_model_serialized(self, model_id: str) -> bool:
+        """Delete one alias while excluding downloads and peer imports.
+
+        Args:
+            model_id: Store alias selected for operator deletion.
+
+        Returns:
+            ``True`` when the alias existed and was deleted.
+
+        Side effects:
+            Writes the durable reconciliation tombstone and removes canonical
+            bytes while holding the same publication lock as model transfers.
+        """
+
+        async with self._download_transfer_lock:
+            return await asyncio.to_thread(self.delete_model, model_id)
 
     def register_model(
         self,
@@ -681,6 +747,55 @@ class ModelStore:
             StoreRegistryIndex(entries=registry).model_dump_json(indent=2)
         )
         temporary.replace(self._registry_path)
+
+    def _read_reconciliation_tombstone_index(
+        self,
+    ) -> StoreReconciliationTombstones:
+        """Read durable automatic-import suppression metadata."""
+
+        if not self._reconciliation_tombstones_path.exists():
+            return StoreReconciliationTombstones(deleted_aliases={})
+        return StoreReconciliationTombstones.model_validate_json(
+            self._reconciliation_tombstones_path.read_bytes(),
+            strict=False,
+        )
+
+    def _write_reconciliation_tombstone_index(
+        self,
+        index: StoreReconciliationTombstones,
+    ) -> None:
+        """Atomically replace durable automatic-import suppression metadata."""
+
+        self._reconciliation_tombstones_path.parent.mkdir(
+            parents=True, exist_ok=True
+        )
+        temporary = self._reconciliation_tombstones_path.with_name(
+            f".{self._reconciliation_tombstones_path.name}.tmp"
+        )
+        temporary.write_text(index.model_dump_json(indent=2))
+        temporary.replace(self._reconciliation_tombstones_path)
+
+    def _record_reconciliation_tombstone(self, model_id: str) -> None:
+        """Persist one operator-deleted alias before its bytes are removed."""
+
+        index = self._read_reconciliation_tombstone_index()
+        deleted_aliases = dict(index.deleted_aliases)
+        deleted_aliases[model_id] = datetime.now(tz=timezone.utc).isoformat()
+        self._write_reconciliation_tombstone_index(
+            StoreReconciliationTombstones(deleted_aliases=deleted_aliases)
+        )
+
+    def _clear_reconciliation_tombstone(self, model_id: str) -> None:
+        """Allow a successful explicit download to reintroduce one alias."""
+
+        index = self._read_reconciliation_tombstone_index()
+        if model_id not in index.deleted_aliases:
+            return
+        deleted_aliases = dict(index.deleted_aliases)
+        del deleted_aliases[model_id]
+        self._write_reconciliation_tombstone_index(
+            StoreReconciliationTombstones(deleted_aliases=deleted_aliases)
+        )
 
     def refresh_recovered_generations(
         self,
@@ -1241,13 +1356,29 @@ class ModelStore:
         if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
             raise ValueError("source_base_url must be an HTTP(S) node API")
         async with self._download_transfer_lock:
+            tombstones = read_reconciliation_tombstones(self._store_path)
+            if record.artifact_model_id in tombstones or (
+                record.owner_model_id is not None
+                and record.owner_model_id in tombstones
+            ):
+                raise ValueError(
+                    f"peer import is suppressed by an operator-deletion tombstone "
+                    f"for {record.owner_model_id or record.artifact_model_id}"
+                )
             existing = self.get_entry(record.artifact_model_id)
+            existing_path = (
+                _resolve_store_child_path(self._store_path, existing.store_path)
+                if existing is not None
+                else None
+            )
             if (
                 existing is not None
                 and existing.installed_card is not None
                 and existing.installed_card.installed_identity
                 == record.installed_identity
                 and existing.installed_card.manifest_sha256 == record.manifest_sha256
+                and existing_path is not None
+                and verify_installed_card(existing_path, existing.installed_card)
             ):
                 return existing
             import_root = self._store_path / ".imports"
@@ -1571,6 +1702,11 @@ class ModelStore:
                 source_repository=artifact_repository,
                 installed_card=installed_card,
             )
+            # A successful explicit upstream download is the operator's durable
+            # opt-in to reintroduce an alias that was previously deleted. Clear
+            # suppression only after the replacement is complete and indexed;
+            # failed transfers must leave stale peer replicas ineligible.
+            self._clear_reconciliation_tombstone(model_id)
             if previous_entry is not None and previous_entry.store_path != sanitized:
                 previous_path = _resolve_store_child_path(
                     self._store_path, previous_entry.store_path

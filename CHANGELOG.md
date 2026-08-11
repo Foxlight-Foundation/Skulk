@@ -17,6 +17,8 @@ This project records release notes here and mirrors public-facing notes in
   capability-bound peer transfers without returning to Hugging Face. The Model
   Store dashboard exposes cache placement, verified versus local-legacy truth,
   reconciliation progress, available updates, and signed warn-only advisories.
+  Durable deletion tombstones prevent missed node-cache evictions from
+  resurrecting removed models or their companion artifacts.
 
 - The dashboard voice loop now narrates code blocks: when a fenced code block
   streams during live generation, the assistant voice speaks a short opener,

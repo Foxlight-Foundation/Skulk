@@ -392,7 +392,10 @@ bounded `/store/storage` inventories and capability-bound range exports.
 Inventory covers staging, direct-download, and configured read-only model
 roots; a canonical identity counts as present only while its adjacent sidecar
 and manifest remain complete. These inventories and transfer metadata never
-enter State or the event log. Signed
+enter State or the event log. Store deletion serializes with publication and
+persists `.skulk/reconciliation-tombstones.json`; stale replicas and companions
+owned by a deleted alias remain visible but cannot be imported until an explicit
+store download completes and clears the tombstone. Signed
 `v1/advisories.json` notices are warning-only and must never block downloads,
 placement, active instances, or user-owned workloads.
 

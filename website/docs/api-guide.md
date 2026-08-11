@@ -1644,6 +1644,12 @@ staging pressure. Returns `404` if the model is not registered in the store. (To
 clear staged copies without deleting the store copy, use
 `POST /store/purge-staging`.)
 
+Before deleting bytes, the store durably tombstones the alias against automatic
+reconciliation. A stale node cache that missed eviction remains visible in
+`cached_on_nodes` but cannot recreate the base artifact or its owned companions.
+The tombstone survives restarts and is cleared only after a later explicit store
+download for that alias completes successfully.
+
 ### Purge staging caches
 
 **POST** `/store/purge-staging`

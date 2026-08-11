@@ -13,7 +13,7 @@ from skulk.store.installed_cards import (
     build_installed_card_record,
     write_installed_card,
 )
-from skulk.store.model_store import ModelStore
+from skulk.store.model_store import ModelStore, read_reconciliation_tombstones
 from skulk.store.peer_exports import ArtifactExportManager
 
 
@@ -140,6 +140,96 @@ async def test_peer_import_promotes_complete_partial_without_network(
     assert entry.installed_card == record
     assert canonical is not None
     assert (canonical / "model.safetensors").read_bytes() == payload
+
+
+async def test_peer_import_repairs_corrupt_matching_canonical_generation(
+    tmp_path: Path,
+) -> None:
+    """Identity equality cannot short-circuit manifest corruption recovery."""
+
+    source = tmp_path / "source" / "org--model"
+    source.mkdir(parents=True)
+    payload = b"healthy-replica"
+    (source / "model.safetensors").write_bytes(payload)
+    record = build_installed_card_record(source, _card())
+    write_installed_card(source, record)
+    manager = ArtifactExportManager()
+    grant = manager.issue(
+        source,
+        manifest_sha256=record.manifest_sha256,
+        target_node_id="store-node",
+    )
+
+    async def export(request: web.Request) -> web.Response:
+        path, _ = manager.resolve(
+            request.match_info["token"],
+            target_node_id=request.headers["X-Skulk-Store-Node"],
+            relative_path=request.match_info["path"],
+        )
+        return web.Response(body=path.read_bytes())
+
+    app = web.Application()
+    app.router.add_get("/store/internal/exports/{token}/{path:.*}", export)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = cast("tuple[str, int]", probe.getsockname())[1]
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+
+    store_root = tmp_path / "store"
+    canonical = store_root / "org--model"
+    canonical.mkdir(parents=True)
+    (canonical / "model.safetensors").write_bytes(payload)
+    write_installed_card(canonical, record)
+    store = ModelStore(store_root)
+    (canonical / "model.safetensors").write_bytes(b"corrupt")
+    try:
+        imported = await store.import_peer_artifact(
+            record,
+            source_base_url=f"http://127.0.0.1:{port}",
+            capability_token=grant.token,
+            target_node_id="store-node",
+        )
+    finally:
+        await runner.cleanup()
+
+    repaired = store.get_store_path("org/model")
+    assert imported.installed_card == record
+    assert repaired is not None
+    assert (repaired / "model.safetensors").read_bytes() == payload
+
+
+async def test_deleted_alias_tombstone_blocks_stale_peer_import(
+    tmp_path: Path,
+) -> None:
+    """A missed node-cache eviction cannot recreate deleted store bytes."""
+
+    store_root = tmp_path / "store"
+    canonical = store_root / "org--model"
+    canonical.mkdir(parents=True)
+    (canonical / "model.safetensors").write_bytes(b"weights")
+    record = build_installed_card_record(canonical, _card())
+    store = ModelStore(store_root)
+    store.register_model(
+        "org/model",
+        canonical,
+        ["model.safetensors"],
+        len(b"weights"),
+        installed_card=record,
+    )
+
+    assert store.delete_model("org/model")
+    assert read_reconciliation_tombstones(store_root) == frozenset({"org/model"})
+    with pytest.raises(ValueError, match="operator-deletion tombstone"):
+        await store.import_peer_artifact(
+            record,
+            source_base_url="http://127.0.0.1:1",
+            capability_token="stale-replica",
+            target_node_id="store-node",
+        )
+    assert store.get_entry("org/model") is None
 
 
 async def test_failed_peer_replacement_preserves_old_generation(

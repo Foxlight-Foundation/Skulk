@@ -470,6 +470,7 @@ from skulk.store.installed_cards import (
     read_installed_card,
     verify_installed_card,
 )
+from skulk.store.model_store import read_reconciliation_tombstones
 from skulk.store.peer_exports import ArtifactExportManager
 from skulk.store.staging_eviction import StagedModelInfo, list_staged_models
 
@@ -739,6 +740,32 @@ def _complete_canonical_identities(
         if adjacent == record and verify_installed_card(canonical_directory, record):
             identities.add(record.installed_identity)
     return identities
+
+
+def _artifact_inventory_is_tombstoned(
+    item: dict[str, object],
+    tombstones: frozenset[str],
+) -> bool:
+    """Return whether an inventory item belongs to an operator-deleted alias.
+
+    Companion artifacts inherit suppression from their owning base-card alias,
+    while independently deleted artifact aliases are suppressed directly.
+
+    Args:
+        item: Camel-case node inventory entry.
+        tombstones: Durable aliases excluded from automatic imports.
+
+    Returns:
+        ``True`` when reconciliation must retain but not import this replica.
+    """
+
+    model_id = item.get("modelId")
+    owner_model_id = item.get("ownerModelId")
+    return (
+        isinstance(model_id, str) and model_id in tombstones
+    ) or (
+        isinstance(owner_model_id, str) and owner_model_id in tombstones
+    )
 
 
 def _validate_audio_upload_metadata(file: StarletteUploadFile) -> None:
@@ -11179,6 +11206,20 @@ class API:
                     self._store_client.local_store_path,
                     registry,
                 )
+                tombstone_metadata_valid = True
+                reconciliation_tombstones: frozenset[str]
+                try:
+                    reconciliation_tombstones = await to_thread.run_sync(
+                        read_reconciliation_tombstones,
+                        self._store_client.local_store_path,
+                    )
+                except (OSError, ValueError) as error:
+                    tombstone_metadata_valid = False
+                    failures.append(
+                        "Could not read reconciliation deletion tombstones: "
+                        f"{error}"
+                    )
+                    reconciliation_tombstones = frozenset()
                 replicas: dict[
                     tuple[str, str], list[tuple[str, str, dict[str, object]]]
                 ] = {}
@@ -11192,9 +11233,6 @@ class API:
                             and isinstance(digest, str)
                             and item.get("manifestComplete") is True
                         ):
-                            replicas.setdefault((identity, digest), []).append(
-                                (node_id, base_url, item)
-                            )
                             cached_locations.setdefault(identity, []).append(
                                 {
                                     "node_id": node_id,
@@ -11206,6 +11244,16 @@ class API:
                                     ),
                                     "in_use": item.get("inUse", False),
                                 }
+                            )
+                            if (
+                                not tombstone_metadata_valid
+                                or _artifact_inventory_is_tombstoned(
+                                    item, reconciliation_tombstones
+                                )
+                            ):
+                                continue
+                            replicas.setdefault((identity, digest), []).append(
+                                (node_id, base_url, item)
                             )
                 self._cached_artifact_locations = cached_locations
                 current_registry_ids: dict[str, str | None] = {}
@@ -11302,7 +11350,9 @@ class API:
                 identity for identity in pending if identity not in existing_identities
             )
             state: Literal["complete", "failed"] = (
-                "failed" if failures and remaining else "complete"
+                "failed"
+                if failures and (remaining or not tombstone_metadata_valid)
+                else "complete"
             )
             self._reconciliation_status = ReconciliationStatus(
                 state=state,

@@ -17,3 +17,5 @@ transferred and verified; newer registry truth appears as an available update.
 The dashboard shows central-store presence, node cache locations, companion
 artifacts, verification state, reconciliation progress, and signed security
 advisories. Advisories are warnings only and cannot disable user workloads.
+Store deletions also persist reconciliation tombstones, so a stale cache on an
+unreachable node cannot silently recreate an intentionally removed model.

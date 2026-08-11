@@ -97,6 +97,12 @@ fallbacks in `SKULK_MODELS_DIR`, and configured read-only model roots. A
 canonical index entry suppresses import only while its adjacent sidecar and
 complete manifest still validate.
 
+An operator store deletion writes a durable alias tombstone before removing
+the canonical generation. Reconciliation continues to report any node caches
+that missed the best-effort eviction, but it will not import the deleted base
+artifact or companions owned by that base card. The tombstone remains through
+restarts; a later explicit, successfully completed store download clears it.
+
 ### GGUF repositories download only the pinned quantization
 
 A GGUF repository often ships several quantizations of the same model (for
