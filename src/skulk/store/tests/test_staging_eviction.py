@@ -75,6 +75,47 @@ def test_eviction_unregisters_deleted_installed_alias(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    model_directory = _stage_model(
+        tmp_path, "org/model", size_bytes=10, last_used_age_seconds=10
+    )
+    installed_model = StagedModelInfo(
+        model_id="org/model",
+        directory=str(model_directory),
+        size_bytes=10,
+        last_used_epoch_seconds=time.time() - 10,
+        installed_identity="local_test",
+    )
+    unregistered: list[str] = []
+
+    def _staged_models(
+        _root: Path,
+        _in_use: frozenset[str] = frozenset(),
+    ) -> list[StagedModelInfo]:
+        return [installed_model]
+
+    def _unregister(model_id: ModelId) -> None:
+        unregistered.append(str(model_id))
+
+    monkeypatch.setattr(
+        "skulk.store.staging_eviction.list_staged_models",
+        _staged_models,
+    )
+    monkeypatch.setattr(
+        "skulk.store.staging_eviction.unregister_installed_card_record",
+        _unregister,
+    )
+
+    enforce_staging_budget(tmp_path, keep_recent_bytes=0)
+
+    assert unregistered == ["org/model"]
+
+
+def test_unresolved_eviction_preserves_installed_truth_from_other_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unrelated unassociated directory cannot clear a resolved alias."""
+
     _stage_model(tmp_path, "org/model", size_bytes=10, last_used_age_seconds=10)
     unregistered: list[str] = []
 
@@ -88,7 +129,7 @@ def test_eviction_unregisters_deleted_installed_alias(
 
     enforce_staging_budget(tmp_path, keep_recent_bytes=0)
 
-    assert unregistered == ["org/model"]
+    assert unregistered == []
 
 
 def test_companion_eviction_unregisters_only_companion_alias(
@@ -108,6 +149,7 @@ def test_companion_eviction_unregisters_only_companion_alias(
         directory=str(companion),
         size_bytes=10,
         last_used_epoch_seconds=time.time() - 10,
+        installed_identity="local_companion_test",
         artifact_role="mtp_sidecar",
         owner_model_id="org/model",
     )

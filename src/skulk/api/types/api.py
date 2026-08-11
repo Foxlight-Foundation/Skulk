@@ -1142,10 +1142,28 @@ class ArtifactExportResponse(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    capability_token: str
-    expires_at_epoch_seconds: float
-    byte_ceiling: int = Field(ge=0)
-    record: InstalledCardRecord
+    capability_token: str = Field(
+        description=(
+            "Opaque, single-purpose bearer capability used to redeem files from "
+            "this exact artifact export before expiry."
+        )
+    )
+    expires_at_epoch_seconds: float = Field(
+        description="Unix epoch time after which the capability cannot be redeemed."
+    )
+    byte_ceiling: int = Field(
+        ge=0,
+        description=(
+            "Maximum cumulative artifact bytes the capability permits the target "
+            "node to read."
+        ),
+    )
+    record: InstalledCardRecord = Field(
+        description=(
+            "Immutable installed-card record whose manifest and generation the "
+            "capability exports."
+        )
+    )
 
 
 class ReconciliationStatus(BaseModel):

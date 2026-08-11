@@ -274,7 +274,11 @@ def _remove_staged_model(
         return False
     report.evicted_model_ids.append(info.model_id)
     report.evicted_bytes += info.size_bytes
-    unregister_installed_card_record(ModelId(info.model_id))
+    if info.installed_identity is not None:
+        # An unresolved directory has no durable association with this alias.
+        # Clearing the process-wide record in that case could discard valid
+        # installed truth loaded from a different configured model root.
+        unregister_installed_card_record(ModelId(info.model_id))
     age_hours = (time.time() - info.last_used_epoch_seconds) / 3600
     logger.info(
         f"Evicted staged model {info.model_id} "

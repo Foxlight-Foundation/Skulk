@@ -1731,7 +1731,8 @@ class ModelStore:
                 )
             total = sum(p.stat().st_size for p in target_dir.rglob("*") if p.is_file())
             installed_card = (
-                build_installed_card_record(
+                await asyncio.to_thread(
+                    build_installed_card_record,
                     target_dir,
                     model_card,
                     artifact_role=artifact_role,
