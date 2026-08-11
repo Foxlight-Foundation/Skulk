@@ -185,6 +185,29 @@ def test_served_draft_record_selects_its_own_gguf(tmp_path: Path) -> None:
     assert record.artifact_file == "draft.gguf"
 
 
+def test_mutable_companion_does_not_inherit_base_revision(tmp_path: Path) -> None:
+    """Explicit companion main remains distinct from its owner's pinned base."""
+
+    owner = _card()
+    companion = tmp_path / "org--model-mtp"
+    companion.mkdir()
+    (companion / "weights.safetensors").write_bytes(b"mtp")
+
+    record = build_installed_card_record(
+        companion,
+        owner,
+        artifact_role="mtp_sidecar",
+        artifact_model_id="org/model-mtp",
+        owner_model_id=str(owner.model_id),
+        owner_card_id=owner.registry_card_id,
+        artifact_repository="org/model-mtp",
+        artifact_revision=None,
+    )
+
+    assert owner.source_revision is not None
+    assert record.artifact_revision is None
+
+
 def test_incomplete_legacy_companion_is_not_associated_by_directory_name(
     tmp_path: Path,
 ) -> None:

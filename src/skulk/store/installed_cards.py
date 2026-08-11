@@ -14,6 +14,7 @@ import json
 import os
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Literal, final
 
@@ -46,6 +47,10 @@ InstalledArtifactRole = Literal[
     "served_draft",
     "vllm_draft",
 ]
+
+
+class _ArtifactRevisionDefault(Enum):
+    OMITTED = "omitted"
 
 
 @final
@@ -272,7 +277,9 @@ def build_installed_card_record(
     owner_model_id: str | None = None,
     owner_card_id: str | None = None,
     artifact_repository: str | None = None,
-    artifact_revision: str | None = None,
+    artifact_revision: str | None | _ArtifactRevisionDefault = (
+        _ArtifactRevisionDefault.OMITTED
+    ),
     artifact_file: str | None = None,
     artifact_format: str | None = None,
     file_manifest: tuple[InstalledFileManifestEntry, ...] | None = None,
@@ -288,9 +295,9 @@ def build_installed_card_record(
     digest = manifest_sha256(files)
     effective_repository = artifact_repository or str(model_card.artifact_repository)
     effective_revision = (
-        artifact_revision
-        if artifact_revision is not None
-        else model_card.source_revision
+        model_card.source_revision
+        if artifact_revision is _ArtifactRevisionDefault.OMITTED
+        else artifact_revision
     )
     revision_verified = (
         model_card.registry_card_id is not None
