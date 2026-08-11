@@ -43,6 +43,10 @@ model card, immutable registry identity and provenance when available, exact
 artifact selection, base or companion role, owning base card, and a canonical
 SHA-256 file manifest. The sidecar is durable truth; `registry.json` is a
 rebuildable index.
+The dashboard labels the immediately placeable group **Fits this cluster**. This
+is a live capacity statement, not a recommendation or qualification claim.
+Registry-backed rows also show the signed origin as Foxlight, Agent, or
+Community; provenance describes authorship, not runtime confidence.
 When a model root is mounted read-only, Skulk stores the same strict record
 under its data directory, keyed by the resolved artifact path and manifest
 digest. This fallback changes only metadata placement; the model bytes remain

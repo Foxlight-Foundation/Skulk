@@ -612,7 +612,7 @@ export function ModelBrowser({
               )}
               {mode !== 'store-download' && picker.recommendedGroups.length > 0 && (
                 <>
-                  <SectionHeader>{t('modelBrowser.recommended', 'Recommended')}</SectionHeader>
+                  <SectionHeader>{t('modelBrowser.recommended', 'Fits this cluster')}</SectionHeader>
                   <ListCard>
                     {picker.recommendedGroups.map(renderGroup)}
                   </ListCard>

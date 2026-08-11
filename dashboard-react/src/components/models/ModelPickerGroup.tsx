@@ -190,6 +190,10 @@ const RegistryChip = styled.span`
   padding: 1px 6px;
 `;
 
+const ProvenanceChip = styled(RegistryChip)`
+  color: ${({ theme }) => theme.colors.textSecondary};
+`;
+
 const StatusDot = styled.span<{ $class: string }>`
   width: 7px;
   height: 7px;
@@ -411,6 +415,17 @@ export function ModelPickerGroup({
 
   const chips = group.capabilities.filter((c) => CHIP_CAPABILITIES.has(c));
   const contextLength = group.smallestVariant.context_length;
+  const provenanceValues = new Set(
+    variants.map((variant) => variant.registry_provenance).filter(Boolean),
+  );
+  const uniformProvenance = provenanceValues.size === 1
+    ? variants.find((variant) => variant.registry_provenance)?.registry_provenance ?? null
+    : null;
+  const provenanceLabel = (value: NonNullable<ModelInfo['registry_provenance']>) => ({
+    foxlight: t('modelInfo.provenanceFoxlight', 'Foxlight'),
+    agent: t('modelInfo.provenanceAgent', 'Agent'),
+    community: t('modelInfo.provenanceCommunity', 'Community'),
+  })[value];
 
   // Artifact format (GGUF, MLX) is placement-relevant truth. Show it on the
   // group row when every variant shares one format; otherwise it appears per
@@ -483,6 +498,11 @@ export function ModelPickerGroup({
             )}
             {variants.every((variant) => variant.catalog_source === 'registry') && (
               <RegistryChip>{t('modelInfo.signedRegistry', 'Signed registry')}</RegistryChip>
+            )}
+            {uniformProvenance && (
+              <ProvenanceChip title={t('modelInfo.provenance', 'Provenance')}>
+                {provenanceLabel(uniformProvenance)}
+              </ProvenanceChip>
             )}
             <MetaText>
               {[
@@ -587,6 +607,11 @@ export function ModelPickerGroup({
                   <QuantBadge>{deriveFormatLabel(v.id)}</QuantBadge>
                 )}
                 <QuantBadge>{v.quantization ?? '—'}</QuantBadge>
+                {!uniformProvenance && v.registry_provenance && (
+                  <ProvenanceChip title={t('modelInfo.provenance', 'Provenance')}>
+                    {provenanceLabel(v.registry_provenance)}
+                  </ProvenanceChip>
+                )}
                 {groupBurst === null && (() => {
                   const b = getBurstInfo?.(v.id) ?? null;
                   return b ? <BurstChip info={b} fleetMemoryBytes={fleetMemoryBytes} /> : null;
