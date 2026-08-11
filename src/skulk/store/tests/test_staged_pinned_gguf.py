@@ -337,6 +337,72 @@ async def test_failed_same_revision_replacement_preserves_old_generation(
 
 
 @pytest.mark.anyio
+async def test_store_host_reloads_canonical_path_after_generation_replacement(
+    tmp_path: Path,
+) -> None:
+    requested_card = _aliased_shard().model_card
+    old_card = requested_card.model_copy(
+        update={
+            "source_repository": ModelId("org/old-artifact"),
+            "registry_card_id": f"card_{'b' * 52}",
+        }
+    )
+    old_path = tmp_path / "old-generation"
+    new_path = tmp_path / "new-generation"
+    for directory, card, payload in (
+        (old_path, old_card, b"old"),
+        (new_path, requested_card, b"new"),
+    ):
+        directory.mkdir()
+        (directory / "model-IQ3_XXS.gguf").write_bytes(payload)
+        (directory / ".skulk-source-revision").write_text(
+            f"{requested_card.source_revision}\n"
+        )
+        write_installed_card(
+            directory,
+            build_installed_card_record(directory, card),
+        )
+
+    class ReplacingCanonicalStoreClient(_RecordingStoreClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.local_store_path = tmp_path
+            self.replaced = False
+
+        async def local_model_path(
+            self,
+            model_id: str,
+            source_revision: str | None = None,
+        ) -> Path:
+            del model_id, source_revision
+            return new_path if self.replaced else old_path
+
+        async def request_and_wait_for_download(
+            self, model_id: str, **kwargs: object
+        ) -> bool:
+            del model_id, kwargs
+            self.replaced = True
+            return True
+
+    downloader = ModelStoreDownloader(
+        inner=_UnusedInnerDownloader(),
+        store_client=cast(
+            ModelStoreClient,
+            cast(object, ReplacingCanonicalStoreClient()),
+        ),
+        staging_config=StagingNodeConfig(
+            enabled=False,
+            node_cache_path=str(tmp_path / "unused-staging"),
+        ),
+    )
+
+    path = await downloader.ensure_shard(_aliased_shard())
+
+    assert path == new_path
+    assert (path / "model-IQ3_XXS.gguf").read_bytes() == b"new"
+
+
+@pytest.mark.anyio
 async def test_store_download_keeps_alias_but_fetches_artifact_repository(
     tmp_path: Path,
 ) -> None:

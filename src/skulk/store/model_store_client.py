@@ -2026,6 +2026,35 @@ class ModelStoreDownloader(ShardDownloader):
                             owner_registry_card_id=owner_card_id,
                             artifact_role=installed_artifact_role,
                         )
+                        replacement_path = await self._store_client.local_model_path(
+                            model_id,
+                            shard.model_card.source_revision,
+                        )
+                        if (
+                            replacement_path is None
+                            or not _staged_directory_looks_complete(replacement_path)
+                            or _staged_pinned_gguf_missing(shard, replacement_path)
+                            or _staged_vision_projector_missing(
+                                shard,
+                                replacement_path,
+                            )
+                            or _staged_same_repo_draft_missing(
+                                shard,
+                                replacement_path,
+                            )
+                            or not _staged_generation_matches(
+                                replacement_path,
+                                artifact_model_id=model_id,
+                                requested_card=shard.model_card,
+                                owner_card=installed_owner_card,
+                                artifact_role=installed_artifact_role,
+                            )
+                        ):
+                            raise ModelNotInStoreError(
+                                f"Model {model_id} replacement is not complete in "
+                                "the canonical store"
+                            )
+                        direct_path = replacement_path
                     logger.info(
                         f"ModelStoreDownloader: staging disabled — loading {model_id} directly from store at {direct_path}"
                     )

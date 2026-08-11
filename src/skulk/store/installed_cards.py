@@ -555,6 +555,10 @@ def associate_installed_card(
         if (
             directory_name in base_names
             and _legacy_base_artifact_is_complete(model_directory)
+            and _legacy_revision_marker_matches(
+                model_directory,
+                card.source_revision,
+            )
             and (
                 card.gguf_file is None
                 or (model_directory / card.gguf_file).is_file()
@@ -590,10 +594,12 @@ def associate_installed_card(
             if repository is None or ModelId(repository).normalize() != directory_name:
                 continue
             role = companion_artifact_role(card, repository)
-            if not _legacy_companion_artifact_is_complete(
-                model_directory,
-                card=card,
-                artifact_role=role,
+            if not _legacy_revision_marker_matches(model_directory, revision) or not (
+                _legacy_companion_artifact_is_complete(
+                    model_directory,
+                    card=card,
+                    artifact_role=role,
+                )
             ):
                 continue
             matches.append(
@@ -635,6 +641,22 @@ def _legacy_base_artifact_is_complete(model_directory: Path) -> bool:
     return (model_directory / "config.json").is_file() and (
         model_directory / "model.safetensors"
     ).is_file()
+
+
+def _legacy_revision_marker_matches(
+    model_directory: Path,
+    expected_revision: str | None,
+) -> bool:
+    """Reject explicit revision evidence that conflicts with a trusted card."""
+
+    marker = model_directory / _SOURCE_REVISION_MARKER
+    if not marker.exists():
+        return True
+    try:
+        observed_revision = marker.read_text().strip()
+    except (OSError, UnicodeError):
+        return False
+    return expected_revision is None or observed_revision == expected_revision
 
 
 def _legacy_companion_artifact_is_complete(

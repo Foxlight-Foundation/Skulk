@@ -178,6 +178,15 @@ def test_incomplete_legacy_base_is_not_associated_by_directory_name(
     assert associate_installed_card(artifact, [_card()]) is None
 
 
+def test_conflicting_legacy_revision_is_not_associated(
+    tmp_path: Path,
+) -> None:
+    artifact = _artifact(tmp_path)
+    (artifact / ".skulk-source-revision").write_text(f"{'c' * 40}\n")
+
+    assert associate_installed_card(artifact, [_card()]) is None
+
+
 def test_read_only_artifact_uses_path_and_manifest_bound_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
