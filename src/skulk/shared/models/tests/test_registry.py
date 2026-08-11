@@ -1,7 +1,9 @@
 # pyright: reportPrivateUsage=false
 """Tests for signed registry loading and artifact identity separation."""
 
+import asyncio
 import json
+import threading
 from pathlib import Path
 from typing import cast
 
@@ -22,6 +24,7 @@ from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.store.installed_cards import (
+    InstalledCardRecord,
     build_installed_card_record,
     write_installed_card,
 )
@@ -302,6 +305,59 @@ def test_completed_stage_converges_installed_cache_without_registry_refresh(
         assert model_cards_module.get_installed_card_record(card.model_id) == record
         assert model_cards_module.get_card(card.model_id) == card
     finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+        model_cards_module._installed_card_cache.clear()
+        model_cards_module._installed_card_cache.update(original_installed)
+        model_cards_module._installed_current_registry_ids.clear()
+        model_cards_module._installed_current_registry_ids.update(
+            original_installed_current
+        )
+
+
+@pytest.mark.asyncio
+async def test_installed_snapshot_preserves_registration_after_scan_started(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale background scan cannot erase a newly completed installation."""
+
+    card = registry_model_cards(
+        RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    )[0]
+    artifact = tmp_path / card.model_id.normalize()
+    artifact.mkdir()
+    (artifact / "model-Q4_K_M.gguf").write_bytes(b"weights")
+    record = build_installed_card_record(artifact, card)
+    original_cache = dict(model_cards_module._card_cache)
+    original_installed = dict(model_cards_module._installed_card_cache)
+    original_installed_current = dict(
+        model_cards_module._installed_current_registry_ids
+    )
+    scan_started = asyncio.Event()
+    release_scan = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def stale_scan() -> list[InstalledCardRecord]:
+        loop.call_soon_threadsafe(scan_started.set)
+        release_scan.wait(timeout=5)
+        return []
+
+    monkeypatch.setattr(model_cards_module, "_discover_installed_cards", stale_scan)
+    model_cards_module._card_cache.clear()
+    model_cards_module._installed_card_cache.clear()
+    model_cards_module._installed_current_registry_ids.clear()
+    try:
+        refresh = asyncio.create_task(model_cards_module._refresh_installed_cards())
+        await scan_started.wait()
+        model_cards_module.register_installed_card_record(record)
+        release_scan.set()
+        await refresh
+
+        assert model_cards_module.get_installed_card_record(card.model_id) == record
+        assert model_cards_module.get_card(card.model_id) == card
+    finally:
+        release_scan.set()
         model_cards_module._card_cache.clear()
         model_cards_module._card_cache.update(original_cache)
         model_cards_module._installed_card_cache.clear()
@@ -715,7 +771,7 @@ async def test_current_registry_id_is_visible_behind_installed_generation(
         model_cards_module._registry_current_cards.update(original_current)
 
 
-def test_installed_startup_selects_current_generation_deterministically(
+async def test_installed_startup_selects_current_generation_deterministically(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -749,7 +805,7 @@ def test_installed_startup_selects_current_generation_deterministically(
     monkeypatch.setattr(constants_module, "SKULK_MODELS_DIR", tmp_path)
     monkeypatch.setattr(constants_module, "SKULK_MODELS_PATH", None)
     try:
-        model_cards_module._load_cards_from_installed_artifacts()
+        await model_cards_module._refresh_installed_cards()
 
         assert model_cards_module.get_card(current.model_id) == current
         installed = model_cards_module.get_installed_card_record(current.model_id)

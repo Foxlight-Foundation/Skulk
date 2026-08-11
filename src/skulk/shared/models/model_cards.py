@@ -80,6 +80,8 @@ _BUILTIN_CARD_DIRS = [
 _card_cache: dict[ModelId, "ModelCard"] = {}
 _installed_card_cache: dict[ModelId, "InstalledCardRecord"] = {}
 _installed_current_registry_ids: dict[ModelId, str | None] = {}
+_installed_card_cache_version = 0
+_installed_card_mutation_versions: dict[ModelId, int] = {}
 _registry_advisories: tuple[RegistryAdvisory, ...] = ()
 _registry_current_cards: dict[ModelId, "ModelCard"] = {}
 _registry_refresh_lock = asyncio.Lock()
@@ -298,18 +300,40 @@ async def _refresh_card_cache() -> None:
     # air-gapped restart never depends on registry freshness. It is applied
     # again after catalog discovery to keep the installed generation active
     # while retaining the newer signed card as update information.
-    await to_thread.run_sync(_load_cards_from_installed_artifacts)
+    await _refresh_installed_cards()
     registry_loaded = await _load_cards_from_registry()
     if not registry_loaded:
         for path in _BUILTIN_CARD_DIRS:
             await _load_cards_from_dir(path, is_custom=False)
-    await to_thread.run_sync(_load_cards_from_installed_artifacts)
+    await _refresh_installed_cards()
     await _load_cards_from_dir(_custom_cards_dir, is_custom=True)
     _last_registry_refresh = time.monotonic()
 
 
-def _load_cards_from_installed_artifacts() -> None:
-    """Load complete artifact-owned cards after catalog discovery.
+async def _refresh_installed_cards() -> None:
+    """Discover sidecars off-thread and apply their snapshot on the event loop."""
+
+    scan_version = _installed_card_cache_version
+    discovered = await to_thread.run_sync(_discover_installed_cards)
+    _apply_installed_card_snapshot(discovered, scan_version)
+
+
+def _discover_installed_cards() -> list["InstalledCardRecord"]:
+    """Return complete artifact-owned cards without mutating process caches."""
+
+    from skulk.shared import constants
+    from skulk.store.installed_cards import discover_installed_cards
+
+    roots = [constants.SKULK_MODELS_DIR]
+    roots.extend(constants.SKULK_MODELS_PATH or ())
+    return discover_installed_cards(roots)
+
+
+def _apply_installed_card_snapshot(
+    discovered: list["InstalledCardRecord"],
+    scan_version: int,
+) -> None:
+    """Merge one filesystem snapshot without losing newer registrations.
 
     An installed generation remains the active generation until its replacement
     has been completely staged.  Consequently a newer registry card is update
@@ -317,12 +341,6 @@ def _load_cards_from_installed_artifacts() -> None:
     still load last and preserve their explicit operator precedence.
     """
 
-    from skulk.shared import constants
-    from skulk.store.installed_cards import discover_installed_cards
-
-    roots = [constants.SKULK_MODELS_DIR]
-    roots.extend(constants.SKULK_MODELS_PATH or ())
-    discovered = discover_installed_cards(roots)
     selected_records: dict[ModelId, InstalledCardRecord] = {}
     for record in discovered:
         if record.artifact_role != "base":
@@ -338,9 +356,23 @@ def _load_cards_from_installed_artifacts() -> None:
             record, current_card_id
         ) < _installed_record_rank(previous, current_card_id):
             selected_records[model_id] = record
-    _installed_card_cache.clear()
-    _installed_current_registry_ids.clear()
+    for model_id in tuple(_installed_card_cache):
+        if _installed_card_mutation_versions.get(model_id, 0) > scan_version:
+            continue
+        if model_id in selected_records:
+            continue
+        prior = _installed_card_cache.pop(model_id)
+        _installed_current_registry_ids.pop(model_id, None)
+        current = _card_cache.get(model_id)
+        if (
+            current is not None
+            and current == prior.model_card
+            and not current.is_custom
+        ):
+            _card_cache.pop(model_id, None)
     for model_id, record in selected_records.items():
+        if _installed_card_mutation_versions.get(model_id, 0) > scan_version:
+            continue
         existing = _card_cache.get(model_id)
         _installed_card_cache[model_id] = record
         current_card = _registry_current_cards.get(model_id)
@@ -384,9 +416,12 @@ def get_installed_card_record(model_id: ModelId) -> "InstalledCardRecord | None"
 def register_installed_card_record(record: "InstalledCardRecord") -> None:
     """Converge process-local installed truth after an atomic stage completes."""
 
+    global _installed_card_cache_version  # noqa: PLW0603
     if record.artifact_role != "base":
         return
     model_id = ModelId(record.owner_model_id or record.artifact_model_id)
+    _installed_card_cache_version += 1
+    _installed_card_mutation_versions[model_id] = _installed_card_cache_version
     _installed_card_cache[model_id] = record
     current_card = _registry_current_cards.get(model_id)
     _installed_current_registry_ids[model_id] = (
@@ -408,7 +443,9 @@ def unregister_installed_card_record(model_id: ModelId) -> None:
         cache for a registry/bundled/custom rebuild on its next read.
     """
 
-    global _card_cache_dirty  # noqa: PLW0603
+    global _card_cache_dirty, _installed_card_cache_version  # noqa: PLW0603
+    _installed_card_cache_version += 1
+    _installed_card_mutation_versions[model_id] = _installed_card_cache_version
     record = _installed_card_cache.pop(model_id, None)
     _installed_current_registry_ids.pop(model_id, None)
     if record is not None:
