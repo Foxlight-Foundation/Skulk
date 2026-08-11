@@ -28,6 +28,7 @@ import contextlib
 import shutil
 import time
 from pathlib import Path
+from typing import Literal
 
 from loguru import logger
 from pydantic import Field
@@ -107,6 +108,9 @@ class StagedModelInfo(CamelCaseModel):
 
     registry_card_id: str | None = None
     """Registry identity retained by the artifact's full effective card."""
+
+    location_kind: Literal["store_local", "node_cache"] = "node_cache"
+    """Whether this directory is canonical-store-local or a node cache."""
 
 
 def model_id_from_staging_directory_name(directory_name: str) -> str:

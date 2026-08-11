@@ -1190,7 +1190,7 @@ class StoreDownloadResponse(CamelCaseModel):
 
 
 class CachedArtifactLocation(BaseModel):
-    """One complete node-local replica reported for a store artifact."""
+    """One node where an exact store artifact generation is available."""
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
@@ -1203,6 +1203,31 @@ class CachedArtifactLocation(BaseModel):
         description="Unix time of the node's most recent artifact use.",
     )
     in_use: bool = Field(description="Whether a live runner currently depends on the replica.")
+    location_kind: Literal["store_local", "node_cache"] = Field(
+        default="node_cache",
+        description="Whether the bytes are canonical-store-local or a node cache."
+    )
+
+
+class CacheInventoryStatus(BaseModel):
+    """Freshness and coverage of telemetry-derived fleet artifact availability."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    state: Literal["syncing", "current", "degraded", "unavailable"] = Field(
+        description="Whether current node availability is complete enough to rely on."
+    )
+    observed_nodes: int = Field(
+        ge=0,
+        description=(
+            "Live nodes with a usable artifact-inventory reading, including stale "
+            "readings retained as partial truth."
+        ),
+    )
+    expected_nodes: int = Field(
+        ge=0,
+        description="Nodes currently expected from live cluster topology.",
+    )
 
 
 class StoreRegistryEntry(BaseModel):
@@ -1267,6 +1292,9 @@ class StoreRegistryResponse(BaseModel):
     entries: list[StoreRegistryEntry] = Field(
         default_factory=list,
         description="Canonical artifacts known to the authoritative model store.",
+    )
+    cache_inventory: CacheInventoryStatus = Field(
+        description="Telemetry freshness and coverage for cached_on_nodes projections."
     )
 
 

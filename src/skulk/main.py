@@ -696,6 +696,7 @@ class Node:
                 skulk_config=skulk_config,
                 store_client=store_client,
                 telemetry_view=telemetry_view,
+                telemetry_sender=router.telemetry_sender(),
                 data_receiver=router.receiver(topics.DATA),
                 provider_stream_sender=router.sender(topics.PROVIDER_DATA),
                 provider_stream_receiver=router.receiver(topics.PROVIDER_DATA),

@@ -18,6 +18,8 @@ from .api import BenchChatCompletionRequest as BenchChatCompletionRequest
 from .api import BenchChatCompletionResponse as BenchChatCompletionResponse
 from .api import BenchImageGenerationResponse as BenchImageGenerationResponse
 from .api import BenchImageGenerationTaskParams as BenchImageGenerationTaskParams
+from .api import CachedArtifactLocation as CachedArtifactLocation
+from .api import CacheInventoryStatus as CacheInventoryStatus
 from .api import CancelCommandResponse as CancelCommandResponse
 from .api import ChatCompletionChoice as ChatCompletionChoice
 from .api import ChatCompletionContentPart as ChatCompletionContentPart

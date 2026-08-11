@@ -1341,6 +1341,8 @@ each node's API.
 
 Each artifact entry also reports `installedIdentity`, `manifestSha256`,
 `verificationState`, `manifestComplete`, `artifactRole`, and `ownerModelId`.
+`locationKind` is `store_local` when the directory belongs to the canonical
+store on this node and `node_cache` for a launchable node-local copy.
 `registryCardId` identifies the full card retained with the bytes, while a
 companion additionally reports its immutable `ownerCardId`; reconciliation
 uses those fields to select one current generation per artifact alias.
@@ -1523,10 +1525,30 @@ an unchanged alias cannot reuse bytes from a different signed source.
 Entries also include the full `installed_card` record, verification state,
 artifact role and owning card, `current_registry_identity`,
 `installed_not_current`, `update_available`, active signed `advisories`,
-`cached_on_nodes` (identity, completeness, bytes, last use, and in-use state),
-and reconciliation state plus last verification time. Companion artifacts are
-first-class entries grouped under their owning base card by the dashboard.
-The response is `{"entries": [...]}` and is fully described as
+`cached_on_nodes` (identity, completeness, bytes, last use, in-use state, and
+`locationKind`), and reconciliation state plus last verification time.
+`locationKind` distinguishes canonical `store_local` availability from a
+`node_cache` copy. Companion artifacts are first-class entries grouped under
+their owning base card by the dashboard.
+
+The top-level `cacheInventory` reports `observedNodes`, `expectedNodes`, and a
+coverage state:
+
+- `syncing`: at least one newly live node has not published its first inventory.
+- `current`: every live node has a fresh, complete reading.
+- `degraded`: known locations are partial because a reading is stale, missing
+  after convergence, or truncated by the fixed telemetry bound.
+- `unavailable`: no usable node inventory exists.
+
+Canonical store entries are not copied into telemetry. The store host publishes
+only its role, and each API synthesizes `store_local` for canonical entries.
+Other cache locations come from compact, last-write-wins node telemetry. Stale
+known locations remain visible while the top-level state is `degraded`; callers
+must not treat this operator/read projection as transfer authorization.
+Reconciliation continues to query `GET /store/storage` directly and verifies
+the exact installed identity and manifest before import or export.
+
+The response is `{"entries": [...], "cacheInventory": {...}}` and is fully described as
 `StoreRegistryResponse` in generated OpenAPI.
 
 The dashboard combines registry results with `GET /v1/models` metadata so it can
