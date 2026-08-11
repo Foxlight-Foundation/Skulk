@@ -80,6 +80,26 @@ def test_unmarked_registry_bytes_remain_local_legacy(tmp_path: Path) -> None:
     assert record.model_card.registry_card_id is not None
 
 
+def test_revision_qualified_base_directory_associates_signed_card(
+    tmp_path: Path,
+) -> None:
+    """Canonical pinned generations retain their signed registry identity."""
+
+    card = _card()
+    assert card.source_revision is not None
+    artifact = tmp_path / f"org--model--revision-{card.source_revision}"
+    artifact.mkdir()
+    (artifact / "config.json").write_text("{}")
+    (artifact / "model.safetensors").write_bytes(b"weights")
+    (artifact / ".skulk-source-revision").write_text(f"{card.source_revision}\n")
+
+    record = associate_installed_card(artifact, [card])
+
+    assert record is not None
+    assert record.verification == "registry_verified"
+    assert record.installed_identity == card.registry_card_id
+
+
 def test_custom_card_keeps_custom_verification(tmp_path: Path) -> None:
     artifact = _artifact(tmp_path)
     record = build_installed_card_record(
@@ -153,6 +173,29 @@ def test_companion_association_retains_owning_full_card(tmp_path: Path) -> None:
     assert record.owner_card_id == owner.registry_card_id
     assert record.model_card == owner
     assert record.artifact_file is None
+
+
+def test_revision_qualified_companion_associates_owning_card(tmp_path: Path) -> None:
+    """Pinned companion generations recognize the canonical directory layout."""
+
+    payload = _card().model_dump(mode="json")
+    revision = "b" * 40
+    payload["runtime"] = {
+        "mtp_sidecar_repo": "org/model-mtp",
+        "mtp_sidecar_revision": revision,
+    }
+    owner = ModelCard.model_validate(payload)
+    companion = tmp_path / f"org--model-mtp--revision-{revision}"
+    companion.mkdir()
+    (companion / "weights.safetensors").write_bytes(b"mtp")
+    (companion / ".skulk-source-revision").write_text(f"{revision}\n")
+
+    record = associate_installed_card(companion, [owner])
+
+    assert record is not None
+    assert record.artifact_role == "mtp_sidecar"
+    assert record.verification == "registry_verified"
+    assert record.owner_card_id == owner.registry_card_id
 
 
 def test_served_draft_record_selects_its_own_gguf(tmp_path: Path) -> None:

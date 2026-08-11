@@ -614,12 +614,12 @@ def associate_installed_card(
     directory_name = model_directory.name
     matches: list[tuple[ModelCard, InstalledArtifactRole, str, str | None]] = []
     for card in cards:
-        base_names = {
-            card.model_id.normalize(),
-            card.artifact_repository.normalize(),
-        }
+        base_matches = any(
+            _artifact_directory_matches(directory_name, repository, card.source_revision)
+            for repository in (card.model_id, card.artifact_repository)
+        )
         if (
-            directory_name in base_names
+            base_matches
             and _legacy_base_artifact_is_complete(model_directory)
             and _legacy_revision_marker_matches(
                 model_directory,
@@ -657,7 +657,9 @@ def associate_installed_card(
                 ]
             )
         for repository, revision in companion_candidates:
-            if repository is None or ModelId(repository).normalize() != directory_name:
+            if repository is None or not _artifact_directory_matches(
+                directory_name, ModelId(repository), revision
+            ):
                 continue
             role = companion_artifact_role(card, repository)
             if not _legacy_revision_marker_matches(model_directory, revision) or not (
@@ -690,6 +692,20 @@ def associate_installed_card(
         owner_card_id=(None if role == "base" else card.registry_card_id),
         artifact_repository=repository,
         artifact_revision=revision,
+    )
+
+
+def _artifact_directory_matches(
+    directory_name: str,
+    repository: ModelId,
+    source_revision: str | None,
+) -> bool:
+    """Match mutable and canonical revision-qualified artifact directories."""
+
+    normalized = repository.normalize()
+    return directory_name == normalized or (
+        source_revision is not None
+        and directory_name == f"{normalized}--revision-{source_revision}"
     )
 
 

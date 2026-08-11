@@ -1529,6 +1529,16 @@ The dashboard combines registry results with `GET /v1/models` metadata so it can
 display derived tags such as `vision`, `thinking`, `embedding`, `tensor`, and
 `optiq` in the Store list.
 
+**GET** `/registry` (internal model-store transport port)
+
+Returns the authoritative store index consumed by Skulk nodes. The optional
+`recover_installed_cards=true` query first rebuilds installed-card associations
+from complete local sidecars and trusted catalog cards. Every entry is emitted
+with JSON-native values; in particular, the nested installed card's
+`captured_at` value is an ISO 8601 UTC string rather than a native datetime.
+This endpoint is cluster-internal transport; operators and dashboards should
+use the enriched public `GET /store/registry` endpoint above.
+
 ### Store downloads
 
 **GET** `/store/downloads`
