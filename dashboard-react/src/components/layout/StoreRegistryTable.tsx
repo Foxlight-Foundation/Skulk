@@ -49,6 +49,12 @@ export interface StoreRegistryEntry {
   }>;
 }
 
+/**
+ * Fleet cache-to-store reconciliation progress returned by `/store/reconciliation`.
+ * Transitional states (`scanning` and `importing`) describe an active pass;
+ * `complete` and `failed` are terminal for that pass, while `idle` means no pass
+ * has been scheduled yet.
+ */
 export interface StoreReconciliationStatus {
   state: 'idle' | 'scanning' | 'importing' | 'complete' | 'failed';
   inventory_only: boolean;

@@ -1153,14 +1153,57 @@ class ReconciliationStatus(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    state: Literal["idle", "scanning", "importing", "complete", "failed"] = "idle"
-    inventory_only: bool = True
-    scanned_nodes: int = Field(default=0, ge=0)
-    discovered_artifacts: int = Field(default=0, ge=0)
-    imported_artifacts: int = Field(default=0, ge=0)
-    pending_imports: tuple[str, ...] = ()
-    failures: tuple[str, ...] = ()
-    last_verified_at: str | None = None
+    state: Literal["idle", "scanning", "importing", "complete", "failed"] = Field(
+        default="idle",
+        description=(
+            "Current pass state: idle before scheduling, scanning inventories, "
+            "importing selected artifacts, complete after convergence, or failed "
+            "when one or more required operations did not converge."
+        ),
+    )
+    inventory_only: bool = Field(
+        default=True,
+        description=(
+            "Whether the pass reports eligible artifacts without importing them."
+        ),
+    )
+    scanned_nodes: int = Field(
+        default=0,
+        ge=0,
+        description="Number of reachable node inventories included in the pass.",
+    )
+    discovered_artifacts: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Distinct complete installed generations selected after replica "
+            "deduplication."
+        ),
+    )
+    imported_artifacts: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Selected generations newly committed to the canonical store by this pass."
+        ),
+    )
+    pending_imports: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Installed identities still absent from the canonical store, or all "
+            "eligible identities during an inventory-only pass."
+        ),
+    )
+    failures: tuple[str, ...] = Field(
+        default=(),
+        description="Operator-readable inventory or import failures from this pass.",
+    )
+    last_verified_at: str | None = Field(
+        default=None,
+        description=(
+            "ISO 8601 UTC completion time of the latest finished reconciliation pass."
+        ),
+    )
 
 
 class PlaceInstanceParams(BaseModel):
