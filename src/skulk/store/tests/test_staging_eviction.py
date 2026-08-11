@@ -16,6 +16,7 @@ from skulk.shared.models.model_cards import ModelId
 from skulk.store.staging_eviction import (
     LAST_USED_MARKER_FILENAME,
     MINIMUM_STAGING_FREE_DISK_BYTES,
+    StagedModelInfo,
     enforce_staging_budget,
     list_staged_models,
     model_id_from_staging_directory_name,
@@ -88,6 +89,51 @@ def test_eviction_unregisters_deleted_installed_alias(
     enforce_staging_budget(tmp_path, keep_recent_bytes=0)
 
     assert unregistered == ["org/model"]
+
+
+def test_companion_eviction_unregisters_only_companion_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Evicting a sidecar cannot discard its surviving base-card truth."""
+
+    companion = _stage_model(
+        tmp_path,
+        "org/model-mtp",
+        size_bytes=10,
+        last_used_age_seconds=10,
+    )
+    staged_companion = StagedModelInfo(
+        model_id="org/model-mtp",
+        directory=str(companion),
+        size_bytes=10,
+        last_used_epoch_seconds=time.time() - 10,
+        artifact_role="mtp_sidecar",
+        owner_model_id="org/model",
+    )
+    unregistered: list[str] = []
+
+    def _staged_models(
+        _root: Path,
+        _in_use: frozenset[str] = frozenset(),
+    ) -> list[StagedModelInfo]:
+        return [staged_companion]
+
+    def _unregister(model_id: ModelId) -> None:
+        unregistered.append(str(model_id))
+
+    monkeypatch.setattr(
+        "skulk.store.staging_eviction.list_staged_models",
+        _staged_models,
+    )
+    monkeypatch.setattr(
+        "skulk.store.staging_eviction.unregister_installed_card_record",
+        _unregister,
+    )
+
+    enforce_staging_budget(tmp_path, keep_recent_bytes=0)
+
+    assert unregistered == ["org/model-mtp"]
 
 
 def test_in_use_models_are_never_evicted(tmp_path: Path) -> None:

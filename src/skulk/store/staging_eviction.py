@@ -274,9 +274,7 @@ def _remove_staged_model(
         return False
     report.evicted_model_ids.append(info.model_id)
     report.evicted_bytes += info.size_bytes
-    unregister_installed_card_record(
-        ModelId(info.owner_model_id or info.model_id)
-    )
+    unregister_installed_card_record(ModelId(info.model_id))
     age_hours = (time.time() - info.last_used_epoch_seconds) / 3600
     logger.info(
         f"Evicted staged model {info.model_id} "
