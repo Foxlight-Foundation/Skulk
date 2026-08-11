@@ -21,7 +21,9 @@ This project records release notes here and mirrors public-facing notes in
   resurrecting removed models or their companion artifacts. Partial legacy
   directories are never promoted from a name match, resumable peer imports
   account only for missing bytes, capability exports enforce their transfer
-  ceiling, and artifact eviction immediately clears stale installed state.
+  ceiling, artifact eviction immediately clears stale installed state, startup
+  polling survives the delayed first scan, and companion recovery selects the
+  generation belonging to the current signed owner card.
 
 - The dashboard voice loop now narrates code blocks: when a fenced code block
   streams during live generation, the assistant voice speaks a short opener,

@@ -907,11 +907,6 @@ class ModelStore:
             )
         for model_id, candidates in recovered_by_model.items():
             previous = registry.get(model_id)
-            current_card_id = (
-                current_registry_ids.get(model_id)
-                if current_registry_ids is not None
-                else None
-            )
             previous_identity = (
                 previous.installed_card.installed_identity
                 if previous is not None and previous.installed_card is not None
@@ -921,12 +916,18 @@ class ModelStore:
 
             def recovery_rank(
                 candidate: StoreModelEntry,
+                model_id: str = model_id,
                 previous_identity: str | None = previous_identity,
                 previous_path: str | None = previous_path,
-                current_card_id: str | None = current_card_id,
             ) -> tuple[bool, bool, bool, float, str]:
                 installed = candidate.installed_card
                 assert installed is not None
+                owner_alias = installed.owner_model_id or model_id
+                current_card_id = (
+                    current_registry_ids.get(owner_alias)
+                    if current_registry_ids is not None
+                    else None
+                )
                 matches_previous = (
                     installed.installed_identity == previous_identity
                     if previous_identity is not None
@@ -934,10 +935,16 @@ class ModelStore:
                 )
                 matches_current = (
                     current_card_id is not None
-                    and installed.model_card.registry_card_id == current_card_id
+                    and (
+                        installed.owner_card_id
+                        or installed.model_card.registry_card_id
+                    )
+                    == current_card_id
                 )
                 return (
-                    not matches_current if current_card_id is not None else False,
+                    not matches_current
+                    if current_registry_ids is not None
+                    else False,
                     not matches_previous,
                     installed.verification != "registry_verified",
                     -installed.captured_at.timestamp(),

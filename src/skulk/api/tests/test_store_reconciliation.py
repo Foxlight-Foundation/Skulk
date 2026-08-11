@@ -3,6 +3,7 @@
 
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -16,14 +17,17 @@ from skulk.api.main import (
     _inventory_installed_artifacts,
     _select_reconciliation_generations,
 )
+from skulk.api.types.api import ReconciliationStatus
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.models.registry import RegistryAdvisory
 from skulk.shared.types.memory import Memory
+from skulk.store.config import ModelStoreConfig, SkulkConfig
 from skulk.store.installed_cards import (
     InstalledCardRecord,
     build_installed_card_record,
     write_installed_card,
 )
+from skulk.store.model_store_client import ModelStoreClient
 
 
 def _installed_card() -> ModelCard:
@@ -255,3 +259,36 @@ def test_canonical_identity_requires_adjacent_complete_manifest(
     (artifact / "model.safetensors").write_bytes(b"truncated")
 
     assert _complete_canonical_identities(store_root, registry) == set()
+
+
+async def test_scheduled_startup_reconciliation_is_not_reported_idle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deliberate first-scan delay remains visibly non-converged."""
+
+    api = object.__new__(api_main.API)
+    api._store_client = cast(
+        "ModelStoreClient",
+        cast(object, SimpleNamespace(local_store_path=tmp_path)),
+    )
+    api._skulk_config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="store-node",
+            store_path=str(tmp_path),
+        )
+    )
+    api._reconciliation_status = ReconciliationStatus()
+
+    class StartupDelayObservedError(Exception):
+        """Stop the lifetime loop after observing its first delay."""
+
+    async def observe_startup_delay(delay_seconds: float) -> None:
+        assert delay_seconds == 10
+        assert api._reconciliation_status.state == "scanning"
+        raise StartupDelayObservedError
+
+    monkeypatch.setattr(api_main.anyio, "sleep", observe_startup_delay)
+
+    with pytest.raises(StartupDelayObservedError):
+        await api._store_reconciliation_loop()

@@ -1045,6 +1045,9 @@ verify the complete manifest in a temporary directory, and preserve both the
 source cache and old canonical generation until commit. Signed registry
 advisories ride as `v1/advisories.json`; they are operator warnings only and
 never participate in download, placement, or runner enforcement.
+The reconciler reports its first scheduled pass as scanning during the startup
+convergence delay, so operator clients continue polling until inventory has
+actually completed.
 
 Store deletion shares that publication lock and first persists an alias
 tombstone under the canonical store's `.skulk` metadata. A stale node cache is

@@ -402,6 +402,9 @@ Legacy association requires complete model bytes before sidecar creation, and
 every staging eviction, purge, explicit delete, or generation replacement must
 unregister the removed installed alias so offline model truth cannot outlive
 its artifact.
+The scheduled startup reconciliation delay reports `scanning`, and companion
+generation recovery compares `owner_model_id` against current registry card
+identity.
 
 Store staging is reachability-aware (#657): "model not in store" (the
 store answered) fetches via the store host, keeping the store the source

@@ -11378,6 +11378,16 @@ class API:
             or not self._skulk_config.model_store.reconciliation.enabled
         ):
             return
+        # The API becomes reachable after this lifetime task is scheduled but
+        # before its intentional convergence delay expires. Represent that
+        # scheduled first pass as active so dashboard clients do not mistake
+        # the initial ``idle`` value for terminal convergence.
+        self._reconciliation_status = ReconciliationStatus(
+            state="scanning",
+            inventory_only=(
+                self._skulk_config.model_store.reconciliation.inventory_only
+            ),
+        )
         await anyio.sleep(10)
         while True:
             try:
