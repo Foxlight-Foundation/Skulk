@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from skulk.shared.models.model_cards import ModelId
 from skulk.store.staging_eviction import (
     LAST_USED_MARKER_FILENAME,
     MINIMUM_STAGING_FREE_DISK_BYTES,
@@ -67,6 +68,26 @@ def test_zero_budget_is_strict_eviction(tmp_path: Path) -> None:
 
     assert sorted(report.evicted_model_ids) == ["org/a", "org/b"]
     assert list(tmp_path.iterdir()) == []
+
+
+def test_eviction_unregisters_deleted_installed_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stage_model(tmp_path, "org/model", size_bytes=10, last_used_age_seconds=10)
+    unregistered: list[str] = []
+
+    def _unregister(model_id: ModelId) -> None:
+        unregistered.append(str(model_id))
+
+    monkeypatch.setattr(
+        "skulk.store.staging_eviction.unregister_installed_card_record",
+        _unregister,
+    )
+
+    enforce_staging_budget(tmp_path, keep_recent_bytes=0)
+
+    assert unregistered == ["org/model"]
 
 
 def test_in_use_models_are_never_evicted(tmp_path: Path) -> None:

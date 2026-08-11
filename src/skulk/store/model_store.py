@@ -1398,11 +1398,26 @@ class ModelStore:
                     verified_destinations.add(destination)
                     continue
                 await aios.remove(str(destination))
-            remaining = sum(
-                entry.size_bytes
-                for entry in record.files
-                if temporary / entry.path not in verified_destinations
-            )
+            remaining = 0
+            for entry in record.files:
+                destination = temporary / entry.path
+                if destination in verified_destinations:
+                    continue
+                partial = destination.with_name(f"{destination.name}.partial")
+                partial_bytes = partial.stat().st_size if partial.is_file() else 0
+                if partial_bytes > entry.size_bytes:
+                    partial.unlink()
+                    partial_bytes = 0
+                elif partial_bytes == entry.size_bytes:
+                    digest = await asyncio.to_thread(_sha256_path, partial)
+                    if digest == entry.sha256:
+                        await aios.makedirs(str(destination.parent), exist_ok=True)
+                        partial.replace(destination)
+                        verified_destinations.add(destination)
+                        continue
+                    partial.unlink()
+                    partial_bytes = 0
+                remaining += entry.size_bytes - partial_bytes
             if remaining > 0:
                 free_bytes = await asyncio.to_thread(
                     lambda: shutil.disk_usage(temporary).free

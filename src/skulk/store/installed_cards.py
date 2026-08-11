@@ -552,8 +552,13 @@ def associate_installed_card(
             card.model_id.normalize(),
             card.artifact_repository.normalize(),
         }
-        if directory_name in base_names and (
-            card.gguf_file is None or (model_directory / card.gguf_file).is_file()
+        if (
+            directory_name in base_names
+            and _legacy_base_artifact_is_complete(model_directory)
+            and (
+                card.gguf_file is None
+                or (model_directory / card.gguf_file).is_file()
+            )
         ):
             matches.append(
                 (card, "base", str(card.artifact_repository), card.source_revision)
@@ -607,6 +612,22 @@ def associate_installed_card(
         artifact_repository=repository,
         artifact_revision=revision,
     )
+
+
+def _legacy_base_artifact_is_complete(model_directory: Path) -> bool:
+    """Conservatively recognize a complete pre-sidecar base artifact."""
+
+    from skulk.download.download_utils import is_model_directory_complete
+
+    if any(model_directory.rglob("*.partial")):
+        return False
+    if is_model_directory_complete(model_directory):
+        return True
+    # Small single-file safetensors repositories do not carry an index. This is
+    # the same conservative exception used by the existing staging fast path.
+    return (model_directory / "config.json").is_file() and (
+        model_directory / "model.safetensors"
+    ).is_file()
 
 
 def ensure_installed_cards(

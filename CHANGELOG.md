@@ -18,7 +18,10 @@ This project records release notes here and mirrors public-facing notes in
   Store dashboard exposes cache placement, verified versus local-legacy truth,
   reconciliation progress, available updates, and signed warn-only advisories.
   Durable deletion tombstones prevent missed node-cache evictions from
-  resurrecting removed models or their companion artifacts.
+  resurrecting removed models or their companion artifacts. Partial legacy
+  directories are never promoted from a name match, resumable peer imports
+  account only for missing bytes, capability exports enforce their transfer
+  ceiling, and artifact eviction immediately clears stale installed state.
 
 - The dashboard voice loop now narrates code blocks: when a fenced code block
   streams during live generation, the assistant voice speaks a short opener,

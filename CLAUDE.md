@@ -398,6 +398,10 @@ owned by a deleted alias remain visible but cannot be imported until an explicit
 store download completes and clears the tombstone. Signed
 `v1/advisories.json` notices are warning-only and must never block downloads,
 placement, active instances, or user-owned workloads.
+Legacy association requires complete model bytes before sidecar creation, and
+every staging eviction, purge, explicit delete, or generation replacement must
+unregister the removed installed alias so offline model truth cannot outlive
+its artifact.
 
 Store staging is reachability-aware (#657): "model not in store" (the
 store answered) fetches via the store host, keeping the store the source

@@ -1032,6 +1032,11 @@ Registry changes are update information: the active installed generation does
 not switch until the replacement generation has transferred, verified, and
 published atomically.
 
+Legacy association requires an existing complete artifact, not merely a trusted
+card with a matching directory name. Every successful artifact-removal path
+also unregisters that installed generation from process-local model truth; the
+next catalog read rescans remaining sidecars before reporting installed state.
+
 The store host runs a background reconciler that polls bounded per-node cache
 inventories outside event-sourced State. Missing canonical artifacts are pulled
 from healthy node caches with target-bound, expiring capability tokens and

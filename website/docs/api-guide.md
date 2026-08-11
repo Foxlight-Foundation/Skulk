@@ -1594,8 +1594,10 @@ node; the node-id field and header are not accepted as self-asserted identity.
 **GET** `/store/internal/exports/{capability_token}/{relative_path}`
 
 Serves only paths in the granted manifest, requires the bound target-node
-header, and supports HTTP byte ranges for restart recovery. These endpoints are
-internal reconciliation transport, not a public model-download API.
+header, rejects files changed after capability issuance, supports HTTP byte
+ranges for restart recovery, and enforces the capability's cumulative byte
+ceiling across requests. These endpoints are internal reconciliation transport,
+not a public model-download API.
 
 **POST** `/imports` (internal model-store transport port)
 

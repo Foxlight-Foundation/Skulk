@@ -84,6 +84,7 @@ _registry_advisories: tuple[RegistryAdvisory, ...] = ()
 _registry_current_cards: dict[ModelId, "ModelCard"] = {}
 _registry_refresh_lock = asyncio.Lock()
 _last_registry_refresh = 0.0
+_card_cache_dirty = False
 _last_registry_miss_refresh = 0.0
 _REGISTRY_MISS_REFRESH_SECONDS: Final[float] = 1.0
 _registry_client = TufRegistryClient(
@@ -278,7 +279,10 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
 
 
 async def _refresh_card_cache() -> None:
-    global _last_registry_refresh  # noqa: PLW0603
+    global _card_cache_dirty, _last_registry_refresh  # noqa: PLW0603
+    # Clear at refresh start so a concurrent artifact deletion can mark the
+    # cache dirty again while awaited registry or custom-card work is running.
+    _card_cache_dirty = False
     # Installed truth is made available before any network/TUF work so an
     # air-gapped restart never depends on registry freshness. It is applied
     # again after catalog discovery to keep the installed generation active
@@ -382,6 +386,31 @@ def register_installed_card_record(record: "InstalledCardRecord") -> None:
         _card_cache[model_id] = record.model_card
 
 
+def unregister_installed_card_record(model_id: ModelId) -> None:
+    """Remove process-local installed truth after its artifact is deleted.
+
+    Args:
+        model_id: Base model alias whose complete local bytes were removed.
+
+    Side effects:
+        Clears installed identity metadata immediately and marks the catalog
+        cache for a registry/bundled/custom rebuild on its next read.
+    """
+
+    global _card_cache_dirty  # noqa: PLW0603
+    record = _installed_card_cache.pop(model_id, None)
+    _installed_current_registry_ids.pop(model_id, None)
+    if record is not None:
+        current = _card_cache.get(model_id)
+        if (
+            current is not None
+            and current == record.model_card
+            and not current.is_custom
+        ):
+            _card_cache.pop(model_id, None)
+    _card_cache_dirty = True
+
+
 def get_current_registry_cards() -> tuple["ModelCard", ...]:
     """Return current TUF catalog cards already verified in this process."""
 
@@ -438,14 +467,14 @@ def same_model_artifact(existing: "ModelCard", expected: "ModelCard") -> bool:
 
 async def _refresh_card_cache_if_due() -> None:
     """Refresh catalog state at most once per configured interval."""
-    refresh_due = not _card_cache or (
+    refresh_due = _card_cache_dirty or not _card_cache or (
         _registry_enabled()
         and time.monotonic() - _last_registry_refresh
         >= SKULK_MODEL_REGISTRY_REFRESH_SECONDS
     )
     if refresh_due:
         async with _registry_refresh_lock:
-            refresh_still_due = not _card_cache or (
+            refresh_still_due = _card_cache_dirty or not _card_cache or (
                 _registry_enabled()
                 and time.monotonic() - _last_registry_refresh
                 >= SKULK_MODEL_REGISTRY_REFRESH_SECONDS

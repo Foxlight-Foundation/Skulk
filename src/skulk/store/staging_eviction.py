@@ -32,6 +32,10 @@ from pathlib import Path
 from loguru import logger
 from pydantic import Field
 
+from skulk.shared.models.model_cards import (
+    ModelId,
+    unregister_installed_card_record,
+)
 from skulk.store.installed_cards import (
     read_installed_card_with_fallback,
     verify_installed_card,
@@ -270,6 +274,9 @@ def _remove_staged_model(
         return False
     report.evicted_model_ids.append(info.model_id)
     report.evicted_bytes += info.size_bytes
+    unregister_installed_card_record(
+        ModelId(info.owner_model_id or info.model_id)
+    )
     age_hours = (time.time() - info.last_used_epoch_seconds) / 3600
     logger.info(
         f"Evicted staged model {info.model_id} "

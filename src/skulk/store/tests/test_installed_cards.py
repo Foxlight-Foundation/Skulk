@@ -152,6 +152,16 @@ def test_companion_association_retains_owning_full_card(tmp_path: Path) -> None:
     assert record.model_card == owner
 
 
+def test_incomplete_legacy_base_is_not_associated_by_directory_name(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "org--model"
+    artifact.mkdir()
+    (artifact / "config.json").write_text("{}")
+
+    assert associate_installed_card(artifact, [_card()]) is None
+
+
 def test_read_only_artifact_uses_path_and_manifest_bound_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

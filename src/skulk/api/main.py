@@ -11127,6 +11127,7 @@ class API:
                 capability_token,
                 target_node_id=target_node_id,
                 relative_path=relative_path,
+                range_header=request.headers.get("range"),
             )
         except PermissionError as error:
             raise HTTPException(status_code=403, detail=str(error)) from error

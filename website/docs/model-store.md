@@ -63,6 +63,8 @@ immutable revision marker plus matching artifact selection is
 `registry_verified`; complete bytes without that proof are `local_legacy` and
 remain usable under their retained effective card. Unmatched directories are
 inventoried as `unresolved` and are not launched or imported automatically.
+Interrupted or partial directories never receive a legacy installed-card
+sidecar merely because their directory name matches a trusted card.
 
 ## Automatic Reconciliation
 
@@ -77,7 +79,10 @@ store node, manifest digest, byte ceiling, and expiry. The store pulls files
 with HTTP ranges into a resumable temporary generation, verifies every size and
 SHA-256 digest, writes the sidecar, and atomically publishes the generation.
 Failed replacement transfers leave the previous generation intact. Source node
-caches are never removed during migration.
+caches are never removed during migration. Capacity admission credits bytes
+already retained in valid partial files, while the export capability enforces
+its manifest-bound cumulative byte ceiling and rejects source files changed
+after issuance.
 
 Set the rollout to inventory-only before importing a pre-existing fleet:
 

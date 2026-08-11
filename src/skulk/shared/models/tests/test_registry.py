@@ -311,6 +311,45 @@ def test_completed_stage_converges_installed_cache_without_registry_refresh(
         )
 
 
+def test_artifact_eviction_unregisters_installed_generation(tmp_path: Path) -> None:
+    """Deleted local bytes stop being active installed truth immediately."""
+
+    card = registry_model_cards(
+        RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    )[0]
+    artifact = tmp_path / card.model_id.normalize()
+    artifact.mkdir()
+    (artifact / "model-Q4_K_M.gguf").write_bytes(b"weights")
+    record = build_installed_card_record(artifact, card)
+
+    original_cache = dict(model_cards_module._card_cache)
+    original_installed = dict(model_cards_module._installed_card_cache)
+    original_installed_current = dict(
+        model_cards_module._installed_current_registry_ids
+    )
+    original_dirty = model_cards_module._card_cache_dirty
+    model_cards_module._card_cache.clear()
+    model_cards_module._installed_card_cache.clear()
+    model_cards_module._installed_current_registry_ids.clear()
+    try:
+        model_cards_module.register_installed_card_record(record)
+        model_cards_module.unregister_installed_card_record(card.model_id)
+
+        assert model_cards_module.get_installed_card_record(card.model_id) is None
+        assert model_cards_module.get_card(card.model_id) is None
+        assert model_cards_module._card_cache_dirty
+    finally:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(original_cache)
+        model_cards_module._installed_card_cache.clear()
+        model_cards_module._installed_card_cache.update(original_installed)
+        model_cards_module._installed_current_registry_ids.clear()
+        model_cards_module._installed_current_registry_ids.update(
+            original_installed_current
+        )
+        model_cards_module._card_cache_dirty = original_dirty
+
+
 def test_client_uses_hash_bound_last_known_good(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

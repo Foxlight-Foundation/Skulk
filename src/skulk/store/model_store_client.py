@@ -705,6 +705,12 @@ class ModelStoreClient:
             )
             if not final_revision_matches and not resumable_staging_matches:
                 await asyncio.to_thread(shutil.rmtree, dest_path)
+                from skulk.shared.models.model_cards import (
+                    ModelId,
+                    unregister_installed_card_record,
+                )
+
+                unregister_installed_card_record(ModelId(model_id))
         await aios.makedirs(dest_path, exist_ok=True)
         if source_revision is not None:
             await asyncio.to_thread(
@@ -753,6 +759,12 @@ class ModelStoreClient:
             return
         try:
             shutil.rmtree(staged_dir)
+            from skulk.shared.models.model_cards import (
+                ModelId,
+                unregister_installed_card_record,
+            )
+
+            unregister_installed_card_record(ModelId(model_id))
             logger.info(
                 f"ModelStoreClient: evicted staged shard for {model_id} from {staged_dir}"
             )

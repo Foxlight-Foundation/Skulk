@@ -2,6 +2,7 @@
 
 import socket
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -13,7 +14,11 @@ from skulk.store.installed_cards import (
     build_installed_card_record,
     write_installed_card,
 )
-from skulk.store.model_store import ModelStore, read_reconciliation_tombstones
+from skulk.store.model_store import (
+    MINIMUM_STAGING_FREE_DISK_BYTES,
+    ModelStore,
+    read_reconciliation_tombstones,
+)
 from skulk.store.peer_exports import ArtifactExportManager
 
 
@@ -52,6 +57,7 @@ async def test_peer_import_resumes_and_verifies_before_publish(tmp_path: Path) -
             request.match_info["token"],
             target_node_id=request.headers["X-Skulk-Store-Node"],
             relative_path=request.match_info["path"],
+            range_header=request.headers.get("Range"),
         )
         data = path.read_bytes()
         range_header = request.headers.get("Range")
@@ -105,6 +111,81 @@ async def test_peer_import_resumes_and_verifies_before_publish(tmp_path: Path) -
         target_node_id="store-node",
     )
     assert duplicate.store_path == entry.store_path
+
+
+async def test_peer_import_capacity_credits_resumable_partial_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Capacity admission reserves only the suffix still needing transfer."""
+
+    source = tmp_path / "source" / "org--model"
+    source.mkdir(parents=True)
+    payload = b"verified-model-weights"
+    (source / "model.safetensors").write_bytes(payload)
+    record = build_installed_card_record(source, _card())
+    write_installed_card(source, record)
+    manager = ArtifactExportManager()
+    grant = manager.issue(
+        source,
+        manifest_sha256=record.manifest_sha256,
+        target_node_id="store-node",
+    )
+
+    async def export(request: web.Request) -> web.Response:
+        path, _ = manager.resolve(
+            request.match_info["token"],
+            target_node_id=request.headers["X-Skulk-Store-Node"],
+            relative_path=request.match_info["path"],
+            range_header=request.headers.get("Range"),
+        )
+        offset = int(request.headers["Range"].removeprefix("bytes=").removesuffix("-"))
+        return web.Response(status=206, body=path.read_bytes()[offset:])
+
+    app = web.Application()
+    app.router.add_get("/store/internal/exports/{token}/{path:.*}", export)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = cast("tuple[str, int]", probe.getsockname())[1]
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+
+    store_root = tmp_path / "store"
+    store = ModelStore(store_root)
+    partial = (
+        store_root
+        / ".imports"
+        / f"{record.installed_identity}.partial"
+        / "model.safetensors.partial"
+    )
+    partial.parent.mkdir(parents=True)
+    prefix_bytes = 15
+    partial.write_bytes(payload[:prefix_bytes])
+    free_bytes = MINIMUM_STAGING_FREE_DISK_BYTES + len(payload) - prefix_bytes
+
+    def _disk_usage(_path: Path) -> SimpleNamespace:
+        return SimpleNamespace(free=free_bytes)
+
+    monkeypatch.setattr(
+        "skulk.store.model_store.shutil.disk_usage",
+        _disk_usage,
+    )
+    try:
+        entry = await store.import_peer_artifact(
+            record,
+            source_base_url=f"http://127.0.0.1:{port}",
+            capability_token=grant.token,
+            target_node_id="store-node",
+        )
+    finally:
+        await runner.cleanup()
+
+    assert entry.installed_card == record
+    canonical = store.get_store_path("org/model")
+    assert canonical is not None
+    assert (canonical / "model.safetensors").read_bytes() == payload
 
 
 async def test_peer_import_promotes_complete_partial_without_network(
@@ -326,3 +407,53 @@ def test_export_capability_is_target_and_manifest_bound(tmp_path: Path) -> None:
         pass
     else:
         raise AssertionError("export token was accepted by the wrong target")
+
+
+def test_export_capability_enforces_file_snapshot_and_byte_ceiling(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "org--model"
+    source.mkdir()
+    weights = source / "model.safetensors"
+    weights.write_bytes(b"weights")
+    record = build_installed_card_record(source, _card())
+    write_installed_card(source, record)
+    manager = ArtifactExportManager()
+    grant = manager.issue(
+        source,
+        manifest_sha256=record.manifest_sha256,
+        target_node_id="store-node",
+    )
+
+    manager.resolve(
+        grant.token,
+        target_node_id="store-node",
+        relative_path="model.safetensors",
+        range_header="bytes=5-",
+    )
+    manager.resolve(
+        grant.token,
+        target_node_id="store-node",
+        relative_path="model.safetensors",
+        range_header="bytes=0-4",
+    )
+    with pytest.raises(PermissionError, match="byte ceiling"):
+        manager.resolve(
+            grant.token,
+            target_node_id="store-node",
+            relative_path="model.safetensors",
+            range_header="bytes=0-0",
+        )
+
+    replacement_grant = manager.issue(
+        source,
+        manifest_sha256=record.manifest_sha256,
+        target_node_id="store-node",
+    )
+    weights.write_bytes(b"changed")
+    with pytest.raises(PermissionError, match="file changed"):
+        manager.resolve(
+            replacement_grant.token,
+            target_node_id="store-node",
+            relative_path="model.safetensors",
+        )
