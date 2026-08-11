@@ -1526,12 +1526,12 @@ Entries also include the full `installed_card` record, verification state,
 artifact role and owning card, `current_registry_identity`,
 `installed_not_current`, `update_available`, active signed `advisories`,
 `cached_on_nodes` (identity, completeness, bytes, last use, in-use state, and
-`locationKind`), and reconciliation state plus last verification time.
-`locationKind` distinguishes canonical `store_local` availability from a
+`location_kind`), and reconciliation state plus last verification time.
+`location_kind` distinguishes canonical `store_local` availability from a
 `node_cache` copy. Companion artifacts are first-class entries grouped under
 their owning base card by the dashboard.
 
-The top-level `cacheInventory` reports `observedNodes`, `expectedNodes`, and a
+The top-level `cache_inventory` reports `observed_nodes`, `expected_nodes`, and a
 coverage state:
 
 - `syncing`: at least one newly live node has not published its first inventory.
@@ -1548,7 +1548,7 @@ must not treat this operator/read projection as transfer authorization.
 Reconciliation continues to query `GET /store/storage` directly and verifies
 the exact installed identity and manifest before import or export.
 
-The response is `{"entries": [...], "cacheInventory": {...}}` and is fully described as
+The response is `{"entries": [...], "cache_inventory": {...}}` and is fully described as
 `StoreRegistryResponse` in generated OpenAPI.
 
 The dashboard combines registry results with `GET /v1/models` metadata so it can
