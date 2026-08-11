@@ -134,6 +134,7 @@ def test_manifest_rejects_unsafe_relative_paths(tmp_path: Path) -> None:
 
 def test_companion_association_retains_owning_full_card(tmp_path: Path) -> None:
     payload = _card().model_dump(mode="json")
+    payload["gguf_file"] = "base.gguf"
     payload["runtime"] = {
         "mtp_sidecar_repo": "org/model-mtp",
         "mtp_sidecar_revision": "b" * 40,
@@ -150,6 +151,37 @@ def test_companion_association_retains_owning_full_card(tmp_path: Path) -> None:
     assert record.owner_model_id == str(owner.model_id)
     assert record.owner_card_id == owner.registry_card_id
     assert record.model_card == owner
+    assert record.artifact_file is None
+
+
+def test_served_draft_record_selects_its_own_gguf(tmp_path: Path) -> None:
+    """A separate served draft cannot inherit its owner's base quant file."""
+
+    payload = _card().model_dump(mode="json")
+    payload["gguf_file"] = "base.gguf"
+    payload["runtime"] = {
+        "served_spec_type": "draft_dflash",
+        "served_spec_draft_repo": "org/model-draft",
+        "served_spec_draft_revision": "b" * 40,
+        "served_spec_draft_file": "draft.gguf",
+    }
+    owner = ModelCard.model_validate(payload)
+    companion = tmp_path / "org--model-draft"
+    companion.mkdir()
+    (companion / "draft.gguf").write_bytes(b"draft")
+
+    record = build_installed_card_record(
+        companion,
+        owner,
+        artifact_role="served_draft",
+        artifact_model_id="org/model-draft",
+        owner_model_id=str(owner.model_id),
+        owner_card_id=owner.registry_card_id,
+        artifact_repository="org/model-draft",
+        artifact_revision="b" * 40,
+    )
+
+    assert record.artifact_file == "draft.gguf"
 
 
 def test_incomplete_legacy_companion_is_not_associated_by_directory_name(

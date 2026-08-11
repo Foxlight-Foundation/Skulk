@@ -311,6 +311,12 @@ def build_installed_card_record(
         and registry_card_id is not None
         else _local_identity(model_card, digest, artifact_role)
     )
+    effective_artifact_file = artifact_file
+    if effective_artifact_file is None:
+        if artifact_role == "base":
+            effective_artifact_file = model_card.gguf_file
+        elif artifact_role == "served_draft" and model_card.runtime is not None:
+            effective_artifact_file = model_card.runtime.served_spec_draft_file
     return InstalledCardRecord(
         installed_identity=installed_identity,
         artifact_model_id=artifact_model_id or str(model_card.model_id),
@@ -321,9 +327,7 @@ def build_installed_card_record(
         owner_card_id=owner_card_id,
         artifact_repository=effective_repository,
         artifact_revision=effective_revision,
-        artifact_file=artifact_file
-        if artifact_file is not None
-        else model_card.gguf_file,
+        artifact_file=effective_artifact_file,
         artifact_format=artifact_format or model_card_artifact_format(model_card),
         quantization=model_card.quantization,
         manifest_sha256=digest,
