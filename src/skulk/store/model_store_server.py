@@ -692,9 +692,15 @@ class ModelStoreServer:
                     None,
                 )
                 if card is None:
-                    card = await get_registry_card_by_id(
+                    refreshed_card = await get_registry_card_by_id(
                         owner_registry_card_id,
                         refresh_on_miss=True,
+                    )
+                    card = (
+                        refreshed_card
+                        if refreshed_card is not None
+                        and str(refreshed_card.model_id) == owner_model_id
+                        else None
                     )
             else:
                 card = next(

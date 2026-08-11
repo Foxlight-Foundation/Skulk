@@ -1546,14 +1546,38 @@ immutable card ID. The store host verifies that identity against its own signed
 catalog and applies its own node-local repository-code approval before fetching
 bytes; approval on the requesting worker does not grant approval on the store.
 
-The optional JSON body accepts `gguf_file`, `source_revision`, and an immutable
-`registry_card_id`:
+The optional JSON body accepts the following fields:
+
+- `gguf_file`: non-empty repo-relative GGUF path selecting the base or companion
+  quant.
+- `extra_gguf_files`: list of non-empty repo-relative GGUF paths to co-fetch from
+  the same repository, such as a same-repo served draft.
+- `source_revision`: full 40-character immutable Hugging Face commit.
+- `source_repository`: upstream `owner/repository` containing the bytes when the
+  store entry's `model_id` is an alias; identifiers longer than 512 characters
+  are rejected.
+- `registry_card_id`: immutable `card_<content-derived-id>` selecting the signed
+  base-card generation.
+- `owner_model_id`: owning base-model alias for a companion artifact. It is
+  required for non-`base` roles and must be an `owner/model` identifier no longer
+  than 512 characters.
+- `owner_registry_card_id`: immutable signed identity of that owning base card.
+  Omit it only for bundled or custom owner cards without a registry identity.
+- `artifact_role`: one of `base`, `vision_weights`, `mtp_sidecar`, `assistant`,
+  `served_draft`, or `vllm_draft`; defaults to `base`.
+
+A complete companion request names the companion repository and immutable
+revision, its role, and its owning card:
 
 ```json
 {
-  "gguf_file": "<repo-relative path>",
+  "gguf_file": "draft.gguf",
+  "extra_gguf_files": [],
   "source_revision": "0123456789abcdef0123456789abcdef01234567",
-  "registry_card_id": "card_<content-derived-id>"
+  "source_repository": "owner/draft-repository",
+  "owner_model_id": "owner/base-model-alias",
+  "owner_registry_card_id": "card_<content-derived-id>",
+  "artifact_role": "served_draft"
 }
 ```
 
@@ -1568,6 +1592,11 @@ requesting a download.
 
 When `registry_card_id` is omitted, Skulk selects the current card for backward
 compatibility. Supplying it requests that exact immutable generation.
+Companion requests instead bind `owner_registry_card_id` to `owner_model_id` and
+require the repository, revision, selected file, and `artifact_role` to match
+that owning card's signed companion declaration. A mismatched alias, role, or
+artifact selection returns `409 Conflict`; malformed identifiers and roles
+return `400 Bad Request`.
 
 ### Reconciliation status
 

@@ -409,6 +409,52 @@ async def test_store_host_binds_companion_to_full_owning_card(
 
 
 @pytest.mark.anyio
+async def test_store_host_rejects_refreshed_companion_owner_alias_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid card ID cannot certify a caller-supplied different owner alias."""
+
+    payload = _registry_card().model_dump(mode="json")
+    payload["trust_remote_code"] = False
+    payload["runtime"] = {
+        "mtp_sidecar_repo": "org/model-mtp",
+        "mtp_sidecar_revision": "c" * 40,
+        "mtp_heads": True,
+    }
+    owner = ModelCard.model_validate(payload)
+
+    async def stale_cards() -> list[ModelCard]:
+        return []
+
+    async def refreshed_card(
+        _card_id: str,
+        *,
+        refresh_on_miss: bool = False,
+    ) -> ModelCard:
+        assert refresh_on_miss
+        return owner
+
+    monkeypatch.setattr(model_store_server_module, "get_all_model_cards", stale_cards)
+    monkeypatch.setattr(
+        model_store_server_module,
+        "get_registry_card_by_id",
+        refreshed_card,
+    )
+
+    with pytest.raises(web.HTTPConflict, match="cannot verify"):
+        await ModelStoreServer._require_remote_code_download_approval(
+            "org/model-mtp",
+            None,
+            source_repository="org/model-mtp",
+            source_revision="c" * 40,
+            pinned_gguf=None,
+            owner_model_id="org/different-owner",
+            owner_registry_card_id=owner.registry_card_id,
+            artifact_role="mtp_sidecar",
+        )
+
+
+@pytest.mark.anyio
 async def test_store_host_accepts_bundled_companion_owner_without_registry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

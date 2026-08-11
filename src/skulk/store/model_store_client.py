@@ -70,6 +70,7 @@ file already exists (from a previous complete run), the file is skipped.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import os
 import shutil
@@ -264,7 +265,11 @@ def _publish_staged_generation(replacement: Path, destination: Path) -> None:
         raise
     if backup.exists():
         shutil.rmtree(backup)
-    replacement.parent.rmdir()
+    # Publication has committed once ``replacement`` is moved into the live
+    # destination. Other interrupted generations may still share this private
+    # parent, so cleanup cannot turn a successful atomic switch into failure.
+    with contextlib.suppress(OSError):
+        replacement.parent.rmdir()
 
 
 class ModelNotInStoreError(Exception):

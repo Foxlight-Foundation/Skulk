@@ -24,11 +24,33 @@ from skulk.store.model_store import ModelStore
 from skulk.store.model_store_client import (
     ModelStoreClient,
     ModelStoreDownloader,
+    _publish_staged_generation,
     _staged_generation_matches,
     _staged_pinned_gguf_missing,
 )
 
 _MODEL_ID = "org/multi-quant-GGUF"
+
+
+def test_published_generation_ignores_shared_parent_cleanup_failure(
+    tmp_path: Path,
+) -> None:
+    """A committed replacement remains successful while another generation exists."""
+
+    destination = tmp_path / "org--model"
+    destination.mkdir()
+    (destination / "model.gguf").write_bytes(b"old")
+    generation_root = tmp_path / ".replacement-generations" / "org--model"
+    replacement = generation_root / "requested"
+    replacement.mkdir(parents=True)
+    (replacement / "model.gguf").write_bytes(b"new")
+    leftover = generation_root / "interrupted"
+    leftover.mkdir()
+
+    _publish_staged_generation(replacement, destination)
+
+    assert (destination / "model.gguf").read_bytes() == b"new"
+    assert leftover.is_dir()
 
 
 class _UnusedInnerDownloader(ShardDownloader):
