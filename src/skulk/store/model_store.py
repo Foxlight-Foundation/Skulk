@@ -797,7 +797,7 @@ class ModelStore:
             StoreReconciliationTombstones(deleted_aliases=deleted_aliases)
         )
 
-    def refresh_recovered_generations(
+    async def refresh_recovered_generations(
         self,
         current_registry_cards: Iterable[ModelCard],
     ) -> None:
@@ -813,7 +813,11 @@ class ModelStore:
             for card in current_registry_cards
             if card.registry_card_id is not None
         }
-        self._rebuild_registry_from_sidecars(current_registry_ids)
+        async with self._download_transfer_lock:
+            await asyncio.to_thread(
+                self._rebuild_registry_from_sidecars,
+                current_registry_ids,
+            )
 
     async def recover_installed_cards_serialized(self) -> None:
         """Adopt complete adjacent sidecars without transferring model bytes.

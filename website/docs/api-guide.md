@@ -1590,8 +1590,12 @@ present in the selected revision falls back to the default at the store protocol
 layer; the `/models/add` card-building endpoint validates exact pins before
 requesting a download.
 
-When `registry_card_id` is omitted, Skulk selects the current card for backward
-compatibility. Supplying it requests that exact immutable generation.
+When `registry_card_id` is omitted, Skulk selects the current card when one
+exists. A Hugging Face search result absent from the catalog may still be
+downloaded with no card ID; the store records it as unverified rather than
+claiming signed registry provenance. Supplying `registry_card_id` requests that
+exact immutable generation and returns `409 Conflict` when the store host cannot
+verify it.
 Companion requests instead bind `owner_registry_card_id` to `owner_model_id` and
 require the repository, revision, selected file, and `artifact_role` to match
 that owning card's signed companion declaration. A mismatched alias, role, or

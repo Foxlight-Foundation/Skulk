@@ -199,11 +199,15 @@ def write_source_revision_marker(path: Path, source_revision: str | None) -> Non
     staging_marker.unlink(missing_ok=True)
 
 
-def _replacement_model_dir(target_dir: Path, source_revision: str | None) -> Path:
-    """Return the resumable sibling directory for a replacement revision."""
+def _replacement_model_dir(
+    target_dir: Path,
+    source_revision: str | None,
+    replacement_identity: str | None = None,
+) -> Path:
+    """Return the resumable sibling directory for one replacement generation."""
 
-    revision = source_revision or "main"
-    return target_dir.with_name(f".{target_dir.name}.revision-{revision}.partial")
+    generation = replacement_identity or source_revision or "main"
+    return target_dir.with_name(f".{target_dir.name}.generation-{generation}.partial")
 
 
 def _recover_interrupted_model_swap(target_dir: Path) -> None:
@@ -1430,6 +1434,7 @@ async def download_shard(
     allow_patterns: list[str] | None = None,
     on_connection_lost: Callable[[], None] = lambda: None,
     capacity_preflight: DownloadCapacityPreflight | None = None,
+    replacement_identity: str | None = None,
 ) -> tuple[Path, RepoDownloadProgress]:
     if not skip_download:
         require_remote_code_approval(shard.model_card)
@@ -1447,13 +1452,23 @@ async def download_shard(
             canonical_target_dir, shard.model_card.source_revision
         )
     )
-    replacing_revision = canonical_target_dir.exists() and not (
-        _source_revision_matches(canonical_target_dir, shard.model_card.source_revision)
-        or resuming_staged_revision
+    replacing_generation = canonical_target_dir.exists() and (
+        replacement_identity is not None
+        or not (
+            _source_revision_matches(
+                canonical_target_dir,
+                shard.model_card.source_revision,
+            )
+            or resuming_staged_revision
+        )
     )
     target_dir = (
-        _replacement_model_dir(canonical_target_dir, shard.model_card.source_revision)
-        if replacing_revision
+        _replacement_model_dir(
+            canonical_target_dir,
+            shard.model_card.source_revision,
+            replacement_identity,
+        )
+        if replacing_generation
         else canonical_target_dir
     )
     if not skip_download:
@@ -1677,7 +1692,7 @@ async def download_shard(
     )
     if (
         skip_download
-        and (replacing_revision or resuming_staged_revision)
+        and (replacing_generation or resuming_staged_revision)
         and final_repo_progress.status == "complete"
     ):
         # All replacement bytes may have landed before a restart, but they are
@@ -1692,7 +1707,7 @@ async def download_shard(
             target_dir,
             shard.model_card.source_revision,
         )
-        if replacing_revision:
+        if replacing_generation:
             await asyncio.to_thread(
                 _commit_replacement_model_dir, target_dir, canonical_target_dir
             )

@@ -13,6 +13,7 @@ from skulk.download.impl_shard_downloader import (
     DirectDownloadCapacityError,
     ResumableShardDownloader,
     _remaining_direct_download_bytes,
+    _replacement_identity_for_installed_card,
 )
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.memory import Memory
@@ -21,7 +22,11 @@ from skulk.shared.types.worker.downloads import (
     RepoDownloadProgress,
 )
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
-from skulk.store.installed_cards import InstalledCardRecord
+from skulk.store.installed_cards import (
+    InstalledCardRecord,
+    build_installed_card_record,
+    write_installed_card,
+)
 
 
 def _shard(model_id: str) -> PipelineShardMetadata:
@@ -62,6 +67,45 @@ def test_remaining_bytes_reject_unknown_manifest_sizes(tmp_path: Path) -> None:
             tmp_path,
             [FileListEntry(type="file", path="missing.safetensors", size=None)],
         )
+
+
+def test_changed_custom_card_requires_new_direct_generation(tmp_path: Path) -> None:
+    """A sidecar mismatch must force a separate direct-download generation."""
+
+    model_directory = tmp_path / "org--model"
+    model_directory.mkdir()
+    (model_directory / "weights.bin").write_bytes(b"old")
+    old_card = _shard("org/model").model_card.model_copy(
+        update={"is_custom": True}
+    )
+    new_card = old_card.model_copy(update={"hidden_size": 2})
+    write_installed_card(
+        model_directory,
+        build_installed_card_record(model_directory, old_card),
+    )
+
+    assert (
+        _replacement_identity_for_installed_card(
+            model_directory,
+            old_card,
+            artifact_model_id="org/model",
+            artifact_role="base",
+        )
+        is None
+    )
+    replacement_identity = _replacement_identity_for_installed_card(
+        model_directory,
+        new_card,
+        artifact_model_id="org/model",
+        artifact_role="base",
+    )
+    assert replacement_identity is not None
+    assert replacement_identity == _replacement_identity_for_installed_card(
+        model_directory,
+        new_card,
+        artifact_model_id="org/model",
+        artifact_role="base",
+    )
 
 
 @pytest.mark.anyio

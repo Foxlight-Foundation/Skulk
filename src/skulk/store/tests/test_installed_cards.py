@@ -1,6 +1,7 @@
 # pyright: reportPrivateUsage=false
 """Installed model cards remain bound to local artifact bytes."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -449,7 +450,7 @@ def test_registry_rebuild_preserves_previously_selected_generation(
     assert recovered.installed_card == current_record
 
 
-def test_registry_rebuild_reselects_current_signed_generation(
+async def test_registry_rebuild_reselects_current_signed_generation(
     tmp_path: Path,
 ) -> None:
     """Post-TUF recovery replaces a deterministic pre-registry selection."""
@@ -476,7 +477,7 @@ def test_registry_rebuild_reselects_current_signed_generation(
     assert initial is not None
     assert initial.installed_card == stale_record
 
-    recovered.refresh_recovered_generations([current_card])
+    await recovered.refresh_recovered_generations([current_card])
 
     selected = recovered.get_entry("org/model")
     assert selected is not None
@@ -484,7 +485,7 @@ def test_registry_rebuild_reselects_current_signed_generation(
     assert selected.installed_card == current_record
 
 
-def test_registry_rebuild_reselects_companion_for_current_owner_card(
+async def test_registry_rebuild_reselects_companion_for_current_owner_card(
     tmp_path: Path,
 ) -> None:
     """Companion recovery ranks generations under their owning base alias."""
@@ -528,12 +529,26 @@ def test_registry_rebuild_reselects_companion_for_current_owner_card(
     assert initial is not None
     assert initial.installed_card == stale_record
 
-    recovered.refresh_recovered_generations([current_card])
+    await recovered.refresh_recovered_generations([current_card])
 
     selected = recovered.get_entry("org/model-mtp")
     assert selected is not None
     assert selected.store_path == "z-current-sidecar"
     assert selected.installed_card == current_record
+
+
+async def test_registry_refresh_waits_for_publication_lock(tmp_path: Path) -> None:
+    """Post-TUF recovery cannot race a download, import, or deletion publish."""
+
+    store = ModelStore(tmp_path)
+    await store._download_transfer_lock.acquire()
+    refresh = asyncio.create_task(store.refresh_recovered_generations([]))
+    await asyncio.sleep(0)
+
+    assert not refresh.done()
+
+    store._download_transfer_lock.release()
+    await refresh
 
 
 async def test_completed_download_refreshes_card_without_rehashing_bytes(

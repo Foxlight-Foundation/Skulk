@@ -15,7 +15,7 @@ from typing import Final, Self
 
 import anyio
 import psutil
-from anyio import BrokenResourceError, ClosedResourceError, to_thread
+from anyio import BrokenResourceError, ClosedResourceError
 from loguru import logger
 from pydantic import PositiveInt
 
@@ -833,8 +833,7 @@ class Node:
     async def run(self):
         if self.store_server is not None:
             await get_all_model_cards()
-            await to_thread.run_sync(
-                self.store_server.refresh_recovered_generations,
+            await self.store_server.refresh_recovered_generations(
                 get_current_registry_cards(),
             )
         async with self._tg as tg:
@@ -993,8 +992,7 @@ class Node:
                 else new_store_server
             )
             await get_all_model_cards()
-            await to_thread.run_sync(
-                self.store_server.refresh_recovered_generations,
+            await self.store_server.refresh_recovered_generations(
                 get_current_registry_cards(),
             )
         if self.api is not None:

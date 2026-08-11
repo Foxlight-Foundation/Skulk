@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import shutil
 from asyncio import create_task
 from collections.abc import Awaitable
@@ -27,8 +28,10 @@ from skulk.shared.types.worker.shards import (
     ShardMetadata,
 )
 from skulk.store.installed_cards import (
+    InstalledArtifactRole,
     build_installed_card_record,
     companion_artifact_role,
+    read_installed_card_with_fallback,
     write_installed_card,
 )
 from skulk.store.staging_eviction import MINIMUM_STAGING_FREE_DISK_BYTES
@@ -36,6 +39,53 @@ from skulk.store.staging_eviction import MINIMUM_STAGING_FREE_DISK_BYTES
 
 class DirectDownloadCapacityError(RuntimeError):
     """Raised before a Hugging Face transfer that would consume headroom."""
+
+
+def _replacement_identity_for_installed_card(
+    model_directory: Path,
+    model_card: ModelCard,
+    *,
+    artifact_model_id: str,
+    artifact_role: InstalledArtifactRole,
+) -> str | None:
+    """Return a stable replacement key when retained card truth has changed."""
+
+    try:
+        record = read_installed_card_with_fallback(model_directory)
+    except (OSError, ValueError):
+        record = None
+    if record is None:
+        return None
+    if artifact_role == "base":
+        requested_card_id = model_card.registry_card_id
+        card_matches = (
+            record.model_card.registry_card_id == requested_card_id
+            if requested_card_id is not None
+            else record.model_card == model_card
+        )
+        generation_matches = (
+            record.artifact_role == "base"
+            and record.artifact_model_id == artifact_model_id
+            and card_matches
+        )
+    else:
+        owner_matches = (
+            record.owner_card_id == model_card.registry_card_id
+            if model_card.registry_card_id is not None
+            else record.model_card == model_card
+        )
+        generation_matches = (
+            record.artifact_role == artifact_role
+            and record.artifact_model_id == artifact_model_id
+            and owner_matches
+        )
+    if generation_matches:
+        return None
+    payload = (
+        f"{artifact_role}\0{artifact_model_id}\0"
+        f"{model_card.model_dump_json(exclude={'is_custom'})}"
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _remaining_direct_download_bytes(
@@ -202,11 +252,22 @@ class ResumableShardDownloader(ShardDownloader):
         shard: ShardMetadata,
         *,
         allow_patterns: list[str] | None = None,
+        replacement_identity: str | None = None,
     ) -> tuple[Path, RepoDownloadProgress]:
         """Serialize exact capacity admission with one direct transfer."""
 
         preflight: DownloadCapacityPreflight = self._ensure_direct_download_capacity
         async with self._direct_transfer_lock:
+            if replacement_identity is not None:
+                return await download_shard(
+                    shard,
+                    self.on_progress_wrapper,
+                    max_parallel_downloads=self.max_parallel_downloads,
+                    allow_patterns=allow_patterns,
+                    skip_internet=self.offline,
+                    capacity_preflight=preflight,
+                    replacement_identity=replacement_identity,
+                )
             return await download_shard(
                 shard,
                 self.on_progress_wrapper,
@@ -248,12 +309,21 @@ class ResumableShardDownloader(ShardDownloader):
                 shard.model_card
             ):
                 try:
+                    repository = str(companion_shard.model_card.model_id)
+                    role = companion_artifact_role(shard.model_card, repository)
+                    replacement_identity = _replacement_identity_for_installed_card(
+                        SKULK_MODELS_DIR / companion_shard.model_card.model_id.normalize(),
+                        shard.model_card,
+                        artifact_model_id=repository,
+                        artifact_role=role,
+                    )
                     (
                         companion_path,
                         companion_progress,
                     ) = await self._download_with_capacity(
                         companion_shard,
                         allow_patterns=allow,
+                        replacement_identity=replacement_identity,
                     )
                     # download_shard converts repo-level fetch failures
                     # (e.g. FileNotFoundError on the file list) into a
@@ -267,8 +337,6 @@ class ResumableShardDownloader(ShardDownloader):
                             f"{companion_progress.status!r})"
                         )
                     if companion_progress.status == "complete":
-                        repository = str(companion_shard.model_card.model_id)
-                        role = companion_artifact_role(shard.model_card, repository)
                         companion_directory = (
                             companion_path.parent
                             if companion_path.is_file()
@@ -303,9 +371,16 @@ class ResumableShardDownloader(ShardDownloader):
                         "will be unavailable on this node."
                     )
 
+        base_replacement_identity = _replacement_identity_for_installed_card(
+            SKULK_MODELS_DIR / shard.model_card.model_id.normalize(),
+            shard.model_card,
+            artifact_model_id=str(shard.model_card.model_id),
+            artifact_role="base",
+        )
         target_dir, base_progress = await self._download_with_capacity(
             shard,
             allow_patterns=allow_patterns,
+            replacement_identity=base_replacement_identity,
         )
 
         if not config_only and base_progress.status == "complete":

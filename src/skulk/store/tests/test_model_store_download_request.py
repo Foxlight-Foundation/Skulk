@@ -155,10 +155,10 @@ async def test_store_host_omitted_card_id_selects_current_signed_card(
 
 
 @pytest.mark.anyio
-async def test_store_host_rejects_unassociated_download_without_card_id(
+async def test_store_host_allows_uncatalogued_download_without_card_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every accepted download must retain a trusted full card."""
+    """Hugging Face search may acquire an artifact absent from the catalog."""
 
     async def no_cards() -> list[ModelCard]:
         return []
@@ -173,10 +173,45 @@ async def test_store_host_rejects_unassociated_download_without_card_id(
         no_current_card,
     )
 
+    retained = await ModelStoreServer._require_remote_code_download_approval(
+        "org/unassociated",
+        None,
+        source_repository="org/unassociated",
+        source_revision=None,
+        pinned_gguf=None,
+    )
+
+    assert retained is None
+
+
+@pytest.mark.anyio
+async def test_store_host_rejects_unknown_explicit_card_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An asserted immutable card identity must always be verifiable."""
+
+    async def no_cards() -> list[ModelCard]:
+        return []
+
+    async def no_card_by_id(
+        _card_id: str,
+        *,
+        refresh_on_miss: bool = False,
+    ) -> None:
+        assert refresh_on_miss
+        return None
+
+    monkeypatch.setattr(model_store_server_module, "get_all_model_cards", no_cards)
+    monkeypatch.setattr(
+        model_store_server_module,
+        "get_registry_card_by_id",
+        no_card_by_id,
+    )
+
     with pytest.raises(web.HTTPConflict, match="cannot verify"):
         await ModelStoreServer._require_remote_code_download_approval(
             "org/unassociated",
-            None,
+            f"card_{'f' * 52}",
             source_repository="org/unassociated",
             source_revision=None,
             pinned_gguf=None,

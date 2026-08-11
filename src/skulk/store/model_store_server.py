@@ -335,13 +335,13 @@ class ModelStoreServer:
         self._app.router.add_delete("/models/{model_id}", self._handle_delete_model)
         self._app.router.add_get("/models/{model_id}/{path:.*}", self._handle_file)
 
-    def refresh_recovered_generations(
+    async def refresh_recovered_generations(
         self,
         current_registry_cards: Iterable[ModelCard],
     ) -> None:
         """Apply post-TUF generation selection to the authoritative store."""
 
-        self._store.refresh_recovered_generations(current_registry_cards)
+        await self._store.refresh_recovered_generations(current_registry_cards)
 
     async def start(self) -> None:
         """Start the HTTP server.  Blocks until the server is stopped."""
@@ -777,6 +777,12 @@ class ModelStoreServer:
                 None,
             )
         if card is None:
+            if registry_card_id is None:
+                # Hugging Face search has always allowed operators to acquire
+                # uncatalogued artifacts. With no asserted signed identity,
+                # retain the entry as unverified instead of treating absence as
+                # a failed identity check.
+                return None
             raise web.HTTPConflict(
                 reason="store host cannot verify the requested registry card"
             )
