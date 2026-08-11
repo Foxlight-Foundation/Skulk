@@ -152,6 +152,22 @@ def test_companion_association_retains_owning_full_card(tmp_path: Path) -> None:
     assert record.model_card == owner
 
 
+def test_incomplete_legacy_companion_is_not_associated_by_directory_name(
+    tmp_path: Path,
+) -> None:
+    payload = _card().model_dump(mode="json")
+    payload["runtime"] = {
+        "mtp_sidecar_repo": "org/model-mtp",
+        "mtp_sidecar_revision": "b" * 40,
+    }
+    owner = ModelCard.model_validate(payload)
+    companion = tmp_path / "org--model-mtp"
+    companion.mkdir()
+    (companion / "config.json").write_text("{}")
+
+    assert associate_installed_card(companion, [owner]) is None
+
+
 def test_incomplete_legacy_base_is_not_associated_by_directory_name(
     tmp_path: Path,
 ) -> None:

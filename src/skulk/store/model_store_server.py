@@ -652,8 +652,6 @@ class ModelStoreServer:
                 None,
             )
         if card is None:
-            if registry_card_id is None:
-                return None
             raise web.HTTPConflict(
                 reason="store host cannot verify the requested registry card"
             )

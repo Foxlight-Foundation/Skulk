@@ -153,6 +153,35 @@ async def test_store_host_omitted_card_id_selects_current_signed_card(
     assert retained == card
 
 
+@pytest.mark.anyio
+async def test_store_host_rejects_unassociated_download_without_card_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every accepted download must retain a trusted full card."""
+
+    async def no_cards() -> list[ModelCard]:
+        return []
+
+    def no_current_card(_model_id: ModelId) -> None:
+        return None
+
+    monkeypatch.setattr(model_store_server_module, "get_all_model_cards", no_cards)
+    monkeypatch.setattr(
+        model_store_server_module,
+        "get_current_registry_card",
+        no_current_card,
+    )
+
+    with pytest.raises(web.HTTPConflict, match="cannot verify"):
+        await ModelStoreServer._require_remote_code_download_approval(
+            "org/unassociated",
+            None,
+            source_repository="org/unassociated",
+            source_revision=None,
+            pinned_gguf=None,
+        )
+
+
 def test_peer_import_loopback_guard_rejects_forwarding_headers() -> None:
     model_store_server_module._require_loopback_peer_import("127.0.0.1", {})
 

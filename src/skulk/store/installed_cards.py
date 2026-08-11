@@ -589,8 +589,15 @@ def associate_installed_card(
         for repository, revision in companion_candidates:
             if repository is None or ModelId(repository).normalize() != directory_name:
                 continue
+            role = companion_artifact_role(card, repository)
+            if not _legacy_companion_artifact_is_complete(
+                model_directory,
+                card=card,
+                artifact_role=role,
+            ):
+                continue
             matches.append(
-                (card, companion_artifact_role(card, repository), repository, revision)
+                (card, role, repository, revision)
             )
     if not matches:
         return None
@@ -628,6 +635,37 @@ def _legacy_base_artifact_is_complete(model_directory: Path) -> bool:
     return (model_directory / "config.json").is_file() and (
         model_directory / "model.safetensors"
     ).is_file()
+
+
+def _legacy_companion_artifact_is_complete(
+    model_directory: Path,
+    *,
+    card: ModelCard,
+    artifact_role: InstalledArtifactRole,
+) -> bool:
+    """Conservatively recognize complete pre-sidecar companion bytes."""
+
+    if any(model_directory.rglob("*.partial")):
+        return False
+    if artifact_role == "mtp_sidecar":
+        # MTP repositories are intentionally not full model directories: they
+        # commonly contain one standalone tensor file and no config or index.
+        return any(
+            candidate.is_file() and candidate.stat().st_size > 0
+            for candidate in model_directory.rglob("*.safetensors")
+        )
+    if artifact_role == "served_draft":
+        selected_file = (
+            card.runtime.served_spec_draft_file
+            if card.runtime is not None
+            else None
+        )
+        return (
+            selected_file is not None
+            and (model_directory / selected_file).is_file()
+            and _legacy_base_artifact_is_complete(model_directory)
+        )
+    return _legacy_base_artifact_is_complete(model_directory)
 
 
 def ensure_installed_cards(
