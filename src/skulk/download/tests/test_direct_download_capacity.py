@@ -109,6 +109,60 @@ def test_changed_custom_card_requires_new_direct_generation(tmp_path: Path) -> N
 
 
 @pytest.mark.anyio
+async def test_config_only_card_change_never_starts_generation_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config probe cannot atomically replace complete installed weights."""
+
+    model_directory = tmp_path / "org--model"
+    model_directory.mkdir()
+    (model_directory / "config.json").write_text("{}")
+    (model_directory / "weights.bin").write_bytes(b"installed-weights")
+    old_card = _shard("org/model").model_card.model_copy(
+        update={"is_custom": True}
+    )
+    new_card = old_card.model_copy(update={"hidden_size": 2})
+    write_installed_card(
+        model_directory,
+        build_installed_card_record(model_directory, old_card),
+    )
+    monkeypatch.setattr(impl_shard_downloader, "SKULK_MODELS_DIR", tmp_path)
+    observed: dict[str, object] = {}
+
+    class ProbeCompleteError(RuntimeError):
+        """Stop after observing direct-download call arguments."""
+
+    async def observe_download(
+        _self: ResumableShardDownloader,
+        _shard_metadata: ShardMetadata,
+        *,
+        allow_patterns: list[str] | None = None,
+        replacement_identity: str | None = None,
+    ) -> tuple[Path, RepoDownloadProgress]:
+        observed["allow_patterns"] = allow_patterns
+        observed["replacement_identity"] = replacement_identity
+        raise ProbeCompleteError
+
+    monkeypatch.setattr(
+        ResumableShardDownloader,
+        "_download_with_capacity",
+        observe_download,
+    )
+    downloader = ResumableShardDownloader()
+    shard = _shard("org/model").model_copy(update={"model_card": new_card})
+
+    with pytest.raises(ProbeCompleteError):
+        await downloader.ensure_shard(shard, config_only=True)
+
+    assert observed == {
+        "allow_patterns": ["config.json"],
+        "replacement_identity": None,
+    }
+    assert (model_directory / "weights.bin").read_bytes() == b"installed-weights"
+
+
+@pytest.mark.anyio
 async def test_direct_download_fails_before_transfer_without_headroom(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

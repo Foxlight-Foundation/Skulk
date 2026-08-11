@@ -371,11 +371,15 @@ class ResumableShardDownloader(ShardDownloader):
                         "will be unavailable on this node."
                     )
 
-        base_replacement_identity = _replacement_identity_for_installed_card(
-            SKULK_MODELS_DIR / shard.model_card.model_id.normalize(),
-            shard.model_card,
-            artifact_model_id=str(shard.model_card.model_id),
-            artifact_role="base",
+        base_replacement_identity = (
+            None
+            if config_only
+            else _replacement_identity_for_installed_card(
+                SKULK_MODELS_DIR / shard.model_card.model_id.normalize(),
+                shard.model_card,
+                artifact_model_id=str(shard.model_card.model_id),
+                artifact_role="base",
+            )
         )
         target_dir, base_progress = await self._download_with_capacity(
             shard,

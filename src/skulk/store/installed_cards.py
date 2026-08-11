@@ -91,27 +91,82 @@ class InstalledCardRecord(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    schema_version: Literal[1] = 1
-    installed_identity: str = Field(
-        pattern=r"^(?:card_[a-z2-7]{52}|local_[a-z2-7]{52})$"
+    schema_version: Literal[1] = Field(
+        default=1,
+        description="Installed-card sidecar schema version.",
     )
-    artifact_model_id: str = Field(min_length=3, max_length=512)
-    model_card: ModelCard
-    verification: InstalledCardVerification
-    artifact_role: InstalledArtifactRole = "base"
-    owner_model_id: str | None = Field(default=None, min_length=3, max_length=512)
-    owner_card_id: str | None = Field(default=None, max_length=80)
-    artifact_repository: str = Field(min_length=3, max_length=512)
+    installed_identity: str = Field(
+        pattern=r"^(?:card_[a-z2-7]{52}|local_[a-z2-7]{52})$",
+        description=(
+            "Immutable signed card ID when verified, otherwise a content-derived "
+            "local generation ID."
+        ),
+    )
+    artifact_model_id: str = Field(
+        min_length=3,
+        max_length=512,
+        description="Canonical store and staging alias for this artifact.",
+    )
+    model_card: ModelCard = Field(
+        description="Complete effective model card retained for offline operation."
+    )
+    verification: InstalledCardVerification = Field(
+        description=(
+            "Evidence class binding the retained card to these bytes: signed "
+            "registry proof, legacy local bytes, custom operator truth, or unresolved."
+        )
+    )
+    artifact_role: InstalledArtifactRole = Field(
+        default="base",
+        description="Base-model or companion role served by this artifact.",
+    )
+    owner_model_id: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=512,
+        description="Owning base-model alias for a companion artifact.",
+    )
+    owner_card_id: str | None = Field(
+        default=None,
+        max_length=80,
+        description="Immutable owning base-card ID when one is available.",
+    )
+    artifact_repository: str = Field(
+        min_length=3,
+        max_length=512,
+        description="Upstream repository containing this artifact's bytes.",
+    )
     artifact_revision: str | None = Field(
         default=None,
         pattern=r"^[0-9a-f]{40}$",
+        description="Immutable upstream commit, or null for a mutable source.",
     )
-    artifact_file: str | None = Field(default=None, max_length=2048)
-    artifact_format: str = Field(default="unknown", min_length=1, max_length=80)
-    quantization: str = Field(default="", max_length=120)
-    manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    files: tuple[InstalledFileManifestEntry, ...]
-    captured_at: datetime
+    artifact_file: str | None = Field(
+        default=None,
+        max_length=2048,
+        description="Selected repo-relative artifact file when file-addressed.",
+    )
+    artifact_format: str = Field(
+        default="unknown",
+        min_length=1,
+        max_length=80,
+        description="Normalized runtime artifact format such as MLX or GGUF.",
+    )
+    quantization: str = Field(
+        default="",
+        max_length=120,
+        description="Artifact quantization label when known.",
+    )
+    manifest_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+        description="SHA-256 of the canonical file-manifest representation.",
+    )
+    files: tuple[InstalledFileManifestEntry, ...] = Field(
+        description="Canonical relative paths, sizes, and digests for every file."
+    )
+    captured_at: datetime = Field(
+        description="UTC timestamp when this installed generation was recorded."
+    )
 
     @model_validator(mode="after")
     def validate_evidence_and_ownership(self) -> "InstalledCardRecord":
