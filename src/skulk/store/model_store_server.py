@@ -67,7 +67,7 @@ import ipaddress
 import json
 import re
 import shutil
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import cast, final
 
 import aiofiles
@@ -77,7 +77,9 @@ from loguru import logger
 
 from skulk.shared.models.model_cards import (
     ModelCard,
+    ModelId,
     get_all_model_cards,
+    get_current_registry_card,
     get_registry_card_by_id,
 )
 from skulk.shared.models.remote_code_approval import require_remote_code_approval
@@ -91,6 +93,27 @@ from skulk.store.model_store import ModelStore
 
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB per streaming chunk
 _SOURCE_REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+_PROXY_FORWARDING_HEADERS = frozenset(
+    {"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Real-IP"}
+)
+
+
+def _require_loopback_peer_import(
+    remote: str | None,
+    headers: Mapping[str, str],
+) -> None:
+    """Reject peer-import mutations not originating directly on loopback."""
+
+    if any(header in headers for header in _PROXY_FORWARDING_HEADERS):
+        raise web.HTTPForbidden(
+            reason="peer imports reject proxy forwarding headers"
+        )
+    try:
+        remote_address = ipaddress.ip_address(remote or "")
+    except ValueError as error:
+        raise web.HTTPForbidden(reason="peer imports are loopback-only") from error
+    if not remote_address.is_loopback:
+        raise web.HTTPForbidden(reason="peer imports are loopback-only")
 _REGISTRY_CARD_ID_PATTERN = re.compile(r"^card_[a-z2-7]{52}$")
 _ARTIFACT_ROLES: frozenset[str] = frozenset(
     {
@@ -252,12 +275,7 @@ class ModelStoreServer:
     async def _handle_peer_import(self, request: web.Request) -> web.Response:
         """``POST /imports`` — pull and commit one capability-bound peer artifact."""
 
-        try:
-            remote = ipaddress.ip_address(request.remote or "")
-        except ValueError as error:
-            raise web.HTTPForbidden(reason="peer imports are loopback-only") from error
-        if not remote.is_loopback:
-            raise web.HTTPForbidden(reason="peer imports are loopback-only")
+        _require_loopback_peer_import(request.remote, request.headers)
         try:
             raw = cast("object", json.loads(await request.text()))
             if not isinstance(raw, dict):
@@ -625,7 +643,7 @@ class ModelStoreServer:
                     refresh_on_miss=True,
                 )
         else:
-            card = next(
+            card = get_current_registry_card(ModelId(model_id)) or next(
                 (
                     candidate
                     for candidate in cards
@@ -638,10 +656,6 @@ class ModelStoreServer:
                 return None
             raise web.HTTPConflict(
                 reason="store host cannot verify the requested registry card"
-            )
-        if registry_card_id is None and card.registry_card_id is not None:
-            raise web.HTTPConflict(
-                reason="signed registry downloads require an immutable card id"
             )
         artifact_repository = source_repository or model_id
         if (

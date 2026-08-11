@@ -83,6 +83,9 @@ caches are never removed during migration. Capacity admission credits bytes
 already retained in valid partial files, while the export capability enforces
 its manifest-bound cumulative byte ceiling and rejects source files changed
 after issuance.
+The internal store import mutation accepts only a direct loopback peer and
+rejects proxy-forwarding headers, so a local reverse proxy cannot turn it into
+a remote mutation surface.
 
 Set the rollout to inventory-only before importing a pre-existing fleet:
 

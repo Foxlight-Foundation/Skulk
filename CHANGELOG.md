@@ -23,7 +23,9 @@ This project records release notes here and mirrors public-facing notes in
   account only for missing bytes, capability exports enforce their transfer
   ceiling, artifact eviction immediately clears stale installed state, startup
   polling survives the delayed first scan, and companion recovery selects the
-  generation belonging to the current signed owner card.
+  generation belonging to the current signed owner card. Internal peer imports
+  reject proxy-forwarded loopback requests, while omitted immutable card IDs
+  retain their documented current-generation compatibility behavior.
 
 - The dashboard voice loop now narrates code blocks: when a fenced code block
   streams during live generation, the assistant voice speaks a short opener,

@@ -405,6 +405,9 @@ its artifact.
 The scheduled startup reconciliation delay reports `scanning`, and companion
 generation recovery compares `owner_model_id` against current registry card
 identity.
+The internal `/imports` mutation rejects proxy-forwarding headers as well as
+non-loopback peers. Store download callers may omit `registry_card_id` to select
+the current card; explicit IDs remain exact-generation requests.
 
 Store staging is reachability-aware (#657): "model not in store" (the
 store answered) fetches via the store host, keeping the store the source

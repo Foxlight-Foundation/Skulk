@@ -112,6 +112,63 @@ async def test_store_host_requires_its_own_remote_code_approval(
 
 
 @pytest.mark.anyio
+async def test_store_host_omitted_card_id_selects_current_signed_card(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy callers may omit the immutable ID and still select current."""
+
+    card = _registry_card()
+    installed_old_card = card.model_copy(
+        update={
+            "source_revision": "c" * 40,
+            "registry_card_id": f"card_{'b' * 52}",
+        }
+    )
+
+    async def cards() -> list[ModelCard]:
+        return [installed_old_card]
+
+    def current_card(_model_id: ModelId) -> ModelCard:
+        return card
+
+    approvals = RemoteCodeApprovalStore(tmp_path / "approvals.json")
+    approvals.approve(card.registry_card_id or "")
+    monkeypatch.setattr(model_store_server_module, "get_all_model_cards", cards)
+    monkeypatch.setattr(
+        model_store_server_module,
+        "get_current_registry_card",
+        current_card,
+    )
+    monkeypatch.setattr(approval_module, "REMOTE_CODE_APPROVALS", approvals)
+
+    retained = await ModelStoreServer._require_remote_code_download_approval(
+        str(card.model_id),
+        None,
+        source_repository=str(card.artifact_repository),
+        source_revision=card.source_revision,
+        pinned_gguf=card.gguf_file,
+    )
+
+    assert retained == card
+
+
+def test_peer_import_loopback_guard_rejects_forwarding_headers() -> None:
+    model_store_server_module._require_loopback_peer_import("127.0.0.1", {})
+
+    with pytest.raises(web.HTTPForbidden, match="proxy forwarding"):
+        model_store_server_module._require_loopback_peer_import(
+            "127.0.0.1",
+            {"X-Forwarded-For": "203.0.113.10"},
+        )
+    with pytest.raises(web.HTTPForbidden, match="loopback-only"):
+        model_store_server_module._require_loopback_peer_import(
+            "203.0.113.10",
+            {},
+        )
+
+
+@pytest.mark.anyio
 async def test_store_host_rejects_unverifiable_registry_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

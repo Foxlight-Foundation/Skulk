@@ -1048,6 +1048,10 @@ never participate in download, placement, or runner enforcement.
 The reconciler reports its first scheduled pass as scanning during the startup
 convergence delay, so operator clients continue polling until inventory has
 actually completed.
+The store's internal import mutation accepts only direct loopback sockets and
+rejects proxy-forwarding headers. Store download requests that omit an
+immutable card ID select the current card for backward compatibility; explicit
+IDs continue to bind the exact requested generation.
 
 Store deletion shares that publication lock and first persists an alias
 tombstone under the canonical store's `.skulk` metadata. A stale node cache is

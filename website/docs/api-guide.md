@@ -1603,7 +1603,8 @@ not a public model-download API.
 
 Asks the authoritative store to pull and atomically publish one artifact from a
 node cache. This endpoint is internal reconciliation transport and accepts only
-a loopback socket peer; remote callers receive `403`. The JSON body contains:
+a direct loopback socket peer with no proxy-forwarding headers; remote or
+forwarded callers receive `403`. The JSON body contains:
 
 - `record`: the complete versioned `InstalledCardRecord`, including its full
   card and canonical file manifest.
