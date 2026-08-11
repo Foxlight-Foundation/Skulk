@@ -1194,13 +1194,15 @@ curl http://localhost:52415/v1/models
 
 This returns known model cards, not just running instances. `GET /models`
 serves the same catalog through the same handler; prefer the `/v1/models` path
-for OpenAI-compatible clients. The transition release prefers the external
-TUF-signed registry and refreshes it every 60 seconds. A successful signed
-catalog is authoritative; bundled cards are used only when the registry is
-disabled or no acceptable live/last-known-good catalog is available. A
-previously verified catalog may be used for up to 30 days during an outage.
-Registry entries include their immutable card and snapshot identities; local
-custom cards retain final override precedence.
+for OpenAI-compatible clients. Complete installed cards load first so an
+air-gapped node keeps the exact generation it can actually launch. The current
+supported catalog comes from the external TUF-signed registry and refreshes at
+most every 60 seconds; a previously verified catalog may be used for up to 30
+days during an outage. That age limit does not apply to complete installed
+artifacts. Bundled cards fill non-installed catalog entries only when registry
+access and its acceptable cache are unavailable or disabled. Registry entries
+include immutable card and snapshot identities; local custom cards retain final
+override precedence.
 
 ### Approve repository code on one node
 
@@ -1524,6 +1526,8 @@ artifact role and owning card, `current_registry_identity`,
 `cached_on_nodes` (identity, completeness, bytes, last use, and in-use state),
 and reconciliation state plus last verification time. Companion artifacts are
 first-class entries grouped under their owning base card by the dashboard.
+The response is `{"entries": [...]}` and is fully described as
+`StoreRegistryResponse` in generated OpenAPI.
 
 The dashboard combines registry results with `GET /v1/models` metadata so it can
 display derived tags such as `vision`, `thinking`, `embedding`, `tensor`, and
@@ -1612,12 +1616,18 @@ that owning card's signed companion declaration. A mismatched alias, role, or
 artifact selection returns `409 Conflict`; malformed identifiers and roles
 return `400 Bad Request`.
 
+The response reports `modelId`, nullable `sourceRevision`, `status`, and
+`progress`; transport or store rejection additionally reports `error`. The
+generated `StoreDownloadResponse` schema describes this wire contract.
+
 ### Reconciliation status
 
 **GET** `/store/reconciliation`
 
 Returns `state`, `inventory_only`, scanned node and discovered/imported artifact
-counts, pending identities, failures, and `last_verified_at`.
+counts, pending identities, failures, and `last_verified_at`. Automatic imports
+are enabled by default (`inventory_only: false`); inventory-only is an optional
+production rollout mode rather than a prerequisite.
 
 **POST** `/store/reconciliation/rescan`
 
@@ -1704,7 +1714,10 @@ download for that alias completes successfully.
 
 **POST** `/store/purge-staging`
 
-Use this to remove staged model artifacts from nodes without deleting the store copy itself.
+Use this to remove staged model artifacts from nodes without deleting the store
+copy itself. Each artifact directory is removed as one unit, so its model bytes,
+installed-card sidecar, revision markers, and last-use marker are evicted
+together.
 
 ### Start optimization
 

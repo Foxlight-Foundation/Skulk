@@ -31,13 +31,30 @@ They drive:
 
 ## Where They Live
 
-Built-in cards are shipped in:
+Skulk's current supported catalog comes from the TUF-verified external registry
+at `registry.foxlight.ai`. A registry card represents one exact selectable
+artifact—one quant or selected file—and carries an immutable card ID and signed
+snapshot provenance. Registry refreshes do not require a Skulk release.
+
+Complete canonical and staged artifacts retain their full effective card and
+hashed manifest beside the bytes in `.skulk/installed-card.json`. These
+installed cards load before registry access, remain usable indefinitely while
+their artifact is complete, and keep an older installed generation active until
+a replacement has transferred and verified atomically.
+
+Fallback cards are still shipped in:
 
 - [`resources/inference_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/main/resources/inference_model_cards)
 - [`resources/image_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/main/resources/image_model_cards)
 - [`resources/embedding_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/main/resources/embedding_model_cards)
 
-Custom cards are stored under the user data directory and synced through the cluster event flow.
+They provide a startup catalog when registry access and its bounded verified
+cache are unavailable; they do not replace the signed registry as current
+catalog truth.
+
+Custom cards are stored under the user data directory and synced through the
+cluster event flow. They are operator-owned and retain final precedence over
+registry, installed, and bundled cards for the same `model_id`.
 
 ## The card interface (source of truth)
 

@@ -87,7 +87,9 @@ The internal store import mutation accepts only a direct loopback peer and
 rejects proxy-forwarding headers, so a local reverse proxy cannot turn it into
 a remote mutation surface.
 
-Set the rollout to inventory-only before importing a pre-existing fleet:
+Automatic imports are enabled by default. On a production fleet where you want
+to inspect the first migration before moving bytes, temporarily enable
+inventory-only mode:
 
 ```yaml
 model_store:
@@ -97,8 +99,8 @@ model_store:
     interval_seconds: 300
 ```
 
-Inspect `GET /store/reconciliation`, then set `inventory_only: false` to enable
-automatic imports. `POST /store/reconciliation/rescan` is a loopback-only
+Inspect `GET /store/reconciliation`, then restore `inventory_only: false` to
+resume automatic imports. `POST /store/reconciliation/rescan` is a loopback-only
 operator retry; periodic reconciliation remains the normal path.
 Inventory and capability-bound export cover the staging cache, direct-download
 fallbacks in `SKULK_MODELS_DIR`, and configured read-only model roots. A
@@ -476,6 +478,9 @@ These are exposed through the main Skulk API:
 - `GET /store/health`
 - `GET /store/registry`
 - `GET /store/downloads`
+- `GET /store/storage`
+- `GET /store/reconciliation`
+- `POST /store/reconciliation/rescan`
 - `POST /store/models/{model_id}/download`
 - `DELETE /store/models/{model_id}/download`
 - `GET /store/models/{model_id}/download/status`
@@ -493,6 +498,12 @@ store transfer work without deleting its partial files. A later
 `POST /store/models/{model_id}/download` resumes from those partials. Repeating
 the cancellation is safe; a request for a model with no cancellable transfer
 returns `409`.
+
+`POST /store/purge-staging` recursively removes each selected node-cache
+artifact directory, including its adjacent `.skulk/installed-card.json`,
+revision marker, and last-use marker. It does not remove the canonical store
+generation. `DELETE /store/models/{model_id}` removes the canonical generation
+and broadcasts the corresponding staged-cache eviction across the fleet.
 
 Common meanings:
 
