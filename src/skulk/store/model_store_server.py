@@ -383,7 +383,7 @@ class ModelStoreServer:
         if _request.query.get("recover_installed_cards") == "true":
             await self._store.recover_installed_cards_serialized()
         models = self._store.list_models()
-        return web.json_response([m.model_dump() for m in models])
+        return web.json_response([m.model_dump(mode="json") for m in models])
 
     async def _handle_models(self, _request: web.Request) -> web.Response:
         """``GET /models`` — list of model IDs in the store."""
