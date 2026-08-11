@@ -337,7 +337,7 @@
   "modelBrowser.noModelsMatch": "No models match your search",
   "modelBrowser.noResultsFound": "No results found",
   "modelBrowser.other": "Other",
-  "modelBrowser.recommended": "Recommended",
+  "modelBrowser.recommended": "Fits this cluster",
   "modelBrowser.searchAriaLabel": "Search models",
   "modelBrowser.searchHuggingFace": "Search all of Hugging Face...",
   "modelBrowser.searching": "Searching...",

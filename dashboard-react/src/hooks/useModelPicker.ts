@@ -181,7 +181,10 @@ export function useModelPicker({
     const rec: ModelGroup[] = [];
     const other: ModelGroup[] = [];
     for (const g of filteredGroups) {
-      const fits = g.variants.some((v) => getModelFitStatus(v.id) === 'fits_now');
+      const fits = g.variants.some((variant) => {
+        const status = getModelFitStatus(variant.id);
+        return status === 'fits_now' || status === 'fits_cluster_capacity';
+      });
       if (fits) rec.push(g);
       else other.push(g);
     }

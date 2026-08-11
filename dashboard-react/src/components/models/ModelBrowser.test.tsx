@@ -4,7 +4,7 @@ import { ThemeProvider } from 'styled-components';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { darkTheme } from '../../theme/theme';
-import type { HuggingFaceModel, ModelInfo } from '../../types/models';
+import type { HuggingFaceModel, ModelInfo, PickerMode } from '../../types/models';
 import { ModelBrowser } from './ModelBrowser';
 import type { BurstInfo } from './burst';
 
@@ -27,6 +27,8 @@ const MODELS: ModelInfo[] = [
     family: 'qwen',
     quantization: '4bit',
     storage_size_megabytes: 2100,
+    catalog_source: 'registry',
+    registry_provenance: 'foxlight',
   },
   {
     id: 'mlx-community/LongCat-AudioDiT-1B-4bit',
@@ -59,6 +61,9 @@ let container: HTMLDivElement | null = null;
 async function renderBrowser(
   onSelect = vi.fn(),
   getBurstInfo?: (variantId: string) => BurstInfo | null,
+  mode: PickerMode = 'store-download',
+  models: ModelInfo[] = MODELS,
+  getModelFitStatus: () => 'fits_now' | 'fits_cluster_capacity' = () => 'fits_now',
 ): Promise<ReturnType<typeof vi.fn>> {
   container = document.createElement('div');
   document.body.append(container);
@@ -67,15 +72,15 @@ async function renderBrowser(
     root?.render(
       <ThemeProvider theme={darkTheme}>
         <ModelBrowser
-          models={MODELS}
+          models={models}
           selectedModelId={null}
           favorites={new Set()}
           canModelFit={() => true}
-          getModelFitStatus={() => 'fits_now'}
+          getModelFitStatus={getModelFitStatus}
           onSelect={onSelect}
           onToggleFavorite={vi.fn()}
           hfTrendingModels={HUB_MODELS}
-          mode="store-download"
+          mode={mode}
           getBurstInfo={getBurstInfo}
           fleetMemoryBytes={64 * 2 ** 30}
         />
@@ -156,6 +161,7 @@ describe('ModelBrowser store discovery taxonomy', () => {
     // and artifact format (the fixture id is an mlx-community repo).
     expect(container?.textContent).toContain('4bit');
     expect(container?.textContent).toContain('MLX');
+    expect(container?.textContent).toContain('Foxlight');
 
     // Clicking the row body of a single-variant group must NOT start a download.
     const rowTitle = Array.from(container?.querySelectorAll('span') ?? [])
@@ -171,6 +177,47 @@ describe('ModelBrowser store discovery taxonomy', () => {
     expect(downloadButton).not.toBeNull();
     await act(async () => downloadButton?.click());
     expect(onSelect).toHaveBeenCalledWith('mlx-community/Qwen3-4B-4bit');
+  });
+
+  it('describes current fit without claiming a recommendation', async () => {
+    await renderBrowser(vi.fn(), undefined, 'launch');
+
+    expect(container?.textContent).toContain('Fits this cluster');
+    expect(container?.textContent).not.toContain('Recommended');
+  });
+
+  it('includes models that fit total cluster capacity under the fit heading', async () => {
+    await renderBrowser(
+      vi.fn(),
+      undefined,
+      'launch',
+      MODELS,
+      () => 'fits_cluster_capacity',
+    );
+
+    expect(container?.textContent).toContain('Fits this cluster');
+    expect(container?.textContent).not.toContain('Other');
+  });
+
+  it('does not apply registry provenance to an unprovenanced grouped variant', async () => {
+    const mixedModels = [
+      MODELS[0],
+      {
+        ...MODELS[0],
+        id: 'local/Qwen3-4B-8bit',
+        name: 'Qwen3-4B-8bit',
+        quantization: '8bit',
+        catalog_source: 'bundled' as const,
+        registry_provenance: null,
+      },
+    ];
+    await renderBrowser(vi.fn(), undefined, 'launch', mixedModels);
+
+    expect(container?.textContent).not.toContain('Foxlight');
+    const rowTitle = Array.from(container?.querySelectorAll('span') ?? [])
+      .find((element) => element.textContent === 'Qwen3 4B');
+    await act(async () => rowTitle?.click());
+    expect(container?.textContent).toContain('Foxlight');
   });
 
   it('partitions burst models after placeable ones and keeps them interactive', async () => {
