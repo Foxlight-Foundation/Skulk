@@ -20,6 +20,7 @@ from skulk.operator.pairing import (
     PairingExchangeRequest,
     PairingExchangeResponse,
     PairingGatewayNotInitializedError,
+    PairingInvitationCapacityError,
     PairingProofError,
     PairingSessionExpiredError,
     PairingSessionNotFoundError,
@@ -83,11 +84,13 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
     @router.post(
         "/pairing-sessions/challenge",
         response_model=PairingChallengeResponse,
+        response_model_exclude_none=True,
         summary="Bind a device key to a local pairing session",
         description=(
             "Accept a candidate Ed25519 public key only when the nonce names an "
-            "unexpired host-created pairing session, then return one random "
-            "challenge for proof of possession."
+            "unexpired host-created pairing session or invitation, then return "
+            "one random challenge for proof of possession. Reusable invitations "
+            "return an independent five-minute attempt identity."
         ),
     )
     def create_pairing_challenge(
@@ -105,6 +108,12 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
             raise HTTPException(status_code=410, detail=str(exc)) from exc
         except PairingSessionStateError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except PairingInvitationCapacityError as exc:
+            raise HTTPException(
+                status_code=429,
+                detail=str(exc),
+                headers={"Retry-After": str(exc.retry_after_seconds)},
+            ) from exc
         except PairingProofError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -113,9 +122,9 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
         response_model=PairingExchangeResponse,
         summary="Exchange a device-key proof for operator credentials",
         description=(
-            "Verify the candidate device's Ed25519 signature, consume the "
-            "single-use session, and return short-lived access plus rotating "
-            "refresh credentials exactly once."
+            "Verify the candidate device's Ed25519 signature, consume its "
+            "single-use session or independent invitation attempt, and return "
+            "short-lived access plus rotating refresh credentials exactly once."
         ),
     )
     def exchange_pairing_proof(

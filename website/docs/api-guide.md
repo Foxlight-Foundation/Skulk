@@ -250,6 +250,42 @@ in the QR's single `z` query parameter. Skulk rejects a package before
 persisting its session if it would exceed the terminal-scannable budget.
 Version-one direct packages retain the uncompressed `payload` shape.
 
+The legacy command remains five-minute and single-use for compatibility. For a
+reusable, revocable version-three invitation, opt in with bounded host flags:
+
+```bash
+uv run skulk operator pair \
+  --valid-for 90d \
+  --max-pairings 10 \
+  --qr-output review.png
+```
+
+`--valid-for` accepts a positive integer followed by `m`, `h`, or `d`, from one
+minute through 90 days. Invitation mode permits ten successful pairings by
+default and accepts an explicit limit from one through twenty. It creates a
+separate five-minute attempt for every scan, so concurrent devices do not share
+or replace challenges. At most ten attempts may be live and one hundred may be
+issued over an invitation's lifetime. Only successful credential issuance
+counts against the pairing limit.
+
+The compressed version-three package adds a public invitation ID, issue time,
+expiry, and pairing limit. It may carry the same app-role relay admission and
+pinned inner-TLS material as version two, but never a canonical Skulk access or
+refresh credential. Treat the QR and optional owner-only PNG as bearer secrets.
+The PNG writer uses owner-only permissions and refuses to overwrite a path.
+
+Invitation management remains local to the designated host:
+
+```bash
+uv run skulk operator invitations list
+uv run skulk operator invitations revoke <invitation-id>
+```
+
+Listing exposes only ID, creation and expiry times, usage, active-attempt
+count, and safe state; it never prints the nonce. Revocation blocks new and
+unfinished attempts but does not disconnect devices that already paired.
+Revoke those devices through the authenticated device-management API.
+
 `--exchange-url https://gateway.example.invalid` remains an optional direct
 LAN/Tailscale path and is required only before relay provisioning. Remote
 exchange URLs must use HTTPS; cleartext HTTP is accepted only for loopback
@@ -269,15 +305,23 @@ Parameters:
   characters after whitespace normalization.
 - JSON body `devicePublicKey` (required): unpadded URL-safe base64 containing
   one raw 32-byte Ed25519 public key.
+- JSON body `invitationId` (optional): version-three invitation UUID. Omit it
+  for legacy single-use packages.
 
 Behavior:
 
-- accepts only a host-created, unused, unexpired session;
-- binds the proposed device key to the session;
-- returns a random base64url `challenge` and the session `expiresAt`;
+- accepts only a host-created, available session or invitation;
+- binds the proposed device key to a legacy session or a new independent
+  five-minute invitation attempt;
+- returns a random base64url `challenge`, attempt `expiresAt`, and an
+  `attemptId` only for version-three invitations;
 - returns `404` for an unknown nonce, `410` after expiry, `409` after another
-  transition already used the session, `422` for an invalid public key, and
-  `503` on an API node that has not been initialized as a gateway.
+  transition already used the session, `422` for an invalid public key, `429`
+  with `Retry-After` when ten invitation attempts are already live, and `503`
+  on an API node that has not been initialized as a gateway. Revoked,
+  exhausted or expired invitations return `410`; the lifetime attempt ceiling
+  returns `410` only when requesting another attempt, while already-issued
+  attempts may still finish before their own expiry.
 
 The device signs the domain-separated message defined by
 `pairing_signature_message` in `src/skulk/operator/pairing.py`. Clients should
@@ -294,11 +338,13 @@ Parameters:
   excluded from the URL so normal request-path logs cannot retain it.
 - JSON body `signature` (required): unpadded URL-safe base64 Ed25519 signature
   produced by the challenged device key.
+- JSON body `invitationId` and `attemptId` (optional as a pair): required for a
+  version-three invitation and omitted together for legacy packages.
 
 Behavior:
 
 - verifies possession of the exact device key bound during the challenge;
-- atomically consumes the session;
+- atomically consumes the legacy session or exact invitation attempt;
 - returns a stable `deviceId`, the validated cluster identity, a 15-minute
   opaque access token, a 30-day rotating refresh token, their expiries, and the
   granted canonical API scopes;
@@ -308,8 +354,9 @@ Behavior:
   certificate. The gateway-role carrier credential is never returned;
 - stores only encrypted session/device state and one-way token digests;
 - never returns either credential again;
-- returns `401` for an invalid proof, `409` for reuse or an out-of-order
-  exchange, `410` after expiry, and `503` on a non-designated node.
+- returns `401` for an invalid proof, `404` for an unknown invitation or
+  attempt, `409` for reuse or an out-of-order exchange, `410` when the session,
+  attempt, or invitation is unavailable, and `503` on a non-designated node.
 
 Together with refresh rotation, these are the complete pre-access-token HTTP
 surface on the relay-only listener. That listener serves the existing canonical

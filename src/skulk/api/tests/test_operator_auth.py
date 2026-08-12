@@ -1,7 +1,7 @@
 """HTTP contract tests for host-authorized operator pairing."""
 
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast
 from uuid import UUID
@@ -16,6 +16,7 @@ from skulk.operator.authority import EncryptedAuthorityStore
 from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
 from skulk.operator.pairing import (
     OperatorPairingService,
+    pairing_invitation_signature_message,
     pairing_signature_message,
 )
 
@@ -118,6 +119,114 @@ def test_pairing_routes_issue_credentials_and_reject_reuse(tmp_path: Path) -> No
         json={"nonce": package.nonce, "signature": _base64url(signature)},
     )
     assert reused_response.status_code == 409
+
+
+def test_reusable_invitation_routes_return_and_require_attempt_identity(
+    tmp_path: Path,
+) -> None:
+    """Version-three exchanges bind credentials to one independent HTTP attempt."""
+
+    now = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    provider = LocalFileAuthorityKeyProvider(tmp_path / "key.bin")
+    service = OperatorPairingService(
+        EncryptedAuthorityStore(provider, tmp_path / "authority.sqlite3"),
+        provider,
+        now=lambda: now,
+    )
+    package = service.create_invitation(
+        lifetime=timedelta(days=90),
+        exchange_url="https://example.invalid",
+    )
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    app = FastAPI()
+    app.include_router(create_operator_auth_router(service))
+    client = TestClient(app)
+
+    challenged = client.post(
+        "/v1/auth/pairing-sessions/challenge",
+        json={
+            "nonce": package.nonce,
+            "invitationId": str(package.invitation_id),
+            "deviceName": "Review phone",
+            "devicePublicKey": _base64url(public_key),
+        },
+    )
+    assert challenged.status_code == 200, challenged.text
+    challenge_body = cast(dict[str, object], challenged.json())
+    attempt_id = UUID(str(challenge_body["attemptId"]))
+    signature = private_key.sign(
+        pairing_invitation_signature_message(
+            cluster_id=UUID(str(package.cluster_id)),
+            invitation_id=package.invitation_id,
+            nonce=package.nonce,
+            attempt_id=attempt_id,
+            challenge=str(challenge_body["challenge"]),
+        )
+    )
+    exchanged = client.post(
+        "/v1/auth/pairing-sessions/exchange",
+        json={
+            "nonce": package.nonce,
+            "invitationId": str(package.invitation_id),
+            "attemptId": str(attempt_id),
+            "signature": _base64url(signature),
+        },
+    )
+    assert exchanged.status_code == 200, exchanged.text
+    assert client.post(
+        "/v1/auth/pairing-sessions/exchange",
+        json={
+            "nonce": package.nonce,
+            "invitationId": str(package.invitation_id),
+            "attemptId": str(attempt_id),
+            "signature": _base64url(signature),
+        },
+    ).status_code == 409
+
+
+def test_reusable_invitation_active_attempt_capacity_returns_retry_after(
+    tmp_path: Path,
+) -> None:
+    """The public challenge route exposes temporary capacity as HTTP 429."""
+
+    now = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    provider = LocalFileAuthorityKeyProvider(tmp_path / "key.bin")
+    service = OperatorPairingService(
+        EncryptedAuthorityStore(provider, tmp_path / "authority.sqlite3"),
+        provider,
+        now=lambda: now,
+    )
+    package = service.create_invitation(
+        lifetime=timedelta(days=1),
+        exchange_url="https://example.invalid",
+    )
+    app = FastAPI()
+    app.include_router(create_operator_auth_router(service))
+    client = TestClient(app)
+    for index in range(11):
+        private_key = Ed25519PrivateKey.generate()
+        public_key = private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        response = client.post(
+            "/v1/auth/pairing-sessions/challenge",
+            json={
+                "nonce": package.nonce,
+                "invitationId": str(package.invitation_id),
+                "deviceName": f"Review phone {index}",
+                "devicePublicKey": _base64url(public_key),
+            },
+        )
+        if index < 10:
+            assert response.status_code == 200
+        else:
+            assert response.status_code == 429
+            assert response.headers["retry-after"] == "300"
 
 
 def test_pairing_routes_are_present_in_openapi(tmp_path: Path) -> None:

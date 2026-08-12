@@ -163,7 +163,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   consensus. The topic and consensus service remain dormant. API nodes do
   construct the independent local pairing service, which never uses this
   network topic.
-- **V1 pairing:** `skulk operator pair` explicitly designates the local host,
+- **Operator pairing:** `skulk operator pair` explicitly designates the local host,
   initializes the encrypted store when needed, and emits one five-minute QR
   capability. A relay-configured gateway emits the version-two package with
   app-role carrier and pinned inner-TLS bootstrap material; `--exchange-url`
@@ -177,7 +177,15 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   device list/revoke routes expose no credential material. A relay-configured
   exchange also returns the app-role carrier credential, opaque locator, and
   pinned inner-TLS trust once for durable local storage; the gateway role never
-  leaves Skulk. Neither QR version contains a canonical access or refresh token.
+  leaves Skulk. No QR package contains a canonical access or refresh token.
+  Explicit duration or pairing-limit flags emit a compressed version-three
+  reusable invitation lasting at most 90 days and permitting at most twenty
+  successful pairings. Every scan receives a separate five-minute attempt.
+  Invitations and attempts are distinct encrypted journal records; ten live
+  and one hundred total attempts are admitted. Global compare-and-set fencing
+  prevents concurrent exchanges from oversubscribing the success limit.
+  Host-only list/revoke commands reveal no nonce. Revocation blocks new and
+  unfinished attempts without revoking credentials already issued to devices.
 - **V1 remote carrier:** `skulk operator configure-relay --provisioning-file`
   validates one generated paired-WebSocket route, encrypts locator and distinct
   app/gateway carrier credentials in the local journal, and creates a protected
