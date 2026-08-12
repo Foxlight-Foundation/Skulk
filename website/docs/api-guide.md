@@ -1856,8 +1856,9 @@ Important fields:
 | `current_registry_identity` | string or null | Current signed identity for the alias, which may differ from the active install |
 | `update_available` | boolean | A newer signed generation exists but is not active until transfer commits |
 | `advisories` | array | Active signed warn-only security notices affecting the installed or current card |
-| `remote_code_approval_required` | boolean | Whether the registry artifact or its selected platform loader can execute repository Python and needs local approval |
-| `remote_code_approved_on_this_node` | boolean | Whether that immutable card is approved on the responding node |
+| `remote_code_approval_required` | boolean | Whether the card or its selected platform loader can execute repository Python and is not automatically trusted, so every serving node needs explicit local approval |
+| `remote_code_approved_on_this_node` | boolean | Whether the exact signed `card_...` or content-derived local `local_...` trust identity is approved on the responding node |
+| `remote_code_automatically_trusted` | boolean | Whether signed Foxlight provenance authorizes repository code for this exact pinned registry card without a second node-local approval |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
 | `resolved_capabilities.supports_speech_synthesis` | boolean | Whether clients should treat the model as a text-to-speech model |
 | `resolved_capabilities.supports_transcription` | boolean | Whether clients should treat the model as a speech-to-text model |
