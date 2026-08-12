@@ -457,10 +457,6 @@ def entrypoint(
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(max(soft, 2048), hard), hard))
 
     shard = bound_instance.bound_shard
-    # This guard belongs before runner-type dispatch: image and embedding
-    # runners do not pass through text-engine resolution, and revoking an
-    # approval must prevent every future runner process from starting.
-    require_remote_code_approval(shard.model_card)
     fast_synch_enabled = resolve_metal_fast_synch(shard.model_card.runtime)
     os.environ["MLX_METAL_FAST_SYNCH"] = "1" if fast_synch_enabled else "0"
     logger.info(
@@ -486,6 +482,11 @@ def entrypoint(
 
     # Import main after setting global logger - this lets us just import logger from this module
     try:
+        # This guard belongs before runner-type dispatch: image and embedding
+        # runners do not pass through text-engine resolution. Keep it inside the
+        # failure-reporting boundary so a denied card becomes an actionable
+        # RunnerFailed state rather than an unreported process-exit retry loop.
+        require_remote_code_approval(shard.model_card)
         if bound_instance.is_image_model:
             from skulk.worker.runner.image_models.runner import Runner as ImageRunner
 

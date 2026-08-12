@@ -102,6 +102,7 @@ def _build_shard() -> PipelineShardMetadata:
             hidden_size=2816,
             supports_tensor=False,
             tasks=[ModelTask.TextGeneration],
+            trust_remote_code=False,
         ),
         device_rank=0,
         world_size=1,

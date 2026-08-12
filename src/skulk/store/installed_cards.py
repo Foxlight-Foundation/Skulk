@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from skulk.shared.constants import SKULK_INSTALLED_CARD_RECORDS_DIR
 from skulk.shared.models.model_cards import ModelCard, ModelId
+from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
 
 INSTALLED_CARD_RELATIVE_PATH = Path(".skulk") / "installed-card.json"
 """Reserved sidecar path copied with canonical and staged artifacts."""
@@ -662,6 +663,57 @@ def installed_card_matches(
     # an operator changes runtime or capability policy would otherwise restore
     # stale launch truth on the next air-gapped restart.
     return requested_id is None and record.model_card == model_card
+
+
+def require_registry_installed_artifact(
+    model_directory: Path,
+    model_card: ModelCard,
+) -> None:
+    """Require a staged artifact to match an immutable signed card exactly.
+
+    This is the runner-load boundary, after staging has completed but before a
+    model loader can execute repository Python. It rechecks the durable sidecar,
+    immutable revision marker and selected artifact identity. Full file hashes
+    were verified before atomic publication; the load boundary repeats bounded
+    path and size verification rather than re-hashing multi-gigabyte weights on
+    every launch.
+
+    Args:
+        model_directory: Complete staged or canonical artifact directory.
+        model_card: Signed card selected for this runner generation.
+
+    Raises:
+        PermissionError: If signed identity cannot be proven from local state.
+    """
+    card_id = model_card.registry_card_id
+    if card_id is None:
+        return
+    try:
+        record = read_installed_card_with_fallback(model_directory)
+    except (OSError, ValueError) as error:
+        raise PermissionError(
+            f"{MODEL_TRUST_FAILURE_MARKER}: installed artifact identity is "
+            f"unreadable for signed card {card_id}"
+        ) from error
+    if record is None or not verify_installed_card(model_directory, record):
+        raise PermissionError(
+            f"{MODEL_TRUST_FAILURE_MARKER}: installed artifact identity is "
+            f"missing or incomplete for signed card {card_id}"
+        )
+    marker_revision = _revision_marker(model_directory)
+    if (
+        record.verification != "registry_verified"
+        or record.installed_identity != card_id
+        or record.model_card.registry_card_id != card_id
+        or record.artifact_repository != str(model_card.artifact_repository)
+        or record.artifact_revision != model_card.source_revision
+        or marker_revision != model_card.source_revision
+        or record.artifact_file != model_card.gguf_file
+    ):
+        raise PermissionError(
+            f"{MODEL_TRUST_FAILURE_MARKER}: installed artifact does not match "
+            f"signed card and pinned revision {card_id}"
+        )
 
 
 def installed_companion_matches(

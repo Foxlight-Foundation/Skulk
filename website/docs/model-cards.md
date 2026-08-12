@@ -101,7 +101,8 @@ node in a cluster must run the same Skulk version.
 - `tasks`
   - supported task families such as `TextGeneration`, `TextEmbedding`, image tasks, `TextToSpeech`, `SpeechToText`, or `SpeechTranslation`
 - `trust_remote_code`
-  - whether the artifact requires repository-supplied Python; for signed-registry cards this remains model truth but execution is blocked until the immutable `registry_card_id` is approved locally on every serving node
+  - whether the artifact requires repository-supplied Python; an immutable, revision-pinned Foxlight-provenance card from the verified registry is itself the trust decision for that exact artifact
+  - agent/community registry cards and custom or unsigned cards require explicit local approval; the approval identity changes with the immutable registry card or complete local card definition
 - `uses_cfg`
   - whether the model uses classifier-free guidance (relevant to some image/diffusion models)
 

@@ -331,7 +331,7 @@ The system uses event sourcing for state management:
 - `src/skulk/shared/models/`: persisted model metadata and capability resolution
   - `model_cards.py`: declarative model cards plus remote-first signed-catalog loading; registry artifact aliases are distinct from `source_repository`, bundled cards are transition fallback, and custom cards remain final overrides
   - `registry.py`: python-tuf client, embedded root trust, serialized 60-second refresh, and hash-bound last-known-good catalog
-  - `remote_code_approval.py`: owner-only node-local immutable-card approvals enforced before download and runner startup
+  - `remote_code_approval.py`: provenance-aware repository-code trust; pinned Foxlight registry cards authorize their exact artifact, while agent/community and local cards use owner-only immutable-card approvals
   - `capabilities.py`: normalized runtime capability profiles derived from model cards plus conservative family defaults
 - `src/skulk/operator/`: stable operator identity, deterministic quorum
   certification, crash-fault consensus and recovery, bounded dormant proposal
@@ -421,8 +421,9 @@ detection) falls back to DIRECT Hugging Face download on the node when
 `allow_hf_fallback` is on, preserving revision/GGUF pinning. The expected
 shape for store-unreachable remote members; a loud log cue elsewhere.
 For signed cards, the store request carries the immutable card ID and the
-store host independently verifies its own node-local remote-code approval
-before downloading; worker approval never grants store-host approval.
+store host independently applies the same provenance-aware remote-code trust
+policy before downloading. A pinned Foxlight-provenance card authorizes its
+exact artifact; explicit approval for any other provenance remains node-local.
 Installer-generated configs begin as local bootstrap stores. On cluster
 formation, followers retry state-sync config bootstrap, receive the elected
 master's routable store address, stop superseded local store servers, and
@@ -445,13 +446,15 @@ root, refreshes at most every 60 seconds, uses a hash-bound 30-day
 last-known-good cache during outages, and retains bundled cards only as the
 transition fallback. `SKULK_OFFLINE=true` suppresses registry network refreshes
 and uses bundled cards. `model_id` may be an artifact alias while
-`source_repository` is the byte origin. Registry cards with
-`trust_remote_code=true` require an immutable-card approval on every serving
-node; registry vision cards require the same approval while the MLX processor
-path can enable repository code internally. The gate runs before download and
-before every runner-type dispatch, and approval mutations require a loopback
-socket peer plus a loopback browser origin. Registry publication cannot grant
-approval. Every separately hosted companion artifact (vision weights or
+`source_repository` is the byte origin. Revision-pinned Foxlight-provenance
+registry cards automatically authorize repository code for their exact
+immutable card. Agent/community registry cards and custom or unsigned cards
+require an exact local approval on every serving node; registry vision cards
+follow the same rule while the MLX processor path can enable repository code
+internally. The gate runs before download and runner load, which also verifies
+the installed sidecar and artifact identity; deterministic trust denial is
+terminal for the unchanged instance. Approval mutations require a loopback
+socket peer plus a loopback browser origin. Every separately hosted companion artifact (vision weights or
 processor, MTP sidecar, assistant model, served GGUF draft, or vLLM drafter)
 must carry its own full revision; companions in the base artifact repository
 inherit `source_revision`.

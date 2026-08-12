@@ -11,7 +11,10 @@ from skulk.api import main as api_main
 from skulk.api.main import API
 from skulk.api.types.api import AddCustomModelParams
 from skulk.shared.models.model_cards import ModelCard, ModelTask, VisionCardConfig
-from skulk.shared.models.remote_code_approval import RemoteCodeApprovalStore
+from skulk.shared.models.remote_code_approval import (
+    RemoteCodeApprovalStore,
+    remote_code_trust_identity,
+)
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 
@@ -95,3 +98,72 @@ async def test_image_card_approval_uses_unfiltered_catalog(
 
     assert result.card_id == card_id
     assert store.approved == [card_id]
+
+
+def test_model_catalog_exposes_foxlight_automatic_remote_code_trust() -> None:
+    """Operators can distinguish signed trust from a local approval gap."""
+    card = ModelCard(
+        model_id=ModelId("org/model"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        trust_remote_code=True,
+        registry_card_id=f"card_{'a' * 52}",
+        registry_snapshot_id="snapshot_1_test",
+        registry_provenance="foxlight",
+    )
+
+    entry = API._model_list_entry(card, frozenset())
+
+    assert entry.remote_code_automatically_trusted
+    assert not entry.remote_code_approval_required
+    assert not entry.remote_code_approved_on_this_node
+
+
+@pytest.mark.asyncio
+async def test_custom_card_approval_uses_content_derived_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsigned cards have an approvable identity that changes with content."""
+    card = ModelCard(
+        model_id=ModelId("org/custom"),
+        source_revision="b" * 40,
+        storage_size=Memory.from_bytes(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        trust_remote_code=True,
+        is_custom=True,
+    )
+
+    async def complete_catalog() -> list[ModelCard]:
+        return [card]
+
+    store = _RecordingApprovalStore()
+    monkeypatch.setattr(api_main, "get_all_model_cards", complete_catalog)
+    monkeypatch.setattr(
+        api_main,
+        "REMOTE_CODE_APPROVALS",
+        cast(RemoteCodeApprovalStore, cast(object, store)),
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/models/remote-code-approvals/test",
+            "headers": [],
+            "client": ("127.0.0.1", 12345),
+            "scheme": "http",
+            "server": ("127.0.0.1", 52415),
+        }
+    )
+    trust_identity = remote_code_trust_identity(card)
+
+    result = await object.__new__(API).approve_remote_code(trust_identity, request)
+
+    assert result.card_id == trust_identity
+    assert store.approved == [trust_identity]

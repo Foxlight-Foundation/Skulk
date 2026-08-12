@@ -17,6 +17,7 @@ from skulk.store.installed_cards import (
     installed_card_matches,
     read_installed_card,
     read_installed_card_with_fallback,
+    require_registry_installed_artifact,
     write_installed_card,
     write_installed_card_with_fallback,
 )
@@ -79,6 +80,39 @@ def test_unmarked_registry_bytes_remain_local_legacy(tmp_path: Path) -> None:
     assert record.verification == "local_legacy"
     assert record.installed_identity.startswith("local_")
     assert record.model_card.registry_card_id is not None
+
+
+def test_runner_boundary_accepts_exact_verified_registry_artifact(
+    tmp_path: Path,
+) -> None:
+    """Pinned sidecar, revision marker and signed card agree at model load."""
+    artifact = _artifact(tmp_path)
+    card = _card()
+    write_installed_card(artifact, build_installed_card_record(artifact, card))
+
+    require_registry_installed_artifact(artifact, card)
+
+
+@pytest.mark.parametrize("failure", ["legacy", "revision", "card"])
+def test_runner_boundary_rejects_mismatched_registry_artifact(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    """Signed provenance never authorizes different or unproven local bytes."""
+    artifact = _artifact(tmp_path, revision_marker=failure != "legacy")
+    card = _card()
+    record = build_installed_card_record(artifact, card)
+    write_installed_card(artifact, record)
+    requested = card
+    if failure == "revision":
+        (artifact / ".skulk-source-revision").write_text(f"{'b' * 40}\n")
+    elif failure == "card":
+        requested = card.model_copy(
+            update={"registry_card_id": f"card_{'b' * 52}"}
+        )
+
+    with pytest.raises(PermissionError, match="signed card"):
+        require_registry_installed_artifact(artifact, requested)
 
 
 def test_revision_qualified_base_directory_associates_signed_card(

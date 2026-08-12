@@ -183,14 +183,21 @@ class ModelListModel(BaseModel):
     remote_code_approval_required: bool = Field(
         default=False,
         description=(
-            "Whether this signed registry artifact or its selected platform loader "
-            "can execute repository Python and therefore requires an explicit "
-            "approval on each serving node."
+            "Whether this card or its selected platform loader can execute "
+            "repository Python and is not automatically trusted by immutable "
+            "Foxlight provenance, requiring approval on each serving node."
         ),
     )
     remote_code_approved_on_this_node: bool = Field(
         default=False,
-        description="Whether the required immutable card id is approved locally.",
+        description="Whether the required immutable trust identity is approved locally.",
+    )
+    remote_code_automatically_trusted: bool = Field(
+        default=False,
+        description=(
+            "Whether signed Foxlight provenance authorizes repository code for "
+            "this exact pinned registry card without a second local approval."
+        ),
     )
     source_revision: str | None = Field(
         default=None,
@@ -235,13 +242,16 @@ class ModelListModel(BaseModel):
 
 
 class RemoteCodeApprovalView(BaseModel):
-    """Node-local approval state for one immutable signed-registry card."""
+    """Node-local approval state for one immutable model-card identity."""
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     card_id: str = Field(
-        pattern=r"^card_[a-z2-7]{52}$",
-        description="Immutable content-derived identifier of the signed registry card.",
+        pattern=r"^(?:card|local)_[a-z2-7]{52}$",
+        description=(
+            "Signed registry card ID or content-derived local identity for an "
+            "unsigned/custom card."
+        ),
     )
     approved_on_this_node: bool = Field(
         description=(
@@ -1476,6 +1486,13 @@ class PlacementPreview(BaseModel):
     # Keys are NodeId strings, values are additional bytes that would be used on that node
     memory_delta_by_node: dict[str, int] | None = None
     error: str | None = None
+    trust_requirement: str | None = Field(
+        default=None,
+        description=(
+            "Actionable immutable-card approval requirement that must hold on "
+            "each selected serving node, or null when card trust is automatic."
+        ),
+    )
     alternative: bool = Field(
         default=False,
         description=(

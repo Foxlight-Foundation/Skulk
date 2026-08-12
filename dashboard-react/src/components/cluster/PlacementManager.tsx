@@ -512,6 +512,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
   const currentKey = comboKey(sharding, instanceMeta);
   const currentCombo = currentOptions?.[currentKey];
   const currentPreview = currentCombo?.available ? currentCombo.preview ?? null : null;
+  const trustRequirement = previews.find((preview) => preview.trust_requirement)?.trust_requirement ?? null;
 
   // Auto-select first available combo when node count changes
   useEffect(() => {
@@ -600,6 +601,12 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
         </Header>
 
         <Body>
+          {!loading && trustRequirement && (
+            <ErrorCallout>
+              <FiInfo size={16} style={{ flexShrink: 0, marginTop: 1 }} />
+              {trustRequirement}
+            </ErrorCallout>
+          )}
           {loading ? (
             <Loading>{t('placement.loading', 'Analyzing placement options...')}</Loading>
           ) : isEmbedding ? (

@@ -1,5 +1,8 @@
-"""Node-local approval store for registry artifacts that execute repository code."""
+"""Trust policy for model artifacts that execute repository code."""
 
+import base64
+import hashlib
+import json
 from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -9,6 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from skulk.shared.constants import SKULK_MODEL_REMOTE_CODE_APPROVALS_PATH
 from skulk.shared.models.model_cards import ModelCard
+
+MODEL_TRUST_FAILURE_MARKER = "model_trust_denied"
+"""Stable runner-failure marker for deterministic, non-retriable trust denial."""
 
 
 class RemoteCodeApprovals(BaseModel):
@@ -75,25 +81,59 @@ REMOTE_CODE_APPROVALS = RemoteCodeApprovalStore()
 
 
 def remote_code_execution_requires_approval(card: ModelCard) -> bool:
-    """Return whether serving a registry card can execute repository Python.
+    """Return whether repository Python needs explicit node-local approval.
 
     MLX vision processor discovery currently includes loaders that enable
     ``trust_remote_code`` internally. Treat that platform behavior as an
-    approval requirement even when the artifact card itself does not request
-    remote code. This keeps model truth separate from the runner's current
-    implementation boundary while failing closed.
+    execution risk even when the artifact card itself does not request remote
+    code. An immutable Foxlight-provenance card from the signed registry is the
+    trust decision for its exact pinned artifact; agent, community, custom and
+    unsigned cards retain the explicit local approval boundary.
     """
-    return card.registry_card_id is not None and (
+    return (
         card.trust_remote_code or card.vision is not None
+    ) and not remote_code_is_automatically_trusted(card)
+
+
+def remote_code_is_automatically_trusted(card: ModelCard) -> bool:
+    """Return whether signed Foxlight provenance authorizes the pinned card.
+
+    All four fields are load-bearing. In particular, copied provenance text or
+    a mutable repository revision cannot acquire automatic execution authority.
+    A changed immutable card receives a different ``registry_card_id`` and is
+    therefore evaluated independently.
+    """
+    return (
+        card.registry_card_id is not None
+        and card.registry_snapshot_id is not None
+        and card.registry_provenance == "foxlight"
+        and card.source_revision is not None
     )
 
 
+def remote_code_trust_identity(card: ModelCard) -> str:
+    """Return the immutable identity used by the local approval store.
+
+    Signed cards use their registry identity. Unsigned and custom cards use a
+    digest of the complete effective card, so a revision or policy change
+    cannot inherit approval from an earlier definition.
+    """
+    if card.registry_card_id is not None:
+        return card.registry_card_id
+    payload = card.model_dump(
+        mode="json",
+        exclude={"registry_snapshot_id"},
+    )
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    digest = base64.b32encode(hashlib.sha256(canonical).digest()).decode().lower()
+    return f"local_{digest.rstrip('=')}"
+
+
 def remote_code_approval_required(card: ModelCard) -> bool:
-    """Return whether a registry card is blocked on this node's approval."""
+    """Return whether a repository-code card is blocked on local approval."""
     return (
         remote_code_execution_requires_approval(card)
-        and card.registry_card_id is not None
-        and not REMOTE_CODE_APPROVALS.is_approved(card.registry_card_id)
+        and not REMOTE_CODE_APPROVALS.is_approved(remote_code_trust_identity(card))
     )
 
 
@@ -106,13 +146,16 @@ def require_remote_code_approval(card: ModelCard) -> None:
         and card.vision.processor_revision is None
     ):
         raise PermissionError(
-            "signed model card references an unpinned vision processor repository: "
+            f"{MODEL_TRUST_FAILURE_MARKER}: signed model card references an "
+            "unpinned vision processor repository: "
             f"{card.registry_card_id}"
         )
     if remote_code_approval_required(card):
+        trust_identity = remote_code_trust_identity(card)
         raise PermissionError(
-            "model card requires node-local remote-code approval: "
-            f"{card.registry_card_id}"
+            f"{MODEL_TRUST_FAILURE_MARKER}: model card requires node-local "
+            "remote-code approval: "
+            f"{trust_identity}"
         )
 
 

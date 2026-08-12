@@ -1279,19 +1279,26 @@ override precedence.
 
 **GET** `/models/remote-code-approvals`
 
-Lists immutable registry card IDs approved to execute repository-supplied
-Python on this API node.
+Lists immutable model-card trust identities approved to execute
+repository-supplied Python on this API node. Signed cards use `card_...` IDs;
+custom and unsigned cards use content-derived `local_...` identities.
+
+Placement previews expose the same exact identity in `trust_requirement` when
+each selected serving node must hold explicit approval. Foxlight-provenance
+cards with automatic signed trust return no such requirement.
 
 **POST** `/models/remote-code-approvals/{card_id}`
 
-Approves an existing signed-registry card that declares
-`trust_remote_code=true`, or a vision card whose current platform loader may
-enable repository code internally. Approval is keyed to the immutable card ID,
-stored in an owner-only local file, and applies only to this node. Repeat it on
-every node that may download or serve the artifact. Skulk fails closed before
-both download and every runner-type dispatch when a required approval is
-absent. Approval lookup uses the complete signed catalog, independent of this
-node's image-model visibility setting. This mutation is accepted only from a
+Approves an existing agent/community registry card, custom card, or unsigned
+card that can execute repository code. Approval is keyed to the immutable
+signed-card ID or the complete local card digest, stored in an owner-only local
+file, and applies only to this node. Repeat it on every node that may download
+or serve the artifact. Immutable, full-revision-pinned cards with Foxlight
+provenance from the TUF-verified registry are already Foxlight's trust decision
+and do not accept or require this second approval. Skulk fails closed before
+download and runner load when an explicit approval is required but absent.
+Approval lookup uses the complete catalog, independent of this node's
+image-model visibility setting. This mutation is accepted only from a
 loopback socket peer; browser
 requests must also have a loopback `Origin`. Requests carrying proxy or
 forwarding headers are rejected outright, because a local reverse proxy's

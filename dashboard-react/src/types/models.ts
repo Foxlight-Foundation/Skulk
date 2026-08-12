@@ -83,6 +83,7 @@ export interface ModelInfo {
   catalog_source?: 'registry' | 'bundled' | 'custom';
   remote_code_approval_required?: boolean;
   remote_code_approved_on_this_node?: boolean;
+  remote_code_automatically_trusted?: boolean;
   quantization?: string;
   supports_tensor?: boolean;
   capabilities?: string[];
@@ -245,6 +246,8 @@ export interface PlacementPreview {
   instance: unknown | null;
   memory_delta_by_node: Record<string, number> | null;
   error: string | null;
+  /** Exact card approval requirement for every selected serving node. */
+  trust_requirement?: string | null;
   /** Per-host alternative to the ranked pick: a single-node placement on a
    * host that passes admission but lost the planner ranking (#557). */
   alternative?: boolean;
