@@ -1843,7 +1843,11 @@ class ModelStoreDownloader(ShardDownloader):
         best-effort — the runner degrades to run-without-speculation, so
         their failures log loudly without failing a loadable base model.
         """
-        require_remote_code_approval(shard.model_card)
+        # A companion shard intentionally carries a bare transport card to stop
+        # recursive companion discovery. Its owning full card is the trust
+        # decision; evaluating the synthetic bare card would discard signed
+        # provenance and spuriously demand a second local approval.
+        require_remote_code_approval(installed_owner_card or shard.model_card)
         protected_model_ids = {
             str(shard.model_card.model_id),
             *(

@@ -28,6 +28,7 @@ def _shard() -> ShardMetadata:
         hidden_size=1,
         supports_tensor=False,
         tasks=[ModelTask.TextGeneration],
+        trust_remote_code=False,
     )
     return PipelineShardMetadata(
         model_card=card,

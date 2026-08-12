@@ -15,6 +15,8 @@ from skulk.shared.models.remote_code_approval import (
     RemoteCodeApprovalStore,
     remote_code_approval_mutation_allowed,
     remote_code_execution_requires_approval,
+    remote_code_is_automatically_trusted,
+    remote_code_trust_identity,
     require_remote_code_approval,
 )
 from skulk.shared.types.common import ModelId
@@ -37,6 +39,7 @@ def _registry_card() -> ModelCard:
         trust_remote_code=True,
         registry_card_id=f"card_{'a' * 52}",
         registry_snapshot_id="snapshot_1_test",
+        registry_provenance="agent",
     )
 
 
@@ -62,12 +65,68 @@ def test_approval_is_immutable_card_scoped_and_private(
         require_remote_code_approval(card)
 
 
-def test_local_cards_do_not_enter_registry_approval_policy() -> None:
-    """Legacy bundled and custom cards retain their existing trust behavior."""
+def test_unsigned_cards_require_content_scoped_local_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unsigned repository code cannot bypass the explicit local boundary."""
+    store = RemoteCodeApprovalStore(tmp_path / "approvals.json")
+    monkeypatch.setattr(approval_module, "REMOTE_CODE_APPROVALS", store)
     card = _registry_card().model_copy(
-        update={"registry_card_id": None, "registry_snapshot_id": None}
+        update={
+            "registry_card_id": None,
+            "registry_snapshot_id": None,
+            "registry_provenance": None,
+        }
     )
+
+    trust_identity = remote_code_trust_identity(card)
+    assert trust_identity.startswith("local_")
+    with pytest.raises(PermissionError, match=trust_identity):
+        require_remote_code_approval(card)
+
+    store.approve(trust_identity)
     require_remote_code_approval(card)
+
+    changed = card.model_copy(update={"source_revision": "c" * 40})
+    assert remote_code_trust_identity(changed) != trust_identity
+    with pytest.raises(PermissionError):
+        require_remote_code_approval(changed)
+
+
+def test_foxlight_signed_pinned_card_is_the_remote_code_trust_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Curated signed provenance needs no redundant node-local approval."""
+    monkeypatch.setattr(
+        approval_module,
+        "REMOTE_CODE_APPROVALS",
+        RemoteCodeApprovalStore(tmp_path / "approvals.json"),
+    )
+    card = _registry_card().model_copy(update={"registry_provenance": "foxlight"})
+
+    assert remote_code_is_automatically_trusted(card)
+    assert not remote_code_execution_requires_approval(card)
+    require_remote_code_approval(card)
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"registry_snapshot_id": None},
+        {"registry_provenance": "community"},
+        {"source_revision": None},
+    ],
+)
+def test_incomplete_or_non_foxlight_registry_evidence_requires_approval(
+    update: dict[str, str | None],
+) -> None:
+    """Copied provenance or mutable artifacts never gain automatic trust."""
+    card = _registry_card().model_copy(
+        update={"registry_provenance": "foxlight", **update}
+    )
+
+    assert not remote_code_is_automatically_trusted(card)
+    assert remote_code_execution_requires_approval(card)
 
 
 def test_registry_vision_card_requires_approval_for_platform_loader(

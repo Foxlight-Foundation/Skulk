@@ -16,6 +16,7 @@ from loguru import logger
 from PIL import Image
 
 from skulk.download.download_utils import (
+    build_model_path,
     companion_download_specs,
     resolve_model_in_path,
 )
@@ -43,6 +44,7 @@ from skulk.shared.models.model_cards import (
     add_to_card_cache,
     delete_custom_card,
 )
+from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.chunks import DataChunk, InputImageChunk
 from skulk.shared.types.commands import (
@@ -67,6 +69,7 @@ from skulk.shared.types.events import (
     NodeDownloadProgress,
     NodeGatheredInfo,
     NodeTimedOut,
+    RunnerStatusUpdated,
     StagedModelEvicted,
     StateSnapshotHydrated,
     TaskCreated,
@@ -113,6 +116,7 @@ from skulk.shared.types.worker.instances import InstanceId, LlamaRpcInstance
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerStatus
 from skulk.shared.types.worker.shards import ShardMetadata, TensorShardMetadata
 from skulk.store.config import StagingNodeConfig
+from skulk.store.installed_cards import require_registry_installed_artifact
 from skulk.store.model_store_client import ModelStoreClient
 from skulk.store.staging_eviction import (
     MINIMUM_STAGING_FREE_DISK_BYTES,
@@ -215,6 +219,46 @@ def _wedged_live_instances(
         if supervisor.bound_instance.instance.instance_id in live_instances
         and _runner_failed_wedged(supervisor.status)
     ]
+
+
+def model_trust_failed_live_instances(
+    runners: Mapping[RunnerId, "RunnerSupervisor"],
+    live_instances: Container[InstanceId],
+) -> list[tuple[InstanceId, ModelId, str]]:
+    """Return live instances with a deterministic model-trust denial.
+
+    Unlike a transient engine crash, a missing approval or mismatched installed
+    identity cannot heal by spawning the same runner again. The caller deletes
+    these instances immediately, preserving the actionable failure message and
+    preventing an endless create/fail loop.
+    """
+    failed: list[tuple[InstanceId, ModelId, str]] = []
+    for supervisor in runners.values():
+        instance_id = supervisor.bound_instance.instance.instance_id
+        status = supervisor.status
+        if (
+            instance_id in live_instances
+            and isinstance(status, RunnerFailed)
+            and status.error_message is not None
+            and MODEL_TRUST_FAILURE_MARKER in status.error_message
+        ):
+            failed.append(
+                (
+                    instance_id,
+                    supervisor.shard_metadata.model_card.model_id,
+                    status.error_message,
+                )
+            )
+    return failed
+
+
+def _model_load_trust_failure_message(error: Exception) -> str:
+    """Return a terminal runner failure for a pre-load trust rejection."""
+    return (
+        f"{MODEL_TRUST_FAILURE_MARKER}: Model load refused before repository "
+        f"code execution: {error}. Re-download the exact signed artifact so "
+        "its installed-card sidecar and pinned revision can be verified."
+    )
 
 
 def runners_never_reported(
@@ -709,6 +753,7 @@ class Worker:
         self._crash_breaker: CrashWindow[InstanceId] = CrashWindow(
             _RUNNER_CRASH_THRESHOLD, _RUNNER_CRASH_WINDOW_SECONDS
         )
+        self._model_trust_failures_handled: set[InstanceId] = set()
         self._stopped: anyio.Event = anyio.Event()
 
     def _effective_downloads(self) -> dict[NodeId, list[DownloadProgress]]:
@@ -1874,6 +1919,21 @@ class Worker:
             # let a lingering instance re-trip and re-send DeleteInstance), so
             # this is where dead-instance keys are reclaimed.
             self._crash_breaker.retain(self.state.instances)
+            self._model_trust_failures_handled.intersection_update(
+                self.state.instances
+            )
+
+            for trust_instance_id, trust_model_id, trust_error in (
+                model_trust_failed_live_instances(self.runners, self.state.instances)
+            ):
+                if trust_instance_id not in self._model_trust_failures_handled:
+                    self._model_trust_failures_handled.add(trust_instance_id)
+                    await self._give_up_on_instance(
+                        trust_instance_id,
+                        f"runner for {trust_model_id} was refused by immutable "
+                        f"model trust policy ({trust_error}); not retrying until "
+                        "the card approval or installed artifact identity changes.",
+                    )
 
             # Wedge-marked LOCAL runner deaths give their instance up here, on
             # observation (see _wedged_live_instances). The breaker's
@@ -2414,6 +2474,35 @@ class Worker:
         if (instance := self.state.instances.get(task.instance_id)) is not None:
             runner_id = instance.shard_assignments.node_to_runner[self.node_id]
             shard = instance.shard(runner_id)
+            runner = self.runners[runner_id]
+            if isinstance(task, LoadModel) and shard is not None:
+                try:
+                    model_directory = build_model_path(
+                        shard.model_card.model_id,
+                        shard.model_card.source_revision,
+                    )
+                    require_registry_installed_artifact(
+                        model_directory,
+                        shard.model_card,
+                    )
+                except (FileNotFoundError, PermissionError) as error:
+                    message = _model_load_trust_failure_message(error)
+                    logger.error(message)
+                    failed = RunnerFailed(error_message=message)
+                    runner.status = failed
+                    await self.event_sender.send(
+                        RunnerStatusUpdated(
+                            runner_id=runner_id,
+                            runner_status=failed,
+                        )
+                    )
+                    await self.event_sender.send(
+                        TaskStatusUpdated(
+                            task_id=task.task_id,
+                            task_status=TaskStatus.Failed,
+                        )
+                    )
+                    return
             if (
                 isinstance(task, LoadModel)
                 and shard is not None
@@ -2456,7 +2545,6 @@ class Worker:
                 f"device_rank={shard.device_rank if shard is not None else 'unknown'}, "
                 f"world_size={shard.world_size if shard is not None else 'unknown'})"
             )
-            runner = self.runners[runner_id]
             if isinstance(task, RealtimeAudioTranscription):
                 command_id = task.command_id
                 try:

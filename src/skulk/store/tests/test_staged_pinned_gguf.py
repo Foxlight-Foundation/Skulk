@@ -136,6 +136,7 @@ def _shard(gguf_file: str) -> PipelineShardMetadata:
             hidden_size=1,
             supports_tensor=False,
             tasks=[ModelTask.TextGeneration],
+            trust_remote_code=False,
             gguf_file=gguf_file,
         ),
         device_rank=0,

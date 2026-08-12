@@ -32,6 +32,7 @@ def _shard(source_revision: str) -> PipelineShardMetadata:
             hidden_size=1,
             supports_tensor=False,
             tasks=[ModelTask.TextGeneration],
+            trust_remote_code=False,
             gguf_file="model.gguf",
             source_revision=source_revision,
         ),

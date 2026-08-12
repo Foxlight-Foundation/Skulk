@@ -75,6 +75,7 @@ def _registry_card() -> ModelCard:
         trust_remote_code=True,
         registry_card_id=f"card_{'a' * 52}",
         registry_snapshot_id="snapshot_1_test",
+        registry_provenance="agent",
     )
 
 

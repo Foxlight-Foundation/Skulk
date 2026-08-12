@@ -123,6 +123,10 @@ async def test_previews_surface_per_host_alternatives(
     ranked = [p for p in previews if not p.get("alternative")]
     alternatives = [p for p in previews if p.get("alternative")]
     assert any(p.get("instance") is not None for p in ranked)
+    assert all(
+        "node-local approval" in str(preview.get("trust_requirement"))
+        for preview in previews
+    )
     assert len(alternatives) == 1
     alt_instance = cast("dict[str, object]", alternatives[0]["instance"])
     inner = cast("dict[str, object]", next(iter(alt_instance.values())))

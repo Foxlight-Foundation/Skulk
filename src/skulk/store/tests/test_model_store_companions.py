@@ -106,6 +106,7 @@ def _shard_with_sidecar() -> PipelineShardMetadata:
             hidden_size=8,
             supports_tensor=False,
             tasks=[ModelTask.TextGeneration],
+            trust_remote_code=False,
             runtime=RuntimeCapabilityCardConfig(
                 mtp_heads=True,
                 mtp_sidecar_repo=_SIDECAR_REPO,

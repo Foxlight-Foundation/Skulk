@@ -1279,19 +1279,26 @@ override precedence.
 
 **GET** `/models/remote-code-approvals`
 
-Lists immutable registry card IDs approved to execute repository-supplied
-Python on this API node.
+Lists immutable model-card trust identities approved to execute
+repository-supplied Python on this API node. Signed cards use `card_...` IDs;
+custom and unsigned cards use content-derived `local_...` identities.
+
+Placement previews expose the same exact identity in `trust_requirement` when
+each selected serving node must hold explicit approval. Foxlight-provenance
+cards with automatic signed trust return no such requirement.
 
 **POST** `/models/remote-code-approvals/{card_id}`
 
-Approves an existing signed-registry card that declares
-`trust_remote_code=true`, or a vision card whose current platform loader may
-enable repository code internally. Approval is keyed to the immutable card ID,
-stored in an owner-only local file, and applies only to this node. Repeat it on
-every node that may download or serve the artifact. Skulk fails closed before
-both download and every runner-type dispatch when a required approval is
-absent. Approval lookup uses the complete signed catalog, independent of this
-node's image-model visibility setting. This mutation is accepted only from a
+Approves an existing agent/community registry card, custom card, or unsigned
+card that can execute repository code. Approval is keyed to the immutable
+signed-card ID or the complete local card digest, stored in an owner-only local
+file, and applies only to this node. Repeat it on every node that may download
+or serve the artifact. Immutable, full-revision-pinned cards with Foxlight
+provenance from the TUF-verified registry are already Foxlight's trust decision
+and do not accept or require this second approval. Skulk fails closed before
+download and runner load when an explicit approval is required but absent.
+Approval lookup uses the complete catalog, independent of this node's
+image-model visibility setting. This mutation is accepted only from a
 loopback socket peer; browser
 requests must also have a loopback `Origin`. Requests carrying proxy or
 forwarding headers are rejected outright, because a local reverse proxy's
@@ -1849,8 +1856,9 @@ Important fields:
 | `current_registry_identity` | string or null | Current signed identity for the alias, which may differ from the active install |
 | `update_available` | boolean | A newer signed generation exists but is not active until transfer commits |
 | `advisories` | array | Active signed warn-only security notices affecting the installed or current card |
-| `remote_code_approval_required` | boolean | Whether the registry artifact or its selected platform loader can execute repository Python and needs local approval |
-| `remote_code_approved_on_this_node` | boolean | Whether that immutable card is approved on the responding node |
+| `remote_code_approval_required` | boolean | Whether the card or its selected platform loader can execute repository Python and is not automatically trusted, so every serving node needs explicit local approval |
+| `remote_code_approved_on_this_node` | boolean | Whether the exact signed `card_...` or content-derived local `local_...` trust identity is approved on the responding node |
+| `remote_code_automatically_trusted` | boolean | Whether signed Foxlight provenance authorizes repository code for this exact pinned registry card without a second node-local approval |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
 | `resolved_capabilities.supports_speech_synthesis` | boolean | Whether clients should treat the model as a text-to-speech model |
 | `resolved_capabilities.supports_transcription` | boolean | Whether clients should treat the model as a speech-to-text model |

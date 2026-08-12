@@ -324,6 +324,8 @@ from skulk.shared.models.remote_code_approval import (
     REMOTE_CODE_APPROVALS,
     remote_code_approval_mutation_allowed,
     remote_code_execution_requires_approval,
+    remote_code_is_automatically_trusted,
+    remote_code_trust_identity,
 )
 from skulk.shared.tracing import (
     TraceEvent,
@@ -2969,6 +2971,13 @@ class API:
             raise HTTPException(
                 status_code=400, detail=f"Failed to load model card: {exc}"
             ) from exc
+        trust_requirement = (
+            "Repository code requires node-local approval for immutable trust "
+            f"identity {remote_code_trust_identity(model_card)} on every selected "
+            "serving node."
+            if remote_code_execution_requires_approval(model_card)
+            else None
+        )
         placement_node_vram = usable_vram_by_node(
             self._telemetry_view.node_system,
             self._telemetry_view.node_resources,
@@ -3189,7 +3198,14 @@ class API:
                     # shape that places.
                     break
 
-        return PlacementPreviewResponse(previews=previews)
+        return PlacementPreviewResponse(
+            previews=[
+                preview.model_copy(
+                    update={"trust_requirement": trust_requirement}
+                )
+                for preview in previews
+            ]
+        )
 
     def get_instance(self, instance_id: InstanceId) -> Instance:
         if instance_id not in self.state.instances:
@@ -7445,7 +7461,11 @@ class API:
             remote_code_approval_required=remote_code_approval_required,
             remote_code_approved_on_this_node=(
                 remote_code_approval_required
-                and card.registry_card_id in (approved_remote_code_card_ids or ())
+                and remote_code_trust_identity(card)
+                in (approved_remote_code_card_ids or ())
+            ),
+            remote_code_automatically_trusted=remote_code_is_automatically_trusted(
+                card
             ),
             source_revision=card.source_revision,
             capabilities=card.capabilities,
@@ -7481,7 +7501,7 @@ class API:
         )
 
     async def list_remote_code_approvals(self) -> list[RemoteCodeApprovalView]:
-        """List immutable registry card ids approved on this API node."""
+        """List immutable model-card trust identities approved on this node."""
         return [
             RemoteCodeApprovalView(card_id=card_id, approved_on_this_node=True)
             for card_id in sorted(REMOTE_CODE_APPROVALS.approved_card_ids())
@@ -7490,10 +7510,10 @@ class API:
     async def approve_remote_code(
         self, card_id: str, request: Request
     ) -> RemoteCodeApprovalView:
-        """Persist approval for one immutable registry card on this API node.
+        """Persist approval for one immutable model card on this API node.
 
         Args:
-            card_id: Immutable content-derived registry card identifier.
+            card_id: Signed card ID or content-derived local card identity.
             request: Incoming request whose peer, origin, and forwarding headers
                 establish the node-local mutation boundary.
 
@@ -7508,22 +7528,22 @@ class API:
             Atomically adds the card identifier to this node's durable approval file.
         """
         self._require_node_local_remote_code_mutation(request)
-        if not re.fullmatch(r"card_[a-z2-7]{52}", card_id):
-            raise HTTPException(status_code=422, detail="Invalid registry card id")
+        if not re.fullmatch(r"(?:card|local)_[a-z2-7]{52}", card_id):
+            raise HTTPException(status_code=422, detail="Invalid model trust identity")
         card = next(
             (
                 candidate
                 for candidate in await get_all_model_cards()
-                if candidate.registry_card_id == card_id
+                if remote_code_trust_identity(candidate) == card_id
             ),
             None,
         )
         if card is None:
-            raise HTTPException(status_code=404, detail="Registry card not found")
+            raise HTTPException(status_code=404, detail="Model card not found")
         if not remote_code_execution_requires_approval(card):
             raise HTTPException(
                 status_code=409,
-                detail="Registry card does not require repository-code approval",
+                detail="Model card does not require node-local repository-code approval",
             )
         REMOTE_CODE_APPROVALS.approve(card_id)
         return RemoteCodeApprovalView(card_id=card_id, approved_on_this_node=True)
@@ -7531,10 +7551,10 @@ class API:
     async def revoke_remote_code(
         self, card_id: str, request: Request
     ) -> RemoteCodeApprovalView:
-        """Persist revocation for one immutable registry card on this API node.
+        """Persist revocation for one immutable model card on this API node.
 
         Args:
-            card_id: Immutable content-derived registry card identifier.
+            card_id: Signed card ID or content-derived local card identity.
             request: Incoming request whose peer, origin, and forwarding headers
                 establish the node-local mutation boundary.
 
@@ -7550,8 +7570,8 @@ class API:
             approval file, preventing future downloads and runner starts.
         """
         self._require_node_local_remote_code_mutation(request)
-        if not re.fullmatch(r"card_[a-z2-7]{52}", card_id):
-            raise HTTPException(status_code=422, detail="Invalid registry card id")
+        if not re.fullmatch(r"(?:card|local)_[a-z2-7]{52}", card_id):
+            raise HTTPException(status_code=422, detail="Invalid model trust identity")
         REMOTE_CODE_APPROVALS.revoke(card_id)
         return RemoteCodeApprovalView(card_id=card_id, approved_on_this_node=False)
 
