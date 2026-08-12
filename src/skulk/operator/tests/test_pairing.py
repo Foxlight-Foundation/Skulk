@@ -1,6 +1,7 @@
 """Tests for host-authorized single-gateway pairing."""
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
@@ -21,12 +22,16 @@ from skulk.operator.pairing import (
     OperatorPairingService,
     OperatorTokenRequest,
     PairingChallengeRequest,
+    PairingChallengeResponse,
     PairingExchangeRequest,
     PairingExchangeResponse,
     PairingGatewayNotInitializedError,
+    PairingInvitationCapacityError,
+    PairingInvitationPackage,
     PairingProofError,
     PairingSessionExpiredError,
     PairingSessionStateError,
+    pairing_invitation_signature_message,
     pairing_signature_message,
 )
 
@@ -85,6 +90,43 @@ def _complete_pairing(
     return service.exchange(
         PairingExchangeRequest(
             nonce=package.nonce,
+            signature=_base64url(signature),
+        )
+    )
+
+
+def _complete_invitation_pairing(
+    service: OperatorPairingService,
+    package: PairingInvitationPackage,
+    *,
+    device_name: str = "Review phone",
+) -> PairingExchangeResponse:
+    """Complete one independent attempt under a reusable invitation."""
+
+    private_key, public_key = _device_key()
+    challenge = service.create_challenge(
+        PairingChallengeRequest(
+            nonce=package.nonce,
+            invitation_id=package.invitation_id,
+            device_name=device_name,
+            device_public_key=public_key,
+        )
+    )
+    assert challenge.attempt_id is not None
+    signature = private_key.sign(
+        pairing_invitation_signature_message(
+            cluster_id=UUID(str(package.cluster_id)),
+            invitation_id=package.invitation_id,
+            nonce=package.nonce,
+            attempt_id=challenge.attempt_id,
+            challenge=challenge.challenge,
+        )
+    )
+    return service.exchange(
+        PairingExchangeRequest(
+            nonce=package.nonce,
+            invitation_id=package.invitation_id,
+            attempt_id=challenge.attempt_id,
             signature=_base64url(signature),
         )
     )
@@ -193,6 +235,469 @@ def test_pairing_expires_after_five_minutes(tmp_path: Path) -> None:
                 device_name="Phone",
                 device_public_key=public_key,
             ),
+        )
+
+
+def test_reusable_invitation_issues_independent_attempts(tmp_path: Path) -> None:
+    """Simultaneous scans receive distinct challenges and both can pair."""
+
+    clock = [datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+    package = service.create_invitation(
+        lifetime=timedelta(days=90),
+        max_pairings=10,
+        exchange_url="https://example.invalid/operator",
+        cluster_name="Review Fabric",
+    )
+    first_private, first_public = _device_key()
+    second_private, second_public = _device_key()
+    first_challenge = service.create_challenge(
+        PairingChallengeRequest(
+            nonce=package.nonce,
+            invitation_id=package.invitation_id,
+            device_name="First reviewer",
+            device_public_key=first_public,
+        )
+    )
+    second_challenge = service.create_challenge(
+        PairingChallengeRequest(
+            nonce=package.nonce,
+            invitation_id=package.invitation_id,
+            device_name="Second reviewer",
+            device_public_key=second_public,
+        )
+    )
+    assert first_challenge.attempt_id is not None
+    assert second_challenge.attempt_id is not None
+    assert first_challenge.attempt_id != second_challenge.attempt_id
+    assert first_challenge.expires_at == clock[0] + timedelta(minutes=5)
+
+    first = service.exchange(
+        PairingExchangeRequest(
+            nonce=package.nonce,
+            invitation_id=package.invitation_id,
+            attempt_id=first_challenge.attempt_id,
+            signature=_base64url(
+                first_private.sign(
+                    pairing_invitation_signature_message(
+                        cluster_id=UUID(str(package.cluster_id)),
+                        invitation_id=package.invitation_id,
+                        nonce=package.nonce,
+                        attempt_id=first_challenge.attempt_id,
+                        challenge=first_challenge.challenge,
+                    )
+                )
+            ),
+        )
+    )
+    second = service.exchange(
+        PairingExchangeRequest(
+            nonce=package.nonce,
+            invitation_id=package.invitation_id,
+            attempt_id=second_challenge.attempt_id,
+            signature=_base64url(
+                second_private.sign(
+                    pairing_invitation_signature_message(
+                        cluster_id=UUID(str(package.cluster_id)),
+                        invitation_id=package.invitation_id,
+                        nonce=package.nonce,
+                        attempt_id=second_challenge.attempt_id,
+                        challenge=second_challenge.challenge,
+                    )
+                )
+            ),
+        )
+    )
+
+    assert first.device_id != second.device_id
+    summary = service.invitations()[0]
+    assert summary.successful_pairings == 2
+    assert summary.active_attempts == 0
+    assert summary.total_attempts == 2
+    assert summary.state == "active"
+    assert package.nonce.encode("ascii") not in (
+        tmp_path / "authority.sqlite3"
+    ).read_bytes()
+
+
+def test_invitation_exhaustion_and_revocation_are_separate_from_devices(
+    tmp_path: Path,
+) -> None:
+    """Invitation limits block new scans while issued device credentials remain valid."""
+
+    clock = [datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+    exhausted = service.create_invitation(
+        lifetime=timedelta(days=1),
+        max_pairings=1,
+        exchange_url="https://example.invalid",
+    )
+    paired = _complete_invitation_pairing(service, exhausted)
+    _, public_key = _device_key()
+    with pytest.raises(PairingSessionExpiredError, match="exhausted"):
+        service.create_challenge(
+            PairingChallengeRequest(
+                nonce=exhausted.nonce,
+                invitation_id=exhausted.invitation_id,
+                device_name="Another phone",
+                device_public_key=public_key,
+            )
+        )
+    assert service.validate_access_token(paired.access_token).device_id == paired.device_id
+
+    revoked = service.create_invitation(
+        lifetime=timedelta(days=1),
+        max_pairings=2,
+        exchange_url="https://example.invalid",
+    )
+    existing_device = _complete_invitation_pairing(service, revoked)
+    unfinished_private_key, unfinished_public_key = _device_key()
+    unfinished = service.create_challenge(
+        PairingChallengeRequest(
+            nonce=revoked.nonce,
+            invitation_id=revoked.invitation_id,
+            device_name="Unfinished phone",
+            device_public_key=unfinished_public_key,
+        )
+    )
+    assert unfinished.attempt_id is not None
+    service.revoke_invitation(revoked.invitation_id)
+    with pytest.raises(PairingSessionExpiredError, match="revoked"):
+        service.create_challenge(
+            PairingChallengeRequest(
+                nonce=revoked.nonce,
+                invitation_id=revoked.invitation_id,
+                device_name="Blocked phone",
+                device_public_key=public_key,
+            )
+        )
+    unfinished_signature = unfinished_private_key.sign(
+        pairing_invitation_signature_message(
+            cluster_id=UUID(str(revoked.cluster_id)),
+            invitation_id=revoked.invitation_id,
+            nonce=revoked.nonce,
+            attempt_id=unfinished.attempt_id,
+            challenge=unfinished.challenge,
+        )
+    )
+    with pytest.raises(PairingSessionExpiredError, match="revoked"):
+        service.exchange(
+            PairingExchangeRequest(
+                nonce=revoked.nonce,
+                invitation_id=revoked.invitation_id,
+                attempt_id=unfinished.attempt_id,
+                signature=_base64url(unfinished_signature),
+            )
+        )
+    assert (
+        service.validate_access_token(existing_device.access_token).device_id
+        == existing_device.device_id
+    )
+    listed = service.devices(existing_device.access_token)
+    assert {device.device_id for device in listed.devices} == {
+        paired.device_id,
+        existing_device.device_id,
+    }
+    summaries = {summary.invitation_id: summary for summary in service.invitations()}
+    assert summaries[exhausted.invitation_id].state == "exhausted"
+    assert summaries[revoked.invitation_id].state == "revoked"
+    assert summaries[revoked.invitation_id].successful_pairings == 1
+    assert summaries[revoked.invitation_id].active_attempts == 1
+
+
+def test_invitation_and_pending_attempt_survive_service_restart(tmp_path: Path) -> None:
+    """Durable authority records preserve reusable pairing across a restart."""
+
+    clock = [datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)]
+    before_restart = _service(tmp_path, clock)
+    package = before_restart.create_invitation(
+        lifetime=timedelta(days=90),
+        exchange_url="https://example.invalid/operator",
+    )
+    private_key, public_key = _device_key()
+    challenge = before_restart.create_challenge(
+        PairingChallengeRequest(
+            nonce=package.nonce,
+            invitation_id=package.invitation_id,
+            device_name="Restarted phone",
+            device_public_key=public_key,
+        )
+    )
+    assert challenge.attempt_id is not None
+
+    after_restart = _service(tmp_path, clock)
+    signature = private_key.sign(
+        pairing_invitation_signature_message(
+            cluster_id=UUID(str(package.cluster_id)),
+            invitation_id=package.invitation_id,
+            nonce=package.nonce,
+            attempt_id=challenge.attempt_id,
+            challenge=challenge.challenge,
+        )
+    )
+    paired = after_restart.exchange(
+        PairingExchangeRequest(
+            nonce=package.nonce,
+            invitation_id=package.invitation_id,
+            attempt_id=challenge.attempt_id,
+            signature=_base64url(signature),
+        )
+    )
+
+    assert after_restart.validate_access_token(paired.access_token).device_id == paired.device_id
+    summary = after_restart.invitations()[0]
+    assert summary.successful_pairings == 1
+    assert summary.total_attempts == 1
+
+
+def test_invitation_attempts_expire_and_active_capacity_is_bounded(
+    tmp_path: Path,
+) -> None:
+    """Unfinished scans do not consume pairing slots and cannot grow without bound."""
+
+    clock = [datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+    package = service.create_invitation(
+        lifetime=timedelta(days=1),
+        exchange_url="https://example.invalid",
+    )
+    for index in range(10):
+        _, public_key = _device_key()
+        service.create_challenge(
+            PairingChallengeRequest(
+                nonce=package.nonce,
+                invitation_id=package.invitation_id,
+                device_name=f"Phone {index}",
+                device_public_key=public_key,
+            )
+        )
+    _, overflow_public_key = _device_key()
+    with pytest.raises(PairingInvitationCapacityError) as raised:
+        service.create_challenge(
+            PairingChallengeRequest(
+                nonce=package.nonce,
+                invitation_id=package.invitation_id,
+                device_name="Overflow phone",
+                device_public_key=overflow_public_key,
+            )
+        )
+    assert raised.value.retry_after_seconds == 300
+    assert service.invitations()[0].state == "attempt-limit"
+
+    clock[0] += timedelta(minutes=5)
+    replacement = service.create_challenge(
+        PairingChallengeRequest(
+            nonce=package.nonce,
+            invitation_id=package.invitation_id,
+            device_name="Replacement phone",
+            device_public_key=overflow_public_key,
+        )
+    )
+    assert replacement.attempt_id is not None
+    summary = service.invitations()[0]
+    assert summary.successful_pairings == 0
+    assert summary.active_attempts == 1
+    assert summary.total_attempts == 11
+
+
+def test_invitation_total_attempts_are_bounded(tmp_path: Path) -> None:
+    """The journal stops growing while its final live attempt can still finish."""
+
+    clock = [datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+    package = service.create_invitation(
+        lifetime=timedelta(days=90),
+        exchange_url="https://example.invalid",
+    )
+    final_private_key: Ed25519PrivateKey | None = None
+    final_challenge: PairingChallengeResponse | None = None
+    for index in range(100):
+        private_key, public_key = _device_key()
+        challenge = service.create_challenge(
+            PairingChallengeRequest(
+                nonce=package.nonce,
+                invitation_id=package.invitation_id,
+                device_name=f"Attempt {index}",
+                device_public_key=public_key,
+            )
+        )
+        if index == 99:
+            final_private_key = private_key
+            final_challenge = challenge
+        else:
+            clock[0] += timedelta(minutes=5)
+
+    _, overflow_public_key = _device_key()
+    with pytest.raises(PairingSessionExpiredError, match="attempt limit"):
+        service.create_challenge(
+            PairingChallengeRequest(
+                nonce=package.nonce,
+                invitation_id=package.invitation_id,
+                device_name="Attempt 101",
+                device_public_key=overflow_public_key,
+            )
+        )
+    summary = service.invitations()[0]
+    assert summary.total_attempts == 100
+    assert summary.successful_pairings == 0
+    assert summary.state == "attempt-limit"
+
+    assert final_private_key is not None
+    assert final_challenge is not None
+    assert final_challenge.attempt_id is not None
+    signature = final_private_key.sign(
+        pairing_invitation_signature_message(
+            cluster_id=UUID(str(package.cluster_id)),
+            invitation_id=package.invitation_id,
+            nonce=package.nonce,
+            attempt_id=final_challenge.attempt_id,
+            challenge=final_challenge.challenge,
+        )
+    )
+    paired = service.exchange(
+        PairingExchangeRequest(
+            nonce=package.nonce,
+            invitation_id=package.invitation_id,
+            attempt_id=final_challenge.attempt_id,
+            signature=_base64url(signature),
+        )
+    )
+    assert service.validate_access_token(paired.access_token).device_id == paired.device_id
+    assert service.invitations()[0].successful_pairings == 1
+
+
+def test_invitation_proof_is_bound_to_its_attempt(tmp_path: Path) -> None:
+    """A valid signature for one attempt cannot complete another attempt."""
+
+    clock = [datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+    package = service.create_invitation(
+        lifetime=timedelta(days=1),
+        exchange_url="https://example.invalid",
+    )
+    private_key, public_key = _device_key()
+    first = service.create_challenge(
+        PairingChallengeRequest(
+            nonce=package.nonce,
+            invitation_id=package.invitation_id,
+            device_name="Phone",
+            device_public_key=public_key,
+        )
+    )
+    second = service.create_challenge(
+        PairingChallengeRequest(
+            nonce=package.nonce,
+            invitation_id=package.invitation_id,
+            device_name="Phone",
+            device_public_key=public_key,
+        )
+    )
+    assert first.attempt_id is not None
+    assert second.attempt_id is not None
+    signature = private_key.sign(
+        pairing_invitation_signature_message(
+            cluster_id=UUID(str(package.cluster_id)),
+            invitation_id=package.invitation_id,
+            nonce=package.nonce,
+            attempt_id=first.attempt_id,
+            challenge=first.challenge,
+        )
+    )
+    with pytest.raises(PairingProofError, match="invalid"):
+        service.exchange(
+            PairingExchangeRequest(
+                nonce=package.nonce,
+                invitation_id=package.invitation_id,
+                attempt_id=second.attempt_id,
+                signature=_base64url(signature),
+            )
+        )
+
+
+def test_concurrent_invitation_exchanges_cannot_exceed_success_limit(
+    tmp_path: Path,
+) -> None:
+    """Global authority fencing admits only one racing final pairing slot."""
+
+    clock = [datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+    package = service.create_invitation(
+        lifetime=timedelta(days=1),
+        max_pairings=1,
+        exchange_url="https://example.invalid",
+    )
+    exchanges: list[PairingExchangeRequest] = []
+    for name in ("First", "Second"):
+        private_key, public_key = _device_key()
+        challenge = service.create_challenge(
+            PairingChallengeRequest(
+                nonce=package.nonce,
+                invitation_id=package.invitation_id,
+                device_name=name,
+                device_public_key=public_key,
+            )
+        )
+        assert challenge.attempt_id is not None
+        exchanges.append(
+            PairingExchangeRequest(
+                nonce=package.nonce,
+                invitation_id=package.invitation_id,
+                attempt_id=challenge.attempt_id,
+                signature=_base64url(
+                    private_key.sign(
+                        pairing_invitation_signature_message(
+                            cluster_id=UUID(str(package.cluster_id)),
+                            invitation_id=package.invitation_id,
+                            nonce=package.nonce,
+                            attempt_id=challenge.attempt_id,
+                            challenge=challenge.challenge,
+                        )
+                    )
+                ),
+            )
+        )
+
+    def exchange(request: PairingExchangeRequest) -> str:
+        """Return the safe result category from one racing exchange."""
+
+        try:
+            service.exchange(request)
+        except PairingSessionExpiredError:
+            return "unavailable"
+        return "paired"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(exchange, exchanges))
+
+    assert sorted(results) == ["paired", "unavailable"]
+    summary = service.invitations()[0]
+    assert summary.successful_pairings == 1
+    assert summary.state == "exhausted"
+
+
+@pytest.mark.parametrize(
+    "lifetime,max_pairings",
+    [
+        (timedelta(seconds=59), 10),
+        (timedelta(days=90, seconds=1), 10),
+        (timedelta(days=1), 0),
+        (timedelta(days=1), 21),
+    ],
+)
+def test_invitation_policy_bounds_are_enforced(
+    tmp_path: Path,
+    lifetime: timedelta,
+    max_pairings: int,
+) -> None:
+    """Hosts cannot create unbounded reusable bearer invitations."""
+
+    clock = [datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+    with pytest.raises(ValueError):
+        service.create_invitation(
+            lifetime=lifetime,
+            max_pairings=max_pairings,
+            exchange_url="https://example.invalid",
         )
 
 

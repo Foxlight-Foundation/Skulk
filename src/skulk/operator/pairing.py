@@ -1,4 +1,4 @@
-"""Single-use host-authorized pairing for one designated Skulk gateway."""
+"""Host-authorized pairing for one designated Skulk gateway."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from pydantic import AnyHttpUrl, Field, field_validator, model_validator
+from pydantic import AnyHttpUrl, Field, ValidationInfo, field_validator, model_validator
 
 from skulk.operator.authority import (
     AuthorityCommitConflictError,
@@ -34,10 +34,19 @@ from skulk.operator.relay import (
 from skulk.utils.pydantic_ext import FrozenModel
 
 _PAIRING_RECORD_TYPE = "operator_pairing_session"
+_PAIRING_INVITATION_RECORD_TYPE = "operator_pairing_invitation"
+_PAIRING_ATTEMPT_RECORD_TYPE = "operator_pairing_attempt"
 _PAIRING_LIFETIME = timedelta(minutes=5)
+_MAXIMUM_INVITATION_LIFETIME = timedelta(days=90)
+_DEFAULT_INVITATION_PAIRINGS = 10
+_MAXIMUM_INVITATION_PAIRINGS = 20
+_MAXIMUM_ACTIVE_INVITATION_ATTEMPTS = 10
+_MAXIMUM_TOTAL_INVITATION_ATTEMPTS = 100
+_AUTHORITY_RETRY_LIMIT = 3
 _ACCESS_TOKEN_LIFETIME = timedelta(minutes=15)
 _REFRESH_TOKEN_LIFETIME = timedelta(days=30)
 _PAIRING_SIGNATURE_CONTEXT = b"skulk-device-pairing-v1\x00"
+_PAIRING_INVITATION_SIGNATURE_CONTEXT = b"skulk-device-pairing-v2\x00"
 _MAXIMUM_RELAY_PAIRING_URL_BYTES = 1_170
 
 type OperatorScope = Literal[
@@ -71,6 +80,16 @@ class PairingSessionExpiredError(PairingError):
 
 class PairingSessionStateError(PairingError):
     """Raised when a pairing transition is repeated or out of order."""
+
+
+class PairingInvitationCapacityError(PairingError):
+    """Raised when an invitation cannot issue another bounded attempt."""
+
+    def __init__(self, message: str, *, retry_after_seconds: int) -> None:
+        """Create a safe capacity failure with a bounded retry hint."""
+
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
 
 
 class PairingProofError(PairingError):
@@ -196,13 +215,109 @@ class PairingPackage(FrozenModel):
         return f"skulk://pair?payload={encoded}"
 
 
+class PairingInvitationPackage(FrozenModel):
+    """Reusable public invitation encoded in a Skulk pairing QR code."""
+
+    version: Literal[3] = Field(
+        default=3,
+        description="Pairing invitation format version.",
+    )
+    cluster_id: UUID = Field(description="Stable identity of the target cluster.")
+    cluster_name: str = Field(description="Operator-visible cluster name.")
+    cluster_fingerprint: str = Field(
+        description="Display fingerprint of the cluster identity key."
+    )
+    exchange_url: AnyHttpUrl = Field(
+        description="Direct or relayed URL serving the pairing exchange."
+    )
+    invitation_id: UUID = Field(description="Public identifier used to manage the invitation.")
+    issued_at: datetime = Field(description="UTC creation time of the invitation.")
+    expires_at: datetime = Field(description="UTC expiry of the invitation.")
+    max_pairings: int = Field(
+        ge=1,
+        le=_MAXIMUM_INVITATION_PAIRINGS,
+        description="Maximum successful device pairings allowed by the invitation.",
+    )
+    nonce: str = Field(
+        min_length=32,
+        max_length=128,
+        description="High-entropy bearer capability for the invitation.",
+    )
+    remote_access: OperatorRemoteAccessMaterial | None = Field(
+        default=None,
+        description="Optional relay and pinned inner-TLS connection material.",
+    )
+
+    @field_validator("issued_at", "expires_at")
+    @classmethod
+    def _timestamps_are_timezone_aware(cls, value: datetime) -> datetime:
+        """Reject ambiguous invitation timestamps."""
+
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("pairing invitation timestamps must include a timezone")
+        return value
+
+    @field_validator("exchange_url")
+    @classmethod
+    def _exchange_url_protects_remote_credentials(
+        cls,
+        value: AnyHttpUrl,
+    ) -> AnyHttpUrl:
+        """Require HTTPS except for explicitly local development URLs."""
+
+        return _validate_exchange_url(value)
+
+    @model_validator(mode="after")
+    def _lifetime_is_bounded(self) -> "PairingInvitationPackage":
+        """Keep invitation duration positive and bounded by product policy."""
+
+        lifetime = self.expires_at - self.issued_at
+        if lifetime < timedelta(minutes=1) or lifetime > _MAXIMUM_INVITATION_LIFETIME:
+            raise ValueError("pairing invitation lifetime must be from one minute to 90 days")
+        return self
+
+    def as_url(self) -> str:
+        """Return the invitation as one compact custom-scheme QR payload."""
+
+        compact_payload: dict[str, object] = {
+            "v": self.version,
+            "i": str(self.cluster_id),
+            "n": self.cluster_name,
+            "f": self.cluster_fingerprint,
+            "u": str(self.exchange_url),
+            "d": str(self.invitation_id),
+            "a": self.issued_at.isoformat(),
+            "e": self.expires_at.isoformat(),
+            "m": self.max_pairings,
+            "o": self.nonce,
+        }
+        if self.remote_access is not None:
+            compact_payload["r"] = {
+                "t": self.remote_access.transport,
+                "w": self.remote_access.app_websocket_url,
+                "l": self.remote_access.routing_locator,
+                "c": self.remote_access.app_carrier_credential,
+                "s": self.remote_access.gateway_server_name,
+                "p": self.remote_access.gateway_ca_certificate_pem,
+            }
+        compressed = zlib.compress(
+            json.dumps(
+                compact_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+            level=9,
+        )
+        return f"skulk://pair?z={_base64url_encode(compressed)}"
+
+
 class PairingChallengeRequest(FrozenModel):
     """Candidate device identity submitted before credential exchange."""
 
     nonce: str = Field(
         min_length=32,
         max_length=128,
-        description="High-entropy single-use capability from the pairing QR.",
+        description="High-entropy bearer capability from the pairing QR.",
     )
     device_name: str = Field(
         min_length=1,
@@ -213,6 +328,10 @@ class PairingChallengeRequest(FrozenModel):
         min_length=40,
         max_length=64,
         description="Unpadded URL-safe base64 Ed25519 device public key.",
+    )
+    invitation_id: UUID | None = Field(
+        default=None,
+        description="Reusable invitation identity, absent for legacy single-use pairing.",
     )
 
     @field_validator("device_name")
@@ -225,6 +344,13 @@ class PairingChallengeRequest(FrozenModel):
             raise ValueError("device_name must not be blank")
         return normalized
 
+    @field_validator("invitation_id", mode="before")
+    @classmethod
+    def _parse_wire_invitation_id(cls, value: object) -> object:
+        """Convert the optional JSON invitation UUID before strict validation."""
+
+        return _parse_optional_wire_uuid(value, "invitation_id")
+
 
 class PairingChallengeResponse(FrozenModel):
     """Cluster challenge that the candidate device must sign."""
@@ -232,7 +358,11 @@ class PairingChallengeResponse(FrozenModel):
     challenge: str = Field(
         description="Unpadded URL-safe base64 random challenge."
     )
-    expires_at: datetime = Field(description="UTC expiry inherited from the session.")
+    expires_at: datetime = Field(description="UTC expiry of this pairing attempt.")
+    attempt_id: UUID | None = Field(
+        default=None,
+        description="Independent reusable-invitation attempt, absent for legacy pairing.",
+    )
 
 
 class PairingExchangeRequest(FrozenModel):
@@ -241,13 +371,40 @@ class PairingExchangeRequest(FrozenModel):
     nonce: str = Field(
         min_length=32,
         max_length=128,
-        description="High-entropy single-use capability from the pairing QR.",
+        description="High-entropy bearer capability from the pairing QR.",
     )
     signature: str = Field(
         min_length=80,
         max_length=100,
         description="Ed25519 signature over the domain-separated pairing challenge.",
     )
+    invitation_id: UUID | None = Field(
+        default=None,
+        description="Reusable invitation identity, absent for legacy pairing.",
+    )
+    attempt_id: UUID | None = Field(
+        default=None,
+        description="Challenge attempt identity, absent for legacy pairing.",
+    )
+
+    @model_validator(mode="after")
+    def _invitation_fields_are_complete(self) -> "PairingExchangeRequest":
+        """Reject partially specified invitation exchanges."""
+
+        if (self.invitation_id is None) != (self.attempt_id is None):
+            raise ValueError("invitation_id and attempt_id must be supplied together")
+        return self
+
+
+    @field_validator("invitation_id", "attempt_id", mode="before")
+    @classmethod
+    def _parse_wire_ids(cls, value: object, info: ValidationInfo) -> object:
+        """Convert optional JSON UUIDs before strict validation."""
+
+        return _parse_optional_wire_uuid(
+            value,
+            info.field_name or "pairing identifier",
+        )
 
 
 class PairingExchangeResponse(FrozenModel):
@@ -374,6 +531,75 @@ class _StoredPairingSession(FrozenModel):
     scopes: tuple[OperatorScope, ...] = ()
 
 
+class _StoredPairingInvitation(FrozenModel):
+    """Encrypted durable state for one reusable host invitation."""
+
+    state: Literal["active", "revoked"]
+    invitation_id: UUID
+    nonce_hash: str
+    created_at: datetime
+    expires_at: datetime
+    exchange_url: str
+    max_pairings: int = Field(ge=1, le=_MAXIMUM_INVITATION_PAIRINGS)
+
+
+class _StoredPairingAttempt(FrozenModel):
+    """Encrypted durable state for one invitation challenge and device."""
+
+    state: Literal["challenged", "consumed", "revoked"]
+    invitation_id: UUID
+    attempt_id: UUID
+    created_at: datetime
+    expires_at: datetime
+    device_name: str
+    device_public_key: str
+    challenge: str
+    device_id: UUID | None = None
+    access_token_hash: str | None = None
+    access_token_expires_at: datetime | None = None
+    refresh_token_hash: str | None = None
+    refresh_token_expires_at: datetime | None = None
+    scopes: tuple[OperatorScope, ...] = ()
+
+
+type _StoredDeviceCredential = _StoredPairingSession | _StoredPairingAttempt
+
+
+type PairingInvitationState = Literal[
+    "active",
+    "expired",
+    "exhausted",
+    "attempt-limit",
+    "revoked",
+]
+
+
+class PairingInvitationSummary(FrozenModel):
+    """Safe host-visible status for one reusable pairing invitation."""
+
+    invitation_id: UUID = Field(description="Public invitation identifier.")
+    created_at: datetime = Field(description="UTC invitation creation time.")
+    expires_at: datetime = Field(description="UTC invitation expiry.")
+    successful_pairings: int = Field(
+        ge=0,
+        description="Number of devices that received credentials.",
+    )
+    max_pairings: int = Field(
+        ge=1,
+        le=_MAXIMUM_INVITATION_PAIRINGS,
+        description="Maximum successful pairings allowed.",
+    )
+    active_attempts: int = Field(
+        ge=0,
+        description="Unexpired attempts currently awaiting proof.",
+    )
+    total_attempts: int = Field(
+        ge=0,
+        description="All attempts issued during the invitation lifetime.",
+    )
+    state: PairingInvitationState = Field(description="Current invitation state.")
+
+
 def _utc_now() -> datetime:
     """Return the current timezone-aware UTC time."""
 
@@ -401,6 +627,19 @@ def _opaque_digest(value: str) -> str:
     """Return a non-reversible identifier for a bearer value."""
 
     return _base64url_encode(hashlib.sha256(value.encode("utf-8")).digest())
+
+
+def _parse_optional_wire_uuid(value: object, field_name: str) -> object:
+    """Convert one optional JSON UUID representation for strict models."""
+
+    if value is None or isinstance(value, UUID):
+        return value
+    if not isinstance(value, str):
+        return value
+    try:
+        return UUID(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be a UUID") from exc
 
 
 def _validate_exchange_url(value: str | AnyHttpUrl) -> AnyHttpUrl:
@@ -444,6 +683,41 @@ def pairing_signature_message(
         + str(cluster_id).encode("ascii")
         + b"\x00"
         + nonce.encode("ascii")
+        + b"\x00"
+        + challenge.encode("ascii")
+    )
+
+
+def pairing_invitation_signature_message(
+    *,
+    cluster_id: UUID,
+    invitation_id: UUID,
+    nonce: str,
+    attempt_id: UUID,
+    challenge: str,
+) -> bytes:
+    """Build the proof message for one reusable-invitation attempt.
+
+    Args:
+        cluster_id: Target cluster identity from the invitation.
+        invitation_id: Public identity of the reusable invitation.
+        nonce: Bearer capability from the invitation QR.
+        attempt_id: Independent attempt returned with the challenge.
+        challenge: Random challenge returned by the gateway.
+
+    Returns:
+        Domain-separated bytes binding the proof to the exact attempt.
+    """
+
+    return (
+        _PAIRING_INVITATION_SIGNATURE_CONTEXT
+        + str(cluster_id).encode("ascii")
+        + b"\x00"
+        + str(invitation_id).encode("ascii")
+        + b"\x00"
+        + nonce.encode("ascii")
+        + b"\x00"
+        + str(attempt_id).encode("ascii")
         + b"\x00"
         + challenge.encode("ascii")
     )
@@ -602,6 +876,87 @@ class OperatorPairingService:
         self._append_session(nonce_hash, session)
         return package
 
+    def create_invitation(
+        self,
+        *,
+        lifetime: timedelta,
+        max_pairings: int = _DEFAULT_INVITATION_PAIRINGS,
+        exchange_url: str | None = None,
+        cluster_name: str = "Cluster",
+    ) -> PairingInvitationPackage:
+        """Create one reusable, revocable host pairing invitation.
+
+        Args:
+            lifetime: Positive invitation lifetime no longer than 90 days.
+            max_pairings: Successful device-pairing limit from one through 20.
+            exchange_url: Optional direct HTTPS base URL. When omitted, a
+                configured relay supplies the inner gateway origin.
+            cluster_name: Name used only when initializing a new gateway.
+
+        Returns:
+            Version-three invitation safe to render as a QR code.
+
+        Raises:
+            ValueError: Policy bounds or protected reachability are invalid.
+            PairingPackageTooLargeError: The resulting QR would be unreliable.
+        """
+
+        if lifetime < timedelta(minutes=1) or lifetime > _MAXIMUM_INVITATION_LIFETIME:
+            raise ValueError("pairing invitation lifetime must be from one minute to 90 days")
+        if not 1 <= max_pairings <= _MAXIMUM_INVITATION_PAIRINGS:
+            raise ValueError("pairing invitation max_pairings must be from one through 20")
+
+        relay_configuration = self._relay_repository.load()
+        use_relay = exchange_url is None
+        if exchange_url is None:
+            if relay_configuration is None:
+                raise ValueError(
+                    "exchange_url is required until operator relay is configured"
+                )
+            exchange_url = f"https://{relay_configuration.gateway_server_name}"
+        validated_exchange_url = _validate_exchange_url(exchange_url)
+        identity = self.initialize_gateway(cluster_name)
+        remote_access = (
+            relay_configuration.device_material()
+            if use_relay and relay_configuration is not None
+            else None
+        )
+
+        now = self._now()
+        invitation_id = uuid4()
+        nonce = secrets.token_urlsafe(32)
+        package = PairingInvitationPackage(
+            cluster_id=UUID(str(identity.cluster_id)),
+            cluster_name=identity.name,
+            cluster_fingerprint=identity.fingerprint,
+            exchange_url=validated_exchange_url,
+            invitation_id=invitation_id,
+            issued_at=now,
+            expires_at=now + lifetime,
+            max_pairings=max_pairings,
+            nonce=nonce,
+            remote_access=remote_access,
+        )
+        if len(package.as_url().encode("utf-8")) > _MAXIMUM_RELAY_PAIRING_URL_BYTES:
+            raise PairingPackageTooLargeError(
+                "pairing invitation package exceeds the supported QR size"
+            )
+        invitation = _StoredPairingInvitation(
+            state="active",
+            invitation_id=invitation_id,
+            nonce_hash=_opaque_digest(nonce),
+            created_at=now,
+            expires_at=package.expires_at,
+            exchange_url=str(package.exchange_url),
+            max_pairings=max_pairings,
+        )
+        self._append_authority_record(
+            record_type=_PAIRING_INVITATION_RECORD_TYPE,
+            record_id=str(invitation_id),
+            payload=invitation,
+        )
+        return package
+
     def create_challenge(
         self,
         request: PairingChallengeRequest,
@@ -621,6 +976,8 @@ class OperatorPairingService:
             PairingProofError: The proposed public key is malformed.
         """
 
+        if request.invitation_id is not None:
+            return self._create_invitation_challenge(request)
         self._decode_device_public_key(request.device_public_key)
         nonce_hash = _opaque_digest(request.nonce)
         session, session_commit_index = self._load_session(nonce_hash)
@@ -662,6 +1019,8 @@ class OperatorPairingService:
             PairingSessionExpiredError: The session expired.
         """
 
+        if request.invitation_id is not None and request.attempt_id is not None:
+            return self._exchange_invitation_proof(request)
         nonce_hash = _opaque_digest(request.nonce)
         session, session_commit_index = self._load_session(nonce_hash)
         self._require_unexpired(session)
@@ -728,6 +1087,204 @@ class OperatorPairingService:
             remote_access=remote_access,
         )
 
+    def _create_invitation_challenge(
+        self,
+        request: PairingChallengeRequest,
+    ) -> PairingChallengeResponse:
+        """Create an independent five-minute attempt under an invitation."""
+
+        self._decode_device_public_key(request.device_public_key)
+        invitation_id = request.invitation_id
+        if invitation_id is None:
+            raise PairingSessionStateError("pairing invitation identity is required")
+        for _ in range(_AUTHORITY_RETRY_LIMIT):
+            invitation, _, attempts, expected_commit_index = self._invitation_snapshot(
+                invitation_id
+            )
+            self._require_invitation_available(
+                invitation,
+                nonce=request.nonce,
+                attempts=attempts,
+                creating_attempt=True,
+            )
+            now = self._now()
+            active_attempts = tuple(
+                attempt
+                for _, attempt, _ in attempts
+                if attempt.state == "challenged" and now < attempt.expires_at
+            )
+            if len(active_attempts) >= _MAXIMUM_ACTIVE_INVITATION_ATTEMPTS:
+                retry_at = min(attempt.expires_at for attempt in active_attempts)
+                retry_seconds = max(1, int((retry_at - now).total_seconds()))
+                raise PairingInvitationCapacityError(
+                    "pairing invitation has too many active attempts",
+                    retry_after_seconds=retry_seconds,
+                )
+
+            attempt_id = uuid4()
+            challenge = _base64url_encode(secrets.token_bytes(32))
+            expires_at = min(now + _PAIRING_LIFETIME, invitation.expires_at)
+            attempt = _StoredPairingAttempt(
+                state="challenged",
+                invitation_id=invitation_id,
+                attempt_id=attempt_id,
+                created_at=now,
+                expires_at=expires_at,
+                device_name=request.device_name,
+                device_public_key=request.device_public_key,
+                challenge=challenge,
+            )
+            try:
+                self._append_authority_record(
+                    record_type=_PAIRING_ATTEMPT_RECORD_TYPE,
+                    record_id=str(attempt_id),
+                    payload=attempt,
+                    expected_commit_index=expected_commit_index,
+                )
+            except AuthorityCommitConflictError:
+                continue
+            return PairingChallengeResponse(
+                challenge=challenge,
+                expires_at=expires_at,
+                attempt_id=attempt_id,
+            )
+        raise PairingSessionStateError(
+            "pairing state changed concurrently; restart pairing"
+        )
+
+    def _exchange_invitation_proof(
+        self,
+        request: PairingExchangeRequest,
+    ) -> PairingExchangeResponse:
+        """Verify and atomically consume one invitation attempt."""
+
+        invitation_id = request.invitation_id
+        attempt_id = request.attempt_id
+        if invitation_id is None or attempt_id is None:
+            raise PairingSessionStateError("pairing invitation attempt is required")
+        for _ in range(_AUTHORITY_RETRY_LIMIT):
+            invitation, _, attempts, expected_commit_index = self._invitation_snapshot(
+                invitation_id
+            )
+            self._require_invitation_available(
+                invitation,
+                nonce=request.nonce,
+                attempts=attempts,
+                creating_attempt=False,
+            )
+            matched = next(
+                (
+                    (record_id, attempt, commit_index)
+                    for record_id, attempt, commit_index in attempts
+                    if attempt.attempt_id == attempt_id
+                ),
+                None,
+            )
+            if matched is None:
+                raise PairingSessionNotFoundError("pairing attempt was not found")
+            record_id, attempt, attempt_commit_index = matched
+            if self._now() >= attempt.expires_at:
+                raise PairingSessionExpiredError("pairing attempt expired")
+            if attempt.state != "challenged":
+                raise PairingSessionStateError("pairing attempt was already used")
+
+            public_key = self._decode_device_public_key(attempt.device_public_key)
+            try:
+                signature = _base64url_decode(request.signature)
+                public_key.verify(
+                    signature,
+                    pairing_invitation_signature_message(
+                        cluster_id=UUID(
+                            str(self._store.cluster_identity().cluster_id)
+                        ),
+                        invitation_id=invitation_id,
+                        nonce=request.nonce,
+                        attempt_id=attempt_id,
+                        challenge=attempt.challenge,
+                    ),
+                )
+            except (InvalidSignature, ValueError, UnicodeError) as exc:
+                raise PairingProofError("device pairing proof is invalid") from exc
+
+            now = self._now()
+            device_id = uuid4()
+            access_token = secrets.token_urlsafe(32)
+            refresh_token = secrets.token_urlsafe(48)
+            access_expires_at = now + _ACCESS_TOKEN_LIFETIME
+            refresh_expires_at = now + _REFRESH_TOKEN_LIFETIME
+            consumed = attempt.model_copy(
+                update={
+                    "state": "consumed",
+                    "device_id": device_id,
+                    "access_token_hash": _opaque_digest(access_token),
+                    "access_token_expires_at": access_expires_at,
+                    "refresh_token_hash": _opaque_digest(refresh_token),
+                    "refresh_token_expires_at": refresh_expires_at,
+                    "scopes": _DEFAULT_SCOPES,
+                }
+            )
+            try:
+                self._append_authority_record(
+                    record_type=_PAIRING_ATTEMPT_RECORD_TYPE,
+                    record_id=record_id,
+                    payload=consumed,
+                    expected_commit_index=expected_commit_index,
+                    expected_record_commit_index=attempt_commit_index,
+                )
+            except AuthorityCommitConflictError:
+                continue
+
+            relay_configuration = self._relay_repository.load()
+            return PairingExchangeResponse(
+                device_id=device_id,
+                cluster=self._store.cluster_identity(),
+                access_token=access_token,
+                access_token_expires_at=access_expires_at,
+                refresh_token=refresh_token,
+                refresh_token_expires_at=refresh_expires_at,
+                scopes=_DEFAULT_SCOPES,
+                remote_access=(
+                    relay_configuration.device_material()
+                    if relay_configuration is not None
+                    else None
+                ),
+            )
+        raise PairingSessionStateError(
+            "pairing state changed concurrently; restart pairing"
+        )
+
+    def invitations(self) -> tuple[PairingInvitationSummary, ...]:
+        """Return safe status for every reusable host invitation."""
+
+        summaries: list[PairingInvitationSummary] = []
+        for invitation_id in self._invitation_ids():
+            invitation, _, attempts, _ = self._invitation_snapshot(invitation_id)
+            summaries.append(self._invitation_summary(invitation, attempts))
+        summaries.sort(key=lambda item: (item.created_at, str(item.invitation_id)))
+        return tuple(summaries)
+
+    def revoke_invitation(self, invitation_id: UUID) -> None:
+        """Revoke an invitation without revoking its already paired devices."""
+
+        invitation, invitation_commit_index, _, expected_commit_index = (
+            self._invitation_snapshot(invitation_id)
+        )
+        if invitation.state == "revoked":
+            return
+        revoked = invitation.model_copy(update={"state": "revoked"})
+        try:
+            self._append_authority_record(
+                record_type=_PAIRING_INVITATION_RECORD_TYPE,
+                record_id=str(invitation_id),
+                payload=revoked,
+                expected_commit_index=expected_commit_index,
+                expected_record_commit_index=invitation_commit_index,
+            )
+        except AuthorityCommitConflictError as exc:
+            raise PairingSessionStateError(
+                "pairing state changed concurrently; retry revocation"
+            ) from exc
+
     def refresh(self, request: OperatorTokenRequest) -> OperatorTokenResponse:
         """Rotate one valid refresh credential and its access token.
 
@@ -744,8 +1301,8 @@ class OperatorPairingService:
             PairingSessionStateError: Concurrent authority state changed.
         """
 
-        record_id, session, session_commit_index = self._load_device_session(
-            request.device_id
+        record_type, record_id, session, session_commit_index = (
+            self._load_device_session(request.device_id)
         )
         self._require_active_device(session)
         if (
@@ -775,9 +1332,10 @@ class OperatorPairingService:
                 "refresh_token_expires_at": refresh_expires_at,
             }
         )
-        self._append_session(
-            record_id,
-            updated,
+        self._append_device_credential(
+            record_type=record_type,
+            record_id=record_id,
+            credential=updated,
             expected_record_commit_index=session_commit_index,
         )
         return OperatorTokenResponse(
@@ -810,8 +1368,8 @@ class OperatorPairingService:
         """
 
         token_hash = _opaque_digest(token)
-        matched_session: _StoredPairingSession | None = None
-        for _, session, _ in self._latest_device_sessions():
+        matched_session: _StoredDeviceCredential | None = None
+        for _, _, session, _ in self._latest_device_sessions():
             if session.access_token_hash is not None and compare_digest(
                 session.access_token_hash,
                 token_hash,
@@ -850,7 +1408,7 @@ class OperatorPairingService:
             required_scopes=("devices:manage",),
         )
         devices: list[OperatorDevice] = []
-        for _, session, _ in self._latest_device_sessions():
+        for _, _, session, _ in self._latest_device_sessions():
             if session.device_id is None or session.device_name is None:
                 continue
             devices.append(
@@ -883,7 +1441,9 @@ class OperatorPairingService:
             access_token,
             required_scopes=("devices:manage",),
         )
-        record_id, session, session_commit_index = self._load_device_session(device_id)
+        record_type, record_id, session, session_commit_index = (
+            self._load_device_session(device_id)
+        )
         if session.state == "revoked":
             return
         revoked = session.model_copy(
@@ -895,19 +1455,20 @@ class OperatorPairingService:
                 "refresh_token_expires_at": None,
             }
         )
-        self._append_session(
-            record_id,
-            revoked,
+        self._append_device_credential(
+            record_type=record_type,
+            record_id=record_id,
+            credential=revoked,
             expected_record_commit_index=session_commit_index,
         )
 
     def _latest_device_sessions(
         self,
-    ) -> tuple[tuple[str, _StoredPairingSession, int], ...]:
-        """Return the newest durable session record for every paired device."""
+    ) -> tuple[tuple[str, str, _StoredDeviceCredential, int], ...]:
+        """Return legacy and invitation-backed paired-device records."""
 
-        latest_record_ids: list[str] = []
-        seen: set[str] = set()
+        latest_records: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
         try:
             records = self._store.records()
         except AuthorityNotInitializedError as exc:
@@ -915,30 +1476,37 @@ class OperatorPairingService:
                 "operator gateway is not initialized"
             ) from exc
         for record in reversed(records):
-            if record.record_type != _PAIRING_RECORD_TYPE or record.record_id in seen:
+            identity = (record.record_type, record.record_id)
+            if record.record_type not in {
+                _PAIRING_RECORD_TYPE,
+                _PAIRING_ATTEMPT_RECORD_TYPE,
+            } or identity in seen:
                 continue
-            seen.add(record.record_id)
-            latest_record_ids.append(record.record_id)
-        sessions: list[tuple[str, _StoredPairingSession, int]] = []
-        for record_id in reversed(latest_record_ids):
-            session, commit_index = self._load_session(record_id)
-            if session.device_id is not None:
-                sessions.append((record_id, session, commit_index))
+            seen.add(identity)
+            latest_records.append(identity)
+        sessions: list[tuple[str, str, _StoredDeviceCredential, int]] = []
+        for record_type, record_id in reversed(latest_records):
+            if record_type == _PAIRING_RECORD_TYPE:
+                credential, commit_index = self._load_session(record_id)
+            else:
+                credential, commit_index = self._load_attempt(record_id)
+            if credential.device_id is not None:
+                sessions.append((record_type, record_id, credential, commit_index))
         return tuple(sessions)
 
     def _load_device_session(
         self,
         device_id: UUID,
-    ) -> tuple[str, _StoredPairingSession, int]:
+    ) -> tuple[str, str, _StoredDeviceCredential, int]:
         """Load the newest credential state for one stable device identity."""
 
-        for record_id, session, commit_index in self._latest_device_sessions():
+        for record_type, record_id, session, commit_index in self._latest_device_sessions():
             if session.device_id == device_id:
-                return record_id, session, commit_index
+                return record_type, record_id, session, commit_index
         raise OperatorDeviceNotFoundError("paired device was not found")
 
     @staticmethod
-    def _require_active_device(session: _StoredPairingSession) -> None:
+    def _require_active_device(session: _StoredDeviceCredential) -> None:
         """Reject a revoked or structurally incomplete device record."""
 
         if session.state != "consumed":
@@ -968,6 +1536,227 @@ class OperatorPairingService:
             raise PairingError("stored pairing session is invalid") from exc
         return session, record.commit_index
 
+    def _load_attempt(self, record_id: str) -> tuple[_StoredPairingAttempt, int]:
+        """Load and validate one encrypted invitation attempt."""
+
+        try:
+            record, payload = self._store.read_latest_record_payload(
+                _PAIRING_ATTEMPT_RECORD_TYPE,
+                record_id,
+            )
+        except AuthorityNotInitializedError as exc:
+            raise PairingSessionNotFoundError("pairing attempt was not found") from exc
+        try:
+            attempt = _StoredPairingAttempt.model_validate_json(
+                json.dumps(payload, separators=(",", ":"), allow_nan=False)
+            )
+        except ValueError as exc:
+            raise PairingError("stored pairing attempt is invalid") from exc
+        return attempt, record.commit_index
+
+    def _invitation_ids(self) -> tuple[UUID, ...]:
+        """Return every reusable invitation identity from public journal metadata."""
+
+        try:
+            records = self._store.records()
+        except AuthorityNotInitializedError as exc:
+            raise PairingGatewayNotInitializedError(
+                "operator gateway is not initialized"
+            ) from exc
+        identities: list[UUID] = []
+        seen: set[str] = set()
+        for record in records:
+            if (
+                record.record_type != _PAIRING_INVITATION_RECORD_TYPE
+                or record.record_id in seen
+            ):
+                continue
+            seen.add(record.record_id)
+            try:
+                identities.append(UUID(record.record_id))
+            except ValueError as exc:
+                raise PairingError("stored pairing invitation identity is invalid") from exc
+        return tuple(identities)
+
+    def _invitation_snapshot(
+        self,
+        invitation_id: UUID,
+    ) -> tuple[
+        _StoredPairingInvitation,
+        int,
+        tuple[tuple[str, _StoredPairingAttempt, int], ...],
+        int,
+    ]:
+        """Read invitation usage against one globally fenced journal snapshot."""
+
+        try:
+            records = self._store.records()
+        except AuthorityNotInitializedError as exc:
+            raise PairingGatewayNotInitializedError(
+                "operator gateway is not initialized"
+            ) from exc
+        if not records:
+            raise PairingSessionNotFoundError("pairing invitation was not found")
+        expected_commit_index = records[-1].commit_index
+        invitation_record = next(
+            (
+                record
+                for record in reversed(records)
+                if record.record_type == _PAIRING_INVITATION_RECORD_TYPE
+                and record.record_id == str(invitation_id)
+            ),
+            None,
+        )
+        if invitation_record is None:
+            raise PairingSessionNotFoundError("pairing invitation was not found")
+        try:
+            _, invitation_payload = self._store.read_latest_record_payload(
+                _PAIRING_INVITATION_RECORD_TYPE,
+                str(invitation_id),
+            )
+            invitation = _StoredPairingInvitation.model_validate_json(
+                json.dumps(invitation_payload, separators=(",", ":"), allow_nan=False)
+            )
+        except (AuthorityNotInitializedError, ValueError) as exc:
+            raise PairingError("stored pairing invitation is invalid") from exc
+
+        attempt_record_ids: list[str] = []
+        seen: set[str] = set()
+        for record in reversed(records):
+            if record.record_type != _PAIRING_ATTEMPT_RECORD_TYPE:
+                continue
+            if record.record_id in seen:
+                continue
+            seen.add(record.record_id)
+            attempt_record_ids.append(record.record_id)
+        attempts: list[tuple[str, _StoredPairingAttempt, int]] = []
+        for record_id in reversed(attempt_record_ids):
+            attempt, commit_index = self._load_attempt(record_id)
+            if attempt.invitation_id == invitation_id:
+                attempts.append((record_id, attempt, commit_index))
+        return (
+            invitation,
+            invitation_record.commit_index,
+            tuple(attempts),
+            expected_commit_index,
+        )
+
+    def _require_invitation_available(
+        self,
+        invitation: _StoredPairingInvitation,
+        *,
+        nonce: str,
+        attempts: tuple[tuple[str, _StoredPairingAttempt, int], ...],
+        creating_attempt: bool,
+    ) -> None:
+        """Reject unknown bearer material and unavailable invitation transitions."""
+
+        if not compare_digest(invitation.nonce_hash, _opaque_digest(nonce)):
+            raise PairingSessionNotFoundError("pairing invitation was not found")
+        now = self._now()
+        if invitation.state == "revoked":
+            raise PairingSessionExpiredError("pairing invitation is revoked")
+        if now >= invitation.expires_at:
+            raise PairingSessionExpiredError("pairing invitation is expired")
+        successful_pairings = sum(
+            attempt.state in {"consumed", "revoked"}
+            for _, attempt, _ in attempts
+        )
+        if successful_pairings >= invitation.max_pairings:
+            raise PairingSessionExpiredError("pairing invitation is exhausted")
+        if creating_attempt and len(attempts) >= _MAXIMUM_TOTAL_INVITATION_ATTEMPTS:
+            raise PairingSessionExpiredError("pairing invitation reached its attempt limit")
+
+    def _invitation_summary(
+        self,
+        invitation: _StoredPairingInvitation,
+        attempts: tuple[tuple[str, _StoredPairingAttempt, int], ...],
+    ) -> PairingInvitationSummary:
+        """Derive safe status from invitation and attempt truth."""
+
+        now = self._now()
+        successful_pairings = sum(
+            attempt.state in {"consumed", "revoked"}
+            for _, attempt, _ in attempts
+        )
+        active_attempts = sum(
+            attempt.state == "challenged" and now < attempt.expires_at
+            for _, attempt, _ in attempts
+        )
+        state: PairingInvitationState
+        if invitation.state == "revoked":
+            state = "revoked"
+        elif now >= invitation.expires_at:
+            state = "expired"
+        elif successful_pairings >= invitation.max_pairings:
+            state = "exhausted"
+        elif (
+            len(attempts) >= _MAXIMUM_TOTAL_INVITATION_ATTEMPTS
+            or active_attempts >= _MAXIMUM_ACTIVE_INVITATION_ATTEMPTS
+        ):
+            state = "attempt-limit"
+        else:
+            state = "active"
+        return PairingInvitationSummary(
+            invitation_id=invitation.invitation_id,
+            created_at=invitation.created_at,
+            expires_at=invitation.expires_at,
+            successful_pairings=successful_pairings,
+            max_pairings=invitation.max_pairings,
+            active_attempts=active_attempts,
+            total_attempts=len(attempts),
+            state=state,
+        )
+
+    def _append_authority_record(
+        self,
+        *,
+        record_type: str,
+        record_id: str,
+        payload: FrozenModel,
+        expected_commit_index: int | None = None,
+        expected_record_commit_index: int = 0,
+    ) -> None:
+        """Append one typed encrypted authority record with optional global fencing."""
+
+        if expected_commit_index is None:
+            records = self._store.records()
+            expected_commit_index = records[-1].commit_index if records else 1
+        serialized = cast(
+            Mapping[str, object],
+            payload.model_dump(mode="json", by_alias=True),
+        )
+        self._store.append(
+            expected_commit_index=expected_commit_index,
+            expected_record_commit_index=expected_record_commit_index,
+            authority_term=1,
+            record_type=record_type,
+            record_id=record_id,
+            payload=serialized,
+        )
+
+    def _append_device_credential(
+        self,
+        *,
+        record_type: str,
+        record_id: str,
+        credential: _StoredDeviceCredential,
+        expected_record_commit_index: int,
+    ) -> None:
+        """Append a legacy or invitation-backed credential transition."""
+
+        try:
+            self._append_authority_record(
+                record_type=record_type,
+                record_id=record_id,
+                payload=credential,
+                expected_record_commit_index=expected_record_commit_index,
+            )
+        except AuthorityCommitConflictError as exc:
+            raise PairingSessionStateError(
+                "pairing state changed concurrently; restart pairing"
+            ) from exc
+
     def _append_session(
         self,
         nonce_hash: str,
@@ -977,20 +1766,12 @@ class OperatorPairingService:
     ) -> None:
         """Append one encrypted session transition with local CAS."""
 
-        records = self._store.records()
-        expected_index = records[-1].commit_index if records else 1
-        payload = cast(
-            Mapping[str, object],
-            session.model_dump(mode="json", by_alias=True),
-        )
         try:
-            self._store.append(
-                expected_commit_index=expected_index,
-                expected_record_commit_index=expected_record_commit_index,
-                authority_term=1,
+            self._append_authority_record(
                 record_type=_PAIRING_RECORD_TYPE,
                 record_id=nonce_hash,
-                payload=payload,
+                payload=session,
+                expected_record_commit_index=expected_record_commit_index,
             )
         except AuthorityCommitConflictError as exc:
             raise PairingSessionStateError(

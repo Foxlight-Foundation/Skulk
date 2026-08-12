@@ -970,7 +970,7 @@ automatic gateway failover are later hardening, not prerequisites for pairing.
 If this gateway is down, remote operator access is down while local cluster and
 dashboard operation continue.
 
-The local command creates a five-minute QR capability. After relay provisioning,
+The default local command creates a legacy five-minute QR capability. After relay provisioning,
 the version-two package includes only the app-role outer carrier admission and
 pinned inner-TLS material needed to reach the same challenge/exchange routes;
 the gateway-role carrier credential and canonical access/refresh credentials
@@ -978,9 +978,18 @@ never enter the QR. `--exchange-url` remains the direct-development fallback.
 The relay package uses bounded compact JSON compressed with zlib so the
 terminal QR remains camera-scannable; oversized packages are rejected before
 their session is persisted.
+An explicit `--valid-for` or `--max-pairings` creates a version-three reusable
+invitation instead, bounded to 90 days and twenty successful pairings. The
+encrypted journal separates the invitation from its independent five-minute
+attempt records. Global compare-and-set fencing and bounded retries prevent
+concurrent exchanges from exceeding the success limit; ten live and one
+hundred total attempts bound abuse and journal growth. Host-only list and
+revoke commands expose no bearer material. Invitation revocation blocks new and
+unfinished attempts without changing credentials already issued to devices.
 The API exposes only challenge and exchange before authentication: a phone
 proposes an Ed25519 key, signs a domain-separated random challenge, and receives
-opaque access and refresh credentials once. Raw nonces and tokens are never stored in plaintext;
+opaque access and refresh credentials once. Version three binds its proof to
+the cluster, invitation, nonce, attempt, and challenge. Raw nonces and tokens are never stored in plaintext;
 the authority journal contains encrypted state and one-way token digests.
 Refresh rotates and invalidates the prior access/refresh pair atomically. The
 same service validates short-lived bearer access, exposes credential-free

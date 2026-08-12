@@ -11,7 +11,7 @@ import ssl
 import zlib
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast, final
 from uuid import UUID
@@ -34,6 +34,7 @@ from skulk.operator.pairing import (
     OperatorPairingService,
     PairingChallengeRequest,
     PairingExchangeRequest,
+    PairingInvitationPackage,
     PairingPackage,
     PairingPackageTooLargeError,
     pairing_signature_message,
@@ -262,6 +263,33 @@ def test_oversized_relay_package_is_rejected_before_session_persistence(
         service.create_session()
 
 
+def test_oversized_invitation_is_rejected_before_invitation_persistence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal-hostile reusable QR never creates invitation authority."""
+
+    service, _ = _service(tmp_path)
+    service.configure_relay(_provisioning(), operator_api_port=52416)
+
+    def oversized_url(_package: PairingInvitationPackage) -> str:
+        return "x" * 1_171
+
+    monkeypatch.setattr(PairingInvitationPackage, "as_url", oversized_url)
+
+    def unexpected_append(*_arguments: object, **_keywords: object) -> None:
+        raise AssertionError("oversized pairing invitation was persisted")
+
+    monkeypatch.setattr(
+        OperatorPairingService,
+        "_append_authority_record",
+        unexpected_append,
+    )
+
+    with pytest.raises(PairingPackageTooLargeError, match="supported QR size"):
+        service.create_invitation(lifetime=timedelta(days=90))
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (
@@ -373,6 +401,99 @@ def test_pair_cli_uses_configured_relay_without_direct_url(
     assert operator_cli.main(["pair"]) == 0
     assert len(payloads) == 1
     assert payloads[0].startswith("skulk://pair?z=")
+
+
+def test_pair_cli_creates_protected_reusable_invitation_png(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Explicit invitation flags preserve defaults and write a protected QR."""
+
+    service, _ = _service(tmp_path)
+    service.configure_relay(_provisioning(), operator_api_port=52416)
+    payloads: list[str] = []
+
+    def service_from_default_paths(
+        _service_type: type[OperatorPairingService],
+    ) -> OperatorPairingService:
+        """Return the isolated configured service for this CLI invocation."""
+
+        return service
+
+    monkeypatch.setattr(
+        OperatorPairingService,
+        "from_default_paths",
+        classmethod(service_from_default_paths),
+    )
+    monkeypatch.setattr(operator_cli, "_print_pairing_qr", payloads.append)
+    qr_path = tmp_path / "review.png"
+
+    assert (
+        operator_cli.main(
+            ["pair", "--valid-for", "90d", "--qr-output", str(qr_path)]
+        )
+        == 0
+    )
+    assert payloads[0].startswith("skulk://pair?z=")
+    assert qr_path.read_bytes().startswith(b"\x89PNG")
+    assert qr_path.stat().st_mode & 0o777 == 0o600
+    invitation = service.invitations()[0]
+    assert invitation.max_pairings == 10
+    assert invitation.state == "active"
+    output = capsys.readouterr().out
+    assert "Treat the terminal QR" in output
+    assert "secret bearer invitation" in output
+
+    with pytest.raises(SystemExit):
+        operator_cli.main(
+            ["pair", "--valid-for", "90d", "--qr-output", str(qr_path)]
+        )
+
+
+def test_invitation_cli_lists_and_revokes_without_printing_nonce(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Host management exposes safe invitation status but never its capability."""
+
+    service, _ = _service(tmp_path)
+    package = service.create_invitation(
+        lifetime=timedelta(days=1),
+        exchange_url="https://example.invalid",
+    )
+
+    def service_from_default_paths(
+        _service_type: type[OperatorPairingService],
+    ) -> OperatorPairingService:
+        """Return the isolated service for CLI management."""
+
+        return service
+
+    monkeypatch.setattr(
+        OperatorPairingService,
+        "from_default_paths",
+        classmethod(service_from_default_paths),
+    )
+
+    assert operator_cli.main(["invitations", "list"]) == 0
+    listed = capsys.readouterr().out
+    assert str(package.invitation_id) in listed
+    assert package.issued_at.isoformat() in listed
+    assert package.expires_at.isoformat() in listed
+    assert package.nonce not in listed
+    assert "active" in listed
+
+    assert (
+        operator_cli.main(
+            ["invitations", "revoke", str(package.invitation_id)]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert operator_cli.main(["invitations", "list"]) == 0
+    assert "revoked" in capsys.readouterr().out
 
 
 class _SyntheticRelay:

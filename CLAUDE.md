@@ -118,7 +118,11 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
   membership chain from immutable bootstrap anchors. The encrypted journal
   requires an injected external data-key provider. The v1 designated gateway
   uses a protected local-file provider and `skulk operator pair` to create a
-  five-minute QR capability. A relay-configured gateway includes app-role
+  legacy five-minute QR capability. Explicit duration or pairing-limit flags
+  create a reusable version-three invitation bounded to 90 days, twenty
+  successful pairings, ten live attempts, and one hundred total attempts. Each
+  scan receives an independent five-minute challenge record, and host-only
+  commands list or revoke invitations without exposing bearer material. A relay-configured gateway includes app-role
   carrier and pinned inner-TLS bootstrap material in the version-two QR while
   retaining `--exchange-url` as a direct fallback. Relay packages use bounded,
   zlib-compressed compact JSON so terminal QRs remain scannable; the API exposes only
