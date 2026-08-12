@@ -323,10 +323,34 @@ Behavior:
   returns `410` only when requesting another attempt, while already-issued
   attempts may still finish before their own expiry.
 
-The device signs the domain-separated message defined by
-`pairing_signature_message` in `src/skulk/operator/pairing.py`. Clients should
-consume the generated contract rather than reconstructing the message from
-this prose.
+Legacy version-one and version-two packages sign the domain-separated message
+defined by `pairing_signature_message` in `src/skulk/operator/pairing.py`:
+
+```text
+"skulk-device-pairing-v1\\0"
+  || ASCII(clusterId) || "\\0"
+  || ASCII(nonce) || "\\0"
+  || ASCII(challenge)
+```
+
+Version-three invitations instead sign the distinct message defined by
+`pairing_invitation_signature_message`:
+
+```text
+"skulk-device-pairing-v2\\0"
+  || ASCII(clusterId) || "\\0"
+  || ASCII(invitationId) || "\\0"
+  || ASCII(nonce) || "\\0"
+  || ASCII(attemptId) || "\\0"
+  || ASCII(challenge)
+```
+
+Here `||` means byte concatenation, each quoted `\\0` is one NUL byte, and
+UUIDs use their canonical lowercase hyphenated representation. The v3 domain
+and both returned identifiers are mandatory: signing the legacy transcript for
+an invitation fails proof verification. Clients should use the corresponding
+shared helper when available rather than maintaining another copy of these
+bytes.
 
 ### Exchange device proof
 
