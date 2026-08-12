@@ -252,6 +252,15 @@ def model_trust_failed_live_instances(
     return failed
 
 
+def _model_load_trust_failure_message(error: Exception) -> str:
+    """Return a terminal runner failure for a pre-load trust rejection."""
+    return (
+        f"{MODEL_TRUST_FAILURE_MARKER}: Model load refused before repository "
+        f"code execution: {error}. Re-download the exact signed artifact so "
+        "its installed-card sidecar and pinned revision can be verified."
+    )
+
+
 def runners_never_reported(
     runners: Mapping[RunnerId, "RunnerSupervisor"],
     live_instances: Container[InstanceId],
@@ -2477,11 +2486,7 @@ class Worker:
                         shard.model_card,
                     )
                 except (FileNotFoundError, PermissionError) as error:
-                    message = (
-                        "Model load refused before repository code execution: "
-                        f"{error}. Re-download the exact signed artifact so its "
-                        "installed-card sidecar and pinned revision can be verified."
-                    )
+                    message = _model_load_trust_failure_message(error)
                     logger.error(message)
                     failed = RunnerFailed(error_message=message)
                     runner.status = failed

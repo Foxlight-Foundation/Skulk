@@ -10,6 +10,7 @@ especially because wedges take ~300s each and would never trip the
 from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerReady
 from skulk.worker.main import (
+    _model_load_trust_failure_message,  # pyright: ignore[reportPrivateUsage] — unit under test
     _runner_failed_wedged,  # pyright: ignore[reportPrivateUsage] — unit under test
     model_trust_failed_live_instances,
 )
@@ -148,3 +149,11 @@ def test_model_trust_failure_is_terminal_for_live_instance() -> None:
         runners,
         cast("set[InstanceId]", {"inst-a", "inst-b"}),
     ) == [("inst-a", "org/model", f"{MODEL_TRUST_FAILURE_MARKER}: approval required")]
+
+
+def test_missing_model_path_is_a_terminal_trust_failure() -> None:
+    """A vanished staged path carries the stable non-retry marker."""
+    message = _model_load_trust_failure_message(FileNotFoundError("model missing"))
+
+    assert message.startswith(f"{MODEL_TRUST_FAILURE_MARKER}:")
+    assert "model missing" in message
