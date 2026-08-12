@@ -583,6 +583,36 @@ const ActionsCell = styled.div<{ $area?: MobileGridArea }>`
 
 const LinkIcon = () => <FiExternalLink size={14} style={{ flexShrink: 0 }} />;
 
+const ModelInfo = styled.div`
+  min-width: min(240px, calc(100vw - 44px));
+  max-width: 100%;
+`;
+
+const ModelInfoTitle = styled.div`
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  margin-bottom: 6px;
+
+  > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+`;
+
+const ModelInfoGrid = styled.div`
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 12px;
+  min-width: 0;
+
+  > * {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+`;
+
 function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: ModelCardInfo }) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
@@ -592,8 +622,8 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
   const resolved = card?.resolvedCapabilities;
 
   return (
-    <div style={{ minWidth: 240 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+    <ModelInfo>
+      <ModelInfoTitle>
         <span style={{ color: theme.colors.gold, fontWeight: 600 }}>
           {entry.model_id}
         </span>
@@ -610,14 +640,14 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
             <LinkIcon />
           </a>
         )}
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
+      </ModelInfoTitle>
+      <ModelInfoGrid>
         <span style={{ color: theme.colors.textMuted }}>{t('common.size', 'Size')}</span>
         <span>{formatBytes(entry.total_bytes)}</span>
         {entry.installed_card && (
           <>
             <span style={{ color: theme.colors.textMuted }}>{t('storeRegistry.installedIdentity', 'Installed identity')}</span>
-            <span style={{ overflowWrap: 'anywhere' }}>{entry.installed_card.installed_identity}</span>
+            <span>{entry.installed_card.installed_identity}</span>
             <span style={{ color: theme.colors.textMuted }}>{t('storeRegistry.verification', 'Verification')}</span>
             <span>{entry.installed_card.verification}</span>
           </>
@@ -684,7 +714,7 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
         <span>{entry.files.length}</span>
         <span style={{ color: theme.colors.textMuted }}>{t('storeRegistry.downloaded', 'Downloaded')}</span>
         <span>{new Date(entry.downloaded_at).toLocaleString()}</span>
-      </div>
+      </ModelInfoGrid>
       {entry.files.length > 0 && (
         <div style={{ marginTop: 8, borderTop: `1px solid ${theme.colors.borderLight}`, paddingTop: 6 }}>
           <div style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
@@ -697,7 +727,7 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
           </div>
         </div>
       )}
-    </div>
+    </ModelInfo>
   );
 }
 

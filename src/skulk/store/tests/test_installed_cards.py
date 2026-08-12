@@ -759,3 +759,42 @@ async def test_completed_download_refreshes_card_without_rehashing_bytes(
     assert refreshed is not None and refreshed.installed_card is not None
     assert refreshed.installed_card.model_card == new_card
     assert refreshed.installed_card.files == old_record.files
+
+
+async def test_completed_legacy_import_with_matching_revision_becomes_verified(
+    tmp_path: Path,
+) -> None:
+    """A trusted card request upgrades exact marked bytes without downloading."""
+
+    store = ModelStore(tmp_path / "store")
+    artifact = tmp_path / "store" / "org--model"
+    artifact.mkdir(parents=True)
+    (artifact / "config.json").write_text("{}")
+    (artifact / "model.safetensors").write_bytes(b"weights")
+    card = _card()
+    legacy = build_installed_card_record(artifact, card)
+    write_installed_card(artifact, legacy)
+    (artifact / ".skulk-source-revision").write_text(f"{card.source_revision}\n")
+    store.register_model(
+        "org/model",
+        artifact,
+        [entry.path for entry in legacy.files],
+        sum(entry.size_bytes for entry in legacy.files),
+        source_revision=card.source_revision,
+        source_repository=str(card.artifact_repository),
+        installed_card=legacy,
+    )
+
+    status = await store.request_download(
+        "org/model",
+        source_revision=card.source_revision,
+        source_repository=str(card.artifact_repository),
+        model_card=card,
+    )
+
+    refreshed = store.get_entry("org/model")
+    assert status.status == "complete"
+    assert refreshed is not None and refreshed.installed_card is not None
+    assert refreshed.installed_card.verification == "registry_verified"
+    assert refreshed.installed_card.installed_identity == card.registry_card_id
+    assert refreshed.installed_card.manifest_sha256 == legacy.manifest_sha256

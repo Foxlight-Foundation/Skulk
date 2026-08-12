@@ -8,6 +8,7 @@ from typing import cast
 import pytest
 from aiohttp import web
 
+import skulk.store.model_store as model_store_module
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.memory import Memory
 from skulk.store.installed_cards import (
@@ -37,7 +38,11 @@ def _card() -> ModelCard:
     )
 
 
-async def test_peer_import_resumes_and_verifies_before_publish(tmp_path: Path) -> None:
+async def test_peer_import_resumes_and_verifies_before_publish(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(model_store_module, "MINIMUM_STAGING_FREE_DISK_BYTES", 0)
     source = tmp_path / "source" / "org--model"
     source.mkdir(parents=True)
     payload = b"verified-model-weights"
@@ -229,9 +234,12 @@ async def test_peer_import_promotes_complete_partial_without_network(
 
 
 async def test_peer_import_repairs_corrupt_matching_canonical_generation(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Identity equality cannot short-circuit manifest corruption recovery."""
+
+    monkeypatch.setattr(model_store_module, "MINIMUM_STAGING_FREE_DISK_BYTES", 0)
 
     source = tmp_path / "source" / "org--model"
     source.mkdir(parents=True)
@@ -321,8 +329,10 @@ async def test_deleted_alias_tombstone_blocks_stale_peer_import(
 
 
 async def test_failed_peer_replacement_preserves_old_generation(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setattr(model_store_module, "MINIMUM_STAGING_FREE_DISK_BYTES", 0)
     source = tmp_path / "source" / "org--model"
     source.mkdir(parents=True)
     (source / "model.safetensors").write_bytes(b"new-generation")
