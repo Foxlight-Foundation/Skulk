@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import skulk.store.model_store as model_store_module
 from skulk.download import download_utils
 from skulk.download.download_utils import FileListEntry
 from skulk.shared.models.model_cards import ModelId
@@ -35,6 +36,10 @@ async def test_cancel_store_download_is_idempotent_and_resumable(
 
     monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", file_list)
     monkeypatch.setattr(download_utils, "download_file_with_retry", blocked_download)
+    # Cancellation behavior must not depend on the development host having the
+    # production store's 10 GiB operating reserve available. Capacity admission
+    # has dedicated tests; this fixture needs to reach its mocked transfer.
+    monkeypatch.setattr(model_store_module, "MINIMUM_STAGING_FREE_DISK_BYTES", 0)
     store = ModelStore(tmp_path)
 
     first_status = await store.request_download("org/model")

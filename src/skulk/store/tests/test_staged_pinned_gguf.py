@@ -32,6 +32,41 @@ from skulk.store.model_store_client import (
 _MODEL_ID = "org/multi-quant-GGUF"
 
 
+def test_signed_staged_fast_path_rejects_local_legacy_sidecar(
+    tmp_path: Path,
+) -> None:
+    """Signed loads must refresh legacy evidence before reusing staged bytes."""
+
+    card = ModelCard(
+        model_id=ModelId("org/model"),
+        storage_size=Memory.from_mb(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        source_revision="a" * 40,
+        registry_card_id=f"card_{'a' * 52}",
+        registry_snapshot_id="snapshot_1_test",
+        registry_provenance="foxlight",
+    )
+    artifact = tmp_path / "org--model"
+    artifact.mkdir()
+    (artifact / "config.json").write_text("{}")
+    (artifact / "model.safetensors").write_bytes(b"weights")
+    legacy = build_installed_card_record(artifact, card)
+    write_installed_card(artifact, legacy)
+    (artifact / ".skulk-source-revision").write_text(f"{card.source_revision}\n")
+
+    assert legacy.verification == "local_legacy"
+    assert not _staged_generation_matches(
+        artifact,
+        artifact_model_id=str(card.model_id),
+        requested_card=card,
+        owner_card=None,
+        artifact_role="base",
+    )
+
+
 def test_published_generation_ignores_shared_parent_cleanup_failure(
     tmp_path: Path,
 ) -> None:

@@ -41,6 +41,7 @@ async def test_store_alias_download_reads_from_artifact_repository(
     tmp_path: Path,
 ) -> None:
     """The canonical store key must not become the Hugging Face origin."""
+    monkeypatch.setattr(model_store_module, "MINIMUM_STAGING_FREE_DISK_BYTES", 0)
     store = ModelStore(tmp_path)
     alias = "org/multi@q4-k-m"
     repository = ModelId("org/multi")
@@ -295,6 +296,7 @@ async def test_pinned_store_download_writes_revision_marker_and_offloads_hashing
 ) -> None:
     """A qualified store entry must remain discoverable by generic runners."""
 
+    monkeypatch.setattr(model_store_module, "MINIMUM_STAGING_FREE_DISK_BYTES", 0)
     store = ModelStore(tmp_path)
     model_id = "org/model"
     store._active_downloads[model_id] = StoreDownloadStatus(
@@ -562,6 +564,7 @@ async def test_mutable_main_download_clears_old_pinned_staging_residue(
 ) -> None:
     """An upgrade must not reuse pinned bytes left in mutable-main's path."""
 
+    monkeypatch.setattr(model_store_module, "MINIMUM_STAGING_FREE_DISK_BYTES", 0)
     store = ModelStore(tmp_path)
     model_id = "org/model"
     target_dir = tmp_path / "org--model"

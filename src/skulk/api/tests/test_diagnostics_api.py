@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 from typing import cast
+from uuid import uuid4
 
 import httpx
 import httpx2
@@ -527,6 +528,11 @@ def test_cluster_diagnostics_returns_local_and_peer_results(
     )
 
     peer_payload = peer_diagnostics.model_dump(mode="json", by_alias=True)
+    peer_install_id = uuid4()
+    peer_payload["identity"] = NodeIdentity(
+        node_install_id=peer_install_id,
+        friendly_name="Peer node",
+    ).model_dump(mode="json", by_alias=True)
     peer_payload["futureNodeCounter"] = 7
     data_plane = _json_mapping(cast(object, peer_payload["dataPlane"]))
     data_plane["futureLifecycleCounter"] = 11
@@ -578,6 +584,8 @@ def test_cluster_diagnostics_returns_local_and_peer_results(
     peer = next(node for node in nodes if node["nodeId"] == "peer-node")
     parsed = _json_mapping(peer["diagnostics"])
     assert "futureNodeCounter" not in parsed
+    identity = _json_mapping(parsed["identity"])
+    assert identity["nodeInstallId"] == str(peer_install_id)
     parsed_data_plane = _json_mapping(parsed["dataPlane"])
     assert "futureLifecycleCounter" not in parsed_data_plane
     parsed_egress = _json_mapping(parsed_data_plane["egress"])

@@ -105,6 +105,7 @@ from skulk.store.installed_cards import (
     installed_card_matches,
     installed_companion_matches,
     read_installed_card_with_fallback,
+    require_registry_installed_artifact,
     write_installed_card_with_fallback,
 )
 from skulk.store.staging_eviction import touch_last_used
@@ -179,6 +180,15 @@ def _staged_generation_matches(
                 owner_card=owner_card,
                 artifact_role=artifact_role,
             )
+        if requested_card.registry_card_id is not None:
+            try:
+                require_registry_installed_artifact(
+                    model_directory,
+                    requested_card,
+                )
+            except PermissionError:
+                return False
+            return True
         return installed_card_matches(model_directory, requested_card)
     return _staged_source_revision_matches(
         model_directory, requested_card.source_revision
