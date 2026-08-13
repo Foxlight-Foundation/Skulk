@@ -187,7 +187,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   Host-only list/revoke commands reveal no nonce. Revocation blocks new and
   unfinished attempts without revoking credentials already issued to devices.
   The ordinary direct dashboard listener exposes the same create/list/revoke
-  authority through `/v1/auth/pairing-invitations`: exact same-origin browser
+  authority through `/v1/auth/pairing-invitations`: loopback socket peer and browser
   requests with `X-Skulk-Dashboard: pairing-v1` are required, forwarding
   headers are rejected, creation returns the bearer package once under
   `no-store`, and safe lists omit it. The relay authorization wrapper returns

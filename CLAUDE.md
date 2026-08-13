@@ -123,7 +123,7 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
   successful pairings, ten live attempts, and one hundred total attempts. Each
   scan receives an independent five-minute challenge record, and host-only
   commands list or revoke invitations without exposing bearer material. The
-  direct same-origin dashboard can create, list, and revoke the same invitation
+  node-local dashboard can create, list, and revoke the same invitation
   records under Settings; its bearer response is no-store and kept in mounted
   component memory for five minutes. The relay authorization wrapper denies
   this management prefix even to scoped devices. A relay-configured gateway includes app-role

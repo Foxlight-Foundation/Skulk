@@ -988,7 +988,7 @@ revoke commands expose no bearer material. Invitation revocation blocks new and
 unfinished attempts without changing credentials already issued to devices.
 The ordinary dashboard listener also exposes create/list/revoke invitation
 management under Settings. These routes reuse the same pairing service and
-encrypted journal as the CLI. They require an exact same-origin browser request
+encrypted journal as the CLI. They require a loopback socket peer and loopback browser request
 with an explicit dashboard marker, reject forwarding headers, return a created
 bearer code once with no-store headers, and keep later list responses
 secret-free. `OperatorGatewayAuthorization` returns `404` for the entire

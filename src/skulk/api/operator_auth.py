@@ -2,6 +2,7 @@
 """FastAPI routes for Skulk operator pairing and credential lifecycle."""
 
 from datetime import timedelta
+from ipaddress import ip_address
 from typing import Annotated, Never
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -50,14 +51,14 @@ _FORWARDED_REQUEST_HEADERS = frozenset(
 )
 
 
-def _same_origin_dashboard_request(request: Request) -> bool:
-    """Return whether a browser request came from this direct dashboard origin.
+def _local_dashboard_authority_request(request: Request) -> bool:
+    """Return whether a browser request came from the node-local dashboard.
 
-    Pairing invitation management is intentionally available from a dashboard
-    opened over a trusted LAN, not only from loopback. Requiring an exact
-    browser origin and rejecting proxy identity headers prevents permissive API
-    CORS or the loopback relay listener from becoming a remote invitation
-    authority. Non-browser callers continue to use the host CLI.
+    Minting a bearer invitation establishes persistent remote operator access,
+    so same-origin headers alone are insufficient: a network client can forge
+    them and a browser can be DNS-rebound. Both the socket peer and browser
+    origin must therefore be loopback. Forwarding headers are rejected because
+    a local reverse proxy would otherwise erase the real peer boundary.
     """
 
     if any(name.lower() in _FORWARDED_REQUEST_HEADERS for name, _ in request.headers.raw):
@@ -65,28 +66,43 @@ def _same_origin_dashboard_request(request: Request) -> bool:
     if request.headers.get("x-skulk-dashboard") != _DASHBOARD_REQUEST_HEADER:
         return False
     origin = request.headers.get("origin") or request.headers.get("referer")
-    host = request.headers.get("host")
-    if origin is None or host is None:
+    client_host = request.client.host if request.client is not None else None
+    if origin is None or client_host is None:
         return False
+
+    def is_loopback(host: str | None) -> bool:
+        if host == "localhost":
+            return True
+        if host is None:
+            return False
+        try:
+            return ip_address(host).is_loopback
+        except ValueError:
+            return False
+
     try:
         parsed_origin = urlsplit(origin)
     except ValueError:
         return False
     return (
-        parsed_origin.scheme in {"http", "https"}
+        is_loopback(client_host)
+        and parsed_origin.scheme in {"http", "https"}
         and parsed_origin.username is None
         and parsed_origin.password is None
-        and parsed_origin.netloc.casefold() == host.casefold()
+        and is_loopback(parsed_origin.hostname)
     )
 
 
-def _require_same_origin_dashboard(request: Request) -> None:
-    """Reject pairing invitation management outside the direct dashboard."""
+def _require_local_dashboard_authority(request: Request) -> None:
+    """Reject invitation management outside the node-local dashboard."""
 
-    if not _same_origin_dashboard_request(request):
+    if not _local_dashboard_authority_request(request):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="pairing invitations may be managed only from the direct Skulk dashboard",
+            detail=(
+                "pairing invitations may be managed only from a dashboard opened "
+                "through localhost on the configured operator gateway"
+            ),
         )
 
 
@@ -147,8 +163,8 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
         response_model_by_alias=True,
         summary="Create a dashboard pairing invitation",
         description=(
-            "Create one bounded, revocable pairing invitation from the direct "
-            "same-origin Skulk dashboard. The secret pairing code is returned "
+            "Create one bounded, revocable pairing invitation from the node-local "
+            "Skulk dashboard. The secret pairing code is returned "
             "once with no-store response headers and is never relay-accessible."
         ),
     )
@@ -159,7 +175,7 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
     ) -> PairingInvitationCreateResponse:
         """Create one invitation and return its QR payload exactly once."""
 
-        _require_same_origin_dashboard(request)
+        _require_local_dashboard_authority(request)
         try:
             package = service.create_invitation(
                 lifetime=timedelta(seconds=payload.valid_for_seconds),
@@ -203,13 +219,13 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
         description=(
             "Return safe invitation status without bearer nonces or pairing "
             "codes. This management route is available only to the direct "
-            "same-origin Skulk dashboard and never through the relay gateway."
+            "node-local Skulk dashboard and never through the relay gateway."
         ),
     )
     def list_pairing_invitations(request: Request) -> list[PairingInvitationSummary]:
         """List safe status for invitations created on this gateway."""
 
-        _require_same_origin_dashboard(request)
+        _require_local_dashboard_authority(request)
         return list(service.invitations())
 
     @router.delete(
@@ -223,9 +239,9 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
         ),
     )
     def revoke_pairing_invitation(invitation_id: UUID, request: Request) -> Response:
-        """Revoke one invitation from the direct same-origin dashboard."""
+        """Revoke one invitation from the node-local dashboard."""
 
-        _require_same_origin_dashboard(request)
+        _require_local_dashboard_authority(request)
         try:
             service.revoke_invitation(invitation_id)
         except PairingSessionNotFoundError as exc:

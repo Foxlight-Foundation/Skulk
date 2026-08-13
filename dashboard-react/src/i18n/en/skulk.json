@@ -742,7 +742,7 @@
   "settings.pairing.durationThirtyDays": "30 days",
   "settings.pairing.expires": "Expires",
   "settings.pairing.generate": "Generate pairing code",
-  "settings.pairing.intro": "Generate a protected code for the Skulk Operator app. The code is a bearer secret and is shown here for five minutes.",
+  "settings.pairing.intro": "Generate a protected code for the Skulk Operator app. For security, open this dashboard through localhost on the operator gateway. The code is a bearer secret and is shown here for five minutes.",
   "settings.pairing.legend": "Pairing",
   "settings.pairing.listUnavailable": "Invitation history is temporarily unavailable. New pairing codes can still be generated.",
   "settings.pairing.paired": "paired",

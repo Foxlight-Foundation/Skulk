@@ -68,14 +68,18 @@ def _dashboard_invitation_service(
 def test_dashboard_can_create_list_and_revoke_pairing_invitation(
     tmp_path: Path,
 ) -> None:
-    """The direct same-origin dashboard owns the complete invitation lifecycle."""
+    """The node-local dashboard owns the complete invitation lifecycle."""
 
     service = _dashboard_invitation_service(tmp_path)
     app = FastAPI()
     app.include_router(create_operator_auth_router(service))
-    client = TestClient(app, base_url="http://cluster.local:52415")
+    client = TestClient(
+        app,
+        base_url="http://127.0.0.1:52415",
+        client=("127.0.0.1", 50000),
+    )
     headers = {
-        "Origin": "http://cluster.local:52415",
+        "Origin": "http://127.0.0.1:52415",
         "X-Skulk-Dashboard": "pairing-v1",
     }
 
@@ -114,15 +118,19 @@ def test_dashboard_can_create_list_and_revoke_pairing_invitation(
     assert relisted[0]["state"] == "revoked"
 
 
-def test_dashboard_invitation_management_requires_exact_browser_origin(
+def test_dashboard_invitation_management_requires_local_browser_authority(
     tmp_path: Path,
 ) -> None:
-    """Cross-origin pages and forwarded relay requests cannot mint invitations."""
+    """Network peers, cross-origin pages, and proxies cannot mint invitations."""
 
     service = _dashboard_invitation_service(tmp_path)
     app = FastAPI()
     app.include_router(create_operator_auth_router(service))
-    client = TestClient(app, base_url="http://cluster.local:52415")
+    client = TestClient(
+        app,
+        base_url="http://127.0.0.1:52415",
+        client=("127.0.0.1", 50000),
+    )
     payload = {"validForSeconds": 300, "maxPairings": 1}
 
     assert client.post("/v1/auth/pairing-invitations", json=payload).status_code == 403
@@ -141,7 +149,7 @@ def test_dashboard_invitation_management_requires_exact_browser_origin(
         client.post(
             "/v1/auth/pairing-invitations",
             headers={
-                "Origin": "http://cluster.local:52415",
+                "Origin": "http://127.0.0.1:52415",
                 "X-Skulk-Dashboard": "pairing-v1",
                 "X-Forwarded-For": "192.0.2.10",
             },
@@ -152,11 +160,27 @@ def test_dashboard_invitation_management_requires_exact_browser_origin(
     listed = client.get(
         "/v1/auth/pairing-invitations",
         headers={
-            "Referer": "http://cluster.local:52415/cluster",
+            "Referer": "http://127.0.0.1:52415/cluster",
             "X-Skulk-Dashboard": "pairing-v1",
         },
     )
     assert listed.status_code == 200
+
+    network_client = TestClient(
+        app,
+        base_url="http://cluster.local:52415",
+        client=("192.0.2.10", 50000),
+    )
+    spoofed = network_client.post(
+        "/v1/auth/pairing-invitations",
+        headers={
+            "Origin": "http://cluster.local:52415",
+            "X-Skulk-Dashboard": "pairing-v1",
+        },
+        json=payload,
+    )
+    assert spoofed.status_code == 403
+    assert "localhost" in spoofed.text
 
 
 def test_dashboard_invitation_creation_requires_configured_gateway(
@@ -171,12 +195,16 @@ def test_dashboard_invitation_creation_requires_configured_gateway(
     )
     app = FastAPI()
     app.include_router(create_operator_auth_router(service))
-    client = TestClient(app, base_url="http://cluster.local:52415")
+    client = TestClient(
+        app,
+        base_url="http://127.0.0.1:52415",
+        client=("127.0.0.1", 50000),
+    )
 
     response = client.post(
         "/v1/auth/pairing-invitations",
         headers={
-            "Origin": "http://cluster.local:52415",
+            "Origin": "http://127.0.0.1:52415",
             "X-Skulk-Dashboard": "pairing-v1",
         },
         json={"validForSeconds": 300, "maxPairings": 1},

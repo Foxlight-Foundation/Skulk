@@ -9,6 +9,7 @@ import { PairingSettings } from './PairingSettings';
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const createInvitationMock = vi.hoisted(() => vi.fn());
+const getInvitationsQueryMock = vi.hoisted(() => vi.fn());
 const refetchMock = vi.hoisted(() => vi.fn());
 const revokeMock = vi.hoisted(() => vi.fn());
 
@@ -34,11 +35,14 @@ vi.mock('qrcode.react', () => ({
 vi.mock('../../store/endpoints/pairing', () => ({
   createPairingInvitation: createInvitationMock,
   PairingInvitationRequestError: class PairingInvitationRequestError extends Error {},
-  useGetPairingInvitationsQuery: () => ({
-    data: [],
-    isError: false,
-    refetch: refetchMock,
-  }),
+  useGetPairingInvitationsQuery: (argument: unknown, options: unknown) => {
+    getInvitationsQueryMock(argument, options);
+    return {
+      data: [],
+      isError: false,
+      refetch: refetchMock,
+    };
+  },
   useRevokePairingInvitationMutation: () => [revokeMock, { isLoading: false }],
 }));
 
@@ -114,6 +118,12 @@ describe('PairingSettings', () => {
     expect(container?.querySelector('canvas')?.getAttribute('data-logo-excavated')).toBe('false');
     expect(container?.textContent).not.toContain('secret-bearing-code');
     expect(container?.textContent).toContain('Visible here for · 5:00');
+    expect(getInvitationsQueryMock).toHaveBeenCalledWith(undefined, {
+      pollingInterval: 15_000,
+      skipPollingIfUnfocused: true,
+      refetchOnFocus: true,
+      refetchOnReconnect: true,
+    });
 
     await act(async () => vi.advanceTimersByTime(5 * 60 * 1_000));
     expect(container?.textContent).toContain('Generate pairing code');

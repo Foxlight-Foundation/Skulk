@@ -224,7 +224,12 @@ export function PairingSettings() {
     data: invitations,
     isError: invitationListFailed,
     refetch: refetchInvitations,
-  } = useGetPairingInvitationsQuery();
+  } = useGetPairingInvitationsQuery(undefined, {
+    pollingInterval: 15_000,
+    skipPollingIfUnfocused: true,
+    refetchOnFocus: true,
+    refetchOnReconnect: true,
+  });
   const [revokeInvitation, revokeResult] = useRevokePairingInvitationMutation();
 
   const resetPairingDisplay = useCallback(() => {
@@ -313,7 +318,7 @@ export function PairingSettings() {
           <Intro>
             {t(
               'settings.pairing.intro',
-              'Generate a protected code for the Skulk Operator app. The code is a bearer secret and is shown here for five minutes.',
+              'Generate a protected code for the Skulk Operator app. For security, open this dashboard through localhost on the operator gateway. The code is a bearer secret and is shown here for five minutes.',
             )}
           </Intro>
           <FormGrid>

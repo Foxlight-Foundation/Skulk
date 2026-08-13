@@ -315,9 +315,9 @@ Parameters:
 
 Behavior:
 
-- requires an exact same-origin browser `Origin` or `Referer`, rejects proxy
-  forwarding headers, and is available only on the ordinary direct dashboard
-  listener;
+- requires both a loopback socket peer and loopback browser `Origin` or
+  `Referer`, rejects proxy forwarding headers, and is available only when the
+  dashboard is opened through localhost on the configured operator gateway;
 - is explicitly unavailable through `OperatorGatewayAuthorization`, even to a
   valid fully scoped device;
 - reuses `OperatorPairingService.create_invitation`, so the CLI and dashboard
@@ -327,7 +327,7 @@ Behavior:
 - returns `Cache-Control: no-store, max-age=0` and `Pragma: no-cache`; clients
   must not persist the response, put it in URLs, logs, telemetry, or shared
   application state;
-- returns `403` outside the direct same-origin dashboard, `409` before relay
+- returns `403` outside the node-local dashboard authority, `409` before relay
   configuration, `422` if the generated package exceeds the reliable QR
   budget, and `503` when the configured gateway identity is temporarily
   unavailable.
@@ -342,7 +342,8 @@ Parameters:
 
 Behavior:
 
-- applies the same direct same-origin and no-forwarding boundary as creation;
+- applies the same loopback-peer, loopback-origin, and no-forwarding boundary
+  as creation;
 - returns invitation ID, creation/expiry, successful and maximum pairings,
   active/total attempts, and state;
 - never returns the invitation nonce, QR payload, carrier credentials, or
@@ -359,7 +360,7 @@ Parameters:
 
 Behavior:
 
-- applies the same direct same-origin and no-forwarding boundary;
+- applies the same loopback-peer, loopback-origin, and no-forwarding boundary;
 - blocks new and unfinished attempts without revoking already paired devices;
 - returns `204` after success or idempotent repeated revocation, `404` for an
   unknown invitation, and `409` for an unresolved concurrent authority
