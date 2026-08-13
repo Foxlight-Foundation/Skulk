@@ -4,6 +4,7 @@ import {
   batchSpeechMaxTokens,
   buildSpeechSynthesisRequest,
   DASHBOARD_SPEECH_SEED,
+  DASHBOARD_SPEECH_SAMPLING,
   MAX_REFERENCE_AUDIO_BYTES,
   speechLanguageForDashboardLocale,
 } from './speechSynthesisRequest';
@@ -32,6 +33,10 @@ describe('buildSpeechSynthesisRequest', () => {
       lang_code: 'English',
       response_format: 'mp3',
       seed: DASHBOARD_SPEECH_SEED,
+      temperature: DASHBOARD_SPEECH_SAMPLING.temperature,
+      top_p: DASHBOARD_SPEECH_SAMPLING.topP,
+      top_k: DASHBOARD_SPEECH_SAMPLING.topK,
+      repetition_penalty: DASHBOARD_SPEECH_SAMPLING.repetitionPenalty,
       max_tokens: 8192,
       voice: 'ryan',
     });
@@ -64,6 +69,12 @@ describe('buildSpeechSynthesisRequest', () => {
     expect(body.get('lang_code')).toBe('English');
     expect(body.get('response_format')).toBe('pcm');
     expect(body.get('seed')).toBe(String(DASHBOARD_SPEECH_SEED));
+    expect(body.get('temperature')).toBe(String(DASHBOARD_SPEECH_SAMPLING.temperature));
+    expect(body.get('top_p')).toBe(String(DASHBOARD_SPEECH_SAMPLING.topP));
+    expect(body.get('top_k')).toBe(String(DASHBOARD_SPEECH_SAMPLING.topK));
+    expect(body.get('repetition_penalty')).toBe(
+      String(DASHBOARD_SPEECH_SAMPLING.repetitionPenalty),
+    );
     expect(body.get('stream')).toBe('true');
     expect(body.has('voice')).toBe(false);
     const uploadedReference = body.get('reference_audio');
