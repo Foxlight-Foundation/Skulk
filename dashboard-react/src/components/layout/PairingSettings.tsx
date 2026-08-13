@@ -6,6 +6,7 @@ import { addToast } from '../../hooks/useToast';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
   createPairingInvitation,
+  pairingInvitationQueryErrorMessage,
   PairingInvitationRequestError,
   type CreatedPairingInvitation,
   type PairingInvitationState,
@@ -222,6 +223,7 @@ export function PairingSettings() {
   const [error, setError] = useState<string | null>(null);
   const {
     data: invitations,
+    error: invitationListError,
     isError: invitationListFailed,
     refetch: refetchInvitations,
   } = useGetPairingInvitationsQuery(undefined, {
@@ -318,7 +320,7 @@ export function PairingSettings() {
           <Intro>
             {t(
               'settings.pairing.intro',
-              'Generate a protected code for the Skulk Operator app. For security, open this dashboard through localhost on the operator gateway. The code is a bearer secret and is shown here for five minutes.',
+              'Generate a protected code for the Skulk Operator app. Open this dashboard on the operator gateway through Tailscale or localhost. The code is a bearer secret and is shown here for five minutes.',
             )}
           </Intro>
           <FormGrid>
@@ -414,11 +416,8 @@ export function PairingSettings() {
 
       {error ? <ErrorText role="alert">{error}</ErrorText> : null}
       {invitationListFailed ? (
-        <ErrorText role="status">
-          {t(
-            'settings.pairing.listUnavailable',
-            'Invitation history is temporarily unavailable. New pairing codes can still be generated.',
-          )}
+        <ErrorText role="alert">
+          {pairingInvitationQueryErrorMessage(invitationListError)}
         </ErrorText>
       ) : null}
 

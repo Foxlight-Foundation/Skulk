@@ -118,10 +118,10 @@ def test_dashboard_can_create_list_and_revoke_pairing_invitation(
     assert relisted[0]["state"] == "revoked"
 
 
-def test_dashboard_invitation_management_requires_local_browser_authority(
+def test_dashboard_invitation_management_requires_direct_browser_authority(
     tmp_path: Path,
 ) -> None:
-    """Network peers, cross-origin pages, and proxies cannot mint invitations."""
+    """Loopback and same-origin tailnet browsers work while other peers do not."""
 
     service = _dashboard_invitation_service(tmp_path)
     app = FastAPI()
@@ -166,21 +166,89 @@ def test_dashboard_invitation_management_requires_local_browser_authority(
     )
     assert listed.status_code == 200
 
-    network_client = TestClient(
+    tailnet_client = TestClient(
         app,
-        base_url="http://cluster.local:52415",
-        client=("192.0.2.10", 50000),
+        base_url="http://kite1:52415",
+        client=("100.101.102.103", 50000),
     )
-    spoofed = network_client.post(
+    tailnet_listed = tailnet_client.get(
         "/v1/auth/pairing-invitations",
         headers={
-            "Origin": "http://cluster.local:52415",
+            "Origin": "http://kite1:52415",
+            "X-Skulk-Dashboard": "pairing-v1",
+        },
+    )
+    assert tailnet_listed.status_code == 200
+
+    tailnet_fqdn_client = TestClient(
+        app,
+        base_url="https://kite1.example-tailnet.ts.net:52415",
+        client=("fd7a:115c:a1e0::1234", 50000),
+    )
+    assert (
+        tailnet_fqdn_client.get(
+            "/v1/auth/pairing-invitations",
+            headers={
+                "Origin": "https://kite1.example-tailnet.ts.net:52415",
+                "X-Skulk-Dashboard": "pairing-v1",
+            },
+        ).status_code
+        == 200
+    )
+
+    tailnet_literal_client = TestClient(
+        app,
+        base_url="http://100.110.120.125:52415",
+        client=("100.101.102.103", 50000),
+    )
+    assert (
+        tailnet_literal_client.get(
+            "/v1/auth/pairing-invitations",
+            headers={
+                "Origin": "http://100.110.120.125:52415",
+                "X-Skulk-Dashboard": "pairing-v1",
+            },
+        ).status_code
+        == 200
+    )
+
+    cross_origin = tailnet_client.post(
+        "/v1/auth/pairing-invitations",
+        headers={
+            "Origin": "https://hostile.example",
             "X-Skulk-Dashboard": "pairing-v1",
         },
         json=payload,
     )
-    assert spoofed.status_code == 403
-    assert "localhost" in spoofed.text
+    assert cross_origin.status_code == 403
+
+    mismatched_port = tailnet_client.post(
+        "/v1/auth/pairing-invitations",
+        headers={
+            "Origin": "http://kite1:52416",
+            "X-Skulk-Dashboard": "pairing-v1",
+        },
+        json=payload,
+    )
+    assert mismatched_port.status_code == 403
+
+    lan_client = TestClient(
+        app,
+        base_url="http://kite1:52415",
+        client=("192.168.1.20", 50000),
+    )
+    blocked_lan = lan_client.post(
+        "/v1/auth/pairing-invitations",
+        headers={
+            "Origin": "http://kite1:52415",
+            "X-Skulk-Dashboard": "pairing-v1",
+        },
+        json=payload,
+    )
+    assert blocked_lan.status_code == 403
+    assert "Tailscale" in blocked_lan.text
+    assert "localhost" in blocked_lan.text
+    assert "ordinary LAN access" in blocked_lan.text
 
 
 def test_dashboard_invitation_creation_requires_configured_gateway(
@@ -212,7 +280,18 @@ def test_dashboard_invitation_creation_requires_configured_gateway(
 
     assert response.status_code == 409
     assert "configured operator gateway" in response.text
+    assert "Tailscale or localhost" in response.text
     assert "pairingCode" not in response.text
+
+    listed = client.get(
+        "/v1/auth/pairing-invitations",
+        headers={
+            "Origin": "http://127.0.0.1:52415",
+            "X-Skulk-Dashboard": "pairing-v1",
+        },
+    )
+    assert listed.status_code == 409
+    assert "configured operator gateway" in listed.text
 
 
 def _pair_device(

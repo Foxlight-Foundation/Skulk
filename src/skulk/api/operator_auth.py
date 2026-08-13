@@ -2,8 +2,8 @@
 """FastAPI routes for Skulk operator pairing and credential lifecycle."""
 
 from datetime import timedelta
-from ipaddress import ip_address
-from typing import Annotated, Never
+from ipaddress import IPv4Network, IPv6Network, ip_address
+from typing import Annotated, Final, Never
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -38,6 +38,19 @@ from skulk.operator.relay import OperatorRelayUnavailableError
 _BEARER_CHALLENGE = {"WWW-Authenticate": "Bearer"}
 _PAIRING_INVITATION_PATH = "/pairing-invitations"
 _DASHBOARD_REQUEST_HEADER = "pairing-v1"
+_TAILSCALE_IPV4_NETWORK: Final = IPv4Network("100.64.0.0/10")
+_TAILSCALE_IPV6_NETWORK: Final = IPv6Network("fd7a:115c:a1e0::/48")
+_PAIRING_AUTHORITY_DETAIL: Final = (
+    "Pairing invitations can be managed only from the configured operator gateway. "
+    "Open that gateway's dashboard through Tailscale using its MagicDNS name or "
+    "Tailscale IP, or open it through localhost. Public relay and ordinary LAN "
+    "access are blocked."
+)
+_PAIRING_GATEWAY_DETAIL: Final = (
+    "This node is not ready to manage pairing invitations. Open Settings on the "
+    "configured operator gateway through Tailscale or localhost; if this is the "
+    "gateway, configure its relay access first."
+)
 _FORWARDED_REQUEST_HEADERS = frozenset(
     {
         b"forwarded",
@@ -51,14 +64,15 @@ _FORWARDED_REQUEST_HEADERS = frozenset(
 )
 
 
-def _local_dashboard_authority_request(request: Request) -> bool:
-    """Return whether a browser request came from the node-local dashboard.
+def _direct_dashboard_authority_request(request: Request) -> bool:
+    """Return whether a browser request came directly over localhost or Tailscale.
 
     Minting a bearer invitation establishes persistent remote operator access,
-    so same-origin headers alone are insufficient: a network client can forge
-    them and a browser can be DNS-rebound. Both the socket peer and browser
-    origin must therefore be loopback. Forwarding headers are rejected because
-    a local reverse proxy would otherwise erase the real peer boundary.
+    so same-origin headers alone are insufficient. The socket peer must be
+    loopback or a Tailscale-assigned address, while the browser origin must
+    exactly match the direct dashboard URL and use a loopback, MagicDNS, or
+    literal Tailscale host. Forwarding headers are rejected because a proxy
+    would otherwise erase the real peer boundary.
     """
 
     if any(name.lower() in _FORWARDED_REQUEST_HEADERS for name, _ in request.headers.raw):
@@ -70,40 +84,104 @@ def _local_dashboard_authority_request(request: Request) -> bool:
     if origin is None or client_host is None:
         return False
 
-    def is_loopback(host: str | None) -> bool:
-        if host == "localhost":
-            return True
-        if host is None:
-            return False
-        try:
-            return ip_address(host).is_loopback
-        except ValueError:
-            return False
-
     try:
         parsed_origin = urlsplit(origin)
+        origin_port = parsed_origin.port
     except ValueError:
         return False
-    return (
-        is_loopback(client_host)
-        and parsed_origin.scheme in {"http", "https"}
-        and parsed_origin.username is None
-        and parsed_origin.password is None
-        and is_loopback(parsed_origin.hostname)
-    )
+    origin_hostname = _normalized_hostname(parsed_origin.hostname)
+    request_hostname = _normalized_hostname(request.url.hostname)
+    if (
+        parsed_origin.scheme not in {"http", "https"}
+        or parsed_origin.scheme != request.url.scheme
+        or parsed_origin.username is not None
+        or parsed_origin.password is not None
+        or origin_hostname is None
+        or origin_hostname != request_hostname
+        or _effective_port(parsed_origin.scheme, origin_port)
+        != _effective_port(request.url.scheme, request.url.port)
+    ):
+        return False
+
+    if _is_loopback_address(client_host):
+        return _is_loopback_hostname(origin_hostname)
+    return _is_tailnet_address(client_host) and _is_tailnet_hostname(origin_hostname)
 
 
-def _require_local_dashboard_authority(request: Request) -> None:
-    """Reject invitation management outside the node-local dashboard."""
+def _normalized_hostname(host: str | None) -> str | None:
+    """Normalize one URL hostname for exact same-origin comparison."""
 
-    if not _local_dashboard_authority_request(request):
+    if host is None:
+        return None
+    return host.rstrip(".").casefold()
+
+
+def _effective_port(scheme: str, port: int | None) -> int | None:
+    """Return the explicit or default port for an HTTP origin."""
+
+    if port is not None:
+        return port
+    if scheme == "http":
+        return 80
+    if scheme == "https":
+        return 443
+    return None
+
+
+def _is_loopback_address(host: str) -> bool:
+    """Return whether a socket peer is an exact loopback IP address."""
+
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_loopback_hostname(host: str) -> bool:
+    """Return whether a same-origin dashboard host denotes loopback."""
+
+    if host == "localhost":
+        return True
+    return _is_loopback_address(host)
+
+
+def _is_tailnet_address(host: str) -> bool:
+    """Return whether a socket peer is in Tailscale's assigned address space."""
+
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return False
+    if address.version == 4:
+        return address in _TAILSCALE_IPV4_NETWORK
+    return address in _TAILSCALE_IPV6_NETWORK
+
+
+def _is_tailnet_hostname(host: str) -> bool:
+    """Return whether a same-origin host is a MagicDNS name or Tailscale IP."""
+
+    if _is_tailnet_address(host):
+        return True
+    return "." not in host or host.endswith(".ts.net")
+
+
+def _require_direct_dashboard_authority(request: Request) -> None:
+    """Reject invitation management outside the direct trusted dashboard."""
+
+    if not _direct_dashboard_authority_request(request):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "pairing invitations may be managed only from a dashboard opened "
-                "through localhost on the configured operator gateway"
-            ),
+            detail=_PAIRING_AUTHORITY_DETAIL,
         )
+
+
+def _raise_pairing_gateway_http_error(exc: Exception) -> Never:
+    """Map an uninitialized local authority to actionable dashboard guidance."""
+
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=_PAIRING_GATEWAY_DETAIL,
+    ) from exc
 
 
 def _require_bearer(authorization: str | None) -> str:
@@ -163,9 +241,10 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
         response_model_by_alias=True,
         summary="Create a dashboard pairing invitation",
         description=(
-            "Create one bounded, revocable pairing invitation from the node-local "
-            "Skulk dashboard. The secret pairing code is returned "
-            "once with no-store response headers and is never relay-accessible."
+            "Create one bounded, revocable pairing invitation from the configured "
+            "gateway dashboard over localhost or Tailscale. The secret pairing code "
+            "is returned once with no-store response headers and is never "
+            "relay-accessible."
         ),
     )
     def create_pairing_invitation(
@@ -175,7 +254,7 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
     ) -> PairingInvitationCreateResponse:
         """Create one invitation and return its QR payload exactly once."""
 
-        _require_local_dashboard_authority(request)
+        _require_direct_dashboard_authority(request)
         try:
             package = service.create_invitation(
                 lifetime=timedelta(seconds=payload.valid_for_seconds),
@@ -192,13 +271,7 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
                 detail="pairing invitation is too large for a reliable QR code",
             ) from exc
         except (PairingGatewayNotInitializedError, ValueError) as exc:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "generate pairing invitations from the configured operator gateway; "
-                    "configure relay access on this node first"
-                ),
-            ) from exc
+            _raise_pairing_gateway_http_error(exc)
         except OperatorRelayUnavailableError as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -218,15 +291,19 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
         summary="List dashboard pairing invitations",
         description=(
             "Return safe invitation status without bearer nonces or pairing "
-            "codes. This management route is available only to the direct "
-            "node-local Skulk dashboard and never through the relay gateway."
+            "codes. This management route is available only to the configured "
+            "gateway dashboard over localhost or Tailscale and never through the "
+            "relay gateway."
         ),
     )
     def list_pairing_invitations(request: Request) -> list[PairingInvitationSummary]:
         """List safe status for invitations created on this gateway."""
 
-        _require_local_dashboard_authority(request)
-        return list(service.invitations())
+        _require_direct_dashboard_authority(request)
+        try:
+            return list(service.invitations())
+        except PairingGatewayNotInitializedError as exc:
+            _raise_pairing_gateway_http_error(exc)
 
     @router.delete(
         f"{_PAIRING_INVITATION_PATH}/{{invitation_id}}",
@@ -235,15 +312,18 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
         description=(
             "Immediately prevent new and unfinished pairing attempts for one "
             "invitation without revoking devices that already paired. This "
-            "management route is never relay-accessible."
+            "management route is available only to the configured gateway "
+            "dashboard over localhost or Tailscale and is never relay-accessible."
         ),
     )
     def revoke_pairing_invitation(invitation_id: UUID, request: Request) -> Response:
-        """Revoke one invitation from the node-local dashboard."""
+        """Revoke one invitation from the trusted direct gateway dashboard."""
 
-        _require_local_dashboard_authority(request)
+        _require_direct_dashboard_authority(request)
         try:
             service.revoke_invitation(invitation_id)
+        except PairingGatewayNotInitializedError as exc:
+            _raise_pairing_gateway_http_error(exc)
         except PairingSessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except PairingSessionStateError as exc:

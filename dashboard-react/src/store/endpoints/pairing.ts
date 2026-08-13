@@ -4,6 +4,9 @@ const dashboardPairingHeaders = {
   'X-Skulk-Dashboard': 'pairing-v1',
 } as const;
 
+const pairingAuthorityGuidance =
+  "Open Settings on the configured operator gateway through Tailscale using its MagicDNS name or Tailscale IP, or through localhost. Public relay and ordinary LAN access cannot manage pairing invitations.";
+
 /** Safe lifecycle state for a reusable operator pairing invitation. */
 export type PairingInvitationState =
   | 'active'
@@ -114,9 +117,21 @@ async function pairingErrorMessage(response: Response): Promise<string> {
   } catch {
     // The status-based fallback below is intentionally payload-independent.
   }
-  return response.status === 409
-    ? 'Open the dashboard on the configured operator gateway, or configure relay access on this node.'
-    : 'Skulk could not manage pairing invitations.';
+  return response.status === 403 || response.status === 409
+    ? pairingAuthorityGuidance
+    : `Skulk could not manage pairing invitations. ${pairingAuthorityGuidance}`;
+}
+
+/** Return actionable dashboard copy for an RTK Query invitation-list failure. */
+export function pairingInvitationQueryErrorMessage(value: unknown): string {
+  if (isObject(value)) {
+    const data = value.data;
+    if (isObject(data) && typeof data.detail === 'string') return data.detail;
+    if (typeof value.error === 'string' && value.error.trim()) {
+      return `Skulk could not load invitation history: ${value.error}. ${pairingAuthorityGuidance}`;
+    }
+  }
+  return `Skulk could not load invitation history. ${pairingAuthorityGuidance}`;
 }
 
 function parseCreatedPairingInvitation(value: unknown): CreatedPairingInvitation {

@@ -125,8 +125,11 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
   commands list or revoke invitations without exposing bearer material. The
   node-local dashboard can create, list, and revoke the same invitation
   records under Settings; its bearer response is no-store and kept in mounted
-  component memory for five minutes. The relay authorization wrapper denies
-  this management prefix even to scoped devices. A relay-configured gateway includes app-role
+  component memory for five minutes. Management requires a same-origin
+  dashboard connection to the configured gateway over loopback or a Tailscale
+  address; ordinary LAN peers, forwarded requests, and the public relay are
+  rejected with actionable recovery guidance. The relay authorization wrapper
+  denies this management prefix even to scoped devices. A relay-configured gateway includes app-role
   carrier and pinned inner-TLS bootstrap material in the version-two QR while
   retaining `--exchange-url` as a direct fallback. Relay packages use bounded,
   zlib-compressed compact JSON so terminal QRs remain scannable; the API exposes only

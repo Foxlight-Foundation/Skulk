@@ -34,11 +34,14 @@ vi.mock('qrcode.react', () => ({
 
 vi.mock('../../store/endpoints/pairing', () => ({
   createPairingInvitation: createInvitationMock,
+  pairingInvitationQueryErrorMessage: () =>
+    'Open Settings on the configured operator gateway through Tailscale or localhost.',
   PairingInvitationRequestError: class PairingInvitationRequestError extends Error {},
   useGetPairingInvitationsQuery: (argument: unknown, options: unknown) => {
     getInvitationsQueryMock(argument, options);
     return {
       data: [],
+      error: undefined,
       isError: false,
       refetch: refetchMock,
     };
