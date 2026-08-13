@@ -988,15 +988,19 @@ revoke commands expose no bearer material. Invitation revocation blocks new and
 unfinished attempts without changing credentials already issued to devices.
 The ordinary dashboard listener also exposes create/list/revoke invitation
 management under Settings. These routes reuse the same pairing service and
-encrypted journal as the CLI. They require a loopback socket peer and loopback browser request
-with an explicit dashboard marker, reject forwarding headers, return a created
-bearer code once with no-store headers, and keep later list responses
-secret-free. `OperatorGatewayAuthorization` returns `404` for the entire
-management prefix before bearer evaluation, so invitation authority never
-crosses the public relay even for a fully scoped paired device. The dashboard
-retains the one-time code only in mounted component memory and resets its QR
-view after five minutes; server invitation validity remains independently
-bounded by the chosen lifetime.
+encrypted journal as the CLI. They require a loopback socket peer or a
+Tailscale socket peer verified by the local Tailscale authority,
+an exact same-origin browser request from a loopback, MagicDNS, `*.ts.net`, or
+literal Tailscale host, and an explicit dashboard marker. Forwarding headers
+ordinary LAN and unverified CGNAT peers are rejected. The routes return a created bearer code
+once with no-store headers and keep later list responses secret-free.
+`OperatorGatewayAuthorization` returns `404` for the entire management prefix
+before bearer evaluation, so invitation authority never crosses the public
+relay even for a fully scoped paired device. The dashboard retains the
+one-time code only in mounted component memory and resets its QR view after
+five minutes; server invitation validity remains independently bounded by the
+chosen lifetime. Rejections tell operators to open the configured gateway over
+Tailscale or localhost rather than presenting a generic availability error.
 The API exposes only challenge and exchange before authentication: a phone
 proposes an Ed25519 key, signs a domain-separated random challenge, and receives
 opaque access and refresh credentials once. Version three binds its proof to

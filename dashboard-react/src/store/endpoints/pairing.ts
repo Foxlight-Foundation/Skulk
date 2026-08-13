@@ -56,6 +56,7 @@ export class PairingInvitationRequestError extends Error {
  */
 export async function createPairingInvitation(
   request: CreatePairingInvitationRequest,
+  fallbackErrorMessage: string,
 ): Promise<CreatedPairingInvitation> {
   const response = await fetch('/v1/auth/pairing-invitations', {
     method: 'POST',
@@ -70,7 +71,7 @@ export async function createPairingInvitation(
   if (!response.ok) {
     throw new PairingInvitationRequestError(
       response.status,
-      await pairingErrorMessage(response),
+      (await pairingErrorMessage(response)) ?? fallbackErrorMessage,
     );
   }
   return parseCreatedPairingInvitation(await response.json());
@@ -107,16 +108,23 @@ export const {
   useRevokePairingInvitationMutation,
 } = pairingApi;
 
-async function pairingErrorMessage(response: Response): Promise<string> {
+async function pairingErrorMessage(response: Response): Promise<string | null> {
   try {
     const body: unknown = await response.json();
     if (isObject(body) && typeof body.detail === 'string') return body.detail;
   } catch {
     // The status-based fallback below is intentionally payload-independent.
   }
-  return response.status === 409
-    ? 'Open the dashboard on the configured operator gateway, or configure relay access on this node.'
-    : 'Skulk could not manage pairing invitations.';
+  return null;
+}
+
+/** Return a safe backend detail for an RTK Query invitation-list failure. */
+export function pairingInvitationQueryErrorDetail(value: unknown): string | null {
+  if (isObject(value)) {
+    const data = value.data;
+    if (isObject(data) && typeof data.detail === 'string') return data.detail;
+  }
+  return null;
 }
 
 function parseCreatedPairingInvitation(value: unknown): CreatedPairingInvitation {

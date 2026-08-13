@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -118,3 +119,77 @@ async def test_hung_probe_child_is_killed_and_reaped(monkeypatch: pytest.MonkeyP
 
     assert status.running is False
     assert process.killed is True
+
+
+class _CompletedProcess:
+    """Completed subprocess fixture with one deterministic JSON payload."""
+
+    def __init__(self, payload: object, *, returncode: int = 0) -> None:
+        self.returncode = returncode
+        self._stdout = json.dumps(payload).encode()
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self._stdout, b""
+
+
+async def test_tailscale_peer_requires_exact_whois_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful whois must bind the exact socket address to its node."""
+
+    payload = {
+        "Node": {
+            "MachineAuthorized": True,
+            "Addresses": ["100.101.102.103/32", "fd7a:115c:a1e0::1/128"],
+        }
+    }
+
+    async def fake_exec(*args: object, **_kwargs: object) -> _CompletedProcess:
+        assert args[1:4] == ("whois", "--json", "100.101.102.103")
+        return _CompletedProcess(payload)
+
+    monkeypatch.setattr(tailscale_module, "_resolve_tailscale_binary", lambda: "/usr/bin/tailscale")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    assert await tailscale_module.is_tailscale_peer("100.101.102.103") is True
+
+
+async def test_tailscale_peer_rejects_cgnat_address_not_owned_by_whois_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CGNAT address membership alone never grants dashboard authority."""
+
+    async def fake_exec(*_args: object, **_kwargs: object) -> _CompletedProcess:
+        return _CompletedProcess(
+            {
+                "Node": {
+                    "MachineAuthorized": True,
+                    "Addresses": ["100.101.102.103/32"],
+                }
+            }
+        )
+
+    monkeypatch.setattr(tailscale_module, "_resolve_tailscale_binary", lambda: "/usr/bin/tailscale")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    assert await tailscale_module.is_tailscale_peer("100.64.0.9") is False
+
+
+async def test_tailscale_peer_requires_explicit_machine_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing authorization state fails closed despite an address match."""
+
+    async def fake_exec(*_args: object, **_kwargs: object) -> _CompletedProcess:
+        return _CompletedProcess(
+            {
+                "Node": {
+                    "Addresses": ["100.101.102.103/32"],
+                }
+            }
+        )
+
+    monkeypatch.setattr(tailscale_module, "_resolve_tailscale_binary", lambda: "/usr/bin/tailscale")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    assert await tailscale_module.is_tailscale_peer("100.101.102.103") is False

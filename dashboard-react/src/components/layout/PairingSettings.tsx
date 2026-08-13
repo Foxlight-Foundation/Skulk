@@ -6,6 +6,7 @@ import { addToast } from '../../hooks/useToast';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
   createPairingInvitation,
+  pairingInvitationQueryErrorDetail,
   PairingInvitationRequestError,
   type CreatedPairingInvitation,
   type PairingInvitationState,
@@ -222,6 +223,7 @@ export function PairingSettings() {
   const [error, setError] = useState<string | null>(null);
   const {
     data: invitations,
+    error: invitationListError,
     isError: invitationListFailed,
     refetch: refetchInvitations,
   } = useGetPairingInvitationsQuery(undefined, {
@@ -261,7 +263,13 @@ export function PairingSettings() {
     setCreating(true);
     setError(null);
     try {
-      const invitation = await createPairingInvitation({ validForSeconds, maxPairings });
+      const invitation = await createPairingInvitation(
+        { validForSeconds, maxPairings },
+        t(
+          'settings.pairing.createAuthorityGuidance',
+          "Skulk could not generate a pairing code. Open Settings on the configured operator gateway through Tailscale using its MagicDNS name or Tailscale IP, or through localhost. Public relay and ordinary LAN access cannot manage pairing invitations.",
+        ),
+      );
       const nextNow = Date.now();
       setCreated(invitation);
       setNow(nextNow);
@@ -309,6 +317,12 @@ export function PairingSettings() {
 
   const remainingSeconds =
     displayUntil === null ? 0 : Math.max(0, Math.ceil((displayUntil - now) / 1_000));
+  const invitationListErrorMessage =
+    pairingInvitationQueryErrorDetail(invitationListError) ??
+    t(
+      'settings.pairing.authorityGuidance',
+      "Skulk could not load pairing invitations. Open Settings on the configured operator gateway through Tailscale using its MagicDNS name or Tailscale IP, or through localhost. Public relay and ordinary LAN access cannot manage pairing invitations.",
+    );
 
   return (
     <Fieldset>
@@ -318,7 +332,7 @@ export function PairingSettings() {
           <Intro>
             {t(
               'settings.pairing.intro',
-              'Generate a protected code for the Skulk Operator app. For security, open this dashboard through localhost on the operator gateway. The code is a bearer secret and is shown here for five minutes.',
+              'Generate a protected code for the Skulk Operator app. Open this dashboard on the operator gateway through Tailscale or localhost. The code is a bearer secret and is shown here for five minutes.',
             )}
           </Intro>
           <FormGrid>
@@ -414,12 +428,7 @@ export function PairingSettings() {
 
       {error ? <ErrorText role="alert">{error}</ErrorText> : null}
       {invitationListFailed ? (
-        <ErrorText role="status">
-          {t(
-            'settings.pairing.listUnavailable',
-            'Invitation history is temporarily unavailable. New pairing codes can still be generated.',
-          )}
-        </ErrorText>
+        <ErrorText role="alert">{invitationListErrorMessage}</ErrorText>
       ) : null}
 
       {invitations && invitations.length > 0 ? (

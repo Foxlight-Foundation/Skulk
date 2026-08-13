@@ -14,7 +14,8 @@ import contextlib
 import json
 import os
 import shutil
-from typing import Any, final
+from ipaddress import ip_address
+from typing import Any, cast, final
 
 from loguru import logger
 from pydantic import Field
@@ -202,3 +203,84 @@ async def query_tailscale_status() -> TailscaleStatus:
         return _not_running
 
     return parse_status_json(raw)
+
+
+async def is_tailscale_peer(peer_host: str) -> bool:
+    """Return whether tailscaled identifies ``peer_host`` as a tailnet node.
+
+    The CGNAT ranges used by Tailscale are not proof of tailnet membership:
+    ordinary networks may also assign RFC 6598 addresses. This helper asks the
+    local tailscaled authority to resolve the exact socket peer and then
+    verifies that the returned node owns that address.
+
+    Args:
+        peer_host: Numeric IPv4 or IPv6 socket peer address.
+
+    Returns:
+        ``True`` only when ``tailscale whois`` succeeds and binds the exact
+        address to an authorized tailnet node. Missing or unhealthy Tailscale
+        installations fail closed.
+    """
+
+    try:
+        peer_address = ip_address(peer_host)
+    except ValueError:
+        return False
+
+    binary = _resolve_tailscale_binary()
+    if binary is None:
+        logger.debug("tailscale binary not found; cannot verify dashboard peer")
+        return False
+
+    process: asyncio.subprocess.Process | None = None
+    try:
+        process = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                binary,
+                "whois",
+                "--json",
+                str(peer_address),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            ),
+            timeout=3.0,
+        )
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=3.0)
+    except (FileNotFoundError, TimeoutError):
+        await _kill_and_reap(process)
+        return False
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"tailscale peer verification failed: {exc}")
+        await _kill_and_reap(process)
+        return False
+
+    if process.returncode != 0:
+        return False
+
+    try:
+        raw_object = cast(object, json.loads(stdout))
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(raw_object, dict):
+        return False
+    raw = cast(dict[object, object], raw_object)
+    node_object = raw.get("Node")
+    if not isinstance(node_object, dict):
+        return False
+    node = cast(dict[object, object], node_object)
+    if node.get("MachineAuthorized") is not True:
+        return False
+    addresses_object = node.get("Addresses")
+    if not isinstance(addresses_object, list):
+        return False
+    addresses = cast(list[object], addresses_object)
+    for value in addresses:
+        if not isinstance(value, str):
+            continue
+        candidate, _, _prefix_length = value.partition("/")
+        try:
+            if ip_address(candidate) == peer_address:
+                return True
+        except ValueError:
+            continue
+    return False
