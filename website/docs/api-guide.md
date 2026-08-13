@@ -319,8 +319,10 @@ Behavior:
   `Origin` or `Referer`, and a loopback, MagicDNS, `*.ts.net`, or literal
   Tailscale dashboard host;
 - accepts Tailscale's `100.64.0.0/10` IPv4 and
-  `fd7a:115c:a1e0::/48` IPv6 address spaces, rejects proxy forwarding headers,
-  and remains unavailable through an ordinary LAN connection;
+  `fd7a:115c:a1e0::/48` IPv6 address spaces only after the local Tailscale
+  authority verifies the exact socket peer, rejects proxy forwarding headers,
+  and remains unavailable through an ordinary LAN or unverified CGNAT
+  connection;
 - is available only when the dashboard is opened on the configured operator
   gateway through Tailscale or localhost;
 - is explicitly unavailable through `OperatorGatewayAuthorization`, even to a
@@ -353,7 +355,10 @@ Behavior:
 - returns invitation ID, creation/expiry, successful and maximum pairings,
   active/total attempts, and state;
 - never returns the invitation nonce, QR payload, carrier credentials, or
-  canonical operator credentials.
+  canonical operator credentials;
+- returns an actionable `403` outside the direct verified
+  Tailscale/localhost dashboard authority and an actionable `409` on a
+  non-gateway or before relay configuration.
 
 ### Revoke a dashboard pairing invitation
 
@@ -370,8 +375,9 @@ Behavior:
   and no-forwarding boundary;
 - blocks new and unfinished attempts without revoking already paired devices;
 - returns `204` after success or idempotent repeated revocation, `404` for an
-  unknown invitation, and `409` for an unresolved concurrent authority
-  transition.
+  unknown invitation, an actionable `403` outside the direct verified
+  Tailscale/localhost dashboard authority, and `409` on a non-gateway, before
+  relay configuration, or for an unresolved concurrent authority transition.
 
 ### Create a device challenge
 

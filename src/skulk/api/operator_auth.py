@@ -1,6 +1,7 @@
 # pyright: reportUnusedFunction=false
 """FastAPI routes for Skulk operator pairing and credential lifecycle."""
 
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from ipaddress import IPv4Network, IPv6Network, ip_address
 from typing import Annotated, Final, Never
@@ -9,6 +10,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response, status
 
+from skulk.connectivity.tailscale import is_tailscale_peer
 from skulk.operator.pairing import (
     OperatorCredentialExpiredError,
     OperatorCredentialInvalidError,
@@ -62,9 +64,13 @@ _FORWARDED_REQUEST_HEADERS = frozenset(
         b"true-client-ip",
     }
 )
+TailnetPeerVerifier = Callable[[str], Awaitable[bool]]
 
 
-def _direct_dashboard_authority_request(request: Request) -> bool:
+async def _direct_dashboard_authority_request(
+    request: Request,
+    tailnet_peer_verifier: TailnetPeerVerifier,
+) -> bool:
     """Return whether a browser request came directly over localhost or Tailscale.
 
     Minting a bearer invitation establishes persistent remote operator access,
@@ -105,7 +111,9 @@ def _direct_dashboard_authority_request(request: Request) -> bool:
 
     if _is_loopback_address(client_host):
         return _is_loopback_hostname(origin_hostname)
-    return _is_tailnet_address(client_host) and _is_tailnet_hostname(origin_hostname)
+    if not (_is_tailnet_address(client_host) and _is_tailnet_hostname(origin_hostname)):
+        return False
+    return await tailnet_peer_verifier(client_host)
 
 
 def _normalized_hostname(host: str | None) -> str | None:
@@ -165,10 +173,13 @@ def _is_tailnet_hostname(host: str) -> bool:
     return "." not in host or host.endswith(".ts.net")
 
 
-def _require_direct_dashboard_authority(request: Request) -> None:
+async def _require_direct_dashboard_authority(
+    request: Request,
+    tailnet_peer_verifier: TailnetPeerVerifier,
+) -> None:
     """Reject invitation management outside the direct trusted dashboard."""
 
-    if not _direct_dashboard_authority_request(request):
+    if not await _direct_dashboard_authority_request(request, tailnet_peer_verifier):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=_PAIRING_AUTHORITY_DETAIL,
@@ -222,11 +233,18 @@ def _raise_credential_http_error(exc: Exception) -> Never:
     raise exc
 
 
-def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
+def create_operator_auth_router(
+    service: OperatorPairingService,
+    *,
+    tailnet_peer_verifier: TailnetPeerVerifier = is_tailscale_peer,
+) -> APIRouter:
     """Create narrowly scoped pairing routes for one designated gateway.
 
     Args:
         service: Encrypted local pairing service owned by the API node.
+        tailnet_peer_verifier: Async local-authority check that binds a socket
+            address to an actual Tailscale node. Production uses tailscaled;
+            tests inject deterministic membership.
 
     Returns:
         Router exposing pairing, refresh rotation, and paired-device
@@ -247,14 +265,14 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
             "relay-accessible."
         ),
     )
-    def create_pairing_invitation(
+    async def create_pairing_invitation(
         payload: PairingInvitationCreateRequest,
         request: Request,
         response: Response,
     ) -> PairingInvitationCreateResponse:
         """Create one invitation and return its QR payload exactly once."""
 
-        _require_direct_dashboard_authority(request)
+        await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
         try:
             package = service.create_invitation(
                 lifetime=timedelta(seconds=payload.valid_for_seconds),
@@ -296,10 +314,10 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
             "relay gateway."
         ),
     )
-    def list_pairing_invitations(request: Request) -> list[PairingInvitationSummary]:
+    async def list_pairing_invitations(request: Request) -> list[PairingInvitationSummary]:
         """List safe status for invitations created on this gateway."""
 
-        _require_direct_dashboard_authority(request)
+        await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
         try:
             return list(service.invitations())
         except PairingGatewayNotInitializedError as exc:
@@ -316,10 +334,10 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
             "dashboard over localhost or Tailscale and is never relay-accessible."
         ),
     )
-    def revoke_pairing_invitation(invitation_id: UUID, request: Request) -> Response:
+    async def revoke_pairing_invitation(invitation_id: UUID, request: Request) -> Response:
         """Revoke one invitation from the trusted direct gateway dashboard."""
 
-        _require_direct_dashboard_authority(request)
+        await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
         try:
             service.revoke_invitation(invitation_id)
         except PairingGatewayNotInitializedError as exc:

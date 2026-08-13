@@ -988,10 +988,11 @@ revoke commands expose no bearer material. Invitation revocation blocks new and
 unfinished attempts without changing credentials already issued to devices.
 The ordinary dashboard listener also exposes create/list/revoke invitation
 management under Settings. These routes reuse the same pairing service and
-encrypted journal as the CLI. They require a loopback or Tailscale socket peer,
+encrypted journal as the CLI. They require a loopback socket peer or a
+Tailscale socket peer verified by the local Tailscale authority,
 an exact same-origin browser request from a loopback, MagicDNS, `*.ts.net`, or
 literal Tailscale host, and an explicit dashboard marker. Forwarding headers
-and ordinary LAN peers are rejected. The routes return a created bearer code
+ordinary LAN and unverified CGNAT peers are rejected. The routes return a created bearer code
 once with no-store headers and keep later list responses secret-free.
 `OperatorGatewayAuthorization` returns `404` for the entire management prefix
 before bearer evaluation, so invitation authority never crosses the public

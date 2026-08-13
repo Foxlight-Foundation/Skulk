@@ -25,6 +25,12 @@ from skulk.operator.relay import (
 )
 
 
+async def _verified_tailnet_peer(peer_host: str) -> bool:
+    """Stand in for tailscaled membership proof in HTTP boundary tests."""
+
+    return peer_host in {"100.101.102.103", "fd7a:115c:a1e0::1234"}
+
+
 def _base64url(value: bytes) -> str:
     """Encode bytes for pairing JSON payloads."""
 
@@ -72,7 +78,12 @@ def test_dashboard_can_create_list_and_revoke_pairing_invitation(
 
     service = _dashboard_invitation_service(tmp_path)
     app = FastAPI()
-    app.include_router(create_operator_auth_router(service))
+    app.include_router(
+        create_operator_auth_router(
+            service,
+            tailnet_peer_verifier=_verified_tailnet_peer,
+        )
+    )
     client = TestClient(
         app,
         base_url="http://127.0.0.1:52415",
@@ -125,7 +136,12 @@ def test_dashboard_invitation_management_requires_direct_browser_authority(
 
     service = _dashboard_invitation_service(tmp_path)
     app = FastAPI()
-    app.include_router(create_operator_auth_router(service))
+    app.include_router(
+        create_operator_auth_router(
+            service,
+            tailnet_peer_verifier=_verified_tailnet_peer,
+        )
+    )
     client = TestClient(
         app,
         base_url="http://127.0.0.1:52415",
@@ -246,6 +262,21 @@ def test_dashboard_invitation_management_requires_direct_browser_authority(
         json=payload,
     )
     assert blocked_lan.status_code == 403
+
+    unverified_cgnat_client = TestClient(
+        app,
+        base_url="http://kite1:52415",
+        client=("100.64.0.9", 50000),
+    )
+    blocked_cgnat = unverified_cgnat_client.post(
+        "/v1/auth/pairing-invitations",
+        headers={
+            "Origin": "http://kite1:52415",
+            "X-Skulk-Dashboard": "pairing-v1",
+        },
+        json=payload,
+    )
+    assert blocked_cgnat.status_code == 403
     assert "Tailscale" in blocked_lan.text
     assert "localhost" in blocked_lan.text
     assert "ordinary LAN access" in blocked_lan.text

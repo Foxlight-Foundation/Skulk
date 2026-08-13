@@ -728,6 +728,8 @@
   "settings.modelStore.storeHostPlaceholder": "hostname or node_id",
   "settings.modelStore.storePath": "Store path",
   "settings.modelStore.storePathPlaceholder": "/path/to/models",
+  "settings.pairing.authorityGuidance": "Skulk could not load pairing invitations. Open Settings on the configured operator gateway through Tailscale using its MagicDNS name or Tailscale IP, or through localhost. Public relay and ordinary LAN access cannot manage pairing invitations.",
+  "settings.pairing.createAuthorityGuidance": "Skulk could not generate a pairing code. Open Settings on the configured operator gateway through Tailscale using its MagicDNS name or Tailscale IP, or through localhost. Public relay and ordinary LAN access cannot manage pairing invitations.",
   "settings.pairing.created": "Pairing code ready",
   "settings.pairing.createFailed": "Skulk could not generate a pairing code.",
   "settings.pairing.device": "device",

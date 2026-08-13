@@ -34,8 +34,7 @@ vi.mock('qrcode.react', () => ({
 
 vi.mock('../../store/endpoints/pairing', () => ({
   createPairingInvitation: createInvitationMock,
-  pairingInvitationQueryErrorMessage: () =>
-    'Open Settings on the configured operator gateway through Tailscale or localhost.',
+  pairingInvitationQueryErrorDetail: () => null,
   PairingInvitationRequestError: class PairingInvitationRequestError extends Error {},
   useGetPairingInvitationsQuery: (argument: unknown, options: unknown) => {
     getInvitationsQueryMock(argument, options);
@@ -107,10 +106,13 @@ describe('PairingSettings', () => {
     );
     await act(async () => generate?.click());
 
-    expect(createInvitationMock).toHaveBeenCalledWith({
-      validForSeconds: 300,
-      maxPairings: 1,
-    });
+    expect(createInvitationMock).toHaveBeenCalledWith(
+      {
+        validForSeconds: 300,
+        maxPairings: 1,
+      },
+      expect.stringContaining('configured operator gateway'),
+    );
     expect(container?.querySelector('canvas')?.getAttribute('data-pairing-code')).toBe(
       'skulk://pair?z=secret-bearing-code',
     );

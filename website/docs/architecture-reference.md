@@ -189,10 +189,11 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   The ordinary direct dashboard listener exposes the same create/list/revoke
   authority through `/v1/auth/pairing-invitations`: the socket peer must be
   loopback or use Tailscale's `100.64.0.0/10` or
-  `fd7a:115c:a1e0::/48` space; the browser request must be exact same-origin
+  `fd7a:115c:a1e0::/48` space and be verified by the local Tailscale authority;
+  the browser request must be exact same-origin
   from a loopback, MagicDNS, `*.ts.net`, or literal Tailscale host and include
-  `X-Skulk-Dashboard: pairing-v1`. Forwarding headers and ordinary LAN peers
-  are rejected. Creation returns the bearer package once under `no-store`, and
+  `X-Skulk-Dashboard: pairing-v1`. Forwarding headers, ordinary LAN peers, and
+  unverified CGNAT peers are rejected. Creation returns the bearer package once under `no-store`, and
   safe lists omit it. The relay authorization wrapper returns `404` for this
   prefix before credential validation, so even a fully scoped paired device
   cannot mint invitations remotely. Settings renders the secret through
