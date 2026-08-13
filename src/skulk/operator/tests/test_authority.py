@@ -152,6 +152,51 @@ def test_append_requires_exact_commit_index(tmp_path: Path) -> None:
     assert b"secret-verifier" not in persisted
 
 
+def test_bulk_read_returns_each_selected_identity_once(tmp_path: Path) -> None:
+    """A bulk projection decrypts only the newest selected logical records."""
+
+    store = _store(tmp_path)
+    material = create_cluster_identity()
+    store.initialize_cluster(material.public_identity, material.private_key)
+    first = store.append(
+        expected_commit_index=1,
+        authority_term=1,
+        record_type="invitation",
+        record_id="one",
+        payload={"state": "active"},
+    )
+    store.append(
+        expected_commit_index=2,
+        expected_record_commit_index=first.commit_index,
+        authority_term=1,
+        record_type="invitation",
+        record_id="one",
+        payload={"state": "revoked"},
+    )
+    store.append(
+        expected_commit_index=3,
+        authority_term=1,
+        record_type="attempt",
+        record_id="phone",
+        payload={"state": "pending"},
+    )
+    store.append(
+        expected_commit_index=4,
+        authority_term=1,
+        record_type="unrelated",
+        record_id="ignored",
+        payload={"state": "hidden"},
+    )
+
+    selected = store.read_latest_record_payloads(("invitation", "attempt"))
+
+    assert [record.commit_index for record, _ in selected] == [3, 4]
+    assert [payload for _, payload in selected] == [
+        {"state": "revoked"},
+        {"state": "pending"},
+    ]
+
+
 def test_append_rejects_stale_logical_record_after_unrelated_activity(
     tmp_path: Path,
 ) -> None:

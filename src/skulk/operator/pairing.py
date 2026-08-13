@@ -1286,10 +1286,47 @@ class OperatorPairingService:
     def invitations(self) -> tuple[PairingInvitationSummary, ...]:
         """Return safe status for every reusable host invitation."""
 
-        summaries: list[PairingInvitationSummary] = []
-        for invitation_id in self._invitation_ids():
-            invitation, _, attempts, _ = self._invitation_snapshot(invitation_id)
-            summaries.append(self._invitation_summary(invitation, attempts))
+        try:
+            records = self._store.read_latest_record_payloads(
+                (
+                    _PAIRING_INVITATION_RECORD_TYPE,
+                    _PAIRING_ATTEMPT_RECORD_TYPE,
+                )
+            )
+        except AuthorityNotInitializedError as exc:
+            raise PairingGatewayNotInitializedError(
+                "operator gateway is not initialized"
+            ) from exc
+        invitations: list[_StoredPairingInvitation] = []
+        attempts_by_invitation: dict[
+            UUID,
+            list[tuple[str, _StoredPairingAttempt, int]],
+        ] = {}
+        for record, payload in records:
+            encoded_payload = json.dumps(
+                payload,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            try:
+                if record.record_type == _PAIRING_INVITATION_RECORD_TYPE:
+                    invitations.append(
+                        _StoredPairingInvitation.model_validate_json(encoded_payload)
+                    )
+                    continue
+                attempt = _StoredPairingAttempt.model_validate_json(encoded_payload)
+            except ValueError as exc:
+                raise PairingError("stored pairing invitation state is invalid") from exc
+            attempts_by_invitation.setdefault(attempt.invitation_id, []).append(
+                (record.record_id, attempt, record.commit_index)
+            )
+        summaries = [
+            self._invitation_summary(
+                invitation,
+                tuple(attempts_by_invitation.get(invitation.invitation_id, ())),
+            )
+            for invitation in invitations
+        ]
         summaries.sort(key=lambda item: (item.created_at, str(item.invitation_id)))
         return tuple(summaries)
 
@@ -1583,30 +1620,6 @@ class OperatorPairingService:
         except ValueError as exc:
             raise PairingError("stored pairing attempt is invalid") from exc
         return attempt, record.commit_index
-
-    def _invitation_ids(self) -> tuple[UUID, ...]:
-        """Return every reusable invitation identity from public journal metadata."""
-
-        try:
-            records = self._store.records()
-        except AuthorityNotInitializedError as exc:
-            raise PairingGatewayNotInitializedError(
-                "operator gateway is not initialized"
-            ) from exc
-        identities: list[UUID] = []
-        seen: set[str] = set()
-        for record in records:
-            if (
-                record.record_type != _PAIRING_INVITATION_RECORD_TYPE
-                or record.record_id in seen
-            ):
-                continue
-            seen.add(record.record_id)
-            try:
-                identities.append(UUID(record.record_id))
-            except ValueError as exc:
-                raise PairingError("stored pairing invitation identity is invalid") from exc
-        return tuple(identities)
 
     def _invitation_snapshot(
         self,

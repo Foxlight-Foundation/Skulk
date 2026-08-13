@@ -405,6 +405,50 @@ def test_invitation_exhaustion_and_revocation_are_separate_from_devices(
     assert summaries[revoked.invitation_id].active_attempts == 1
 
 
+def test_invitation_listing_uses_one_bulk_authority_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retained invitations and attempts are summarized from one journal query."""
+
+    clock = [datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)]
+    service = _service(tmp_path, clock)
+    first = service.create_invitation(
+        lifetime=timedelta(days=30),
+        max_pairings=3,
+        exchange_url="https://example.invalid",
+    )
+    second = service.create_invitation(
+        lifetime=timedelta(days=30),
+        max_pairings=3,
+        exchange_url="https://example.invalid",
+    )
+    _complete_invitation_pairing(service, first)
+    _complete_invitation_pairing(service, second)
+    calls = 0
+    original = EncryptedAuthorityStore.read_latest_record_payloads
+
+    def counted_bulk_read(
+        store: EncryptedAuthorityStore,
+        record_types: tuple[str, ...],
+    ) -> tuple[tuple[object, dict[str, object]], ...]:
+        nonlocal calls
+        calls += 1
+        return original(store, record_types)
+
+    monkeypatch.setattr(
+        EncryptedAuthorityStore,
+        "read_latest_record_payloads",
+        counted_bulk_read,
+    )
+
+    summaries = service.invitations()
+
+    assert calls == 1
+    assert len(summaries) == 2
+    assert all(summary.successful_pairings == 1 for summary in summaries)
+
+
 def test_invitation_and_pending_attempt_survive_service_restart(tmp_path: Path) -> None:
     """Durable authority records preserve reusable pairing across a restart."""
 
