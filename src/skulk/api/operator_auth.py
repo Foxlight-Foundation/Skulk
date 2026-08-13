@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response, status
+from starlette.concurrency import run_in_threadpool
 
 from skulk.connectivity.tailscale import is_tailscale_peer
 from skulk.operator.pairing import (
@@ -274,13 +275,14 @@ def create_operator_auth_router(
 
         await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
         try:
-            package = service.create_invitation(
+            package = await run_in_threadpool(
+                service.create_invitation,
                 lifetime=timedelta(seconds=payload.valid_for_seconds),
                 max_pairings=payload.max_pairings,
             )
             invitation = next(
                 item
-                for item in service.invitations()
+                for item in await run_in_threadpool(service.invitations)
                 if item.invitation_id == package.invitation_id
             )
         except PairingPackageTooLargeError as exc:
@@ -319,7 +321,7 @@ def create_operator_auth_router(
 
         await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
         try:
-            return list(service.invitations())
+            return list(await run_in_threadpool(service.invitations))
         except PairingGatewayNotInitializedError as exc:
             _raise_pairing_gateway_http_error(exc)
 
@@ -339,7 +341,7 @@ def create_operator_auth_router(
 
         await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
         try:
-            service.revoke_invitation(invitation_id)
+            await run_in_threadpool(service.revoke_invitation, invitation_id)
         except PairingGatewayNotInitializedError as exc:
             _raise_pairing_gateway_http_error(exc)
         except PairingSessionNotFoundError as exc:

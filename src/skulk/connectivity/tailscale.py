@@ -268,7 +268,7 @@ async def is_tailscale_peer(peer_host: str) -> bool:
     if not isinstance(node_object, dict):
         return False
     node = cast(dict[object, object], node_object)
-    if node.get("MachineAuthorized") is False:
+    if node.get("MachineAuthorized") is not True:
         return False
     addresses_object = node.get("Addresses")
     if not isinstance(addresses_object, list):
