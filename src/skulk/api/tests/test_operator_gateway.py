@@ -128,6 +128,40 @@ def test_pairing_and_refresh_paths_remain_reachable_before_access_authentication
     assert client.post("/v1/auth/token").status_code == 200
 
 
+def test_dashboard_invitation_management_is_never_relay_accessible(
+    tmp_path: Path,
+) -> None:
+    """Even a fully scoped device cannot reach the local dashboard authority."""
+
+    service, exchange = _paired_service(tmp_path)
+    canonical = FastAPI()
+
+    @canonical.post("/v1/auth/pairing-invitations")
+    def create_invitation() -> dict[str, bool]:
+        return {"created": True}
+
+    @canonical.get("/v1/auth/pairing-invitations")
+    def list_invitations() -> dict[str, bool]:
+        return {"listed": True}
+
+    @canonical.delete("/v1/auth/pairing-invitations/{invitation_id}")
+    def revoke_invitation(invitation_id: UUID) -> dict[str, str]:
+        return {"revoked": str(invitation_id)}
+
+    client = TestClient(OperatorGatewayAuthorization(canonical, service))
+    headers = {"Authorization": f"Bearer {exchange.access_token}"}
+    invitation_id = UUID("00000000-0000-4000-8000-000000000001")
+    assert client.post("/v1/auth/pairing-invitations", headers=headers).status_code == 404
+    assert client.get("/v1/auth/pairing-invitations", headers=headers).status_code == 404
+    assert (
+        client.delete(
+            f"/v1/auth/pairing-invitations/{invitation_id}",
+            headers=headers,
+        ).status_code
+        == 404
+    )
+
+
 def test_remote_websocket_requires_an_operator_bearer(tmp_path: Path) -> None:
     """Canonical WebSockets share the same access-token boundary."""
 

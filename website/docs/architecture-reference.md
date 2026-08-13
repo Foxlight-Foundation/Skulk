@@ -186,6 +186,15 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   prevents concurrent exchanges from oversubscribing the success limit.
   Host-only list/revoke commands reveal no nonce. Revocation blocks new and
   unfinished attempts without revoking credentials already issued to devices.
+  The ordinary direct dashboard listener exposes the same create/list/revoke
+  authority through `/v1/auth/pairing-invitations`: loopback socket peer and browser
+  requests with `X-Skulk-Dashboard: pairing-v1` are required, forwarding
+  headers are rejected, creation returns the bearer package once under
+  `no-store`, and safe lists omit it. The relay authorization wrapper returns
+  `404` for this prefix before credential validation, so even a fully scoped
+  paired device cannot mint invitations remotely. Settings renders the secret
+  through `qrcode.react` in component memory for five minutes, independently
+  of the server-side invitation lifetime.
 - **V1 remote carrier:** `skulk operator configure-relay --provisioning-file`
   validates one generated paired-WebSocket route, encrypts locator and distinct
   app/gateway carrier credentials in the local journal, and creates a protected

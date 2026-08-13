@@ -14,7 +14,7 @@ import base64
 import json
 import os
 import sqlite3
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -507,6 +507,60 @@ class EncryptedAuthorityStore:
             record_id,
         )
 
+    def read_latest_record_payloads(
+        self,
+        record_types: Sequence[str],
+    ) -> tuple[tuple[AuthorityRecord, dict[str, object]], ...]:
+        """Read the newest encrypted payload for each identity of selected types.
+
+        Args:
+            record_types: Bounded record types to include. Duplicate values are
+                ignored while preserving the caller's first-seen order.
+
+        Returns:
+            Latest metadata and decrypted payload pairs in ascending commit order.
+            An empty selection returns an empty tuple without opening the store.
+
+        Raises:
+            AuthorityNotInitializedError: The authority store is unavailable.
+            AuthorityIntegrityError: Authenticated decryption or validation fails.
+            ValueError: A record type is invalid.
+
+        This bulk boundary prevents read-only projections from turning a retained
+        append-only journal into one scan and decryption pass per logical record.
+        """
+
+        selected_types = tuple(dict.fromkeys(record_types))
+        if not selected_types:
+            return ()
+        for record_type in selected_types:
+            self._validate_record_identity(record_type, "bulk-read")
+        cluster_identity = self.cluster_identity()
+        placeholders = ", ".join("?" for _ in selected_types)
+        with closing(self._connect_existing()) as connection:
+            rows = self._fetch_all(
+                connection.execute(
+                    f"""
+                    SELECT journal.commit_index, journal.authority_term,
+                           journal.record_type, journal.record_id, journal.key_id,
+                           journal.nonce, journal.ciphertext, journal.created_at
+                    FROM authority_journal AS journal
+                    INNER JOIN (
+                        SELECT record_type, record_id, MAX(commit_index) AS commit_index
+                        FROM authority_journal
+                        WHERE record_type IN ({placeholders})
+                        GROUP BY record_type, record_id
+                    ) AS latest
+                    ON journal.commit_index = latest.commit_index
+                    ORDER BY journal.commit_index ASC
+                    """,
+                    selected_types,
+                )
+            )
+        return tuple(
+            self._decrypt_record_row(cluster_identity, row) for row in rows
+        )
+
     def _read_latest_payload_for_identity(
         self,
         cluster_identity: ClusterPublicIdentity,
@@ -546,6 +600,15 @@ class EncryptedAuthorityStore:
             )
         if row is None:
             raise AuthorityNotInitializedError("authority record does not exist")
+        return self._decrypt_record_row(cluster_identity, row)
+
+    def _decrypt_record_row(
+        self,
+        cluster_identity: ClusterPublicIdentity,
+        row: _SqliteRow,
+    ) -> tuple[AuthorityRecord, dict[str, object]]:
+        """Authenticate and decode one encrypted authority journal row."""
+
         commit_index = self._required_int(row[0], "commit_index")
         authority_term = self._required_int(row[1], "authority_term")
         persisted_record_type = self._required_str(row[2], "record_type")

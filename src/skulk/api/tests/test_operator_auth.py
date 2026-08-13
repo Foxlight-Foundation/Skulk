@@ -19,12 +19,200 @@ from skulk.operator.pairing import (
     pairing_invitation_signature_message,
     pairing_signature_message,
 )
+from skulk.operator.relay import (
+    OperatorRelayConfigurationRepository,
+    OperatorRelayProvisioning,
+)
 
 
 def _base64url(value: bytes) -> str:
     """Encode bytes for pairing JSON payloads."""
 
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _dashboard_invitation_service(
+    tmp_path: Path,
+) -> OperatorPairingService:
+    """Return one relay-configured service suitable for dashboard invitations."""
+
+    provider = LocalFileAuthorityKeyProvider(tmp_path / "dashboard-key.bin")
+    store = EncryptedAuthorityStore(provider, tmp_path / "dashboard-authority.sqlite3")
+    repository = OperatorRelayConfigurationRepository(
+        store,
+        certificate_path=tmp_path / "dashboard-relay-cert.pem",
+        private_key_path=tmp_path / "dashboard-relay-key.pem",
+    )
+    service = OperatorPairingService(
+        store,
+        provider,
+        relay_repository=repository,
+        now=lambda: datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc),
+    )
+    service.configure_relay(
+        OperatorRelayProvisioning(
+            version=1,
+            app_websocket_url="wss://relay.example.invalid/v1/carrier/app",
+            gateway_websocket_url="wss://relay.example.invalid/v1/carrier/gateway",
+            routing_locator=_base64url(bytes(range(32))),
+            app_carrier_credential=_base64url(bytes(range(32, 64))),
+            gateway_carrier_credential=_base64url(bytes(range(64, 96))),
+            lane_count=1,
+        ),
+        operator_api_port=52416,
+        cluster_name="Fox Den",
+    )
+    return service
+
+
+def test_dashboard_can_create_list_and_revoke_pairing_invitation(
+    tmp_path: Path,
+) -> None:
+    """The node-local dashboard owns the complete invitation lifecycle."""
+
+    service = _dashboard_invitation_service(tmp_path)
+    app = FastAPI()
+    app.include_router(create_operator_auth_router(service))
+    client = TestClient(
+        app,
+        base_url="http://127.0.0.1:52415",
+        client=("127.0.0.1", 50000),
+    )
+    headers = {
+        "Origin": "http://127.0.0.1:52415",
+        "X-Skulk-Dashboard": "pairing-v1",
+    }
+
+    created = client.post(
+        "/v1/auth/pairing-invitations",
+        headers=headers,
+        json={"validForSeconds": 7 * 24 * 60 * 60, "maxPairings": 3},
+    )
+    assert created.status_code == 200
+    assert created.headers["cache-control"] == "no-store, max-age=0"
+    assert created.headers["pragma"] == "no-cache"
+    body = cast(dict[str, object], created.json())
+    pairing_code = body["pairingCode"]
+    assert isinstance(pairing_code, str)
+    assert pairing_code.startswith("skulk://pair?z=")
+    invitation = cast(dict[str, object], body["invitation"])
+    assert invitation["maxPairings"] == 3
+    invitation_id = str(invitation["invitationId"])
+
+    listed = client.get("/v1/auth/pairing-invitations", headers=headers)
+    assert listed.status_code == 200
+    listed_body = cast(list[dict[str, object]], listed.json())
+    assert listed_body == [invitation]
+    assert pairing_code not in listed.text
+    assert "nonce" not in listed.text.casefold()
+
+    revoked = client.delete(
+        f"/v1/auth/pairing-invitations/{invitation_id}",
+        headers=headers,
+    )
+    assert revoked.status_code == 204
+    relisted = cast(
+        list[dict[str, object]],
+        client.get("/v1/auth/pairing-invitations", headers=headers).json(),
+    )
+    assert relisted[0]["state"] == "revoked"
+
+
+def test_dashboard_invitation_management_requires_local_browser_authority(
+    tmp_path: Path,
+) -> None:
+    """Network peers, cross-origin pages, and proxies cannot mint invitations."""
+
+    service = _dashboard_invitation_service(tmp_path)
+    app = FastAPI()
+    app.include_router(create_operator_auth_router(service))
+    client = TestClient(
+        app,
+        base_url="http://127.0.0.1:52415",
+        client=("127.0.0.1", 50000),
+    )
+    payload = {"validForSeconds": 300, "maxPairings": 1}
+
+    assert client.post("/v1/auth/pairing-invitations", json=payload).status_code == 403
+    assert (
+        client.post(
+            "/v1/auth/pairing-invitations",
+            headers={
+                "Origin": "https://hostile.example",
+                "X-Skulk-Dashboard": "pairing-v1",
+            },
+            json=payload,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            "/v1/auth/pairing-invitations",
+            headers={
+                "Origin": "http://127.0.0.1:52415",
+                "X-Skulk-Dashboard": "pairing-v1",
+                "X-Forwarded-For": "192.0.2.10",
+            },
+            json=payload,
+        ).status_code
+        == 403
+    )
+    listed = client.get(
+        "/v1/auth/pairing-invitations",
+        headers={
+            "Referer": "http://127.0.0.1:52415/cluster",
+            "X-Skulk-Dashboard": "pairing-v1",
+        },
+    )
+    assert listed.status_code == 200
+
+    network_client = TestClient(
+        app,
+        base_url="http://cluster.local:52415",
+        client=("192.0.2.10", 50000),
+    )
+    spoofed = network_client.post(
+        "/v1/auth/pairing-invitations",
+        headers={
+            "Origin": "http://cluster.local:52415",
+            "X-Skulk-Dashboard": "pairing-v1",
+        },
+        json=payload,
+    )
+    assert spoofed.status_code == 403
+    assert "localhost" in spoofed.text
+
+
+def test_dashboard_invitation_creation_requires_configured_gateway(
+    tmp_path: Path,
+) -> None:
+    """A non-gateway dashboard cannot mint unusable remote invitations."""
+
+    provider = LocalFileAuthorityKeyProvider(tmp_path / "unconfigured-key.bin")
+    service = OperatorPairingService(
+        EncryptedAuthorityStore(provider, tmp_path / "unconfigured-authority.sqlite3"),
+        provider,
+    )
+    app = FastAPI()
+    app.include_router(create_operator_auth_router(service))
+    client = TestClient(
+        app,
+        base_url="http://127.0.0.1:52415",
+        client=("127.0.0.1", 50000),
+    )
+
+    response = client.post(
+        "/v1/auth/pairing-invitations",
+        headers={
+            "Origin": "http://127.0.0.1:52415",
+            "X-Skulk-Dashboard": "pairing-v1",
+        },
+        json={"validForSeconds": 300, "maxPairings": 1},
+    )
+
+    assert response.status_code == 409
+    assert "configured operator gateway" in response.text
+    assert "pairingCode" not in response.text
 
 
 def _pair_device(
@@ -230,7 +418,7 @@ def test_reusable_invitation_active_attempt_capacity_returns_retry_after(
 
 
 def test_pairing_routes_are_present_in_openapi(tmp_path: Path) -> None:
-    """Both HTTP operations remain visible in the generated API contract."""
+    """Every pairing and invitation route remains visible in the API contract."""
 
     provider = LocalFileAuthorityKeyProvider(tmp_path / "key.bin")
     service = OperatorPairingService(
@@ -246,6 +434,8 @@ def test_pairing_routes_are_present_in_openapi(tmp_path: Path) -> None:
     assert "/v1/auth/token" in paths
     assert "/v1/auth/devices" in paths
     assert "/v1/auth/devices/{device_id}" in paths
+    assert "/v1/auth/pairing-invitations" in paths
+    assert "/v1/auth/pairing-invitations/{invitation_id}" in paths
 
 
 def test_token_rotation_and_device_revocation_http_contract(tmp_path: Path) -> None:

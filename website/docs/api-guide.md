@@ -274,7 +274,8 @@ pinned inner-TLS material as version two, but never a canonical Skulk access or
 refresh credential. Treat the QR and optional owner-only PNG as bearer secrets.
 The PNG writer uses owner-only permissions and refuses to overwrite a path.
 
-Invitation management remains local to the designated host:
+Invitation management remains local to the designated host. Headless operators
+can use the CLI:
 
 ```bash
 uv run skulk operator invitations list
@@ -286,11 +287,84 @@ count, and safe state; it never prints the nonce. Revocation blocks new and
 unfinished attempts but does not disconnect devices that already paired.
 Revoke those devices through the authenticated device-management API.
 
+The dashboard exposes the same authority operation under **Settings →
+Pairing**. Operators choose a lifetime and device limit, generate a branded QR,
+and may download or revoke it. The bearer QR remains in mounted browser memory
+for five minutes and then the section resets; this display timeout does not
+shorten a longer invitation. Safe invitation status remains visible without
+the nonce or pairing code.
+
 `--exchange-url https://gateway.example.invalid` remains an optional direct
 LAN/Tailscale path and is required only before relay provisioning. Remote
 exchange URLs must use HTTPS; cleartext HTTP is accepted only for loopback
 development URLs. A relay-configured package includes both the protected inner
 origin and relay bootstrap material, and the app prefers the relay path.
+
+### Create a dashboard pairing invitation
+
+**POST** `/v1/auth/pairing-invitations`
+
+Parameters:
+
+- JSON body `validForSeconds` (required): whole-second lifetime from 60 through
+  7,776,000 seconds (90 days).
+- JSON body `maxPairings` (required): successful device limit from 1 through
+  20.
+- Header `X-Skulk-Dashboard: pairing-v1` (required): explicit dashboard
+  request marker.
+
+Behavior:
+
+- requires both a loopback socket peer and loopback browser `Origin` or
+  `Referer`, rejects proxy forwarding headers, and is available only when the
+  dashboard is opened through localhost on the configured operator gateway;
+- is explicitly unavailable through `OperatorGatewayAuthorization`, even to a
+  valid fully scoped device;
+- reuses `OperatorPairingService.create_invitation`, so the CLI and dashboard
+  cannot diverge in identity, relay material, limits, or journal behavior;
+- returns safe `invitation` status plus one `pairingCode` containing the secret
+  `skulk://pair?z=...` bearer package;
+- returns `Cache-Control: no-store, max-age=0` and `Pragma: no-cache`; clients
+  must not persist the response, put it in URLs, logs, telemetry, or shared
+  application state;
+- returns `403` outside the node-local dashboard authority, `409` before relay
+  configuration, `422` if the generated package exceeds the reliable QR
+  budget, and `503` when the configured gateway identity is temporarily
+  unavailable.
+
+### List dashboard pairing invitations
+
+**GET** `/v1/auth/pairing-invitations`
+
+Parameters:
+
+- Header `X-Skulk-Dashboard: pairing-v1` (required).
+
+Behavior:
+
+- applies the same loopback-peer, loopback-origin, and no-forwarding boundary
+  as creation;
+- returns invitation ID, creation/expiry, successful and maximum pairings,
+  active/total attempts, and state;
+- never returns the invitation nonce, QR payload, carrier credentials, or
+  canonical operator credentials.
+
+### Revoke a dashboard pairing invitation
+
+**DELETE** `/v1/auth/pairing-invitations/{invitation_id}`
+
+Parameters:
+
+- Path `invitation_id` (required): public invitation UUID.
+- Header `X-Skulk-Dashboard: pairing-v1` (required).
+
+Behavior:
+
+- applies the same loopback-peer, loopback-origin, and no-forwarding boundary;
+- blocks new and unfinished attempts without revoking already paired devices;
+- returns `204` after success or idempotent repeated revocation, `404` for an
+  unknown invitation, and `409` for an unresolved concurrent authority
+  transition.
 
 ### Create a device challenge
 

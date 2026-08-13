@@ -21,6 +21,7 @@ export const apiSlice = createApi({
     'TraceList',
     'Trace',
     'NodeDiagnostics',
+    'PairingInvitations',
   ] as const,
   // Endpoints land via `injectEndpoints` from feature modules; this scaffold
   // intentionally has none so the migration can introduce them incrementally.
