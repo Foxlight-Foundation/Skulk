@@ -268,7 +268,11 @@ async def is_tailscale_peer(peer_host: str) -> bool:
     if not isinstance(node_object, dict):
         return False
     node = cast(dict[object, object], node_object)
-    if node.get("MachineAuthorized") is not True:
+    # Current Tailscale `whois --json` responses omit MachineAuthorized for
+    # valid peers. A successful local-daemon whois plus an exact address match
+    # is the membership proof; when the optional field is present, still fail
+    # closed unless it explicitly confirms authorization.
+    if "MachineAuthorized" in node and node.get("MachineAuthorized") is not True:
         return False
     addresses_object = node.get("Addresses")
     if not isinstance(addresses_object, list):
