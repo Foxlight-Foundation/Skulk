@@ -1,10 +1,12 @@
 # pyright: reportUnusedFunction=false
 """FastAPI routes for Skulk operator pairing and credential lifecycle."""
 
+from datetime import timedelta
 from typing import Annotated, Never
+from urllib.parse import urlsplit
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException, Response, status
+from fastapi import APIRouter, Header, HTTPException, Request, Response, status
 
 from skulk.operator.pairing import (
     OperatorCredentialExpiredError,
@@ -21,13 +23,71 @@ from skulk.operator.pairing import (
     PairingExchangeResponse,
     PairingGatewayNotInitializedError,
     PairingInvitationCapacityError,
+    PairingInvitationCreateRequest,
+    PairingInvitationCreateResponse,
+    PairingInvitationSummary,
+    PairingPackageTooLargeError,
     PairingProofError,
     PairingSessionExpiredError,
     PairingSessionNotFoundError,
     PairingSessionStateError,
 )
+from skulk.operator.relay import OperatorRelayUnavailableError
 
 _BEARER_CHALLENGE = {"WWW-Authenticate": "Bearer"}
+_PAIRING_INVITATION_PATH = "/pairing-invitations"
+_DASHBOARD_REQUEST_HEADER = "pairing-v1"
+_FORWARDED_REQUEST_HEADERS = frozenset(
+    {
+        b"forwarded",
+        b"x-forwarded-for",
+        b"x-forwarded-host",
+        b"x-forwarded-proto",
+        b"x-real-ip",
+        b"cf-connecting-ip",
+        b"true-client-ip",
+    }
+)
+
+
+def _same_origin_dashboard_request(request: Request) -> bool:
+    """Return whether a browser request came from this direct dashboard origin.
+
+    Pairing invitation management is intentionally available from a dashboard
+    opened over a trusted LAN, not only from loopback. Requiring an exact
+    browser origin and rejecting proxy identity headers prevents permissive API
+    CORS or the loopback relay listener from becoming a remote invitation
+    authority. Non-browser callers continue to use the host CLI.
+    """
+
+    if any(name.lower() in _FORWARDED_REQUEST_HEADERS for name, _ in request.headers.raw):
+        return False
+    if request.headers.get("x-skulk-dashboard") != _DASHBOARD_REQUEST_HEADER:
+        return False
+    origin = request.headers.get("origin") or request.headers.get("referer")
+    host = request.headers.get("host")
+    if origin is None or host is None:
+        return False
+    try:
+        parsed_origin = urlsplit(origin)
+    except ValueError:
+        return False
+    return (
+        parsed_origin.scheme in {"http", "https"}
+        and parsed_origin.username is None
+        and parsed_origin.password is None
+        and parsed_origin.netloc.casefold() == host.casefold()
+    )
+
+
+def _require_same_origin_dashboard(request: Request) -> None:
+    """Reject pairing invitation management outside the direct dashboard."""
+
+    if not _same_origin_dashboard_request(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="pairing invitations may be managed only from the direct Skulk dashboard",
+        )
 
 
 def _require_bearer(authorization: str | None) -> str:
@@ -80,6 +140,99 @@ def create_operator_auth_router(service: OperatorPairingService) -> APIRouter:
     """
 
     router = APIRouter(prefix="/v1/auth", tags=["Authentication"])
+
+    @router.post(
+        _PAIRING_INVITATION_PATH,
+        response_model=PairingInvitationCreateResponse,
+        response_model_by_alias=True,
+        summary="Create a dashboard pairing invitation",
+        description=(
+            "Create one bounded, revocable pairing invitation from the direct "
+            "same-origin Skulk dashboard. The secret pairing code is returned "
+            "once with no-store response headers and is never relay-accessible."
+        ),
+    )
+    def create_pairing_invitation(
+        payload: PairingInvitationCreateRequest,
+        request: Request,
+        response: Response,
+    ) -> PairingInvitationCreateResponse:
+        """Create one invitation and return its QR payload exactly once."""
+
+        _require_same_origin_dashboard(request)
+        try:
+            package = service.create_invitation(
+                lifetime=timedelta(seconds=payload.valid_for_seconds),
+                max_pairings=payload.max_pairings,
+            )
+            invitation = next(
+                item
+                for item in service.invitations()
+                if item.invitation_id == package.invitation_id
+            )
+        except PairingPackageTooLargeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="pairing invitation is too large for a reliable QR code",
+            ) from exc
+        except (PairingGatewayNotInitializedError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "generate pairing invitations from the configured operator gateway; "
+                    "configure relay access on this node first"
+                ),
+            ) from exc
+        except OperatorRelayUnavailableError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="the operator gateway identity is temporarily unavailable",
+            ) from exc
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return PairingInvitationCreateResponse(
+            invitation=invitation,
+            pairing_code=package.as_url(),
+        )
+
+    @router.get(
+        _PAIRING_INVITATION_PATH,
+        response_model=list[PairingInvitationSummary],
+        response_model_by_alias=True,
+        summary="List dashboard pairing invitations",
+        description=(
+            "Return safe invitation status without bearer nonces or pairing "
+            "codes. This management route is available only to the direct "
+            "same-origin Skulk dashboard and never through the relay gateway."
+        ),
+    )
+    def list_pairing_invitations(request: Request) -> list[PairingInvitationSummary]:
+        """List safe status for invitations created on this gateway."""
+
+        _require_same_origin_dashboard(request)
+        return list(service.invitations())
+
+    @router.delete(
+        f"{_PAIRING_INVITATION_PATH}/{{invitation_id}}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        summary="Revoke a dashboard pairing invitation",
+        description=(
+            "Immediately prevent new and unfinished pairing attempts for one "
+            "invitation without revoking devices that already paired. This "
+            "management route is never relay-accessible."
+        ),
+    )
+    def revoke_pairing_invitation(invitation_id: UUID, request: Request) -> Response:
+        """Revoke one invitation from the direct same-origin dashboard."""
+
+        _require_same_origin_dashboard(request)
+        try:
+            service.revoke_invitation(invitation_id)
+        except PairingSessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PairingSessionStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @router.post(
         "/pairing-sessions/challenge",

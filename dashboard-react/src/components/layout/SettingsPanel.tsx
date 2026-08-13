@@ -20,6 +20,7 @@ import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import type { ThemeName } from '../../theme';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import { PairingSettings } from './PairingSettings';
 
 export interface SettingsPanelProps {
   open: boolean;
@@ -375,6 +376,8 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
         <Body>
           {loading && <LoadingText>{t('settings.loadingConfig', 'Loading config...')}</LoadingText>}
           {error && <ErrorText>{error}</ErrorText>}
+
+          <PairingSettings />
 
           {/* Appearance */}
           <Fieldset>

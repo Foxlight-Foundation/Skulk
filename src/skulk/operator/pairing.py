@@ -600,6 +600,36 @@ class PairingInvitationSummary(FrozenModel):
     state: PairingInvitationState = Field(description="Current invitation state.")
 
 
+class PairingInvitationCreateRequest(FrozenModel):
+    """Bounded dashboard request for one reusable pairing invitation."""
+
+    valid_for_seconds: int = Field(
+        ge=60,
+        le=int(_MAXIMUM_INVITATION_LIFETIME.total_seconds()),
+        description="Invitation lifetime in whole seconds, from one minute to 90 days.",
+    )
+    max_pairings: int = Field(
+        ge=1,
+        le=_MAXIMUM_INVITATION_PAIRINGS,
+        description="Maximum successful device pairings allowed, from one through 20.",
+    )
+
+
+class PairingInvitationCreateResponse(FrozenModel):
+    """One-time dashboard response containing a protected pairing QR payload."""
+
+    invitation: PairingInvitationSummary = Field(
+        description="Safe status for the newly created invitation."
+    )
+    pairing_code: str = Field(
+        min_length=1,
+        max_length=_MAXIMUM_RELAY_PAIRING_URL_BYTES,
+        description=(
+            "Secret skulk:// bearer invitation returned once for immediate QR rendering."
+        ),
+    )
+
+
 def _utc_now() -> datetime:
     """Return the current timezone-aware UTC time."""
 

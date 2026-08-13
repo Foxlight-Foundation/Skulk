@@ -24,6 +24,7 @@ _UNAUTHENTICATED_PATHS: Final = frozenset(
         "/v1/auth/token",
     }
 )
+_DIRECT_DASHBOARD_ONLY_PREFIXES: Final = ("/v1/auth/pairing-invitations",)
 _MODEL_PREFIXES: Final = ("/v1/models", "/models", "/model-store", "/v1/store")
 _INFERENCE_PREFIXES: Final = (
     "/v1/chat",
@@ -60,6 +61,15 @@ class OperatorGatewayAuthorization:
             await self._app(scope, receive, send)
             return
         path = cast(str, scope.get("path", ""))
+        if path.startswith(_DIRECT_DASHBOARD_ONLY_PREFIXES):
+            await _deny(
+                scope,
+                receive,
+                send,
+                status_code=404,
+                detail="route unavailable",
+            )
+            return
         if path in _UNAUTHENTICATED_PATHS:
             await self._app(scope, receive, send)
             return
