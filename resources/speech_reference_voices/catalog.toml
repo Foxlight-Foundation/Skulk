@@ -63,6 +63,14 @@ transcript_file = "samson/reference.txt"
 sha256 = "dbe0b3f4c436cf361766d354aaf0a79ef80d09eb448cae48d58abc783ad158ad"
 
 [[voices]]
+id = "skulk"
+name = "Skulk"
+preferred_languages = ["en"]
+audio_file = "skulk/reference.mp3"
+transcript_file = "skulk/reference.txt"
+sha256 = "ae92e4d65ce814f6f85571f4c7f49ab5160a3b8c1f1b240b0c2379ee65acf44f"
+
+[[voices]]
 id = "sydney"
 name = "Sydney"
 preferred_languages = ["en"]

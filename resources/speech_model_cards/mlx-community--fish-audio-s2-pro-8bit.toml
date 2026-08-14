@@ -16,8 +16,8 @@ response_formats = ["wav"]
 supports_streaming = false
 supports_realtime = false
 supports_voice_listing = true
-voices = ["angus", "ember", "hannah", "ian", "jake", "kite", "rufus", "samson", "sydney", "sylvie"]
-default_voice = "kite"
+voices = ["angus", "ember", "hannah", "ian", "jake", "kite", "rufus", "samson", "skulk", "sydney", "sylvie"]
+default_voice = "skulk"
 supports_reference_audio = true
 sample_rates = [44100]
 
@@ -68,6 +68,12 @@ id = "samson"
 name = "Samson"
 preferred_languages = ["en"]
 reference_profile = "samson"
+
+[[audio.voice_catalog]]
+id = "skulk"
+name = "Skulk"
+preferred_languages = ["en"]
+reference_profile = "skulk"
 
 [[audio.voice_catalog]]
 id = "sydney"

@@ -266,7 +266,12 @@ def test_qwen_base_card_pins_validated_six_bit_artifact() -> None:
     ),
 )
 def test_reference_capable_cards_expose_shared_voice_catalog(card_name: str) -> None:
-    """Every validated cloning model must expose the same packaged profiles."""
+    """Every validated cloning model must expose the same packaged profiles.
+
+    The default is the product's signature voice: ``skulk`` speaks for the
+    steward and for any caller that does not choose a voice, so all three
+    cloning cards must agree on it.
+    """
 
     profiles = bundled_reference_voice_profiles()
     card = _load(Path(RESOURCES_DIR) / "speech_model_cards" / card_name)
@@ -274,7 +279,7 @@ def test_reference_capable_cards_expose_shared_voice_catalog(card_name: str) -> 
     assert card.audio is not None
     assert card.audio.supports_reference_audio is True
     assert card.audio.supports_voice_listing is True
-    assert card.audio.default_voice == "kite"
+    assert card.audio.default_voice == "skulk"
     assert card.audio.voices == tuple(profile.id for profile in profiles)
     assert tuple(voice.id for voice in card.audio.voice_catalog) == card.audio.voices
     assert tuple(voice.name for voice in card.audio.voice_catalog) == tuple(
