@@ -32,6 +32,7 @@ def _shard(source_revision: str) -> PipelineShardMetadata:
             hidden_size=1,
             supports_tensor=False,
             tasks=[ModelTask.TextGeneration],
+            trust_remote_code=False,
             gguf_file="model.gguf",
             source_revision=source_revision,
         ),
@@ -386,3 +387,61 @@ async def test_revision_download_commits_complete_replacement(
     ).read_text().strip() == _NEW_REVISION
     assert progress.status == "complete"
     assert terminal_progress[-1].status == "complete"
+
+
+@pytest.mark.asyncio
+async def test_card_generation_change_replaces_same_revision_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A changed card cannot relabel reused bytes from the same revision."""
+
+    canonical = tmp_path / "org--model"
+    canonical.mkdir()
+    (canonical / "model.gguf").write_bytes(b"old-old")
+    (canonical / ".skulk-source-revision").write_text(f"{_NEW_REVISION}\n")
+
+    async def file_list(*_args: object, **_kwargs: object) -> list[FileListEntry]:
+        return [FileListEntry(type="file", path="model.gguf", size=7)]
+
+    async def complete_download(
+        _model_id: ModelId,
+        _revision: str,
+        path: str,
+        target_dir: Path,
+        on_progress: Callable[[int, int, bool], None],
+        on_connection_lost: Callable[[], None],
+        skip_internet: bool,
+    ) -> Path:
+        del on_connection_lost, skip_internet
+        assert target_dir != canonical
+        assert (canonical / "model.gguf").read_bytes() == b"old-old"
+        target = target_dir / path
+        target.write_bytes(b"new-new")
+        on_progress(7, 7, True)
+        return target
+
+    async def ignore_progress(
+        _shard: ShardMetadata,
+        _progress: RepoDownloadProgress,
+    ) -> None:
+        pass
+
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", file_list)
+    monkeypatch.setattr(
+        download_utils,
+        "download_file_with_retry",
+        complete_download,
+    )
+
+    model_path, progress = await download_shard(
+        _shard(_NEW_REVISION),
+        ignore_progress,
+        allow_patterns=["*"],
+        replacement_identity="a" * 64,
+    )
+
+    assert model_path == canonical / "model.gguf"
+    assert (canonical / "model.gguf").read_bytes() == b"new-new"
+    assert progress.status == "complete"

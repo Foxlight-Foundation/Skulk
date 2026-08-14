@@ -36,7 +36,10 @@ def resolve_reasoning_params(
       non-disabled effort or the profile default effort
     - when only ``reasoning_effort`` is provided, it determines thinking on/off
       relative to the profile's disabled effort
-    - when neither value is provided, the runtime uses the model's default behavior
+    - when neither value is provided for a toggleable model with a known
+      capability profile, use the profile's disabled effort so a missing UI/API
+      control does not let tokenizer defaults route the whole answer into hidden
+      reasoning
     """
     enabled_effort = (
         capability_profile.default_reasoning_effort
@@ -77,6 +80,9 @@ def resolve_reasoning_params(
 
     if reasoning_effort is not None:
         return reasoning_effort, reasoning_effort != disabled_effort
+
+    if capability_profile is not None:
+        return disabled_effort, False
 
     return None, None
 

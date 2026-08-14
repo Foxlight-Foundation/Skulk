@@ -32,11 +32,12 @@ endpoint, so you can run models far larger than any single machine could hold.
    ```
 
    It installs prerequisites, builds the node, writes a `skulk.yaml` with
-   single-node [model store](./model-store.md) defaults (only when none
-   exists, so the store-first download flow works out of the box), and
-   finishes with `skulk doctor --fix`, which audits the machine (GPUs,
-   inference engines, storage) and fixes what it safely can. Then start
-   Skulk from the install directory:
+   bootstrap [model store](./model-store.md) defaults (only when none exists),
+   and finishes with `skulk doctor --fix`, which audits the machine (GPUs,
+   inference engines, storage) and fixes what it safely can. A single node
+   serves its own store immediately; several fresh nodes converge on the
+   elected master's store when their cluster forms. Then start Skulk from the
+   install directory:
 
    ```bash
    cd ~/skulk && uv run skulk
@@ -47,8 +48,9 @@ endpoint, so you can run models far larger than any single machine could hold.
    [run as a service](run-skulk-as-a-service) to keep Skulk running across
    reboots.
 2. Open the dashboard (default `http://localhost:52415`), pick a model, and
-   launch it. Skulk places it across the cluster and starts serving when it is
-   ready.
+   launch it. The supported catalog comes from Skulk's TUF-verified external
+   model-card registry; each card identifies one exact selectable artifact.
+   Skulk places it across the cluster and starts serving when it is ready.
 3. Call the OpenAI-compatible endpoint at `/v1/chat/completions` with any client
    that speaks that format. The [API guide](api-guide) walks through a first
    request step by step, from placement to first token.
@@ -89,6 +91,11 @@ works out of the box. No SDK changes, no custom client.
 per-node diagnostics, and structured logs you can ship to VictoriaLogs let you
 see exactly what each node is doing during a request.
 
+**Air-gap durable.** Every complete model-store or staged artifact retains its
+full effective card and hashed manifest beside the bytes. Installed models load
+from that local truth before registry access, and node caches can reconcile into
+the central store without downloading again from Hugging Face.
+
 ## Common tasks
 
 - **Use the API** to run inference: [API guide](api-guide), and the browsable
@@ -98,6 +105,8 @@ see exactly what each node is doing during a request.
   [remote access via Tailscale](tailscale).
 - **Debug the cluster** during a request: [tracing and debugging](tracing).
 - **Add models to the model store**: [model store guide](model-store).
+- **Understand model identity and catalog precedence**:
+  [model cards](model-cards).
 - **Span locations or networks** with one cluster:
   [multi-network clustering](tailscale-clustering).
 

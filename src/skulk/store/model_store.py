@@ -21,18 +21,23 @@ Responsibilities
 
 Registry format
 ---------------
-``registry.json`` is a plain JSON object::
+``registry.json`` is a versioned, rebuildable index::
 
     {
-      "mlx-community/Qwen3-30B-A3B-4bit": {
-        "model_id": "mlx-community/Qwen3-30B-A3B-4bit",
-        "store_path": "mlx-community--Qwen3-30B-A3B-4bit",
-        "files": ["config.json", "model-00001-of-00008.safetensors", ...],
-        "downloaded_at": "2026-03-20T14:32:00+00:00",
-        "total_bytes": 21474836480
-      },
-      ...
+      "schema_version": 1,
+      "entries": {
+        "mlx-community/Qwen3-30B-A3B-4bit": {
+          "model_id": "mlx-community/Qwen3-30B-A3B-4bit",
+          "store_path": "mlx-community--Qwen3-30B-A3B-4bit",
+          "files": ["config.json", "model-00001-of-00008.safetensors", ...],
+          "downloaded_at": "2026-03-20T14:32:00+00:00",
+          "total_bytes": 21474836480
+        }
+      }
     }
+
+Legacy plain mappings are migrated on the next write. Complete artifact
+sidecars rebuild the index after corruption or loss.
 
 Directory layout on the store host::
 
@@ -60,23 +65,43 @@ when a new model is registered, so this is not a hot path.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import json
 import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, final
+from typing import TYPE_CHECKING, Literal, final
 
 import aiofiles.os as aios
+import aiohttp
 from loguru import logger
 from pydantic import BaseModel, ConfigDict
 
 from skulk.shared.types.worker.downloads import FileListEntry
+from skulk.store.installed_cards import (
+    INSTALLED_CARD_RELATIVE_PATH,
+    InstalledArtifactRole,
+    InstalledCardRecord,
+    build_file_manifest,
+    build_installed_card_record,
+    manifest_sha256,
+    read_installed_card,
+    verify_installed_card,
+    write_installed_card,
+)
 from skulk.store.staging_eviction import MINIMUM_STAGING_FREE_DISK_BYTES
+
+if TYPE_CHECKING:
+    from skulk.shared.models.model_cards import ModelCard
 
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
 _SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
+_RECONCILIATION_TOMBSTONES_RELATIVE_PATH = (
+    Path(".skulk") / "reconciliation-tombstones.json"
+)
 
 
 def _remaining_store_download_bytes(
@@ -106,9 +131,7 @@ def _remaining_store_download_bytes(
         # canonical file, unlinking only its store name leaves those blocks
         # owned by the staged link, so none of its bytes can be credited.
         reclaimable_target_bytes = (
-            target_bytes
-            if target_stat is not None and target_stat.st_nlink == 1
-            else 0
+            target_bytes if target_stat is not None and target_stat.st_nlink == 1 else 0
         )
         # A partial is grown in place, so its existing bytes remain reusable.
         remaining_bytes += max(
@@ -116,6 +139,16 @@ def _remaining_store_download_bytes(
             expected_size - reclaimable_target_bytes - resumable_bytes,
         )
     return remaining_bytes
+
+
+def _sha256_path(path: Path) -> str:
+    """Hash one artifact path without loading multi-gigabyte files into memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(8 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def select_store_gguf_download_files(
@@ -281,12 +314,65 @@ class StoreModelEntry(BaseModel):
     total_bytes: int
     source_revision: str | None = None
     """Immutable Hugging Face commit that produced this entry, when pinned."""
+    source_repository: str | None = None
+    """Upstream repository that supplied the bytes; ``None`` means ``model_id``
+    for entries written before repository-aware artifact identity."""
     # Whether the upstream repo ships a multimodal projector, recorded at
     # registration so the availability hot path can decide a vision GGUF's
     # completeness without an HF repo-list probe (#346). ``None`` on entries
     # written before this field existed (legacy): those fall back to a one-time
     # HF probe until they are re-registered.
     repo_has_projector: bool | None = None
+    installed_card: InstalledCardRecord | None = None
+    """Complete local card and manifest identity for air-gapped operation."""
+
+
+@final
+class StoreRegistryIndex(BaseModel):
+    """Schema-versioned rebuildable index for canonical store artifacts."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    schema_version: Literal[1] = 1
+    entries: dict[str, StoreModelEntry]
+
+
+@final
+class StoreReconciliationTombstones(BaseModel):
+    """Durable aliases that automatic cache reconciliation must not restore."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    schema_version: Literal[1] = 1
+    deleted_aliases: dict[str, str]
+    """Model aliases mapped to the UTC time their operator deletion committed."""
+
+
+def read_reconciliation_tombstones(store_path: Path) -> frozenset[str]:
+    """Return aliases suppressed from automatic peer-cache reconciliation.
+
+    A malformed tombstone file raises instead of silently treating every alias
+    as eligible for import. Losing deletion intent is less safe than pausing
+    reconciliation until the operator repairs the small metadata file.
+
+    Args:
+        store_path: Canonical model-store root.
+
+    Returns:
+        The aliases retained as operator-deletion tombstones.
+
+    Raises:
+        ValueError: If the durable tombstone file is malformed.
+        OSError: If the file exists but cannot be read.
+    """
+
+    path = store_path / _RECONCILIATION_TOMBSTONES_RELATIVE_PATH
+    if not path.exists():
+        return frozenset()
+    index = StoreReconciliationTombstones.model_validate_json(
+        path.read_bytes(), strict=False
+    )
+    return frozenset(index.deleted_aliases)
 
 
 @dataclass
@@ -295,7 +381,16 @@ class StoreDownloadStatus:
 
     model_id: str
     source_revision: str | None = None
-    status: Literal["pending", "downloading", "complete", "failed"] = "pending"
+    source_repository: str | None = None
+    pinned_gguf: str | None = None
+    extra_pinned_gguf: tuple[str, ...] = ()
+    model_card: ModelCard | None = None
+    artifact_role: InstalledArtifactRole = "base"
+    owner_model_id: str | None = None
+    owner_card_id: str | None = None
+    status: Literal["pending", "downloading", "complete", "failed", "cancelled"] = (
+        "pending"
+    )
     progress: float = 0.0
     error: str | None = None
 
@@ -326,19 +421,37 @@ class ModelStore:
         store.register_model("mlx-community/Qwen3-30B-A3B-4bit", model_path, files, total)
     """
 
-    def __init__(self, store_path: Path) -> None:
+    def __init__(
+        self,
+        store_path: Path,
+        *,
+        recover_installed_cards: bool = True,
+    ) -> None:
         """
         Args:
             store_path: Absolute path to the model store root directory on the
                 store host.  This directory must be readable by the Skulk process
                 and writable for registry updates.
+            recover_installed_cards: Rebuild the registry index from complete
+                adjacent sidecars. Authoritative store construction enables this;
+                transient read-only clients must disable it so ordinary path
+                resolution cannot scan or rewrite the store.
         """
         self._store_path = store_path
         self._registry_path = store_path / "registry.json"
+        self._reconciliation_tombstones_path = (
+            store_path / _RECONCILIATION_TOMBSTONES_RELATIVE_PATH
+        )
+        self._legacy_registry_backup_path = (
+            store_path / "registry.pre-installed-cards.json"
+        )
         self._active_downloads: dict[str, StoreDownloadStatus] = {}
         self._download_lock = asyncio.Lock()
         self._download_transfer_lock = asyncio.Lock()
         self._download_tasks: set[asyncio.Task[None]] = set()
+        self._download_tasks_by_model: dict[str, asyncio.Task[None]] = {}
+        if recover_installed_cards:
+            self._rebuild_registry_from_sidecars()
 
     @property
     def store_path(self) -> Path:
@@ -400,6 +513,20 @@ class ModelStore:
         entry = self.get_entry(model_id)
         return entry is not None and entry.source_revision == source_revision
 
+    def entry_matches_artifact(
+        self,
+        model_id: str,
+        source_revision: str | None,
+        source_repository: str | None,
+    ) -> bool:
+        """Return whether the canonical entry matches the complete byte source."""
+        entry = self.get_entry(model_id)
+        if entry is None or entry.source_revision != source_revision:
+            return False
+        registered_repository = entry.source_repository or entry.model_id
+        requested_repository = source_repository or model_id
+        return registered_repository == requested_repository
+
     def list_models(self) -> list[StoreModelEntry]:
         """Return all :class:`StoreModelEntry` objects currently in the registry
         whose directories still exist on disk.
@@ -411,9 +538,11 @@ class ModelStore:
             entry
             for entry in registry.values()
             if (
-                (model_path := _resolve_store_child_path(
-                    self._store_path, entry.store_path
-                ))
+                (
+                    model_path := _resolve_store_child_path(
+                        self._store_path, entry.store_path
+                    )
+                )
                 is not None
                 and model_path.exists()
             )
@@ -431,6 +560,11 @@ class ModelStore:
         entry = registry.pop(model_id, None)
         if entry is None:
             return False
+        # Persist deletion intent before removing either the canonical bytes or
+        # the index entry. A node that missed the best-effort staged eviction may
+        # otherwise advertise its retained copy and cause reconciliation to
+        # resurrect the model immediately after this method reports success.
+        self._record_reconciliation_tombstone(model_id)
         # Remove files from disk
         model_path = _resolve_store_child_path(self._store_path, entry.store_path)
         if model_path is None:
@@ -443,25 +577,41 @@ class ModelStore:
             logger.info(f"ModelStore: deleted {model_id} from {model_path}")
         # Update registry
         self._store_path.mkdir(parents=True, exist_ok=True)
-        self._registry_path.write_text(
-            json.dumps(
-                {k: v.model_dump() for k, v in registry.items()},
-                indent=2,
-            )
-        )
+        self._write_registry(registry)
         # Drop a *terminal* cached download status for the deleted model. Leaving
         # a stale "complete" here makes a later request_download short-circuit and
         # never re-fetch the model we just removed (the registry entry and files
         # are gone but the in-memory status would still say complete). Only clear
-        # complete/failed entries: an in-flight (pending/downloading) entry is
+        # complete/failed/cancelled entries: an in-flight (pending/downloading) entry is
         # held by a live _do_download task, and popping it would crash that task
         # (it reads self._active_downloads[model_id]). request_download also
         # re-checks is_in_store as a backstop, so a surviving in-flight entry that
         # later completes against a since-deleted model is still self-correcting.
         cached = self._active_downloads.get(model_id)
-        if cached is not None and cached.status in ("complete", "failed"):
+        if cached is not None and cached.status in (
+            "complete",
+            "failed",
+            "cancelled",
+        ):
             del self._active_downloads[model_id]
         return True
+
+    async def delete_model_serialized(self, model_id: str) -> bool:
+        """Delete one alias while excluding downloads and peer imports.
+
+        Args:
+            model_id: Store alias selected for operator deletion.
+
+        Returns:
+            ``True`` when the alias existed and was deleted.
+
+        Side effects:
+            Writes the durable reconciliation tombstone and removes canonical
+            bytes while holding the same publication lock as model transfers.
+        """
+
+        async with self._download_transfer_lock:
+            return await asyncio.to_thread(self.delete_model, model_id)
 
     def register_model(
         self,
@@ -471,6 +621,8 @@ class ModelStore:
         total_bytes: int,
         repo_has_projector: bool | None = None,
         source_revision: str | None = None,
+        source_repository: str | None = None,
+        installed_card: InstalledCardRecord | None = None,
     ) -> None:
         """Add or update *model_id* in the registry.
 
@@ -489,30 +641,43 @@ class ModelStore:
                 this entry, or ``None`` for mutable ``main``. Registration
                 writes the matching filesystem marker before publishing the
                 registry entry so revision-aware runners resolve the same path.
+            source_repository: Upstream Hugging Face repository that supplied
+                the bytes, or ``None`` when it is identical to ``model_id``.
+            installed_card: Full local card and byte manifest retained beside
+                the artifact for registry-independent restart.
         """
         from skulk.download.download_utils import write_source_revision_marker
 
         resolved_root = self._store_path.resolve()
         resolved_model_path = model_path.resolve()
-        if resolved_model_path == resolved_root or not resolved_model_path.is_relative_to(
-            resolved_root
+        if (
+            resolved_model_path == resolved_root
+            or not resolved_model_path.is_relative_to(resolved_root)
         ):
             raise ValueError(f"Model path must be contained by the store: {model_path}")
         relative_path = str(resolved_model_path.relative_to(resolved_root))
+        effective_files = list(files)
+        if installed_card is not None:
+            write_installed_card(resolved_model_path, installed_card)
+            sidecar_name = INSTALLED_CARD_RELATIVE_PATH.as_posix()
+            if sidecar_name not in effective_files:
+                effective_files.append(sidecar_name)
         entry = StoreModelEntry(
             model_id=model_id,
             store_path=relative_path,
-            files=files,
+            files=effective_files,
             downloaded_at=datetime.now(tz=timezone.utc).isoformat(),
             total_bytes=total_bytes,
             repo_has_projector=repo_has_projector,
             source_revision=source_revision,
+            source_repository=source_repository,
+            installed_card=installed_card,
         )
         write_source_revision_marker(resolved_model_path, source_revision)
         self._write_registry_entry(entry)
         logger.info(
             f"ModelStore: registered {model_id} at {relative_path} "
-            f"({total_bytes:,} bytes, {len(files)} files)"
+            f"({total_bytes:,} bytes, {len(effective_files)} files)"
         )
 
     def list_files_for_model(self, model_id: str) -> list[str] | None:
@@ -543,10 +708,14 @@ class ModelStore:
             if not isinstance(data, dict):
                 logger.warning("ModelStore: registry.json is not a dict — resetting")
                 return {}
+            if "schema_version" in data or "entries" in data:
+                return StoreRegistryIndex.model_validate(data, strict=False).entries
+            # V0 was an unversioned mapping. It remains readable and migrates
+            # atomically the next time any entry changes.
             return {
-                k: StoreModelEntry.model_validate(v)
-                for k, v in data.items()
-                if isinstance(k, str)
+                key: StoreModelEntry.model_validate(value, strict=False)
+                for key, value in data.items()
+                if isinstance(key, str)
             }
         except Exception as exc:
             logger.warning(f"ModelStore: failed to read registry: {exc}")
@@ -557,12 +726,283 @@ class ModelStore:
         self._store_path.mkdir(parents=True, exist_ok=True)
         registry = self._read_registry()
         registry[entry.model_id] = entry
-        self._registry_path.write_text(
-            json.dumps(
-                {k: v.model_dump() for k, v in registry.items()},
-                indent=2,
-            )
+        self._write_registry(registry)
+
+    def _write_registry(self, registry: dict[str, StoreModelEntry]) -> None:
+        """Atomically replace the versioned rebuildable registry index."""
+
+        self._store_path.mkdir(parents=True, exist_ok=True)
+        if (
+            self._registry_path.is_file()
+            and not self._legacy_registry_backup_path.exists()
+        ):
+            try:
+                existing_bytes = self._registry_path.read_bytes()
+                existing_payload: object = json.loads(existing_bytes)
+                if isinstance(existing_payload, dict) and not (
+                    "schema_version" in existing_payload
+                    or "entries" in existing_payload
+                ):
+                    backup_temporary = self._legacy_registry_backup_path.with_name(
+                        f".{self._legacy_registry_backup_path.name}.tmp"
+                    )
+                    backup_temporary.write_bytes(existing_bytes)
+                    backup_temporary.replace(self._legacy_registry_backup_path)
+            except (OSError, ValueError):
+                # A corrupt index is recovered from sidecars; there is no valid
+                # legacy index to preserve as the migration backup.
+                pass
+        temporary = self._registry_path.with_name(".registry.json.tmp")
+        temporary.write_text(
+            StoreRegistryIndex(entries=registry).model_dump_json(indent=2)
         )
+        temporary.replace(self._registry_path)
+
+    def _read_reconciliation_tombstone_index(
+        self,
+    ) -> StoreReconciliationTombstones:
+        """Read durable automatic-import suppression metadata."""
+
+        if not self._reconciliation_tombstones_path.exists():
+            return StoreReconciliationTombstones(deleted_aliases={})
+        return StoreReconciliationTombstones.model_validate_json(
+            self._reconciliation_tombstones_path.read_bytes(),
+            strict=False,
+        )
+
+    def _write_reconciliation_tombstone_index(
+        self,
+        index: StoreReconciliationTombstones,
+    ) -> None:
+        """Atomically replace durable automatic-import suppression metadata."""
+
+        self._reconciliation_tombstones_path.parent.mkdir(
+            parents=True, exist_ok=True
+        )
+        temporary = self._reconciliation_tombstones_path.with_name(
+            f".{self._reconciliation_tombstones_path.name}.tmp"
+        )
+        temporary.write_text(index.model_dump_json(indent=2))
+        temporary.replace(self._reconciliation_tombstones_path)
+
+    def _record_reconciliation_tombstone(self, model_id: str) -> None:
+        """Persist one operator-deleted alias before its bytes are removed."""
+
+        index = self._read_reconciliation_tombstone_index()
+        deleted_aliases = dict(index.deleted_aliases)
+        deleted_aliases[model_id] = datetime.now(tz=timezone.utc).isoformat()
+        self._write_reconciliation_tombstone_index(
+            StoreReconciliationTombstones(deleted_aliases=deleted_aliases)
+        )
+
+    def _clear_reconciliation_tombstone(self, model_id: str) -> None:
+        """Allow a successful explicit download to reintroduce one alias."""
+
+        index = self._read_reconciliation_tombstone_index()
+        if model_id not in index.deleted_aliases:
+            return
+        deleted_aliases = dict(index.deleted_aliases)
+        del deleted_aliases[model_id]
+        self._write_reconciliation_tombstone_index(
+            StoreReconciliationTombstones(deleted_aliases=deleted_aliases)
+        )
+
+    async def refresh_recovered_generations(
+        self,
+        current_registry_cards: Iterable[ModelCard],
+    ) -> None:
+        """Re-select recovered generations after signed catalog discovery.
+
+        Store construction intentionally recovers installed sidecars before any
+        registry access. Once TUF discovery completes, this second pass makes
+        current signed identity outrank a preserved prior index selection.
+        """
+
+        current_registry_ids = {
+            str(card.model_id): card.registry_card_id
+            for card in current_registry_cards
+            if card.registry_card_id is not None
+        }
+        async with self._download_transfer_lock:
+            await asyncio.to_thread(
+                self._rebuild_registry_from_sidecars,
+                current_registry_ids,
+            )
+
+    async def recover_installed_cards_serialized(self) -> None:
+        """Adopt complete adjacent sidecars without transferring model bytes.
+
+        Reconciliation can create a sidecar for a canonical pre-upgrade entry
+        after this process constructed the store. Refresh the rebuildable index
+        under the publication lock so the existing generation becomes complete
+        in place and is never selected as its own peer-import source.
+        """
+
+        async with self._download_transfer_lock:
+            await asyncio.to_thread(self._rebuild_registry_from_sidecars)
+
+    def _rebuild_registry_from_sidecars(
+        self,
+        current_registry_ids: dict[str, str] | None = None,
+    ) -> None:
+        """Recover missing index entries from artifact-owned sidecars.
+
+        The index is intentionally rebuildable: a torn or removed
+        ``registry.json`` must not make complete air-gapped artifacts disappear.
+        Existing entries win unless a valid sidecar provides the same model id,
+        in which case the sidecar refreshes the installed-card payload.
+        """
+
+        if not self._store_path.is_dir():
+            return
+        registry = self._read_registry()
+        tombstoned_aliases = frozenset(
+            self._read_reconciliation_tombstone_index().deleted_aliases
+        )
+        changed = False
+        for model_id, entry in tuple(registry.items()):
+            retained = entry.installed_card
+            if model_id in tombstoned_aliases or (
+                retained is not None
+                and retained.owner_model_id in tombstoned_aliases
+            ):
+                del registry[model_id]
+                changed = True
+                continue
+            if retained is None:
+                continue
+            model_directory = _resolve_store_child_path(
+                self._store_path, entry.store_path
+            )
+            try:
+                adjacent = (
+                    read_installed_card(model_directory)
+                    if model_directory is not None
+                    else None
+                )
+            except (OSError, ValueError):
+                adjacent = None
+            if (
+                model_directory is None
+                or adjacent != retained
+                or not verify_installed_card(model_directory, retained)
+            ):
+                logger.warning(
+                    f"ModelStore: removing incomplete installed index entry "
+                    f"for {model_id}; reconciliation may recover a healthy replica"
+                )
+                del registry[model_id]
+                changed = True
+        recovered_by_model: dict[str, list[StoreModelEntry]] = {}
+        for model_directory in self._store_path.iterdir():
+            if not model_directory.is_dir() or model_directory.name.startswith("."):
+                continue
+            try:
+                record = read_installed_card(model_directory)
+            except (OSError, ValueError) as error:
+                logger.warning(
+                    f"ModelStore: ignoring invalid installed-card sidecar at "
+                    f"{model_directory}: {error}"
+                )
+                continue
+            if record is None:
+                continue
+            if record.artifact_model_id in tombstoned_aliases or (
+                record.owner_model_id is not None
+                and record.owner_model_id in tombstoned_aliases
+            ):
+                logger.info(
+                    "ModelStore: suppressing sidecar recovery for "
+                    f"operator-deleted alias {record.artifact_model_id}"
+                )
+                continue
+            if not verify_installed_card(model_directory, record):
+                logger.warning(
+                    f"ModelStore: ignoring incomplete installed artifact at "
+                    f"{model_directory} while rebuilding the registry"
+                )
+                continue
+            files = [
+                *(entry.path for entry in record.files),
+                INSTALLED_CARD_RELATIVE_PATH.as_posix(),
+            ]
+            relative_path = str(
+                model_directory.resolve().relative_to(self._store_path.resolve())
+            )
+            previous = registry.get(record.artifact_model_id)
+            recovered = StoreModelEntry(
+                model_id=record.artifact_model_id,
+                store_path=relative_path,
+                files=files,
+                downloaded_at=(
+                    previous.downloaded_at
+                    if previous is not None
+                    else record.captured_at.isoformat()
+                ),
+                total_bytes=sum(entry.size_bytes for entry in record.files),
+                source_revision=record.artifact_revision,
+                source_repository=record.artifact_repository,
+                repo_has_projector=(
+                    previous.repo_has_projector if previous is not None else None
+                ),
+                installed_card=record,
+            )
+            recovered_by_model.setdefault(record.artifact_model_id, []).append(
+                recovered
+            )
+        for model_id, candidates in recovered_by_model.items():
+            previous = registry.get(model_id)
+            previous_identity = (
+                previous.installed_card.installed_identity
+                if previous is not None and previous.installed_card is not None
+                else None
+            )
+            previous_path = previous.store_path if previous is not None else None
+
+            def recovery_rank(
+                candidate: StoreModelEntry,
+                model_id: str = model_id,
+                previous_identity: str | None = previous_identity,
+                previous_path: str | None = previous_path,
+            ) -> tuple[bool, bool, bool, float, str]:
+                installed = candidate.installed_card
+                assert installed is not None
+                owner_alias = installed.owner_model_id or model_id
+                current_card_id = (
+                    current_registry_ids.get(owner_alias)
+                    if current_registry_ids is not None
+                    else None
+                )
+                matches_previous = (
+                    installed.installed_identity == previous_identity
+                    if previous_identity is not None
+                    else candidate.store_path == previous_path
+                )
+                matches_current = (
+                    current_card_id is not None
+                    and (
+                        installed.owner_card_id
+                        or installed.model_card.registry_card_id
+                    )
+                    == current_card_id
+                )
+                return (
+                    not matches_current
+                    if current_registry_ids is not None
+                    else False,
+                    not matches_previous,
+                    installed.verification != "registry_verified",
+                    -installed.captured_at.timestamp(),
+                    candidate.store_path,
+                )
+
+            recovered = min(candidates, key=recovery_rank)
+            if recovered != previous:
+                registry[model_id] = recovered
+                changed = True
+        if not changed:
+            return
+        self._write_registry(registry)
 
     # ------------------------------------------------------------------
     # Store-side HuggingFace downloads
@@ -631,12 +1071,77 @@ class ModelStore:
         registered = set(entry.files)
         return any(name not in registered for name in required_files)
 
+    @staticmethod
+    def _same_requested_card(
+        existing: ModelCard | None,
+        requested: ModelCard | None,
+    ) -> bool:
+        """Return whether concurrent requests carry the same full card truth."""
+
+        if existing is None or requested is None:
+            return existing is requested
+        if (
+            existing.registry_card_id is not None
+            or requested.registry_card_id is not None
+        ):
+            return existing.registry_card_id == requested.registry_card_id
+        return existing == requested
+
+    def _ensure_installed_card(
+        self,
+        model_id: str,
+        model_card: ModelCard,
+        artifact_role: InstalledArtifactRole,
+        owner_model_id: str | None,
+        owner_card_id: str | None,
+        artifact_file: str | None,
+    ) -> None:
+        """Materialize or refresh a sidecar without transferring model bytes."""
+
+        entry = self.get_entry(model_id)
+        if entry is None:
+            raise ValueError(f"cannot attach a card to missing store model {model_id}")
+        model_path = _resolve_store_child_path(self._store_path, entry.store_path)
+        if model_path is None or not model_path.is_dir():
+            raise ValueError(
+                f"cannot attach a card to unavailable store model {model_id}"
+            )
+        record = build_installed_card_record(
+            model_path,
+            model_card,
+            artifact_role=artifact_role,
+            artifact_model_id=model_id,
+            owner_model_id=owner_model_id,
+            owner_card_id=owner_card_id,
+            artifact_repository=entry.source_repository or entry.model_id,
+            artifact_revision=entry.source_revision,
+            artifact_file=artifact_file,
+            file_manifest=(
+                entry.installed_card.files
+                if entry.installed_card is not None
+                and entry.installed_card.artifact_repository
+                == (entry.source_repository or entry.model_id)
+                and entry.installed_card.artifact_revision == entry.source_revision
+                and entry.installed_card.artifact_file == artifact_file
+                and verify_installed_card(model_path, entry.installed_card)
+                else None
+            ),
+        )
+        refreshed = entry.model_copy(update={"installed_card": record})
+        write_installed_card(model_path, record)
+        self._write_registry_entry(refreshed)
+
     async def request_download(
         self,
         model_id: str,
         pinned_gguf: str | None = None,
         extra_pinned_gguf: list[str] | None = None,
         source_revision: str | None = None,
+        source_repository: str | None = None,
+        model_card: ModelCard | None = None,
+        artifact_role: InstalledArtifactRole = "base",
+        owner_model_id: str | None = None,
+        owner_card_id: str | None = None,
     ) -> StoreDownloadStatus:
         """Request that the store download a model from HuggingFace.
 
@@ -655,7 +1160,15 @@ class ModelStore:
         immutable Hugging Face commit. A different registered revision is
         replaced only after the requested revision has downloaded and
         registered successfully.
+        ``source_repository`` names the upstream byte source when ``model_id``
+        is a distinct store and runtime alias.
+        ``model_card`` is the independently verified complete card retained
+        beside the finished artifact.
+        Companion downloads retain that owning card together with their role
+        and owning identities instead of synthesizing a bare model card.
         """
+        requested_repository = source_repository or model_id
+        requested_companions = tuple(sorted(extra_pinned_gguf or []))
         # Checked outside the lock: it may do a (cached) repo file-list fetch, and
         # holding the download lock across network I/O would serialize unrelated
         # requests.
@@ -668,12 +1181,20 @@ class ModelStore:
         async with self._download_lock:
             existing = self._active_downloads.get(model_id)
             if existing is not None:
-                if (
-                    existing.status in ("pending", "downloading")
-                    and existing.source_revision != source_revision
+                existing_repository = existing.source_repository or model_id
+                if existing.status in ("pending", "downloading") and (
+                    existing.source_revision != source_revision
+                    or existing_repository != requested_repository
+                    or existing.pinned_gguf != pinned_gguf
+                    or existing.extra_pinned_gguf != requested_companions
+                    or not self._same_requested_card(existing.model_card, model_card)
+                    or existing.artifact_role != artifact_role
+                    or existing.owner_model_id != owner_model_id
+                    or existing.owner_card_id != owner_card_id
                 ):
                     raise ValueError(
-                        f"{model_id} is already downloading revision "
+                        f"{model_id} is already downloading a different artifact "
+                        f"selection from {existing_repository}@"
                         f"{existing.source_revision or 'main'}"
                     )
                 # A failed entry retries. A cached-complete entry is stale when:
@@ -697,27 +1218,51 @@ class ModelStore:
                     or missing_pinned_gguf
                     or missing_companion
                     or existing.source_revision != source_revision
+                    or existing_repository != requested_repository
+                    or not self._same_requested_card(existing.model_card, model_card)
+                    or existing.artifact_role != artifact_role
+                    or existing.owner_model_id != owner_model_id
+                    or existing.owner_card_id != owner_card_id
                     or not self.is_in_store(model_id)
                 )
-                if existing.status == "failed" or stale_complete:
+                if existing.status in ("failed", "cancelled") or stale_complete:
                     del self._active_downloads[model_id]
                 else:
                     return existing
-            revision_mismatch = self.is_in_store(
+            artifact_mismatch = self.is_in_store(
                 model_id
-            ) and not self.entry_matches_revision(model_id, source_revision)
+            ) and not self.entry_matches_artifact(
+                model_id,
+                source_revision,
+                source_repository,
+            )
             if (
                 self.is_in_store(model_id)
                 and not missing_projector
                 and not missing_pinned_gguf
                 and not missing_companion
-                and not revision_mismatch
+                and not artifact_mismatch
             ):
+                if model_card is not None:
+                    await asyncio.to_thread(
+                        self._ensure_installed_card,
+                        model_id,
+                        model_card,
+                        artifact_role,
+                        owner_model_id,
+                        owner_card_id,
+                        pinned_gguf,
+                    )
                 return StoreDownloadStatus(
                     model_id=model_id,
                     source_revision=source_revision,
+                    source_repository=requested_repository,
                     status="complete",
                     progress=1.0,
+                    model_card=model_card,
+                    artifact_role=artifact_role,
+                    owner_model_id=owner_model_id,
+                    owner_card_id=owner_card_id,
                 )
             if missing_projector:
                 logger.warning(
@@ -737,29 +1282,87 @@ class ModelStore:
                     f"missing a requested companion GGUF ({extra_pinned_gguf}); "
                     "re-downloading to recover it (existing weights are reused)."
                 )
-            if revision_mismatch:
+            if artifact_mismatch:
+                current = self.get_entry(model_id)
+                current_repository = (
+                    current.source_repository or current.model_id
+                    if current is not None
+                    else "unknown"
+                )
+                current_revision = (
+                    current.source_revision or "main"
+                    if current is not None
+                    else "unknown"
+                )
                 logger.warning(
-                    f"ModelStore: {model_id} is pinned to revision "
-                    f"{source_revision or 'main'}, but the canonical entry has a "
-                    "different source revision; downloading a qualified replacement."
+                    f"ModelStore: {model_id} requests "
+                    f"{requested_repository}@{source_revision or 'main'}, but the "
+                    f"canonical entry identifies {current_repository}@"
+                    f"{current_revision}; downloading a qualified replacement."
                 )
             status = StoreDownloadStatus(
                 model_id=model_id,
                 source_revision=source_revision,
+                source_repository=requested_repository,
+                pinned_gguf=pinned_gguf,
+                extra_pinned_gguf=requested_companions,
+                model_card=model_card,
+                artifact_role=artifact_role,
+                owner_model_id=owner_model_id,
+                owner_card_id=owner_card_id,
                 status="pending",
             )
             self._active_downloads[model_id] = status
-        task = asyncio.create_task(
-            self._do_download(
-                model_id,
-                pinned_gguf,
-                extra_pinned_gguf,
-                source_revision,
+            task = asyncio.create_task(
+                self._do_download(
+                    model_id,
+                    pinned_gguf,
+                    extra_pinned_gguf,
+                    source_revision,
+                    source_repository,
+                    model_card,
+                    artifact_role,
+                    owner_model_id,
+                    owner_card_id,
+                )
             )
-        )
-        self._download_tasks.add(task)
-        task.add_done_callback(self._download_tasks.discard)
+            self._download_tasks.add(task)
+            self._download_tasks_by_model[model_id] = task
+            task.add_done_callback(self._download_tasks.discard)
         return status
+
+    async def cancel_download(self, model_id: str) -> StoreDownloadStatus | None:
+        """Cancel one pending or active canonical-store download.
+
+        Partial files remain available for the resumable downloader. Repeating
+        cancellation for an already-cancelled request is idempotent. ``None``
+        means the model has no cancellable store transfer.
+
+        Args:
+            model_id: HuggingFace-style model identifier.
+
+        Returns:
+            The cancelled status, or ``None`` when no transfer can be cancelled.
+        """
+
+        async with self._download_lock:
+            status = self._active_downloads.get(model_id)
+            if status is not None and status.status == "cancelled":
+                return status
+            if status is None or status.status not in ("pending", "downloading"):
+                return None
+            task = self._download_tasks_by_model.get(model_id)
+            if task is None:
+                return None
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        final_status = self.get_download_status(model_id)
+        return (
+            final_status
+            if final_status is not None and final_status.status == "cancelled"
+            else None
+        )
 
     def get_download_status(self, model_id: str) -> StoreDownloadStatus | None:
         """Return the download status for *model_id*, or None."""
@@ -770,6 +1373,7 @@ class ModelStore:
             return StoreDownloadStatus(
                 model_id=model_id,
                 source_revision=entry.source_revision,
+                source_repository=entry.source_repository or entry.model_id,
                 status="complete",
                 progress=1.0,
             )
@@ -783,12 +1387,187 @@ class ModelStore:
             if s.status in ("pending", "downloading")
         ]
 
+    async def import_peer_artifact(
+        self,
+        record: InstalledCardRecord,
+        *,
+        source_base_url: str,
+        capability_token: str,
+        target_node_id: str,
+    ) -> StoreModelEntry:
+        """Pull, verify and atomically publish one peer-cached artifact.
+
+        The transfer resumes per file through HTTP ranges and shares the same
+        publication lock as normal Hugging Face downloads.  Existing source
+        caches are read-only from this operation and are never evicted.
+        """
+
+        from urllib.parse import quote, urlsplit
+
+        parsed = urlsplit(source_base_url)
+        if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+            raise ValueError("source_base_url must be an HTTP(S) node API")
+        async with self._download_transfer_lock:
+            tombstones = read_reconciliation_tombstones(self._store_path)
+            if record.artifact_model_id in tombstones or (
+                record.owner_model_id is not None
+                and record.owner_model_id in tombstones
+            ):
+                raise ValueError(
+                    f"peer import is suppressed by an operator-deletion tombstone "
+                    f"for {record.owner_model_id or record.artifact_model_id}"
+                )
+            existing = self.get_entry(record.artifact_model_id)
+            existing_path = (
+                _resolve_store_child_path(self._store_path, existing.store_path)
+                if existing is not None
+                else None
+            )
+            if (
+                existing is not None
+                and existing.installed_card is not None
+                and existing.installed_card.installed_identity
+                == record.installed_identity
+                and existing.installed_card.manifest_sha256 == record.manifest_sha256
+                and existing_path is not None
+                and verify_installed_card(existing_path, existing.installed_card)
+            ):
+                return existing
+            import_root = self._store_path / ".imports"
+            await aios.makedirs(str(import_root), exist_ok=True)
+            temporary = import_root / f"{record.installed_identity}.partial"
+            await aios.makedirs(str(temporary), exist_ok=True)
+            verified_destinations: set[Path] = set()
+            for entry in record.files:
+                destination = temporary / entry.path
+                if not (
+                    destination.is_file()
+                    and destination.stat().st_size == entry.size_bytes
+                ):
+                    continue
+                digest = await asyncio.to_thread(_sha256_path, destination)
+                if digest == entry.sha256:
+                    verified_destinations.add(destination)
+                    continue
+                await aios.remove(str(destination))
+            remaining = 0
+            for entry in record.files:
+                destination = temporary / entry.path
+                if destination in verified_destinations:
+                    continue
+                partial = destination.with_name(f"{destination.name}.partial")
+                partial_bytes = partial.stat().st_size if partial.is_file() else 0
+                if partial_bytes > entry.size_bytes:
+                    partial.unlink()
+                    partial_bytes = 0
+                elif partial_bytes == entry.size_bytes:
+                    digest = await asyncio.to_thread(_sha256_path, partial)
+                    if digest == entry.sha256:
+                        await aios.makedirs(str(destination.parent), exist_ok=True)
+                        partial.replace(destination)
+                        verified_destinations.add(destination)
+                        continue
+                    partial.unlink()
+                    partial_bytes = 0
+                remaining += entry.size_bytes - partial_bytes
+            if remaining > 0:
+                free_bytes = await asyncio.to_thread(
+                    lambda: shutil.disk_usage(temporary).free
+                )
+                required = remaining + MINIMUM_STAGING_FREE_DISK_BYTES
+                if free_bytes < required:
+                    raise ModelStoreCapacityError(
+                        "Insufficient canonical model-store capacity for peer import"
+                    )
+            headers = {"X-Skulk-Store-Node": target_node_id}
+            timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_read=120)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                for manifest_entry in record.files:
+                    destination = temporary / manifest_entry.path
+                    await aios.makedirs(str(destination.parent), exist_ok=True)
+                    partial = destination.with_name(f"{destination.name}.partial")
+                    offset = partial.stat().st_size if partial.is_file() else 0
+                    if destination in verified_destinations:
+                        continue
+                    if offset > manifest_entry.size_bytes:
+                        partial.unlink()
+                        offset = 0
+                    elif offset == manifest_entry.size_bytes:
+                        digest = await asyncio.to_thread(_sha256_path, partial)
+                        if digest == manifest_entry.sha256:
+                            partial.replace(destination)
+                            continue
+                        partial.unlink()
+                        offset = 0
+                    request_headers = dict(headers)
+                    if offset:
+                        request_headers["Range"] = f"bytes={offset}-"
+                    relative = quote(manifest_entry.path, safe="/")
+                    url = (
+                        f"{source_base_url.rstrip('/')}/store/internal/exports/"
+                        f"{capability_token}/{relative}"
+                    )
+                    async with session.get(url, headers=request_headers) as response:
+                        if response.status not in ({206} if offset else {200, 206}):
+                            raise RuntimeError(
+                                f"peer export returned HTTP {response.status}"
+                            )
+                        mode = "ab" if offset else "wb"
+                        with partial.open(mode) as output:
+                            async for chunk in response.content.iter_chunked(
+                                8 * 1024 * 1024
+                            ):
+                                output.write(chunk)
+                    if partial.stat().st_size != manifest_entry.size_bytes:
+                        raise RuntimeError(
+                            f"peer export size mismatch for {manifest_entry.path}"
+                        )
+                    partial.replace(destination)
+            imported_files = build_file_manifest(temporary)
+            if manifest_sha256(imported_files) != record.manifest_sha256:
+                raise RuntimeError("peer export manifest digest mismatch")
+            final_name = (
+                record.artifact_model_id.replace("/", "--")
+                + "--installed-"
+                + record.installed_identity[-16:]
+            )
+            final_path = self._store_path / final_name
+            if final_path.exists():
+                await asyncio.to_thread(shutil.rmtree, final_path)
+            temporary.replace(final_path)
+            write_installed_card(final_path, record)
+            files = [entry.path for entry in record.files]
+            self.register_model(
+                record.artifact_model_id,
+                final_path,
+                files,
+                sum(entry.size_bytes for entry in record.files),
+                source_revision=record.artifact_revision,
+                source_repository=record.artifact_repository,
+                installed_card=record,
+            )
+            if existing is not None and existing.store_path != final_name:
+                previous = _resolve_store_child_path(
+                    self._store_path, existing.store_path
+                )
+                if previous is not None:
+                    await asyncio.to_thread(shutil.rmtree, previous, True)
+            imported = self.get_entry(record.artifact_model_id)
+            if imported is None:
+                raise RuntimeError("peer import committed without a registry entry")
+            return imported
+
     async def _do_download(
         self,
         model_id: str,
         pinned_gguf: str | None = None,
         extra_pinned_gguf: list[str] | None = None,
         source_revision: str | None = None,
+        source_repository: str | None = None,
+        model_card: ModelCard | None = None,
+        artifact_role: InstalledArtifactRole = "base",
+        owner_model_id: str | None = None,
+        owner_card_id: str | None = None,
     ) -> None:
         """Download a model from HuggingFace into the store and register it.
 
@@ -796,6 +1575,8 @@ class ModelStore:
         GGUF quant's shard group to fetch, honoring a custom pin (#344).
         ``extra_pinned_gguf`` names same-repo companion GGUFs (a served-engine
         draft bundled with the base) co-fetched in the same store download.
+        ``source_repository`` is the upstream repository when ``model_id`` is
+        a distinct immutable-artifact alias used for store identity.
         """
         from skulk.download.download_utils import (
             download_file_with_retry,
@@ -806,14 +1587,21 @@ class ModelStore:
 
         status = self._active_downloads[model_id]
         revision = source_revision or "main"
+        artifact_repository = source_repository or model_id
         sanitized = model_id.replace("/", "--")
         if source_revision is not None:
             sanitized = f"{sanitized}--revision-{source_revision}"
+        if source_repository is not None:
+            repository_digest = hashlib.sha256(source_repository.encode()).hexdigest()[
+                :12
+            ]
+            sanitized = f"{sanitized}--source-{repository_digest}"
         target_dir = self._store_path / sanitized
         previous_entry = self.get_entry(model_id)
         transfer_lock_acquired = False
         logger.info(
-            f"ModelStore: downloading {model_id} from HuggingFace to {target_dir}"
+            f"ModelStore: downloading {model_id} from HuggingFace repository "
+            f"{artifact_repository} to {target_dir}"
         )
 
         try:
@@ -832,7 +1620,7 @@ class ModelStore:
             await aios.makedirs(str(target_dir), exist_ok=True)
 
             repo_file_list = await fetch_file_list_with_cache(
-                ModelId(model_id), revision, recursive=True
+                ModelId(artifact_repository), revision, recursive=True
             )
             # A vision GGUF (LLaVA/Qwen-VL/Gemma-VLM style) ships its multimodal
             # projector as a separate ``*mmproj*.gguf`` alongside the LM weights;
@@ -841,9 +1629,7 @@ class ModelStore:
             # lands before registering (see the post-download guard below): a
             # store entry that omits the projector stages an unloadable vision
             # model, which surfaces only as a runner crash at load time (#346).
-            repo_ships_projector = has_gguf_projector(
-                f.path for f in repo_file_list
-            )
+            repo_ships_projector = has_gguf_projector(f.path for f in repo_file_list)
             # For a GGUF repo, fetch only the preferred quant's shard group plus
             # config.json (dropping other quants, original/*, metal/*, etc.),
             # mirroring the direct-HF selective download (#339). The projector
@@ -880,9 +1666,7 @@ class ModelStore:
                 free_bytes = await asyncio.to_thread(
                     lambda: shutil.disk_usage(target_dir).free
                 )
-                required_free_bytes = (
-                    additional_bytes + MINIMUM_STAGING_FREE_DISK_BYTES
-                )
+                required_free_bytes = additional_bytes + MINIMUM_STAGING_FREE_DISK_BYTES
                 if free_bytes < required_free_bytes:
                     raise ModelStoreCapacityError(
                         f"Insufficient canonical model-store disk capacity for "
@@ -906,7 +1690,7 @@ class ModelStore:
                     return cb
 
                 await download_file_with_retry(
-                    ModelId(model_id),
+                    ModelId(artifact_repository),
                     revision,
                     f.path,
                     target_dir,
@@ -960,6 +1744,22 @@ class ModelStore:
                     "refusing to register an incomplete entry. Re-run the download."
                 )
             total = sum(p.stat().st_size for p in target_dir.rglob("*") if p.is_file())
+            installed_card = (
+                await asyncio.to_thread(
+                    build_installed_card_record,
+                    target_dir,
+                    model_card,
+                    artifact_role=artifact_role,
+                    artifact_model_id=model_id,
+                    owner_model_id=owner_model_id,
+                    owner_card_id=owner_card_id,
+                    artifact_repository=artifact_repository,
+                    artifact_revision=source_revision,
+                    artifact_file=pinned_gguf,
+                )
+                if model_card is not None
+                else None
+            )
             self.register_model(
                 model_id,
                 target_dir,
@@ -967,11 +1767,15 @@ class ModelStore:
                 total,
                 repo_has_projector=repo_ships_projector,
                 source_revision=source_revision,
+                source_repository=artifact_repository,
+                installed_card=installed_card,
             )
-            if (
-                previous_entry is not None
-                and previous_entry.store_path != sanitized
-            ):
+            # A successful explicit upstream download is the operator's durable
+            # opt-in to reintroduce an alias that was previously deleted. Clear
+            # suppression only after the replacement is complete and indexed;
+            # failed transfers must leave stale peer replicas ineligible.
+            self._clear_reconciliation_tombstone(model_id)
+            if previous_entry is not None and previous_entry.store_path != sanitized:
                 previous_path = _resolve_store_child_path(
                     self._store_path, previous_entry.store_path
                 )
@@ -989,16 +1793,26 @@ class ModelStore:
                 f"ModelStore: downloaded {model_id} from HuggingFace ({total:,} bytes)"
             )
 
+        except asyncio.CancelledError:
+            status.status = "cancelled"
+            status.error = None
+            logger.info(f"ModelStore: cancelled download of {model_id}")
+            raise
         except Exception as exc:
             status.status = "failed"
             # Always record the exception TYPE: several failure modes (notably a
             # TimeoutError) stringify to "", which produced an empty, useless
             # error field that hid the real cause of a stalled large download.
             detail = str(exc)
-            status.error = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+            status.error = (
+                f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+            )
             logger.exception(
                 f"ModelStore: download of {model_id} failed ({type(exc).__name__})"
             )
         finally:
             if transfer_lock_acquired:
                 self._download_transfer_lock.release()
+            current_task = asyncio.current_task()
+            if self._download_tasks_by_model.get(model_id) is current_task:
+                del self._download_tasks_by_model[model_id]

@@ -51,12 +51,13 @@ flowchart TB
 
 Each subsystem has its own concern:
 
-- **Router** wraps libp2p (via PyO3 Rust bindings) and exposes typed pub/sub topics: `GLOBAL_EVENTS`, `LOCAL_EVENTS`, `COMMANDS`, `DOWNLOAD_COMMANDS`, `STATE_SYNC_MESSAGES`, `ELECTION_MESSAGES`, `CONNECTION_MESSAGES`, `TELEMETRY`, `DATA`, `PROVIDER_DATA`, `REALTIME_AUDIO`, `SPEECH_MEDIA`, `TRACE_DATA`, and `VISION_MEDIA`. Components subscribe by topic; every topic has a machine-checked control, telemetry, or data plane assignment and payloads are validated Pydantic types.
-- **Telemetry plane** (`TELEMETRY` topic) carries last-write-wins readings that are *not* decisions: each node's `participation` role and `backends`, memory and system profile, observational identity/disk/rdma-ctl status, heartbeat, and non-terminal model-download progress. Local producers never wait for network capacity: a fixed 256-key admission map replaces older values for the same node/reading (download progress additionally keys by model), evicts the oldest distinct key only at the bound, and drains through a one-packet network queue. Telemetry then uses a dedicated gossipsub behavior and protocol with independent per-peer handler queues: transport isolation is structural, so a saturated control or election path cannot delay telemetry and telemetry fan-out cannot consume control or election capacity. Aggregate pressure is available at `GET /v1/diagnostics/telemetry`. Readings land in an in-memory `TelemetryView`, not event-sourced `State`; only download completion and failure remain durable. Attempt identities stop delayed progress on the independent protocol from overriding terminal/reset decisions, while `GET /state` overlays the live view to preserve the dashboard's wire shape. The system profile includes a collector-agnostic accelerator block (GPU utilization, VRAM used and total, power, temperature, clock) normalized at each platform collector. Because the context-admission ceiling must be identical across ranks but telemetry is unordered, the master computes it once at placement time and stamps it onto the instance (`context_token_limit`). **Connectivity readings stay on the control plane**: `node_network`, the thunderbolt maps, and derived `thunderbolt_bridge_cycles` define the topology graph and therefore require ordered event-sourced state.
+- **Router** wraps libp2p (via PyO3 Rust bindings) and exposes typed pub/sub topics: `GLOBAL_EVENTS`, `LOCAL_EVENTS`, `COMMANDS`, `DOWNLOAD_COMMANDS`, `STATE_SYNC_MESSAGES`, `ELECTION_MESSAGES`, `AUTHORITY_MESSAGES`, `CONNECTION_MESSAGES`, `TELEMETRY`, `DATA`, `PROVIDER_DATA`, `REALTIME_AUDIO`, `SPEECH_MEDIA`, `TRACE_DATA`, and `VISION_MEDIA`. Components subscribe by topic; every topic has a machine-checked control, authority, telemetry, or data plane assignment and payloads are validated Pydantic types.
+- **Telemetry plane** (`TELEMETRY` topic) carries last-write-wins readings that are *not* decisions: each node's `participation` role and `backends`, memory and system profile, observational identity/disk/rdma-ctl status, heartbeat, non-terminal model-download progress, and compact node-local artifact availability. A node-owned inventory service runs independently of the HTTP API (including under `--no-api`), publishes at startup and after storage/runtime transitions, and repairs every 60 seconds; a fixed entry ceiling and truncation flag keep it bounded. Detached records for read-only model roots receive one full hash verification per stable file-stat fingerprint, so periodic repair scans reuse process-local trust while any path, device, inode, size, modification-time, or change-time transition forces re-verification. Canonical card bodies, manifests, and the store catalog never ride telemetry: the store host advertises only its role, and API nodes synthesize canonical `store_local` locations while projecting additional `node_cache` copies from `TelemetryView`. Local receipt time establishes freshness; readings become partial after two publication intervals and are pruned with node membership. Local producers never wait for network capacity: a fixed 256-key admission map replaces older values for the same node/reading (download progress additionally keys by model), evicts the oldest distinct key only at the bound, and drains through a one-packet network queue. Telemetry then uses a dedicated gossipsub behavior and protocol with independent per-peer handler queues: transport isolation is structural, so a saturated control or election path cannot delay telemetry and telemetry fan-out cannot consume control or election capacity. Aggregate pressure is available at `GET /v1/diagnostics/telemetry`. Readings land in an in-memory `TelemetryView`, not event-sourced `State`; only download completion and failure remain durable. Attempt identities stop delayed progress on the independent protocol from overriding terminal/reset decisions, while `GET /state` overlays the live view to preserve the dashboard's wire shape. `GET /store/registry` exposes inventory coverage as `syncing`, `current`, `degraded`, or `unavailable`; this is operator/read truth only. Store reconciliation continues to query each node's `/store/storage` directly and verify identities and manifests before transferring bytes. The system profile includes a collector-agnostic accelerator block (GPU utilization, VRAM used and total, power, temperature, clock) normalized at each platform collector. Because the context-admission ceiling must be identical across ranks but telemetry is unordered, the master computes it once at placement time and stamps it onto the instance (`context_token_limit`). **Connectivity readings stay on the control plane**: `node_network`, the thunderbolt maps, and derived `thunderbolt_bridge_cycles` define the topology graph and therefore require ordered event-sourced state.
 - **Data plane** has six typed families. `DATA` carries generated token, image, embedding, transcription, and audio output; `PROVIDER_DATA` carries extension-provider stream frames without adding arbitrary provider payloads to `DataChunk`; `REALTIME_AUDIO` carries built-in realtime STT PCM from an owning API to the selected speech worker; `SPEECH_MEDIA` carries bounded request-scoped TTS reference audio and batch STT uploads; `TRACE_DATA` carries terminal per-rank diagnostic traces to the owning API; and `VISION_MEDIA` carries VLM and image-edit input from the owning API directly to every worker rank selected by the master's authoritative `TaskCreated` decision. Streaming families use explicit per-stream lifecycles and every family uses node-addressed same-node short circuit/remote delivery on Zenoh. Vision uses `opened -> chunk* -> completed -> accepted`, with a source-side deadline requiring acceptance from every selected rank. Batch STT waits for `TaskCreated`, then sends raw frames to the selected worker and gates runner dispatch on exact sequence, task owner, count, and SHA-256 verification. Trace assembly is best-effort and bounded by task count and age. Vision ingress has its own bounded network-receive lanes and remote dispatcher, stream/owner admission limits, five-minute lease, and `NodeDiagnostics.visionMediaEgress` counters so a large upload cannot delay control receive or consume generated-output capacity. Workers retain incomplete input only within fixed frame, per-command byte, process byte, stream-count, and age bounds; they expose it to planning only after the completion frame, sequence set, metadata, authoritative task owner, and SHA-256 digest verify and the acknowledgement is admitted to transport. `NodeDiagnostics.visionMediaIngress` reports API-staged commands/bytes, pending worker acknowledgements, retained worker streams/frames/bytes, verified streams, completions, rejections, and expirations. A generated-output command queue has a separate 30-minute no-frame resource lease, renewed by every producer frame observed by egress. The master never indexes, persists, or application-relays payloads from these families. OpenAI response models retain their required base64/JSON shapes, while provider, realtime audio, speech media, and vision media cluster framing uses bounded headers plus raw bytes. See [how the cluster communicates](cluster-communication) for transport and trust details.
 
   Vision admission is hard-bounded: an API accepts at most 64 staged plus active commands, 32 MiB per command, and 512 MiB across staged plus active transfers. The isolated remote dispatcher admits 16 streams total and per destination owner, with a 66-frame queue holding one open frame, at most 64 half-megabyte payload frames, and one completion frame per stream (512 MiB maximum queued media), 64 bounded rejection tasks, and a five-minute idle lease. Network receive has a separate 66-frame payload lane and 1024-frame metadata-only terminal lane. A worker admits 64 streams, 64 media chunks and 32 MiB per command, 512 MiB process-wide, and retains at most 64 pre-task failure reports; both worker retention and source acknowledgement expire after five minutes. Same-process delivery uses rendezvous channels rather than hidden packet queues.
 - **Election** runs the bully algorithm and broadcasts `ELECTION_MESSAGES`. The winner takes the master role. The topic has its own bounded Python egress queue and is negotiated on a dedicated gossipsub protocol with its own per-peer handler queue, so saturation from control or telemetry fan-out cannot consume election capacity. A compatibility copy on the legacy protocol lets old and new nodes elect during staggered upgrades; identical candidates received on both paths count once.
+- **Operator authority consensus** is a separate crash-fault protocol over signed, stable-installation-addressed `AUTHORITY_MESSAGES`. Ballot promises, accepted values, votes, certificates, and bounded catch-up suffixes contain public consensus metadata only; credentials, prompts, relay keys, and decrypted authority records never enter the topic. The topic has its own bounded Python egress queue so ordinary Python control backlog cannot queue ahead of a ballot or certificate, while the current Rust transport carries it on the default authenticated libp2p gossipsub behavior. The consensus service lifecycle is not started yet, so registering the topic alone grants no operator capability.
 - **Master** admits only an explicit allowlist of durable control decisions and ordered connectivity facts, indexes those events into the event log (writing them to disk via `DiskEventLog`), publishes indexed events on `GLOBAL_EVENTS` for followers, and decides instance placements when a model is launched. Decodable payload events, observational telemetry, and transient download progress are skipped at their source sequence before ordering, persistence, replay, state application, or global broadcast. Snapshot-tail replay runs on one coalescing background worker and emits 32-event bursts at a bounded cadence, so a joining node cannot make a retained 10k-event tail monopolize command processing or overflow slower peers. The master also warns when the log grows above 60 events/min for a full minute while no task or download is active, identifying periodic control-plane amplification before it becomes replay pressure.
 - **Worker** receives indexed events, applies them to its local view of `State`, downloads model weights to disk when assigned a placement, and spawns / supervises runner subprocesses. Before spawning, it refuses a shard that won't fit local memory (a last-resort guard below the master's admission check, using the same shared estimator), and a crash circuit breaker gives up on a runner that keeps failing rather than relaunching it into another GPU-memory leak. When the give-up is driven by that *memory* guard (not a crash) the worker asks the master to re-place the model one node wider via `RefuseInstancePlacement` instead of letting the placement silently disappear (see "Placement memory admission" below).
 - **Runner** is *not* in the same process; it's a `mp.Process` daemon spawned by the worker. It owns one model and serves inference tasks for it. Multiple runners (one per pipeline rank) coordinate via `mlx.distributed` collectives.
@@ -262,7 +263,11 @@ whose fleet has other live Zenoh members raises the error-level
 naming the fix. This closes the silent-failure shape where a member that
 multicast scouting cannot reach (for example one joined over a routed or
 overlay network) looks healthy on the control plane while every remote stream
-through it dies with transport errors.
+through it dies with transport errors. The placement planner consumes the same
+positive-evidence predicate: it removes every candidate cycle touching a known
+isolated node and returns a specific placement error if none remain. Unknown
+peer counts stay eligible during startup, so missing telemetry does not create a
+false hard failure.
 
 Zenoh is the shipping default, including for a zero-config installation. Startup
 binds a specific private-LAN or CGNAT fabric IPv4, falling back to loopback on
@@ -394,6 +399,10 @@ memory/topology axes above:
 - `backend_preference` is a **soft score**: when several compatible nodes
   qualify, the planner prefers the node whose backend ranks earliest in the
   card's preference list (for example preferring a GPU backend over CPU).
+- `max_pipeline_split_layer` is a **hard sharding constraint** for architectures
+  whose tail layers reuse KV from earlier concrete layers. Proportional layer
+  allocation may move boundaries left, but never beyond this limit; the usual
+  per-node memory check then validates the adjusted shards before launch.
 
 The engine axis (which runtime) is orthogonal to the node axis (which machine):
 the same card mechanism that routes a GGUF model to a Vulkan llama.cpp node would
@@ -520,14 +529,19 @@ runner emits independently encoded MP3 segments or headerless mono
 signed-16-bit PCM, and the API describes the PCM framing through response
 headers before it commits the body. (The bundled Qwen3 TTS card declares MP3
 and PCM streaming after live validation; the remaining bundled speech cards
-stay batch-only.) Cards with fixed speakers can declare `audio.voices`, a
-validated default voice, and ordered `audio.voice_catalog` display/language
-metadata. The Skulk `GET /v1/audio/voices` extension exposes that model truth;
+stay batch-only.) Cards can declare `audio.voices`, a validated default voice,
+and ordered `audio.voice_catalog` display/language metadata. Entries may be
+model-native speakers or bundled reference profiles. The Skulk
+`GET /v1/audio/voices` extension exposes that model truth;
 the dashboard can choose the first preferred-language match and pins it across
 all sentence-sized requests in one response. The API applies the card default
-only when callers omit `voice`.
+only when callers omit `voice`. For a bundled profile, the API sends only its
+stable identifier and the selected worker resolves a checksummed local MP3 plus
+exact transcript before calling the upstream model. The bytes and private file
+path never enter commands, State, or the event log, and no cluster media
+transfer is needed.
 
-Cards declaring reference-audio support accept a bounded multipart upload on
+Cards declaring reference-audio support also accept a bounded multipart upload on
 the same route. The API pins the command to one ready instance and sends the
 raw file to that worker over the node-addressed `SPEECH_MEDIA` data plane; only
 metadata rides the command path, and the audio bytes never enter `State` or the
@@ -539,7 +553,8 @@ The dashboard exposes this upload only for a selected TTS card declaring the
 capability, keeps the clip browser-local until synthesis, and reuses the same
 request-scoped `File` for all sentence segments in one response. Selecting a
 different TTS model clears the clip; persistent custom voices remain a separate
-resource and lifecycle.
+resource and lifecycle. An upload overrides catalog selection for that request,
+so the API rejects requests that combine `voice` and `reference_audio`.
 
 The same core path also backs the first-party `tts@1.0.0` capability provider
 (see [Extensions](#extensions-plugins)): a generic provider call becomes the
@@ -688,8 +703,13 @@ anything action-shaped is returned to the operator as a recommendation.
 The dashboard composes these surfaces in chat: mounted TTS models can speak
 draft text, replay assistant messages, or auto-speak final assistant responses
 (the dashboard requests PCM, segments visible assistant output into ordered
-sentences, and pauses HTTP reads against a bounded AudioWorklet queue; stop
-aborts queued and active synthesis), and mounted STT models transcribe a
+sentences, serially starts the next synthesis as soon as the preceding HTTP
+response is ingested, and appends every response to one bounded continuous
+playback timeline; playback begins with the first PCM instead of waiting for
+lookahead, so an underrun remains a natural pause; HTTPS and localhost use an
+`AudioWorklet`, while ordinary LAN HTTP uses scheduled 100 ms
+`AudioBufferSourceNode` frames; stop aborts queued and active synthesis), and
+mounted STT models transcribe a
 browser recording into the draft box. Realtime cards get the live microphone
 path only when the card's declaration and the local API's live `stt.realtime`
 advertisement agree; an AudioWorklet then captures microphone audio and
@@ -822,7 +842,10 @@ environment intelligence described above. On an NVIDIA Linux node,
 Skulk's validated dependency matrix and records `SKULK_VLLM_BIN` (vLLM lives
 in its own venv because Skulk pins a newer transformers than vLLM can use).
 Re-running the installer is safe; every step is idempotent. `--headless` is
-the explicit opt-out for an intentionally API-only node.
+the explicit opt-out for an intentionally API-only node. The supervised
+launchd/systemd entrypoint uses that same bundled Node.js runtime for dashboard
+rebuilds after updates, so Linux nodes do not require a separate host npm
+installation to keep their UI current.
 
 ## The inference engine
 
@@ -921,7 +944,158 @@ The wider observability story (cluster timeline, hang-rate SLO, per-node panel) 
 
 ## Storage
 
-Three on-disk responsibilities:
+Four on-disk responsibilities:
+
+### Operator identity and authority foundation
+
+Remote operator identity is deliberately separate from runtime libp2p identity
+and from the event-sourced inference state. `src/skulk/operator/identity.py`
+creates one persistent random `node_install_id` per host and generates the
+cluster's Ed25519 public identity. A libp2p peer ID may change after a process
+restart; a mobile history reference, device membership record, or future deep
+link must therefore never use it as a durable subject.
+
+The non-secret `node_install_id` is included in the node's existing
+`StaticNodeInformation` telemetry reading and appears under
+`GET /state` → `nodeIdentities`. This is an identity projection, not authority
+state: keys, credentials, membership records, and encrypted journal contents
+never enter telemetry or event-sourced `State`. `POST /admin/restart` can resolve
+that stable identity to the currently live libp2p node immediately before it
+dispatches the existing `RestartNode` command.
+
+`src/skulk/operator/authority.py` is the encrypted local projection for
+replicated operator authority. Secret-bearing JSON records use
+AES-256-GCM with authenticated metadata binding the cluster ID, authority term,
+commit index, record type, record ID, schema version, and external key version.
+The database stores ciphertext and public journal metadata only. The active
+data key comes from an injected `AuthorityKeyProvider`; the database never
+persists it. Cluster bootstrap commits the Ed25519 private key as the first
+encrypted record. Every open repairs POSIX directory and database modes,
+identity replacement fsyncs both file and parent directory, and public cluster
+metadata is rebound to the decrypted private key before use.
+
+`src/skulk/operator/replication.py` is the deterministic cryptographic apply
+boundary in front of that projection. Each authority transition names the
+cluster, monotonic term and contiguous index, previous-commit digest, payload
+digest, and one active membership digest or two joint-membership digests.
+The first shared log position is derived from stable cluster public-key
+material and deliberately excludes the editable display name.
+Ed25519 votes bind the complete descriptor and the stable
+`node_install_id`. A strict majority is required for every named membership;
+learners never count, duplicate nodes/keys/votes fail closed, and joint changes
+require consecutive generations plus a majority in both the old and new
+configurations. Only an exact certified payload can pass the final local
+compare-and-set append.
+
+`src/skulk/operator/consensus.py` adds a transport- and storage-injected,
+two-phase crash-fault protocol. A totally ordered ballot combines a monotonic
+counter with the stable proposer installation ID. Voters durably promise before
+replying and durably accept before signing; a replacement proposer must recover
+the highest accepted value returned by its prepare quorum. Learners do not vote,
+joint membership changes require both old and new majorities, removed voters
+are fenced by the committed membership, and replicas recover gaps from bounded
+contiguous certificate suffixes. Every wire envelope binds its message ID,
+source, target, and typed payload with Ed25519.
+
+`src/skulk/operator/consensus_store.py` persists the public consensus safety
+state in a separate SQLite WAL database. Promise and accepted state, immutable
+bootstrap anchors, and an append-only certificate log commit atomically through
+compare-and-set revisions. On every load the repository re-verifies the full
+signature, quorum, digest, index, and membership chain from bootstrap; it never
+stores secret-bearing payloads or encryption keys. Every open also repairs the
+database, WAL, and shared-memory sidecar modes on POSIX.
+`src/skulk/operator/transport.py` filters the broadcast authority topic by
+stable target identity before a participant sees it.
+
+`src/skulk/operator/service.py` provides a still-dormant asynchronous lifecycle
+around that deterministic participant. It admits one local proposal at a time,
+uses bounded outbound and response queues, applies explicit phase deadlines and
+bounded retries, recovers a prior proposer's accepted value before advancing the
+caller's intent, persists the local certificate before reporting success, and
+broadcasts commits to voters and learners for bounded catch-up. Its diagnostics
+contain queue depths and counters only. Authority producer admission is bounded
+both before serialization and in the dedicated network egress queue.
+
+Authority leader selection, encrypted authority-payload replication,
+OS-protected key wrapping, gateway fencing leases, and Node startup integration
+remain later slices. The registered `AUTHORITY_MESSAGES` topic, participant, and
+dormant service do not authorize any API route by themselves.
+Operator identity and authorization records never enter `State`, telemetry,
+diagnostics, or the public event log.
+
+The first usable remote-operator slice deliberately chooses a simpler
+availability contract. One API-capable host is designated by running
+`skulk operator pair`. `LocalFileAuthorityKeyProvider` creates a random
+32-byte key in the protected Skulk configuration directory and
+`OperatorPairingService` persists pairing transitions in the encrypted local
+journal. POSIX mode `0600` protects the local key; hardware-backed wrapping and
+automatic gateway failover are later hardening, not prerequisites for pairing.
+If this gateway is down, remote operator access is down while local cluster and
+dashboard operation continue.
+
+The default local command creates a legacy five-minute QR capability. After relay provisioning,
+the version-two package includes only the app-role outer carrier admission and
+pinned inner-TLS material needed to reach the same challenge/exchange routes;
+the gateway-role carrier credential and canonical access/refresh credentials
+never enter the QR. `--exchange-url` remains the direct-development fallback.
+The relay package uses bounded compact JSON compressed with zlib so the
+terminal QR remains camera-scannable; oversized packages are rejected before
+their session is persisted.
+An explicit `--valid-for` or `--max-pairings` creates a version-three reusable
+invitation instead, bounded to 90 days and twenty successful pairings. The
+encrypted journal separates the invitation from its independent five-minute
+attempt records. Global compare-and-set fencing and bounded retries prevent
+concurrent exchanges from exceeding the success limit; ten live and one
+hundred total attempts bound abuse and journal growth. Host-only list and
+revoke commands expose no bearer material. Invitation revocation blocks new and
+unfinished attempts without changing credentials already issued to devices.
+The ordinary dashboard listener also exposes create/list/revoke invitation
+management under Settings. These routes reuse the same pairing service and
+encrypted journal as the CLI. They require a loopback socket peer or a
+Tailscale socket peer verified by the local Tailscale authority,
+an exact same-origin browser request from a loopback, MagicDNS, `*.ts.net`, or
+literal Tailscale host, and an explicit dashboard marker. Forwarding headers
+ordinary LAN and unverified CGNAT peers are rejected. The routes return a created bearer code
+once with no-store headers and keep later list responses secret-free.
+`OperatorGatewayAuthorization` returns `404` for the entire management prefix
+before bearer evaluation, so invitation authority never crosses the public
+relay even for a fully scoped paired device. The dashboard retains the
+one-time code only in mounted component memory and resets its QR view after
+five minutes; server invitation validity remains independently bounded by the
+chosen lifetime. Rejections tell operators to open the configured gateway over
+Tailscale or localhost rather than presenting a generic availability error.
+The API exposes only challenge and exchange before authentication: a phone
+proposes an Ed25519 key, signs a domain-separated random challenge, and receives
+opaque access and refresh credentials once. Version three binds its proof to
+the cluster, invitation, nonce, attempt, and challenge. Raw nonces and tokens are never stored in plaintext;
+the authority journal contains encrypted state and one-way token digests.
+Refresh rotates and invalidates the prior access/refresh pair atomically. The
+same service validates short-lived bearer access, exposes credential-free
+paired-device projections, and makes revocation immediate. The relay-only
+listener applies these scopes to the existing canonical routes; Skulk does not
+create parallel model, inference, or command APIs.
+
+`skulk operator configure-relay` installs one generated paired-WebSocket route
+before normal public operation. The app and gateway use distinct 256-bit outer
+carrier credentials and one opaque locator; all are encrypted in the local
+authority journal, while the generated inner-TLS private key is an owner-only
+file. Pairing returns only the app role plus the pinned self-signed gateway
+certificate. On startup the designated gateway maintains a bounded pool of
+outbound WebSockets. Each lane bridges opaque binary messages to a separate
+loopback TLS listener serving the existing FastAPI application. The relay never
+terminates that inner TLS connection.
+
+The loopback TLS listener wraps the canonical application with operator bearer
+validation: reads, model views, inference/WebSockets, mutations, and device
+management map onto the existing scopes. Pairing challenge/exchange and refresh
+remain reachable before access-token validation. The ordinary port-52415 local
+listener remains unchanged for the dashboard and existing direct clients; it is
+never the relay connector's destination. If the designated gateway or relay is
+unavailable, remote access fails while local cluster operation continues. Relay
+configuration loading, the loopback TLS listener, and the outbound connector
+are supervised as an optional ingress unit: corrupt authority/TLS material,
+bind failures, and connector failures are reported with sanitized messages and
+cannot cancel or prevent startup of the ordinary local API.
 
 ### Event log
 
@@ -935,17 +1109,121 @@ Models live under `SKULK_MODELS_DIR`: by default that resolves to `SKULK_DATA_HO
 
 ### Model store (optional)
 
-For multi-node deployments with shared filesystems, a model store hosts canonical model artifacts on one machine. Other nodes stage from the store (rsync-like) rather than each downloading from Hugging Face independently. On the store host itself, staging hardlinks the store's files into the staging directory instead of copying them (store files are immutable once registered, and staged files are never mutated in place), so a model staged on the same filesystem as its canonical copy costs no extra disk; a filesystem that cannot link falls back to a real copy. This is a config-driven feature; without a store, each node downloads independently. When a model is missing from the store, the node asks the store host to fetch it from Hugging Face and then stages from the store, keeping the store the single source of truth. A node that cannot reach the store at all is handled differently: rather than starving with a working internet path, it downloads directly from Hugging Face (preserving any pinned source revision) and logs the topology problem loudly. That is the expected shape for a remote fabric member whose route to the home store does not exist; on a node that should reach the store, the same log line is the cue to fix the route. See [Model Store](model-store) for setup details.
+For multi-node deployments, a model store hosts canonical model artifacts on one machine. Other nodes stage from the store (rsync-like) rather than each downloading from Hugging Face independently. A fresh install initially configures its local node as a bootstrap store so one-node operation works immediately. When independently installed nodes form a cluster, the elected master's state-sync response carries its routable store address; followers retry through the startup window, persist that authoritative config, stop superseded local store servers, and atomically repoint their API and worker store clients. This turns several bootstrap stores into one source of truth without installer-time inventory. An explicit shared `store_host` on every node overrides which machine election starts from.
 
-A model card can bind its artifacts to an immutable Hugging Face commit through `source_revision`, and the pin is part of artifact identity rather than a download hint. Metadata probes and byte downloads read at exactly that commit, the store registry persists it, and every staged copy records it in an on-disk revision marker; a staged or canonical directory carrying a different revision is the wrong artifact and is replaced rather than reused, with the replacement landing only after the requested revision has fully downloaded so a failed fetch never destroys the previous copy. Pinned models load from a revision-qualified canonical directory, so pinned bytes never occupy the mutable-`main` path and a changed upstream `main` can never silently substitute different weights for a qualified artifact.
+Every complete canonical and staged artifact is self-describing through a
+versioned `.skulk/installed-card.json` sidecar containing the full card and a
+SHA-256 manifest. Startup resolves installed generations before registry
+access, so air-gapped nodes keep serving complete local artifacts indefinitely.
+Registry changes are update information: the active installed generation does
+not switch until the replacement generation has transferred, verified, and
+published atomically.
 
-Staged copies have a lifecycle: by default (`cleanup_on_deactivate: true`), a staged model becomes an eviction candidate when no live runner uses it (including as a companion repo: MTP sidecar, assistant, served draft, or split vision weights, which no instance names directly but which a live runner depends on just the same). Candidates are kept newest-first by last use up to the `staging_keep_recent_gb` grace budget (default 40 GiB) and deleted beyond it; the in-use set is always kept and does not count against the budget. That recency pass runs at instance deactivation and node startup, where it reconciles copies orphaned by a crashed session. A separate safety trigger runs inside every store-backed staging transaction: after the store resolves the exact registered artifact set, Skulk counts only the additional manifest bytes (resumable data is credited and same-filesystem hardlinks add zero), protects every active base-plus-companion transaction and live runner, then evicts the least-recently-used idle copies until that allocation fits with 10 GiB of operating-system headroom. Capacity admission and transfer are serialized so concurrent launches cannot spend the same free bytes. Disk safety overrides the warm-cache grace budget and still applies when `cleanup_on_deactivate` is `false`; if all idle data is gone and capacity remains insufficient, the worker emits `DownloadFailed` before transfer. The store host's canonical path is never subject to either eviction path; instead, canonical Hugging Face downloads serialize exact selected-manifest admission with transfer and fail before writing when the authoritative volume cannot preserve the same reserve. Store-unreachable direct fallback uses the same mechanism against the actual model-cache filesystem, never the unrelated staging path. `GET /store/storage` reports the per-node breakdown. Deleting a model from the store (`DELETE /store/models/{id}`) goes further than the lazy budget pass: it removes the canonical copy from the store host *and* broadcasts a cluster-wide eviction (the `EvictStagedModel` command → `StagedModelEvicted` event) so every node immediately drops its locally-staged copy, because a worker's staged shards are an independent cache the store-host delete would otherwise leave behind. `POST /store/purge-staging` clears staged copies without touching the store's canonical copy.
+Legacy association requires an existing complete artifact, not merely a trusted
+card with a matching directory name. Every successful artifact-removal path
+also unregisters that installed generation from process-local model truth; the
+next catalog read rescans remaining sidecars before reporting installed state.
+
+The store host runs a background reconciler that polls bounded per-node cache
+inventories outside event-sourced State. Missing canonical artifacts are pulled
+from healthy node caches with target-bound, expiring capability tokens and
+range-capable per-file HTTP. Imports share the normal store publication lock,
+verify the complete manifest in a temporary directory, and preserve both the
+source cache and old canonical generation until commit. Signed registry
+advisories ride as `v1/advisories.json`; they are operator warnings only and
+never participate in download, placement, or runner enforcement.
+The reconciler reports its first scheduled pass as scanning during the startup
+convergence delay, so operator clients continue polling until inventory has
+actually completed.
+The store's internal import mutation accepts only direct loopback sockets and
+rejects proxy-forwarding headers. Registry-verified peer records are compared
+with the store host's independently TUF-verified immutable card and exact
+artifact/companion identity before transfer. During upgrades, reconciliation
+first adopts a complete sidecar beside an already-canonical legacy entry under
+the publication lock, avoiding a copy of the store's own model back into
+itself. Store download requests that omit an immutable card ID select the
+current card for backward compatibility; explicit IDs continue to bind the
+exact requested generation.
+
+Store deletion shares that publication lock and first persists an alias
+tombstone under the canonical store's `.skulk` metadata. A stale node cache is
+still visible to operators but cannot be reconciled back into the store; owned
+companions inherit the base alias suppression. Only a successful explicit
+upstream download clears the tombstone.
+
+On the store host itself, staging hardlinks the store's files into the staging directory instead of copying them (store files are immutable once registered, and staged files are never mutated in place), so a model staged on the same filesystem as its canonical copy costs no extra disk; a filesystem that cannot link falls back to a real copy. When a model is missing from the store, the node asks the store host to fetch it from Hugging Face and then stages from the store, keeping the store the single source of truth. A node that cannot reach the store at all is handled differently: rather than starving with a working internet path, it downloads directly from Hugging Face (preserving any pinned source revision) and logs the topology problem loudly. That is the expected shape for a remote fabric member whose route to the home store does not exist; on a node that should reach the store, the same log line is the cue to fix the route. See [Model Store](model-store) for setup details.
+
+A model card can bind its artifacts to an immutable Hugging Face commit through `source_revision`, and the repository plus pin are artifact identity rather than download hints. Metadata probes and byte downloads read from exactly that source, the store registry persists both values, and every staged copy records the revision in an on-disk marker; a staged or canonical directory carrying a different source identity is the wrong artifact and is replaced rather than reused, with the replacement landing only after the requested artifact has fully downloaded so a failed fetch never destroys the previous copy. Pinned models load from revision- and source-qualified canonical directories, so pinned bytes never occupy the mutable-`main` path and a changed upstream `main` can never silently substitute different weights for a qualified artifact.
+
+Staged copies have a lifecycle: by default (`cleanup_on_deactivate: true`), a staged model becomes an eviction candidate when no live runner uses it (including as a companion repo: MTP sidecar, assistant, served draft, or split vision weights, which no instance names directly but which a live runner depends on just the same). Candidates are kept newest-first by last use up to the `staging_keep_recent_gb` grace budget (default 40 GiB) and deleted beyond it; the in-use set is always kept and does not count against the budget. That recency pass runs at instance deactivation and node startup, where it reconciles copies orphaned by a crashed session. A separate safety trigger runs inside every store-backed staging transaction: after the store resolves the exact registered artifact set, Skulk counts only the additional manifest bytes (resumable data is credited and same-filesystem hardlinks add zero), protects every active base-plus-companion transaction and live runner, then evicts the least-recently-used idle copies until that allocation fits with 10 GiB of operating-system headroom. Capacity admission and transfer are serialized so concurrent launches cannot spend the same free bytes. Disk safety overrides the warm-cache grace budget and still applies when `cleanup_on_deactivate` is `false`; if all idle data is gone and capacity remains insufficient, the worker emits `DownloadFailed` before transfer. The store host's canonical path is never subject to either eviction path; instead, canonical Hugging Face downloads serialize exact selected-manifest admission with transfer and fail before writing when the authoritative volume cannot preserve the same reserve. Operators can cancel that canonical work through `DELETE /store/models/{id}/download`; cancellation preserves partial files so a later request can resume. Store-unreachable direct fallback uses the same mechanism against the actual model-cache filesystem, never the unrelated staging path. `GET /store/storage` reports artifacts across the staging cache, direct-download model root, and configured read-only roots so fallback downloads can reconcile when the store returns. Deleting a model from the store (`DELETE /store/models/{id}`) goes further than the lazy budget pass: it removes the canonical copy from the store host *and* broadcasts a cluster-wide eviction (the `EvictStagedModel` command → `StagedModelEvicted` event) so every node immediately drops its locally-staged copy, because a worker's staged shards are an independent cache the store-host delete would otherwise leave behind. `POST /store/purge-staging` clears staged copies without touching the store's canonical copy.
 
 Companion repos follow a single download contract: `companion_download_specs()` (in `src/skulk/download/download_utils.py`) enumerates a card's companions (MTP sidecar, assistant model, split vision weights), each flagged required or best-effort, and every model resolution path (fresh download, already-staged fast path, store staging, direct-from-store) ensures companions through it before reporting the model ready. Required companions (vision weights, which the model cannot load without) fail the resolution loudly; best-effort companions (sidecar, assistant) log and continue, so a missing drafter degrades to plain decode instead of blocking the model.
 
 ### Custom model cards
 
-User-added model cards live under `SKULK_CUSTOM_MODEL_CARDS_DIR` (default `SKULK_DATA_HOME/custom_model_cards`) as TOML files. On Linux that resolves to `~/.local/share/skulk/custom_model_cards`; on macOS/Windows to `~/.skulk/custom_model_cards`. Built-in cards live in `resources/inference_model_cards/`. The capability resolver reads both; custom cards override built-ins for the same `model_id`.
+User-added model cards live under `SKULK_CUSTOM_MODEL_CARDS_DIR` (default `SKULK_DATA_HOME/custom_model_cards`) as TOML files. On Linux that resolves to `~/.local/share/skulk/custom_model_cards`; on macOS/Windows to `~/.skulk/custom_model_cards`. They load after installed, registry, and bundled sources and therefore remain the final operator-owned override for the same `model_id`.
+
+### Signed external model-card registry
+
+Skulk's current supported catalog is the signed external registry.
+`TufRegistryClient`
+(`src/skulk/shared/models/registry.py`) starts from the public root embedded in
+the Python package, verifies standard TUF metadata, and downloads the complete
+`v1/catalog.json` target. Refresh is serialized across callers and runs at most
+once per 60 seconds. A successful refresh also writes a hash-bound
+last-known-good copy; when the registry is unreachable, that copy is accepted
+for at most 30 days. Complete installed-card sidecars load before any registry
+work and remain active indefinitely while their manifests verify, so that age
+limit never expires an installed artifact. If registry access and its acceptable
+cache are unavailable, bundled cards fill the non-installed fallback catalog.
+`SKULK_OFFLINE=true` suppresses registry network refreshes entirely, retaining
+complete installed generations and using bundled cards only for the remaining
+catalog. Custom cards still load last and override every other source.
+
+A registry card separates its selectable `model_id` alias from
+`source_repository`. The alias is the fabric/store identity; metadata and byte
+requests use the source repository. This allows one exact card per quant or
+selected file even when several artifacts share a Hugging Face repository.
+Signed aliases are restricted to path-safe repository identifiers, and signed
+payloads are always forced to non-custom cards so they cannot survive catalog
+replacement or revocation using operator-owned override semantics.
+The external registry publishes provenance-stamped cards that pass deterministic
+structural validation. Runtime qualification remains separate evidence for an
+exact artifact, engine build, hardware class, and capability; it governs
+verification and recommendation policy rather than global catalog existence.
+Catalog provenance (`foxlight`, `agent`, or `community`) is signed metadata and
+does not participate in the content-derived `registry_card_id`.
+
+Repository-code trust follows the card's provenance. A TUF-verified, immutable,
+full-revision-pinned card with `registry_provenance=foxlight` is Foxlight's trust
+decision for that exact artifact and runs without a redundant node-local
+approval. Agent/community registry cards and unsigned or custom cards remain
+blocked before download and runner load until their exact immutable trust
+identity appears in that node's owner-only approval file. Signed cards use
+`registry_card_id`; unsigned/custom cards use a digest of the complete effective
+card, so a changed revision or card definition must be approved again. Registry
+vision cards follow the same policy while the MLX processor path contains
+loaders that enable repository code internally; that is platform truth and does
+not rewrite the artifact card.
+When a card names any separately hosted companion—vision weights or processor,
+an MTP sidecar, an assistant model, or a served-engine/vLLM draft—its signed
+content must also name that repository's full immutable revision. Every download
+and loader receives the corresponding pin; a companion in the base artifact
+repository inherits `source_revision`. Approval therefore authorizes immutable
+processor code, not whatever its repository serves later, and qualification
+continues to identify exact companion bytes. Immediately before load, a runner
+rechecks that a signed card's installed sidecar, repository, revision marker,
+selected file, and manifest all identify that card. A deterministic trust
+denial reports `RunnerFailed` and tears down the instance without retrying the
+unchanged generation.
+Approval mutations accept only a direct loopback socket peer with no proxy or
+forwarding headers and, for browser calls, a loopback origin, so the inference
+API's permissive CORS policy and a co-located reverse proxy cannot grant
+approval. A worker requesting a canonical-store download forwards the immutable
+card ID; the store host verifies it against its own signed catalog and applies
+the same provenance-aware trust policy before fetching bytes. Only immutable
+Foxlight provenance grants automatic trust; registry publication with agent or
+community provenance cannot do so.
 
 Model discovery feeds this card system. `GET /models/search` searches Hugging Face repositories, and `POST /models/add` builds a custom card from repository metadata, detecting GGUF repositories (which `mlx-lm` cannot load) and giving them a llama.cpp card instead of the MLX default. Hugging Face's search indexes repository metadata, not file manifests, so a pasted GGUF filename can come back empty even when the file exists somewhere on the Hub. Filename-shaped queries therefore get a bounded fallback: Skulk progressively broadens the model-name prefix, inspects a capped set of candidate repositories' file manifests, keeps only repositories containing the exact basename, and returns the matched repo-relative path alongside each result. Adding such a result pins that exact quant file on the generated card instead of applying the default quant preference, and the pin is honored end to end: the store download request names the pinned file, a staged directory that lacks the pinned quant (or its complete shard group) is not treated as a cache hit, and the store recovers a missing selected file before staging.
 
@@ -1183,7 +1461,7 @@ Architecture decisions:
 - **Activity-style routing.** No react-router. Routes are managed via an `activeRoute` enum in `uiSlice`. Each top-level page renders based on the current value.
 - **Hooks over services.** The cluster state subscription lives in `useClusterState`; topology rendering subscribes via the hook. No service singletons.
 - **Tolgee localization.** `dashboard-react/src/i18n/tolgee.ts` initializes Tolgee with the `skulk` namespace and wraps the app through `TolgeeProvider`. Dashboard code uses Tolgee's `t()` function with an English fallback for each key rather than `<T>`. Runtime translations are fetched from a CDN/static prefix (`VITE_TOLGEE_CDN_PREFIX`, default `/i18n`), with English bundled in `src/i18n/en/skulk.json` as the offline fallback. `VITE_TOLGEE_AVAILABLE_LANGUAGES` is a comma-separated list of language tags to preload/allow; English is always present.
-- **Theme-token-driven styling.** `dashboard-react/src/theme/theme.ts` exports `darkTheme` and `lightTheme`; styled-components reference tokens via `${({ theme }) => theme.colors.X}`.
+- **Theme-token-driven styling.** `dashboard-react/src/theme/theme.ts` exports `darkTheme` and `lightTheme`; styled-components reference tokens via `${({ theme }) => theme.colors.X}`. Dark mode follows the Foxlight operator design system's Den palette (indigo surfaces, starlight accent, amber reserved for work in flight). Components never branch on the theme name; all variation lives in tokens, including the optional scene: building with `VITE_NIGHT_SKY=1` sets the dark palette's `scene` token to the brand valley's star field, which enables the `SceneBackdrop` crown layer plus the `ShootingStars` animation and retires the background mesh for that palette.
 - **localStorage for cross-session preferences** (theme, observability panel width); sessionStorage for in-session UI state (which page, panel open/closed, scroll positions).
 
 The dashboard's main surfaces:

@@ -275,6 +275,34 @@ def test_audio_speech_request_allows_model_default_response_format() -> None:
     assert request.response_format is None
 
 
+def test_audio_speech_request_accepts_bounded_sampling_seed() -> None:
+    """Speech callers may request reproducible MLX sampling."""
+
+    request = AudioSpeechRequest.model_validate(
+        {
+            "model": "mlx-community/qwen3-tts-test",
+            "input": "hello",
+            "seed": 42,
+        }
+    )
+
+    assert request.seed == 42
+
+
+@pytest.mark.parametrize("seed", (-1, 2**32))
+def test_audio_speech_request_rejects_out_of_range_seed(seed: int) -> None:
+    """The wire contract is limited to MLX's unsigned 32-bit seed range."""
+
+    with pytest.raises(ValidationError):
+        AudioSpeechRequest.model_validate(
+            {
+                "model": "mlx-community/qwen3-tts-test",
+                "input": "hello",
+                "seed": seed,
+            }
+        )
+
+
 def test_audio_speech_request_rejects_unknown_audio_format() -> None:
     """Unsupported audio container names should fail request validation."""
 
@@ -303,6 +331,20 @@ def test_audio_speech_route_is_documented_in_openapi() -> None:
     content = cast(dict[str, object], request_body["content"])
     assert "application/json" in content
     assert "multipart/form-data" in content
+
+
+def test_builtin_tts_descriptor_exposes_bounded_sampling_seed() -> None:
+    """Provider clients receive the same deterministic-seed contract as REST."""
+
+    properties = cast(
+        dict[str, object], TTS_CAPABILITY_DESCRIPTOR.input_schema["properties"]
+    )
+
+    assert properties["seed"] == {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 2**32 - 1,
+    }
 
 
 def test_audio_speech_http_parses_multipart_reference_audio(
@@ -338,6 +380,7 @@ def test_audio_speech_http_parses_multipart_reference_audio(
             "input": "hello",
             "response_format": "wav",
             "speed": "1.25",
+            "seed": "42",
             "stream": "false",
             "reference_text": "sample transcript",
         },
@@ -348,6 +391,7 @@ def test_audio_speech_http_parses_multipart_reference_audio(
     assert len(captured) == 1
     request, filename = captured[0]
     assert request.speed == 1.25
+    assert request.seed == 42
     assert request.stream is False
     assert request.reference_text == "sample transcript"
     assert filename == "sample.wav"
@@ -355,7 +399,12 @@ def test_audio_speech_http_parses_multipart_reference_audio(
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    (("speed", "fast"), ("max_tokens", "many"), ("stream", "sometimes")),
+    (
+        ("speed", "fast"),
+        ("max_tokens", "many"),
+        ("seed", "random"),
+        ("stream", "sometimes"),
+    ),
 )
 def test_audio_speech_http_rejects_invalid_multipart_scalars(
     field: str,
@@ -611,7 +660,7 @@ async def test_audio_voices_returns_static_mounted_catalog(
     """Voice listing should return only identifiers declared by the card."""
 
     api = _build_api()
-    card = _tts_card()
+    card = _tts_card(supports_reference_audio=True)
     assert card.audio is not None
     card = card.model_copy(
         update={
@@ -629,6 +678,7 @@ async def test_audio_voices_returns_static_mounted_catalog(
                             id="coral",
                             name="Coral",
                             preferred_languages=("es",),
+                            reference_profile="coral",
                         ),
                     ),
                 }
@@ -653,6 +703,84 @@ async def test_audio_voices_returns_static_mounted_catalog(
         ("es",),
     ]
     assert all(voice.model == str(card.model_id) for voice in response.data)
+    assert [voice.kind for voice in response.data] == ["builtin", "reference"]
+
+
+@pytest.mark.anyio
+async def test_selected_voice_resolves_bundled_reference_profile() -> None:
+    """A catalog voice should become a worker-local profile identifier."""
+
+    api = _build_api()
+    card = _tts_card(supports_reference_audio=True)
+    assert card.audio is not None
+    card = card.model_copy(
+        update={
+            "audio": card.audio.model_copy(
+                update={
+                    "supports_voice_listing": True,
+                    "voices": ("angus",),
+                    "default_voice": "angus",
+                    "voice_catalog": (
+                        AudioVoiceConfig(
+                            id="angus",
+                            name="Angus",
+                            preferred_languages=("en",),
+                            reference_profile="angus",
+                        ),
+                    ),
+                }
+            )
+        }
+    )
+    api.state = _state_with_running_card(card)
+
+    resolved = await api._bundled_reference_profile_for_voice(
+        card.model_id,
+        "angus",
+    )
+
+    assert resolved == "angus"
+
+
+@pytest.mark.anyio
+async def test_uploaded_reference_audio_rejects_catalog_voice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request cannot ambiguously select two independent voice conditions."""
+
+    api = _build_api()
+    card = _tts_card(supports_reference_audio=True)
+
+    async def _validate_model(
+        self: API,
+        requested_model: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        del self, requested_model, response_format, stream
+        return card.model_id, AudioResponseFormat.Wav
+
+    monkeypatch.setattr(API, "_validate_speech_synthesis_model", _validate_model)
+    upload = UploadFile(
+        filename="sample.wav",
+        file=io.BytesIO(b"RIFF-reference"),
+        headers=Headers({"content-type": "audio/wav"}),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.audio_speech(
+            AudioSpeechRequest(
+                model=str(card.model_id),
+                input="hello",
+                response_format=AudioResponseFormat.Wav,
+                voice="angus",
+            ),
+            reference_audio_file=upload,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "cannot be combined" in str(exc_info.value.detail)
 
 
 @pytest.mark.anyio
@@ -732,7 +860,14 @@ async def test_audio_speech_rejects_unknown_explicit_catalog_voice() -> None:
     card = _tts_card()
     assert card.audio is not None
     card = card.model_copy(
-        update={"audio": card.audio.model_copy(update={"voices": ("ryan",)})}
+        update={
+            "audio": card.audio.model_copy(
+                update={
+                    "supports_voice_listing": True,
+                    "voices": ("ryan",),
+                }
+            )
+        }
     )
     api.state = _state_with_running_card(card)
 
@@ -748,6 +883,29 @@ async def test_audio_speech_rejects_unknown_explicit_catalog_voice() -> None:
 
     assert exc_info.value.status_code == 400
     assert "GET /v1/audio/voices" in str(exc_info.value.detail)
+
+
+@pytest.mark.anyio
+async def test_audio_speech_rejects_voice_for_reference_only_model() -> None:
+    """A reference-only model must not silently ignore a named speaker."""
+
+    api = _build_api()
+    card = _tts_card(supports_reference_audio=True)
+    api.state = _state_with_running_card(card)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api._apply_default_speech_voice(
+            AudioSpeechRequest(
+                model=str(card.model_id),
+                input="hello",
+                voice="ryan",
+            ),
+            card.model_id,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "does not expose a voice catalog" in str(exc_info.value.detail)
+    assert "provide `reference_audio` instead" in str(exc_info.value.detail)
 
 
 @pytest.mark.anyio
@@ -1161,6 +1319,7 @@ async def test_audio_speech_streams_audio_chunks_and_sends_command(
             input="hello",
             stream=True,
             streaming_interval=0.25,
+            seed=42,
         )
     )
 
@@ -1173,6 +1332,7 @@ async def test_audio_speech_streams_audio_chunks_and_sends_command(
     command = sent_commands[0]
     assert command.task_params.stream is True
     assert command.task_params.streaming_interval == 0.25
+    assert command.task_params.seed == 42
     assert command.command_id not in api._audio_speech_queues
 
 

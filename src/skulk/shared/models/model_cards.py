@@ -1,13 +1,17 @@
+import asyncio
 import json
+import os
+import re
 import struct
+import time
 from collections.abc import Awaitable, Callable, Iterable
 from enum import Enum
-from typing import Annotated, Any, Final, Literal, NamedTuple, cast
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NamedTuple, cast
 
 import aiofiles
 import aiofiles.os as aios
 import tomlkit
-from anyio import Path, open_file
+from anyio import Path, open_file, to_thread
 from huggingface_hub import model_info
 from loguru import logger
 from pydantic import (
@@ -27,12 +31,28 @@ from skulk.shared.constants import (
     RESOURCES_DIR,
     SKULK_CUSTOM_MODEL_CARDS_DIR,
     SKULK_ENABLE_IMAGE_MODELS,
+    SKULK_MODEL_REGISTRY_CACHE_DIR,
+    SKULK_MODEL_REGISTRY_ENABLED,
+    SKULK_MODEL_REGISTRY_MAX_STALE_DAYS,
+    SKULK_MODEL_REGISTRY_REFRESH_SECONDS,
+    SKULK_MODEL_REGISTRY_TIMEOUT_SECONDS,
+    SKULK_MODEL_REGISTRY_URL,
     SKULK_MODELS_DIRS,
+    SKULK_OFFLINE,
+)
+from skulk.shared.models.registry import (
+    EMBEDDED_REGISTRY_ROOT,
+    RegistryAdvisory,
+    RegistryCatalog,
+    TufRegistryClient,
 )
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import ReasoningEffort
 from skulk.utils.pydantic_ext import CamelCaseModel, FrozenModel
+
+if TYPE_CHECKING:
+    from skulk.store.installed_cards import InstalledCardRecord
 
 # Revision of the machine card generator (`fetch_from_hf`). Bump whenever the
 # GENERATED output changes in a way that makes previously generated cards
@@ -45,7 +65,7 @@ from skulk.utils.pydantic_ext import CamelCaseModel, FrozenModel
 # whatever that generator got wrong (the fresh-fleet audit found exactly that:
 # pre-#652-fix cards forcing serial in-process llama_cpp over the served
 # engine).
-CARD_GENERATOR_REVISION: Final[int] = 1
+CARD_GENERATOR_REVISION: Final[int] = 2
 
 # kinda ugly...
 # TODO: load search path from config.toml
@@ -58,6 +78,117 @@ _BUILTIN_CARD_DIRS = [
 ]
 
 _card_cache: dict[ModelId, "ModelCard"] = {}
+_installed_card_cache: dict[ModelId, "InstalledCardRecord"] = {}
+_installed_current_registry_ids: dict[ModelId, str | None] = {}
+_installed_card_cache_version = 0
+_installed_card_mutation_versions: dict[ModelId, int] = {}
+_registry_advisories: tuple[RegistryAdvisory, ...] = ()
+_registry_current_cards: dict[ModelId, "ModelCard"] = {}
+_registry_refresh_lock = asyncio.Lock()
+_last_registry_refresh = 0.0
+_card_cache_dirty = False
+_last_registry_miss_refresh = 0.0
+_REGISTRY_MISS_REFRESH_SECONDS: Final[float] = 1.0
+_registry_client = TufRegistryClient(
+    base_url=SKULK_MODEL_REGISTRY_URL,
+    cache_dir=SKULK_MODEL_REGISTRY_CACHE_DIR,
+    embedded_root=EMBEDDED_REGISTRY_ROOT,
+    timeout_seconds=SKULK_MODEL_REGISTRY_TIMEOUT_SECONDS,
+    max_stale_days=SKULK_MODEL_REGISTRY_MAX_STALE_DAYS,
+)
+
+
+def _registry_enabled() -> bool:
+    """Return whether this process should contact the external registry."""
+    return (
+        SKULK_MODEL_REGISTRY_ENABLED
+        and not SKULK_OFFLINE
+        and os.environ.get("SKULK_TESTS") != "1"
+    )
+
+
+def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
+    """Convert one verified registry snapshot to Skulk runtime cards atomically."""
+    cards: list[ModelCard] = []
+    aliases: set[ModelId] = set()
+    card_ids = {envelope.card_id for envelope in catalog.cards}
+    if set(catalog.card_metadata) != card_ids:
+        raise ValueError("registry catalog metadata does not match its card set")
+    for envelope in catalog.cards:
+        alias = ModelId(envelope.alias)
+        if alias in aliases:
+            raise ValueError(f"signed registry contains duplicate alias {alias}")
+        aliases.add(alias)
+        payload = dict(envelope.card)
+        if payload.get("source_revision") != envelope.artifact.revision:
+            raise ValueError(
+                f"registry envelope revision disagrees with card {envelope.card_id}"
+            )
+        if payload.get("gguf_file") != envelope.artifact.selected_file:
+            raise ValueError(
+                f"registry envelope file disagrees with card {envelope.card_id}"
+            )
+        metadata = catalog.card_metadata.get(envelope.card_id)
+        if metadata is None:
+            raise ValueError(
+                f"registry catalog omits provenance for {envelope.card_id}"
+            )
+        payload.update(
+            {
+                "model_id": alias,
+                "source_repository": ModelId(envelope.artifact.repository),
+                "registry_card_id": envelope.card_id,
+                "registry_snapshot_id": catalog.snapshot_id,
+                "registry_provenance": metadata.provenance,
+                # Only cards loaded from the operator-owned custom directory
+                # receive override semantics. Signed content cannot opt itself
+                # out of registry replacement or revocation.
+                "is_custom": False,
+            }
+        )
+        cards.append(ModelCard.model_validate(payload))
+    return cards
+
+
+async def _load_cards_from_registry() -> bool:
+    """Refresh a complete registry snapshot and report whether it is authoritative."""
+    _registry_current_cards.clear()
+    if not _registry_enabled():
+        return False
+    try:
+        catalog = await to_thread.run_sync(
+            _registry_client.load_catalog,
+            registry_model_cards,
+        )
+        cards = registry_model_cards(catalog)
+    except Exception as error:  # noqa: BLE001 - transition fallback boundary
+        logger.warning(
+            f"signed model registry unavailable ({error}); using bundled model cards"
+        )
+        for model_id, card in tuple(_card_cache.items()):
+            if card.registry_card_id is not None and not card.is_custom:
+                del _card_cache[model_id]
+        return False
+    global _registry_advisories  # noqa: PLW0603
+    try:
+        advisories = await to_thread.run_sync(_registry_client.load_advisories)
+        _registry_advisories = tuple(
+            advisory for advisory in advisories.advisories if advisory.active
+        )
+    except Exception as error:  # noqa: BLE001 - warning channel fallback
+        logger.warning(f"signed model advisories unavailable ({error})")
+    for model_id, card in tuple(_card_cache.items()):
+        if not card.is_custom:
+            del _card_cache[model_id]
+    for card in cards:
+        _registry_current_cards[card.model_id] = card
+        existing = _card_cache.get(card.model_id)
+        if existing is None or not existing.is_custom:
+            _card_cache[card.model_id] = card
+    logger.info(
+        f"loaded {len(cards)} cards from signed registry snapshot {catalog.snapshot_id}"
+    )
+    return True
 
 
 def _detect_vision_from_config(model_id: ModelId) -> "VisionCardConfig | None":
@@ -81,8 +212,9 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
     """Load all TOML model cards from a directory into the cache.
 
     Within a load pass the first card for a model id wins (duplicate ids in
-    the builtin dirs, or among custom files, keep their existing precedence),
-    but a CUSTOM card replaces a bundled card for the same id: the custom
+    the builtin dirs, or among custom files, keep their existing precedence).
+    A current CUSTOM file replaces both a bundled card and retained custom
+    sidecar metadata for the same id: the custom
     directory exists for operator override, and the previous first-wins
     behavior silently ignored the override because the builtin dirs load
     first (#652). One exception: a MACHINE-GENERATED custom card (stamped
@@ -95,16 +227,22 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
     logged, since a silently dropped operator card reads as "my card is
     live" while the bundled card actually serves.
     """
+    loaded_in_this_pass: set[ModelId] = set()
     async for toml_file in directory.rglob("*.toml"):
         try:
             card = await ModelCard.load_from_path(toml_file)
             if is_custom:
                 card = card.model_copy(update={"is_custom": True})
+                if card.model_id in loaded_in_this_pass:
+                    continue
+                loaded_in_this_pass.add(card.model_id)
             if card.vision is None:
                 vision = _detect_vision_from_config(card.model_id)
                 if vision is not None:
                     card = card.model_copy(update={"vision": vision})
             existing = _card_cache.get(card.model_id)
+            if is_custom and existing is not None and not existing.is_custom:
+                card = preserve_generated_card_constraints(card, existing)
             stale_generated = (
                 card.generator_revision is not None
                 and card.generator_revision < CARD_GENERATOR_REVISION
@@ -122,6 +260,12 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
                         f"re-add the model to regenerate it with current "
                         f"engine selection"
                     )
+                _card_cache[card.model_id] = card
+            elif is_custom and existing.is_custom:
+                logger.info(
+                    f"current custom model card {toml_file} replaces retained "
+                    f"custom metadata for {card.model_id}"
+                )
                 _card_cache[card.model_id] = card
             elif is_custom and not existing.is_custom:
                 if stale_generated:
@@ -148,9 +292,200 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
 
 
 async def _refresh_card_cache() -> None:
-    for path in _BUILTIN_CARD_DIRS:
-        await _load_cards_from_dir(path, is_custom=False)
+    global _card_cache_dirty, _last_registry_refresh  # noqa: PLW0603
+    # Clear at refresh start so a concurrent artifact deletion can mark the
+    # cache dirty again while awaited registry or custom-card work is running.
+    _card_cache_dirty = False
+    # Installed truth is made available before any network/TUF work so an
+    # air-gapped restart never depends on registry freshness. It is applied
+    # again after catalog discovery to keep the installed generation active
+    # while retaining the newer signed card as update information.
+    await _refresh_installed_cards()
+    registry_loaded = await _load_cards_from_registry()
+    if not registry_loaded:
+        for path in _BUILTIN_CARD_DIRS:
+            await _load_cards_from_dir(path, is_custom=False)
+    await _refresh_installed_cards()
     await _load_cards_from_dir(_custom_cards_dir, is_custom=True)
+    _last_registry_refresh = time.monotonic()
+
+
+async def _refresh_installed_cards() -> None:
+    """Discover sidecars off-thread and apply their snapshot on the event loop."""
+
+    scan_version = _installed_card_cache_version
+    discovered = await to_thread.run_sync(_discover_installed_cards)
+    _apply_installed_card_snapshot(discovered, scan_version)
+
+
+def _discover_installed_cards() -> list["InstalledCardRecord"]:
+    """Return complete artifact-owned cards without mutating process caches."""
+
+    from skulk.shared import constants
+    from skulk.store.installed_cards import discover_installed_cards
+
+    roots = [constants.SKULK_MODELS_DIR]
+    roots.extend(constants.SKULK_MODELS_PATH or ())
+    return discover_installed_cards(roots)
+
+
+def _apply_installed_card_snapshot(
+    discovered: list["InstalledCardRecord"],
+    scan_version: int,
+) -> None:
+    """Merge one filesystem snapshot without losing newer registrations.
+
+    An installed generation remains the active generation until its replacement
+    has been completely staged.  Consequently a newer registry card is update
+    information, not permission to reinterpret existing bytes.  Custom cards
+    still load last and preserve their explicit operator precedence.
+    """
+
+    selected_records: dict[ModelId, InstalledCardRecord] = {}
+    for record in discovered:
+        if record.artifact_role != "base":
+            continue
+        model_id = ModelId(record.owner_model_id or record.artifact_model_id)
+        current_card = _registry_current_cards.get(model_id)
+        current_card_id = (
+            current_card.registry_card_id if current_card is not None else None
+        )
+
+        previous = selected_records.get(model_id)
+        if previous is None or _installed_record_rank(
+            record, current_card_id
+        ) < _installed_record_rank(previous, current_card_id):
+            selected_records[model_id] = record
+    for model_id in tuple(_installed_card_cache):
+        if _installed_card_mutation_versions.get(model_id, 0) > scan_version:
+            continue
+        if model_id in selected_records:
+            continue
+        prior = _installed_card_cache.pop(model_id)
+        _installed_current_registry_ids.pop(model_id, None)
+        current = _card_cache.get(model_id)
+        if (
+            current is not None
+            and current == prior.model_card
+            and not current.is_custom
+        ):
+            _card_cache.pop(model_id, None)
+    for model_id, record in selected_records.items():
+        if _installed_card_mutation_versions.get(model_id, 0) > scan_version:
+            continue
+        existing = _card_cache.get(model_id)
+        _installed_card_cache[model_id] = record
+        current_card = _registry_current_cards.get(model_id)
+        _installed_current_registry_ids[model_id] = (
+            current_card.registry_card_id if current_card is not None else None
+        )
+        if existing is not None and existing.is_custom:
+            continue
+        if (
+            existing is not None
+            and existing.registry_card_id is not None
+            and existing.registry_card_id == record.model_card.registry_card_id
+        ):
+            continue
+        _card_cache[model_id] = record.model_card
+
+
+def _installed_record_rank(
+    record: "InstalledCardRecord", current_card_id: str | None
+) -> tuple[bool, bool, bool, float, str]:
+    """Rank competing complete generations for deterministic startup selection."""
+
+    return (
+        record.verification != "custom",
+        not (
+            current_card_id is not None
+            and record.model_card.registry_card_id == current_card_id
+        ),
+        record.verification != "registry_verified",
+        -record.captured_at.timestamp(),
+        record.installed_identity,
+    )
+
+
+def get_installed_card_record(model_id: ModelId) -> "InstalledCardRecord | None":
+    """Return the active installed record for ``model_id``, when discovered."""
+
+    return _installed_card_cache.get(model_id)
+
+
+def register_installed_card_record(record: "InstalledCardRecord") -> None:
+    """Converge process-local installed truth after an atomic stage completes."""
+
+    global _installed_card_cache_version  # noqa: PLW0603
+    if record.artifact_role != "base":
+        return
+    model_id = ModelId(record.owner_model_id or record.artifact_model_id)
+    _installed_card_cache_version += 1
+    _installed_card_mutation_versions[model_id] = _installed_card_cache_version
+    _installed_card_cache[model_id] = record
+    current_card = _registry_current_cards.get(model_id)
+    _installed_current_registry_ids[model_id] = (
+        current_card.registry_card_id if current_card is not None else None
+    )
+    existing = _card_cache.get(model_id)
+    if existing is None or not existing.is_custom or record.verification == "custom":
+        _card_cache[model_id] = record.model_card
+
+
+def unregister_installed_card_record(model_id: ModelId) -> None:
+    """Remove process-local installed truth after its artifact is deleted.
+
+    Args:
+        model_id: Base model alias whose complete local bytes were removed.
+
+    Side effects:
+        Clears installed identity metadata immediately and marks the catalog
+        cache for a registry/bundled/custom rebuild on its next read.
+    """
+
+    global _card_cache_dirty, _installed_card_cache_version  # noqa: PLW0603
+    _installed_card_cache_version += 1
+    _installed_card_mutation_versions[model_id] = _installed_card_cache_version
+    record = _installed_card_cache.pop(model_id, None)
+    _installed_current_registry_ids.pop(model_id, None)
+    if record is not None:
+        current = _card_cache.get(model_id)
+        if (
+            current is not None
+            and current == record.model_card
+            and not current.is_custom
+        ):
+            _card_cache.pop(model_id, None)
+    _card_cache_dirty = True
+
+
+def get_current_registry_cards() -> tuple["ModelCard", ...]:
+    """Return current TUF catalog cards already verified in this process."""
+
+    return tuple(_registry_current_cards.values())
+
+
+def get_current_registry_card_id(model_id: ModelId) -> str | None:
+    """Return the current signed identity observed beside an installed model."""
+
+    return _installed_current_registry_ids.get(model_id)
+
+
+def get_current_registry_card(model_id: ModelId) -> "ModelCard | None":
+    """Return signed current truth even when an older install remains active."""
+
+    return _registry_current_cards.get(model_id)
+
+
+def get_model_advisories(model_card: "ModelCard") -> tuple[RegistryAdvisory, ...]:
+    """Return active signed warnings affecting one card or alias."""
+
+    return tuple(
+        advisory
+        for advisory in _registry_advisories
+        if model_card.registry_card_id in advisory.affected_card_ids
+        or str(model_card.model_id) in advisory.affected_model_aliases
+    )
 
 
 def _is_image_card(card: "ModelCard") -> bool:
@@ -162,12 +497,127 @@ def get_card(model_id: ModelId) -> "ModelCard | None":
     return _card_cache.get(model_id)
 
 
-async def get_model_cards() -> list["ModelCard"]:
-    if len(_card_cache) == 0:
+def same_model_artifact(existing: "ModelCard", expected: "ModelCard") -> bool:
+    """Return whether two cards identify the same downloadable artifact.
+
+    Signed registry card IDs cover the complete immutable card contents, so an
+    alias retained across a registry replacement must not reuse prior download
+    state. Legacy and custom cards lack that identity and use strict card
+    equality instead.
+    """
+    if existing.registry_card_id is not None or expected.registry_card_id is not None:
+        return (
+            existing.registry_card_id is not None
+            and existing.registry_card_id == expected.registry_card_id
+        )
+    return existing == expected
+
+
+async def _refresh_card_cache_if_due() -> None:
+    """Refresh catalog state at most once per configured interval."""
+    refresh_due = _card_cache_dirty or not _card_cache or (
+        _registry_enabled()
+        and time.monotonic() - _last_registry_refresh
+        >= SKULK_MODEL_REGISTRY_REFRESH_SECONDS
+    )
+    if refresh_due:
+        async with _registry_refresh_lock:
+            refresh_still_due = _card_cache_dirty or not _card_cache or (
+                _registry_enabled()
+                and time.monotonic() - _last_registry_refresh
+                >= SKULK_MODEL_REGISTRY_REFRESH_SECONDS
+            )
+            if refresh_still_due:
+                await _refresh_card_cache()
+
+
+async def get_all_model_cards() -> list["ModelCard"]:
+    """Return the complete verified/custom catalog without UI task filtering."""
+    await _refresh_card_cache_if_due()
+    return list(_card_cache.values())
+
+
+async def get_registry_card_by_id(
+    card_id: str,
+    *,
+    refresh_on_miss: bool = False,
+) -> "ModelCard | None":
+    """Resolve one signed card, optionally forcing a throttled refresh on a miss.
+
+    Args:
+        card_id: Immutable registry card identifier to resolve.
+        refresh_on_miss: Whether an absent identifier should trigger one
+            serialized refresh outside the normal catalog interval.
+
+    Returns:
+        The matching signed card, or ``None`` when it remains unknown.
+
+    Side effects:
+        May refresh the signed registry and rebuild the process card cache.
+    """
+    global _last_registry_miss_refresh  # noqa: PLW0603
+    await _refresh_card_cache_if_due()
+    card = _cached_registry_card_by_id(card_id)
+    if card is not None or not refresh_on_miss or not _registry_enabled():
+        return card
+    async with _registry_refresh_lock:
+        card = _cached_registry_card_by_id(card_id)
+        now = time.monotonic()
+        if (
+            card is not None
+            or now - _last_registry_miss_refresh < _REGISTRY_MISS_REFRESH_SECONDS
+        ):
+            return card
+        _last_registry_miss_refresh = now
         await _refresh_card_cache()
+        return _cached_registry_card_by_id(card_id)
+
+
+def _cached_registry_card_by_id(card_id: str) -> "ModelCard | None":
+    """Resolve signed identity without letting an installed alias hide current truth."""
+
+    return next(
+        (
+            candidate
+            for candidate in (
+                *_registry_current_cards.values(),
+                *_card_cache.values(),
+            )
+            if candidate.registry_card_id == card_id
+        ),
+        None,
+    )
+
+
+async def get_model_cards() -> list["ModelCard"]:
+    """Return model cards visible under this node's feature configuration."""
+    cards = await get_all_model_cards()
     if SKULK_ENABLE_IMAGE_MODELS:
-        return list(_card_cache.values())
-    return [c for c in _card_cache.values() if not _is_image_card(c)]
+        return cards
+    return [card for card in cards if not _is_image_card(card)]
+
+
+async def get_bundled_card(model_id: ModelId) -> "ModelCard | None":
+    """Load the curated card for a model independently of custom overrides.
+
+    Args:
+        model_id: Exact repository identifier to resolve.
+
+    Returns:
+        The matching bundled card, or ``None`` when the repository is not in
+        the curated catalog.
+
+    The live cache intentionally lets custom cards win. Callers that need the
+    curated safety baseline must therefore resolve it from bundled storage,
+    especially when a repeated add request has already replaced the cache
+    entry with a generated custom card.
+    """
+    card_path = model_id.normalize() + ".toml"
+    for directory in _BUILTIN_CARD_DIRS:
+        path = directory / card_path
+        if await path.exists():
+            return await ModelCard.load_from_path(path)
+    return None
 
 
 class ModelTask(str, Enum):
@@ -200,7 +650,7 @@ class AudioCardKind(str, Enum):
 
 
 class AudioVoiceConfig(FrozenModel):
-    """Declarative metadata for one stable built-in TTS voice."""
+    """Declarative metadata for one stable TTS voice."""
 
     id: str
     """Model-specific voice identifier accepted by speech synthesis."""
@@ -208,10 +658,14 @@ class AudioVoiceConfig(FrozenModel):
     """Human-readable voice name shown by clients."""
     preferred_languages: tuple[str, ...] = ()
     """Ordered BCP 47 language tags for which this voice is a preferred match."""
+    reference_profile: str | None = None
+    """Bundled reference profile used to condition models without built-in voices."""
 
-    @field_validator("id", "name", mode="before")
+    @field_validator("id", "name", "reference_profile", mode="before")
     @classmethod
-    def _normalize_voice_text(cls, value: object) -> str:
+    def _normalize_voice_text(cls, value: object) -> str | None:
+        if value is None:
+            return None
         normalized = str(value).strip()
         if not normalized:
             raise ValueError("voice id and name must not be empty")
@@ -293,10 +747,15 @@ class VisionCardConfig(CamelCaseModel):
     weights_repo: str = ""
     """Repo holding the vision-tower weights when separate from the LM; empty if
     bundled with the main weights."""
+    weights_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")] | None = None
+    """Immutable commit for a separate ``weights_repo``."""
     image_token: str | None = None
     """The literal image placeholder string, when distinct from ``image_token_id``."""
     processor_repo: str | None = None
     """Repo providing the image processor/preprocessor config, if not the main repo."""
+    processor_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")] | None = None
+    """Immutable commit for ``processor_repo``. Signed registry cards require
+    this whenever a separate processor repository can supply executable code."""
     boi_token_id: int | None = None
     """Begin-of-image token id, for families that bracket image spans."""
     eoi_token_id: int | None = None
@@ -499,9 +958,7 @@ class AudioCardConfig(CamelCaseModel):
             return ()
         if not isinstance(value, Iterable) or isinstance(value, (str, bytes)):
             raise ValueError("voices must be a list of non-empty identifiers")
-        voices = tuple(
-            str(item).strip() for item in cast("Iterable[object]", value)
-        )
+        voices = tuple(str(item).strip() for item in cast("Iterable[object]", value))
         if any(not voice for voice in voices):
             raise ValueError("voices must contain only non-empty identifiers")
         if len(set(voices)) != len(voices):
@@ -552,6 +1009,19 @@ class AudioCardConfig(CamelCaseModel):
             if catalog_ids != self.voices:
                 raise ValueError(
                     "voice_catalog ids must match voices exactly and preserve order"
+                )
+            reference_voices = tuple(
+                voice
+                for voice in self.voice_catalog
+                if voice.reference_profile is not None
+            )
+            if reference_voices and self.supports_reference_audio is not True:
+                raise ValueError(
+                    "reference voice profiles require supports_reference_audio=true"
+                )
+            if any(voice.id != voice.reference_profile for voice in reference_voices):
+                raise ValueError(
+                    "reference voice ids must match their bundled profile ids"
                 )
         if self.default_voice is not None and self.default_voice not in self.voices:
             raise ValueError("default_voice must be included in voices")
@@ -611,6 +1081,15 @@ class PlacementCardConfig(CamelCaseModel):
 
     max_context_tokens: int | None = None
     """Soft: caps the placement-time KV budget check (see #145) when set."""
+
+    max_pipeline_split_layer: int | None = Field(default=None, ge=1)
+    """Largest layer boundary at which a pipeline rank may begin.
+
+    Some architectures end with layers that reuse KV produced by earlier
+    concrete layers. Keeping every split at or before this boundary ensures the
+    final rank owns those producers as well as their dependent tail. ``None``
+    allows the planner to split at any ordinary layer boundary.
+    """
 
     backend_preference: tuple[str, ...] = ()
     """Soft, ordered preference among the node's backend tags (e.g.
@@ -699,6 +1178,8 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     The sidecar is downloaded alongside the base model weights and loaded
     into the runner for speculative decoding. Produced by SWP.
     """
+    mtp_sidecar_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")] | None = None
+    """Immutable commit for a separate ``mtp_sidecar_repo``."""
     mtp_norm_convention: Literal["zero_centered", "actual_scale"] | None = None
     """How the sidecar stores its RMSNorm weights.
 
@@ -749,6 +1230,10 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     the runner — declaring it here only pre-downloads it. See the Gemma 4 MTP
     initiative in the foxlight-docs hub (Phase C).
     """
+    assistant_model_revision: (
+        Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")] | None
+    ) = None
+    """Immutable commit for a separate ``assistant_model_repo``."""
     served_spec_type: (
         Literal[
             "none",
@@ -793,6 +1278,10 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     ``draft_mtp`` leave this unset (heads are in the base GGUF). When set, the
     draft GGUF is downloaded as a companion alongside the base and passed as
     ``--model-draft``. Pairs with ``served_spec_draft_file``."""
+    served_spec_draft_revision: (
+        Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")] | None
+    ) = None
+    """Immutable commit for a separate ``served_spec_draft_repo``."""
     served_spec_draft_file: str | None = None
     """Repo-relative GGUF filename of the served draft model (in
     ``served_spec_draft_repo``), e.g. ``"mtp-gemma-4-31B-it.gguf"``. Required when
@@ -832,6 +1321,10 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     from its own Hugging Face cache at engine start (the target model still
     stages through the Skulk model store; staging the draft through the
     store as a pinned companion is a follow-up)."""
+    vllm_spec_draft_revision: (
+        Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")] | None
+    ) = None
+    """Immutable commit supplied to vLLM for ``vllm_spec_draft_repo``."""
 
     vllm_tool_call_parser: str | None = None
     """vLLM server-side tool-call parser name for this model
@@ -859,17 +1352,11 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
         custom cards deserve the same loud failure at load (PR #649 review).
         """
         if self.vllm_spec_num_tokens is not None and self.vllm_spec_method is None:
-            raise ValueError(
-                "vllm_spec_num_tokens requires vllm_spec_method"
-            )
+            raise ValueError("vllm_spec_num_tokens requires vllm_spec_method")
         if self.vllm_spec_method == "dflash" and self.vllm_spec_draft_repo is None:
-            raise ValueError(
-                "vllm_spec_method 'dflash' requires vllm_spec_draft_repo"
-            )
+            raise ValueError("vllm_spec_method 'dflash' requires vllm_spec_draft_repo")
         if self.vllm_spec_draft_repo is not None and self.vllm_spec_method != "dflash":
-            raise ValueError(
-                "vllm_spec_draft_repo requires vllm_spec_method 'dflash'"
-            )
+            raise ValueError("vllm_spec_draft_repo requires vllm_spec_method 'dflash'")
         return self
 
     @field_validator("prompt_renderer", mode="before")
@@ -911,9 +1398,12 @@ class ModelCard(CamelCaseModel):
     """
 
     model_id: ModelId
-    """The model's identifier (a HuggingFace repo id, e.g.
-    ``mlx-community/Qwen3.5-9B-4bit``, or a custom id). Slashes become ``--`` in
-    the on-disk store directory name."""
+    """The selectable artifact alias. Historically this was always the upstream
+    Hugging Face repository id; registry cards may use a distinct alias so two
+    exact files or quants from one repository remain separate artifacts."""
+    source_repository: ModelId | None = None
+    """Upstream Hugging Face repository that owns the artifact bytes. ``None``
+    means it is identical to ``model_id`` for legacy and locally generated cards."""
     storage_size: Memory
     """On-disk size of the weights this card loads (for a GGUF card, just the
     selected quant's shard group, not every quant the repo hosts). The planner
@@ -950,10 +1440,13 @@ class ModelCard(CamelCaseModel):
     (preferring a quant over BF16) so the download fetches only that quant and the
     runner loads deterministically, instead of each layer re-globbing/guessing.
     ``None`` for non-GGUF (safetensors/MLX) cards."""
-    source_revision: Annotated[
-        str,
-        Field(pattern=r"^[0-9a-f]{40}$"),
-    ] | None = None
+    source_revision: (
+        Annotated[
+            str,
+            Field(pattern=r"^[0-9a-f]{40}$"),
+        ]
+        | None
+    ) = None
     """Immutable Hugging Face commit for this card's model artifacts.
 
     ``None`` preserves the historical behavior of resolving the repository's
@@ -1015,7 +1508,89 @@ class ModelCard(CamelCaseModel):
             object.__setattr__(
                 self,
                 "vision",
-                self.vision.model_copy(update={"weights_repo": str(self.model_id)}),
+                self.vision.model_copy(
+                    update={"weights_repo": str(self.artifact_repository)}
+                ),
+            )
+        return self
+
+    registry_card_id: Annotated[str, Field(pattern=r"^card_[a-z2-7]{52}$")] | None = (
+        None
+    )
+    """Immutable content-derived registry card id, or ``None`` for local cards."""
+    registry_snapshot_id: str | None = None
+    """Signed registry snapshot that supplied this runtime card."""
+    registry_provenance: Literal["foxlight", "agent", "community"] | None = None
+    """Audited registry origin, kept separate from immutable artifact identity."""
+
+    @model_validator(mode="after")
+    def _require_registry_companion_revisions(self) -> "ModelCard":
+        """Reject signed cards whose separate companion sources are mutable."""
+        if self.registry_card_id is None:
+            return self
+        base_repository = str(self.artifact_repository)
+        companions: list[tuple[str, str | None, str | None]] = []
+        if self.vision is not None:
+            companions.extend(
+                (
+                    (
+                        "vision.weights_repo",
+                        self.vision.weights_repo,
+                        self.vision.weights_revision,
+                    ),
+                    (
+                        "vision.processor_repo",
+                        self.vision.processor_repo,
+                        self.vision.processor_revision,
+                    ),
+                )
+            )
+        if self.runtime is not None:
+            companions.extend(
+                (
+                    (
+                        "runtime.mtp_sidecar_repo",
+                        self.runtime.mtp_sidecar_repo,
+                        self.runtime.mtp_sidecar_revision,
+                    ),
+                    (
+                        "runtime.assistant_model_repo",
+                        self.runtime.assistant_model_repo,
+                        self.runtime.assistant_model_revision,
+                    ),
+                    (
+                        "runtime.served_spec_draft_repo",
+                        self.runtime.served_spec_draft_repo,
+                        self.runtime.served_spec_draft_revision,
+                    ),
+                    (
+                        "runtime.vllm_spec_draft_repo",
+                        self.runtime.vllm_spec_draft_repo,
+                        self.runtime.vllm_spec_draft_revision,
+                    ),
+                )
+            )
+        for field_name, repository, revision in companions:
+            if repository and repository != base_repository and revision is None:
+                revision_field = f"{field_name.removesuffix('_repo')}_revision"
+                raise ValueError(
+                    f"signed registry cards with {field_name} require immutable "
+                    f"{revision_field}"
+                )
+        return self
+
+    @property
+    def artifact_repository(self) -> ModelId:
+        """Return the upstream repository independently of the artifact alias."""
+        return self.source_repository or self.model_id
+
+    @model_validator(mode="after")
+    def _validate_pipeline_split_limit(self) -> "ModelCard":
+        """Require a constrained split boundary to lie inside the model."""
+        split_limit = self.placement.max_pipeline_split_layer
+        if split_limit is not None and split_limit >= self.n_layers:
+            raise ValueError(
+                "placement.max_pipeline_split_layer must be smaller than n_layers"
             )
         return self
 
@@ -1044,7 +1619,7 @@ class ModelCard(CamelCaseModel):
     @staticmethod
     async def load(model_id: ModelId) -> "ModelCard":
         if model_id not in _card_cache:
-            await _refresh_card_cache()
+            await _refresh_card_cache_if_due()
         if (mc := _card_cache.get(model_id)) is not None:
             return mc
 
@@ -1176,8 +1751,10 @@ class ModelCard(CamelCaseModel):
         except (FileNotFoundError, ValidationError):
             config_data = None
 
-        if config_data is not None and config_data.layer_count and (
-            config_data.hidden_size
+        if (
+            config_data is not None
+            and config_data.layer_count
+            and (config_data.hidden_size)
         ):
             n_layers = config_data.layer_count
             hidden_size = config_data.hidden_size
@@ -1218,7 +1795,9 @@ class ModelCard(CamelCaseModel):
         # and never needs image_token_id, and an empty model_type routes it to the
         # general multimodal handler. The mmproj weights are fetched via the
         # projector glob in gguf_allow_patterns, not from config.json.
-        vision = getattr(config_data, "vision", None) if config_data is not None else None
+        vision = (
+            getattr(config_data, "vision", None) if config_data is not None else None
+        )
         if vision is None and gguf_repo_has_projector(model_id, source_revision):
             logger.info(
                 f"GGUF repo {model_id} ships an mmproj projector but no vision "
@@ -1280,6 +1859,37 @@ class ModelCard(CamelCaseModel):
         )
 
 
+def preserve_generated_card_constraints(
+    generated: ModelCard,
+    bundled: ModelCard | None,
+) -> ModelCard:
+    """Carry curated hard placement constraints into a generated override.
+
+    Args:
+        generated: Machine-generated Hugging Face metadata card.
+        bundled: Existing curated card for the same model, when one exists.
+
+    Returns:
+        The generated card with any curated pipeline split boundary retained.
+
+    Operator-authored cards have no generator stamp and remain authoritative.
+    Generated cards are metadata caches, so they must not erase a bundled
+    architecture invariant merely because the user added the same repository
+    through the dashboard.
+    """
+    if (
+        generated.generator_revision is None
+        or bundled is None
+        or bundled.is_custom
+        or bundled.placement.max_pipeline_split_layer is None
+    ):
+        return generated
+    placement = generated.placement.model_copy(
+        update={"max_pipeline_split_layer": bundled.placement.max_pipeline_split_layer}
+    )
+    return generated.model_copy(update={"placement": placement})
+
+
 def add_to_card_cache(card: "ModelCard") -> None:
     """Add or update a model card in the in-memory cache."""
     _card_cache[card.model_id] = card
@@ -1288,18 +1898,15 @@ def add_to_card_cache(card: "ModelCard") -> None:
 async def delete_custom_card(model_id: ModelId) -> bool:
     """Delete a user-added custom model card. Returns True if deleted.
 
-    If the deleted card was overriding a bundled card (#652), the bundled
-    card is reloaded immediately: the cache only self-refreshes when empty,
-    so a bare pop would leave the bundled model missing from the catalog
-    until process restart. The builtin reload is first-wins, so it restores
-    only ids that are now absent and cannot displace other live overrides.
+    Rebuild the catalog through the same signed-registry selection used at
+    startup. A direct bundled reload would temporarily resurrect revoked cards
+    and restore the wrong source beneath a deleted registry override.
     """
     card_path = _custom_cards_dir / (ModelId(model_id).normalize() + ".toml")
     if await card_path.exists():
         await card_path.unlink()
         _card_cache.pop(model_id, None)
-        for builtin_dir in _BUILTIN_CARD_DIRS:
-            await _load_cards_from_dir(builtin_dir, is_custom=False)
+        await _refresh_card_cache()
         return True
     return False
 
@@ -1473,9 +2080,7 @@ def gguf_repo_has_projector(
     """
     try:
         info = (
-            model_info(
-                model_id, revision=source_revision, files_metadata=True
-            )
+            model_info(model_id, revision=source_revision, files_metadata=True)
             if source_revision is not None
             else model_info(model_id, files_metadata=True)
         )
@@ -1562,18 +2167,47 @@ def _gguf_quant_label(name: str) -> str:
     return ""
 
 
+# Companion artifacts a GGUF repo ships ALONGSIDE the model: speculative
+# drafters (dspark/dflash/draft), importance-matrix calibration files, and
+# multimodal projectors. Useless (or worse, actively misleading) as the main
+# model: a repo default that picked unsloth's ``dspark-*-Q8_0.gguf`` drafter
+# would stage a 10 GB draft model wearing a 284B model's name. Word-boundary
+# matched so ordinary model names containing these letters don't trip it.
+_COMPANION_GGUF_PATTERN: Final = re.compile(
+    r"(?:^|[^a-z0-9])(?:mmproj|imatrix|dspark|dflash|draft)(?:$|[^a-z])"
+)
+
+
+def is_companion_gguf(name: str) -> bool:
+    """True when a GGUF filename names a companion artifact, not LM weights.
+
+    Companions are speculative-decoding drafters (``dspark``/``dflash``/
+    ``draft``), importance-matrix calibration files, and multimodal
+    projectors. They are ranked dead-last by default selection so a repo
+    default never picks one, while a drafter-only repo (a published draft
+    companion) still resolves.
+    """
+    return _COMPANION_GGUF_PATTERN.search(name.rsplit("/", 1)[-1].lower()) is not None
+
+
 def select_preferred_gguf(gguf_files: "list[tuple[str, int]]") -> str:
     """Pick the GGUF weights file to load: best quant, then basename order.
 
     Prefers a real quantization (Q4_K_M first) over the unquantized BF16/F16 a
-    multi-quant repo also ships (#334). The basename tie-break makes the choice
+    multi-quant repo also ships (#334), and ranks companion artifacts
+    (drafters, imatrix files) behind every real quant so a repo default never
+    stages a speculator as the model. The basename tie-break makes the choice
     deterministic and, for a shard group, picks the first shard. The runner's
     ``select_gguf_file`` falls back to this same ranking when the card does not
     pin a file, so download, sizing, and loading all agree.
     """
     return min(
         (name for name, _ in gguf_files),
-        key=lambda name: (gguf_quant_rank(name), name.rsplit("/", 1)[-1]),
+        key=lambda name: (
+            is_companion_gguf(name),
+            gguf_quant_rank(name),
+            name.rsplit("/", 1)[-1],
+        ),
     )
 
 
@@ -1604,9 +2238,7 @@ def select_requested_gguf(
     # Backends open the first shard and discover the remaining files from it.
     # Preserve the selected quant group while normalizing a pasted later shard
     # to the same entrypoint used by automatic GGUF selection.
-    return min(
-        name for name in available if _gguf_shard_base(name) == requested_group
-    )
+    return min(name for name in available if _gguf_shard_base(name) == requested_group)
 
 
 # Glob for the multimodal projector a vision GGUF repo ships alongside the LM

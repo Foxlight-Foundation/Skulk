@@ -33,6 +33,7 @@ output_parser = "gemma4"
 # Depth > 1 measured slower (depth 2: 65%, 31.2 tok/s) — chain acceptance
 # decay outweighs the extra rows; leave depth at the default 1.
 assistant_model_repo = "mlx-community/gemma-4-26B-A4B-it-assistant-bf16"
+assistant_model_revision = "cda74908f1dbe7d3dbd3030e66576a7d4094144f"
 # MLX_METAL_FAST_SYNCH wedges the GPU command queue on this model under the
 # ring backend with multimodal load: the runner thread enters TH_UNINT in
 # the AGX driver at pipeline_last_eval_output, transitively starves

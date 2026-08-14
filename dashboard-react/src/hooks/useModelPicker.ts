@@ -57,7 +57,6 @@ export function useModelPicker({
   models,
   favorites,
   recentModelIds = [],
-  canModelFit,
   getModelFitStatus,
   downloadStatusMap,
   instanceStatuses,
@@ -114,8 +113,6 @@ export function useModelPicker({
       groups = groups.filter((g) => favorites.has(g.id));
     } else if (selectedFamily === 'recents') {
       return recentGroups;
-    } else if (selectedFamily === 'huggingface') {
-      return []; // HF results are handled separately
     } else if (selectedFamily) {
       groups = groups.filter((g) => g.family === selectedFamily);
     }
@@ -125,7 +122,13 @@ export function useModelPicker({
       groups = groups.filter(
         (g) =>
           g.name.toLowerCase().includes(q) ||
-          g.variants.some((v) => v.id.toLowerCase().includes(q)),
+          // The rows display the card's human-readable base model, so the
+          // exact text a user sees must also match their search.
+          g.variants.some(
+            (v) =>
+              v.id.toLowerCase().includes(q) ||
+              (v.base_model ?? '').toLowerCase().includes(q),
+          ),
       );
     }
 
@@ -178,7 +181,10 @@ export function useModelPicker({
     const rec: ModelGroup[] = [];
     const other: ModelGroup[] = [];
     for (const g of filteredGroups) {
-      const fits = g.variants.some((v) => getModelFitStatus(v.id) === 'fits_now');
+      const fits = g.variants.some((variant) => {
+        const status = getModelFitStatus(variant.id);
+        return status === 'fits_now' || status === 'fits_cluster_capacity';
+      });
       if (fits) rec.push(g);
       else other.push(g);
     }

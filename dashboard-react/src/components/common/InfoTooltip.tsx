@@ -47,7 +47,9 @@ const Trigger = styled.span`
 `;
 
 const TooltipBox = styled.div`
-  max-width: 360px;
+  box-sizing: border-box;
+  max-width: min(360px, calc(100vw - 16px));
+  overflow-wrap: anywhere;
   padding: 10px 14px;
   background: ${({ theme }) => theme.colors.surface};
   border: 1px solid ${({ theme }) => theme.colors.goldDim};
@@ -59,6 +61,12 @@ const TooltipBox = styled.div`
   line-height: 1.5;
   white-space: pre-line;
   z-index: 9999;
+`;
+
+const TooltipContent = styled.div`
+  max-height: calc(100vh - 36px);
+  overflow-x: hidden;
+  overflow-y: auto;
 `;
 
 const ARROW_SIZE = 8;
@@ -144,7 +152,7 @@ export function InfoTooltip({
               stroke={theme.colors.goldDim}
               strokeWidth={1}
             />
-            {content}
+            <TooltipContent>{content}</TooltipContent>
           </TooltipBox>
         </FloatingPortal>
       )}

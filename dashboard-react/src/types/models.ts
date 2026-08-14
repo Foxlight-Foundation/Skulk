@@ -75,6 +75,15 @@ export interface ModelInfo {
   tags?: string[];
   storage_size_megabytes?: number;
   base_model?: string;
+  artifact_repository?: string;
+  artifact_file?: string | null;
+  registry_card_id?: string | null;
+  registry_snapshot_id?: string | null;
+  registry_provenance?: 'foxlight' | 'agent' | 'community' | null;
+  catalog_source?: 'registry' | 'bundled' | 'custom';
+  remote_code_approval_required?: boolean;
+  remote_code_approved_on_this_node?: boolean;
+  remote_code_automatically_trusted?: boolean;
   quantization?: string;
   supports_tensor?: boolean;
   capabilities?: string[];
@@ -187,6 +196,30 @@ export interface HuggingFaceModel {
   tags: string[];
   /** Exact repo-relative GGUF path matched by a filename search. */
   matched_file?: string | null;
+  /** Hugging Face task tag (text-generation, image-text-to-text, ...). */
+  pipeline_tag?: string | null;
+  /** Framework the repository targets (transformers, diffusers, mlx, gguf). */
+  library_name?: string | null;
+  /** True when the license must be accepted and a token presented to download. */
+  gated?: boolean;
+  /** License identifier from the model card. */
+  license?: string | null;
+  /** Total parameter count from safetensors/GGUF metadata. */
+  param_count?: number | null;
+  /** Exact total artifact bytes from GGUF metadata. */
+  total_file_size?: number | null;
+  /** Context window from GGUF metadata. */
+  context_length?: number | null;
+  /** Parent repository this model derives from, when tagged. */
+  base_model_repo?: string | null;
+  /** Derivation kind: finetune, quantized, merge, or adapter. */
+  base_model_relation?: string | null;
+  /** arXiv paper identifiers tagged on the repository. */
+  arxiv_ids?: string[];
+  /** ISO 639-1 language tags declared on the repository. */
+  languages?: string[];
+  /** Model architecture from repository config or GGUF metadata. */
+  architecture?: string | null;
 }
 
 /** Progress snapshot for a download shown in the dashboard. */
@@ -213,6 +246,8 @@ export interface PlacementPreview {
   instance: unknown | null;
   memory_delta_by_node: Record<string, number> | null;
   error: string | null;
+  /** Exact card approval requirement for every selected serving node. */
+  trust_requirement?: string | null;
   /** Per-host alternative to the ranked pick: a single-node placement on a
    * host that passes admission but lost the planner ranking (#557). */
   alternative?: boolean;

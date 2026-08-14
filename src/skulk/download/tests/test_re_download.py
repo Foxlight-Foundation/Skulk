@@ -10,7 +10,9 @@ from typing import Callable
 from unittest.mock import AsyncMock, patch
 
 import anyio
+import pytest
 
+from skulk.download import coordinator as coordinator_module
 from skulk.download.coordinator import DownloadCoordinator
 from skulk.download.download_utils import RepoDownloadProgress
 from skulk.download.impl_shard_downloader import SingletonShardDownloader
@@ -28,6 +30,10 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.telemetry import NodeTelemetry
 from skulk.shared.types.worker.downloads import DownloadCompleted, DownloadFailed
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
+from skulk.store.installed_cards import (
+    build_installed_card_record,
+    write_installed_card,
+)
 from skulk.utils.channels import Receiver, Sender, channel
 
 NODE_ID = NodeId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
@@ -37,6 +43,9 @@ MODEL_ID = ModelId("test-org/test-model")
 def _make_shard(
     model_id: ModelId = MODEL_ID,
     source_revision: str | None = None,
+    *,
+    gguf_file: str | None = None,
+    registry_card_id: str | None = None,
 ) -> ShardMetadata:
     return PipelineShardMetadata(
         model_card=ModelCard(
@@ -47,6 +56,8 @@ def _make_shard(
             supports_tensor=False,
             tasks=[ModelTask.TextGeneration],
             source_revision=source_revision,
+            gguf_file=gguf_file,
+            registry_card_id=registry_card_id,
         ),
         device_rank=0,
         world_size=1,
@@ -163,6 +174,53 @@ class SlowCancellationShardDownloader(FakeShardDownloader):
         return await super().ensure_shard(shard)
 
 
+async def test_purge_all_unregisters_only_companion_artifact_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Purging a companion directory must preserve its owner's installed truth."""
+
+    _command_send, command_receive = channel[ForwarderDownloadCommand]()
+    event_send, _event_receive = channel[Event]()
+    telemetry_send, _telemetry_receive = channel[NodeTelemetry]()
+    coordinator = DownloadCoordinator(
+        node_id=NODE_ID,
+        shard_downloader=FakeShardDownloader(),
+        download_command_receiver=command_receive,
+        event_sender=event_send,
+        telemetry_sender=telemetry_send,
+        offline=True,
+    )
+    owner_card = _make_shard(ModelId("org/base")).model_card
+    companion_id = ModelId("org/base-mtp")
+    companion_directory = tmp_path / companion_id.normalize()
+    companion_directory.mkdir()
+    (companion_directory / "weights.safetensors").write_bytes(b"companion")
+    write_installed_card(
+        companion_directory,
+        build_installed_card_record(
+            companion_directory,
+            owner_card,
+            artifact_model_id=companion_id,
+            artifact_repository=str(companion_id),
+            artifact_role="mtp_sidecar",
+            owner_model_id=owner_card.model_id,
+        ),
+    )
+    unregistered: list[ModelId] = []
+    monkeypatch.setattr(
+        coordinator_module,
+        "unregister_installed_card_record",
+        unregistered.append,
+    )
+
+    purged = await coordinator._purge_dir(tmp_path, "staging")
+
+    assert purged == 1
+    assert unregistered == [companion_id]
+    assert not companion_directory.exists()
+
+
 async def test_revision_change_restarts_failed_download_state() -> None:
     """A failed attempt for an old pin must not suppress a corrected pin."""
 
@@ -191,6 +249,44 @@ async def test_revision_change_restarts_failed_download_state() -> None:
     status = coordinator.download_status[MODEL_ID]
     assert isinstance(status, DownloadFailed)
     assert status.shard_metadata.model_card.source_revision == "1" * 40
+
+
+async def test_registry_identity_change_restarts_same_revision_status() -> None:
+    """A new signed quant cannot inherit stale same-alias completion state."""
+    _command_send, command_receive = channel[ForwarderDownloadCommand]()
+    event_send, _event_receive = channel[Event]()
+    telemetry_send, _telemetry_receive = channel[NodeTelemetry]()
+    coordinator = DownloadCoordinator(
+        node_id=NODE_ID,
+        shard_downloader=FakeShardDownloader(),
+        download_command_receiver=command_receive,
+        event_sender=event_send,
+        telemetry_sender=telemetry_send,
+        offline=True,
+    )
+    old_shard = _make_shard(
+        source_revision="a" * 40,
+        gguf_file="model-q4.gguf",
+        registry_card_id=f"card_{'a' * 52}",
+    )
+    new_shard = _make_shard(
+        source_revision="a" * 40,
+        gguf_file="model-q5.gguf",
+        registry_card_id=f"card_{'b' * 52}",
+    )
+    coordinator.download_status[MODEL_ID] = DownloadFailed(
+        shard_metadata=old_shard,
+        node_id=NODE_ID,
+        error_message="old artifact failed",
+        model_directory="/missing",
+    )
+
+    await coordinator._start_download(new_shard)
+
+    status = coordinator.download_status[MODEL_ID]
+    assert isinstance(status, DownloadFailed)
+    assert status.shard_metadata.model_card.registry_card_id == f"card_{'b' * 52}"
+    assert status.shard_metadata.model_card.gguf_file == "model-q5.gguf"
 
 
 async def test_revision_change_replaces_active_download_after_cleanup() -> None:

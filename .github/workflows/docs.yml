@@ -16,6 +16,13 @@ on:
       - main
       - dev
 
+# A new push to a PR obsoletes the in-flight validation build, so superseded
+# PR runs are cancelled. Pushes to main/dev keep unique groups (keyed by sha)
+# so deploys are never cancelled mid-flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 

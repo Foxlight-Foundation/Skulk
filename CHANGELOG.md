@@ -7,7 +7,119 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- Model artifacts are now self-describing and air-gap durable: canonical and
+  staged copies retain their complete model card, immutable selection,
+  verification state, companion ownership, and SHA-256 manifest in an atomic
+  installed-card sidecar. The authoritative store automatically inventories
+  existing node caches and can import missing artifacts through resumable,
+  capability-bound peer transfers without returning to Hugging Face. The Model
+  Store dashboard exposes cache placement, verified versus local-legacy truth,
+  reconciliation progress, available updates, and signed warn-only advisories.
+  Durable deletion tombstones prevent missed node-cache evictions from
+  resurrecting removed models or their companion artifacts. Partial legacy
+  directories are never promoted from a name match, resumable peer imports
+  account only for missing bytes, capability exports enforce their transfer
+  ceiling, artifact eviction immediately clears stale installed state, startup
+  polling survives the delayed first scan, and companion recovery selects the
+  generation belonging to the current signed owner card. Internal peer imports
+  reject proxy-forwarded loopback requests, while omitted immutable card IDs
+  retain their documented current-generation compatibility behavior.
+
+- The dashboard voice loop now narrates code blocks: when a fenced code block
+  streams during live generation, the assistant voice speaks a short opener,
+  occasional fillers while the block streams, and a closer when it ends,
+  instead of leaving dead air where the unspoken code would be. Fillers fire
+  only when the voice has actually run out of queued speech, so narration can
+  never stack behind prose or chatter on a fast stream; adjacent blocks
+  continue without a false finish, replayed messages stay silent about code
+  by construction, and the Narrate code toggle beside Auto speech turns the
+  behavior off.
+
+## [1.5.0] - 2026-08-07
+
+### Changed
+
+- Redesigned the dashboard's dark mode around the Foxlight operator design
+  system's Den palette, replacing the previous high-contrast scheme: indigo
+  surfaces over a deep night canvas, a starlight accent for everyday
+  interaction, and amber reserved for work actually in flight (RAM a model is
+  holding, downloads in progress, attention badges). Light mode is unchanged.
+  Both palettes share one token vocabulary, so components never branch on the
+  theme name. Building the dashboard with `VITE_NIGHT_SKY=1` additionally
+  crowns dark mode with the brand valley's star field (occasional shooting
+  stars included, and the abstract mesh stands down); the default build ships
+  a CSS-only night gradient with the mesh.
+
+### Added
+
+- Bundled ten checksummed English reference voices (Angus, Ember, Hannah, Ian,
+  Jake, Kite, Rufus, Samson, Sydney, and Sylvie) for the validated Qwen Base,
+  LongCat, and Fish voice-cloning cards. They appear through the ordinary voice
+  catalog and resolve to local conditioning audio plus its exact transcript only
+  inside the selected worker, with Kite as the shipped default. Qwen Base now
+  ships the stable six-bit conversion; the unstable 0.6B CustomVoice and
+  four-bit Base cards are no longer offered.
+
 ### Fixed
+
+- Dashboard speech now prepares model turns for synthesis structurally rather
+  than sentence-by-sentence alone: an unpunctuated block such as a bold story
+  title gains terminal punctuation so it no longer bleeds into the following
+  sentence, Markdown block and heading boundaries end a spoken segment even
+  when the model omitted punctuation, emoji are stripped instead of being
+  read aloud, and a horizontal rule becomes a brief audible pause on the
+  streaming playback timeline instead of spoken dashes.
+
+- Dashboard speech now sends completed turns and replay requests to batch-only
+  TTS models as one synthesis call. Sentence-sized request queues remain
+  reserved for cards that truthfully advertise streaming PCM, avoiding the
+  repeated full-generation overhead that made LongCat and Fish playback
+  unnecessarily slow.
+
+- Supervised Linux updates now rebuild the dashboard with Skulk's bundled
+  Node.js runtime. The launchd/systemd startup wrapper previously used bare
+  `npm` even though the official installer uses the required pinned runtime.
+  Linux nodes without a system Node.js installation therefore kept serving an
+  old dashboard after successful code updates while logging non-fatal npm
+  failures. Boot-time prep now reserves headless mode for explicitly API-only
+  nodes and retains system npm only as a recovery fallback.
+
+- Dashboard speech now sends the same deterministic seed for every generated
+  sentence and replay segment. The public speech API and built-in TTS provider
+  also accept an optional unsigned 32-bit seed, which the speech runner applies
+  immediately before model generation; callers that omit it retain upstream
+  advancing-random-stream behavior.
+
+- Dashboard realtime STT Auto-send now submits final transcripts through the
+  same chat-completions path as typed prompts. Voice turns retain the complete
+  dashboard conversation, use normal generation limits, and share the same
+  streaming, cancellation, and sentence-paced TTS behavior instead of creating
+  a separate socket-local conversation capped at 256 output tokens.
+
+- Omitted TTS `max_tokens` no longer inherits undersized upstream model
+  defaults that hard-cut ordinary speech mid-word. Speech runners now apply a
+  4096-token serving budget only to models that explicitly declare the control,
+  while preserving caller-supplied limits and leaving unsupported models alone.
+
+- The dashboard model-store page now retries transient registry and download
+  request failures until it has both a successful registry snapshot and no
+  active downloads. A brief API connection reset during a fresh-install model
+  download can no longer leave the page stuck at "0 models in store" after the
+  model was registered successfully.
+
+- Disabled the Qwen3.5 2B MLX card's MTP sidecar after clean-install text and
+  vision journeys showed repetitive generation until the output limit. The
+  same shipped model now uses vanilla decoding, which completes both journeys
+  normally while retaining its text, thinking-toggle, and vision capabilities.
+
+- Fresh multi-node installs now converge their per-node bootstrap model stores
+  on the elected master's routable store endpoint. Followers retry
+  authoritative config sync through the startup window, stop superseded local
+  store servers, and update dashboard and worker clients together, preventing
+  dashboard download followed by placement on another node from downloading
+  the same multi-gigabyte model from Hugging Face twice.
 
 - Routed text-only requests on native MLX-VLM models through their language
   model instead of the multimodal outer model. This prevents Qwen3-VL text
@@ -73,6 +185,42 @@ This project records release notes here and mirrors public-facing notes in
 - Fixed HTTP model-store staging progress to use the canonical registry byte total across fresh and resumed multi-file transfers, restoring the bounded fraction gate that prevents progress telemetry from flooding the ordered control plane (#520).
 
 ### Changed
+
+- Redesigned the dashboard's Find Models dialog. Catalog rows now lead with the
+  card's human-readable model name over a family monogram tile, show capability
+  chips shared with the store table plus size and context metadata, and label
+  store state with an explicit "In store" chip instead of bare check and arrow
+  glyphs. Downloads start only from a labeled Download button (per quantization
+  in the expanded size list), so clicking a row can no longer silently kick off
+  a multi-hundred-gigabyte transfer. The family sidebar dropdown became a chip
+  rail, and Hugging Face results gained author and popularity metadata lines.
+  Rows carry the model's brand mark (or a monogram when no vector or bundled
+  raster mark exists), quantization and artifact-format tiles, and a
+  fleet-first ordering: models the local fleet can serve list first, and
+  models needing more capacity move to a "Needs burst capacity" section with
+  an amber Burst chip explaining whether size or artifact format exceeds the
+  fleet. Burst rows stay fully downloadable; Hugging Face size verdicts prefer
+  exact GGUF artifact sizes and metadata parameter counts, falling back to
+  name-derived estimates marked as such. The Hugging Face trending list now
+  sorts by Hugging Face's trending score instead of all-time downloads, gains
+  a "Show more" pager, and rows surface task chips, gated-license markers,
+  parameter counts, artifact sizes, and context lengths from the enriched
+  `/models/search` response. Results also carry derivation lineage
+  (finetune, quantized, merge, adapter, shown as a small classification
+  tile on the row), tagged papers, languages, and architecture, and every
+  discovery row links its exact Hugging Face repository. The row's info
+  popover became a real dossier: it lazily fetches the model card's own
+  description through the new `GET /models/card-summary` endpoint and shows
+  lineage with a link to the parent repository, architecture, languages,
+  license, and arXiv papers. A task chip rail on the search tab filters
+  trending and search results by Hugging Face task (text, vision, STT,
+  TTS, embedding, image generation) via the endpoint's `pipeline_tag`
+  parameter. GGUF results expand into a per-quantization download chooser
+  backed by the new `GET /models/gguf-quants` endpoint, and default GGUF
+  selection now ranks companion artifacts (speculative drafters such as
+  dspark/dflash files, imatrix calibration data) behind every real quant,
+  so adding a repository can no longer silently stage a 10 GB drafter
+  wearing the model's name.
 
 - **Concurrent slots on the served llama.cpp engine no longer shrink each
   request's context window.** `SKULK_LLAMA_SERVER_PARALLEL` asks a node to serve
@@ -231,7 +379,7 @@ This project records release notes here and mirrors public-facing notes in
   static voice catalogs via `GET /v1/audio/voices`, and bounded multipart
   reference audio for supporting cards); mounted STT models serve
   `POST /v1/audio/transcriptions` (with typed SSE or progressive NDJSON
-  streaming where a card proves it) and experimental
+  streaming where a card proves it) and standard
   `POST /v1/audio/translations`. A realtime transcription provider pins a
   session to a mounted speech worker and feeds a true upstream streaming
   session over bounded ingress; `WS /v1/realtime` is the OpenAI-compatible
@@ -405,8 +553,7 @@ This project records release notes here and mirrors public-facing notes in
   context), and `withdraw_capability(tag)` reverses an advertisement, with the
   telemetry publisher emitting one final empty reading when a node's last tag is
   withdrawn so peers clear their entry instead of holding a stale value. A
-  reference provider lives at `examples/extensions/echo-provider/`. Invoking a
-  capability (the generic call envelope) is the next slice of this surface.
+  reference provider lives at `examples/extensions/echo-provider/`.
 
 - **Extensions get telemetry-plane access (read + advertise).** First-class
   fabric citizenship expressed as plane access: a plugin can now both discover
@@ -422,16 +569,6 @@ This project records release notes here and mirrors public-facing notes in
     every peer's `read_cluster()` snapshot under `ClusterNodeView.capabilities`.
     Advertising is additive and idempotent; the tag keeps being gossiped
     (last-write-wins) until the node leaves the cluster.
-
-- **A gated "Experiments" area for staging in-development features.** A node
-  started with `SKULK_ENABLE_EXPERIMENTAL_MODE` set reveals an Experiments
-  section in the dashboard Settings; without it, the section is hidden and any
-  feature that opts into the gate stays inert, so a released build can carry
-  work-in-progress UX without exposing it. The switch is deliberately
-  feature-agnostic (it knows about no particular experiment); a feature that
-  wants to be gated reads it and adds its own toggle to the section, so its
-  operator UX is built alongside it. No experimental features ship in this
-  release, so with the flag on, the section shows a placeholder.
 
 ### Fixed
 

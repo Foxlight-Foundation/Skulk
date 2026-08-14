@@ -89,6 +89,7 @@ If `resolved_capabilities.supports_thinking_toggle` is `true`:
 
 - `enable_thinking=true` enables thinking using the model profile's default effort unless an explicit non-disabled effort is provided
 - `enable_thinking=false` disables thinking using the profile's disabled effort
+- omitting both `enable_thinking` and `reasoning_effort` disables thinking using the profile's disabled effort
 - `reasoning_effort="none"` also disables thinking
 
 ### Non-toggleable reasoning models

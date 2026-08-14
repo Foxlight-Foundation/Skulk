@@ -9,6 +9,7 @@ quantization = "4bit"
 base_model = "Qwen3-VL 4B Instruct"
 capabilities = ["text", "thinking", "thinking_toggle", "vision"]
 context_length = 262144
+source_revision = "2fd8dacbdb8f1e54b8c005f081ec5bf79c56376b"
 
 [vision]
 image_token_id = 151655
@@ -16,4 +17,4 @@ model_type = "qwen3_vl"
 weights_repo = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
 
 [storage_size]
-in_bytes = 8875631616
+in_bytes = 3109732071

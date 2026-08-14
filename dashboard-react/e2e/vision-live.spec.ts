@@ -133,8 +133,9 @@ test('the built-in dashboard sends and understands a real portrait', async ({ pa
   expect(Buffer.from(dataUrlMatch![1], 'base64').equals(readFileSync(exactImagePath))).toBe(true);
 
   const assistantMessage = page.locator('[data-message-role="assistant"]').last();
-  await expect(assistantMessage).toContainText(/\S/, { timeout: 2 * 60 * 1000 });
-  const answer = await assistantMessage.innerText();
+  const assistantResponse = assistantMessage.locator('[data-testid="assistant-response-content"]').last();
+  await expect(assistantResponse).toContainText(/\S/, { timeout: 2 * 60 * 1000 });
+  const answer = await assistantResponse.innerText();
 
   writeFileSync(
     testInfo.outputPath('vision-answer.json'),

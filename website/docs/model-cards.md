@@ -31,13 +31,30 @@ They drive:
 
 ## Where They Live
 
-Built-in cards are shipped in:
+Skulk's current supported catalog comes from the TUF-verified external registry
+at `registry.foxlight.ai`. A registry card represents one exact selectable
+artifact—one quant or selected file—and carries an immutable card ID and signed
+snapshot provenance. Registry refreshes do not require a Skulk release.
+
+Complete canonical and staged artifacts retain their full effective card and
+hashed manifest beside the bytes in `.skulk/installed-card.json`. These
+installed cards load before registry access, remain usable indefinitely while
+their artifact is complete, and keep an older installed generation active until
+a replacement has transferred and verified atomically.
+
+Fallback cards are still shipped in:
 
 - [`resources/inference_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/main/resources/inference_model_cards)
 - [`resources/image_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/main/resources/image_model_cards)
 - [`resources/embedding_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/main/resources/embedding_model_cards)
 
-Custom cards are stored under the user data directory and synced through the cluster event flow.
+They provide a startup catalog when registry access and its bounded verified
+cache are unavailable; they do not replace the signed registry as current
+catalog truth.
+
+Custom cards are stored under the user data directory and synced through the
+cluster event flow. They are operator-owned and retain final precedence over
+registry, installed, and bundled cards for the same `model_id`.
 
 ## The card interface (source of truth)
 
@@ -59,7 +76,9 @@ node in a cluster must run the same Skulk version.
 ### Identity and size
 
 - `model_id`
-  - Hugging Face / MLX model identifier
+  - selectable artifact alias; legacy and bundled cards normally use the Hugging Face repository id, while registry cards may give two exact files or quants from one repository different aliases
+- `source_repository`
+  - optional upstream Hugging Face repository containing the bytes; defaults to `model_id` and is set by the registry when the selectable alias differs from the byte origin
 - `storage_size`
   - total model size used for store/download/placement planning
 - `n_layers`
@@ -82,11 +101,17 @@ node in a cluster must run the same Skulk version.
 - `tasks`
   - supported task families such as `TextGeneration`, `TextEmbedding`, image tasks, `TextToSpeech`, `SpeechToText`, or `SpeechTranslation`
 - `trust_remote_code`
-  - whether the loader may enable remote-code behavior for this model
+  - whether the artifact requires repository-supplied Python; an immutable, revision-pinned Foxlight-provenance card from the verified registry is itself the trust decision for that exact artifact
+  - agent/community registry cards and custom or unsigned cards require explicit local approval; the approval identity changes with the immutable registry card or complete local card definition
 - `uses_cfg`
   - whether the model uses classifier-free guidance (relevant to some image/diffusion models)
 
 ### Catalog metadata
+
+- `registry_card_id` / `registry_snapshot_id` / `registry_provenance`
+  - provenance is signed catalog metadata (`foxlight`, `agent`, or `community`)
+    and is deliberately excluded from the content-derived card identity
+  - runtime provenance attached by the verified external catalog; these are absent from bundled and custom cards
 
 - `family`
   - coarse family label such as `gemma`, `qwen`, `deepseek`
@@ -113,10 +138,15 @@ Fields include:
   - MLX-VLM model family identifier such as `gemma4`
 - `weights_repo`
   - optional alternate weights repository for the vision tower
+- `weights_revision`
+  - full immutable commit for a separate `weights_repo`; required for signed-registry cards
 - `image_token`
   - optional literal image token string
 - `processor_repo`
   - optional alternate processor repository
+- `processor_revision`
+  - full immutable commit for a separate `processor_repo`; required for
+    signed-registry cards because processor loaders may execute repository Python
 - `boi_token_id`
   - optional begin-of-image token id
 - `eoi_token_id`
@@ -142,6 +172,8 @@ card written against the original `{"mlx"}` set keeps matching.
   - optional minimum accelerator memory a node must have to be eligible.
 - `max_context_tokens`
   - optional cap on the admission context for this model, independent of the model's trained context length.
+- `max_pipeline_split_layer`
+  - optional largest layer boundary where a later pipeline rank may begin. Use it when a model's tail reuses KV from earlier concrete layers; the planner shifts proportional boundaries left as needed and reruns normal per-node memory checks so the final rank owns every producer it consumes.
 
 ## Extended Capability Sections
 
@@ -191,20 +223,23 @@ Declares speech serving metadata for TTS and STT models:
 - `supports_voice_listing`
   - whether voices can be enumerated by the serving API
 - `voices`
-  - stable built-in voice identifiers returned by `GET /v1/audio/voices`; this
+  - stable model-native or bundled-reference identifiers returned by
+    `GET /v1/audio/voices`; this
     requires `kind = "tts"` and `supports_voice_listing = true`
 - `voice_catalog`
   - optional ordered metadata for every identifier in `voices`; each entry
     carries the same `id`, a display `name`, and ordered BCP 47
-    `preferred_languages` used by clients for deterministic language matching
+    `preferred_languages` used by clients for deterministic language matching;
+    `reference_profile` names a checksummed profile under
+    `resources/speech_reference_voices/` when the voice is reference-conditioned
 - `default_voice`
-  - built-in voice used when a TTS request omits `voice`; it must appear in
+  - stable voice used when a TTS request omits `voice`; it must appear in
     `voices`
 - `supports_reference_audio`
   - whether managed reference audio can condition the voice
 - `supports_translation`
   - whether speech-to-English translation is supported through the
-    experimental `/v1/audio/translations` route
+    standard `/v1/audio/translations` route
 - `sample_rates`
   - supported input or output sample rates in hertz
 
@@ -246,6 +281,8 @@ Declares runtime integration preferences:
   - maximum draft depth the MTP heads support; start at `1` for Apple Silicon (deeper values rarely amortize on Metal due to near-linear verify-pass scaling)
 - `mtp_sidecar_repo`
   - Hugging Face repo ID containing the published `mtp.safetensors` sidecar (e.g. `"FoxlightAI/qwen3-5-9b-base-mtp"`); produced by SWP (Skulk Weights Publisher) from the original BF16 checkpoint
+- `mtp_sidecar_revision`
+  - full immutable commit for a separately hosted MTP sidecar; required for signed-registry cards
 - `mtp_norm_convention`
   - how the MTP heads normalize hidden states (`zero_centered` or `actual_scale`); must match how the sidecar was produced
 - `mtp_concat_order`
@@ -254,6 +291,12 @@ Declares runtime integration preferences:
   - set to `false` to forbid speculative decoding when the model is sharded across multiple nodes (it stays single-node speculative); the runner and the generation loop read this to make the same rank-symmetric decision
 - `assistant_model_repo`
   - Hugging Face repo of a small companion model used as an external drafter for speculative decoding (the Gemma 4 path), as opposed to native MTP heads
+- `assistant_model_revision`
+  - full immutable commit for a separately hosted assistant; required for signed-registry cards
+
+Separate `served_spec_draft_repo` and `vllm_spec_draft_repo` companions likewise
+require `served_spec_draft_revision` and `vllm_spec_draft_revision`. A companion
+in the base artifact repository inherits the card's `source_revision`.
 
 ## MTP Speculative Decoding
 
@@ -294,6 +337,7 @@ Gemma 4 does **not** use native MTP heads; it uses an external drafter model (`a
 mtp_heads = true
 mtp_max_depth = 1
 mtp_sidecar_repo = "FoxlightAI/qwen3-5-9b-base-mtp"
+mtp_sidecar_revision = "06c840b3529f5695648807d993b1cb48b576a988"
 ```
 
 The sidecar repo must be published by SWP before adding these fields. See the [SWP documentation](https://foxlight-foundation.github.io/skulk-weights-publisher/) for how sidecars are produced and published.
@@ -407,6 +451,22 @@ id = "ryan"
 name = "Ryan"
 preferred_languages = ["en"]
 ```
+
+For a reference-conditioned voice, the catalog ID and `reference_profile` must
+match and the card must declare `supports_reference_audio = true`:
+
+```toml
+[[audio.voice_catalog]]
+id = "angus"
+name = "Angus"
+preferred_languages = ["en"]
+reference_profile = "angus"
+```
+
+The central profile manifest pins the local MP3 digest and exact transcript.
+Model cards intentionally repeat the public voice order so API and dashboard
+behavior remain explicit model truth; CI verifies every bundled cloning card
+against the central manifest.
 
 ## When to Extend a Card
 

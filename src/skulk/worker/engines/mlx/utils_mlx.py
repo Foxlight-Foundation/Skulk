@@ -57,6 +57,7 @@ from skulk.download.download_utils import (
     build_companion_model_path,
     build_model_path,
     build_sidecar_path,
+    companion_artifact_location,
 )
 from skulk.shared.types.common import Host
 from skulk.shared.types.memory import Memory
@@ -980,6 +981,7 @@ def load_mlx_items(
             vision_config,
             bound_instance.bound_shard.model_card.model_id,
             bound_instance.bound_shard.model_card.source_revision,
+            bound_instance.bound_shard.model_card.artifact_repository,
         )
     else:
         vision_processor = None
@@ -1039,8 +1041,15 @@ def load_mlx_items(
         # Sidecar repos carry only mtp.safetensors (no config.json), so they
         # must be resolved with the sidecar resolver — build_model_path's
         # model-completeness check rejects their directories.
+        sidecar_model_id, sidecar_revision = companion_artifact_location(
+            bound_instance.bound_shard.model_card,
+            runtime.mtp_sidecar_repo,
+            runtime.mtp_sidecar_revision,
+        )
         mtp_safetensors = build_sidecar_path(
-            ModelId(runtime.mtp_sidecar_repo), "mtp.safetensors"
+            sidecar_model_id,
+            "mtp.safetensors",
+            sidecar_revision,
         )
         if mtp_safetensors is not None:
             mtp_weights = cast("dict[str, mx.array]", mx.load(str(mtp_safetensors)))
@@ -1066,8 +1075,14 @@ def load_mlx_items(
     if runtime and runtime.assistant_model_repo and assistant_placement_ok:
         # Gemma 4 assistant drafter (gemma4-mtp Phase C). Same placement
         # envelope as MTP sidecars (#200/#201).
+        assistant_model_id, assistant_revision = companion_artifact_location(
+            bound_instance.bound_shard.model_card,
+            runtime.assistant_model_repo,
+            runtime.assistant_model_revision,
+        )
         assistant_dir = build_companion_model_path(
-            ModelId(runtime.assistant_model_repo)
+            assistant_model_id,
+            assistant_revision,
         )
         if assistant_dir is not None:
             assistant_model = load_assistant_model(assistant_dir)

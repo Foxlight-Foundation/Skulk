@@ -51,6 +51,7 @@ Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard),
 - `resources/image_model_cards/` — Image model metadata TOML files
 - `resources/embedding_model_cards/` — Embedding model metadata TOML files
 - `resources/speech_model_cards/` — Speech model metadata TOML files
+- `resources/speech_reference_voices/` — Checksummed bundled TTS conditioning audio and exact transcripts
 - `deployment/logging/` — VictoriaLogs + Grafana stack and Vector config
 - `docs/` — Technical documentation
 - `docs/model-runtime-notes/` — Internal per-model clustered runtime notes
@@ -79,6 +80,17 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
 - `src/skulk/master/` — Master node (placement, election, event sourcing)
 - `src/skulk/worker/` — Worker node (inference, runner management, download coordination)
 - `src/skulk/store/` — Model store (registry, downloads, config, model optimizer)
+- `src/skulk/operator/` — Stable operator identity, quorum certification,
+  crash-fault consensus, bounded dormant proposal lifecycle, and
+  encrypted/public authority persistence. It also owns the designated-gateway
+  local key provider, paired-WebSocket relay configuration/connector,
+  `skulk operator pair` and `configure-relay` commands, and single-use device
+  pairing plus credential lifecycle; the matching FastAPI routes and relay-only
+  canonical API guard live in `src/skulk/api/operator_auth.py` and
+  `src/skulk/api/operator_gateway.py`. It is a
+  separate security plane from event-sourced inference state; do not place its
+  secrets or mutable authorization records in `State`, telemetry, diagnostics,
+  or ordinary events.
 - `src/skulk/shared/` — Shared types, constants, topology
 - `website/docs/` — Docusaurus documentation source, including API guide and model-capability docs
 
@@ -125,7 +137,11 @@ For the React dashboard:
 
 ## Model Cards
 
-Skulk uses TOML-based model cards to define model metadata and capabilities. Model cards are stored in:
+Skulk uses TOML-based model cards to define model metadata and capabilities.
+The signed external registry is the curated source of truth; bundled cards are
+retained only as a transition fallback, and local custom cards remain explicit
+operator overrides. Model-card locations are:
+- `Foxlight-Foundation/foxlight-model-registry/seed/cards/` for the pinned migration seed and registry candidate workflow
 - `resources/inference_model_cards/` for text generation models
 - `resources/image_model_cards/` for image generation models
 - `resources/embedding_model_cards/` for embedding models
@@ -133,6 +149,13 @@ Skulk uses TOML-based model cards to define model metadata and capabilities. Mod
 - `~/.skulk/custom_model_cards/` for user-added custom models
 
 ### Adding a Model Card
+
+Do not add a new curated card only to Skulk's bundled resources. Submit it to
+the private registry as one exact artifact (one card per quant/file), pin a full
+40-character source revision and exact GGUF file where applicable, then attach
+runtime qualification evidence. Structural validation alone must leave it a
+candidate. Bundled edits during the transition must mirror the registry and
+state why fallback compatibility requires them.
 
 To add a new model, create a TOML file with the following structure:
 
@@ -297,6 +320,21 @@ npm run test
 npm run build
 ```
 
+The joined operator-access qualification is opt-in because it executes a real
+`paired-websocket-service` binary from the sibling `skulk-relay` repository.
+It starts an isolated loopback relay and a minimal relay-only Skulk API with
+temporary authority state; it does not discover, join, or mutate a fleet:
+
+```bash
+SKULK_PAIRED_RELAY_BINARY=/absolute/path/to/paired-websocket-service \
+uv run pytest src/skulk/operator/tests/test_joined_relay_integration.py
+```
+
+The test proves QR package generation, Ed25519 device proof, credential
+exchange, authenticated canonical `/state`, token rotation, paired-device
+listing, revocation, and rejection of revoked credentials through the actual
+opaque carrier and pinned inner TLS connection.
+
 The live vision test is deliberately explicit because it places a real image
 through the built-in dashboard and a running model. Provide the dashboard URL,
 the exact mounted model ID, and a local PNG fixture:
@@ -373,6 +411,14 @@ uv run skulk-harness fresh-install qualify \
 
 The green reports must cover Apple Silicon, AMD Linux, and a clean RunPod
 NVIDIA pod. A configured-fleet battery is not an acceptable substitute.
+
+After the automated candidate matrix passes, a human tester exercises the same
+exact commit through the first-install dashboard journeys in the
+[human release qualification guide](website/docs/human-release-qualification.md).
+Human acceptance supplements the automated gate; it cannot replace a failed or
+incomplete harness matrix. Any product, shipped-default, installer, dashboard,
+or model-card change made in response to human testing creates a new candidate
+that must repeat the automated qualification before promotion.
 
 ## Submitting Changes
 

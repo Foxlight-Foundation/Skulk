@@ -6,6 +6,17 @@
  * Components must never branch on theme name — all variation lives here.
  */
 
+import valleyNight from '../assets/scene/valley-night.webp';
+
+/**
+ * Build-time opt-in for the night-sky scene (`VITE_NIGHT_SKY=1`): the star
+ * field from the brand valley painting crowns dark mode, shooting stars
+ * included, and the abstract mesh stands down. Without the flag, dark mode
+ * ships the plain CSS night. Everything downstream keys off the `scene`
+ * token, so the flag decides it in exactly one place.
+ */
+const nightSkyEnabled = import.meta.env.VITE_NIGHT_SKY === '1';
+
 const sharedFonts = {
   body: "'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
   mono: "'JetBrains Mono', 'Fira Code', monospace",
@@ -70,6 +81,22 @@ interface ColorTokens {
   goldDim: string;
   goldBg: string;
   goldStrong: string; // readable on goldBg
+  /**
+   * De-emphasized accent-family FOREGROUND text (metric values, thinking
+   * headers, code-language labels). Unlike `goldDim`, which dims far enough
+   * to serve as borders and glows, this stays readable at small sizes.
+   */
+  goldTextDim: string;
+
+  /**
+   * The living colour (Den design language): marks work actually in flight —
+   * a loading instance, a download in progress, RAM a model is holding.
+   * Never decoration; if it appears in three places on a screen, two are
+   * wrong. Distinct from `gold`, the everyday interactive accent.
+   */
+  live: string;
+  liveBg: string;
+  onLive: string;
 
   // Semantic
   accent: string;
@@ -131,82 +158,139 @@ interface ColorTokens {
   bgMeshLine: string;
   bgMeshNode: string;
 
+  /**
+   * Scene image behind the app (a CSS background-image value), or 'none'.
+   * The night palette crowns the viewport with the star field from the
+   * brand valley painting (shared with foxlight.ai and the operator app),
+   * fading to nothing on the way down; a palette without a scene keeps the
+   * abstract mesh instead. Components branch on this token's value, never
+   * on the theme name.
+   */
+  scene: string;
+  /** Structural scrim over the scene: sinks the top for the header and
+   * buries the base so dense content keeps its ground. */
+  sceneScrim: string;
+
+  /**
+   * 'on' to wrap topology/placement SVG marks in their soft glow filters
+   * (reads as luminance on a dark canvas); 'none' where the same filter
+   * reads as a hard drop-shadow (light surfaces). Replaces the old habit of
+   * sniffing `bg === '#000000'`, which broke the moment the canvas moved.
+   */
+  svgGlow: string;
+
+  /**
+   * Vision capability-chip tint. Palette-aware because the chip renders
+   * 10px text over its own faint tint: the night palette can afford a
+   * pastel cyan, while daylight needs a deep cyan to stay readable on
+   * white. Deliberately not the warning token (amber must never repeat
+   * down a list as decoration).
+   */
+  tagVision: string;
+
   // Status (always-on, palette-independent severity colors are ok inside semantic.*)
   healthy: string;
   unhealthy: string;
 }
 
 const darkColors: ColorTokens = {
-  bg: '#000000',
+  // Den (night on the ridge), from the operator app design system: indigo
+  // surfaces over a deep night canvas, starlight for hairlines and the
+  // everyday accent, amber strictly for whatever is alive. Values track
+  // skulk-app/src/theme/tokens.ts (the 1a Den palette).
+  bg: '#080C1A',
+  // A CSS-only night: den glow crowning the header, and the fire's warmth
+  // (the palette's horizon amber) breathing up from just below the frame,
+  // so the canvas carries the valley's atmosphere without the painting.
   bgGradient: `
-    radial-gradient(ellipse at 0% 0%, #141428 0%, transparent 50%),
-    radial-gradient(ellipse at 100% 100%, #141428 0%, transparent 50%),
-    #000000
+    radial-gradient(ellipse 90% 55% at 50% -12%, rgba(43, 58, 99, 0.55) 0%, transparent 62%),
+    radial-gradient(ellipse 68% 38% at 82% 108%, rgba(168, 86, 12, 0.28) 0%, transparent 66%),
+    radial-gradient(ellipse 90% 30% at 12% 112%, rgba(43, 58, 99, 0.38) 0%, transparent 58%),
+    #080C1A
   `,
-  surface: '#111111',
-  surfaceHover: '#1a1a1a',
-  surfaceElevated: 'rgba(17, 17, 17, 0.95)',
-  surfaceSunken: 'rgba(0, 0, 0, 0.4)',
-  header: 'rgba(5, 2, 31, 0.16)',
-  headerBorder: 'linear-gradient(to right, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.03))',
-  overlay: 'rgba(0, 0, 0, 0.6)',
-  shadow: 'rgba(0, 0, 0, 0.4)',
-  shadowStrong: 'rgba(0, 0, 0, 0.6)',
+  surface: '#12192E',
+  surfaceHover: '#1B2540',
+  surfaceElevated: 'rgba(16, 22, 42, 0.96)',
+  surfaceSunken: 'rgba(43, 58, 99, 0.16)',
+  header: 'rgba(8, 12, 26, 0.78)',
+  headerBorder: 'linear-gradient(to right, rgba(147, 174, 223, 0.22), rgba(147, 174, 223, 0.03))',
+  overlay: 'rgba(5, 7, 15, 0.65)',
+  shadow: 'rgba(0, 0, 0, 0.5)',
+  shadowStrong: 'rgba(0, 0, 0, 0.7)',
 
-  border: 'rgba(255, 255, 255, 0.21)',
-  borderLight: 'rgba(255, 255, 255, 0.18)',
-  borderStrong: 'rgba(255, 255, 255, 0.35)',
+  border: 'rgba(147, 174, 223, 0.13)',
+  borderLight: 'rgba(147, 174, 223, 0.10)',
+  borderStrong: 'rgba(147, 174, 223, 0.22)',
 
-  text: '#ffffff',
-  textSecondary: 'rgba(255, 255, 255, 0.7)',
-  textMuted: 'rgba(255, 255, 255, 0.45)',
-  textOnAccent: '#000000',
+  text: '#F4F6FB',
+  textSecondary: 'rgba(147, 174, 223, 0.78)',
+  textMuted: 'rgba(232, 237, 247, 0.52)',
+  textOnAccent: '#07101E',
 
-  gold: '#FFD700',
-  goldDim: 'rgba(255, 215, 0, 0.5)',
-  goldBg: 'rgba(255, 215, 0, 0.08)',
-  goldStrong: '#FFD700',
+  // The night accent is starlight, not gold: interactive emphasis borrows the
+  // Den's secondary accent so amber (see `live`) stays scarce and alive.
+  gold: '#93AEDF',
+  goldDim: 'rgba(147, 174, 223, 0.45)',
+  goldTextDim: 'rgba(147, 174, 223, 0.72)',
+  goldBg: 'rgba(147, 174, 223, 0.12)',
+  goldStrong: '#B9CBEC',
 
-  accent: '#22c55e',
-  accentHover: '#16a34a',
-  accentBg: 'rgba(34, 197, 94, 0.12)',
-  error: '#ef4444',
-  errorBg: 'rgba(239, 68, 68, 0.12)',
-  errorText: '#fca5a5',
+  live: '#F2A03D',
+  liveBg: 'rgba(242, 160, 61, 0.14)',
+  onLive: '#1C1206',
+
+  accent: '#54C79A',
+  accentHover: '#3FB287',
+  accentBg: 'rgba(84, 199, 154, 0.14)',
+  error: '#F2707E',
+  errorBg: 'rgba(242, 112, 126, 0.14)',
+  errorText: '#F8A9B1',
   errorFill: '#dc2626',
   errorOnFill: '#ffffff',
-  errorOnSurface: '#fca5a5',                 // light red, readable on dark surface
-  warning: '#f59e0b',
-  warningBg: 'rgba(245, 158, 11, 0.12)',
-  warningText: '#fcd34d',
-  warningFill: '#ffcc33',
-  warningOnFill: '#000000',
-  warningOnSurface: '#fcd34d',               // light amber, readable on dark surface
-  info: '#3b82f6',
-  infoBg: 'rgba(59, 130, 246, 0.12)',
+  errorOnSurface: '#F8A9B1',
+  warning: '#F2A03D',
+  warningBg: 'rgba(242, 160, 61, 0.13)',
+  warningText: '#FFD79A',
+  // Solid attention badging is one of the few places amber earns a fill:
+  // it marks something the operator must act on, not decoration.
+  warningFill: '#F2A03D',
+  warningOnFill: '#1C1206',
+  warningOnSurface: '#F2A03D',
+  info: '#93AEDF',
+  infoBg: 'rgba(147, 174, 223, 0.14)',
 
-  chatBubbleUser: 'rgba(255, 215, 0, 0.08)',
-  chatBubbleAssistant: 'rgba(255, 255, 255, 0.04)',
-  chatBubbleBorder: 'rgba(255, 255, 255, 0.12)',
-  chatCodeBg: 'rgba(0, 0, 0, 0.5)',
+  chatBubbleUser: 'rgba(43, 58, 99, 0.36)',
+  chatBubbleAssistant: 'rgba(43, 58, 99, 0.14)',
+  chatBubbleBorder: 'rgba(147, 174, 223, 0.13)',
+  chatCodeBg: 'rgba(5, 7, 15, 0.55)',
 
-  heatmapLow: '#1e3a8a',
-  heatmapMid: '#FFD700',
-  heatmapHigh: '#ef4444',
+  heatmapLow: '#16203F',
+  heatmapMid: '#93AEDF',
+  heatmapHigh: '#F2A03D',
 
-  deviceIconStroke: '#ffffff',
-  deviceIconFill: 'rgba(255, 255, 255, 0.08)',
-  deviceBody: '#1a1a1a',
-  ramFill: 'rgba(255, 215, 0, 0.75)',
-  deviceLabel: '#ffffff', // white wordmark: stays readable over both the dark case and the gold RAM fill
-  gpuBarBg: 'rgba(80, 80, 90, 0.7)',
-  meshLine: 'rgba(255, 215, 0, 0.35)',
-  meshNode: 'rgba(255, 215, 0, 0.6)',
-  bgMeshLine: 'rgba(255, 215, 0, 0.21)',
-  bgMeshNode: 'rgba(255, 215, 0, 0.10)',
+  deviceIconStroke: '#E8EDF7',
+  deviceIconFill: 'rgba(147, 174, 223, 0.08)',
+  deviceBody: '#131B30',
+  // RAM a model is holding is work in flight: the one place the topology
+  // legitimately burns amber (the Den's "node actually holding work").
+  ramFill: 'rgba(242, 160, 61, 0.75)',
+  deviceLabel: '#E8EDF7',
+  gpuBarBg: 'rgba(43, 58, 99, 0.65)',
+  meshLine: 'rgba(147, 174, 223, 0.30)',
+  meshNode: 'rgba(147, 174, 223, 0.55)',
+  bgMeshLine: 'rgba(147, 174, 223, 0.10)',
+  bgMeshNode: 'rgba(147, 174, 223, 0.08)',
 
-  healthy: '#4ade80',
-  unhealthy: '#ef4444',
+  // With the flag, the star field crowns the viewport and dissolves on the
+  // way down; without it, the CSS night gradient carries the atmosphere
+  // alone and the mesh returns.
+  scene: nightSkyEnabled ? `url(${valleyNight})` : 'none',
+  sceneScrim: 'none',
+  svgGlow: 'on',
+  tagVision: '#22d3ee',
+
+  healthy: '#54C79A',
+  unhealthy: '#F2707E',
 };
 
 const lightColors: ColorTokens = {
@@ -240,8 +324,16 @@ const lightColors: ColorTokens = {
   // doesn't need to know which palette is active.
   gold: '#1d4ed8',
   goldDim: 'rgba(29, 78, 216, 0.55)',
+  // Same value as goldDim: the light palette's dim blue is already readable
+  // as text, so the split only changes dark mode.
+  goldTextDim: 'rgba(29, 78, 216, 0.55)',
   goldBg: 'rgba(29, 78, 216, 0.10)',
   goldStrong: '#1e3a8a',
+
+  // Noon identity amber (the deeper value that reads on white).
+  live: '#AC580A',
+  liveBg: '#FCF2E6',
+  onLive: '#FFF6EA',
 
   accent: '#0ea5e9',
   accentHover: '#0284c7',
@@ -262,9 +354,8 @@ const lightColors: ColorTokens = {
   warning: '#475569',                       // slate-600 (border/accent)
   warningBg: 'rgba(71, 85, 105, 0.08)',     // slate-600 at 8%
   warningText: '#1e293b',                   // slate-800
-  // Solid-callout pair stays palette-independent — same yellow + black in
-  // both modes — because the intent is high-attention badging, not subtle
-  // tinting. Mirrors the dark-mode values verbatim.
+  // Solid-callout pair: high-attention badging, not subtle tinting. Light
+  // mode keeps the legacy yellow; the night palette badges in its amber.
   warningFill: '#ffcc33',
   warningOnFill: '#000000',
   warningOnSurface: '#b45309',               // amber-700, readable on white
@@ -290,6 +381,11 @@ const lightColors: ColorTokens = {
   meshNode: 'rgba(29, 78, 216, 0.55)',
   bgMeshLine: 'rgba(29, 78, 216, 0.16)',
   bgMeshNode: 'rgba(29, 78, 216, 0.12)',
+
+  scene: 'none',
+  sceneScrim: 'none',
+  svgGlow: 'none',
+  tagVision: '#0E7490',
 
   healthy: '#0ea5e9',
   unhealthy: '#dc2626',

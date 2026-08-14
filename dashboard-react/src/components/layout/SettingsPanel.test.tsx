@@ -32,6 +32,10 @@ vi.mock('../../hooks/useToast', () => ({
   addToast: vi.fn(),
 }));
 
+vi.mock('./PairingSettings', () => ({
+  PairingSettings: () => <div>Pairing</div>,
+}));
+
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 

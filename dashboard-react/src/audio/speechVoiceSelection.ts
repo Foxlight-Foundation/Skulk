@@ -96,6 +96,14 @@ export function selectSpeechVoice(
     containsLatinScript(text) ? soleCatalogLatinLanguage(voices) : null
   );
   if (language) {
+    const defaultOption = defaultVoice
+      ? voices.find((voice) => voice.id === defaultVoice)
+      : undefined;
+    if (defaultOption?.preferredLanguages.some(
+      (candidate) => primaryLanguage(candidate) === language,
+    )) {
+      return defaultOption.id;
+    }
     const match = voices.find((voice) => voice.preferredLanguages.some(
       (candidate) => primaryLanguage(candidate) === language,
     ));

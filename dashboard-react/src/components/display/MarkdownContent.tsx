@@ -195,7 +195,7 @@ const Container = styled.div`
   .mc-code-lang {
     font-size: ${({ theme }) => theme.fontSizes.label};
     font-family: ${({ theme }) => theme.fonts.mono};
-    color: ${({ theme }) => theme.colors.goldDim};
+    color: ${({ theme }) => theme.colors.goldTextDim};
   }
 
   .mc-copy-btn {

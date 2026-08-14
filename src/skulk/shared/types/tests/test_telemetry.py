@@ -7,9 +7,18 @@ an in-process-only test missed a strict round-trip failure.
 """
 
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+
+import pytest
+from pydantic import ValidationError
 
 from skulk.routing.topics import TELEMETRY
 from skulk.shared.tests.conftest import get_pipeline_shard_metadata
+from skulk.shared.types.artifact_inventory import (
+    ARTIFACT_INVENTORY_ENTRY_LIMIT,
+    NodeArtifactAvailability,
+    NodeArtifactInventory,
+)
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import NodeDownloadProgress, StateSnapshotHydrated
 from skulk.shared.types.memory import Memory
@@ -67,6 +76,77 @@ def test_node_heartbeat_survives_topic_codec_round_trip() -> None:
 
     assert restored == message
     assert isinstance(restored.info, NodeHeartbeat)
+
+
+def test_artifact_inventory_round_trips_and_coalesces_by_node() -> None:
+    """A newer inventory replaces the same node's prior availability reading."""
+
+    node = NodeId("node-a")
+    inventory = NodeArtifactInventory(
+        artifacts=[
+            NodeArtifactAvailability(
+                model_id="org/model",
+                installed_identity="installed-generation",
+                size_bytes=1024,
+                last_used_epoch_seconds=42,
+                in_use=True,
+                manifest_complete=True,
+            ),
+        ],
+        store_host=False,
+        truncated=False,
+    )
+    message = NodeTelemetry(node_id=node, info=inventory)
+
+    restored = TELEMETRY.deserialize(TELEMETRY.serialize(message))
+
+    assert restored == message
+    assert isinstance(restored.info, NodeArtifactInventory)
+    assert restored.coalescing_key() == f"{node}:NodeArtifactInventory"
+
+
+def test_artifact_inventory_uses_local_receipt_time_and_prunes_with_membership() -> None:
+    """Availability freshness never depends on the publishing node's clock."""
+
+    node = NodeId("node-a")
+    received_at = datetime(2026, 8, 11, 12, 0, tzinfo=timezone.utc)
+    inventory = NodeArtifactInventory(
+        artifacts=[],
+        store_host=True,
+        truncated=False,
+    )
+    view = TelemetryView()
+
+    view.apply(
+        NodeTelemetry(node_id=node, info=inventory),
+        received_at=received_at,
+    )
+
+    assert view.node_artifact_inventories[node] == inventory
+    assert view.node_artifact_inventory_received_at[node] == received_at
+    view.prune(node)
+    assert node not in view.node_artifact_inventories
+    assert node not in view.node_artifact_inventory_received_at
+
+
+def test_artifact_inventory_rejects_payloads_beyond_the_fixed_entry_bound() -> None:
+    """One producer cannot turn compact telemetry into an unbounded catalog."""
+
+    artifact = NodeArtifactAvailability(
+        model_id="org/model",
+        installed_identity="installed-generation",
+        size_bytes=1024,
+        last_used_epoch_seconds=42,
+        in_use=False,
+        manifest_complete=True,
+    )
+
+    with pytest.raises(ValidationError):
+        NodeArtifactInventory(
+            artifacts=[artifact] * (ARTIFACT_INVENTORY_ENTRY_LIMIT + 1),
+            store_host=False,
+            truncated=True,
+        )
 
 
 def test_live_download_progress_round_trips_and_terminal_wins() -> None:
@@ -504,22 +584,27 @@ def test_view_merges_identity_from_two_readings() -> None:
     # accumulation), regardless of arrival order.
     view = TelemetryView()
     node = NodeId("node-a")
+    node_install_id = uuid4()
     view.apply(NodeTelemetry(node_id=node, info=MiscData(friendly_name="Kite 2")))
-    view.apply(
-        NodeTelemetry(
-            node_id=node,
-            info=StaticNodeInformation(
-                model="Mac mini",
-                chip="M4",
-                os_version="26.4",
-                os_build_version="X",
-                skulk_version="1.2.0",
-                skulk_commit="abc123",
-            ),
-        )
+    static_reading = NodeTelemetry(
+        node_id=node,
+        info=StaticNodeInformation(
+            node_install_id=node_install_id,
+            model="Mac mini",
+            chip="M4",
+            os_version="26.4",
+            os_build_version="X",
+            skulk_version="1.2.0",
+            skulk_commit="abc123",
+        ),
     )
+    restored = TELEMETRY.deserialize(TELEMETRY.serialize(static_reading))
+    assert isinstance(restored.info, StaticNodeInformation)
+    assert restored.info.node_install_id == node_install_id
+    view.apply(restored)
     identity = view.node_identities[node]
     assert identity.friendly_name == "Kite 2"  # preserved across the static merge
+    assert identity.node_install_id == node_install_id
     assert identity.chip_id == "M4"
     assert identity.skulk_version == "1.2.0"
     # a later friendly-name update keeps the static fields

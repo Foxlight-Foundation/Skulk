@@ -102,6 +102,7 @@ def _build_shard() -> PipelineShardMetadata:
             hidden_size=2816,
             supports_tensor=False,
             tasks=[ModelTask.TextGeneration],
+            trust_remote_code=False,
         ),
         device_rank=0,
         world_size=1,
@@ -180,8 +181,11 @@ async def test_http_stage_uses_registered_total_for_resumed_progress(
         total_bytes_offset: int,
         grand_total: int,
         source_revision: str | None,
+        *,
+        replace_existing: bool,
     ) -> int:
         assert source_revision is None
+        assert not replace_existing
         size = download_sizes[file_path]
         assert on_progress is not None
         await on_progress(total_bytes_offset + size, grand_total)
@@ -208,6 +212,54 @@ async def test_http_stage_uses_registered_total_for_resumed_progress(
     assert path == dest_path
     assert observed == [(550, 1_000), (1_000, 1_000)]
     assert admitted_bytes == [750]
+
+
+@pytest.mark.anyio
+async def test_http_staging_replaces_installed_card_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A same-revision card update atomically refreshes staged truth."""
+
+    client = ModelStoreClient(store_host="store.local", store_port=58080)
+    destination = tmp_path / "staging"
+    sidecar = destination / ".skulk" / "installed-card.json"
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text("old")
+
+    async def fetch_file_list(
+        _model_id: str, _source_revision: str | None
+    ) -> list[str]:
+        return [".skulk/installed-card.json"]
+
+    async def fetch_total(
+        _model_id: str, _source_revision: str | None
+    ) -> int:
+        return 3
+
+    async def download_store_file(
+        _model_id: str,
+        _file_path: str,
+        _dest_path: Path,
+        _on_progress: Callable[[int, int], Awaitable[None]] | None,
+        total_bytes_offset: int,
+        grand_total: int,
+        source_revision: str | None,
+        *,
+        replace_existing: bool,
+    ) -> int:
+        del total_bytes_offset, grand_total, source_revision
+        assert replace_existing
+        sidecar.write_text("new")
+        return 3
+
+    monkeypatch.setattr(client, "_fetch_file_list", fetch_file_list)
+    monkeypatch.setattr(client, "_fetch_model_total_bytes", fetch_total)
+    monkeypatch.setattr(client, "_download_store_file", download_store_file)
+
+    await client._stage_http("org/model", destination, None)  # pyright: ignore[reportPrivateUsage]
+
+    assert sidecar.read_text() == "new"
 
 
 @pytest.mark.anyio

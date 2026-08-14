@@ -49,6 +49,10 @@ describe('speech language and voice selection', () => {
     expect(selectSpeechVoice('これは日本語です。', VOICES, null, 'serena')).toBe('ono_anna');
   });
 
+  it('prefers the card default among voices matching the response language', () => {
+    expect(selectSpeechVoice('This is English.', VOICES, null, 'aiden')).toBe('aiden');
+  });
+
   it('does not misclassify Latin text when the catalog has multiple Latin languages', () => {
     const multilingualVoices: ChatVoiceOption[] = [
       ...VOICES,

@@ -11,11 +11,17 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final, Self
+from typing import Final, Self, cast
 
 import anyio
 import psutil
-from anyio import BrokenResourceError, ClosedResourceError
+from anyio import (
+    BrokenResourceError,
+    ClosedResourceError,
+    EndOfStream,
+    WouldBlock,
+    to_thread,
+)
 from loguru import logger
 from pydantic import PositiveInt
 
@@ -30,6 +36,7 @@ from skulk.download.coordinator import DownloadCoordinator
 from skulk.download.impl_shard_downloader import skulk_shard_downloader
 from skulk.extensions import load_extensions
 from skulk.master.main import Master
+from skulk.operator.pairing import OperatorPairingService
 from skulk.routing.event_router import EventRouter
 from skulk.routing.router import Router, TelemetrySender, get_node_id_keypair
 from skulk.routing.zenoh_status import ZenohPeerSampler
@@ -40,14 +47,40 @@ from skulk.shared.logging import (
     logger_cleanup,
     logger_setup,
 )
+from skulk.shared.models.model_cards import (
+    get_all_model_cards,
+    get_current_registry_cards,
+    register_installed_card_record,
+)
 from skulk.shared.session_carryover import seed_state_for_new_session
+from skulk.shared.types.artifact_inventory import (
+    ARTIFACT_INVENTORY_DEBOUNCE_SECONDS,
+    ARTIFACT_INVENTORY_ENTRY_LIMIT,
+    ARTIFACT_INVENTORY_REFRESH_SECONDS,
+    NodeArtifactAvailability,
+    NodeArtifactInventory,
+)
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.commands import ForwarderDownloadCommand, SyncConfig
 from skulk.shared.types.common import NodeId, SessionId, SystemId
+from skulk.shared.types.events import (
+    IndexedEvent,
+    InstanceCreated,
+    InstanceDeleted,
+    NodeDownloadProgress,
+    RunnerStatusUpdated,
+    StagedModelEvicted,
+    StateSnapshotHydrated,
+)
 from skulk.shared.types.profiling import NodeDataTransport, NodeResources
+from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
 from skulk.startup_recovery import preflight_api_port
+from skulk.store.artifact_inventory import (
+    installed_artifact_roots,
+    inventory_installed_artifacts,
+)
 from skulk.store.config import (
     SkulkConfig,
     load_skulk_config,
@@ -55,6 +88,7 @@ from skulk.store.config import (
     resolve_config_path,
     resolve_node_staging,
 )
+from skulk.store.installed_cards import VerifiedDetachedInstalledCardCache
 from skulk.store.model_store import ModelStore
 from skulk.store.model_store_client import ModelStoreClient, ModelStoreDownloader
 from skulk.store.model_store_server import ModelStoreServer
@@ -92,6 +126,9 @@ def _derive_zenoh_namespace(raw: str) -> str:
 _LIBP2P_NETWORK_VERSION = "v0.0.2"
 _LIBP2P_NAMESPACE_ENV_VAR = "SKULK_LIBP2P_NAMESPACE"
 _NODE_RESOURCES_POLL_INTERVAL_SECONDS = 2.0
+_CLUSTER_CONFIG_SYNC_ATTEMPTS = 30
+_CLUSTER_CONFIG_SYNC_RESPONSE_TIMEOUT_SECONDS = 1.0
+_CLUSTER_CONFIG_SYNC_RETRY_INTERVAL_SECONDS = 0.2
 # Cadence of the local zenoh-isolation check, and the floor between repeated
 # operator warnings while the condition persists. The check is a cheap local
 # session introspection; the warning floor keeps a permanently isolated node
@@ -141,9 +178,7 @@ async def _publish_management_node_resources(
                     else None
                 ),
             )
-            await telemetry_sender.send(
-                NodeTelemetry(node_id=node_id, info=resources)
-            )
+            await telemetry_sender.send(NodeTelemetry(node_id=node_id, info=resources))
         except (ClosedResourceError, BrokenResourceError):
             return
         except Exception as error:
@@ -230,7 +265,9 @@ def _resolve_zenoh_listen(env_value: str) -> str:
     if listen:
         return listen
     candidate = _routable_local_ipv4()
-    host = candidate if candidate and _is_trusted_fabric_ipv4(candidate) else "127.0.0.1"
+    host = (
+        candidate if candidate and _is_trusted_fabric_ipv4(candidate) else "127.0.0.1"
+    )
     return f"tcp/{host}:{_DEFAULT_ZENOH_PORT}"
 
 
@@ -348,7 +385,9 @@ def _routable_local_ipv4() -> str | None:
     return routable[0] if routable else None
 
 
-def _routable_store_advertise_host(configured: str | None, hostname_fallback: str) -> str:
+def _routable_store_advertise_host(
+    configured: str | None, hostname_fallback: str
+) -> str:
     """Pick an address other nodes can actually reach the model store host at.
 
     The store host broadcasts this as ``store_http_host`` so workers build the
@@ -436,6 +475,32 @@ def _configure_model_store_runtime(
     return store_client, store_server
 
 
+def _state_sync_store_http_host(
+    node_id: NodeId,
+    skulk_config: SkulkConfig | None,
+) -> str | None:
+    """Return this store host's routable address for cluster bootstrap."""
+
+    if (
+        skulk_config is None
+        or skulk_config.model_store is None
+        or not skulk_config.model_store.enabled
+    ):
+        return None
+    model_store = skulk_config.model_store
+    local_hostname = socket.gethostname()
+    if not node_matches_store_host(
+        model_store.store_host,
+        str(node_id),
+        hostname=local_hostname,
+    ):
+        return None
+    return _routable_store_advertise_host(
+        model_store.store_http_host,
+        local_hostname,
+    )
+
+
 @dataclass
 class Node:
     router: Router
@@ -456,12 +521,29 @@ class Node:
     # master re-election; the subscriber feeds it, the master/API read it.
     telemetry_view: TelemetryView
     telemetry_receiver: Receiver[NodeTelemetry]
+    # A node-level event tap drives cache rescans even when this process was
+    # intentionally launched without an HTTP API.
+    artifact_inventory_event_receiver: Receiver[IndexedEvent] | None = None
     data_plane_zenoh: bool = False
     # Samples the router's live Zenoh peer-transport count for NodeResources
     # advertisement and the local isolation warning. None only in tests that
     # construct Node without create().
     zenoh_peer_sampler: ZenohPeerSampler | None = None
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
+    _artifact_inventory_trigger_sender: Sender[None] = field(init=False)
+    _artifact_inventory_trigger_receiver: Receiver[None] = field(init=False)
+    _artifact_inventory_detached_cache: VerifiedDetachedInstalledCardCache = field(
+        init=False,
+        default_factory=VerifiedDetachedInstalledCardCache,
+    )
+
+    def __post_init__(self) -> None:
+        """Create the bounded coalescing trigger used by artifact rescans."""
+
+        (
+            self._artifact_inventory_trigger_sender,
+            self._artifact_inventory_trigger_receiver,
+        ) = channel[None](1)
 
     @classmethod
     async def create(cls, args: "Args") -> Self:
@@ -540,6 +622,7 @@ class Node:
         await router.register_topic(topics.LOCAL_EVENTS)
         await router.register_topic(topics.COMMANDS)
         await router.register_topic(topics.ELECTION_MESSAGES)
+        await router.register_topic(topics.AUTHORITY_MESSAGES)
         await router.register_topic(topics.CONNECTION_MESSAGES)
         await router.register_topic(topics.DOWNLOAD_COMMANDS)
         await router.register_topic(topics.STATE_SYNC_MESSAGES)
@@ -583,7 +666,9 @@ class Node:
             and skulk_config.inference is not None
             and not _user_set_kv_backend
         ):
-            os.environ["SKULK_KV_CACHE_BACKEND"] = skulk_config.inference.kv_cache_backend
+            os.environ["SKULK_KV_CACHE_BACKEND"] = (
+                skulk_config.inference.kv_cache_backend
+            )
             logger.info(
                 f"Inference config: kv_cache_backend={skulk_config.inference.kv_cache_backend}"
             )
@@ -597,7 +682,9 @@ class Node:
             os.environ["HF_TOKEN"] = skulk_config.hf_token
             logger.info("HF token loaded from config")
 
-        store_client, store_server = _configure_model_store_runtime(node_id, skulk_config)
+        store_client, store_server = _configure_model_store_runtime(
+            node_id, skulk_config
+        )
 
         # Create DownloadCoordinator (unless --no-downloads)
         if not args.no_downloads:
@@ -615,6 +702,7 @@ class Node:
                     store_client=store_client,
                     staging_config=staging_cfg,
                     allow_hf_fallback=ms.download.allow_hf_fallback,
+                    installed_card_callback=register_installed_card_record,
                 )
             else:
                 shard_downloader = base_downloader
@@ -653,13 +741,12 @@ class Node:
                 skulk_config=skulk_config,
                 store_client=store_client,
                 telemetry_view=telemetry_view,
+                telemetry_sender=router.telemetry_sender(),
                 data_receiver=router.receiver(topics.DATA),
                 provider_stream_sender=router.sender(topics.PROVIDER_DATA),
                 provider_stream_receiver=router.receiver(topics.PROVIDER_DATA),
                 realtime_audio_packet_sender=router.sender(topics.REALTIME_AUDIO),
-                realtime_audio_packet_receiver=router.receiver(
-                    topics.REALTIME_AUDIO
-                ),
+                realtime_audio_packet_receiver=router.receiver(topics.REALTIME_AUDIO),
                 speech_media_packet_sender=router.sender(topics.SPEECH_MEDIA),
                 speech_media_packet_receiver=router.receiver(topics.SPEECH_MEDIA),
                 trace_data_receiver=router.receiver(topics.TRACE_DATA),
@@ -670,15 +757,14 @@ class Node:
                 ),
                 data_plane_zenoh=_zenoh_on,
                 data_plane_egress_provider=router.data_plane_egress_diagnostics,
-                vision_media_egress_provider=(
-                    router.vision_media_egress_diagnostics
-                ),
+                vision_media_egress_provider=(router.vision_media_egress_diagnostics),
                 telemetry_plane_provider=router.telemetry_plane_diagnostics,
                 # Installed plugins (skulk.extensions entry points), discovered
                 # once per process. First-party provider facades are registered
                 # by the API and delegate to the existing core runtimes.
                 extensions=load_extensions(),
                 enable_builtin_providers=True,
+                operator_pairing_service=OperatorPairingService.from_default_paths(),
             )
         else:
             api = None
@@ -713,25 +799,18 @@ class Node:
                 data_sender=router.sender(topics.DATA),
                 trace_data_sender=router.sender(topics.TRACE_DATA),
                 realtime_audio_receiver=realtime_audio_receiver,
-                realtime_audio_packet_receiver=router.receiver(
-                    topics.REALTIME_AUDIO
-                ),
+                realtime_audio_packet_receiver=router.receiver(topics.REALTIME_AUDIO),
                 speech_media_packet_receiver=router.receiver(topics.SPEECH_MEDIA),
                 vision_media_packet_sender=router.sender(topics.VISION_MEDIA),
                 vision_media_packet_receiver=router.receiver(topics.VISION_MEDIA),
-                connection_message_receiver=router.receiver(
-                    topics.CONNECTION_MESSAGES
-                ),
+                connection_message_receiver=router.receiver(topics.CONNECTION_MESSAGES),
                 session_connection_snapshot=router.current_session_connections,
                 store_client=worker_store_client,
                 staging_config=worker_staging_cfg,
             )
-            if (
-                download_coordinator is not None
-                and isinstance(
-                    download_coordinator.shard_downloader,
-                    ModelStoreDownloader,
-                )
+            if download_coordinator is not None and isinstance(
+                download_coordinator.shard_downloader,
+                ModelStoreDownloader,
             ):
                 download_coordinator.shard_downloader.set_staging_capacity_callback(
                     worker.prepare_staging_transfer
@@ -757,6 +836,10 @@ class Node:
             state_sync_sender=router.sender(topics.STATE_SYNC_MESSAGES),
             download_command_sender=router.sender(topics.DOWNLOAD_COMMANDS),
             telemetry_view=telemetry_view,
+            state_sync_store_http_host=_state_sync_store_http_host(
+                node_id,
+                skulk_config,
+            ),
         )
 
         er_send, er_recv = channel[ElectionResult]()
@@ -789,11 +872,17 @@ class Node:
             store_server,
             telemetry_view,
             router.receiver(topics.TELEMETRY),
+            event_router.receiver(),
             _zenoh_on,
             zenoh_peer_sampler,
         )
 
     async def run(self):
+        if self.store_server is not None:
+            await get_all_model_cards()
+            await self.store_server.refresh_recovered_generations(
+                get_current_registry_cards(),
+            )
         async with self._tg as tg:
             signal.signal(signal.SIGINT, lambda _, __: self.shutdown())
             signal.signal(signal.SIGTERM, lambda _, __: self.shutdown())
@@ -801,6 +890,9 @@ class Node:
             tg.start_soon(self.event_router.run)
             tg.start_soon(self.election.run)
             tg.start_soon(self._run_telemetry)
+            tg.start_soon(self._artifact_inventory_loop)
+            if self.artifact_inventory_event_receiver is not None:
+                tg.start_soon(self._observe_artifact_inventory_events)
             if self.worker is None:
                 tg.start_soon(
                     _publish_management_node_resources,
@@ -821,6 +913,186 @@ class Node:
             if self.api:
                 tg.start_soon(self.api.run)
             tg.start_soon(self._elect_loop)
+
+    def _mark_artifact_inventory_dirty(self) -> None:
+        """Schedule one debounced local artifact rescan without blocking events."""
+
+        try:
+            self._artifact_inventory_trigger_sender.send_nowait(None)
+        except (WouldBlock, ClosedResourceError):
+            return
+
+    async def _observe_artifact_inventory_events(self) -> None:
+        """Translate relevant replicated transitions into local rescan hints."""
+
+        receiver = self.artifact_inventory_event_receiver
+        if receiver is None:
+            return
+        with receiver as events:
+            async for indexed_event in events:
+                if isinstance(
+                    indexed_event.event,
+                    (
+                        InstanceCreated,
+                        InstanceDeleted,
+                        NodeDownloadProgress,
+                        RunnerStatusUpdated,
+                        StagedModelEvicted,
+                        StateSnapshotHydrated,
+                    ),
+                ):
+                    self._mark_artifact_inventory_dirty()
+
+    def _current_artifact_inventory_state(self) -> State:
+        """Return this node's freshest replicated runtime view."""
+
+        if self.worker is not None:
+            return self.worker.state
+        if self.api is not None:
+            return self.api.state
+        if self.master is not None:
+            return self.master.state
+        return State()
+
+    def _artifact_models_in_use(self) -> frozenset[str]:
+        """Return model and companion repositories used by local live shards."""
+
+        in_use: set[str] = set()
+        for instance in self._current_artifact_inventory_state().instances.values():
+            if self.node_id not in instance.shard_assignments.node_to_runner:
+                continue
+            for shard in instance.shard_assignments.runner_to_shard.values():
+                card = shard.model_card
+                in_use.add(str(card.model_id))
+                if card.vision and card.vision.weights_repo:
+                    in_use.add(card.vision.weights_repo)
+                if card.runtime is not None:
+                    if card.runtime.mtp_sidecar_repo:
+                        in_use.add(card.runtime.mtp_sidecar_repo)
+                    if card.runtime.assistant_model_repo:
+                        in_use.add(card.runtime.assistant_model_repo)
+        return frozenset(in_use)
+
+    def _configured_artifact_cache_root(self) -> Path | None:
+        """Return this node's configured cache root when staging is enabled."""
+
+        config = self.skulk_config
+        if (
+            config is None
+            or config.model_store is None
+            or not config.model_store.enabled
+        ):
+            return None
+        staging = resolve_node_staging(config.model_store, str(self.node_id))
+        return Path(staging.node_cache_path).expanduser() if staging.enabled else None
+
+    async def _artifact_inventory_loop(self) -> None:
+        """Publish startup, change-triggered, and periodic availability readings."""
+
+        while True:
+            try:
+                await self._publish_artifact_inventory()
+            except Exception as error:  # noqa: BLE001 - lifetime service boundary
+                logger.exception(f"Artifact-inventory telemetry scan failed: {error}")
+            triggered = False
+            with anyio.move_on_after(ARTIFACT_INVENTORY_REFRESH_SECONDS):
+                try:
+                    await self._artifact_inventory_trigger_receiver.receive()
+                except EndOfStream:
+                    return
+                triggered = True
+            if not triggered:
+                continue
+            await anyio.sleep(ARTIFACT_INVENTORY_DEBOUNCE_SECONDS)
+            while True:
+                try:
+                    self._artifact_inventory_trigger_receiver.receive_nowait()
+                except WouldBlock:
+                    break
+                except EndOfStream:
+                    return
+
+    async def _publish_artifact_inventory(self) -> None:
+        """Scan compact node-cache truth and offer one telemetry snapshot."""
+
+        config = self.skulk_config
+        store_enabled = (
+            config is not None
+            and config.model_store is not None
+            and config.model_store.enabled
+        )
+        canonical_root = (
+            self.store_client.local_store_path
+            if self.store_client is not None
+            else None
+        )
+        artifacts: list[NodeArtifactAvailability] = []
+        truncated = False
+        if store_enabled:
+            canonical_resolved = (
+                canonical_root.expanduser().resolve()
+                if canonical_root is not None
+                else None
+            )
+            roots = tuple(
+                root
+                for root in installed_artifact_roots(
+                    self._configured_artifact_cache_root()
+                )
+                if canonical_resolved is None
+                or not root.expanduser().resolve().is_relative_to(canonical_resolved)
+            )
+            cards = await get_all_model_cards()
+            discovered = await to_thread.run_sync(
+                inventory_installed_artifacts,
+                roots,
+                cards,
+                self._artifact_models_in_use(),
+                None,
+                self._artifact_inventory_detached_cache,
+            )
+            cache_items = [
+                item
+                for item in discovered
+                if item.installed_identity is not None
+                and (
+                    canonical_resolved is None
+                    or not Path(item.directory)
+                    .resolve()
+                    .is_relative_to(canonical_resolved)
+                )
+            ]
+            cache_items.sort(
+                key=lambda item: (
+                    not item.in_use,
+                    not item.manifest_complete,
+                    -item.last_used_epoch_seconds,
+                    item.model_id,
+                    item.installed_identity or "",
+                )
+            )
+            truncated = len(cache_items) > ARTIFACT_INVENTORY_ENTRY_LIMIT
+            artifacts = [
+                NodeArtifactAvailability(
+                    model_id=item.model_id,
+                    installed_identity=cast(str, item.installed_identity),
+                    size_bytes=item.size_bytes,
+                    last_used_epoch_seconds=item.last_used_epoch_seconds,
+                    in_use=item.in_use,
+                    manifest_complete=item.manifest_complete,
+                )
+                for item in cache_items[:ARTIFACT_INVENTORY_ENTRY_LIMIT]
+            ]
+        await self.router.telemetry_sender().send(
+            NodeTelemetry(
+                node_id=self.node_id,
+                info=NodeArtifactInventory(
+                    artifacts=artifacts,
+                    store_host=canonical_root is not None,
+                    truncated=truncated,
+                ),
+            )
+        )
 
     async def _run_telemetry(self) -> None:
         """Maintain the node-owned TelemetryView from the telemetry plane (#279).
@@ -894,7 +1166,7 @@ class Node:
             topics.STATE_SYNC_MESSAGES
         )
         with state_sync_receiver as messages:
-            for attempt in range(3):
+            for attempt in range(_CLUSTER_CONFIG_SYNC_ATTEMPTS):
                 await state_sync_sender.send(
                     StateSyncMessage(
                         kind="request",
@@ -902,7 +1174,7 @@ class Node:
                         session_id=session_id,
                     )
                 )
-                with anyio.move_on_after(1.0):
+                with anyio.move_on_after(_CLUSTER_CONFIG_SYNC_RESPONSE_TIMEOUT_SECONDS):
                     async for origin, message in messages:
                         if message.kind != "response":
                             continue
@@ -913,8 +1185,13 @@ class Node:
                         if origin != str(session_id.master_node_id):
                             continue
                         return message.config_yaml
-                if attempt < 2:
-                    await anyio.sleep(0.2)
+                if attempt < _CLUSTER_CONFIG_SYNC_ATTEMPTS - 1:
+                    await anyio.sleep(_CLUSTER_CONFIG_SYNC_RETRY_INTERVAL_SECONDS)
+        logger.warning(
+            "Authoritative cluster config was unavailable after "
+            f"{_CLUSTER_CONFIG_SYNC_ATTEMPTS} bootstrap attempts; retaining "
+            "the local config"
+        )
         return None
 
     def _apply_cluster_config_yaml(self, config_yaml: str) -> None:
@@ -923,6 +1200,37 @@ class Node:
         config_path = resolve_config_path()
         config_path.write_text(config_yaml)
         self.skulk_config = load_skulk_config(config_path)
+
+    async def _apply_authoritative_cluster_config(self, config_yaml: str) -> None:
+        """Converge config plus every live model-store consumer atomically."""
+
+        previous_store_server = self.store_server
+        self._apply_cluster_config_yaml(config_yaml)
+        new_store_client, new_store_server = _configure_model_store_runtime(
+            self.node_id,
+            self.skulk_config,
+        )
+        self.store_client = new_store_client
+        if new_store_server is None:
+            if previous_store_server is not None:
+                await previous_store_server.stop()
+            self.store_server = None
+        else:
+            self.store_server = (
+                previous_store_server
+                if previous_store_server is not None
+                else new_store_server
+            )
+            await get_all_model_cards()
+            await self.store_server.refresh_recovered_generations(
+                get_current_registry_cards(),
+            )
+        if self.api is not None:
+            self.api.set_model_store_runtime(
+                self.skulk_config,
+                self.store_client,
+            )
+        self._mark_artifact_inventory_dirty()
 
     async def _broadcast_config_if_store_host(self) -> None:
         """If this node is the store host, broadcast a valid config to all nodes.
@@ -1022,6 +1330,9 @@ class Node:
                         external_inbound=self.router.receiver(topics.GLOBAL_EVENTS),
                         external_outbound=self.router.sender(topics.LOCAL_EVENTS),
                     )
+                    self.artifact_inventory_event_receiver = (
+                        self.event_router.receiver()
+                    )
                     # Wait to bootstrap the replacement event router until the
                     # replacement worker/API receivers are attached. Otherwise,
                     # a fast snapshot hydrate can be emitted before those
@@ -1071,6 +1382,10 @@ class Node:
                             topics.DOWNLOAD_COMMANDS
                         ),
                         telemetry_view=self.telemetry_view,
+                        state_sync_store_http_host=_state_sync_store_http_host(
+                            self.node_id,
+                            self.skulk_config,
+                        ),
                     )
                     self._tg.start_soon(self.master.run)
                 elif (
@@ -1094,17 +1409,8 @@ class Node:
                         result.session_id
                     )
                     if authoritative_config_yaml is not None:
-                        self._apply_cluster_config_yaml(authoritative_config_yaml)
-                        new_store_client, new_store_server = (
-                            _configure_model_store_runtime(
-                                self.node_id, self.skulk_config
-                            )
-                        )
-                        self.store_client = new_store_client
-                        self.store_server = (
-                            previous_store_server
-                            if previous_store_server is not None
-                            else new_store_server
+                        await self._apply_authoritative_cluster_config(
+                            authoritative_config_yaml
                         )
                 if result.is_new_master:
                     if self.download_coordinator:
@@ -1126,6 +1432,9 @@ class Node:
                                 store_client=self.store_client,
                                 staging_config=elect_staging,
                                 allow_hf_fallback=ms.download.allow_hf_fallback,
+                                installed_card_callback=(
+                                    register_installed_card_record
+                                ),
                             )
                         else:
                             elect_downloader = base_dl
@@ -1221,12 +1530,9 @@ class Node:
                                 topics.VISION_MEDIA
                             ),
                         )
-                        if (
-                            self.download_coordinator is not None
-                            and isinstance(
-                                self.download_coordinator.shard_downloader,
-                                ModelStoreDownloader,
-                            )
+                        if self.download_coordinator is not None and isinstance(
+                            self.download_coordinator.shard_downloader,
+                            ModelStoreDownloader,
                         ):
                             self.download_coordinator.shard_downloader.set_staging_capacity_callback(
                                 self.worker.prepare_staging_transfer
@@ -1252,6 +1558,9 @@ class Node:
                             result.session_id.master_node_id,
                         )
                     if start_replacement_event_router:
+                        self._tg.start_soon(
+                            self._observe_artifact_inventory_events
+                        )
                         self._tg.start_soon(self.event_router.run)
                     # Broadcast config to cluster so worker nodes get the right store address
                     await self._broadcast_config_if_store_host()
@@ -1264,6 +1573,11 @@ class Node:
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "operator":
+        # Operator commands are local administration and never launch a node.
+        from skulk.operator.cli import main as operator_main
+
+        sys.exit(operator_main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "doctor":
         # `skulk doctor` is a standalone audit, not a node launch: dispatch
         # before Args.parse() so the node argument parser never sees it.
@@ -1338,9 +1652,7 @@ def main():
         from skulk.provisioning import ensure_llama_server
 
         if (
-            ensure_llama_server(
-                current_node_facts(), allow_download=not args.offline
-            )
+            ensure_llama_server(current_node_facts(), allow_download=not args.offline)
             is not None
         ):
             refresh_node_facts()

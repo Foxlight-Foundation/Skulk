@@ -35,6 +35,88 @@ With the model store:
 - other nodes stage needed files from that host
 - Skulk keeps the same cluster and inference architecture, but changes where model artifacts come from
 
+## Installed Cards and Existing Caches
+
+Every complete canonical or staged artifact carries an atomic
+`.skulk/installed-card.json` sidecar. The versioned record retains the full
+model card, immutable registry identity and provenance when available, exact
+artifact selection, base or companion role, owning base card, and a canonical
+SHA-256 file manifest. The sidecar is durable truth; `registry.json` is a
+rebuildable index.
+The dashboard labels the immediately placeable group **Fits this cluster**. This
+is a live capacity statement, not a recommendation or qualification claim.
+Registry-backed rows also show the signed origin as Foxlight, Agent, or
+Community; provenance describes authorship, not runtime confidence.
+When a model root is mounted read-only, Skulk stores the same strict record
+under its data directory, keyed by the resolved artifact path and manifest
+digest. This fallback changes only metadata placement; the model bytes remain
+untouched in their mounted root.
+
+On startup, Skulk reads installed cards before contacting the registry. In
+`SKULK_OFFLINE=true` mode, an installed model remains usable indefinitely while
+its manifest is complete; the registry client's bounded last-known-good window
+does not expire installed artifacts. Custom cards retain precedence. If the
+registry removes or replaces a card, the installed generation remains active
+and the dashboard reports `installed_not_current` or `update_available` until a
+complete replacement commits.
+
+Pre-existing caches are associated only with trusted card sources: an existing
+sidecar, persisted download state, custom card, bundled card, or signed catalog.
+A matching directory name never creates signed verification by itself. A full
+immutable revision marker plus matching artifact selection is
+`registry_verified`; complete bytes without that proof are `local_legacy` and
+remain usable under their retained effective card. Unmatched directories are
+inventoried as `unresolved` and are not launched or imported automatically.
+Interrupted or partial directories never receive a legacy installed-card
+sidecar merely because their directory name matches a trusted card.
+
+## Automatic Reconciliation
+
+The authoritative store host periodically inventories bounded node-local cache
+summaries outside replicated State and the event log. Replicas deduplicate by
+installed identity and manifest digest. When the store is missing an artifact,
+it prefers a same-host copy, then a revision-verified copy, then a deterministic
+healthy source node.
+
+The source issues a random short-lived capability bound to the source, target
+store node, manifest digest, byte ceiling, and expiry. The store pulls files
+with HTTP ranges into a resumable temporary generation, verifies every size and
+SHA-256 digest, writes the sidecar, and atomically publishes the generation.
+Failed replacement transfers leave the previous generation intact. Source node
+caches are never removed during migration. Capacity admission credits bytes
+already retained in valid partial files, while the export capability enforces
+its manifest-bound cumulative byte ceiling and rejects source files changed
+after issuance.
+The internal store import mutation accepts only a direct loopback peer and
+rejects proxy-forwarding headers, so a local reverse proxy cannot turn it into
+a remote mutation surface.
+
+Automatic imports are enabled by default. On a production fleet where you want
+to inspect the first migration before moving bytes, temporarily enable
+inventory-only mode:
+
+```yaml
+model_store:
+  reconciliation:
+    enabled: true
+    inventory_only: true
+    interval_seconds: 300
+```
+
+Inspect `GET /store/reconciliation`, then restore `inventory_only: false` to
+resume automatic imports. `POST /store/reconciliation/rescan` is a loopback-only
+operator retry; periodic reconciliation remains the normal path.
+Inventory and capability-bound export cover the staging cache, direct-download
+fallbacks in `SKULK_MODELS_DIR`, and configured read-only model roots. A
+canonical index entry suppresses import only while its adjacent sidecar and
+complete manifest still validate.
+
+An operator store deletion writes a durable alias tombstone before removing
+the canonical generation. Reconciliation continues to report any node caches
+that missed the best-effort eviction, but it will not import the deleted base
+artifact or companions owned by that base card. The tombstone remains through
+restarts; a later explicit, successfully completed store download clears it.
+
 ### GGUF repositories download only the pinned quantization
 
 A GGUF repository often ships several quantizations of the same model (for
@@ -47,10 +129,11 @@ repo.
 ### Qualified cards can pin immutable artifacts
 
 A model card may set `source_revision` to a full Hugging Face commit hash. The
-store records that revision with its registry entry and treats a different
-revision as a different artifact generation. If a card's pin changes, Skulk
-downloads and registers the replacement before removing the previous canonical
-copy.
+store records both that revision and the effective source repository with its
+registry entry. Either mismatch identifies a different artifact generation,
+even when the selectable alias is unchanged. If either identity field changes,
+Skulk downloads and registers the replacement before removing the previous
+canonical copy; concurrent downloads deduplicate only when both fields match.
 
 Worker staging enforces the same discipline: each staged directory records the
 revision it was staged from, and a staging request checks that record before
@@ -85,35 +168,43 @@ An operator-supplied routable IP in `store_http_host` is still honored as-is.
 Make sure:
 
 - all nodes are running the same Skulk build
-- you know which machine should be the store host
-- that machine has enough storage for the models you want to share
-- the chosen `store_path` is mounted and writable
+- for an explicit store deployment, you know which machine should be the
+  store host and its chosen `store_path` is mounted, writable, and large enough
+- for a default fresh cluster, the elected master's normal user-home
+  filesystem has enough space for the models you want to share
 
 The store server uses port `12415` by default. This listener is deliberately
 outside the dynamic client-port ranges used by supported operating systems, so
 an unrelated outbound connection cannot claim it before Skulk starts.
 
 :::note Fresh installs
-`install.sh` writes a `skulk.yaml` with single-node store defaults (this
-host as its own store host, storing under `~/.skulk/model-store`) when no
-config exists, so the store API works out of the box. When you join several
-such nodes into one cluster, designate exactly ONE store host and point
-every node's `store_host` at it.
+`install.sh` writes bootstrap store defaults (this host under
+`~/.skulk/model-store`) when no config exists, so a single node works
+immediately. When several independently installed nodes form a cluster, the
+elected master advertises a routable store address through bootstrap state
+sync. Followers adopt that authoritative config, stop their temporary local
+store servers, and point both dashboard and worker traffic at the same store.
+If you need a specific machine or attached volume, configure the same explicit
+`store_host` on every node instead.
 :::
 
 ## Recommended Setup: Dashboard First
 
 This is the simplest path for most people.
 
-1. Start Skulk on all nodes with `uv run skulk`.
-2. Open the dashboard on the node you want to become the store host.
+1. Start Skulk on all nodes with `uv run skulk`. Fresh defaults already
+   converge on one store.
+2. Open the dashboard on the node you want to use for administration.
 3. Go to **Settings**.
-4. Enable the store host toggle.
-5. Choose the store path.
+4. To override the elected default, enable the store host toggle for the
+   machine that should own the canonical store.
+5. Choose its store path.
 6. Save the config.
 7. Restart Skulk on all nodes if the dashboard tells you a restart is required.
 
-After that, use the dashboard or API normally. When models are available in the store, worker nodes stage from the store host instead of downloading independently.
+After that, use the dashboard or API normally. When models are available in
+the store, worker nodes stage from the store host instead of downloading
+independently.
 
 ## Manual Setup with `skulk.yaml`
 
@@ -153,6 +244,11 @@ model_store:
     # (unbounded) and reclaim disk only via POST /store/purge-staging.
     cleanup_on_deactivate: true
     staging_keep_recent_gb: 40
+
+  reconciliation:
+    enabled: true
+    inventory_only: false
+    interval_seconds: 300
 
   node_overrides:
     mac-studio-1:
@@ -230,6 +326,11 @@ what is in use). Raise it on nodes with large disks to keep more models warm.
 The in-use set rides on top of the budget rather than inside it: a node always
 keeps everything its live runners need, plus up to 40 GiB of the most recently
 used idle copies.
+
+Before any store probe or copy, staging checks the installed identity and local
+manifest. An exact complete cache is used immediately, including while
+air-gapped. A stale generation is replaced atomically from the central store,
+and missing required companions disable the fast path.
 
 ### Pre-download capacity safety
 
@@ -381,7 +482,11 @@ These are exposed through the main Skulk API:
 - `GET /store/health`
 - `GET /store/registry`
 - `GET /store/downloads`
+- `GET /store/storage`
+- `GET /store/reconciliation`
+- `POST /store/reconciliation/rescan`
 - `POST /store/models/{model_id}/download`
+- `DELETE /store/models/{model_id}/download`
 - `GET /store/models/{model_id}/download/status`
 - `DELETE /store/models/{model_id}`
 - `POST /store/purge-staging`
@@ -391,6 +496,18 @@ The dashboard's Store Registry view combines these registry entries with model
 metadata so it can show capability-derived tags for downloaded models. Today
 that includes `vision`, `thinking`, `embedding`, `tensor`, and `optiq` when the
 underlying model card exposes enough metadata for Skulk to derive them.
+
+`DELETE /store/models/{model_id}/download` stops pending or active canonical
+store transfer work without deleting its partial files. A later
+`POST /store/models/{model_id}/download` resumes from those partials. Repeating
+the cancellation is safe; a request for a model with no cancellable transfer
+returns `409`.
+
+`POST /store/purge-staging` recursively removes each selected node-cache
+artifact directory, including its adjacent `.skulk/installed-card.json`,
+revision marker, and last-use marker. It does not remove the canonical store
+generation. `DELETE /store/models/{model_id}` removes the canonical generation
+and broadcasts the corresponding staged-cache eviction across the fleet.
 
 Common meanings:
 

@@ -14,6 +14,7 @@ so a newly added card is held to the same bar automatically.
 
 import tomllib
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -21,6 +22,7 @@ from skulk.shared.backends import engine_of
 from skulk.shared.constants import RESOURCES_DIR
 from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.model_cards import ModelCard
+from skulk.shared.models.reference_voices import bundled_reference_voice_profiles
 
 _CARD_DIRS = {
     "inference": Path(RESOURCES_DIR) / "inference_model_cards",
@@ -80,6 +82,28 @@ def test_gemma4_12b_card_does_not_advertise_missing_vision_tower() -> None:
     assert card.modalities is None
 
 
+def test_qwen3_vl_4b_card_pins_the_measured_artifact() -> None:
+    """Keep disk admission aligned with the complete pinned upstream artifact."""
+    card = _load(
+        _CARD_DIRS["inference"]
+        / "mlx-community--Qwen3-VL-4B-Instruct-4bit.toml"
+    )
+
+    assert card.source_revision == "2fd8dacbdb8f1e54b8c005f081ec5bf79c56376b"
+    assert card.storage_size.in_bytes == 3_109_732_071
+
+
+def test_qwen35_2b_card_keeps_unstable_mtp_disabled() -> None:
+    """Do not re-enable the sidecar that loops in clean user journeys."""
+    card = _load(
+        _CARD_DIRS["inference"] / "mlx-community--Qwen3.5-2B-4bit.toml"
+    )
+
+    assert card.runtime is not None
+    assert card.runtime.mtp_heads is False
+    assert card.runtime.mtp_sidecar_repo is None
+
+
 @pytest.mark.parametrize(("kind", "path"), _CARD_FILES, ids=_CARD_IDS)
 def test_bundled_card_invariants(kind: str, path: Path) -> None:
     card = _load(path)  # validation itself is the first gate
@@ -105,7 +129,6 @@ def test_bundled_card_invariants(kind: str, path: Path) -> None:
     assert not missing_preference, (
         f"backend_preference not in compatible_backends: {missing_preference}"
     )
-
     engines = {engine for tag in compatible if (engine := engine_of(tag))}
     is_gguf = card.gguf_file is not None or "gguf" in str(card.model_id).lower()
     if kind == "inference":
@@ -184,6 +207,19 @@ def test_bundled_card_invariants(kind: str, path: Path) -> None:
         # inconsistent bundled card already fails at parse above.
 
 
+def test_nonempty_placement_tables_declare_model_backend_truth() -> None:
+    """Keep serialized cards complete for external registry validation."""
+    for _, path in _CARD_FILES:
+        raw = cast("dict[str, object]", tomllib.loads(path.read_text()))
+        placement = raw.get("placement")
+        if isinstance(placement, dict):
+            typed_placement = cast("dict[str, object]", placement)
+            compatible = typed_placement.get("compatible_backends")
+            assert isinstance(compatible, list) and compatible, (
+                f"{path.name} has a placement table without compatible_backends"
+            )
+
+
 @pytest.mark.parametrize(
     ("kind", "path"),
     [(kind, path) for kind, path in _CARD_FILES if kind == "inference"],
@@ -206,34 +242,63 @@ def test_bundled_card_capability_resolution_is_coherent(kind: str, path: Path) -
     )
 
 
-def test_qwen_custom_voice_card_exposes_upstream_speaker_inventory() -> None:
-    """The voice endpoint must expose the checkpoint's stable speaker IDs."""
+def test_qwen_base_card_pins_validated_six_bit_artifact() -> None:
+    """Ship the smallest Qwen Base conversion validated for stable cloning."""
 
     path = (
         Path(RESOURCES_DIR)
         / "speech_model_cards"
-        / "mlx-community--Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit.toml"
+        / "mlx-community--Qwen3-TTS-12Hz-0.6B-Base-6bit.toml"
     )
     card = _load(path)
 
-    assert card.audio is not None
-    assert card.audio.supports_voice_listing is True
-    assert card.audio.default_voice == "ryan"
-    assert card.audio.voices == (
-        "serena",
-        "vivian",
-        "uncle_fu",
-        "ryan",
-        "aiden",
-        "ono_anna",
-        "sohee",
-        "eric",
-        "dylan",
-    )
-    assert tuple(voice.id for voice in card.audio.voice_catalog) == card.audio.voices
-    assert card.audio.voice_catalog[3].name == "Ryan"
-    assert card.audio.voice_catalog[3].preferred_languages == ("en",)
+    assert card.quantization == "6bit"
+    assert card.source_revision == "4e44ed4bcee28a0f89a493e07bde16e6dccd43eb"
+    assert card.storage_size.in_bytes == 1_851_314_126
 
+
+@pytest.mark.parametrize(
+    "card_name",
+    (
+        "mlx-community--Qwen3-TTS-12Hz-0.6B-Base-6bit.toml",
+        "mlx-community--LongCat-AudioDiT-1B-4bit.toml",
+        "mlx-community--fish-audio-s2-pro-8bit.toml",
+    ),
+)
+def test_reference_capable_cards_expose_shared_voice_catalog(card_name: str) -> None:
+    """Every validated cloning model must expose the same packaged profiles."""
+
+    profiles = bundled_reference_voice_profiles()
+    card = _load(Path(RESOURCES_DIR) / "speech_model_cards" / card_name)
+
+    assert card.audio is not None
+    assert card.audio.supports_reference_audio is True
+    assert card.audio.supports_voice_listing is True
+    assert card.audio.default_voice == "kite"
+    assert card.audio.voices == tuple(profile.id for profile in profiles)
+    assert tuple(voice.id for voice in card.audio.voice_catalog) == card.audio.voices
+    assert tuple(voice.name for voice in card.audio.voice_catalog) == tuple(
+        profile.name for profile in profiles
+    )
+    assert tuple(voice.reference_profile for voice in card.audio.voice_catalog) == (
+        card.audio.voices
+    )
+
+
+@pytest.mark.parametrize(
+    "card_name",
+    (
+        "mlx-community--LongCat-AudioDiT-1B-4bit.toml",
+        "mlx-community--fish-audio-s2-pro-8bit.toml",
+    ),
+)
+def test_voice_cloning_cards_expose_managed_reference_audio(card_name: str) -> None:
+    """Bundled cloning models must expose the conditioning path Skulk serves."""
+
+    card = _load(Path(RESOURCES_DIR) / "speech_model_cards" / card_name)
+
+    assert card.audio is not None
+    assert card.audio.supports_reference_audio is True
 
 def test_default_steward_models_are_bundled_tool_calling_text_cards() -> None:
     """Every default steward brain must exist, place, and call tools.

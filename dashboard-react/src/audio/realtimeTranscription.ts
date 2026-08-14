@@ -343,6 +343,7 @@ export class RealtimeConversationSocket {
   private connected = false;
   private acceptingAudio = true;
   private turnHasAudio = false;
+  private inputPaused = false;
   private responseActive = false;
   private terminal = false;
   private connectResolve: (() => void) | null = null;
@@ -386,7 +387,7 @@ export class RealtimeConversationSocket {
     if (!this.connected || !socket || socket.readyState !== 1) {
       throw new Error('realtime conversation socket is not connected');
     }
-    if (!this.acceptingAudio) return;
+    if (!this.acceptingAudio || this.inputPaused || this.responseActive) return;
     if (socket.bufferedAmount > MAX_SOCKET_BUFFERED_BYTES) {
       const error = new Error('Realtime conversation cannot keep up with microphone audio.');
       this.fail(error);
@@ -414,12 +415,21 @@ export class RealtimeConversationSocket {
     if (!this.connected || !socket || socket.readyState !== 1 || !this.turnHasAudio) {
       return false;
     }
+    if (!this.acceptingAudio) return true;
     if (this.pendingSamples.length > 0) {
       this.sendSamples(Float32Array.from(this.pendingSamples.splice(0)));
     }
     socket.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
     this.acceptingAudio = false;
     return true;
+  }
+
+  /** Pause microphone admission without closing the persistent conversation. */
+  setInputPaused(paused: boolean): void {
+    this.inputPaused = paused;
+    this.pendingSamples.length = 0;
+    this.resampler = null;
+    this.inputSampleRate = null;
   }
 
   /** Return whether assistant model or speech output is still draining. */
@@ -627,6 +637,13 @@ export class RealtimePcmCapture {
       await context.close().catch(() => undefined);
       throw error;
     }
+  }
+
+  /** Enable or disable microphone tracks while preserving the capture graph. */
+  setEnabled(enabled: boolean): void {
+    this.stream.getAudioTracks().forEach((track) => {
+      track.enabled = enabled;
+    });
   }
 
   /** Stop microphone tracks and close the browser audio graph. */

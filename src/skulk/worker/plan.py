@@ -3,6 +3,7 @@
 from collections.abc import Mapping, Sequence, Set
 
 from skulk.shared.models.capabilities import is_gemma4_family
+from skulk.shared.models.model_cards import same_model_artifact
 from skulk.shared.types.chunks import InputImageChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.tasks import (
@@ -147,9 +148,6 @@ def _model_needs_download(
     global_download_status: Mapping[NodeId, Sequence[DownloadProgress]],
 ) -> DownloadModel | None:
     local_downloads = global_download_status.get(node_id, [])
-    download_status = {
-        dp.shard_metadata.model_card.model_id: dp for dp in local_downloads
-    }
 
     for runner in runners.values():
         # An RPC donor never touches the model file: the driver reads the GGUF
@@ -157,13 +155,21 @@ def _model_needs_download(
         # RunnerIdle window would plan a multi-GB download for nothing (#328).
         if _is_rpc_donor(runner):
             continue
-        model_id = runner.bound_instance.bound_shard.model_card.model_id
-        if isinstance(runner.status, RunnerIdle) and (
-            model_id not in download_status
-            or not isinstance(
-                download_status[model_id],
-                (DownloadOngoing, DownloadCompleted, DownloadFailed),
-            )
+        expected_shard = runner.bound_instance.bound_shard
+        matching_status = next(
+            (
+                progress
+                for progress in local_downloads
+                if same_model_artifact(
+                    progress.shard_metadata.model_card,
+                    expected_shard.model_card,
+                )
+            ),
+            None,
+        )
+        if isinstance(runner.status, RunnerIdle) and not isinstance(
+            matching_status,
+            (DownloadOngoing, DownloadCompleted, DownloadFailed),
         ):
             # We don't invalidate download_status randomly in case a file gets deleted on disk
             return DownloadModel(
@@ -248,7 +254,10 @@ def _load_model(
             driver_node = runner.bound_instance.bound_node_id
             driver_download_complete = driver_node in global_download_status and any(
                 isinstance(dp, DownloadCompleted)
-                and dp.shard_metadata.model_card.model_id == shard_assignments.model_id
+                and same_model_artifact(
+                    dp.shard_metadata.model_card,
+                    runner.bound_instance.bound_shard.model_card,
+                )
                 for dp in global_download_status[driver_node]
             )
             donors_ready = all(
@@ -268,7 +277,12 @@ def _load_model(
             nid in global_download_status
             and any(
                 isinstance(dp, DownloadCompleted)
-                and dp.shard_metadata.model_card.model_id == shard_assignments.model_id
+                and same_model_artifact(
+                    dp.shard_metadata.model_card,
+                    shard_assignments.runner_to_shard[
+                        shard_assignments.node_to_runner[nid]
+                    ].model_card,
+                )
                 for dp in global_download_status[nid]
             )
             for nid in shard_assignments.node_to_runner

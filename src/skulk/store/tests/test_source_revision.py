@@ -2,24 +2,86 @@
 """Immutable source-revision behavior for store downloads and staging."""
 
 import asyncio
+import threading
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 import skulk.shared.constants as constants
 from skulk.download import download_utils
-from skulk.shared.models.model_cards import ModelId
+from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.downloads import FileListEntry
 from skulk.store import model_store as model_store_module
+from skulk.store.installed_cards import InstalledCardRecord
 from skulk.store.model_store import ModelStore, StoreDownloadStatus
 from skulk.store.model_store_client import (
     ModelStoreClient,
     _staged_source_revision_matches,
+    _staging_dir,
 )
 
 _OLD_REVISION = "0" * 40
 _NEW_REVISION = "1" * 40
+
+
+@pytest.mark.parametrize("model_id", ["", ".", "..", "org\\..\\model"])
+def test_staging_directory_rejects_path_like_model_ids(
+    tmp_path: Path, model_id: str
+) -> None:
+    """Revision replacement can only delete a child of the staging root."""
+    with pytest.raises(ValueError, match="safe staging directory"):
+        _staging_dir(str(tmp_path / "staging"), model_id)
+
+
+async def test_store_alias_download_reads_from_artifact_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The canonical store key must not become the Hugging Face origin."""
+    monkeypatch.setattr(model_store_module, "MINIMUM_STAGING_FREE_DISK_BYTES", 0)
+    store = ModelStore(tmp_path)
+    alias = "org/multi@q4-k-m"
+    repository = ModelId("org/multi")
+    observed: list[ModelId] = []
+    store._active_downloads[alias] = StoreDownloadStatus(model_id=alias)
+
+    async def file_list(
+        model_id: ModelId,
+        _revision: str,
+        recursive: bool,
+    ) -> list[FileListEntry]:
+        assert recursive
+        observed.append(model_id)
+        return [FileListEntry(type="file", path="config.json", size=2)]
+
+    async def download_file(
+        model_id: ModelId,
+        _revision: str,
+        path: str,
+        download_dir: Path,
+        on_progress: Callable[[int, int, bool], None],
+        *_: object,
+        **__: object,
+    ) -> Path:
+        observed.append(model_id)
+        target = download_dir / path
+        target.write_bytes(b"{}")
+        on_progress(2, 2, True)
+        return target
+
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", file_list)
+    monkeypatch.setattr(download_utils, "download_file_with_retry", download_file)
+
+    await store._do_download(alias, source_repository=str(repository))
+
+    assert observed == [repository, repository]
+    entry = store.get_entry(alias)
+    assert entry is not None
+    assert entry.source_repository == str(repository)
+    assert store.get_entry(str(repository)) is None
 
 
 def test_canonical_capacity_counts_resumable_and_replaced_bytes(
@@ -38,8 +100,7 @@ def test_canonical_capacity_counts_resumable_and_replaced_bytes(
     ]
 
     assert (
-        model_store_module._remaining_store_download_bytes(target, files)
-        == 5 + 5 + 7
+        model_store_module._remaining_store_download_bytes(target, files) == 5 + 5 + 7
     )
 
 
@@ -65,7 +126,9 @@ def test_canonical_capacity_does_not_credit_hardlinked_target(
 
 
 def test_canonical_capacity_rejects_unknown_manifest_sizes(tmp_path: Path) -> None:
-    with pytest.raises(model_store_module.ModelStoreCapacityError, match="unknown size"):
+    with pytest.raises(
+        model_store_module.ModelStoreCapacityError, match="unknown size"
+    ):
         model_store_module._remaining_store_download_bytes(
             tmp_path,
             [FileListEntry(type="file", path="missing.safetensors", size=None)],
@@ -135,9 +198,7 @@ async def test_canonical_download_reuses_complete_artifact_without_reserve(
         recursive: bool,
     ) -> list[FileListEntry]:
         assert recursive
-        return [
-            FileListEntry(type="file", path="model.gguf", size=len(b"complete"))
-        ]
+        return [FileListEntry(type="file", path="model.gguf", size=len(b"complete"))]
 
     async def reuse_file(
         _model_id: ModelId,
@@ -222,27 +283,45 @@ def test_external_pinned_registration_writes_loadable_revision_marker(
         source_revision=_NEW_REVISION,
     )
 
-    assert (
-        model_dir / ".skulk-source-revision"
-    ).read_text().strip() == _NEW_REVISION
+    assert (model_dir / ".skulk-source-revision").read_text().strip() == _NEW_REVISION
     assert (
         download_utils.build_model_path(ModelId("org/model"), _NEW_REVISION)
         == model_dir
     )
 
 
-async def test_pinned_store_download_writes_revision_marker(
+async def test_pinned_store_download_writes_revision_marker_and_offloads_hashing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """A qualified store entry must remain discoverable by generic runners."""
 
+    monkeypatch.setattr(model_store_module, "MINIMUM_STAGING_FREE_DISK_BYTES", 0)
     store = ModelStore(tmp_path)
     model_id = "org/model"
     store._active_downloads[model_id] = StoreDownloadStatus(
         model_id=model_id,
         source_revision=_NEW_REVISION,
     )
+    card = ModelCard(
+        model_id=ModelId(model_id),
+        storage_size=Memory.from_bytes(7),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        source_revision=_NEW_REVISION,
+    )
+    event_loop_thread_id = threading.get_ident()
+    hashing_thread_ids: list[int] = []
+    original_builder = cast(
+        "Callable[..., InstalledCardRecord]",
+        model_store_module.build_installed_card_record,
+    )
+
+    def tracked_builder(*args: object, **kwargs: object) -> InstalledCardRecord:
+        hashing_thread_ids.append(threading.get_ident())
+        return original_builder(*args, **kwargs)
 
     async def file_list(
         _model_id: ModelId,
@@ -271,11 +350,17 @@ async def test_pinned_store_download_writes_revision_marker(
 
     monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", file_list)
     monkeypatch.setattr(download_utils, "download_file_with_retry", download_file)
+    monkeypatch.setattr(
+        model_store_module,
+        "build_installed_card_record",
+        tracked_builder,
+    )
 
     await store._do_download(
         model_id,
         pinned_gguf="model.gguf",
         source_revision=_NEW_REVISION,
+        model_card=card,
     )
 
     entry = store.get_entry(model_id)
@@ -283,6 +368,8 @@ async def test_pinned_store_download_writes_revision_marker(
     model_dir = tmp_path / entry.store_path
     assert entry.source_revision == _NEW_REVISION
     assert (model_dir / ".skulk-source-revision").read_text().strip() == _NEW_REVISION
+    assert hashing_thread_ids
+    assert all(thread_id != event_loop_thread_id for thread_id in hashing_thread_ids)
 
 
 async def test_store_redownloads_when_registered_revision_differs(
@@ -312,6 +399,94 @@ async def test_store_redownloads_when_registered_revision_differs(
     for task in tuple(store._download_tasks):
         task.cancel()
     await asyncio.gather(*store._download_tasks, return_exceptions=True)
+
+
+async def test_store_redownloads_when_registered_repository_differs(
+    tmp_path: Path,
+) -> None:
+    """A matching commit cannot make a different signed repository a cache hit."""
+    store = ModelStore(tmp_path)
+    model_id = "org/model@q4"
+    model_dir = tmp_path / "org--model@q4"
+    model_dir.mkdir()
+    (model_dir / "model.gguf").write_bytes(b"old")
+    store.register_model(
+        model_id,
+        model_dir,
+        ["model.gguf"],
+        3,
+        source_revision=_NEW_REVISION,
+        source_repository="org/old-source",
+    )
+
+    status = await store.request_download(
+        model_id,
+        pinned_gguf="model.gguf",
+        source_revision=_NEW_REVISION,
+        source_repository="org/new-source",
+    )
+
+    assert status.status in {"pending", "downloading"}
+    assert status.source_revision == _NEW_REVISION
+    assert status.source_repository == "org/new-source"
+    for task in tuple(store._download_tasks):
+        task.cancel()
+    await asyncio.gather(*store._download_tasks, return_exceptions=True)
+
+
+async def test_active_download_dedup_rejects_different_repository(
+    tmp_path: Path,
+) -> None:
+    """Concurrent requests may deduplicate only the same complete artifact."""
+    store = ModelStore(tmp_path)
+    model_id = "org/model@q4"
+    store._active_downloads[model_id] = StoreDownloadStatus(
+        model_id=model_id,
+        source_revision=_NEW_REVISION,
+        source_repository="org/old-source",
+        status="downloading",
+    )
+
+    with pytest.raises(ValueError, match="org/old-source"):
+        await store.request_download(
+            model_id,
+            source_revision=_NEW_REVISION,
+            source_repository="org/new-source",
+        )
+
+
+@pytest.mark.parametrize(
+    ("pinned_gguf", "extra_pinned_gguf"),
+    [
+        ("model-Q5_K_M.gguf", ["draft-Q4_K_M.gguf"]),
+        ("model-Q4_K_M.gguf", ["draft-Q5_K_M.gguf"]),
+    ],
+)
+async def test_active_download_dedup_rejects_different_file_selection(
+    tmp_path: Path,
+    pinned_gguf: str,
+    extra_pinned_gguf: list[str],
+) -> None:
+    """Concurrent requests may not reuse bytes selected by another card."""
+    store = ModelStore(tmp_path)
+    model_id = "org/model@quant"
+    store._active_downloads[model_id] = StoreDownloadStatus(
+        model_id=model_id,
+        source_revision=_NEW_REVISION,
+        source_repository="org/model",
+        pinned_gguf="model-Q4_K_M.gguf",
+        extra_pinned_gguf=("draft-Q4_K_M.gguf",),
+        status="downloading",
+    )
+
+    with pytest.raises(ValueError, match="different artifact selection"):
+        await store.request_download(
+            model_id,
+            pinned_gguf=pinned_gguf,
+            extra_pinned_gguf=extra_pinned_gguf,
+            source_revision=_NEW_REVISION,
+            source_repository="org/model",
+        )
 
 
 async def test_staging_replaces_files_from_another_revision(
@@ -389,6 +564,7 @@ async def test_mutable_main_download_clears_old_pinned_staging_residue(
 ) -> None:
     """An upgrade must not reuse pinned bytes left in mutable-main's path."""
 
+    monkeypatch.setattr(model_store_module, "MINIMUM_STAGING_FREE_DISK_BYTES", 0)
     store = ModelStore(tmp_path)
     model_id = "org/model"
     target_dir = tmp_path / "org--model"
@@ -534,9 +710,7 @@ async def test_unpinned_staging_rejects_interrupted_pinned_cache(
     destination = tmp_path / "org--model"
     destination.mkdir()
     (destination / "model.gguf").write_bytes(b"pinned")
-    (destination / ".skulk-source-revision-staging").write_text(
-        f"{_NEW_REVISION}\n"
-    )
+    (destination / ".skulk-source-revision-staging").write_text(f"{_NEW_REVISION}\n")
 
     assert not _staged_source_revision_matches(destination, None)
 

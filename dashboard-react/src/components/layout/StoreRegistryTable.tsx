@@ -8,6 +8,7 @@ import { BsChatDotsFill } from 'react-icons/bs';
 import { formatBytes } from '../../utils/format';
 import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
+import { buildTagColors, CapabilityTagBadge } from '../common/capabilityTags';
 import { ClusterCard, type ClusterCardProps } from '../cluster/ClusterCard';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 import { modelSupportsTextChat } from '../../types/models';
@@ -21,6 +22,48 @@ export interface StoreRegistryEntry {
   total_bytes: number;
   files: string[];
   downloaded_at: string;
+  installed_card?: {
+    installed_identity: string;
+    verification: 'registry_verified' | 'local_legacy' | 'custom' | 'unresolved';
+    artifact_role: 'base' | 'vision_weights' | 'mtp_sidecar' | 'assistant' | 'served_draft' | 'vllm_draft';
+    owner_model_id?: string | null;
+    owner_card_id?: string | null;
+  } | null;
+  cached_on_nodes?: Array<{
+    node_id: string;
+    complete: boolean;
+    installed_identity: string;
+    bytes: number;
+    last_use_epoch_seconds: number;
+    in_use: boolean;
+  }>;
+  update_available?: boolean;
+  installed_not_current?: boolean;
+  reconciliation_state?: string;
+  advisories?: Array<{
+    advisory_id: string;
+    severity: 'low' | 'moderate' | 'high' | 'critical';
+    title: string;
+    description: string;
+    enforcement: 'warn';
+  }>;
+}
+
+/**
+ * Fleet cache-to-store reconciliation progress returned by `/store/reconciliation`.
+ * Transitional states (`scanning` and `importing`) describe an active pass;
+ * `complete` and `failed` are terminal for that pass, while `idle` means no pass
+ * has been scheduled yet.
+ */
+export interface StoreReconciliationStatus {
+  state: 'idle' | 'scanning' | 'importing' | 'complete' | 'failed';
+  inventory_only: boolean;
+  scanned_nodes: number;
+  discovered_artifacts: number;
+  imported_artifacts: number;
+  pending_imports: string[];
+  failures: string[];
+  last_verified_at?: string | null;
 }
 
 export interface StoreDownloadProgress {
@@ -91,6 +134,7 @@ export interface StoreRegistryTableProps {
    *  not independently placeable, so their launch/placement/optiq actions are
    *  suppressed and a role badge is shown instead. */
   companions?: Record<string, CompanionInfo>;
+  reconciliation?: StoreReconciliationStatus | null;
 }
 
 /* ---- helpers ---- */
@@ -206,6 +250,10 @@ const EmptyBox = styled.div`
 const Table = styled.div`
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md};
+  /* Dense content keeps its ground: near-opaque so the scene backdrop
+   * cannot compete with a column of identifiers (atmosphere yields to
+   * density). */
+  background: ${({ theme }) => theme.colors.surfaceElevated};
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -260,7 +308,7 @@ const TRow = styled.div<{ $highlight?: boolean }>`
 
   ${({ $highlight }) =>
     $highlight &&
-    css`background: ${({ theme }) => theme.colors.goldBg};`}
+    css`background: ${({ theme }) => theme.colors.liveBg};`}
 `;
 
 const ModelCell = styled.div<{ $area?: MobileGridArea }>`
@@ -289,8 +337,8 @@ const ReadyBadge = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.healthy};
-  background: rgba(34, 197, 94, 0.1);
-  border: 1px solid rgba(34, 197, 94, 0.2);
+  background: ${({ theme }) => theme.colors.accentBg};
+  border: 1px solid ${({ theme }) => theme.colors.accentBg};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 1px 6px;
 `;
@@ -302,9 +350,9 @@ const ActiveBadge = styled.span`
   flex-shrink: 0;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.gold};
-  background: ${({ theme }) => theme.colors.goldBg};
-  border: 1px solid ${({ theme }) => theme.colors.goldDim};
+  color: ${({ theme }) => theme.colors.live};
+  background: ${({ theme }) => theme.colors.liveBg};
+  border: 1px solid ${({ theme }) => theme.colors.liveBg};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 1px 6px;
 `;
@@ -321,35 +369,13 @@ const ActiveDot = styled.span`
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: ${({ theme }) => theme.colors.gold};
+  background: ${({ theme }) => theme.colors.live};
   animation: ${pulse} 1.5s ease-in-out infinite;
 `;
 
-function buildTagColors(theme: Theme): Record<string, { color: string; bg: string; border: string }> {
-  return {
-    optiq: { color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.1)', border: 'rgba(167, 139, 250, 0.3)' },
-    thinking: { color: theme.colors.info, bg: theme.colors.infoBg, border: theme.colors.infoBg },
-    vision: { color: theme.colors.warning, bg: theme.colors.warningBg, border: theme.colors.warningBg },
-    tensor: { color: theme.colors.healthy, bg: theme.colors.accentBg, border: theme.colors.accentBg },
-    embedding: { color: '#f472b6', bg: 'rgba(244, 114, 182, 0.1)', border: 'rgba(244, 114, 182, 0.3)' },
-    tts: { color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.1)', border: 'rgba(56, 189, 248, 0.3)' },
-    stt: { color: '#34d399', bg: 'rgba(52, 211, 153, 0.1)', border: 'rgba(52, 211, 153, 0.3)' },
-  };
-}
-
-const TagBadge = styled.span<{ $color: string; $bg: string; $border: string }>`
-  flex-shrink: 0;
-  font-size: 10px;
-  font-family: ${({ theme }) => theme.fonts.body};
-  font-weight: 500;
-  color: ${({ $color }) => $color};
-  background: ${({ $bg }) => $bg};
-  border: 1px solid ${({ $border }) => $border};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  padding: 0 5px;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
-`;
+// Capability chips share one dialect with the Find Models modal — see
+// common/capabilityTags. TagBadge keeps its local name for the JSX below.
+const TagBadge = CapabilityTagBadge;
 
 /** Badge marking a store entry as a speculative-decoding companion (a drafter
  *  or an MTP-head sidecar) rather than a launchable model. Muted so it reads as
@@ -371,6 +397,18 @@ const CompanionBadge = styled.span`
   letter-spacing: 0.3px;
 `;
 
+const StateBadge = styled.span<{ $tone?: 'ok' | 'warn' | 'danger' }>`
+  flex-shrink: 0;
+  font-size: 10px;
+  font-family: ${({ theme }) => theme.fonts.body};
+  color: ${({ theme, $tone }) =>
+    $tone === 'danger' ? theme.colors.error : $tone === 'warn' ? theme.colors.gold : theme.colors.healthy};
+  background: ${({ theme, $tone }) =>
+    $tone === 'danger' ? theme.colors.errorBg : $tone === 'warn' ? theme.colors.goldBg : theme.colors.accentBg};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  padding: 1px 6px;
+`;
+
 const ChatBubble = styled.button`
   all: unset;
   cursor: pointer;
@@ -382,8 +420,8 @@ const ChatBubble = styled.button`
   transition: all 0.15s;
 
   &:hover {
-    color: #86efac;
-    filter: drop-shadow(0 0 4px rgba(74, 222, 128, 0.4));
+    color: ${({ theme }) => theme.colors.accentHover};
+    filter: drop-shadow(0 0 4px ${({ theme }) => theme.colors.accentBg});
   }
 `;
 
@@ -410,7 +448,7 @@ const ProgressTrack = styled.div`
 const ProgressFill = styled.div<{ $pct: number }>`
   width: ${({ $pct }) => $pct}%;
   height: 100%;
-  background: ${({ theme }) => theme.colors.gold};
+  background: ${({ theme }) => theme.colors.live};
   border-radius: 3px;
   transition: width 0.3s ease-out;
 `;
@@ -418,7 +456,7 @@ const ProgressFill = styled.div<{ $pct: number }>`
 const ProgressText = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.live};
 `;
 
 const spin = keyframes`
@@ -545,6 +583,36 @@ const ActionsCell = styled.div<{ $area?: MobileGridArea }>`
 
 const LinkIcon = () => <FiExternalLink size={14} style={{ flexShrink: 0 }} />;
 
+const ModelInfo = styled.div`
+  min-width: min(240px, calc(100vw - 44px));
+  max-width: 100%;
+`;
+
+const ModelInfoTitle = styled.div`
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  margin-bottom: 6px;
+
+  > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+`;
+
+const ModelInfoGrid = styled.div`
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 12px;
+  min-width: 0;
+
+  > * {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+`;
+
 function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: ModelCardInfo }) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
@@ -554,8 +622,8 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
   const resolved = card?.resolvedCapabilities;
 
   return (
-    <div style={{ minWidth: 240 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+    <ModelInfo>
+      <ModelInfoTitle>
         <span style={{ color: theme.colors.gold, fontWeight: 600 }}>
           {entry.model_id}
         </span>
@@ -572,10 +640,24 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
             <LinkIcon />
           </a>
         )}
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
+      </ModelInfoTitle>
+      <ModelInfoGrid>
         <span style={{ color: theme.colors.textMuted }}>{t('common.size', 'Size')}</span>
         <span>{formatBytes(entry.total_bytes)}</span>
+        {entry.installed_card && (
+          <>
+            <span style={{ color: theme.colors.textMuted }}>{t('storeRegistry.installedIdentity', 'Installed identity')}</span>
+            <span>{entry.installed_card.installed_identity}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('storeRegistry.verification', 'Verification')}</span>
+            <span>{entry.installed_card.verification}</span>
+          </>
+        )}
+        {(entry.cached_on_nodes?.length ?? 0) > 0 && (
+          <>
+            <span style={{ color: theme.colors.textMuted }}>{t('storeRegistry.cachedOn', 'Cached on')}</span>
+            <span>{entry.cached_on_nodes?.map((node) => node.node_id).join(', ')}</span>
+          </>
+        )}
         {card?.baseModel && (
           <>
             <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.baseModel', 'Base model')}</span>
@@ -632,7 +714,7 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
         <span>{entry.files.length}</span>
         <span style={{ color: theme.colors.textMuted }}>{t('storeRegistry.downloaded', 'Downloaded')}</span>
         <span>{new Date(entry.downloaded_at).toLocaleString()}</span>
-      </div>
+      </ModelInfoGrid>
       {entry.files.length > 0 && (
         <div style={{ marginTop: 8, borderTop: `1px solid ${theme.colors.borderLight}`, paddingTop: 6 }}>
           <div style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
@@ -645,7 +727,7 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
           </div>
         </div>
       )}
-    </div>
+    </ModelInfo>
   );
 }
 
@@ -666,11 +748,21 @@ export function StoreRegistryTable({
   totalClusterMemoryBytes = 0,
   onOptimize,
   companions = {},
+  reconciliation = null,
 }: StoreRegistryTableProps) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
   const TAG_COLORS = useMemo(() => buildTagColors(theme), [theme]);
-  const registeredIds = useMemo(() => new Set(entries.map((e) => e.model_id)), [entries]);
+  const orderedEntries = useMemo(() => [...entries].sort((left, right) => {
+    const leftOwner = left.installed_card?.owner_model_id ?? left.model_id;
+    const rightOwner = right.installed_card?.owner_model_id ?? right.model_id;
+    const ownerOrder = leftOwner.localeCompare(rightOwner);
+    if (ownerOrder !== 0) return ownerOrder;
+    const leftCompanion = left.installed_card?.artifact_role !== undefined && left.installed_card.artifact_role !== 'base';
+    const rightCompanion = right.installed_card?.artifact_role !== undefined && right.installed_card.artifact_role !== 'base';
+    return Number(leftCompanion) - Number(rightCompanion) || left.model_id.localeCompare(right.model_id);
+  }), [entries]);
+  const registeredIds = useMemo(() => new Set(orderedEntries.map((e) => e.model_id)), [orderedEntries]);
   const pendingDownloads = useMemo(
     () => activeDownloads.filter((d) => !registeredIds.has(d.modelId)),
     [activeDownloads, registeredIds],
@@ -693,6 +785,11 @@ export function StoreRegistryTable({
             plural: entries.length !== 1 ? 's' : '',
           })}
           {downloadingCount > 0 && t('storeRegistry.downloadingCount', ', {count} downloading', { count: downloadingCount })}
+          {reconciliation && reconciliation.state !== 'idle' && (
+            <> · {reconciliation.state === 'importing'
+              ? t('storeRegistry.reconciling', 'reconciling {count} artifact(s)', { count: reconciliation.pending_imports.length })
+              : t('storeRegistry.reconciliationState', 'reconciliation {state}', { state: reconciliation.state })}</>
+          )}
         </HeaderText>
         <HeaderActions>
           {actions}
@@ -745,14 +842,20 @@ export function StoreRegistryTable({
           ))}
 
           {/* Registered entries */}
-          {entries.map((entry) => {
+          {orderedEntries.map((entry) => {
             const dl = downloadMap.get(entry.model_id);
             const active = isActive(entry.model_id);
             const tooLarge = totalClusterMemoryBytes > 0 && entry.total_bytes > totalClusterMemoryBytes;
             // Speculative-decoding companion (drafter / MTP-head sidecar): loaded
             // automatically with its parent, never placed on its own, so it gets
             // no launch/placement/optiq actions, only a role badge.
-            const companion = companions[entry.model_id];
+            const installedRole = entry.installed_card?.artifact_role;
+            const companion = installedRole && installedRole !== 'base'
+              ? {
+                  role: installedRole === 'mtp_sidecar' ? 'sidecar' as const : 'drafter' as const,
+                  parent: entry.installed_card?.owner_model_id ?? t('common.unknown', 'Unknown'),
+                }
+              : companions[entry.model_id];
             // OptiQ is mlx-optiq mixed-precision quantization, which operates on
             // MLX (safetensors) weights. GGUF models carry llama.cpp's own quant
             // format, so OptiQ doesn't apply — hide the optimize action for them.
@@ -814,6 +917,27 @@ export function StoreRegistryTable({
                           ? t('storeRegistry.companionSidecar', 'Sidecar')
                           : t('storeRegistry.companionDrafter', 'Drafter')}
                       </CompanionBadge>
+                    </InfoTooltip>
+                  )}
+                  <StateBadge>{t('storeRegistry.central', 'Central')}</StateBadge>
+                  {entry.installed_card?.verification === 'registry_verified' ? (
+                    <StateBadge>{t('storeRegistry.verified', 'Verified')}</StateBadge>
+                  ) : entry.installed_card?.verification === 'local_legacy' ? (
+                    <StateBadge $tone="warn">{t('storeRegistry.localLegacy', 'Local legacy')}</StateBadge>
+                  ) : null}
+                  {(entry.cached_on_nodes?.length ?? 0) > 0 && (
+                    <StateBadge>{t('storeRegistry.cachedNodes', '{count} node(s)', { count: entry.cached_on_nodes?.length ?? 0 })}</StateBadge>
+                  )}
+                  {entry.update_available && (
+                    <StateBadge $tone="warn">{t('storeRegistry.updateAvailable', 'Update available')}</StateBadge>
+                  )}
+                  {(entry.advisories?.length ?? 0) > 0 && (
+                    <InfoTooltip
+                      content={entry.advisories?.map((advisory) => `${advisory.advisory_id}: ${advisory.title}`).join('\n')}
+                      placement="right"
+                      delay={0}
+                    >
+                      <StateBadge $tone="danger">{t('storeRegistry.securityAdvisory', 'Security advisory')}</StateBadge>
                     </InfoTooltip>
                   )}
                   {(() => {

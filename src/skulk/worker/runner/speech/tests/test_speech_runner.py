@@ -17,6 +17,7 @@ import pytest
 from anyio import WouldBlock
 
 from skulk.shared.models.model_cards import AudioCardKind, AudioResponseFormat, ModelId
+from skulk.shared.models.reference_voices import ReferenceVoiceProfile
 from skulk.shared.types.audio import (
     AudioTranscriptionTaskParams,
     RealtimeAudioInputFrame,
@@ -667,6 +668,12 @@ def test_speech_synthesis_emits_audio_chunk_and_active_status(
         return b"WAVDATA"
 
     monkeypatch.setattr(speech_runner, "_encode_audio", _fake_encode)
+    seeded_requests: list[int | None] = []
+    monkeypatch.setattr(
+        speech_runner,
+        "_seed_tts_sampling",
+        lambda seed: seeded_requests.append(seed),
+    )
 
     command_id = CommandId("speech-command-1")
     task = SpeechSynthesis(
@@ -678,6 +685,7 @@ def test_speech_synthesis_emits_audio_chunk_and_active_status(
             response_format=AudioResponseFormat.Wav,
             voice="af_heart",
             speed=1.1,
+            seed=42,
         ),
     )
     runner.task_receiver = cast("object", _OneShotReceiver([task]))  # pyright: ignore[reportAttributeAccessIssue]
@@ -685,6 +693,7 @@ def test_speech_synthesis_emits_audio_chunk_and_active_status(
     runner.main()
 
     assert model.calls == [("hello world", "af_heart", 1.1, False)]
+    assert seeded_requests == [42]
     assert any(
         isinstance(event, TaskAcknowledged) and event.task_id == task.task_id
         for event in sender.events
@@ -812,20 +821,18 @@ def test_tts_reference_audio_temp_file_is_request_scoped(
         sample_rate = 24000
 
         def __init__(self) -> None:
-            self.reference_path: Path | None = None
+            self.reference_audio: object | None = None
 
         def generate(
             self,
             text: str,
             *,
-            ref_audio: str | None = None,
+            ref_audio: object | None = None,
             ref_text: str | None = None,
         ) -> list[_FakeSpeechResult]:
             assert text == "hello"
             assert ref_text == "reference transcript"
-            assert ref_audio is not None
-            self.reference_path = Path(ref_audio)
-            assert self.reference_path.read_bytes() == b"RIFF-reference"
+            self.reference_audio = ref_audio
             return [_FakeSpeechResult()]
 
     runner, _ = _make_runner()
@@ -843,6 +850,21 @@ def test_tts_reference_audio_temp_file_is_request_scoped(
         return b"WAV"
 
     monkeypatch.setattr(speech_runner, "_encode_audio", _fake_encode)
+    loaded_waveform = object()
+    observed_reference_path: Path | None = None
+
+    def _fake_load_reference_audio(audio_path: str, sample_rate: int) -> object:
+        nonlocal observed_reference_path
+        observed_reference_path = Path(audio_path)
+        assert observed_reference_path.read_bytes() == b"RIFF-reference"
+        assert sample_rate == 24000
+        return loaded_waveform
+
+    monkeypatch.setattr(
+        speech_runner,
+        "_load_tts_reference_audio",
+        _fake_load_reference_audio,
+    )
 
     encoded, sample_rate = runner._run_tts(
         SpeechSynthesis(
@@ -866,8 +888,96 @@ def test_tts_reference_audio_temp_file_is_request_scoped(
 
     assert encoded == b"WAV"
     assert sample_rate == 24000
-    assert model.reference_path is not None
-    assert not model.reference_path.exists()
+    assert model.reference_audio is loaded_waveform
+    assert observed_reference_path is not None
+    assert not observed_reference_path.exists()
+
+
+def test_bundled_reference_voice_is_resolved_inside_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Packaged voice media stays local and supplies exact conditioning text."""
+
+    class _ReferenceSpeechModel:
+        sample_rate = 24000
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object | None]] = []
+
+        def generate(
+            self,
+            text: str,
+            *,
+            voice: str | None = None,
+            ref_audio: object | None = None,
+            ref_text: str | None = None,
+            guidance_method: str | None = None,
+        ) -> list[_FakeSpeechResult]:
+            assert text == "hello"
+            self.calls.append(
+                {
+                    "voice": voice,
+                    "ref_audio": ref_audio,
+                    "ref_text": ref_text,
+                    "guidance_method": guidance_method,
+                }
+            )
+            return [_FakeSpeechResult()]
+
+    reference_path = tmp_path / "reference.mp3"
+    reference_path.write_bytes(b"reference")
+    profile = ReferenceVoiceProfile(
+        id="angus",
+        name="Angus",
+        preferred_languages=("en",),
+        audio_path=reference_path,
+        transcript="Exact transcript.",
+        sha256=hashlib.sha256(b"reference").hexdigest(),
+    )
+    runner, _ = _make_runner()
+    runner.shard_metadata.model_card.family = "longcat_audiodit"
+    model = _ReferenceSpeechModel()
+    runner.model = model
+    loaded_waveform = object()
+
+    def _profile(profile_id: str) -> ReferenceVoiceProfile:
+        assert profile_id == "angus"
+        return profile
+
+    def _load(audio_path: str, sample_rate: int) -> object:
+        assert audio_path == str(reference_path)
+        assert sample_rate == 24000
+        return loaded_waveform
+
+    monkeypatch.setattr(speech_runner, "bundled_reference_voice_profile", _profile)
+    monkeypatch.setattr(speech_runner, "_load_tts_reference_audio", _load)
+    monkeypatch.setattr(speech_runner, "_encode_audio", lambda *_args: b"WAV")
+
+    encoded, sample_rate = runner._run_tts(
+        SpeechSynthesis(
+            instance_id=InstanceId("speech-instance-1"),
+            command_id=CommandId("bundled-reference-command"),
+            task_params=SpeechSynthesisTaskParams(
+                model=ModelId("org/reference-tts"),
+                input_text="hello",
+                response_format=AudioResponseFormat.Wav,
+                voice="angus",
+                reference_voice_profile="angus",
+            ),
+        )
+    )
+
+    assert encoded == b"WAV"
+    assert sample_rate == 24000
+    assert model.calls == [
+        {
+            "voice": None,
+            "ref_audio": loaded_waveform,
+            "ref_text": "Exact transcript.",
+            "guidance_method": "apg",
+        }
+    ]
 
 
 def test_speech_synthesis_handles_single_tuple_result(
@@ -956,6 +1066,44 @@ def test_speech_synthesis_handles_single_numpy_result(
     assert encoded == b"array-audio"
     assert sample_rate == 24000
     assert encoded_calls == [([0.7, 0.8], 24000)]
+
+
+def test_tts_generation_uses_safe_default_and_preserves_explicit_budget() -> None:
+    """Omitted TTS limits must not inherit a model default that truncates speech."""
+
+    class _BudgetSpeechModel:
+        def __init__(self) -> None:
+            self.max_token_calls: list[int] = []
+
+        def generate(
+            self,
+            text: str,
+            *,
+            max_tokens: int = 1024,
+        ) -> list[_FakeSpeechResult]:
+            assert text == "hello budget"
+            self.max_token_calls.append(max_tokens)
+            return [_FakeSpeechResult()]
+
+    runner, _sender = _make_runner()
+    model = _BudgetSpeechModel()
+    runner.model = model
+
+    def task(max_tokens: int | None) -> SpeechSynthesis:
+        return SpeechSynthesis(
+            instance_id=InstanceId("speech-instance-1"),
+            command_id=CommandId(f"speech-budget-{max_tokens}"),
+            task_params=SpeechSynthesisTaskParams(
+                model=ModelId("mlx-community/fish-test"),
+                input_text="hello budget",
+                response_format=AudioResponseFormat.Wav,
+                max_tokens=max_tokens,
+            ),
+        )
+
+    assert list(runner._iter_tts_results(task(None), stream=False))
+    assert list(runner._iter_tts_results(task(2048), stream=False))
+    assert model.max_token_calls == [4096, 2048]
 
 
 def test_speech_synthesis_uses_staged_voice_assets(

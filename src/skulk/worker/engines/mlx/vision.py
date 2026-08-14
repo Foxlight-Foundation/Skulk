@@ -65,6 +65,7 @@ from skulk.shared.tracing import TraceAttrValue
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.mlx import Model
 from skulk.shared.types.tasks import TaskId
+from skulk.shared.types.text_generation import ReasoningEffort
 from skulk.worker.engines.mlx.cache import encode_prompt
 from skulk.worker.engines.mlx.gemma4_prompt import render_gemma4_prompt
 from skulk.worker.engines.mlx.utils_mlx import fix_unmatched_think_end_tokens
@@ -159,7 +160,7 @@ def _filter_config(cls: type, d: JsonDict) -> JsonDict:
 
 
 def _load_mlx_vlm_image_processor_from_pretrained(
-    proc_mod: object, repo: str
+    proc_mod: object, repo: str, revision: str | None = None
 ) -> _ImageProcessorProtocol | None:
     """Load an MLX-VLM processor via ``from_pretrained`` and extract its image processor.
 
@@ -190,14 +191,12 @@ def _load_mlx_vlm_image_processor_from_pretrained(
                     or parameter.kind is inspect.Parameter.VAR_KEYWORD
                     for parameter in parameters
                 )
-                processor = from_pretrained(
-                    repo,
-                    **(
-                        {"trust_remote_code": True}
-                        if supports_trust_remote_code
-                        else {}
-                    ),
-                )
+                loader_options: dict[str, object] = {}
+                if supports_trust_remote_code:
+                    loader_options["trust_remote_code"] = True
+                if revision is not None:
+                    loader_options["revision"] = revision
+                processor = from_pretrained(repo, **loader_options)
             except Exception as exc:
                 logger.info(
                     f"mlx_vlm {attr_name}.from_pretrained failed for {repo}: {exc}"
@@ -255,7 +254,9 @@ def _instantiate_mlx_vlm_image_processor(
     return None
 
 
-def _load_gemma3n_pil_image_processor(repo: str) -> _ImageProcessorProtocol:
+def _load_gemma3n_pil_image_processor(
+    repo: str, revision: str | None = None
+) -> _ImageProcessorProtocol:
     """Load Gemma 3n's configured SigLIP processor without torchvision.
 
     Transformers 5 exposes ``AutoImageProcessor`` as a torchvision-gated dummy
@@ -272,7 +273,10 @@ def _load_gemma3n_pil_image_processor(repo: str) -> _ImageProcessorProtocol:
     factory = cast(_ImageProcessorFactory, cast(object, SiglipImageProcessorPil))
     return cast(
         _ImageProcessorProtocol,
-        factory.from_pretrained(repo),
+        factory.from_pretrained(
+            repo,
+            **({"revision": revision} if revision is not None else {}),
+        ),
     )
 
 
@@ -618,6 +622,8 @@ def _build_vision_prompt_with_debug(
     model_type: str | None = None,
     boi_token_id: int | None = None,
     eoi_token_id: int | None = None,
+    enable_thinking: bool | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
 ) -> _VisionPromptBuild:
     """Build the expanded prompt and retain the raw placeholder layout.
 
@@ -633,12 +639,22 @@ def _build_vision_prompt_with_debug(
         prompt = render_gemma4_prompt(
             chat_template_messages,
             add_generation_prompt=True,
+            enable_thinking=enable_thinking,
         )
     else:
+        extra_kwargs: dict[str, Any] = {}
+        if enable_thinking is not None:
+            # Qwen3 and GLM use "enable_thinking"; DeepSeek uses "thinking".
+            # Unknown Jinja variables are ignored by templates that do not need them.
+            extra_kwargs["enable_thinking"] = enable_thinking
+            extra_kwargs["thinking"] = enable_thinking
+        if reasoning_effort is not None:
+            extra_kwargs["reasoning_effort"] = reasoning_effort
         prompt = tokenizer.apply_chat_template(
             chat_template_messages,
             tokenize=False,
             add_generation_prompt=True,
+            **extra_kwargs,
         )
     raw_prompt = prompt
     raw_placeholder_positions = _prompt_placeholder_positions(raw_prompt, image_token)
@@ -696,8 +712,29 @@ def build_vision_prompt(
     model_type: str | None = None,
     boi_token_id: int | None = None,
     eoi_token_id: int | None = None,
+    enable_thinking: bool | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
 ) -> str:
-    """Build a full prompt string with image placeholders expanded to features."""
+    """Build a full prompt string with image placeholders expanded to features.
+
+    Args:
+        tokenizer: Tokenizer whose chat template renders the textual turns.
+        chat_template_messages: OpenAI-style chat messages that may include
+            image parts.
+        n_tokens_per_image: Number of placeholder tokens each image expands to.
+        image_token: Placeholder token text used by the model's vision template.
+        model_type: Optional model family override for custom prompt renderers.
+        boi_token_id: Optional beginning-of-image token for framed templates.
+        eoi_token_id: Optional end-of-image token for framed templates.
+        enable_thinking: Explicit thinking toggle forwarded to templates that
+            support it.
+        reasoning_effort: Optional reasoning effort forwarded to templates that
+            support it.
+
+    Returns:
+        The rendered prompt with each image placeholder expanded to match the
+        encoded vision feature count.
+    """
     return _build_vision_prompt_with_debug(
         tokenizer,
         chat_template_messages,
@@ -706,6 +743,8 @@ def build_vision_prompt(
         model_type=model_type,
         boi_token_id=boi_token_id,
         eoi_token_id=eoi_token_id,
+        enable_thinking=enable_thinking,
+        reasoning_effort=reasoning_effort,
     ).prompt
 
 
@@ -874,15 +913,18 @@ class VisionEncoder:
         config: VisionCardConfig,
         model_id: ModelId,
         source_revision: str | None = None,
+        source_repository: ModelId | None = None,
     ):
         self._config = config
+        self._source_revision = source_revision
+        self._source_repository = source_repository or model_id
         self._main_model_path = build_model_path(model_id, source_revision)
-        weights_revision = (
-            source_revision if config.weights_repo == str(model_id) else None
-        )
-        self._model_path = build_model_path(
-            ModelId(config.weights_repo), weights_revision
-        )
+        if config.weights_repo == str(self._source_repository):
+            self._model_path = self._main_model_path
+        else:
+            self._model_path = build_model_path(
+                ModelId(config.weights_repo), config.weights_revision
+            )
         self._vision_tower: nn.Module | None = None
         self._projector: nn.Module | None = None
         self._processor: _ImageProcessorProtocol | None = None
@@ -1033,12 +1075,22 @@ class VisionEncoder:
 
         processor_repo = self._config.processor_repo
         repo = processor_repo or str(self._model_path)
+        processor_revision = (
+            self._source_revision
+            if processor_repo == str(self._source_repository)
+            else self._config.processor_revision
+        )
+        loader_options: dict[str, object] = (
+            {"revision": processor_revision}
+            if processor_revision is not None
+            else {}
+        )
         image_proc: _ImageProcessorProtocol | None = None
         load_failures: list[str] = []
         try:
             image_proc = cast(
                 _ImageProcessorProtocol | None,
-                load_image_processor(repo),
+                load_image_processor(repo, **loader_options),
             )
         except (ImportError, OSError, ValueError) as exc:
             load_failures.append(f"mlx_vlm.utils.load_image_processor: {exc}")
@@ -1046,7 +1098,9 @@ class VisionEncoder:
 
         if image_proc is None and self._config.model_type == "gemma3n":
             try:
-                image_proc = _load_gemma3n_pil_image_processor(repo)
+                image_proc = _load_gemma3n_pil_image_processor(
+                    repo, processor_revision
+                )
                 logger.info("Using Transformers PIL SigLIP image processor")
             except (ImportError, OSError, TypeError, ValueError) as exc:
                 load_failures.append(f"Transformers PIL SigLIP processor: {exc}")
@@ -1060,6 +1114,7 @@ class VisionEncoder:
                 image_proc = _load_mlx_vlm_image_processor_from_pretrained(
                     proc_mod,
                     repo,
+                    processor_revision,
                 )
                 if image_proc is not None:
                     break
@@ -1072,7 +1127,11 @@ class VisionEncoder:
                 )
                 image_proc = cast(
                     _ImageProcessorProtocol,
-                    auto_from_pretrained(repo, trust_remote_code=True),
+                    auto_from_pretrained(
+                        repo,
+                        trust_remote_code=True,
+                        **loader_options,
+                    ),
                 )
             except (ImportError, OSError, ValueError) as exc:
                 load_failures.append(f"transformers.AutoImageProcessor: {exc}")
@@ -1577,9 +1636,15 @@ class VisionProcessor:
         config: VisionCardConfig,
         model_id: ModelId,
         source_revision: str | None = None,
+        source_repository: ModelId | None = None,
     ):
         self.vision_config = config
-        self._encoder = VisionEncoder(config, model_id, source_revision)
+        self._encoder = VisionEncoder(
+            config,
+            model_id,
+            source_revision,
+            source_repository,
+        )
         self._feature_cache: dict[str, tuple[mx.array, list[int]]] = {}
         self._feature_cache_max = 32
 
@@ -1601,7 +1666,26 @@ class VisionProcessor:
         model: Model,
         *,
         task_id: TaskId | str | None = None,
+        enable_thinking: bool | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
     ) -> VisionResult:
+        """Convert images and chat messages into model-ready vision inputs.
+
+        Args:
+            images: Base64-encoded image payloads from the request.
+            chat_template_messages: Chat messages containing the image parts.
+            tokenizer: Tokenizer used to render and encode the multimodal prompt.
+            model: Loaded MLX model receiving the resulting prompt inputs.
+            task_id: Optional task identifier for diagnostics.
+            enable_thinking: Explicit thinking toggle forwarded to the prompt
+                renderer.
+            reasoning_effort: Optional reasoning effort forwarded to the prompt
+                renderer.
+
+        Returns:
+            Vision preprocessing output containing prompt tokens, media regions,
+            and either fused embeddings or native image tensors.
+        """
         logger.info(f"Vision pipeline: {len(images)} image(s)")
         record_runner_phase(
             "vision_preprocess",
@@ -1619,6 +1703,8 @@ class VisionProcessor:
                 tokenizer,
                 model,
                 task_id=task_id,
+                enable_thinking=enable_thinking,
+                reasoning_effort=reasoning_effort,
             )
 
         cache_key = self._image_cache_key(images)
@@ -1652,6 +1738,8 @@ class VisionProcessor:
             model_type=self.vision_config.model_type,
             boi_token_id=self.vision_config.boi_token_id,
             eoi_token_id=self.vision_config.eoi_token_id,
+            enable_thinking=enable_thinking,
+            reasoning_effort=reasoning_effort,
         )
         prompt = prompt_build.prompt
         record_runner_phase(
@@ -1747,6 +1835,8 @@ class VisionProcessor:
         model: Model,
         *,
         task_id: TaskId | str | None = None,
+        enable_thinking: bool | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
     ) -> VisionResult:
         """Process images for models with native vision support (e.g. Gemma 4).
 
@@ -1850,6 +1940,8 @@ class VisionProcessor:
             model_type=self.vision_config.model_type,
             boi_token_id=self.vision_config.boi_token_id,
             eoi_token_id=self.vision_config.eoi_token_id,
+            enable_thinking=enable_thinking,
+            reasoning_effort=reasoning_effort,
         )
         prompt = prompt_build.prompt
         record_runner_phase(
@@ -1962,8 +2054,31 @@ def prepare_vision(
     model: Model,
     *,
     task_id: TaskId | str | None = None,
+    enable_thinking: bool | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
 ) -> VisionResult | None:
     """Encode images and build the vision-augmented prompt.
+
+    Args:
+        images: Base64-encoded image payloads, or ``None`` for text-only tasks.
+        chat_template_messages: Chat messages preserving the request's image
+            placement.
+        vision_processor: Processor configured for the selected vision model.
+        tokenizer: Tokenizer used by the model's chat template.
+        model: Loaded MLX model receiving the vision-preprocessed inputs.
+        task_id: Optional task identifier for diagnostics.
+        enable_thinking: Explicit thinking toggle forwarded to vision prompt
+            rendering.
+        reasoning_effort: Optional reasoning effort forwarded to vision prompt
+            rendering.
+
+    Returns:
+        ``None`` for requests without images, otherwise a ``VisionResult`` ready
+        for generation.
+
+    Raises:
+        VisionPreprocessingError: Raised when a request contains images but the
+            prompt cannot be built without dropping or hallucinating them.
 
     Returns ``None`` only when the request carried no images. A request that
     does carry images either gets them spliced into the prompt or raises
@@ -1984,4 +2099,6 @@ def prepare_vision(
         tokenizer=tokenizer,
         model=model,
         task_id=task_id,
+        enable_thinking=enable_thinking,
+        reasoning_effort=reasoning_effort,
     )

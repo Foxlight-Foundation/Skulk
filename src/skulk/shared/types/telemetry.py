@@ -21,6 +21,7 @@ from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 
+from skulk.shared.types.artifact_inventory import NodeArtifactInventory
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import (
     Event,
@@ -101,7 +102,7 @@ class NodeTelemetry(CamelCaseModel):
     event: it is gossiped node -> all and never enters the event log."""
 
     node_id: NodeId
-    info: GatheredInfo | LiveDownloadProgress
+    info: GatheredInfo | LiveDownloadProgress | NodeArtifactInventory
 
     def coalescing_key(self) -> str:
         """Return the bounded latest-value identity used before network egress.
@@ -144,6 +145,10 @@ class TelemetryView:
         # readings here so a plugin can discover which peers offer which
         # capability. Opaque free-form strings; Skulk core does not interpret them.
         self.node_capabilities: dict[NodeId, frozenset[str]] = {}
+        # Compact launchable-artifact availability. Canonical card/manifests
+        # stay in the store; this is only the latest per-node observation.
+        self.node_artifact_inventories: dict[NodeId, NodeArtifactInventory] = {}
+        self.node_artifact_inventory_received_at: dict[NodeId, datetime] = {}
         # Non-terminal download status is observational and last-write-wins.
         # Durable State retains only completed/failed terminal outcomes.
         self.node_downloads: dict[NodeId, dict[str, LiveDownloadProgress]] = {}
@@ -219,6 +224,8 @@ class TelemetryView:
         self.node_identities.pop(node_id, None)
         self.node_rdma_ctl.pop(node_id, None)
         self.node_capabilities.pop(node_id, None)
+        self.node_artifact_inventories.pop(node_id, None)
+        self.node_artifact_inventory_received_at.pop(node_id, None)
         self.node_downloads.pop(node_id, None)
         for attempts in (
             self._node_download_attempts,
@@ -272,6 +279,9 @@ class TelemetryView:
             self.node_system[node_id] = info.system_profile
         elif isinstance(info, NodeCapabilities):
             self.node_capabilities[node_id] = info.capabilities
+        elif isinstance(info, NodeArtifactInventory):
+            self.node_artifact_inventories[node_id] = info
+            self.node_artifact_inventory_received_at[node_id] = receipt_time
         elif isinstance(info, (DownloadPending, DownloadOngoing)):
             model_id = str(info.shard_metadata.model_card.model_id)
             key = (node_id, model_id)
@@ -338,6 +348,7 @@ class TelemetryView:
             current = self.node_identities.get(node_id, NodeIdentity())
             self.node_identities[node_id] = current.model_copy(
                 update={
+                    "node_install_id": info.node_install_id,
                     "model_id": info.model,
                     "chip_id": info.chip,
                     "os_version": info.os_version,

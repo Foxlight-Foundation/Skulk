@@ -148,8 +148,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
   minimum speech, silence hangover, preroll, and maximum utterance duration;
   media is processed per call and never retained. Translation-capable STT cards
   serve experimental `/v1/audio/translations` only with global experimental
-  mode and `experiments.speech_translation`; TTS cards may expose static voices
-  through the Skulk `/v1/audio/voices` extension. The realtime transcription
+  mode and `experiments.speech_translation`; TTS cards may expose model-native
+  voices or checksummed bundled reference profiles through the Skulk
+  `/v1/audio/voices` extension. Bundled profiles resolve to local audio and exact
+  transcripts only inside the worker. The realtime transcription
   WebSocket accepts bounded server VAD and serializes utterances as distinct
   provider calls. Optional response configuration routes final transcripts
   through a mounted chat model and mounted `tts@1.0.0` provider; explicit
@@ -201,7 +203,7 @@ Rust code in `rust/` provides:
 - `system_custodian`: System-level operations
 
 ### Dashboard
-React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API.
+React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API. Styling is theme-token-driven (`dashboard-react/src/theme/theme.ts`, dark = the operator design system's Den palette); components never branch on the theme name. Building with `VITE_NIGHT_SKY=1` sets the dark palette's `scene` token to the brand valley star field (scene crown + shooting stars, mesh retired); default builds ship a CSS-only night gradient with the mesh.
 
 ### Model Capability System
 Skulk now treats model capability handling as two layers:
@@ -209,8 +211,9 @@ Skulk now treats model capability handling as two layers:
 - **Resolved capability profiles**: normalized runtime behavior contracts derived from the card plus conservative family defaults
 
 This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, speech/TTS/STT metadata, and additive `/v1/models` metadata consumed by the dashboard.
-TTS cards with fixed speakers may declare `audio.voices` plus a validated
-`audio.default_voice`, which the API applies only when callers omit `voice`.
+TTS cards may declare `audio.voices`, optional bundled `reference_profile`
+identifiers, plus a validated `audio.default_voice`, which the API applies only
+when callers omit `voice`.
 
 **Model truth vs platform truth:** a card's `compatible_backends` declares which
 engines the model's artifacts run on (MODEL truth) and must never encode a gap
@@ -230,6 +233,17 @@ Centralized logging uses a three-layer stack:
 ## Mandatory Workflow Rules
 
 These rules apply to every change. No exceptions.
+
+### Experimental code stays out of dev
+
+Unproven, demo-bound, or design-in-motion work never merges to dev. It lives
+on a long-lived `initiative/<name>` branch, deploys only to an isolated
+cluster segment for validation, and merges to dev only after its acceptance
+gate passes (a working demo, an explicit design sign-off, or both). "The code
+is inert" and "nothing imports it yet" are not exemptions: if the design is
+still moving, the code is experimental and dev must not carry it. Cutting the
+initiative branch, deploying it to the isolated segment, and gating the
+merge-back are part of starting the work, not cleanup afterward.
 
 ### Documentation
 

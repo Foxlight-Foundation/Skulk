@@ -36,6 +36,7 @@ token.
 - Placement and launch: [Placement and Instance Management](#placement-and-instance-management)
 - Store and config: [Model Store Endpoints](#model-store-endpoints) and [Configuration Endpoints](#configuration-endpoints)
 - Debugging: [State, Events, and Tracing](#state-events-and-tracing)
+- Pair a device: [Operator Device Pairing](#operator-device-pairing)
 
 ## First Success Flow
 
@@ -144,6 +145,7 @@ The Ollama group also serves alias paths (`/ollama/api/api/...`,
 - `GET /store/registry`
 - `GET /store/downloads`
 - `POST /store/models/{model_id}/download`
+- `DELETE /store/models/{model_id}/download`
 - `GET /store/models/{model_id}/download/status`
 - `DELETE /store/models/{model_id}`
 - `POST /store/purge-staging`
@@ -184,6 +186,14 @@ The Ollama group also serves alias paths (`/ollama/api/api/...`,
 - `POST /v1/capabilities/stream`
 - `POST /v1/capabilities/stream/cancel`
 
+### Operator Authentication
+
+- `POST /v1/auth/pairing-sessions/challenge`
+- `POST /v1/auth/pairing-sessions/exchange`
+- `POST /v1/auth/token`
+- `GET /v1/auth/devices`
+- `DELETE /v1/auth/devices/{device_id}`
+
 The node diagnostics bundle includes the node's own Tailscale state
 (`tailscale`: running flag, tailnet IP, hostname, MagicDNS name), probed on
 the node the bundle describes, so the per-node cluster endpoint reports the
@@ -192,6 +202,344 @@ request. The probe is best-effort: a node without a working `tailscale` CLI
 reports `running: false`, and `null` marks only an unexpected probe failure.
 
 For the full interactive reference with request/response schemas, see the [API Reference](/api/skulk-api).
+
+## Operator Device Pairing
+
+Operator pairing is explicitly started on the host that will act as the
+designated remote gateway. It does not expose an HTTP endpoint that creates
+pairing sessions:
+
+```bash
+uv run skulk operator configure-relay \
+  --provisioning-file /protected/path/relay-v1.json \
+  --operator-api-port 52417 \
+  --cluster-name "Cluster"
+```
+
+The generated provisioning document is supplied by the Foxlight relay service
+and contains `version`, `appWebsocketUrl`, `gatewayWebsocketUrl`,
+`routingLocator`, distinct `appCarrierCredential` and
+`gatewayCarrierCredential` values, and `laneCount`. Treat the file as a secret:
+it contains both outer carrier roles. Skulk validates exact fixed carrier paths,
+requires WSS except for loopback development, stores the route and credentials
+inside the encrypted authority journal, generates an owner-only pinned TLS
+identity, and refuses silent replacement. Restart Skulk after initial
+configuration so the designated gateway opens its bounded outbound lane pool.
+The operator listener defaults to loopback port `52417`, separate from Skulk's
+default `52416` fabric transport.
+
+```bash
+uv run skulk operator pair \
+  --cluster-name "Cluster"
+```
+
+The command initializes the gateway's encrypted local authority store when
+needed, creates one high-entropy session that expires after five minutes, and
+prints a terminal QR code plus the exact `skulk://pair?...` fallback payload.
+When relay access is configured, the version-two QR uses it by default and
+contains cluster identity, fingerprint, the single-use nonce and expiry, plus
+the app-role outer carrier locator/credential and pinned inner-TLS material
+needed to reach these same pairing routes. It never contains a canonical access
+or refresh credential, or the gateway-role carrier credential. Treat the QR as
+host-authorized pairing material and do not publish it. The app-role carrier
+credential only admits an opaque relay lane; the five-minute nonce and device
+proof still gate credential issuance at Skulk.
+
+Version-two packages use bounded compact JSON compressed with zlib and carried
+in the QR's single `z` query parameter. Skulk rejects a package before
+persisting its session if it would exceed the terminal-scannable budget.
+Version-one direct packages retain the uncompressed `payload` shape.
+
+The legacy command remains five-minute and single-use for compatibility. For a
+reusable, revocable version-three invitation, opt in with bounded host flags:
+
+```bash
+uv run skulk operator pair \
+  --valid-for 90d \
+  --max-pairings 10 \
+  --qr-output review.png
+```
+
+`--valid-for` accepts a positive integer followed by `m`, `h`, or `d`, from one
+minute through 90 days. Invitation mode permits ten successful pairings by
+default and accepts an explicit limit from one through twenty. It creates a
+separate five-minute attempt for every scan, so concurrent devices do not share
+or replace challenges. At most ten attempts may be live and one hundred may be
+issued over an invitation's lifetime. Only successful credential issuance
+counts against the pairing limit.
+
+The compressed version-three package adds a public invitation ID, issue time,
+expiry, and pairing limit. It may carry the same app-role relay admission and
+pinned inner-TLS material as version two, but never a canonical Skulk access or
+refresh credential. Treat the QR and optional owner-only PNG as bearer secrets.
+The PNG writer uses owner-only permissions and refuses to overwrite a path.
+
+Invitation management remains local to the designated host. Headless operators
+can use the CLI:
+
+```bash
+uv run skulk operator invitations list
+uv run skulk operator invitations revoke <invitation-id>
+```
+
+Listing exposes only ID, creation and expiry times, usage, active-attempt
+count, and safe state; it never prints the nonce. Revocation blocks new and
+unfinished attempts but does not disconnect devices that already paired.
+Revoke those devices through the authenticated device-management API.
+
+The dashboard exposes the same authority operation under **Settings →
+Pairing**. Operators choose a lifetime and device limit, generate a branded QR,
+and may download or revoke it. The bearer QR remains in mounted browser memory
+for five minutes and then the section resets; this display timeout does not
+shorten a longer invitation. Safe invitation status remains visible without
+the nonce or pairing code.
+
+`--exchange-url https://gateway.example.invalid` remains an optional direct
+LAN/Tailscale path and is required only before relay provisioning. Remote
+exchange URLs must use HTTPS; cleartext HTTP is accepted only for loopback
+development URLs. A relay-configured package includes both the protected inner
+origin and relay bootstrap material, and the app prefers the relay path.
+
+### Create a dashboard pairing invitation
+
+**POST** `/v1/auth/pairing-invitations`
+
+Parameters:
+
+- JSON body `validForSeconds` (required): whole-second lifetime from 60 through
+  7,776,000 seconds (90 days).
+- JSON body `maxPairings` (required): successful device limit from 1 through
+  20.
+- Header `X-Skulk-Dashboard: pairing-v1` (required): explicit dashboard
+  request marker.
+
+Behavior:
+
+- requires a loopback or Tailscale socket peer, an exact same-origin browser
+  `Origin` or `Referer`, and a loopback, MagicDNS, `*.ts.net`, or literal
+  Tailscale dashboard host;
+- accepts Tailscale's `100.64.0.0/10` IPv4 and
+  `fd7a:115c:a1e0::/48` IPv6 address spaces only after the local Tailscale
+  authority verifies the exact socket peer, rejects proxy forwarding headers,
+  and remains unavailable through an ordinary LAN or unverified CGNAT
+  connection;
+- is available only when the dashboard is opened on the configured operator
+  gateway through Tailscale or localhost;
+- is explicitly unavailable through `OperatorGatewayAuthorization`, even to a
+  valid fully scoped device;
+- reuses `OperatorPairingService.create_invitation`, so the CLI and dashboard
+  cannot diverge in identity, relay material, limits, or journal behavior;
+- returns safe `invitation` status plus one `pairingCode` containing the secret
+  `skulk://pair?z=...` bearer package;
+- returns `Cache-Control: no-store, max-age=0` and `Pragma: no-cache`; clients
+  must not persist the response, put it in URLs, logs, telemetry, or shared
+  application state;
+- returns an actionable `403` outside the direct Tailscale/localhost dashboard
+  authority, an actionable `409` on a non-gateway or before relay
+  configuration, `422` if the generated package exceeds the reliable QR
+  budget, and `503` when the configured gateway identity is temporarily
+  unavailable.
+
+### List dashboard pairing invitations
+
+**GET** `/v1/auth/pairing-invitations`
+
+Parameters:
+
+- Header `X-Skulk-Dashboard: pairing-v1` (required).
+
+Behavior:
+
+- applies the same loopback-or-Tailscale peer, exact same-origin, trusted-host,
+  and no-forwarding boundary as creation;
+- returns invitation ID, creation/expiry, successful and maximum pairings,
+  active/total attempts, and state;
+- never returns the invitation nonce, QR payload, carrier credentials, or
+  canonical operator credentials;
+- returns an actionable `403` outside the direct verified
+  Tailscale/localhost dashboard authority and an actionable `409` on a
+  non-gateway or before relay configuration.
+
+### Revoke a dashboard pairing invitation
+
+**DELETE** `/v1/auth/pairing-invitations/{invitation_id}`
+
+Parameters:
+
+- Path `invitation_id` (required): public invitation UUID.
+- Header `X-Skulk-Dashboard: pairing-v1` (required).
+
+Behavior:
+
+- applies the same loopback-or-Tailscale peer, exact same-origin, trusted-host,
+  and no-forwarding boundary;
+- blocks new and unfinished attempts without revoking already paired devices;
+- returns `204` after success or idempotent repeated revocation, `404` for an
+  unknown invitation, an actionable `403` outside the direct verified
+  Tailscale/localhost dashboard authority, and `409` on a non-gateway, before
+  relay configuration, or for an unresolved concurrent authority transition.
+
+### Create a device challenge
+
+**POST** `/v1/auth/pairing-sessions/challenge`
+
+Parameters:
+
+- JSON body `nonce` (required): high-entropy capability from the QR package.
+  It is deliberately excluded from the URL so normal request-path logs cannot
+  retain it.
+- JSON body `deviceName` (required): operator-visible device label, 1–80
+  characters after whitespace normalization.
+- JSON body `devicePublicKey` (required): unpadded URL-safe base64 containing
+  one raw 32-byte Ed25519 public key.
+- JSON body `invitationId` (optional): version-three invitation UUID. Omit it
+  for legacy single-use packages.
+
+Behavior:
+
+- accepts only a host-created, available session or invitation;
+- binds the proposed device key to a legacy session or a new independent
+  five-minute invitation attempt;
+- returns a random base64url `challenge`, attempt `expiresAt`, and an
+  `attemptId` only for version-three invitations;
+- returns `404` for an unknown nonce, `410` after expiry, `409` after another
+  transition already used the session, `422` for an invalid public key, `429`
+  with `Retry-After` when ten invitation attempts are already live, and `503`
+  on an API node that has not been initialized as a gateway. Revoked,
+  exhausted or expired invitations return `410`; the lifetime attempt ceiling
+  returns `410` only when requesting another attempt, while already-issued
+  attempts may still finish before their own expiry.
+
+Legacy version-one and version-two packages sign the domain-separated message
+defined by `pairing_signature_message` in `src/skulk/operator/pairing.py`:
+
+```text
+"skulk-device-pairing-v1\\0"
+  || ASCII(clusterId) || "\\0"
+  || ASCII(nonce) || "\\0"
+  || ASCII(challenge)
+```
+
+Version-three invitations instead sign the distinct message defined by
+`pairing_invitation_signature_message`:
+
+```text
+"skulk-device-pairing-v2\\0"
+  || ASCII(clusterId) || "\\0"
+  || ASCII(invitationId) || "\\0"
+  || ASCII(nonce) || "\\0"
+  || ASCII(attemptId) || "\\0"
+  || ASCII(challenge)
+```
+
+Here `||` means byte concatenation, each quoted `\\0` is one NUL byte, and
+UUIDs use their canonical lowercase hyphenated representation. The v3 domain
+and both returned identifiers are mandatory: signing the legacy transcript for
+an invitation fails proof verification. Clients should use the corresponding
+shared helper when available rather than maintaining another copy of these
+bytes.
+
+### Exchange device proof
+
+**POST** `/v1/auth/pairing-sessions/exchange`
+
+Parameters:
+
+- JSON body `nonce` (required): the same pairing capability. It is deliberately
+  excluded from the URL so normal request-path logs cannot retain it.
+- JSON body `signature` (required): unpadded URL-safe base64 Ed25519 signature
+  produced by the challenged device key.
+- JSON body `invitationId` and `attemptId` (optional as a pair): required for a
+  version-three invitation and omitted together for legacy packages.
+
+Behavior:
+
+- verifies possession of the exact device key bound during the challenge;
+- atomically consumes the legacy session or exact invitation attempt;
+- returns a stable `deviceId`, the validated cluster identity, a 15-minute
+  opaque access token, a 30-day rotating refresh token, their expiries, and the
+  granted canonical API scopes;
+- when relay access is configured, also returns one-time `remoteAccess` material:
+  `transport=paired_websocket_v1`, app WebSocket URL, opaque route locator,
+  app-role carrier credential, inner-TLS server name, and pinned gateway CA
+  certificate. The gateway-role carrier credential is never returned;
+- stores only encrypted session/device state and one-way token digests;
+- never returns either credential again;
+- returns `401` for an invalid proof, `404` for an unknown invitation or
+  attempt, `409` for reuse or an out-of-order exchange, `410` when the session,
+  attempt, or invitation is unavailable, and `503` on a non-designated node.
+
+Together with refresh rotation, these are the complete pre-access-token HTTP
+surface on the relay-only listener. That listener serves the existing canonical
+Skulk app rather than a parallel mobile API: safe reads require `cluster:read`
+or `models:read`, inference/WebSocket routes require `chat:write`, mutations
+require `operations:write`, and device routes require `devices:manage`. The
+existing local listener and dashboard remain unchanged for direct clients; only
+the separate loopback TLS listener connected to the relay applies this bearer
+boundary.
+
+### Rotate operator credentials
+
+**POST** `/v1/auth/token`
+
+Parameters:
+
+- JSON body `deviceId` (required): stable paired-device UUID returned by the
+  exchange.
+- JSON body `refreshToken` (required): current opaque rotating refresh
+  credential.
+
+Behavior:
+
+- validates the device and current refresh-token digest;
+- atomically invalidates both members of the previous token pair;
+- returns a fresh 15-minute access token and 30-day refresh token, their
+  expiries, and the device's unchanged scopes;
+- returns `401` for an unknown, revoked, expired, or replayed credential and
+  `409` if concurrent credential state changed.
+
+The client must replace both stored credentials as one operation. A response
+lost after the gateway commits rotation requires pairing again because replaying
+the previous refresh token is intentionally rejected. Relay and pinned TLS
+material are not repeated during refresh; the app retains them in platform
+secure storage until it disconnects or pairs again.
+
+### List paired devices
+
+**GET** `/v1/auth/devices`
+
+Parameters:
+
+- `Authorization: Bearer <access-token>` (required): a valid credential with
+  `devices:manage` scope.
+
+Behavior:
+
+- returns stable device IDs, display names, pairing times, refresh expiries,
+  active/revoked state, and which row represents the caller;
+- never returns device public keys, token digests, raw credentials, or pairing
+  nonces;
+- returns `401` for a missing, malformed, unknown, revoked, or expired bearer
+  and `403` when the bearer lacks device-management scope.
+
+### Revoke a paired device
+
+**DELETE** `/v1/auth/devices/{device_id}`
+
+Parameters:
+
+- path `device_id` (required): stable paired-device UUID to revoke;
+- `Authorization: Bearer <access-token>` (required): a valid credential with
+  `devices:manage` scope.
+
+Behavior:
+
+- atomically clears the target's access and refresh digests and expiries;
+- returns `204` after successful revocation and when an authorized caller
+  repeats revocation for the same already-revoked target;
+- makes both credentials unusable immediately;
+- returns `401` for an invalid caller, `403` for insufficient scope, `404` for
+  an unknown target device, and `409` if concurrent credential state changed.
 
 ## OpenAI Chat Completions
 
@@ -409,6 +757,7 @@ Notes:
 - Treat `resolved_capabilities` as the default tool-free request path; request-specific options such as tools can change prompt rendering and related resolved values for mixed-mode model families.
 - Thinking-control semantics are model-aware:
   - if `supports_thinking_toggle` is `true`, send `enable_thinking=true` or `false` explicitly
+  - if both `enable_thinking` and `reasoning_effort` are omitted for a model with a known toggleable capability profile, Skulk disables thinking using the profile's disabled effort
   - `reasoning_effort="none"` disables thinking for toggleable models
   - if a model does not support toggleable thinking, Skulk ignores explicit toggle overrides but still preserves explicit non-disabled reasoning-effort hints when the model family supports them
 
@@ -598,13 +947,15 @@ Request fields:
 |-------|------|-------|
 | `model` | string | Required mounted TTS model id |
 | `input` | string | Required text to synthesize |
-| `voice` | string or null | Optional model-specific voice name. When omitted, Skulk applies the mounted model card's `audio.default_voice` when declared. |
+| `voice` | string or null | Optional stable voice identifier. Accepted only when the mounted card declares a static `audio.voices` catalog; unknown names are rejected. Entries may be model-native speakers or checksummed reference profiles bundled with Skulk. When omitted, Skulk applies the card's `audio.default_voice` when declared. |
 | `speed` | number or null | Optional positive speaking speed multiplier |
 | `response_format` | string or null | Optional output format: `mp3`, `wav`, `flac`, `ogg`, `opus`, or raw `pcm`. When omitted or set to `null`, Skulk uses `mp3` for `stream=true`; otherwise it uses the mounted model card default when declared and falls back to `mp3`; supported values are constrained by the model card when declared |
 | `stream` | boolean | Optional. When `true`, Skulk returns a chunked HTTP response and yields MP3 or raw PCM bytes as the speech runner emits them; accepted only when the mounted TTS card explicitly declares `audio.supports_streaming = true` and every routable instance of the requested model has a ready runner |
 | `streaming_interval` | number or null | Optional positive model-specific streaming cadence hint, accepted only with `stream=true` |
 | `instruct`, `lang_code` | string or null | Optional model-specific generation hints |
-| `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number or integer | Optional model-specific sampling controls |
+| `temperature`, `top_p`, `top_k`, `repetition_penalty` | number | Optional model-specific sampling controls |
+| `max_tokens` | integer or null | Optional model-specific generation ceiling. An explicit value is preserved. When omitted and the mounted model explicitly declares this control, Skulk uses a 4096-token serving default instead of inheriting a potentially truncating upstream library default. Models that do not declare the control receive no injected keyword. |
+| `seed` | integer or null | Optional unsigned 32-bit sampling seed. When supplied, the speech runner resets MLX sampling immediately before generation so identical model, voice, text, and sampling controls are reproducible. Omission preserves the upstream advancing random stream. |
 | `reference_audio` | multipart file or null | Optional request-scoped voice-conditioning audio. Accepted only as a multipart upload for a mounted card declaring `audio.supports_reference_audio = true`; server-local paths are rejected |
 | `reference_text` | string or null | Optional transcript of `reference_audio`; accepted only when the multipart upload is present |
 
@@ -637,15 +988,23 @@ file when generation ends or fails. Reference-audio requests return **503
 Service Unavailable** when the Zenoh data plane is unavailable; Skulk never
 broadcasts private reference media through the gossipsub fallback.
 
+Reference-capable bundled cards may also expose Skulk's packaged voice profiles
+through the ordinary `voice` field. The worker resolves the selected identifier
+to its checksummed local MP3 and exact transcript; those asset paths and bytes
+never enter the command, State, or event log. This path does not require an
+upload or Zenoh media transfer. A multipart `reference_audio` upload is an
+explicit request-scoped override and cannot be combined with `voice`.
+
 `streaming_interval` without `stream=true`, `reference_text` without a
-multipart reference upload, and JSON `reference_audio` path strings return
-**400 Bad Request**.
+multipart reference upload, a multipart upload combined with `voice`, and JSON
+`reference_audio` path strings return **400 Bad Request**.
 
 ## Skulk Audio Voices API
 
 **GET** `/v1/audio/voices?model=<model-id>`
 
-Returns stable built-in voice identifiers declared by one mounted TTS model.
+Returns stable model-native and bundled-reference voice identifiers declared by
+one mounted TTS model.
 This is a Skulk extension, not an OpenAI compatibility route. The model must
 declare `audio.supports_voice_listing = true`; otherwise Skulk returns **400 Bad
 Request**.
@@ -655,9 +1014,11 @@ curl 'http://localhost:52415/v1/audio/voices?model=org/tts-model'
 ```
 
 The response is `{ "object": "list", "data": [...] }`. Each item contains the
-voice `id`, display `name`, mounted `model`, `kind = "builtin"`, and an ordered
-`preferred_languages` array of BCP 47 tags when the model card declares
-language preferences. Version 1 does not create or persist voice profiles.
+voice `id`, display `name`, mounted `model`, a `kind` of `"builtin"` for a
+model-native speaker or `"reference"` for a checksummed profile shipped with
+Skulk, and an ordered `preferred_languages` array of BCP 47 tags when the model
+card declares language preferences. This endpoint does not create or persist
+user voice profiles.
 
 ## OpenAI Audio Transcriptions API
 
@@ -991,11 +1352,54 @@ curl http://localhost:52415/v1/models
 
 This returns known model cards, not just running instances. `GET /models`
 serves the same catalog through the same handler; prefer the `/v1/models` path
-for OpenAI-compatible clients.
+for OpenAI-compatible clients. Complete installed cards load first so an
+air-gapped node keeps the exact generation it can actually launch. The current
+supported catalog comes from the external TUF-signed registry and refreshes at
+most every 60 seconds; a previously verified catalog may be used for up to 30
+days during an outage. That age limit does not apply to complete installed
+artifacts. Bundled cards fill non-installed catalog entries only when registry
+access and its acceptable cache are unavailable or disabled. Registry entries
+include immutable card and snapshot identities; local custom cards retain final
+override precedence.
+
+### Approve repository code on one node
+
+**GET** `/models/remote-code-approvals`
+
+Lists immutable model-card trust identities approved to execute
+repository-supplied Python on this API node. Signed cards use `card_...` IDs;
+custom and unsigned cards use content-derived `local_...` identities.
+
+Placement previews expose the same exact identity in `trust_requirement` when
+each selected serving node must hold explicit approval. Foxlight-provenance
+cards with automatic signed trust return no such requirement.
+
+**POST** `/models/remote-code-approvals/{card_id}`
+
+Approves an existing agent/community registry card, custom card, or unsigned
+card that can execute repository code. Approval is keyed to the immutable
+signed-card ID or the complete local card digest, stored in an owner-only local
+file, and applies only to this node. Repeat it on every node that may download
+or serve the artifact. Immutable, full-revision-pinned cards with Foxlight
+provenance from the TUF-verified registry are already Foxlight's trust decision
+and do not accept or require this second approval. Skulk fails closed before
+download and runner load when an explicit approval is required but absent.
+Approval lookup uses the complete catalog, independent of this node's
+image-model visibility setting. This mutation is accepted only from a
+loopback socket peer; browser
+requests must also have a loopback `Origin`. Requests carrying proxy or
+forwarding headers are rejected outright, because a local reverse proxy's
+socket would otherwise be indistinguishable from a direct loopback client.
+
+**DELETE** `/models/remote-code-approvals/{card_id}`
+
+Revokes that node-local approval. Revocation prevents future downloads and
+runner starts; it does not delete already downloaded bytes. The same loopback
+peer and browser-origin restriction applies.
 
 ### Search Hugging Face
 
-**GET** `/models/search?query=...&limit=...&mlx_only=...`
+**GET** `/models/search?query=...&limit=...&mlx_only=...&offset=...`
 
 ```bash
 curl "http://localhost:52415/models/search?query=qwen3&limit=5"
@@ -1005,11 +1409,55 @@ Behavior note:
 
 - `mlx_only=true` restricts results to the `mlx-community` author; the default
   searches all Hugging Face model repositories.
+- An empty `query` returns repositories sorted by Hugging Face's trending
+  score; text queries sort by downloads.
+- `offset` skips that many leading results, for "show more" paging.
+- `pipeline_tag` restricts results to one Hugging Face task (for example
+  `text-generation` or `automatic-speech-recognition`).
 - Ordinary text queries use Hugging Face repository search.
 - A query ending in `.gguf` also performs a bounded filename-aware fallback:
   Skulk broadens the model-name prefix, inspects those candidate repositories'
   manifests, and returns only exact filename matches. Exact matches carry a
   `matched_file` repo-relative path so the dashboard can preserve that quant.
+- Each result additionally carries discovery metadata when Hugging Face
+  reports it: `pipeline_tag` (task), `library_name`, `gated` (license
+  acceptance plus an HF token are required to download), `license`,
+  `param_count` (total parameters from safetensors or GGUF metadata),
+  `total_file_size` (exact GGUF artifact bytes), `context_length`,
+  `base_model_repo` and `base_model_relation` (derivation lineage:
+  finetune, quantized, merge, or adapter), `arxiv_ids`, `languages`, and
+  `architecture`.
+
+### List a GGUF repository's quantizations
+
+**GET** `/models/gguf-quants?model_id=owner/name`
+
+```bash
+curl "http://localhost:52415/models/gguf-quants?model_id=unsloth/DeepSeek-V4-Flash-0731-GGUF"
+```
+
+Returns `{ "model_id": ..., "options": [...] }` where each option is one
+downloadable quantization: its repo-relative first shard (`gguf_file`, the
+value to pin when adding or downloading), human `label`, exact `total_bytes`,
+and `shard_count`, sorted smallest first. Companion artifacts (speculative
+drafters, imatrix calibration files, multimodal projectors) are excluded;
+`options` is empty for a non-GGUF repository. The dashboard's Hugging Face
+results use this for the per-quant download chooser.
+
+### Fetch a model card summary
+
+**GET** `/models/card-summary?model_id=owner/name`
+
+```bash
+curl "http://localhost:52415/models/card-summary?model_id=LiquidAI/LFM2.5-2.6B"
+```
+
+Downloads the repository's model card README and returns
+`{ "model_id": ..., "summary": ... }`, where `summary` is the card's first
+prose paragraphs with markup stripped (bounded length). The summary is empty
+when the README is missing or has no usable prose. Summaries are cached per
+API process; the dashboard's discovery popovers fetch this lazily when
+opened.
 
 ### Add a Hugging Face model
 
@@ -1023,11 +1471,19 @@ Behavior note:
 }
 ```
 
-Fetches metadata and adds a custom model card to the cluster catalog. A
-generated GGUF card is compatible with both llama.cpp engines and prefers
+Fetches metadata and adds a custom model card to the cluster catalog. The
+request must come directly from a loopback peer with no proxy forwarding
+headers; browser requests must also carry a loopback origin. Generated cards
+may execute repository code, so this endpoint shares the node-local mutation
+boundary used by remote-code approvals. A generated GGUF card is compatible
+with both llama.cpp engines and prefers
 the served `llama_server` tags, so on a node running llama-server it gets
 that engine's concurrency slots and is eligible for multi-node pooling via
 RPC; nodes without a served binary fall through to the in-process engine.
+When the repository exactly matches a bundled card, generated metadata retains
+the bundled card's hard pipeline-split constraint; adding a curated model through
+the dashboard therefore cannot erase an architecture safety boundary. A
+hand-authored card remains an explicit operator override.
 The
 `model_id` field is required. `gguf_file` is optional; when supplied it must be
 an exact repo-relative GGUF weight path and the card pins that quant instead of
@@ -1041,11 +1497,22 @@ artifact downloads are pinned to that immutable revision.
 
 **GET** `/store/storage`
 
-Returns the local node's storage picture: every staged model with its size,
-last-use time, and whether a live instance (or one of its companion repos:
+Returns the local node's storage picture: every installed artifact across the
+configured staging cache, `SKULK_MODELS_DIR`, and read-only model search roots,
+with its size, last-use time, and whether a live instance (or one of its companion repos:
 MTP sidecar, assistant, vision weights) currently depends on it, plus
 event-log usage and free disk on the models volume. Cluster-wide views query
 each node's API.
+
+Each artifact entry also reports `installedIdentity`, `manifestSha256`,
+`verificationState`, `manifestComplete`, `artifactRole`, and `ownerModelId`.
+`locationKind` is `store_local` when the directory belongs to the canonical
+store on this node and `node_cache` for a launchable node-local copy.
+`registryCardId` identifies the full card retained with the bytes, while a
+companion additionally reports its immutable `ownerCardId`; reconciliation
+uses those fields to select one current generation per artifact alias.
+Directories that cannot be associated with trusted card truth appear with an
+`unresolved` verification state and are not imported or launched automatically.
 
 ```bash
 curl http://localhost:52415/store/storage
@@ -1104,9 +1571,10 @@ command is forwarded, so an impossible placement fails at the API instead of
 silently failing on the master:
 
 - **400** with the specific reason: no connected cycle of `min_nodes` nodes,
-  exclusions removed every candidate, the model does not support Tensor
-  sharding, or a node cannot fit its weight shard plus runtime headroom
-  (the error names the node and the GB arithmetic).
+  exclusions removed every candidate, every candidate has a positively known
+  isolated Zenoh inference data plane, the model does not support Tensor
+  sharding, or a node cannot fit its weight shard plus runtime headroom (the
+  error names the node and the GB arithmetic).
 - **503** when cluster info is still being gossiped (a cluster that just
   formed): connection edges lag node identities by a few gossip rounds, and
   per-node memory info lags the edges. The request internally waits up to
@@ -1337,9 +1805,52 @@ Use this to confirm whether the store is configured and reachable.
 
 Use this to inspect which models the shared store knows about.
 
+Each registry entry records nullable `source_revision` and `source_repository`
+metadata. Cache hits require the effective repository and revision to match, so
+an unchanged alias cannot reuse bytes from a different signed source.
+
+Entries also include the full `installed_card` record, verification state,
+artifact role and owning card, `current_registry_identity`,
+`installed_not_current`, `update_available`, active signed `advisories`,
+`cached_on_nodes` (identity, completeness, bytes, last use, in-use state, and
+`location_kind`), and reconciliation state plus last verification time.
+`location_kind` distinguishes canonical `store_local` availability from a
+`node_cache` copy. Companion artifacts are first-class entries grouped under
+their owning base card by the dashboard.
+
+The top-level `cache_inventory` reports `observed_nodes`, `expected_nodes`, and a
+coverage state:
+
+- `syncing`: at least one newly live node has not published its first inventory.
+- `current`: every live node has a fresh, complete reading.
+- `degraded`: known locations are partial because a reading is stale, missing
+  after convergence, or truncated by the fixed telemetry bound.
+- `unavailable`: no usable node inventory exists.
+
+Canonical store entries are not copied into telemetry. The store host publishes
+only its role, and each API synthesizes `store_local` for canonical entries.
+Other cache locations come from compact, last-write-wins node telemetry. Stale
+known locations remain visible while the top-level state is `degraded`; callers
+must not treat this operator/read projection as transfer authorization.
+Reconciliation continues to query `GET /store/storage` directly and verifies
+the exact installed identity and manifest before import or export.
+
+The response is `{"entries": [...], "cache_inventory": {...}}` and is fully described as
+`StoreRegistryResponse` in generated OpenAPI.
+
 The dashboard combines registry results with `GET /v1/models` metadata so it can
 display derived tags such as `vision`, `thinking`, `embedding`, `tensor`, and
 `optiq` in the Store list.
+
+**GET** `/registry` (internal model-store transport port)
+
+Returns the authoritative store index consumed by Skulk nodes. The optional
+`recover_installed_cards=true` query first rebuilds installed-card associations
+from complete local sidecars and trusted catalog cards. Every entry is emitted
+with JSON-native values; in particular, the nested installed card's
+`captured_at` value is an ISO 8601 UTC string rather than a native datetime.
+This endpoint is cluster-internal transport; operators and dashboards should
+use the enriched public `GET /store/registry` endpoint above.
 
 ### Store downloads
 
@@ -1353,12 +1864,43 @@ Use this to inspect in-progress shared-store download activity.
 
 Use this when you want the store host to fetch and register a model.
 
-The optional JSON body accepts `gguf_file` and `source_revision`:
+For signed-registry artifacts, Skulk's internal request also carries the
+immutable card ID. The store host verifies that identity against its own signed
+catalog and applies its own node-local repository-code approval before fetching
+bytes; approval on the requesting worker does not grant approval on the store.
+
+The optional JSON body accepts the following fields:
+
+- `gguf_file`: non-empty repo-relative GGUF path selecting the base or companion
+  quant.
+- `extra_gguf_files`: list of non-empty repo-relative GGUF paths to co-fetch from
+  the same repository, such as a same-repo served draft.
+- `source_revision`: full 40-character immutable Hugging Face commit.
+- `source_repository`: upstream `owner/repository` containing the bytes when the
+  store entry's `model_id` is an alias; identifiers longer than 512 characters
+  are rejected.
+- `registry_card_id`: immutable `card_<content-derived-id>` selecting the signed
+  base-card generation.
+- `owner_model_id`: owning base-model alias for a companion artifact. It is
+  required for non-`base` roles and must be an `owner/model` identifier no longer
+  than 512 characters.
+- `owner_registry_card_id`: immutable signed identity of that owning base card.
+  Omit it only for bundled or custom owner cards without a registry identity.
+- `artifact_role`: one of `base`, `vision_weights`, `mtp_sidecar`, `assistant`,
+  `served_draft`, or `vllm_draft`; defaults to `base`.
+
+A complete companion request names the companion repository and immutable
+revision, its role, and its owning card:
 
 ```json
 {
-  "gguf_file": "<repo-relative path>",
-  "source_revision": "0123456789abcdef0123456789abcdef01234567"
+  "gguf_file": "draft.gguf",
+  "extra_gguf_files": [],
+  "source_revision": "0123456789abcdef0123456789abcdef01234567",
+  "source_repository": "owner/draft-repository",
+  "owner_model_id": "owner/base-model-alias",
+  "owner_registry_card_id": "card_<content-derived-id>",
+  "artifact_role": "served_draft"
 }
 ```
 
@@ -1371,9 +1913,94 @@ present in the selected revision falls back to the default at the store protocol
 layer; the `/models/add` card-building endpoint validates exact pins before
 requesting a download.
 
+When `registry_card_id` is omitted, Skulk selects the current card when one
+exists. A Hugging Face search result absent from the catalog may still be
+downloaded with no card ID; the store records it as unverified rather than
+claiming signed registry provenance. Supplying `registry_card_id` requests that
+exact immutable generation and returns `409 Conflict` when the store host cannot
+verify it.
+Companion requests instead bind `owner_registry_card_id` to `owner_model_id` and
+require the repository, revision, selected file, and `artifact_role` to match
+that owning card's signed companion declaration. A mismatched alias, role, or
+artifact selection returns `409 Conflict`; malformed identifiers and roles
+return `400 Bad Request`.
+
+The response reports `modelId`, nullable `sourceRevision`, `status`, and
+`progress`; transport or store rejection additionally reports `error`. The
+generated `StoreDownloadResponse` schema describes this wire contract.
+
+### Reconciliation status
+
+**GET** `/store/reconciliation`
+
+Returns `state`, `inventory_only`, scanned node and discovered/imported artifact
+counts, pending identities, failures, and `last_verified_at`. Automatic imports
+are enabled by default (`inventory_only: false`); inventory-only is an optional
+production rollout mode rather than a prerequisite.
+
+**POST** `/store/reconciliation/rescan`
+
+Runs one immediate retry. This mutation accepts only a loopback socket peer,
+rejects proxy forwarding headers, and requires a loopback browser origin when
+an `Origin` header is present.
+
+### Internal cache export
+
+**POST** `/store/internal/exports`
+
+Creates a random short-lived capability bound to one installed identity,
+manifest digest, target store node, byte ceiling, and expiry. The caller's
+socket address must also match an advertised interface of the claimed store
+node; the node-id field and header are not accepted as self-asserted identity.
+
+**GET** `/store/internal/exports/{capability_token}/{relative_path}`
+
+Serves only paths in the granted manifest, requires the bound target-node
+header, rejects files changed after capability issuance, supports HTTP byte
+ranges for restart recovery, and enforces the capability's cumulative byte
+ceiling across requests. These endpoints are internal reconciliation transport,
+not a public model-download API.
+
+**POST** `/imports` (internal model-store transport port)
+
+Asks the authoritative store to pull and atomically publish one artifact from a
+node cache. This endpoint is internal reconciliation transport and accepts only
+a direct loopback socket peer with no proxy-forwarding headers; remote or
+forwarded callers receive `403`. The JSON body contains:
+
+- `record`: the complete versioned `InstalledCardRecord`, including its full
+  card and canonical file manifest.
+- `source_base_url`: the selected source node's internal export URL.
+- `capability_token`: the short-lived token issued by that source for this
+  manifest and target store node.
+- `target_node_id`: the store node identity bound into the capability.
+
+The store resumes individual files with HTTP ranges, enforces its capacity
+floor, verifies every size and SHA-256 digest, writes the installed-card
+sidecar, and publishes the new generation and rebuildable registry entry only
+after complete verification. A peer record claiming `registry_verified` is
+also rebound to the store host's independently TUF-verified card: its full
+immutable card payload, alias, repository, revision, selected file, artifact
+role, and companion ownership must agree before any transfer starts. A
+successful response is the resulting store registry entry. Malformed records
+or missing fields return `400`; invalid or expired capabilities, unsafe
+manifest paths, insufficient capacity, source loss, digest mismatch, or signed
+card disagreement fail the import without replacing the active generation.
+Operators do not call this endpoint directly; the reconciler uses it after
+`POST /store/internal/exports` grants a transfer.
+
 ### Store download status
 
 **GET** `/store/models/{model_id}/download/status`
+
+### Cancel a store download
+
+**DELETE** `/store/models/{model_id}/download`
+
+Cancels one pending or active canonical-store download. Partial files remain in
+the store staging directory so a later request can resume instead of starting
+over. Repeating cancellation for an already-cancelled transfer succeeds. The
+endpoint returns `409` when no cancellable transfer exists.
 
 ### Delete a model from the store
 
@@ -1386,11 +2013,20 @@ staging pressure. Returns `404` if the model is not registered in the store. (To
 clear staged copies without deleting the store copy, use
 `POST /store/purge-staging`.)
 
+Before deleting bytes, the store durably tombstones the alias against automatic
+reconciliation. A stale node cache that missed eviction remains visible in
+`cached_on_nodes` but cannot recreate the base artifact or its owned companions.
+The tombstone survives restarts and is cleared only after a later explicit store
+download for that alias completes successfully.
+
 ### Purge staging caches
 
 **POST** `/store/purge-staging`
 
-Use this to remove staged model artifacts from nodes without deleting the store copy itself.
+Use this to remove staged model artifacts from nodes without deleting the store
+copy itself. Each artifact directory is removed as one unit, so its model bytes,
+installed-card sidecar, revision markers, and last-use marker are evicted
+together.
 
 ### Start optimization
 
@@ -1417,6 +2053,21 @@ Important fields:
 | `tags` | array | UI-friendly derived labels such as `vision`, `thinking`, `embedding`, `tts`, `stt`, `tensor`, and `optiq` |
 | `supports_tensor` | boolean | Whether tensor parallel launch is supported |
 | `base_model` | string | Base family or upstream source model when known |
+| `artifact_repository` | string | Upstream repository containing the artifact bytes; may differ from `id` when several exact files or quants share one repository |
+| `artifact_file` | string or null | Exact selected file for file-addressed artifacts such as GGUF |
+| `catalog_source` | string | `registry`, `bundled`, or `custom` |
+| `registry_card_id` | string or null | Immutable content-derived card identity from the signed registry |
+| `registry_snapshot_id` | string or null | Signed catalog snapshot that supplied the card |
+| `registry_provenance` | string or null | Audited signed-registry origin (`foxlight`, `agent`, or `community`); null for bundled/custom cards |
+| `installed` | boolean | Whether this node has a complete active installed generation |
+| `active_installed_identity` | string or null | Durable generation identity this node will launch |
+| `installed_verification` | string or null | `registry_verified`, `local_legacy`, `custom`, or `unresolved` |
+| `current_registry_identity` | string or null | Current signed identity for the alias, which may differ from the active install |
+| `update_available` | boolean | A newer signed generation exists but is not active until transfer commits |
+| `advisories` | array | Active signed warn-only security notices affecting the installed or current card |
+| `remote_code_approval_required` | boolean | Whether the card or its selected platform loader can execute repository Python and is not automatically trusted, so every serving node needs explicit local approval |
+| `remote_code_approved_on_this_node` | boolean | Whether the exact signed `card_...` or content-derived local `local_...` trust identity is approved on the responding node |
+| `remote_code_automatically_trusted` | boolean | Whether signed Foxlight provenance authorizes repository code for this exact pinned registry card without a second node-local approval |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
 | `resolved_capabilities.supports_speech_synthesis` | boolean | Whether clients should treat the model as a text-to-speech model |
 | `resolved_capabilities.supports_transcription` | boolean | Whether clients should treat the model as a speech-to-text model |
@@ -1425,8 +2076,13 @@ Important fields:
 | `resolved_capabilities.supports_realtime_audio` | boolean | Whether the model declares realtime audio support |
 | `resolved_capabilities.audio_response_formats` | array | Encoded audio formats the model can produce for speech synthesis |
 | `runtime.mtp_sidecar_repo` | string | Repo of this model's MTP sidecar (prediction heads), when it declares one |
+| `runtime.mtp_sidecar_revision` | string | Immutable commit of a separately hosted MTP sidecar |
 | `runtime.assistant_model_repo` | string | Repo of this model's speculative-decoding assistant (drafter), when it declares one |
+| `runtime.assistant_model_revision` | string | Immutable commit of a separately hosted assistant model |
 | `runtime.served_spec_draft_repo` | string | Repo of this model's separate served-engine draft GGUF, when it declares one |
+| `runtime.served_spec_draft_revision` | string | Immutable commit of a separately hosted served-engine draft |
+| `runtime.vllm_spec_draft_repo` | string | Repo of this model's separate vLLM drafter, when it declares one |
+| `runtime.vllm_spec_draft_revision` | string | Immutable commit of a separately hosted vLLM drafter |
 
 The dashboard uses `tags` for compact badges and `capabilities` for filtering
 and richer tooltips. The `audio` and `resolved_capabilities.*speech*` fields
@@ -1438,12 +2094,15 @@ for ready mounted speech models. Browser microphone capture is a browser
 security feature, so STT recording controls require a secure origin such as
 HTTPS or localhost even though the API endpoint itself is ordinary multipart
 HTTP. Speech translation metadata remains reserved for later audio endpoints.
-The three `runtime.*_repo` fields name a model's
+The four `runtime.*_repo` fields name a model's
 speculative-decoding companions (a draft model or an MTP-head sidecar). Those
 companion repos are downloaded and loaded automatically with their parent and
 are not independently placeable, so the dashboard marks any store entry matching
 one of these repos as a companion (a "Drafter" or "Sidecar" badge) rather than
 offering it launch, placement, or optimize actions.
+For signed cards, every separately hosted companion has a matching full commit
+revision; companions stored in the base artifact repository inherit the base
+card's `source_revision`.
 
 ## Configuration Endpoints
 
@@ -1507,15 +2166,29 @@ Node IDs are per-session and change when the process restarts.
 
 ### Restart a node
 
-**POST** `/admin/restart?node_id=<optional node id>`
+**POST** `/admin/restart?node_install_id=<stable id>`
 
-Gracefully restart the Skulk process on this or a remote node. When `node_id` is omitted or matches the local node, replaces the current process image in-place via `os.execv` (same PID). When `node_id` targets a remote node, sends a `RestartNode` command via pub/sub.
+Gracefully restart the Skulk process on this or a remote node. Operator clients
+should pass the stable UUIDv4 `node_install_id` published under
+`GET /state` → `nodeIdentities[*].nodeInstallId`. Skulk resolves that identity
+against current live telemetry immediately before dispatch, so a process restart
+cannot leave the client targeting an expired libp2p session. A missing stable
+target returns HTTP 404; an ambiguous target returns HTTP 409.
+
+Legacy local clients may continue to pass the session-scoped
+`node_id=<runtime id>`. Supplying both target forms returns HTTP 400. Omitting
+both restarts the API node itself. A local target replaces the current process
+image in-place via `os.execv` (same PID); a remote target sends the existing
+`RestartNode` command via pub/sub.
 
 - GPU/Metal memory is released when the process image is replaced
 - the node rejoins the cluster automatically on startup
 - active inference is interrupted
 
-Returns `{"status": "restarting", "node_id": "..."}` for local restarts, or `{"status": "restart_sent", "node_id": "..."}` for remote restarts.
+Returns `{"status": "restarting", "node_id": "...", "node_install_id": "..."}`
+for stable local targets, or the corresponding `"restart_sent"` status for
+stable remote targets. Legacy session-targeted responses retain their existing
+shape without `node_install_id`.
 If a local restart is already scheduled, returns HTTP 409 with `{"status": "restart_already_pending"}`.
 
 ### Onboarding status
@@ -2008,7 +2681,8 @@ Its payload accepts:
 | `voice` | string | Optional model-specific voice |
 | `streaming_interval` | number | Optional positive generation cadence hint |
 | `speed`, `instruct`, `lang_code` | model-specific | Optional speech controls |
-| `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number | Optional model-specific sampling controls |
+| `temperature`, `top_p`, `repetition_penalty` | number | Optional model-specific sampling controls |
+| `top_k`, `max_tokens`, `seed` | integer | Optional model-specific sampling controls; `seed` must be unsigned 32-bit |
 
 Each `chunk` payload reports `model`, `format: "mp3"`, `chunk_index`,
 `is_partial`, and optional `sample_rate`; the MP3 bytes are carried beside it
@@ -2161,8 +2835,12 @@ samples, the dashboard continuously resamples them to 24 kHz PCM16, and the
 client aggregates worklet callbacks into 100 ms transport frames before the
 mic control commits the socket when recording stops. Realtime mode can retain
 the socket across server-VAD turns, show partial transcripts in the editable
-draft, and optionally auto-send final transcripts through the selected mounted
-chat model. If either capability truth is absent, chat retains the batch `MediaRecorder` plus
+draft, and optionally auto-send final transcripts through the same dashboard
+`POST /v1/chat/completions` flow used by typed prompts. This preserves the full
+dashboard conversation and its ordinary generation, cancellation, and TTS
+semantics; the WebSocket's optional `response` participant remains available to
+API clients but is not a second dashboard conversation. If either capability
+truth is absent, chat retains the batch `MediaRecorder` plus
 `POST /v1/audio/transcriptions` path.
 
 When `response` is configured, the API node that owns the WebSocket retains the
@@ -2331,13 +3009,15 @@ The operator panel at `/operator` is designed for mobile access and can also be 
 
 | Endpoint | Description |
 | --- | --- |
-| `POST /admin/restart?node_id=<id>` | Send a restart command to any node in the cluster |
+| `POST /admin/restart?node_install_id=<id>` | Resolve a stable installation identity and send a restart command to its current live node |
 
 ### Typical operator app workflow
 
 1. Call `GET /v1/connectivity/remote-access` on the initially discovered node to get the `preferredUrl`, then use that as the base URL for subsequent calls.
-2. Poll `GET /state` every 5 seconds for node health (memory, GPU, temperature).
-3. Show per-node cards with restart buttons that call `POST /admin/restart?node_id=<id>`.
+2. Poll `GET /state` every 5 seconds for node health (memory, GPU, temperature)
+   and stable `nodeIdentities[*].nodeInstallId` values.
+3. Show restart only when the selected live node reports a stable installation
+   identity, then call `POST /admin/restart?node_install_id=<id>`.
 4. On first launch or settings screen, show the `operatorUrl` as a QR code so users can hand it off to another device.
 
 ## Helpful Next Docs

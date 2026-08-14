@@ -22,6 +22,7 @@ from skulk.shared.backends import (
     platform_compatible_backends,
     resolve_node_backend,
 )
+from skulk.shared.data_plane_health import zenoh_isolated_nodes
 from skulk.shared.models.memory_estimate import instance_context_token_limit
 from skulk.shared.models.model_cards import ModelCard, ModelId, card_serves_speech
 from skulk.shared.topology import Topology
@@ -388,6 +389,30 @@ def place_instance(
                 "Check the excluded_nodes list — node IDs change when a "
                 "cluster session restarts."
             )
+
+    # A healthy control-plane topology does not prove that generated tokens can
+    # return from every candidate node. When telemetry positively reports a
+    # live Zenoh node with zero peers, exclude every cycle touching it so the
+    # planner cannot create a runner that loads successfully but never delivers
+    # output. Unknown peer counts remain eligible during startup.
+    if node_resources:
+        isolated_nodes = zenoh_isolated_nodes(
+            live_nodes=set(topology.list_nodes()),
+            node_resources=node_resources,
+        )
+        if isolated_nodes:
+            candidate_cycles = [
+                cycle
+                for cycle in candidate_cycles
+                if not (set(cycle.node_ids) & isolated_nodes)
+            ]
+            if not candidate_cycles:
+                raise PlacementError(
+                    f"All cycles of at least {command.min_nodes} node(s) touch "
+                    "a node whose Zenoh inference data plane is isolated. "
+                    "Restore data-plane connectivity or exclude the affected "
+                    "node before placing the model."
+                )
 
     # Hard-filter on node participation and backend compatibility (#149).
     # A node is ineligible for an inference shard of THIS model when it

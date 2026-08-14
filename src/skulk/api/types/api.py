@@ -7,11 +7,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from skulk.shared.models.capabilities import ResolvedCapabilityProfile
 from skulk.shared.models.model_cards import AudioResponseFormat, ModelCard, ModelId
+from skulk.shared.models.registry import RegistryAdvisory
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import ReasoningEffort
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from skulk.shared.types.worker.shards import Sharding, ShardMetadata
+from skulk.store.installed_cards import InstalledArtifactRole, InstalledCardRecord
 from skulk.store.staging_eviction import StagedModelInfo
 from skulk.utils.pydantic_ext import CamelCaseModel
 
@@ -131,6 +133,81 @@ class ModelListModel(BaseModel):
     family: str = Field(default="")
     quantization: str = Field(default="")
     base_model: str = Field(default="")
+    artifact_repository: str = Field(
+        default="",
+        description=(
+            "Upstream repository containing the exact artifact; distinct from id "
+            "when multiple registry cards select files from one repository."
+        ),
+    )
+    artifact_file: str | None = Field(
+        default=None,
+        description="Exact selected repository file for file-addressed artifacts.",
+    )
+    registry_card_id: str | None = Field(
+        default=None,
+        pattern=r"^card_[a-z2-7]{52}$",
+        description="Immutable signed-registry card id, or null for local cards.",
+    )
+    registry_snapshot_id: str | None = Field(
+        default=None,
+        description="Signed snapshot that supplied this card, or null for local cards.",
+    )
+    registry_provenance: Literal["foxlight", "agent", "community"] | None = Field(
+        default=None,
+        description=(
+            "Audited signed-registry origin, or null for bundled and custom cards."
+        ),
+    )
+    installed: bool = Field(
+        default=False,
+        description="Whether this node has an active complete installed generation.",
+    )
+    active_installed_identity: str | None = Field(
+        default=None,
+        description="Durable identity of the generation this node will launch.",
+    )
+    installed_verification: (
+        Literal["registry_verified", "local_legacy", "custom", "unresolved"] | None
+    ) = Field(
+        default=None,
+        description="Evidence level binding the active card to local artifact bytes.",
+    )
+    current_registry_identity: str | None = Field(
+        default=None,
+        description="Current signed card identity for this alias, when available.",
+    )
+    update_available: bool = Field(
+        default=False,
+        description="Whether registry truth names a newer generation than the active installation.",
+    )
+    advisories: list[RegistryAdvisory] = Field(
+        default_factory=list,
+        description="Active signed warnings affecting this installed or current card.",
+    )
+    catalog_source: Literal["registry", "bundled", "custom"] = Field(
+        default="bundled",
+        description="Trust and precedence source for this catalog entry.",
+    )
+    remote_code_approval_required: bool = Field(
+        default=False,
+        description=(
+            "Whether this card or its selected platform loader can execute "
+            "repository Python and is not automatically trusted by immutable "
+            "Foxlight provenance, requiring approval on each serving node."
+        ),
+    )
+    remote_code_approved_on_this_node: bool = Field(
+        default=False,
+        description="Whether the required immutable trust identity is approved locally.",
+    )
+    remote_code_automatically_trusted: bool = Field(
+        default=False,
+        description=(
+            "Whether signed Foxlight provenance authorizes repository code for "
+            "this exact pinned registry card without a second local approval."
+        ),
+    )
     source_revision: str | None = Field(
         default=None,
         pattern=r"^[0-9a-f]{40}$",
@@ -173,10 +250,33 @@ class ModelListModel(BaseModel):
     )
 
 
+class RemoteCodeApprovalView(BaseModel):
+    """Node-local approval state for one immutable model-card identity."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    card_id: str = Field(
+        pattern=r"^(?:card|local)_[a-z2-7]{52}$",
+        description=(
+            "Signed registry card ID or content-derived local identity for an "
+            "unsigned/custom card."
+        ),
+    )
+    approved_on_this_node: bool = Field(
+        description=(
+            "Whether this API node's local approval file permits the card to "
+            "download or execute repository code."
+        )
+    )
+
+
 class ResolvedModelCapabilities(BaseModel):
     """Normalized runtime behavior that UI and API consumers can safely inspect."""
 
-    family: str = Field(default="", description="Resolved model family used for runtime behavior decisions.")
+    family: str = Field(
+        default="",
+        description="Resolved model family used for runtime behavior decisions.",
+    )
     supports_thinking: bool = Field(
         default=False,
         description="Whether the runtime expects the model to expose a reasoning or thinking mode.",
@@ -309,7 +409,9 @@ class ReasoningCapabilitySection(BaseModel):
     disabled_effort: ReasoningEffort | None = None
 
     @classmethod
-    def from_model_card(cls, model_card: ModelCard) -> "ReasoningCapabilitySection | None":
+    def from_model_card(
+        cls, model_card: ModelCard
+    ) -> "ReasoningCapabilitySection | None":
         config = model_card.reasoning
         if config is None:
             return None
@@ -329,7 +431,9 @@ class ModalitiesCapabilitySection(BaseModel):
     supports_native_multimodal: bool | None = None
 
     @classmethod
-    def from_model_card(cls, model_card: ModelCard) -> "ModalitiesCapabilitySection | None":
+    def from_model_card(
+        cls, model_card: ModelCard
+    ) -> "ModalitiesCapabilitySection | None":
         config = model_card.modalities
         if config is None:
             return None
@@ -371,11 +475,11 @@ class AudioCapabilitySection(BaseModel):
     )
     default_voice: str | None = Field(
         default=None,
-        description="Built-in voice used when a request omits an explicit voice.",
+        description="Stable voice used when a request omits an explicit voice.",
     )
     voices: list[str] = Field(
         default_factory=list,
-        description="Stable built-in voice identifiers declared by the model card.",
+        description="Stable built-in or bundled-reference voice identifiers.",
     )
     supports_reference_audio: bool | None = Field(
         default=None,
@@ -422,7 +526,9 @@ class ToolingCapabilitySection(BaseModel):
     tool_call_format: str | None = None
 
     @classmethod
-    def from_model_card(cls, model_card: ModelCard) -> "ToolingCapabilitySection | None":
+    def from_model_card(
+        cls, model_card: ModelCard
+    ) -> "ToolingCapabilitySection | None":
         config = model_card.tooling
         if config is None:
             return None
@@ -455,6 +561,10 @@ class RuntimeCapabilitySection(BaseModel):
             "sidecar repo as a companion rather than a launchable entry."
         ),
     )
+    mtp_sidecar_revision: str | None = Field(
+        default=None,
+        description="Immutable commit of the MTP sidecar repository.",
+    )
     assistant_model_repo: str | None = Field(
         default=None,
         description=(
@@ -462,6 +572,10 @@ class RuntimeCapabilitySection(BaseModel):
             "it declares one. A companion loaded with the base model, not "
             "independently placeable."
         ),
+    )
+    assistant_model_revision: str | None = Field(
+        default=None,
+        description="Immutable commit of the assistant-model repository.",
     )
     served_spec_draft_repo: str | None = Field(
         default=None,
@@ -471,9 +585,27 @@ class RuntimeCapabilitySection(BaseModel):
             "independently placeable."
         ),
     )
+    served_spec_draft_revision: str | None = Field(
+        default=None,
+        description="Immutable commit of the served-engine draft repository.",
+    )
+    vllm_spec_draft_repo: str | None = Field(
+        default=None,
+        description=(
+            "Repo of this model's vLLM speculative-decoding drafter, when it "
+            "declares one. A companion loaded with the base model, not "
+            "independently placeable."
+        ),
+    )
+    vllm_spec_draft_revision: str | None = Field(
+        default=None,
+        description="Immutable commit of the vLLM drafter repository.",
+    )
 
     @classmethod
-    def from_model_card(cls, model_card: ModelCard) -> "RuntimeCapabilitySection | None":
+    def from_model_card(
+        cls, model_card: ModelCard
+    ) -> "RuntimeCapabilitySection | None":
         config = model_card.runtime
         if config is None:
             return None
@@ -487,8 +619,13 @@ class RuntimeCapabilitySection(BaseModel):
                 config.output_parser.value if config.output_parser is not None else None
             ),
             mtp_sidecar_repo=config.mtp_sidecar_repo,
+            mtp_sidecar_revision=config.mtp_sidecar_revision,
             assistant_model_repo=config.assistant_model_repo,
+            assistant_model_revision=config.assistant_model_revision,
             served_spec_draft_repo=config.served_spec_draft_repo,
+            served_spec_draft_revision=config.served_spec_draft_revision,
+            vllm_spec_draft_repo=config.vllm_spec_draft_repo,
+            vllm_spec_draft_revision=config.vllm_spec_draft_revision,
         )
 
 
@@ -572,9 +709,7 @@ class OpenUrlToolResponse(BaseModel):
     """Structured response returned by the generic URL-open tool endpoint."""
 
     url: str = Field(description="Original URL requested by the caller.")
-    final_url: str = Field(
-        description="Final URL after redirects were followed."
-    )
+    final_url: str = Field(description="Final URL after redirects were followed.")
     title: str | None = Field(
         default=None,
         description="Best-effort page title when one could be determined.",
@@ -610,9 +745,7 @@ class ExtractPageToolResponse(BaseModel):
     """Structured response returned by the generic page-extraction tool endpoint."""
 
     url: str = Field(description="Original URL requested by the caller.")
-    final_url: str = Field(
-        description="Final URL after redirects were followed."
-    )
+    final_url: str = Field(description="Final URL after redirects were followed.")
     title: str | None = Field(
         default=None,
         description="Best-effort page title when one could be determined.",
@@ -889,18 +1022,118 @@ class HuggingFaceSearchResult(BaseModel):
             "for ordinary repository search results."
         ),
     )
+    pipeline_tag: str | None = Field(
+        default=None,
+        description="Hugging Face task tag (for example text-generation), when declared.",
+    )
+    library_name: str | None = Field(
+        default=None,
+        description="Framework the repository targets (transformers, diffusers, mlx, gguf).",
+    )
+    gated: bool = Field(
+        default=False,
+        description=(
+            "True when downloading requires accepting the repository's license "
+            "on Hugging Face and presenting an access token."
+        ),
+    )
+    license: str | None = Field(
+        default=None,
+        description="License identifier from the model card, when declared.",
+    )
+    param_count: int | None = Field(
+        default=None,
+        description=(
+            "Total parameter count reported by the repository's safetensors or "
+            "GGUF metadata, when available."
+        ),
+    )
+    total_file_size: int | None = Field(
+        default=None,
+        description="Exact total artifact bytes reported by GGUF metadata, when available.",
+    )
+    context_length: int | None = Field(
+        default=None,
+        description="Model context window reported by GGUF metadata, when available.",
+    )
+    base_model_repo: str | None = Field(
+        default=None,
+        description="Parent repository this model derives from, when tagged.",
+    )
+    base_model_relation: str | None = Field(
+        default=None,
+        description="How this model derives from its parent: finetune, quantized, merge, or adapter.",
+    )
+    arxiv_ids: list[str] = Field(
+        default_factory=list,
+        description="arXiv paper identifiers tagged on the repository.",
+    )
+    languages: list[str] = Field(
+        default_factory=list,
+        description="ISO 639-1 language tags declared on the repository.",
+    )
+    architecture: str | None = Field(
+        default=None,
+        description="Model architecture from repository config or GGUF metadata.",
+    )
 
 
-class StoreDownloadRequest(BaseModel):
-    """Optional file selection for a shared-store model download."""
+class GgufQuantOption(BaseModel):
+    """One downloadable quantization of a GGUF repository."""
 
     model_config = ConfigDict(frozen=True, strict=True)
 
+    gguf_file: str = Field(
+        description="Repo-relative first shard of the quant's group; pin this to download it."
+    )
+    label: str = Field(description="Human quant label, e.g. Q4_K_M or UD-Q2_K_XL.")
+    total_bytes: int = Field(
+        description="Exact total bytes of the quant's shard group."
+    )
+    shard_count: int = Field(description="Number of GGUF shards in the group.")
+
+
+class GgufQuantOptions(BaseModel):
+    """Quantization inventory for one GGUF repository."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    model_id: str
+    options: list[GgufQuantOption] = Field(default_factory=list)
+
+
+class HuggingFaceCardSummary(BaseModel):
+    """Prose summary extracted from a Hugging Face model card README."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    model_id: str
+    summary: str = Field(
+        description="First prose paragraphs of the model card, markup stripped; empty when the card has no usable prose.",
+    )
+
+
+class StoreDownloadRequest(BaseModel):
+    """Optional artifact selection for a shared-store model download."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
     gguf_file: str | None = Field(
         default=None,
+        min_length=1,
+        max_length=2048,
         description=(
             "Exact repo-relative GGUF file whose shard group the store should "
             "download. Omit to use the repository's default quant selection."
+        ),
+    )
+    extra_gguf_files: list[
+        Annotated[str, Field(min_length=1, max_length=2048)]
+    ] = Field(
+        default_factory=list,
+        description=(
+            "Same-repository companion GGUF paths to fetch with the selected "
+            "base quant."
         ),
     )
     source_revision: str | None = Field(
@@ -909,6 +1142,277 @@ class StoreDownloadRequest(BaseModel):
         description=(
             "Immutable Hugging Face commit to download. Omit to resolve the "
             "repository's mutable main branch."
+        ),
+    )
+    registry_card_id: str | None = Field(
+        default=None,
+        pattern=r"^card_[a-z2-7]{52}$",
+        description=(
+            "Optional immutable signed card identity. Omit to select the current "
+            "card for the model alias."
+        ),
+    )
+    source_repository: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=512,
+        pattern=r"^[^/]+/.+$",
+        description=(
+            "Upstream owner/repository containing the bytes when model_id is "
+            "a distinct store alias."
+        ),
+    )
+    owner_model_id: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=512,
+        pattern=r"^[^/]+/.+$",
+        description="Owning base-model alias for a companion artifact.",
+    )
+    owner_registry_card_id: str | None = Field(
+        default=None,
+        pattern=r"^card_[a-z2-7]{52}$",
+        description="Immutable signed identity of the owning base card.",
+    )
+    artifact_role: InstalledArtifactRole = Field(
+        default="base",
+        description="Base or declared companion role retained in installed truth.",
+    )
+
+
+class StoreDownloadResponse(CamelCaseModel):
+    """Current state returned after requesting a canonical-store download."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    model_id: str | None = Field(
+        default=None,
+        description="Store artifact alias accepted for download, when available.",
+    )
+    source_revision: str | None = Field(
+        default=None,
+        description="Immutable source commit selected for this transfer, or null for mutable main.",
+    )
+    status: str = Field(
+        description="Current store transfer state, or error when the store rejected the request."
+    )
+    progress: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Completed transfer fraction when the store supplied one.",
+    )
+    error: str | None = Field(
+        default=None,
+        description="Operator-readable store error when status is error.",
+    )
+
+
+class CachedArtifactLocation(BaseModel):
+    """One node where an exact store artifact generation is available."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    node_id: str = Field(description="Fabric node retaining this exact generation.")
+    complete: bool = Field(description="Whether the node reported a complete manifest.")
+    installed_identity: str = Field(description="Durable installed generation identity.")
+    bytes: int = Field(ge=0, description="Artifact bytes retained on the node.")
+    last_use_epoch_seconds: float = Field(
+        ge=0,
+        description="Unix time of the node's most recent artifact use.",
+    )
+    in_use: bool = Field(description="Whether a live runner currently depends on the replica.")
+    location_kind: Literal["store_local", "node_cache"] = Field(
+        default="node_cache",
+        description="Whether the bytes are canonical-store-local or a node cache."
+    )
+
+
+class CacheInventoryStatus(BaseModel):
+    """Freshness and coverage of telemetry-derived fleet artifact availability."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    state: Literal["syncing", "current", "degraded", "unavailable"] = Field(
+        description="Whether current node availability is complete enough to rely on."
+    )
+    observed_nodes: int = Field(
+        ge=0,
+        description=(
+            "Live nodes with a usable artifact-inventory reading, including stale "
+            "readings retained as partial truth."
+        ),
+    )
+    expected_nodes: int = Field(
+        ge=0,
+        description="Nodes currently expected from live cluster topology.",
+    )
+
+
+class StoreRegistryEntry(BaseModel):
+    """Canonical store entry enriched with fleet cache and registry status."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    model_id: str = Field(description="Canonical store artifact alias.")
+    store_path: str = Field(description="Artifact directory relative to the store root.")
+    files: list[str] = Field(description="Registered files relative to the artifact directory.")
+    downloaded_at: str = Field(description="ISO 8601 UTC registration time.")
+    total_bytes: int = Field(ge=0, description="Registered artifact byte total.")
+    source_revision: str | None = Field(
+        default=None,
+        description="Immutable Hugging Face source commit, or null for mutable main.",
+    )
+    source_repository: str | None = Field(
+        default=None,
+        description="Upstream byte repository when different from the store alias.",
+    )
+    repo_has_projector: bool | None = Field(
+        default=None,
+        description="Whether the registered repository contains a multimodal projector.",
+    )
+    installed_card: InstalledCardRecord | None = Field(
+        default=None,
+        description="Complete durable card, artifact identity, ownership, and manifest.",
+    )
+
+    cached_on_nodes: list[CachedArtifactLocation] = Field(
+        default_factory=list,
+        description="Complete replicas of this installed identity reported across the fleet.",
+    )
+    current_registry_identity: str | None = Field(
+        default=None,
+        description="Current signed card identity for the owning model alias.",
+    )
+    installed_not_current: bool = Field(
+        description="Whether the installed generation is absent from or superseded by the current registry."
+    )
+    update_available: bool = Field(
+        description="Whether a different signed generation is available for installation."
+    )
+    advisories: list[RegistryAdvisory] = Field(
+        default_factory=list,
+        description="Active signed warn-only advisories affecting the installed or current card.",
+    )
+    reconciliation_state: Literal[
+        "idle", "scanning", "importing", "complete", "failed"
+    ] = Field(description="Current fleet reconciliation state.")
+    last_verified_at: str | None = Field(
+        default=None,
+        description="ISO 8601 UTC completion time of the latest reconciliation pass.",
+    )
+
+
+class StoreRegistryResponse(BaseModel):
+    """Public model-store registry and fleet cache-placement view."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    entries: list[StoreRegistryEntry] = Field(
+        default_factory=list,
+        description="Canonical artifacts known to the authoritative model store.",
+    )
+    cache_inventory: CacheInventoryStatus = Field(
+        description="Telemetry freshness and coverage for cached_on_nodes projections."
+    )
+
+
+class ArtifactExportRequest(BaseModel):
+    """Request a short-lived capability for one exact staged artifact."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    installed_identity: str = Field(description="Installed generation to export.")
+    manifest_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+        description="Exact manifest digest the store intends to import.",
+    )
+    target_node_id: str = Field(description="Store node allowed to redeem the token.")
+
+
+class ArtifactExportResponse(BaseModel):
+    """Issued artifact export capability and immutable manifest."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    capability_token: str = Field(
+        description=(
+            "Opaque, single-purpose bearer capability used to redeem files from "
+            "this exact artifact export before expiry."
+        )
+    )
+    expires_at_epoch_seconds: float = Field(
+        description="Unix epoch time after which the capability cannot be redeemed."
+    )
+    byte_ceiling: int = Field(
+        ge=0,
+        description=(
+            "Maximum cumulative artifact bytes the capability permits the target "
+            "node to read."
+        ),
+    )
+    record: InstalledCardRecord = Field(
+        description=(
+            "Immutable installed-card record whose manifest and generation the "
+            "capability exports."
+        )
+    )
+
+
+class ReconciliationStatus(BaseModel):
+    """Fleet cache-to-store reconciliation progress."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    state: Literal["idle", "scanning", "importing", "complete", "failed"] = Field(
+        default="idle",
+        description=(
+            "Current pass state: idle before scheduling, scanning inventories, "
+            "importing selected artifacts, complete after convergence, or failed "
+            "when one or more required operations did not converge."
+        ),
+    )
+    inventory_only: bool = Field(
+        default=True,
+        description=(
+            "Whether the pass reports eligible artifacts without importing them."
+        ),
+    )
+    scanned_nodes: int = Field(
+        default=0,
+        ge=0,
+        description="Number of reachable node inventories included in the pass.",
+    )
+    discovered_artifacts: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Distinct complete installed generations selected after replica "
+            "deduplication."
+        ),
+    )
+    imported_artifacts: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Selected generations newly committed to the canonical store by this pass."
+        ),
+    )
+    pending_imports: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Installed identities still absent from the canonical store, or all "
+            "eligible identities during an inventory-only pass."
+        ),
+    )
+    failures: tuple[str, ...] = Field(
+        default=(),
+        description="Operator-readable inventory or import failures from this pass.",
+    )
+    last_verified_at: str | None = Field(
+        default=None,
+        description=(
+            "ISO 8601 UTC completion time of the latest finished reconciliation pass."
         ),
     )
 
@@ -991,6 +1495,13 @@ class PlacementPreview(BaseModel):
     # Keys are NodeId strings, values are additional bytes that would be used on that node
     memory_delta_by_node: dict[str, int] | None = None
     error: str | None = None
+    trust_requirement: str | None = Field(
+        default=None,
+        description=(
+            "Actionable immutable-card approval requirement that must hold on "
+            "each selected serving node, or null when card trust is automatic."
+        ),
+    )
     alternative: bool = Field(
         default=False,
         description=(
@@ -1056,7 +1567,10 @@ class AudioSpeechRequest(BaseModel):
     )
     voice: str | None = Field(
         default=None,
-        description="Model-specific voice name or preset when supported.",
+        description=(
+            "Model-specific native voice or bundled-reference profile when "
+            "declared by the mounted card."
+        ),
     )
     speed: float | None = Field(
         default=None,
@@ -1114,7 +1628,20 @@ class AudioSpeechRequest(BaseModel):
     max_tokens: int | None = Field(
         default=None,
         gt=0,
-        description="Optional model-specific maximum generation token budget.",
+        description=(
+            "Optional model-specific maximum generation token budget. When omitted, "
+            "the speech runner supplies 4096 only to generators that explicitly "
+            "declare this control."
+        ),
+    )
+    seed: int | None = Field(
+        default=None,
+        ge=0,
+        le=2**32 - 1,
+        description=(
+            "Optional deterministic sampling seed applied immediately before "
+            "this speech generation."
+        ),
     )
     reference_audio: str | None = Field(
         default=None,
@@ -1153,9 +1680,11 @@ class AudioVoice(BaseModel, frozen=True):
             "this voice."
         ),
     )
-    kind: Literal["builtin"] = Field(
+    kind: Literal["builtin", "reference"] = Field(
         default="builtin",
-        description="Voice source. Version 1 exposes built-in voices only.",
+        description=(
+            "Voice source: a model-native preset or a bundled reference profile."
+        ),
     )
 
 
@@ -1413,9 +1942,7 @@ class TraceEventResponse(CamelCaseModel):
     model_id: str | None = None
     task_kind: TraceTaskKind | None = None
     tags: list[str] = Field(default_factory=list)
-    attrs: dict[str, str | int | float | bool | list[str]] = Field(
-        default_factory=dict
-    )
+    attrs: dict[str, str | int | float | bool | list[str]] = Field(default_factory=dict)
 
 
 class TraceResponse(CamelCaseModel):
