@@ -37,6 +37,24 @@ This project records release notes here and mirrors public-facing notes in
   by construction, and the Narrate code toggle beside Auto speech turns the
   behavior off.
 
+- Intelligent Fabric mode gives the cluster a resident steward: an assistant
+  the fabric itself keeps placed as a hidden system instance, ready to answer
+  operator questions about cluster health, models, downloads, and diagnostics.
+  The steward investigates through read-only tools before answering and
+  cannot change the cluster. It is off by default; enabling it in Settings
+  makes the master establish the placement as a planner invariant — placed on
+  the best available nodes from a benched preference list (with a GGUF
+  universal floor so every fleet can serve one), re-placed after node loss or
+  master failover, and protected from ordinary deletion. Clients talk to it
+  through the standard OpenAI-compatible chat surface as the virtual model
+  `skulk/steward` (streaming included, no steward-specific client code), poll
+  readiness at `GET /v1/steward`, and see it flagged with
+  `system_role: "steward"` in `GET /v1/models` so pickers can badge or
+  separate it. The dashboard gains a Steward page, chat-middleware extensions
+  run on steward turns exactly as on ordinary completions, and a steward that
+  is still being placed answers with a clean 503 status payload instead of
+  failing mid-answer.
+
 ## [1.5.0] - 2026-08-07
 
 ### Changed
