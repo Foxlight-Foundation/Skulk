@@ -1,10 +1,11 @@
 import styled from 'styled-components';
 import { FiSettings, FiDatabase, FiMessageSquare, FiSun, FiMoon } from 'react-icons/fi';
-import { MdHub } from 'react-icons/md';
+import { MdHub, MdAutoAwesome } from 'react-icons/md';
 import { VscBug } from 'react-icons/vsc';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import { useGetStewardStatusQuery } from '../../store/endpoints/steward';
 import type { NavRoute } from './HeaderNav';
 
 /**
@@ -106,6 +107,10 @@ const Divider = styled.div`
  * action closes the sheet so the content behind it is immediately visible.
  */
 export function MobileMenuSheet({ open, activeRoute, onNavigate, onOpenSettings, onClose }: MobileMenuSheetProps) {
+  const { data: stewardStatus } = useGetStewardStatusQuery(undefined, {
+    pollingInterval: 30000,
+  });
+  const stewardEnabled = stewardStatus?.enabled ?? false;
   const { t } = useSkulkTranslation();
   const dispatch = useAppDispatch();
   const themeName = useAppSelector((s) => s.ui.theme);
@@ -129,6 +134,11 @@ export function MobileMenuSheet({ open, activeRoute, onNavigate, onOpenSettings,
         <MenuRow $active={activeRoute === 'chat'} onClick={() => go('chat')} tabIndex={open ? 0 : -1}>
           <FiMessageSquare size={18} /> {t('header.nav.chat', 'Chat')}
         </MenuRow>
+        {stewardEnabled && (
+          <MenuRow $active={activeRoute === 'steward'} onClick={() => go('steward')} tabIndex={open ? 0 : -1}>
+            <MdAutoAwesome size={18} /> {t('header.nav.steward', 'Steward')}
+          </MenuRow>
+        )}
         <Divider />
         <MenuRow
           $active={observabilityPanelOpen}

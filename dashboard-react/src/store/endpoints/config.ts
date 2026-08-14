@@ -64,12 +64,21 @@ export interface TelemetryConfig {
   ingest_url: string;
 }
 
+/** Intelligent-fabric (resident steward) settings. */
+export interface IntelligentFabricConfig {
+  /** Master switch: the fabric keeps a hidden steward placement while on. */
+  enabled: boolean;
+  /** Ordered model-card preference list for the steward brain. */
+  steward_models?: string[];
+}
+
 export interface FullConfig {
   model_store?: PersistedStoreConfig;
   inference?: InferenceConfig;
   logging?: LoggingConfig;
   experiments?: ExperimentsConfig;
   telemetry?: TelemetryConfig;
+  intelligent_fabric?: IntelligentFabricConfig;
   hf_token?: string;
 }
 
@@ -109,7 +118,9 @@ export const configApi = apiSlice.injectEndpoints({
         method: 'PUT',
         body: { config },
       }),
-      invalidatesTags: ['Config'],
+      // Saving may flip intelligent_fabric: refresh steward status so the
+      // nav link and steward page react immediately, not on the next poll.
+      invalidatesTags: ['Config', 'StewardStatus'],
     }),
   }),
 });

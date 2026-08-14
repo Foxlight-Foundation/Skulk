@@ -125,6 +125,17 @@ from skulk.api.realtime import (
     RealtimeResponseConfig,
     RealtimeTranscriptionBridge,
 )
+from skulk.api.steward import (
+    STEWARD_NOT_READY_MESSAGES,
+    STEWARD_RETRY_AFTER_SECONDS,
+    STEWARD_SYSTEM_PROMPT,
+    STEWARD_VIRTUAL_MODEL_ID,
+    StewardCanaryState,
+    StewardChatMessage,
+    StewardHarness,
+    StewardStatusResponse,
+    derive_steward_state,
+)
 from skulk.api.types import (
     AddCustomModelParams,
     AdvancedImageParams,
@@ -149,6 +160,7 @@ from skulk.api.types import (
     CancelCommandResponse,
     ChatCompletionChoice,
     ChatCompletionMessage,
+    ChatCompletionMessageText,
     ChatCompletionRequest,
     ChatCompletionResponse,
     CreateInstanceParams,
@@ -436,8 +448,11 @@ from skulk.shared.types.telemetry import (
     TelemetryView,
     record_membership_from_event,
 )
-from skulk.shared.types.text_generation import TextGenerationTaskParams
-from skulk.shared.types.worker.downloads import DownloadCompleted
+from skulk.shared.types.text_generation import (
+    InputMessage,
+    TextGenerationTaskParams,
+)
+from skulk.shared.types.worker.downloads import DownloadCompleted, LiveDownloadProgress
 from skulk.shared.types.worker.instances import (
     Instance,
     InstanceId,
@@ -1547,6 +1562,11 @@ class API:
             for descriptor in self._extensions.capability_descriptors:
                 self._telemetry_view.local_advertised_capabilities.add(descriptor.id)
             self._extensions.run_startup_hooks(self._extension_context)
+        # Steward liveness history, shared between the canary loop that writes
+        # it and the status endpoint that reads it (both event-loop tasks on
+        # this node), so an outstanding failed probe surfaces as `degraded`
+        # instead of hiding until the third failure tears the steward down.
+        self._steward_canary = StewardCanaryState()
         self._event_log = DiskEventLog(_API_EVENT_LOG_DIR) if enable_event_log else None
         self._event_log_appends_since_retention_check = 0
         self._system_id = SystemId()
@@ -1559,6 +1579,14 @@ class API:
         self.last_completed_election: int = 0
         self.port = port
         self._skulk_config = skulk_config
+        # Terminal failures that arrived before their command's stream queue
+        # was registered (#223 follow-up): the low-level chunk stream
+        # registers its queue lazily on first iteration, so a fast TaskFailed
+        # (e.g. a pinned steward request whose instance vanished, on a
+        # single-node cluster where the master round-trip is local) can beat
+        # registration and _terminate_command_stream would silently no-op,
+        # hanging the caller. Bounded FIFO; consumed at stream registration.
+        self._pending_stream_failures: dict[CommandId, ErrorChunk] = {}
         self._store_client = store_client
         self._artifact_exports = ArtifactExportManager()
         reconciliation_config = (
@@ -2096,7 +2124,10 @@ class API:
             description=(
                 "Generate text with an OpenAI Chat Completions-compatible payload. The requested "
                 "model must already be placed, running, and declare TextGeneration; speech-only "
-                "models are rejected before command dispatch."
+                "models are rejected before command dispatch. The reserved model id "
+                "'skulk/steward' selects the intelligent-fabric steward and answers 404 when "
+                "that mode is disabled, or 503 with the steward status payload while the "
+                "steward is still being placed, staged, or loaded."
             ),
         )(self.chat_completions)
         self.app.post(
@@ -2509,6 +2540,20 @@ class API:
                 "explicit failures rather than vanishing."
             ),
         )(self.get_cluster_performance_envelopes)
+        self.app.get(
+            "/v1/steward",
+            tags=["Steward"],
+            summary="Get intelligent-fabric steward status",
+            description=(
+                "Report whether intelligent-fabric mode is enabled and whether "
+                "a steward placement currently exists, with its model and "
+                "instance id when present, plus a one-word lifecycle 'state' "
+                "(disabled, downloading, starting, ready, degraded) derived "
+                "from those fields and the liveness canary's history. The "
+                "steward is the fabric-maintained resident assistant; see the "
+                "steward chat endpoint."
+            ),
+        )(self.get_steward_status)
         self.app.post(
             "/v1/diagnostics/node/runners/{runner_id}/cancel",
             tags=["Diagnostics"],
@@ -2879,6 +2924,18 @@ class API:
         self, payload: CreateInstanceParams
     ) -> CreateInstanceResponse:
         instance = payload.instance
+        if instance.system_role is not None:
+            # System placements (the intelligent-fabric steward) are minted
+            # and maintained by the fabric's own invariant; accepting one
+            # from a caller would let an arbitrary instance impersonate the
+            # steward and suppress the configured placement.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "system_role placements are fabric-managed and cannot "
+                    "be created through this endpoint"
+                ),
+            )
         model_card = await ModelCard.load(instance.shard_assignments.model_id)
         required_memory = model_card.storage_size
         available_memory = self._calculate_total_available_memory()
@@ -3212,9 +3269,381 @@ class API:
             raise HTTPException(status_code=404, detail="Instance not found")
         return self.state.instances[instance_id]
 
+    async def _steward_chat_completions(
+        self, payload: ChatCompletionRequest
+    ) -> StreamingResponse:
+        """Serve the steward through the standard chat-completions surface.
+
+        The steward's tool surface belongs to the server, so client tool
+        definitions are rejected rather than silently ignored, and client
+        system messages are dropped in favor of the steward's own prompt
+        (documented in the API guide). History is the caller's user and
+        assistant turns; multimodal content parts are flattened to their
+        text. Both streaming and non-streaming ride the ordinary adapters
+        over the harness's chunk stream.
+
+        Refusals happen before the response begins, in this order: 400 for
+        client tool definitions, 404 when intelligent-fabric mode is off,
+        400 for a conversation with no question to answer, then 503 with the
+        steward status payload while no steward is ready to answer.
+
+        Raises:
+            HTTPException: 400, 404, or 503 per the order above.
+
+        Returns:
+            The streaming (SSE) or collected (JSON) chat-completions
+            response for one steward turn.
+        """
+        if payload.tools:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "The steward's tool surface is server-side; client tool "
+                    "definitions are not accepted for this model"
+                ),
+            )
+        if not self._intelligent_fabric_enabled():
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Model not available: intelligent-fabric mode is "
+                    "disabled. Enable intelligent_fabric in Settings to "
+                    "use the steward."
+                ),
+            )
+        history: list[StewardChatMessage] = []
+        for message in payload.messages:
+            if message.role not in ("user", "assistant"):
+                continue
+            content = message.content
+            if isinstance(content, list):
+                text = " ".join(
+                    part.text
+                    for part in content
+                    if isinstance(part, ChatCompletionMessageText) and part.text
+                )
+            elif isinstance(content, ChatCompletionMessageText):
+                text = content.text
+            elif isinstance(content, str):
+                text = content
+            else:
+                text = ""
+            if text:
+                history.append(
+                    StewardChatMessage(role=message.role, content=text)
+                )
+        if not history or history[-1].role != "user":
+            # A steward turn answers an operator; assistant-only history or
+            # a trailing assistant message has no question to investigate.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "The conversation must end with a user message for the "
+                    "steward to answer"
+                ),
+            )
+        status = self._steward_status()
+        if not status.ready:
+            # Readiness preflight: a steward that is still placing, staging
+            # weights, or loading cannot answer, and saying so as a 503 with
+            # the status payload is a contract a client can act on (retry,
+            # show progress). Reporting it as a 200 SSE error chunk instead
+            # made "the fabric is still setting up" indistinguishable from
+            # "the model failed mid-answer" to every OpenAI-compatible
+            # client. The in-stream error path stays for the race where the
+            # placement disappears between this check and dispatch.
+            detail: dict[str, object] = status.model_dump(mode="json")
+            detail["message"] = STEWARD_NOT_READY_MESSAGES[status.state]
+            raise HTTPException(
+                status_code=503,
+                detail=detail,
+                headers={"Retry-After": str(STEWARD_RETRY_AFTER_SECONDS)},
+            )
+        harness = StewardHarness(self)
+        command_id = CommandId()
+        history, system_prompt, task_params = (
+            await self._steward_extension_transform(history, stream=payload.stream)
+        )
+        chunk_stream = harness.run_turn_chunks(
+            history, system_prompt=system_prompt
+        )
+        if self._extensions is not None and self._extensions.has_chat_middleware:
+            chunk_stream = self._extensions.tap_chat_stream(
+                self._extension_context, task_params, chunk_stream
+            )
+        if payload.stream:
+            return StreamingResponse(
+                with_sse_keepalive(
+                    generate_chat_stream(command_id, chunk_stream),
+                ),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "close",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+        return StreamingResponse(
+            collect_chat_response(command_id, chunk_stream),
+            media_type="application/json",
+        )
+
+    async def _steward_extension_transform(
+        self, history: list[StewardChatMessage], *, stream: bool
+    ) -> tuple[list[StewardChatMessage], str, TextGenerationTaskParams]:
+        """Run chat middleware's request transform over one steward turn.
+
+        The steward answers through a bespoke harness rather than the ordinary
+        dispatch path, so ``chat_completions`` returns before its extension
+        hook. Without this, an installed chat middleware silently sees every
+        conversation on the node except the steward's own, which is the one
+        conversation an ambient-memory or policy extension most needs.
+
+        The turn is presented in the same canonical shape the ordinary path
+        uses: the steward's system prompt as ``instructions`` and the operator
+        history as ``input``. Those are also the only two channels read back,
+        because they are the only ones the harness owns (sampling, tools, and
+        the model are the steward's, not the caller's). A transform that
+        leaves the turn without a trailing user message is discarded in full
+        rather than obeyed, since the harness's contract is that a steward
+        turn answers an operator question.
+
+        Every middleware call inside is guarded by the loader, so a raising
+        extension is logged and the steward answers unchanged.
+
+        Args:
+            history: The turn's user/assistant conversation.
+            stream: Whether the caller requested SSE, mirrored into the params
+                so observers see the real request shape.
+
+        Returns:
+            The history to run, the system prompt to run it with, and the
+            params describing that same turn. The three always agree: on a
+            rejected transform all three are the originals, so the response
+            tap never describes a turn that was not the one served.
+        """
+        original = TextGenerationTaskParams(
+            model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
+            input=[
+                InputMessage(role=message.role, content=message.content)
+                for message in history
+            ],
+            instructions=STEWARD_SYSTEM_PROMPT,
+            stream=stream,
+        )
+        if self._extensions is None or not self._extensions.has_chat_middleware:
+            return history, STEWARD_SYSTEM_PROMPT, original
+        transformed = await self._extensions.transform_chat_request(
+            self._extension_context, original
+        )
+        candidate = [
+            StewardChatMessage(role=message.role, content=message.content)
+            for message in transformed.input
+            if message.role in ("user", "assistant") and message.content
+        ]
+        if not candidate or candidate[-1].role != "user":
+            # Reject the whole transform, not just its history. Keeping the
+            # transformed instructions or params here would run the turn on
+            # one conversation while telling observers it was another, and
+            # an ambient-memory or audit middleware would then file the
+            # answer against the wrong conversation.
+            logger.warning(
+                "chat middleware left the steward turn without a trailing "
+                "user message; discarding the transform"
+            )
+            return history, STEWARD_SYSTEM_PROMPT, original
+        # Report the turn as it will actually run, not as the middleware
+        # wrote it. Built from ``original`` rather than from the transform,
+        # so accepting the two channels the harness honors cannot smuggle in
+        # any of the ones it ignores: the steward's own sampling, tool set,
+        # and response mode are what serve, whatever a middleware returned,
+        # and an audit observer must not be told otherwise.
+        prompt = transformed.instructions or STEWARD_SYSTEM_PROMPT
+        effective = original.model_copy(
+            update={
+                "input": [
+                    InputMessage(role=message.role, content=message.content)
+                    for message in candidate
+                ],
+                "instructions": prompt,
+            }
+        )
+        return candidate, prompt, effective
+
+    async def _steward_canary_loop(self) -> None:
+        """Deterministic degraded-but-alive detection for the steward.
+
+        The node hosting the steward instance probes its generation path on
+        a slow cadence; three consecutive failures tear the instance down
+        (the master's invariant re-places it within a tick). Detection is
+        code-checked, repair is the fabric's deterministic machinery: no
+        model judges another model's health. Skips whenever the mode is
+        off, this node is not the host, the runner is not idle-Ready, or a
+        task is in flight (the worker's wedge detector owns the busy case).
+
+        Known limitation (#734): the elected prober is the steward's
+        hosting node, so a split deployment whose hosting worker runs
+        --no-api has no canary; probing from any API node needs API
+        presence advertised in node resources first.
+        """
+        from skulk.api.steward import (
+            CANARY_FAILURE_THRESHOLD,
+            CANARY_INTERVAL_SECONDS,
+            canary_probe_target,
+        )
+
+        canary = self._steward_canary
+        while True:
+            await anyio.sleep(CANARY_INTERVAL_SECONDS)
+            try:
+                if not self._intelligent_fabric_enabled():
+                    canary.clear_failures()
+                    continue
+                target = canary_probe_target(
+                    self.state.instances,
+                    self.state.runners,
+                    self.state.tasks,
+                    self.node_id,
+                )
+                if target is None:
+                    # A skipped probe (busy, loading, not the elected
+                    # prober) is not evidence of health: keep the failure
+                    # count so "3 consecutive failures" means three failed
+                    # probes with no intervening success. Reset only when
+                    # the steward instance itself is gone.
+                    tracked = canary.instance_id
+                    if tracked is not None and tracked not in self.state.instances:
+                        canary.reset()
+                    continue
+                if target != canary.instance_id:
+                    canary.track(target)
+                harness = StewardHarness(self)
+                located = harness.steward_instance()
+                if located is None or located[0] != target:
+                    continue
+                if await harness.canary_probe(target, located[1]):
+                    canary.clear_failures()
+                    continue
+                failures = canary.record_failure()
+                logger.warning(
+                    f"Steward canary probe failed ({failures}/"
+                    f"{CANARY_FAILURE_THRESHOLD}) for instance {target}"
+                )
+                if failures >= CANARY_FAILURE_THRESHOLD:
+                    logger.error(
+                        f"Steward instance {target} failed "
+                        f"{CANARY_FAILURE_THRESHOLD} consecutive canary "
+                        "probes; tearing it down for re-placement"
+                    )
+                    await self._send(DeleteInstance(instance_id=target))
+                    canary.clear_failures()
+            except Exception:
+                # The canary must never take the API down; a broken probe
+                # pass just waits for the next interval.
+                logger.warning("Steward canary pass failed", exc_info=True)
+
+    async def get_steward_status(self) -> "StewardStatusResponse":
+        """Report intelligent-fabric mode and the current steward placement."""
+        return self._steward_status()
+
+    def _steward_model_is_downloading(self, model_id: str) -> bool:
+        """Whether any node holds a live download record for ``model_id``.
+
+        Live means Pending or Ongoing in the effective view (telemetry's
+        non-terminal records merged over the terminal ones in state), which
+        is exactly the window in which the steward exists as a placement but
+        its weights are not on disk yet.
+        """
+        for records in self._telemetry_view.effective_downloads(
+            self.state.downloads
+        ).values():
+            for record in records:
+                if not isinstance(record, LiveDownloadProgress):
+                    continue
+                if str(record.shard_metadata.model_card.model_id) == model_id:
+                    return True
+        return False
+
+    def _steward_status(self) -> "StewardStatusResponse":
+        """Build the steward status snapshot.
+
+        Shared by ``GET /v1/steward`` and the chat-completions readiness
+        preflight so a client polling the status endpoint and a client
+        posting a turn can never disagree about whether the steward is
+        servable.
+        """
+        located = StewardHarness(self).steward_instance()
+        ready = False
+        downloading = False
+        canary_failures = 0
+        if located is not None:
+            instance = self.state.instances.get(located[0])
+            if instance is not None:
+                runner_ids = instance.shard_assignments.node_to_runner.values()
+                # Running counts as ready: a steward mid-generation is
+                # serving, not still loading.
+                ready = bool(runner_ids) and all(
+                    isinstance(
+                        self.state.runners.get(runner_id),
+                        (RunnerReady, RunnerRunning),
+                    )
+                    for runner_id in runner_ids
+                )
+            if not ready:
+                downloading = self._steward_model_is_downloading(located[1])
+            canary_failures = self._steward_canary.consecutive_failures_for(
+                located[0]
+            )
+        enabled = self._intelligent_fabric_enabled()
+        return StewardStatusResponse(
+            enabled=enabled,
+            present=located is not None,
+            ready=ready,
+            steward_model=located[1] if located is not None else None,
+            instance_id=str(located[0]) if located is not None else None,
+            state=derive_steward_state(
+                enabled=enabled,
+                present=located is not None,
+                ready=ready,
+                downloading=downloading,
+                canary_failures=canary_failures,
+            ),
+        )
+
+    def _intelligent_fabric_enabled(self) -> bool:
+        """Whether intelligent-fabric mode is currently enabled.
+
+        Reads the on-disk cluster config (kept current on every node by
+        SyncConfig) so the answer tracks fleet-wide Settings changes made
+        from any node, falling back to the startup-parsed config when the
+        file is momentarily unreadable.
+        """
+        try:
+            config = load_skulk_config()
+        except Exception:
+            config = self._skulk_config
+        fabric = config.intelligent_fabric if config is not None else None
+        return fabric is not None and fabric.enabled
+
     async def delete_instance(self, instance_id: InstanceId) -> DeleteInstanceResponse:
         if instance_id not in self.state.instances:
             raise HTTPException(status_code=404, detail="Instance not found")
+        instance = self.state.instances[instance_id]
+        if instance.system_role == "steward" and self._intelligent_fabric_enabled():
+            # The steward is a fabric-maintained system placement: while the
+            # mode is on, the master would immediately re-place it anyway, so
+            # an ordinary delete is refused loudly instead of producing a
+            # confusing delete-then-reappear. Internal correctness paths
+            # (worker give-up on a crashed instance, repair teardown) send
+            # DeleteInstance directly on the command plane and are unaffected.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This is the intelligent-fabric steward placement, which "
+                    "the fabric maintains automatically. Disable intelligent "
+                    "fabric in Settings to remove it."
+                ),
+            )
 
         command = DeleteInstance(
             instance_id=instance_id,
@@ -3340,6 +3769,15 @@ class API:
                 yield pending_error
                 return
 
+            if pending_failure := self._pending_stream_failures.pop(
+                command_id, None
+            ):
+                # The task already failed before this stream registered
+                # (fast local TaskFailed, e.g. a pinned instance that
+                # vanished); deliver the buffered terminal chunk.
+                yield pending_failure
+                return
+
             with recv as token_chunks:
                 # Idle backstop (#279 Phase 2b): the DATA plane is best-effort, so
                 # a dropped chunk could hang this receive forever. The idle timer
@@ -3448,6 +3886,7 @@ class API:
         model_id: ModelId,
         *,
         task_params: TextGenerationTaskParams | None = None,
+        extension_tap: bool = True,
     ) -> AsyncGenerator[
         TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None
     ]:
@@ -3465,6 +3904,14 @@ class API:
         ``model_id`` must be the POST-transform model actually dispatched (chat
         middleware may reroute it), so observations attribute to the served
         model, not the caller's requested alias.
+
+        ``extension_tap=False`` keeps the envelope and telemetry taps but
+        withholds the extension chat-summary tap. It is for generations that
+        are a step inside some larger turn rather than a turn of their own:
+        the steward's investigation steps and its liveness probe run through
+        this method, and an observer that saw each of them would record the
+        steward's internal tool traffic and count one answer many times.
+        Whoever owns the enclosing turn applies the single correct tap.
         """
         chunk_stream: AsyncGenerator[
             TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None
@@ -3477,7 +3924,8 @@ class API:
         )
         chunk_stream = self._tap_performance_envelope(model_id, chunk_stream)
         if (
-            task_params is not None
+            extension_tap
+            and task_params is not None
             and self._extensions is not None
             and self._extensions.has_chat_middleware
         ):
@@ -4198,8 +4646,67 @@ class API:
                     "Vision media timed out waiting for worker verification",
                 )
 
+    async def send_task_cancellation(self, command_id: CommandId) -> None:
+        """Public cancellation seam for internal callers (the steward harness).
+
+        Sends the same TaskCancelled command the HTTP cancel endpoint sends,
+        suppressing the final TaskFinished so the worker can observe the
+        cancelled task and stop the runner promptly.
+        """
+        await self._send(TaskCancelled(cancelled_command_id=command_id))
+        self._cancelled_command_ids.add(command_id)
+
+    async def dispatch_text_generation(
+        self,
+        task_params: TextGenerationTaskParams,
+        target_instance_id: InstanceId | None = None,
+    ) -> TextGeneration:
+        """Public dispatch seam for internal callers (the steward harness).
+
+        Sends a text-generation command through the same validated path as
+        the HTTP chat adapters, optionally pinned to one instance.
+        """
+        return await self._send_text_generation_with_images(
+            task_params, target_instance_id=target_instance_id
+        )
+
+    def text_generation_chunk_stream(
+        self,
+        command: TextGeneration,
+        task_params: TextGenerationTaskParams,
+        *,
+        extension_tap: bool = True,
+    ) -> AsyncGenerator[
+        ErrorChunk | ToolCallChunk | TokenChunk | PrefillProgressChunk, None
+    ]:
+        """Public tapped chunk stream for one dispatched command.
+
+        Same observation taps as the HTTP adapters (envelopes, telemetry,
+        extensions), so internal consumers are indistinguishable from
+        external ones to the observability planes.
+
+        Args:
+            command: The dispatched generation to stream.
+            task_params: The params that were dispatched.
+            extension_tap: Pass ``False`` when this generation is one step
+                inside a larger turn that applies its own extension tap; see
+                :meth:`_tapped_text_stream`.
+        """
+        return self._tapped_text_stream(
+            command.command_id,
+            task_params.model,
+            task_params=task_params,
+            extension_tap=extension_tap,
+        )
+
+    async def running_model_card(self, model_id: ModelId) -> ModelCard | None:
+        """Public card lookup preferring the card carried on a live instance."""
+        return await self._get_running_model_card(model_id)
+
     async def _send_text_generation_with_images(
-        self, task_params: TextGenerationTaskParams
+        self,
+        task_params: TextGenerationTaskParams,
+        target_instance_id: InstanceId | None = None,
     ) -> TextGeneration:
         # Single dispatch chokepoint for every text-generation wire format
         # (chat, claude, ollama, responses, bench) — reject un-renderable
@@ -4230,7 +4737,11 @@ class API:
             )
         images = task_params.images
         if not images:
-            command = TextGeneration(task_params=task_params, owner_node=self.node_id)
+            command = TextGeneration(
+            task_params=task_params,
+            owner_node=self.node_id,
+            target_instance_id=target_instance_id,
+        )
             await self._send(command)
             return command
 
@@ -4271,7 +4782,11 @@ class API:
             task_params = task_params.model_copy(
                 update={"images": [], "image_hashes": cached_hashes}
             )
-            command = TextGeneration(task_params=task_params, owner_node=self.node_id)
+            command = TextGeneration(
+            task_params=task_params,
+            owner_node=self.node_id,
+            target_instance_id=target_instance_id,
+        )
             await self._send(command)
             return command
 
@@ -4288,7 +4803,11 @@ class API:
                 "image_count": len(new_images),
             }
         )
-        command = TextGeneration(task_params=task_params, owner_node=self.node_id)
+        command = TextGeneration(
+            task_params=task_params,
+            owner_node=self.node_id,
+            target_instance_id=target_instance_id,
+        )
         self._stage_vision_media(
             command.command_id,
             task_params.model,
@@ -4308,6 +4827,12 @@ class API:
         self, payload: ChatCompletionRequest
     ) -> ChatCompletionResponse | StreamingResponse:
         """OpenAI Chat Completions API - adapter."""
+        if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
+            # The reserved steward id selects model-plus-harness: the
+            # server-side investigation loop answers, with its tool trace
+            # streamed as reasoning content. Checked before card resolution
+            # so no repository of the same name can shadow it.
+            return await self._steward_chat_completions(payload)
         resolved_model = await self._resolve_and_validate_text_model(payload.model)
         model_card = await self._get_running_model_card(resolved_model)
         task_params = await chat_request_to_text_generation(
@@ -6391,9 +6916,7 @@ class API:
             ),
         )
         command_id = command.command_id
-        self._embedding_queues[command_id], recv = channel[
-            EmbeddingChunk | ErrorChunk
-        ]()
+        recv = self._open_stream_queue(self._embedding_queues, command_id)
         try:
             with anyio.fail_after(timeout_seconds):
                 await self._send(command)
@@ -6547,9 +7070,9 @@ class API:
         images_complete = 0
 
         try:
-            self._image_generation_queues[command_id], recv = channel[
-                ImageChunk | ErrorChunk
-            ]()
+            recv = self._open_stream_queue(
+                self._image_generation_queues, command_id
+            )
 
             if pending_error := self._take_vision_media_failure(command_id):
                 error_response = ErrorResponse(
@@ -6682,9 +7205,9 @@ class API:
         stats: ImageGenerationStats | None = None
 
         try:
-            self._image_generation_queues[command_id], recv = channel[
-                ImageChunk | ErrorChunk
-            ]()
+            recv = self._open_stream_queue(
+                self._image_generation_queues, command_id
+            )
 
             if pending_error := self._take_vision_media_failure(command_id):
                 raise HTTPException(
@@ -7493,12 +8016,29 @@ class API:
             cards = [c for c in cards if c.model_id in downloaded_model_ids]
 
         approved_remote_code_card_ids = REMOTE_CODE_APPROVALS.approved_card_ids()
-        return ModelList(
-            data=[
-                self._model_list_entry(card, approved_remote_code_card_ids)
-                for card in cards
-            ]
-        )
+        entries = [
+            self._model_list_entry(card, approved_remote_code_card_ids)
+            for card in cards
+        ]
+        if self._intelligent_fabric_enabled():
+            # The steward's virtual id is addressable like any chat model but
+            # is fabric-managed: flagged so pickers can badge or separate it.
+            entries.append(
+                ModelListModel(
+                    id=STEWARD_VIRTUAL_MODEL_ID,
+                    name="Steward",
+                    description=(
+                        "The cluster's resident assistant. Ask it about "
+                        "cluster health, models, and diagnostics; it "
+                        "investigates through read-only tools before "
+                        "answering and cannot change the cluster."
+                    ),
+                    tags=["system", "steward"],
+                    tasks=["TextGeneration"],
+                    system_role="steward",
+                )
+            )
+        return ModelList(data=entries)
 
     async def list_remote_code_approvals(self) -> list[RemoteCodeApprovalView]:
         """List immutable model-card trust identities approved on this node."""
@@ -7740,6 +8280,9 @@ class API:
                 tg.start_soon(self._sweep_pending_trace_data)
                 tg.start_soon(self._sweep_pending_vision_media)
                 tg.start_soon(self._sweep_provider_stream_receivers)
+                # Steward canary (intelligent fabric): degraded-but-alive
+                # detection on the hosting node; inert while the mode is off.
+                tg.start_soon(self._steward_canary_loop)
                 # Releases reorder gaps stuck on a chunk dropped by the
                 # best-effort DATA topic (#279 Phase 2b); lifetime-scoped like
                 # _apply_data. Only meaningful while the reorder buffer is on;
@@ -8628,6 +9171,26 @@ class API:
             except (BrokenResourceError, ClosedResourceError):
                 self._audio_transcription_queues.pop(command_id, None)
 
+    def _open_stream_queue[ChunkT](
+        self,
+        queue_map: dict[CommandId, Sender[ChunkT | ErrorChunk]],
+        command_id: CommandId,
+    ) -> Receiver[ChunkT | ErrorChunk]:
+        """Register a fresh per-command stream queue, draining any buffered
+        terminal failure.
+
+        A fast local TaskFailed can beat the lazily-registered stream queue,
+        leaving its terminal chunk in the pending-failure buffer; every
+        non-text stream family opens its queue through here so that chunk is
+        delivered through the fresh queue instead of the request hanging
+        (the text stream drains the same buffer inside its generator).
+        """
+        sender, receiver = channel[ChunkT | ErrorChunk]()
+        queue_map[command_id] = sender
+        if pending_failure := self._pending_stream_failures.pop(command_id, None):
+            sender.send_nowait(pending_failure)
+        return receiver
+
     async def _terminate_command_stream(
         self, task_id: task_types.TaskId, error_message: str
     ) -> None:
@@ -8672,6 +9235,7 @@ class API:
                 except (BrokenResourceError, ClosedResourceError):
                     self._audio_transcription_queues.pop(task.command_id, None)
             return
+        delivered = False
         for queue_map in (
             self._text_generation_queues,
             self._image_generation_queues,
@@ -8680,10 +9244,26 @@ class API:
             self._audio_transcription_queues,
         ):
             if queue := queue_map.get(task.command_id):
+                delivered = True
                 try:
                     await queue.send(error_chunk)
                 except (BrokenResourceError, ClosedResourceError):
                     queue_map.pop(task.command_id, None)
+        owner = getattr(task, "owner_node", None)
+        if not delivered and (owner is None or owner == self.node_id):
+            # Every task family that reaches this point streams through one
+            # of the queue maps above (Realtime returned earlier). Only the
+            # task's owning API can ever register the command's queue, so
+            # other nodes skip buffering entries no consumer will drain
+            # (owner None = legacy gossip fan-out, where any API may serve).
+            # No stream queue exists yet: buffer the terminal chunk for the
+            # lazily-registered stream to consume at startup, instead of
+            # dropping it and hanging the request. Every stream family
+            # drains this buffer at its queue-registration site.
+            while len(self._pending_stream_failures) >= 256:
+                oldest = next(iter(self._pending_stream_failures))
+                del self._pending_stream_failures[oldest]
+            self._pending_stream_failures[task.command_id] = error_chunk
 
     def _save_trace(
         self, task_id: task_types.TaskId, trace_data: Sequence[TraceEventData]
@@ -11932,9 +12512,7 @@ class API:
         command_id = command.command_id
 
         try:
-            self._embedding_queues[command_id], recv = channel[
-                EmbeddingChunk | ErrorChunk
-            ]()
+            recv = self._open_stream_queue(self._embedding_queues, command_id)
 
             await self._send(command)
 
@@ -12144,7 +12722,7 @@ class API:
             target_instance_id=target_instance_id,
         )
         command_id = command.command_id
-        self._audio_speech_queues[command_id], recv = channel[AudioChunk | ErrorChunk]()
+        recv = self._open_stream_queue(self._audio_speech_queues, command_id)
         if reference_audio is not None:
             self._speech_media_commands.add(command_id)
             assert target_node is not None
@@ -14007,9 +14585,9 @@ class API:
         command = AudioTranscription(owner_node=self.node_id, task_params=params)
         command_id = command.command_id
         try:
-            self._audio_transcription_queues[command_id], recv = channel[
-                TranscriptionChunk | ErrorChunk
-            ]()
+            recv = self._open_stream_queue(
+                self._audio_transcription_queues, command_id
+            )
             self._stage_audio_transcription_media(command_id, params, audio_bytes)
             await self._send(command)
         except BaseException:

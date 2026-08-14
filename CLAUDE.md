@@ -288,7 +288,13 @@ A model card's `placement.compatible_backends` selects which engine serves it
   `--speculative-config` (method `mtp` = native prediction heads,
   Qwen3.6-27B-FP8 measured 2.01x; method `dflash` = separate block-parallel
   speculator repo, the Laguna cards). Single-node
-  text in v1; tool calling / logprobs / multi-node / vLLM-aware admission
+  text with tool calling: a card pinning `runtime.vllm_tool_call_parser`
+  (explicit only, no family fallback; Qwen2.5 pins hermes) launches the
+  server with vLLM's parser pair, tool requests run non-streamed to
+  `ToolCallChunk` (llama_server shape), parserless cards reject tools
+  loudly, and
+  `TextGenerationTaskParams.tool_choice` now reaches every served engine.
+  Logprobs / multi-node / vLLM-aware admission
   are follow-ups. Lifecycle (#653): teardown signals the server's whole
   process group (vLLM's EngineCore is a grandchild) with an orphan-sweep
   mop after graceful leader exit, and worker startup reaps init-reparented
@@ -297,13 +303,47 @@ A model card's `placement.compatible_backends` selects which engine serves it
   `AcceleratorMetrics.compute_capability` (+ `native_fp4`/`native_fp8`, via NVML)
   is the capability signal for keying placement on GPU generation, not vendor.
 
+### Intelligent fabric (steward)
+Optional resident operator assistant, config-gated (`intelligent_fabric` in
+skulk.yaml, default off). Identity = `BaseInstance.system_role` flagged
+placement (additive schema field); the master's `_maintain_steward_placement`
+planning-tick invariant keeps exactly one steward placed from the
+`steward_models` preference list (Qwen3.6-35B-A3B GGUF then MLX = the
+benched v1 brain, then the Qwen3.5-4B MLX/GGUF cards, then the Qwen3.5-0.8B
+GGUF universal floor so CPU-only fleets place one), tears down duplicates,
+and inherits failover from election since the invariant re-runs on every
+tick. Every steward generation runs with thinking OFF
+(`STEWARD_THINKING_ENABLED`): bench-measured, thinking degraded the
+finalists' trust behavior, and it is the harness's request shape rather
+than a card claim. GGUF steward cards must stay text-only or the vision
+platform gate bars them from `llama_server`. Repair builders re-stamp `system_role` (same pattern as #658
+exclusions). `TextGeneration.target_instance_id` pins generation to one
+instance (mirrors SpeechSynthesis). Harness = `src/skulk/api/steward.py`:
+bounded read-only tools (state/resources/telemetry/data-plane/versions/
+envelopes/doctor/catalog), 8 steps per turn, observe/advise only, rides the
+normal chat dispatch path. Client surface = reserved virtual
+model `skulk/steward` on chat-completions (client tools 400; trace as
+reasoning_content; streaming via the ordinary adapters over
+`run_turn_chunks`); `GET /v1/steward` = presence plus a derived `state`
+(`disabled|downloading|starting|ready|degraded`); flagged entry in
+/v1/models (`system_role`). The reserved id refuses with 503 (status
+payload + Retry-After) before streaming when no steward is ready, keeping
+the in-stream ErrorChunk for the post-preflight race. Ordinary deletion of
+the steward is refused while the mode is on; the dashboard hides
+`systemRole` instances. Canary: the hosting node's API probes the steward
+every 300s when idle-Ready (minimal pinned generation, code-checked); the
+failure run lives in `StewardCanaryState` so one failure already reads as
+`degraded`, and 3 consecutive failures tear it down and the invariant
+re-places (degraded-but-alive coverage; busy-wedge stays with the worker
+wedge detector).
+
 ### Message Flow
 Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `GLOBAL_EVENTS`: Master broadcasts indexed events to all workers
 - `LOCAL_EVENTS`: Workers send events to master for indexing
 - `COMMANDS`: Workers/API send commands to master
 - `STATE_SYNC_MESSAGES`: Followers request the current session snapshot before replaying the retained tail
-- `DATA`: Generated token/image/embedding/transcription/audio output, off the event log and master hot path. `DataChunk` carries `{command_id, kind, chunk?, sequence, owner_node}` with an explicit `started -> chunk* -> completed|failed|cancelled` lifecycle. `RunnerSupervisor` emits start and exactly one terminal; `API._apply_data` orders/deduplicates frames and converts unresolved gaps into terminal transport errors plus producer cancellation. Zenoh is the shipping default, including for zero-config installs: startup auto-binds only a private-LAN or CGNAT fabric IPv4 (loopback on offline or public-only hosts) and uses multicast scouting when no explicit connect list is supplied; public listeners require an explicit override, while routed/Tailscale fleets provide explicit endpoints and retain multicast-off behavior. Zenoh keys by `data/<owner_node>` and short-circuits same-node output. Remote egress uses bounded independent per-command workers with owner/process admission caps and a five-second publish deadline, so a slow or missing owner cannot stall another local or remote stream; saturation fails only the affected stream rather than silently returning incomplete output. Every node advertises its startup-resolved `gossipsub`/`zenoh` choice in `NodeResources.data_transport`; worker nodes use the resource gatherer, while `--no-worker` nodes publish no backends and effective management-only participation from the node lifecycle. `/state` exposes `nodeResources` and marks a split live fleet with error-level `data_transport_mismatch` health reasons. `NodeResources.zenoh_connected_peers` (sampled via `ZenohPeerSampler` behind a 90s startup grace) additionally raises error-level `zenoh_isolated` when a Zenoh node holds 0 peer transports while other live nodes advertise Zenoh (the multicast-unreachable remote-member shape), plus a recurring local warning. Mixed transports remain unsupported and unbridged. `NodeDiagnostics.data_plane` and the dashboard expose lifecycle, first-byte/span, ordering, queue, drop, and publish metrics. Existing OpenAI audio edges retain base64/JSON; provider streaming uses `extensions/streams.py` JSON headers plus raw inline media or staged blob references. This is a wire change: deploy same-version fleets only.
+- `DATA`: Generated token/image/embedding/transcription/audio output, off the event log and master hot path. `DataChunk` carries `{command_id, kind, chunk?, sequence, owner_node}` with an explicit `started -> chunk* -> completed|failed|cancelled` lifecycle. `RunnerSupervisor` emits start and exactly one terminal; `API._apply_data` orders/deduplicates frames and converts unresolved gaps into terminal transport errors plus producer cancellation. Terminal task failures that beat a stream's lazy queue registration are buffered per command and drained at every stream family's registration site (text/image/edits/embedding/speech/transcription), so fast local failures cannot hang a caller. Zenoh is the shipping default, including for zero-config installs: startup auto-binds only a private-LAN or CGNAT fabric IPv4 (loopback on offline or public-only hosts) and uses multicast scouting when no explicit connect list is supplied; public listeners require an explicit override, while routed/Tailscale fleets provide explicit endpoints and retain multicast-off behavior. Zenoh keys by `data/<owner_node>` and short-circuits same-node output. Remote egress uses bounded independent per-command workers with owner/process admission caps and a five-second publish deadline, so a slow or missing owner cannot stall another local or remote stream; saturation fails only the affected stream rather than silently returning incomplete output. Every node advertises its startup-resolved `gossipsub`/`zenoh` choice in `NodeResources.data_transport`; worker nodes use the resource gatherer, while `--no-worker` nodes publish no backends and effective management-only participation from the node lifecycle. `/state` exposes `nodeResources` and marks a split live fleet with error-level `data_transport_mismatch` health reasons. `NodeResources.zenoh_connected_peers` (sampled via `ZenohPeerSampler` behind a 90s startup grace) additionally raises error-level `zenoh_isolated` when a Zenoh node holds 0 peer transports while other live nodes advertise Zenoh (the multicast-unreachable remote-member shape), plus a recurring local warning. Mixed transports remain unsupported and unbridged. `NodeDiagnostics.data_plane` and the dashboard expose lifecycle, first-byte/span, ordering, queue, drop, and publish metrics. Existing OpenAI audio edges retain base64/JSON; provider streaming uses `extensions/streams.py` JSON headers plus raw inline media or staged blob references. This is a wire change: deploy same-version fleets only.
 - `PROVIDER_DATA`: Extension-provider media in its own type family, off the event log/master/State. `ProviderStreamPacket` routes each direction to its receiving node; wire framing is a bounded length-prefixed JSON lifecycle header plus optional raw media bytes (1 MiB inline cap) or a staged blob reference. It shares DATA's same-node short circuit and dedicated Zenoh loop, with bounded queues keyed by owner/call/direction, admission caps, publish deadline, rejection behavior, and egress diagnostics. `ExtensionContext.stream_capability` opens through a control-sized peer API request and returns output frames plus a caller input sink for client-streaming/bidirectional modes. Both directions enforce `started -> chunk* -> terminal`; caller `complete()` half-closes input without ending provider output. `NodeDiagnostics.provider` exposes bounded per-capability admission, input-queue, media-volume, first-output, terminal, and cancellation metrics without retaining payloads or completed call IDs. Same-version fleet required.
 - `REALTIME_AUDIO`: Built-in realtime STT PCM ingress, off the event log/master/State. `RealtimeAudioPacket` carries a bounded JSON lifecycle header plus raw PCM bytes from the owning API node to the selected single-host speech worker. It shares the Zenoh scheduler's bounded independent command queues and same-node short circuit; transport rejection is source-routed so only the affected provider call fails. Remote capability is unavailable without Zenoh. Same-version fleet required.
 - `SPEECH_MEDIA`: Bounded speech input, off the event log/master/State. TTS reference audio requires node-addressed Zenoh. Batch STT audio is retained at the owning API until authoritative `TaskCreated` placement, then sent as raw frames to each selected speech worker; workers gate runner dispatch on exact sequence, task owner, count, and SHA-256 verification. Batch STT retains a target-filtered gossipsub fallback on the trusted fabric. Same-version fleet required.
@@ -364,7 +404,10 @@ clusters). Contract in `src/skulk/extensions/types.py`: chat middleware gets
 `transform_chat_request` (pre-dispatch, on the API node) and
 `observe_chat_response` (immutable summary, background task), plus an
 `ExtensionContext` with `embed_texts` (in-process `/v1/embeddings`,
-`API.embed_texts`). Invariants: every extension call is guarded (a raising
+`API.embed_texts`). Both hooks also run on the steward's bespoke turn
+(`API._steward_extension_transform`): the turn is presented as the steward's
+system prompt in `instructions` plus the operator history in `input`, and only
+those two are read back. Invariants: every extension call is guarded (a raising
 extension never degrades inference), extensions never own the chunk stream,
 and no extension installed = Skulk unchanged. Kill switch:
 `SKULK_EXTENSIONS_DISABLE=1`.

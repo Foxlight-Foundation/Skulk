@@ -2,7 +2,7 @@
 # served engine (#630): the mid-size card of the vLLM starter set (~29.6 GB of
 # weights, fits 48 GB-class GPUs with KV headroom). Qwen2.5 is an INSTRUCT
 # model, NOT a thinking model (no <think> mode before Qwen3); text-only, no
-# [reasoning] section. Tool calling is declared off: see the [tooling] note below.
+# [reasoning] section. Tool calling is on: see the [tooling] note below.
 # context_length is the config.json max_position_embeddings (32768).
 # `supports_tensor = false`: vLLM runs single-node in Skulk. Architecture from
 # config.json (qwen2: 48 layers, hidden 5120, 8 KV heads, bf16). storage_size
@@ -20,14 +20,14 @@ capabilities = ["text"]
 context_length = 32768
 trust_remote_code = false
 
-# PLATFORM truth override: Qwen2.5 the MODEL supports OpenAI tool calling
-# (the qwen family default would advertise it), but these cards serve
-# exclusively on the vllm engine, whose runner does not implement tool
-# dispatch yet (#638). Advertising tools here would promise a guaranteed
-# runtime error. Flip this back to the family default when the vllm runner
-# gains tool calling.
+# Tool calling is on: Qwen2.5 emits Hermes-style JSON tool calls, so the
+# card pins vLLM's hermes parser in [runtime] and the server returns
+# structured tool_calls.
+[runtime]
+vllm_tool_call_parser = "hermes"
+
 [tooling]
-supports_tool_calling = false
+supports_tool_calling = true
 
 [placement]
 compatible_backends = ["vllm-cuda", "vllm-rocm"]

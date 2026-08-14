@@ -345,9 +345,16 @@ agreement; it retires when vLLM-aware admission arrives. Checkpoints that
 ship native multi-token-prediction heads (Qwen3.6 among them) can declare
 vLLM speculative decoding on their card, engaging the model's own prediction
 heads with no separate draft model; measured on an A100, this roughly
-doubles single-stream decode on the dense Qwen3.6. This first slice is
-single-node text generation; tool calling, logprobs, vLLM's own multi-GPU
-parallelism, and vLLM-aware memory admission are follow-ups.
+doubles single-stream decode on the dense Qwen3.6. This slice is
+single-node text generation with tool calling: when a card pins vLLM's
+native tool-call parser (the explicit runtime field
+`vllm_tool_call_parser`; there is no family fallback, because one model
+family can span tool-call generations with different wire formats), the
+runner launches the server with it and a tool-enabled request runs
+unstreamed so the caller receives the assembled call, the same shape as
+the llama.cpp engines; a card with no resolvable parser rejects tool
+requests loudly instead of silently dropping them. Logprobs, vLLM's own
+multi-GPU parallelism, and vLLM-aware memory admission are follow-ups.
 
 The vLLM server's lifecycle is guarded against GPU-memory leaks in both
 directions. On teardown, the runner signals the server's entire process
@@ -635,7 +642,63 @@ input chunks into exact classifier windows, and emits typed
 minimum-speech, silence-hangover, preroll, and maximum-utterance state. Media
 is processed per call and never retained.
 
-### The dashboard voice loop
+### Intelligent fabric (the steward)
+
+Skulk can keep a small resident model, the steward, always available to
+answer operator questions about the cluster. The mode is configured by the
+`intelligent_fabric` section of the cluster configuration and is off by
+default.
+
+The steward is an ordinary model instance with one extra property: its
+placement record carries a system-role marker, and the master treats "exactly
+one steward placement exists" as an invariant of its planning loop. The
+master places the first servable model from the configured preference list,
+re-places the steward after node loss through the same repair machinery every
+instance gets, and, because the invariant is re-evaluated on every planning
+tick, a newly elected master re-establishes the steward automatically after
+failover. Duplicate stewards (possible across a failover window) are detected
+and reduced to one. The steward placement is hidden from user-facing instance
+surfaces and refuses ordinary deletion while the mode is enabled.
+
+Conversation happens through the standard OpenAI-compatible chat-completions
+endpoint using the reserved virtual model id `skulk/steward`, streaming
+included, so any OpenAI-compatible client can talk to the cluster with no
+steward-specific integration. The reserved id selects the model plus the
+server-side harness: a bounded, strictly read-only tool surface (cluster
+state with health reasons, per-node resources and capability conflicts,
+telemetry and data-plane diagnostics, per-node version status, performance
+envelopes, the local doctor check registry, the model catalog, and a
+search over Skulk's own bundled documentation so what-is and how-to
+questions are answered from the shipped docs rather than model priors)
+and an investigation loop of up to eight tool calls per turn. Tool steps stream to
+the client as reasoning content while the investigation runs, followed by
+the answer; client-supplied tool definitions are rejected, and client system
+prompts are ignored in favor of the steward's own. Generation itself rides
+the normal text-generation dispatch path, pinned to the steward instance,
+and the underlying model card id remains addressable as an ordinary model
+without tools or cluster access. Steward turns always run with the brain's
+thinking disabled: the model candidates were compared with and without it,
+and thinking made the finalists measurably less trustworthy on this
+workload while gaining nothing, so the harness pins it off rather than
+leaving the choice to whichever model is placed.
+
+A small status endpoint reports presence and readiness so clients know
+whether to offer the surface, along with a single lifecycle word covering
+the whole progression from disabled through downloading, starting, and
+ready to degraded. Because a steward that has not finished being placed
+cannot answer, the reserved model id refuses those requests up front with a
+service-unavailable response carrying that same status, so a client can tell
+"the fabric is still setting up" from "the answer failed halfway". The node
+hosting the steward also runs a slow deterministic canary: a minimal
+pinned generation whose answer is shape-checked by code, so a steward
+that is alive in state but wedged in generation is torn down and
+re-placed by the same invariant that handles node loss. The first failed
+probe already shows up in the status as a degraded steward, well before the
+third one triggers the replacement. In this release
+the steward observes and advises only: no tool can change the cluster, and
+anything action-shaped is returned to the operator as a recommendation.
+
+## The dashboard voice loop
 
 The dashboard composes these surfaces in chat: mounted TTS models can speak
 draft text, replay assistant messages, or auto-speak final assistant responses
@@ -782,7 +845,12 @@ Re-running the installer is safe; every step is idempotent. `--headless` is
 the explicit opt-out for an intentionally API-only node. The supervised
 launchd/systemd entrypoint uses that same bundled Node.js runtime for dashboard
 rebuilds after updates, so Linux nodes do not require a separate host npm
-installation to keep their UI current.
+installation to keep their UI current. That entrypoint syncs the uv
+environment exactly on every service start, which would silently prune any
+separately installed `skulk.extensions` plugin (they live outside the locked
+resolution, like the source-built GPU llama.cpp wheel the wrapper already
+preserves); setting `SKULK_PRESERVE_VENV_EXTRAS=1` in the node's environment
+switches that sync to `uv sync --inexact` so such plugins survive restarts.
 
 ## The inference engine
 
@@ -1202,6 +1270,17 @@ The contract is deliberately small (`src/skulk/extensions/`):
   system region). `observe_chat_response` receives an immutable summary of
   the completed generation (final text, thinking text, finish reason) in a
   background task after the response ends.
+- Both hooks also run on the steward's turns. The steward answers through its
+  own investigation harness rather than the ordinary dispatch path, so the
+  turn is presented to middleware in the same canonical shape: the steward's
+  system prompt as `instructions` and the operator conversation as `input`.
+  Those two are also the only channels read back, because the rest of the
+  turn (model, sampling, tool surface) belongs to the steward. A transform
+  that leaves the turn without a trailing user message is discarded, since a
+  steward turn exists to answer an operator question. The response observer
+  fires once for the turn: the investigation's individual tool steps and the
+  liveness canary pass `extension_tap=False` to the shared tapped stream, so
+  observers see conversations rather than the steward's internal machinery.
 - Each hook invocation receives an `ExtensionContext` carrying the node
   identity, the running Skulk version, programmatic access to the cluster's
   embedding serving (the in-process equivalent of `POST /v1/embeddings`), and

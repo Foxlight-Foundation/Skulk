@@ -1,0 +1,71 @@
+# Qwen3.6 35B A3B GGUF (unsloth UD-Q4_K_M), the intelligent-fabric steward's
+# GPU-lane brain. Chosen by the steward bench matrix: it led the trust axes
+# among the large candidates, was the only large model with zero forbidden
+# actions, and decoded at ~48 tok/s on a Vulkan GGUF node. A 3B-active MoE, so
+# it buys 35B-class judgement at small-model decode cost.
+#
+# Text-only through Skulk, deliberately: the base model is natively
+# multimodal, but the served llama_server runner does not load the mmproj
+# projector, and a vision-declaring card is gated off the served lanes by
+# platform truth (platform_compatible_backends in shared/backends.py). The
+# steward never sends images, so omitting vision here costs nothing and keeps
+# the card placeable on exactly the nodes it is meant for. Same reasoning as
+# the Qwen3.5-4B GGUF steward card.
+#
+# Architecture facts from the base repo config's text_config (arch
+# qwen3_5_moe: 40 layers, hidden 2048, 2 KV heads, 262144 ctx). storage_size
+# is the pinned quant file, the only weight file this card downloads.
+# supports_tensor = false: single-node on either GGUF engine.
+#
+# NO speculative-decoding section: the checkpoint ships MTP prediction heads
+# (mtp_num_hidden_layers = 1) and llama-server can drive them with
+# --spec-type draft-mtp, but that pairing is unmeasured on this quant, and
+# the sibling Qwen3.5-35B-A3B measured MTP NET NEGATIVE on MLX because fast
+# MoE decode magnifies per-round overhead. Add served_spec_type only with a
+# measurement behind it.
+model_id = "unsloth/Qwen3.6-35B-A3B-GGUF"
+n_layers = 40
+hidden_size = 2048
+num_key_value_heads = 2
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "qwen"
+quantization = "UD-Q4_K_M"
+base_model = "Qwen3.6 35B A3B"
+capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 262144
+gguf_file = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+# Pinned to the repository state the steward bench ran against, so an
+# upstream requant cannot silently change the brain.
+source_revision = "a483e9e6cbd595906af30beda3187c2663a1118c"
+trust_remote_code = false
+
+[reasoning]
+supports_toggle = true
+format = "token_delimited"
+default_effort = "medium"
+disabled_effort = "none"
+
+# Verified against this repo's chat template (the GGUF's embedded template and
+# the MLX sibling's chat_template.jinja emit the identical block): Qwen3.6
+# writes tool calls as
+#   <tool_call>\n<function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n</function>\n</tool_call>
+# which is exactly the Qwen3 XML dialect the shared generic text parser
+# recognizes (tool_text_parser._TOOLCALL_BLOCK_RE / _FUNCTION_RE /
+# _PARAMETER_RE), and the same dialect the steward harness re-parses if an
+# engine passes the markup through as content.
+[tooling]
+supports_tool_calling = true
+tool_call_format = "generic"
+
+[placement]
+# Every GGUF lane, matching the steward floor card: a node with
+# llama-cpp-python but no llama-server binary advertises only
+# llama_cpp-<compute>, and this card should be servable wherever the weights
+# fit. CPU lanes are listed for completeness but rank last; a 22 GB quant on
+# CPU is a fallback, not a plan.
+compatible_backends = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu", "llama_cpp-vulkan", "llama_cpp-cuda", "llama_cpp-rocm", "llama_cpp-cpu"]
+backend_preference = ["llama_server-cuda", "llama_server-vulkan", "llama_server-rocm", "llama_cpp-cuda", "llama_cpp-vulkan", "llama_cpp-rocm", "llama_server-cpu", "llama_cpp-cpu"]
+
+[storage_size]
+in_bytes = 22134528992

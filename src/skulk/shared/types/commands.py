@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import Field
 
 from skulk.api.types import (
@@ -35,6 +37,12 @@ class TestCommand(BaseCommand):
 class TextGeneration(BaseCommand):
     task_params: TextGenerationTaskParams
     owner_node: NodeId | None = None
+    # Pin this generation to one specific instance instead of least-loaded
+    # selection across all instances serving the model (mirrors
+    # SpeechSynthesis.target_instance_id). Used by the steward chat surface
+    # and the steward canary so their requests always land on the hidden
+    # system placement; None preserves normal selection.
+    target_instance_id: InstanceId | None = None
 
 
 class ImageGeneration(BaseCommand):
@@ -92,6 +100,10 @@ class PlaceInstance(BaseCommand):
     # instances on these nodes are not affected — exclusion is purely a hint
     # to the candidate-cycle search for *this* placement.
     excluded_nodes: list[NodeId] = Field(default_factory=list)
+    # System-placement marker stamped onto the minted instance (the
+    # intelligent-fabric steward). Only the master's invariant pass and
+    # repair builders set this; the operator placement API never does.
+    system_role: Literal["steward"] | None = None
 
 
 class CreateInstance(BaseCommand):

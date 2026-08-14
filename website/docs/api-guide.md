@@ -1653,6 +1653,128 @@ Use this when you already have an `instance` object and want exact control.
 
 **DELETE** `/instance/{instance_id}`
 
+## Intelligent Fabric (Steward)
+
+When intelligent-fabric mode is enabled in the cluster configuration
+(`intelligent_fabric.enabled`), the fabric keeps a small resident model (the
+steward) placed as a hidden system instance. The steward investigates the
+cluster through a bounded read-only tool surface and answers operator
+questions; it cannot change the cluster.
+
+### Talking to the steward: the virtual model
+
+Clients consume the steward through the standard OpenAI-compatible
+`POST /v1/chat/completions` endpoint using the reserved model id
+`skulk/steward`. Any OpenAI-compatible client works, streaming included; no
+steward-specific client code is required beyond the model id.
+
+Semantics of the reserved id:
+
+- The server runs the steward's investigation loop (up to 8 read-only tool
+  calls per turn: cluster state, node resources, telemetry and data-plane
+  diagnostics, version status, performance envelopes, the local doctor
+  registry, the model catalog, and a search over Skulk's own bundled
+  documentation) and answers from the evidence.
+- The tool trace is returned as reasoning content: in streaming responses,
+  each tool step arrives as a `reasoning_content` delta while the
+  investigation runs, followed by the answer as `content`; non-streaming
+  responses carry the trace in the message's `reasoning_content` field.
+- Client-supplied `tools` are rejected with `400`: the steward's tool
+  surface belongs to the server.
+- Client `system` messages are ignored in favor of the steward's own system
+  prompt; `user` and `assistant` turns form the conversation history, which
+  the client owns and resends each turn (the server is stateless).
+- The steward always runs with thinking disabled, regardless of what the
+  brain model supports. Requests to the reserved id cannot turn it back on;
+  addressing the underlying card directly still gives you the model's normal
+  reasoning behavior.
+- Requests to the id while intelligent-fabric mode is disabled return `404`
+  with an explanatory message.
+- If the mode is enabled but the steward is not ready to answer (still being
+  placed, still downloading its weights, still loading), the request is
+  refused with `503` before any streaming begins, carrying a `Retry-After`
+  header and a JSON body whose `detail` is the `GET /v1/steward` payload
+  (`enabled`, `present`, `ready`, `steward_model`, `instance_id`, `state`)
+  plus a human-readable `message`. Clients should back off and retry, or
+  poll `GET /v1/steward` and show the `state` while they wait.
+- A steward that disappears in the window between that check and dispatch
+  (a repair starting at exactly the wrong moment) still surfaces as an error
+  chunk in the normal chat-completions error shape, because the response has
+  already begun by then.
+- The underlying model card id (for example the bundled Qwen3.6-35B-A3B)
+  remains addressable as an ordinary model and answers WITHOUT tools or
+  cluster access: only the reserved id selects model-plus-harness.
+
+The steward appears in `GET /v1/models` as an entry flagged with
+`system_role: "steward"` while the mode is enabled, so model pickers can
+badge or separate it rather than listing it as an ordinary model.
+
+#### Extensions on a steward turn
+
+If the serving node has an extension installed that provides chat middleware,
+its two hooks run on steward turns as well as on ordinary chat completions. A
+node with no such extension behaves exactly as described above.
+
+The turn is presented to middleware in the same canonical form the ordinary
+chat path uses: the steward's system prompt as `instructions`, and the `user`
+and `assistant` history as `input`. Only those two channels are read back:
+
+- **`instructions`** becomes the turn's system message, so a middleware can
+  augment (or replace) the steward's prompt. This is how, for example, an
+  ambient-memory extension adds recollections from earlier conversations.
+- **`input`** becomes the conversation history, keeping only `user` and
+  `assistant` messages with non-empty content.
+- Everything else a middleware returns is ignored. The model, sampling
+  parameters, and tool surface belong to the steward, so a middleware cannot
+  reroute the turn to another model or arm a different tool set.
+
+If a transform leaves the turn without a trailing `user` message, the whole
+transform is discarded (prompt and history both) and the turn runs on the
+operator's original conversation, because a steward turn exists to answer an
+operator question. Whatever a middleware returns, the params handed to the
+response observer always describe the turn that actually ran: the reserved
+model, the filtered history, and the effective system prompt.
+
+The response observer fires exactly once per steward turn, receiving the final
+answer. The investigation's individual tool steps and the steward's periodic
+liveness probe are not observed: they are internal machinery, not
+conversations. A middleware that raises is logged and skipped, and the steward
+answers as though no extension were installed. None of this changes the
+request or response wire format.
+
+### GET /v1/steward
+
+Returns steward availability. Clients use this to decide whether to show a
+steward surface at all.
+
+Response fields:
+
+- `enabled`: whether intelligent-fabric mode is enabled in Settings.
+- `present`: whether a steward placement currently exists.
+- `ready`: whether every steward runner reports Ready or Running. Present
+  but not ready means the model is still downloading or loading; clients
+  should keep showing a preparing state and hold chat until ready.
+- `steward_model`: model card id of the steward brain when present, else null.
+- `instance_id`: the steward instance id when present, else null.
+- `state`: a one-word lifecycle summary derived from the fields above plus
+  the liveness canary's history, for clients that want to render a single
+  line instead of re-deriving the precedence rules. The booleans remain
+  authoritative. Values:
+  - `disabled`: intelligent-fabric mode is off.
+  - `downloading`: a placement exists and the brain's weights are still
+    being staged. This is the long first-run wait.
+  - `starting`: the fabric is placing the steward, or it is placed and
+    loading.
+  - `ready`: serving, with no outstanding liveness failure.
+  - `degraded`: serving, but the hosting node's liveness canary has at least
+    one failed probe outstanding. The steward may still answer; three
+    consecutive failures make the fabric replace the placement.
+
+Note: deleting the steward instance through `DELETE /instance/{instance_id}`
+is refused with `409` while intelligent-fabric mode is enabled; disable the
+mode in Settings to remove the placement (the fabric then tears it down
+automatically).
+
 ## Download Management
 
 ### Start a node download

@@ -31,11 +31,19 @@ llama.cpp here" judgment lives.
 
 ## Current scope
 
-The engine serves **single-node, streamed text generation**. Its boundaries
-are enforced loudly rather than degraded silently:
+The engine serves **single-node text generation with tool calling**. Its
+boundaries are enforced loudly rather than degraded silently:
 
-- **Tool calling is rejected** with a clear error: retry without `tools` or
-  use a model carded for `llama_cpp` / `llama_server`.
+- **Tool calling works on parser-pinned cards.** A card that pins
+  `vllm_tool_call_parser` in its `[runtime]` section (the bundled Qwen2.5
+  vLLM cards pin `hermes`) launches the server with vLLM's native
+  tool-call parsing, and a tool-enabled request runs non-streamed so the
+  caller receives the assembled call, the same shape as the llama.cpp
+  engines. A tool attempt cut short by `max_tokens` reports `length`
+  instead of surfacing an incomplete call. Cards without a pinned parser
+  reject tool requests with a clear error rather than silently dropping
+  them; there is no family-default fallback, because one model family can
+  span generations with different tool wire formats.
 - **Per-token logprobs are rejected** with a clear error: the OpenAI SSE proxy
   does not surface them, and Skulk refuses to silently omit what you asked
   for.

@@ -1,6 +1,6 @@
 import styled, { css, useTheme } from 'styled-components';
 import { FiSettings, FiSidebar, FiDatabase, FiMessageSquare, FiSun, FiMoon } from 'react-icons/fi';
-import { MdHub } from 'react-icons/md';
+import { MdHub, MdAutoAwesome } from 'react-icons/md';
 import { VscBug } from 'react-icons/vsc';
 import { Button } from '../common/Button';
 import SkulkIcon from '../icons/SkulkIcon';
@@ -8,9 +8,10 @@ import type { Theme } from '../../theme';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import { useGetStewardStatusQuery } from '../../store/endpoints/steward';
 import { MOBILE_BREAKPOINT_PX } from '../../hooks/useMediaQuery';
 
-export type NavRoute = 'cluster' | 'model-store' | 'chat' | 'operator';
+export type NavRoute = 'cluster' | 'model-store' | 'chat' | 'steward' | 'operator';
 
 export interface HeaderNavProps {
   showHome?: boolean;
@@ -304,6 +305,7 @@ const SidebarIcon = () => <FiSidebar size={18} />;
 const ClusterIcon = () => <MdHub size={16} />;
 const StoreIcon = () => <FiDatabase size={16} />;
 const ChatIcon = () => <FiMessageSquare size={16} />;
+const StewardIcon = () => <MdAutoAwesome size={16} />;
 
 const ObservabilityIcon = () => <VscBug size={16} />;
 const SettingsIcon = () => <FiSettings size={16} />;
@@ -357,6 +359,12 @@ export function HeaderNav({
   onOpenSettings,
   className,
 }: HeaderNavProps) {
+  // The steward link appears only while intelligent-fabric mode is on;
+  // polling keeps it in step with Settings changes made on any node.
+  const { data: stewardStatus } = useGetStewardStatusQuery(undefined, {
+    pollingInterval: 30000,
+  });
+  const stewardEnabled = stewardStatus?.enabled ?? false;
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
   const dispatch = useAppDispatch();
@@ -438,6 +446,12 @@ export function HeaderNav({
         <NavLink $active={activeRoute === 'chat'} onClick={() => navigate('chat')}>
           <ChatIcon /> {t('header.nav.chat', 'Chat')}
         </NavLink>
+
+        {stewardEnabled && (
+          <NavLink $active={activeRoute === 'steward'} onClick={() => navigate('steward')}>
+            <StewardIcon /> {t('header.nav.steward', 'Steward')}
+          </NavLink>
+        )}
         </>)}
 
         {instanceCount > 0 && (

@@ -299,3 +299,69 @@ def test_voice_cloning_cards_expose_managed_reference_audio(card_name: str) -> N
 
     assert card.audio is not None
     assert card.audio.supports_reference_audio is True
+
+def test_default_steward_models_are_bundled_tool_calling_text_cards() -> None:
+    """Every default steward brain must exist, place, and call tools.
+
+    The master walks ``steward_models`` in order and places the first card
+    the cluster can serve, so an entry naming a card that is not bundled is
+    a silent skip that costs a fleet its best brain, and an entry whose card
+    cannot call tools would place a steward that can never investigate.
+    """
+    from skulk.shared.backends import platform_compatible_backends
+    from skulk.store.config import IntelligentFabricConfig
+
+    bundled = {
+        str(_load(path).model_id): path
+        for kind, path in _CARD_FILES
+        if kind == "inference"
+    }
+    for model_ref in IntelligentFabricConfig().steward_models:
+        assert model_ref in bundled, f"steward model {model_ref} has no bundled card"
+        card = _load(bundled[model_ref])
+        profile = resolve_model_capability_profile(card.model_id, model_card=card)
+        assert profile.supports_tool_calling, (
+            f"steward model {model_ref} cannot call tools"
+        )
+        # The platform filter is what placement actually applies; a card that
+        # loses every backend to it is unplaceable no matter what it declares.
+        assert platform_compatible_backends(
+            card.placement.compatible_backends,
+            card_serves_vision=card.vision is not None,
+            card_serves_speech=False,
+        ), f"steward model {model_ref} has no platform-servable backend"
+
+
+def test_steward_gguf_brains_stay_eligible_for_the_served_lanes() -> None:
+    """A vision declaration would gate the GGUF brains off llama_server.
+
+    The served runner cannot load an mmproj projector, so ``[vision]`` on a
+    GGUF card removes every ``llama_server-*`` tag at placement time. Both
+    Qwen3.6 and Qwen3.5 GGUF steward cards are deliberately text-only for
+    this reason, and the base models being natively multimodal makes that an
+    easy thing to "fix" back into a break.
+    """
+    from skulk.shared.backends import engine_of, platform_compatible_backends
+    from skulk.store.config import IntelligentFabricConfig
+
+    bundled = {
+        str(_load(path).model_id): path
+        for kind, path in _CARD_FILES
+        if kind == "inference"
+    }
+    gguf_refs = [
+        ref for ref in IntelligentFabricConfig().steward_models if "GGUF" in ref
+    ]
+    assert gguf_refs, "the steward preference list lost its GGUF entries"
+    for model_ref in gguf_refs:
+        card = _load(bundled[model_ref])
+        assert card.vision is None, f"{model_ref} declares vision"
+        assert "vision" not in card.capabilities, f"{model_ref} declares vision"
+        servable = platform_compatible_backends(
+            card.placement.compatible_backends,
+            card_serves_vision=False,
+            card_serves_speech=False,
+        )
+        assert "llama_server" in {
+            engine for tag in servable if (engine := engine_of(tag))
+        }, f"{model_ref} lost the served lane"
