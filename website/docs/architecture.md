@@ -845,7 +845,12 @@ Re-running the installer is safe; every step is idempotent. `--headless` is
 the explicit opt-out for an intentionally API-only node. The supervised
 launchd/systemd entrypoint uses that same bundled Node.js runtime for dashboard
 rebuilds after updates, so Linux nodes do not require a separate host npm
-installation to keep their UI current.
+installation to keep their UI current. That entrypoint syncs the uv
+environment exactly on every service start, which would silently prune any
+separately installed `skulk.extensions` plugin (they live outside the locked
+resolution, like the source-built GPU llama.cpp wheel the wrapper already
+preserves); setting `SKULK_PRESERVE_VENV_EXTRAS=1` in the node's environment
+switches that sync to `uv sync --inexact` so such plugins survive restarts.
 
 ## The inference engine
 
