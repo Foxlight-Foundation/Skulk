@@ -9,6 +9,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Skulk now ships its signature voice: a new bundled reference profile named
+  Skulk, constructed synthetically like the existing ten and paired with the
+  same shared conditioning transcript. It appears in the voice catalog of
+  every validated cloning card and replaces Kite as the default voice, so any
+  synthesis request that does not choose a voice — including speech spoken on
+  behalf of the steward — speaks as Skulk. The reference-voices README now
+  also records how bundled profiles are authored.
+
 - Model artifacts are now self-describing and air-gap durable: canonical and
   staged copies retain their complete model card, immutable selection,
   verification state, companion ownership, and SHA-256 manifest in an atomic
