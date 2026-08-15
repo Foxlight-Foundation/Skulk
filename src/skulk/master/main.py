@@ -1658,21 +1658,31 @@ class Master:
                                             f"excluding the refuser: {fallback_err}). "
                                             "Giving up on this placement."
                                         )
-                                if not any(
+                                replacement_created = any(
                                     instance_id not in after_delete
                                     for instance_id in final_placement
-                                ):
-                                    generated_events.append(
-                                        instance_failure_event(
-                                            refused,
-                                            error_code="placement_failed",
-                                            error_message=(
-                                                "Skulk could not recover a placement "
-                                                "after a node refused its shard: "
-                                                f"{command.reason}"
-                                            )[:2048],
-                                        )
+                                )
+                                generated_events.append(
+                                    instance_failure_event(
+                                        refused,
+                                        error_code="placement_failed",
+                                        error_message=(
+                                            (
+                                                (
+                                                    "Skulk replaced this placement "
+                                                    "after a node refused its shard: "
+                                                )
+                                                if replacement_created
+                                                else (
+                                                    "Skulk could not recover a "
+                                                    "placement after a node refused "
+                                                    "its shard: "
+                                                )
+                                            )
+                                            + command.reason
+                                        )[:2048],
                                     )
+                                )
                                 transition_events = get_transition_events(
                                     self.state.instances,
                                     final_placement,
