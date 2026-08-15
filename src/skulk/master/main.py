@@ -2067,8 +2067,9 @@ class Master:
                     error_code="download_failed",
                     error_message=(
                         "A node could not stage the model, so Skulk tore down "
-                        f"this placement and attempted recovery: {cause}"
-                    )[:2048],
+                        "this placement and attempted recovery. Inspect cluster "
+                        "logs for the underlying storage or transport error."
+                    ),
                 )
             )
             for cmd in cancel_unnecessary_downloads(

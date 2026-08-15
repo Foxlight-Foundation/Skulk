@@ -217,6 +217,14 @@ def _instance_failure_message(reason: str) -> str:
     return normalized[:_INSTANCE_FAILURE_MESSAGE_LIMIT]
 
 
+def _model_trust_instance_failure_message(model_id: ModelId) -> str:
+    """Return safe operator guidance for a terminal model-trust rejection."""
+    return _instance_failure_message(
+        f"runner for {model_id} was refused by immutable model trust policy; "
+        "not retrying until the card approval or installed artifact identity changes."
+    )
+
+
 def _wedged_live_instances(
     runners: Mapping[RunnerId, "RunnerSupervisor"],
     live_instances: Container[InstanceId],
@@ -1957,11 +1965,13 @@ class Worker:
             ):
                 if trust_instance_id not in self._model_trust_failures_handled:
                     self._model_trust_failures_handled.add(trust_instance_id)
+                    logger.error(
+                        f"Worker: model trust rejection for instance "
+                        f"{trust_instance_id}: {trust_error}"
+                    )
                     await self._give_up_on_instance(
                         trust_instance_id,
-                        f"runner for {trust_model_id} was refused by immutable "
-                        f"model trust policy ({trust_error}); not retrying until "
-                        "the card approval or installed artifact identity changes.",
+                        _model_trust_instance_failure_message(trust_model_id),
                         error_code="model_trust_rejected",
                     )
 
