@@ -166,3 +166,37 @@ def test_mlx_ring_meta_is_benign_for_a_single_node_gguf_steward() -> None:
     assert isinstance(instance, MlxRingInstance)
     assert instance.system_role == "steward"
     assert len(instance.shard_assignments.node_to_runner) == 1
+
+
+def test_steward_candidates_require_text_and_tool_capability() -> None:
+    """Only tool-calling text cards may serve as steward brains (#830).
+
+    The harness always dispatches ``TextGeneration`` with server tools, so
+    an operator override naming any other card shape must be skipped, not
+    placed.
+    """
+    from skulk.master.main import steward_candidate_is_servable
+    from skulk.shared.models.model_cards import ToolingCardConfig
+
+    def _card(tasks: list[ModelTask], *, tools: bool) -> ModelCard:
+        return ModelCard(
+            model_id=ModelId("candidate-model"),
+            storage_size=Memory.from_gb(3),
+            n_layers=12,
+            hidden_size=30,
+            supports_tensor=True,
+            tasks=tasks,
+            tooling=ToolingCardConfig(supports_tool_calling=True) if tools else None,
+        )
+
+    assert steward_candidate_is_servable(
+        _card([ModelTask.TextGeneration], tools=True)
+    )
+    # A speech card cannot serve steward turns no matter what it declares.
+    assert not steward_candidate_is_servable(
+        _card([ModelTask.TextToSpeech], tools=True)
+    )
+    # A text card without tool calling can never investigate.
+    assert not steward_candidate_is_servable(
+        _card([ModelTask.TextGeneration], tools=False)
+    )

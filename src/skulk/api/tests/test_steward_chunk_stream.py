@@ -206,3 +206,68 @@ async def test_complete_literal_example_survives_in_final_answer() -> None:
     token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
     content = "".join(c.text for c in token_chunks if not c.is_thinking)
     assert content == answer
+
+
+async def test_cancel_turn_stops_the_generation_and_the_loop() -> None:
+    """Cancelling the advertised outer id ends the whole turn (#830).
+
+    The latch matters as much as the cancellation: without it the
+    investigation loop would treat the cancelled step as complete and
+    dispatch the next one, leaving the turn running behind the caller's
+    back.
+    """
+    cancelled: list[object] = []
+
+    class _Api:
+        async def send_task_cancellation(self, command_id: object) -> None:
+            cancelled.append(command_id)
+
+    # A script that would otherwise tool-loop for the full step budget.
+    harness = _ScriptedHarness(turns=[("", [_call("get_cluster_state")])])
+    harness._api = cast("API", cast(object, _Api()))  # pyright: ignore[reportPrivateUsage]
+    harness._active_command_id = cast(Any, "cmd-inner-1")  # pyright: ignore[reportPrivateUsage]
+
+    stream = harness.run_turn_chunks(
+        [StewardChatMessage(role="user", content="hi")]
+    )
+    first = await stream.__anext__()
+    assert isinstance(first, TokenChunk)
+    generations_before_cancel = len(harness.system_prompts)
+
+    await harness.cancel_turn()
+    assert cancelled == ["cmd-inner-1"]
+
+    async for _chunk in stream:
+        pass
+    # The loop stopped at the latch instead of dispatching further steps.
+    assert len(harness.system_prompts) == generations_before_cancel
+
+
+async def test_cancel_command_routes_a_registered_steward_turn() -> None:
+    """POST /v1/cancel/{outer_id} must reach the turn's harness, not 404."""
+    from skulk.api.main import API
+    from skulk.shared.types.common import CommandId
+
+    cancelled: list[object] = []
+
+    class _Api:
+        async def send_task_cancellation(self, command_id: object) -> None:
+            cancelled.append(command_id)
+
+    harness = _ScriptedHarness(turns=[("irrelevant", [])])
+    harness._api = cast("API", cast(object, _Api()))  # pyright: ignore[reportPrivateUsage]
+    harness._active_command_id = cast(Any, "cmd-inner-9")  # pyright: ignore[reportPrivateUsage]
+
+    outer_id = CommandId()
+    api = API.__new__(API)
+    api._text_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._image_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._embedding_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._audio_speech_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._audio_transcription_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._steward_turn_harnesses = {outer_id: harness}  # pyright: ignore[reportPrivateUsage]
+
+    response = await api.cancel_command(outer_id)
+
+    assert response.command_id == outer_id
+    assert cancelled == ["cmd-inner-9"]

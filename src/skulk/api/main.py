@@ -1567,6 +1567,11 @@ class API:
         # this node), so an outstanding failed probe surfaces as `degraded`
         # instead of hiding until the third failure tears the steward down.
         self._steward_canary = StewardCanaryState()
+        # Live steward turns keyed by their advertised outer command id, so
+        # the generic cancel-by-id endpoint can stop a turn whose inner
+        # generation ids the caller never sees. Entries live exactly as long
+        # as their turn's chunk stream.
+        self._steward_turn_harnesses: dict[CommandId, StewardHarness] = {}
         self._event_log = DiskEventLog(_API_EVENT_LOG_DIR) if enable_event_log else None
         self._event_log_appends_since_retention_check = 0
         self._system_id = SystemId()
@@ -3371,6 +3376,12 @@ class API:
             chunk_stream = self._extensions.tap_chat_stream(
                 self._extension_context, task_params, chunk_stream
             )
+        # The advertised command id must honor the generic cancel-by-id
+        # contract (POST /v1/cancel/{command_id}). The harness's inner
+        # generation ids are never shown to the caller, so the outer id is
+        # registered for the turn's lifetime and cancel_command routes it to
+        # the harness.
+        chunk_stream = self._register_steward_turn(command_id, harness, chunk_stream)
         if payload.stream:
             return StreamingResponse(
                 with_sse_keepalive(
@@ -3387,6 +3398,33 @@ class API:
             collect_chat_response(command_id, chunk_stream),
             media_type="application/json",
         )
+
+    async def _register_steward_turn(
+        self,
+        command_id: CommandId,
+        harness: StewardHarness,
+        chunk_stream: "AsyncGenerator[TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None]",
+    ) -> "AsyncGenerator[TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None]":
+        """Expose a steward turn to cancel-by-id for the stream's lifetime.
+
+        Registration and removal bracket the passthrough stream itself, so
+        the mapping can never outlive its turn: normal completion, client
+        disconnect, and cancellation all pass through the ``finally``.
+
+        Args:
+            command_id: The outer command id advertised to the caller.
+            harness: The harness serving this turn.
+            chunk_stream: The turn's chunk stream to pass through.
+
+        Yields:
+            The wrapped stream's chunks, unchanged.
+        """
+        self._steward_turn_harnesses[command_id] = harness
+        try:
+            async for chunk in chunk_stream:
+                yield chunk
+        finally:
+            self._steward_turn_harnesses.pop(command_id, None)
 
     async def _steward_extension_transform(
         self, history: list[StewardChatMessage], *, stream: bool
@@ -3665,6 +3703,16 @@ class API:
             or self._audio_transcription_queues.get(command_id)
         )
         if sender is None:
+            # A steward turn advertises one outer command id while its inner
+            # generations run under private ids; route the outer id to the
+            # harness so the generic cancel contract holds there too.
+            steward_turn = self._steward_turn_harnesses.get(command_id)
+            if steward_turn is not None:
+                await steward_turn.cancel_turn()
+                return CancelCommandResponse(
+                    message="Steward turn cancelled.",
+                    command_id=command_id,
+                )
             raise HTTPException(
                 status_code=404,
                 detail="Command not found or already completed",

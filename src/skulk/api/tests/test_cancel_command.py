@@ -42,6 +42,7 @@ def _make_api() -> Any:
     api._vision_media_failures = {}  # pyright: ignore[reportPrivateUsage]
     api._vision_media_packet_sender = None  # pyright: ignore[reportPrivateUsage]
     api._cancelled_command_ids = set()  # pyright: ignore[reportPrivateUsage]
+    api._steward_turn_harnesses = {}  # pyright: ignore[reportPrivateUsage]
     api._chunk_reorder = {}  # pyright: ignore[reportPrivateUsage]
     api._data_dedup_cursor = {}  # pyright: ignore[reportPrivateUsage]
     api._data_plane_observer = DataPlaneObserver(  # pyright: ignore[reportPrivateUsage]

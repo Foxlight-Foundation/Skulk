@@ -834,9 +834,10 @@ class Runner(ServedConcurrentDispatch):
             if task.task_params.tools and self._tool_call_parser is None:
                 raise RuntimeError(
                     "This model's card declares no vLLM tool-call parser "
-                    "(runtime.vllm_tool_call_parser or a family default), so "
-                    "the server was launched without tool support. Retry "
-                    "without tools or serve a tool-capable card."
+                    "(runtime.vllm_tool_call_parser; there is no family "
+                    "fallback), so the server was launched without tool "
+                    "support. Retry without tools or serve a card that pins "
+                    "a parser."
                 )
             if wants_logprobs(
                 task.task_params.logprobs, task.task_params.top_logprobs

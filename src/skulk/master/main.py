@@ -30,11 +30,18 @@ from skulk.master.placement_utils import (
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_EVENT_LOG_DIR, SKULK_TRACING_ENABLED
 from skulk.shared.log_summaries import summarize_command_for_log
+from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.memory_estimate import (
     estimate_shard_footprint,
     shard_fraction_of_model,
 )
-from skulk.shared.models.model_cards import ModelId, get_card, get_model_cards
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    get_card,
+    get_model_cards,
+)
 from skulk.shared.types.commands import (
     AddCustomModelCard,
     AudioTranscription,
@@ -233,6 +240,29 @@ _COMMAND_TASK_TYPES = (
 
 
 NODE_HEARTBEAT_GAP_WARNING = timedelta(seconds=10)
+
+
+def steward_candidate_is_servable(card: "ModelCard") -> bool:
+    """Whether a configured steward candidate can actually serve steward turns.
+
+    The steward harness always dispatches ``TextGeneration`` with server-side
+    tools, so a candidate must be a text-generation card whose resolved
+    capability profile supports tool calling. Anything else (an embedding,
+    image, speech, or tool-less card named through an operator override of
+    ``steward_models``) would place a steward that fails every turn instead
+    of falling through to the next candidate. The bundled defaults are
+    additionally CI-locked to pass this check.
+
+    Args:
+        card: The candidate's model card.
+
+    Returns:
+        True when the card can serve tool-driven steward text generation.
+    """
+    if ModelTask.TextGeneration not in card.tasks:
+        return False
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    return profile.supports_tool_calling
 
 
 def _aware_timestamp(when: datetime) -> datetime:
@@ -1994,6 +2024,21 @@ class Master:
             await self._teardown_steward_instances(extras)
             return
         if stewards:
+            # Reconcile a preference-list edit: a steward whose model was
+            # removed from ``steward_models`` is deliberately deselected and
+            # must not keep serving indefinitely. Teardown here is enough —
+            # this same invariant re-places from the current list on the
+            # next tick. Reordering the list alone never replaces a placed
+            # steward (upgrade churn is worse than a working older brain).
+            placed = self.state.instances.get(stewards[0])
+            if placed is not None:
+                placed_model = str(placed.shard_assignments.model_id)
+                if placed_model not in fabric.steward_models:
+                    logger.info(
+                        f"Steward model {placed_model} was removed from "
+                        "steward_models; replacing the placement"
+                    )
+                    await self._teardown_steward_instances(stewards)
             return
 
         now = time.monotonic()
@@ -2009,6 +2054,12 @@ class Master:
             if card is None:
                 logger.warning(
                     f"Steward model {model_ref} has no model card; skipping"
+                )
+                continue
+            if not steward_candidate_is_servable(card):
+                logger.warning(
+                    f"Steward model {model_ref} is not a tool-calling text "
+                    "card; skipping"
                 )
                 continue
             command = PlaceInstance(

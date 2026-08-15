@@ -642,6 +642,10 @@ class StewardHarness:
         # abandoned stream (client disconnect, cancel button) can stop the
         # runner instead of leaving it generating for nobody.
         self._active_command_id: CommandId | None = None
+        # Latched by cancel_turn: the investigation loop checks it before
+        # every inner dispatch, so cancelling the advertised outer command
+        # stops the whole turn rather than just its current generation.
+        self._turn_cancelled = False
         # Aggregated across the turn's inner generations so the terminal
         # chunk reports real usage instead of null, and the model's actual
         # terminal reason (e.g. length) is preserved.
@@ -713,7 +717,7 @@ class StewardHarness:
         # stream iteration, and the chunk stream's own cancellation handling
         # already sends TaskCancelled and finalizes; a second cancel here
         # would just duplicate it for an already-finalized command.
-        with anyio.move_on_after(CANARY_PROBE_TIMEOUT_SECONDS):
+        with anyio.move_on_after(CANARY_PROBE_TIMEOUT_SECONDS) as deadline_scope:
             async for chunk in chunk_stream:
                 if isinstance(chunk, ErrorChunk):
                     return False
@@ -725,6 +729,12 @@ class StewardHarness:
                     got_text = True
                 if isinstance(chunk, TokenChunk) and chunk.finish_reason is not None:
                     break
+        # A cancelled deadline is a failed probe no matter what arrived
+        # first: partial output followed by a stall is exactly the wedge
+        # this canary exists to catch, and counting it as success would
+        # reset the failure run the teardown threshold depends on.
+        if deadline_scope.cancelled_caught:
+            return False
         return got_text
 
     def steward_instance(self) -> tuple[InstanceId, str] | None:
@@ -952,6 +962,25 @@ class StewardHarness:
                     with anyio.move_on_after(2, shield=True):
                         await self._api.send_task_cancellation(abandoned)
 
+    async def cancel_turn(self) -> None:
+        """Cancel the running turn on behalf of the advertised command id.
+
+        The chat surface advertises one outer command id for the whole turn
+        while the harness dispatches per-step inner generations under ids the
+        client never sees. Cancelling the outer id must therefore stop the
+        inner generation currently in flight AND latch the turn closed so
+        the investigation loop does not simply dispatch its next step.
+
+        Side effects:
+            Sends a task cancellation for the active inner command, if any.
+        """
+        self._turn_cancelled = True
+        active = self._active_command_id
+        if active is None:
+            return
+        self._active_command_id = None
+        await self._api.send_task_cancellation(active)
+
     async def _run_investigation(
         self,
         messages: list[ChatCompletionMessage],
@@ -962,6 +991,8 @@ class StewardHarness:
         wrap it with abandonment cleanup."""
         reply = ""
         for step_index in range(MAX_STEPS_PER_TURN):
+            if self._turn_cancelled:
+                return
             if step_index == MAX_STEPS_PER_TURN - 1:
                 messages.append(
                     ChatCompletionMessage(
