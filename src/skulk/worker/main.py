@@ -205,12 +205,15 @@ and weight mmaps, far under an indefinite hang."""
 _INSTANCE_FAILURE_MESSAGE_LIMIT = 2048
 
 
-def _instance_failure_message(reason: str, detail: str | None = None) -> str:
-    """Return bounded payload-free failure text suitable for replicated state."""
-    parts = [reason]
-    if detail and detail not in reason:
-        parts.append(f"Last runner error: {detail}")
-    normalized = " ".join(" ".join(parts).split())
+def _instance_failure_message(reason: str) -> str:
+    """Return bounded classified failure text suitable for replicated state.
+
+    ``RunnerFailed.error_message`` is deliberately excluded: it originates in
+    raw exception text and may contain local paths, URLs, or payload-derived
+    details. Those diagnostics remain transient log evidence, while durable
+    operator truth retains only the worker-authored safe reason.
+    """
+    normalized = " ".join(reason.split())
     return normalized[:_INSTANCE_FAILURE_MESSAGE_LIMIT]
 
 
@@ -872,7 +875,6 @@ class Worker:
         reason: str,
         *,
         error_code: InstanceFailureCode,
-        detail: str | None = None,
     ) -> None:
         """Tear down a repeatedly-failing instance instead of relaunching it.
 
@@ -885,7 +887,7 @@ class Worker:
         ``InstanceId``s are unique, so the stale entry can never collide with a
         future instance.
         """
-        message = _instance_failure_message(reason, detail)
+        message = _instance_failure_message(reason)
         logger.error(f"Worker: giving up on instance {instance_id}: {message}")
         await self.command_sender.send(
             ForwarderCommand(
@@ -2106,11 +2108,6 @@ class Worker:
                                 "node's available memory dropped, a reboot is "
                                 "the only way to reclaim it.",
                                 error_code="runner_wedged",
-                                detail=(
-                                    runner.status.error_message
-                                    if isinstance(runner.status, RunnerFailed)
-                                    else None
-                                ),
                             )
                         elif self._crash_breaker.record(task.instance_id):
                             # Runner keeps crashing (e.g. OOM on load). Give up
@@ -2123,11 +2120,6 @@ class Worker:
                                 f"{_RUNNER_CRASH_WINDOW_SECONDS:.0f}s "
                                 "(likely insufficient memory)",
                                 error_code="runner_crashed",
-                                detail=(
-                                    runner.status.error_message
-                                    if isinstance(runner.status, RunnerFailed)
-                                    else None
-                                ),
                             )
                         else:
                             # Runner crashed but instance still exists and the

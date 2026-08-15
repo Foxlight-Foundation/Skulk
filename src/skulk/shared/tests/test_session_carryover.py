@@ -10,13 +10,14 @@ from datetime import datetime, timezone
 
 from skulk.shared.session_carryover import seed_state_for_new_session
 from skulk.shared.topology import Topology
-from skulk.shared.types.common import NodeId
+from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.profiling import NodeNetworkInfo
 from skulk.shared.types.state import State
 from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
     DownloadOngoing,
 )
+from skulk.shared.types.worker.instances import InstanceFailure, InstanceId
 
 
 def _prior_state() -> tuple[State, NodeId]:
@@ -52,6 +53,23 @@ def test_carries_durable_facts():
     # The telemetry-plane readings (node_memory/system since slice 2;
     # node_identities/disk/rdma-ctl since slice 3) are no longer carried — they
     # live in the Node-owned TelemetryView, which survives election separately.
+
+
+def test_carries_bounded_instance_failure_truth() -> None:
+    """Routine master promotion must not erase why a placement disappeared."""
+    failure = InstanceFailure(
+        instance_id=InstanceId("failed-instance"),
+        model_id=ModelId("org/model"),
+        error_code="runner_crashed",
+        error_message="Runner crashed repeatedly while loading the model.",
+        affected_node_ids=[NodeId("node-a")],
+        recorded_at=datetime(2026, 8, 15, 16, 0, tzinfo=timezone.utc),
+    )
+    prior = State(instance_failures=[failure])
+
+    seed = seed_state_for_new_session(prior)
+
+    assert seed.instance_failures == [failure]
 
 
 def test_carries_only_completed_downloads():
