@@ -42,6 +42,7 @@ from skulk.shared.types.commands import (
     DeleteCustomModelCard,
     DeleteInstance,
     EvictStagedModel,
+    FailInstance,
     ForwarderCommand,
     ForwarderDownloadCommand,
     ImageEdits,
@@ -67,6 +68,7 @@ from skulk.shared.types.events import (
     GlobalForwarderEvent,
     IndexedEvent,
     InstanceDeleted,
+    InstanceFailureRecorded,
     LocalForwarderEvent,
     NodeDownloadProgress,
     NodeGatheredInfo,
@@ -122,7 +124,13 @@ from skulk.shared.types.worker.downloads import (
     DownloadPending,
     DownloadProgress,
 )
-from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
+from skulk.shared.types.worker.instances import (
+    Instance,
+    InstanceFailure,
+    InstanceFailureCode,
+    InstanceId,
+    InstanceMeta,
+)
 from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
 from skulk.shared.types.worker.shards import RpcDonorShardMetadata, Sharding
 from skulk.store.config import load_skulk_config, resolve_config_path
@@ -233,6 +241,93 @@ _COMMAND_TASK_TYPES = (
 
 
 NODE_HEARTBEAT_GAP_WARNING = timedelta(seconds=10)
+_INSTANCE_FAILURE_MESSAGE_LIMIT = 2048
+
+
+def _node_unavailable_failure_message(node_id: NodeId, reason: str) -> str:
+    """Return a bounded liveness explanation for an unconstrained node id."""
+    prefix = "The placement was torn down because assigned node "
+    suffix = f" {reason}."
+    available_node_characters = max(
+        0, _INSTANCE_FAILURE_MESSAGE_LIMIT - len(prefix) - len(suffix)
+    )
+    return f"{prefix}{str(node_id)[:available_node_characters]}{suffix}"
+
+
+def instance_failure_event(
+    instance: Instance,
+    *,
+    error_code: InstanceFailureCode,
+    error_message: str,
+    recorded_at: datetime | None = None,
+) -> InstanceFailureRecorded:
+    """Build durable operator truth while the failed placement still exists.
+
+    Args:
+        instance: Placement whose terminal failure is being retained.
+        error_code: Stable operator-facing category for the failure.
+        error_message: Bounded, payload-safe explanation shown to operators.
+        recorded_at: Optional authoritative occurrence time. Defaults to the
+            current UTC time when omitted.
+
+    Returns:
+        A new failure event containing the placement identity and assigned
+        nodes. Constructing the event does not mutate cluster state or emit it.
+    """
+    return InstanceFailureRecorded(
+        failure=InstanceFailure(
+            instance_id=instance.instance_id,
+            model_id=instance.shard_assignments.model_id,
+            system_role=instance.system_role,
+            error_code=error_code,
+            error_message=error_message,
+            affected_node_ids=tuple(instance.shard_assignments.node_to_runner),
+            recorded_at=recorded_at or datetime.now(tz=timezone.utc),
+        )
+    )
+
+
+def dead_node_instance_failure_events(
+    state: State,
+    connected_node_ids: AbstractSet[NodeId],
+    timed_out_node_ids: AbstractSet[NodeId],
+) -> list[InstanceFailureRecorded]:
+    """Return one retained failure for every placement affected by node loss.
+
+    A timed-out node can remain in the replicated topology until
+    :class:`NodeTimedOut` applies, so topology absence alone is insufficient.
+    This helper intentionally considers both signals and leaves event emission
+    and subsequent teardown to the planning loop.
+
+    Args:
+        state: Current immutable cluster state containing live placements.
+        connected_node_ids: Nodes currently present in topology.
+        timed_out_node_ids: Nodes whose liveness evidence has expired, even if
+            their topology entry has not yet been removed.
+
+    Returns:
+        One payload-safe failure event per affected placement. The helper does
+        not mutate state, emit events, or tear down placements.
+    """
+    failures: list[InstanceFailureRecorded] = []
+    for instance in state.instances.values():
+        unavailable_nodes = sorted(
+            node_id
+            for node_id in instance.shard_assignments.node_to_runner
+            if node_id not in connected_node_ids or node_id in timed_out_node_ids
+        )
+        if not unavailable_nodes:
+            continue
+        node_id = unavailable_nodes[0]
+        reason = "timed out" if node_id in timed_out_node_ids else "left the live topology"
+        failures.append(
+            instance_failure_event(
+                instance,
+                error_code="node_unavailable",
+                error_message=_node_unavailable_failure_message(node_id, reason),
+            )
+        )
+    return failures
 
 
 def _aware_timestamp(when: datetime) -> datetime:
@@ -1324,6 +1419,48 @@ class Master:
                                     )
                                 )
                             generated_events.extend(transition_events)
+                        case FailInstance():
+                            # Failure teardown is deliberately distinct from an
+                            # operator stop. Capture model, nodes, and cause while
+                            # the instance still exists, then delete it through the
+                            # same lifecycle path as an ordinary stop.
+                            failed_instance = self.state.instances.get(
+                                command.instance_id
+                            )
+                            if failed_instance is None:
+                                logger.info(
+                                    "FailInstance for unknown instance "
+                                    f"{command.instance_id}; ignoring redelivery"
+                                )
+                            else:
+                                self._record_freed_instance(failed_instance)
+                                placement = delete_instance(
+                                    DeleteInstance(instance_id=command.instance_id),
+                                    self.state.instances,
+                                )
+                                generated_events.append(
+                                    instance_failure_event(
+                                        failed_instance,
+                                        error_code=command.error_code,
+                                        error_message=command.error_message,
+                                    )
+                                )
+                                for cancel_command in cancel_unnecessary_downloads(
+                                    placement, self._effective_downloads()
+                                ):
+                                    await self.download_command_sender.send(
+                                        ForwarderDownloadCommand(
+                                            origin=self._system_id,
+                                            command=cancel_command,
+                                        )
+                                    )
+                                generated_events.extend(
+                                    get_transition_events(
+                                        self.state.instances,
+                                        placement,
+                                        self.state.tasks,
+                                    )
+                                )
                         case RefuseInstancePlacement():
                             # A worker could not fit its shard at load time
                             # (#290). Delete the refused instance and re-place
@@ -1353,6 +1490,16 @@ class Master:
                                         instance_id=command.instance_id
                                     ),
                                     self.state.instances,
+                                )
+                                await self.event_sender.send(
+                                    instance_failure_event(
+                                        refused,
+                                        error_code="placement_failed",
+                                        error_message=(
+                                            "Skulk exhausted placement recovery after "
+                                            f"a node refused its shard: {command.reason}"
+                                        )[:2048],
+                                    )
                                 )
                                 # Same download hygiene as every other delete
                                 # path: a rank still mid-download for the
@@ -1511,6 +1658,31 @@ class Master:
                                             f"excluding the refuser: {fallback_err}). "
                                             "Giving up on this placement."
                                         )
+                                replacement_created = any(
+                                    instance_id not in after_delete
+                                    for instance_id in final_placement
+                                )
+                                generated_events.append(
+                                    instance_failure_event(
+                                        refused,
+                                        error_code="placement_failed",
+                                        error_message=(
+                                            (
+                                                (
+                                                    "Skulk replaced this placement "
+                                                    "after a node refused its shard: "
+                                                )
+                                                if replacement_created
+                                                else (
+                                                    "Skulk could not recover a "
+                                                    "placement after a node refused "
+                                                    "its shard: "
+                                                )
+                                            )
+                                            + command.reason
+                                        )[:2048],
+                                    )
+                                )
                                 transition_events = get_transition_events(
                                     self.state.instances,
                                     final_placement,
@@ -1767,8 +1939,19 @@ class Master:
                     )
                     await self.event_sender.send(task_failed)
 
-            # kill broken instances (suppressed during the topology-settle
-            # grace, same rationale as dying_instance_ids above)
+            # Retain the failure before either InstanceDeleted or NodeTimedOut
+            # removes the placement. Timed-out nodes may still be present in
+            # topology, so this must use the same combined liveness truth as
+            # dying_instance_ids rather than topology absence alone.
+            if topology_settled:
+                for failure_event in dead_node_instance_failure_events(
+                    self.state, connected_node_ids, timed_out_node_ids
+                ):
+                    await self.event_sender.send(failure_event)
+
+            # Kill instances whose assigned node has already left topology.
+            # NodeTimedOut below owns teardown for timed-out-but-still-present
+            # nodes, preventing duplicate deletion events.
             if topology_settled:
                 for instance_id, instance in self.state.instances.items():
                     for node_id in instance.shard_assignments.node_to_runner:
@@ -1895,6 +2078,17 @@ class Master:
                 )
             transition_events = get_transition_events(
                 self.state.instances, final_placement, self.state.tasks
+            )
+            await self.event_sender.send(
+                instance_failure_event(
+                    instance,
+                    error_code="download_failed",
+                    error_message=(
+                        "A node could not stage the model, so Skulk tore down "
+                        "this placement and attempted recovery. Inspect cluster "
+                        "logs for the underlying storage or transport error."
+                    ),
+                )
             )
             for cmd in cancel_unnecessary_downloads(
                 final_placement, self._effective_downloads()

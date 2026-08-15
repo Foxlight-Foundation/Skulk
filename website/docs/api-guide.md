@@ -1326,8 +1326,8 @@ Finding the command ID:
   value
 - non-streaming chat responses use the command ID as the response `id`
 - Skulk control responses such as `POST /place_instance` return an explicit
-  `command_id` field (those placement commands complete immediately and are
-  not cancellable here)
+  `command_id` field plus the exact resulting `instance_id` (those placement
+  commands complete immediately and are not cancellable here)
 
 ```bash
 curl -X POST http://localhost:52415/v1/cancel/<command_id>
@@ -1580,6 +1580,12 @@ silently failing on the master:
   per-node memory info lags the edges. The request internally waits up to
   15 seconds for the info to arrive before giving up, so retry shortly on 503.
 
+A successful response includes both `command_id` and `instance_id`. For
+`POST /place_instance` they contain the same stable value: the accepted command
+owns exactly that resulting placement identity. Clients should retain
+`instance_id` and correlate progress against that runtime rather than guessing
+from model name or observation order. The field is additive for older clients.
+
 Memory fitting is checked **per node, not summed across the cycle**: Tensor
 sharding splits weights evenly, Pipeline allocates layers proportionally to
 each node's available memory, and every node must hold its share times a
@@ -1643,7 +1649,10 @@ instance shape before launch, including the hardware-aware
 
 **POST** `/instance`
 
-Use this when you already have an `instance` object and want exact control.
+Use this when you already have an `instance` object and want exact control. A
+successful response returns the accepted `command_id`, the submitted
+`instance_id`, and its `model_card`; clients can use that exact instance
+identity to correlate the acknowledgement with later runtime and failure truth.
 
 ### Inspect one instance
 
@@ -2224,6 +2233,22 @@ curl -X POST http://localhost:52415/onboarding
 **GET** `/state`
 
 Returns the cluster state as Skulk currently sees it.
+
+`instanceFailures` is a newest-first, event-sourced history of the 64 most
+recent terminal placement failures. Each entry includes the vanished
+`instanceId`, `modelId`, optional `systemRole`, stable `errorCode`, bounded
+operator-safe `errorMessage`, assigned `affectedNodeIds`, and UTC `recordedAt`.
+Ordinary instance, model, and assigned-node identifiers remain unchanged; an
+identifier exceeding 256 UTF-8 bytes is represented as a stable
+`sha256:<digest>` reference. The assigned-node list retains at most 64 entries
+and rejects non-string values during strict replay, so hostile explicit
+placement input cannot inflate replicated state and corrupted snapshots cannot
+invent authoritative identities.
+Skulk records the entry before removing the failed instance, so operators can
+distinguish a runner crash, unresponsive or wedged runner, trust rejection,
+unrecoverable placement, or lost node from a clean operator stop. Prompt and
+generated-response content never enters this history. Replacing the same model
+creates a new instance identity and does not erase the earlier failure.
 
 The response also carries a derived `nodeHealth` map (keyed by node id) so a
 problem on a node is visible rather than silent. Each entry is a `level`
@@ -2997,7 +3022,7 @@ The operator panel at `/operator` is designed for mobile access and can also be 
 
 | Endpoint | Description |
 | --- | --- |
-| `GET /state` | Full cluster state: nodes, instances, runners, memory, GPU |
+| `GET /state` | Full cluster state: nodes, instances, recent terminal instance failures, runners, memory, GPU |
 | `GET /node_id` | Local node's ID |
 | `GET /node/identity` | Node ID, hostname, and preferred LAN IP |
 

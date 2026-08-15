@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from skulk.api.types import (
     ImageEditsTaskParams,
@@ -16,7 +16,12 @@ from skulk.shared.types.chunks import InputChunk
 from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
 from skulk.shared.types.text_generation import TextGenerationTaskParams
-from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
+from skulk.shared.types.worker.instances import (
+    Instance,
+    InstanceFailureCode,
+    InstanceId,
+    InstanceMeta,
+)
 from skulk.shared.types.worker.shards import Sharding, ShardMetadata
 from skulk.utils.pydantic_ext import CamelCaseModel, TaggedModel
 
@@ -112,6 +117,33 @@ class CreateInstance(BaseCommand):
 
 class DeleteInstance(BaseCommand):
     instance_id: InstanceId
+
+
+class FailInstance(BaseCommand):
+    """Report a terminal runtime failure to the authoritative master.
+
+    The master records bounded operator failure truth before applying the
+    ordinary instance teardown path. The command therefore carries only a
+    stable category and payload-safe explanation; prompts, responses,
+    credentials, and raw diagnostic output must never be included.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    instance_id: InstanceId = Field(
+        description="Exact placement identity that must be retained and torn down."
+    )
+    error_code: InstanceFailureCode = Field(
+        description="Stable operator-facing category for the terminal failure."
+    )
+    error_message: str = Field(
+        min_length=1,
+        max_length=2048,
+        description=(
+            "Bounded payload-safe operator explanation retained after teardown; "
+            "never contains prompts, responses, credentials, or raw diagnostics."
+        ),
+    )
 
 
 class RefuseInstancePlacement(BaseCommand):
@@ -233,6 +265,7 @@ Command = (
     | PlaceInstance
     | CreateInstance
     | DeleteInstance
+    | FailInstance
     | RefuseInstancePlacement
     | TaskCancelled
     | TaskFinished

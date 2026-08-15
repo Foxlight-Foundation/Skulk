@@ -1541,6 +1541,9 @@ class DeleteInstanceTaskParams(BaseModel):
 class CreateInstanceResponse(BaseModel):
     message: str
     command_id: CommandId
+    instance_id: InstanceId = Field(
+        description="Exact placement identity created by the accepted command."
+    )
     model_card: ModelCard
 
 

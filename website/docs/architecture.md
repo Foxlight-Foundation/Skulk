@@ -198,6 +198,12 @@ Operationally, the rule of thumb:
 
 `PlaceInstance` carries an optional `excluded_nodes` list. The master's placement planner treats those nodes as absent when scoring candidate cycles for that single placement only: it's a per-launch hint, not a cluster-wide flag. Already-running instances on the listed nodes are unaffected. Operators set the list from the dashboard's placement modal before pressing Launch. The effective exclusions are also stamped onto the placed instance itself, so automatic repair re-placements (a memory-refused shard, a failed download) keep honoring the operator's exclusions rather than searching the full topology; before the stamp existed, a repaired instance could land on exactly the nodes the caller excluded.
 
+The placement minted from `PlaceInstance` uses the command ID as its instance
+ID. `POST /place_instance` returns both names for that value, giving clients an
+exact acknowledgement-to-runtime correlation even when several operators
+place the same model concurrently. A repair placement receives a fresh command
+and therefore a fresh identity.
+
 The planner's memory admission is per node, not summed across the candidate cycle: Tensor sharding splits the weights evenly across ranks while Pipeline allocates layers proportionally to each node's available memory, and every node must fit its weight share times a runtime-overhead factor (KV cache, activations, MLX buffers, the runner process) plus a flat floor, and an exact weights-equal-free-memory fit is rejected because it thrashes rather than runs. "Available memory" here is the GPU-wireable figure, `total − wired − anonymous − compressor` from a `vm_stat` snapshot taken alongside each telemetry sample, not the naive free-plus-inactive figure, which counts reclaimable file cache as used (after downloading a model, the weights sitting in file cache would deflate availability by the model's full size and refuse a placement that runs comfortably; macOS evicts that cache the moment Metal wires pages). It deliberately does not credit compression of idle anonymous memory. Because that availability rides the telemetry plane (last-write-wins gossip), it lags a teardown by a few rounds: right after an instance is deleted the freed memory is not yet reflected, so a placement issued immediately afterward (a test harness or a rapid model swap) would read deflated availability and be refused until the gossip settles. To avoid that, the master credits a just-deleted instance's per-node footprint back to the admission inputs for a short grace window, then lets the credit expire so a genuine shortfall reasserts; the worker's own pre-load fit guard remains the last-resort check against an over-credit. Placement failures are typed: a topology gap, an exclusion that removed every candidate, a per-node memory shortfall (with the arithmetic), and the not-an-error startup cases where cluster info simply has not finished gossiping (`PlacementInfoPendingError`, which covers both phases: connection edges lagging node identities, and memory info lagging the edges) are all distinct, and `POST /place_instance` dry-runs the placement against replicated state so callers get the real reason as a 400/503 instead of an acknowledged command that silently fails on the master.
 
 The master admits on the gossiped (telemetry-plane, last-write-wins) `ram_available`, while the worker's pre-spawn guard reads a fresh live `vm_stat` figure at load time. On a borderline multi-node split the live reading can sit just below the admitted estimate, so the master admits a cycle the worker then refuses. The worker guard therefore allows a small fit tolerance (10% of usable): a shard's footprint already bakes in the engine overhead factor, a full KV reservation, and a flat floor, so a sub-GB miss is within that pad and within live-versus-gossip jitter, and refusing on it would flip a placement the master admitted into a needless failure (a 0.2GB / 2% miss was observed refusing a 24B model at the load re-check across a 3-node ring). Only a shortfall beyond the tolerance, the signature of a node that genuinely lost memory since admission, trips the guard. When it does, rather than letting that instance vanish, the worker emits `RefuseInstancePlacement` and the master re-places the same model one node wider (`min_nodes` = refused width + 1) so each node holds a smaller share. On a heterogeneous cluster "wider" is not always possible even when a working placement exists: engines differ per node, so a GGUF model refused by one GPU node may fit alone on another GPU node while a Mac can never join its cycle. When no wider cycle exists, the master therefore falls back once to a single-node placement that excludes the refusing node. A refusal against that fallback is terminal: the master tears the placement down, cancels the model downloads it started, and gives up, which bounds the refusal chain at two hops so it can never oscillate between two refusing nodes. This self-corrects tight splits instead of requiring an operator to notice and re-launch.
@@ -224,6 +230,25 @@ session reset fails every still-open command stream directly before
 discarding its queue maps. Together these guarantee an open request is
 terminated within seconds of any node death rather than dangling until the
 client's own timeout.
+
+Instance failure is retained separately from the request that happened to
+expose it. A worker that gives up after repeated runner crashes, a wedge, an
+unresponsive spawn, or a model-trust rejection sends `FailInstance` instead of
+an ordinary delete. The master emits `InstanceFailureRecorded` while the
+placement still exists and only then emits `InstanceDeleted`. Node-loss and
+terminal placement-recovery paths do the same. `State.instance_failures` keeps
+the newest 64 records, replacing duplicate reports for one instance, so
+`GET /state` API consumers and Skulk's own fabric cognition can explain why a
+model vanished after its live instance and short-lived task records are gone.
+Clean operator stops use `DeleteInstance` and intentionally
+do not create failure history. The record contains stable categories, bounded
+operator-safe runner detail, model and instance identities, assigned nodes, and
+the master's UTC acceptance time; it never contains prompts or generated
+content. Assigned-node history is limited to 64 entries; every retained
+instance, model, and node identifier is limited to 256 UTF-8 bytes, with larger
+values represented only by stable SHA-256 references. Replay rejects non-string
+node identities rather than rewriting corrupted state. These constraints keep
+repeated failures and replicated snapshots strictly bounded.
 
 A snapshot-bootstrap rollout has one operational rule: once a master starts compacting old replay history after writing snapshots, older nodes that only know how to "replay from event 0" should be considered temporary guests during the rollout window. Upgrade all nodes before relying on bounded retention as the steady state.
 

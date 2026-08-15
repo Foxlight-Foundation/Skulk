@@ -48,7 +48,7 @@ from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.chunks import DataChunk, InputImageChunk
 from skulk.shared.types.commands import (
-    DeleteInstance,
+    FailInstance,
     ForwarderCommand,
     ForwarderDownloadCommand,
     RefuseInstancePlacement,
@@ -112,7 +112,11 @@ from skulk.shared.types.worker.downloads import (
     DownloadPending,
     DownloadProgress,
 )
-from skulk.shared.types.worker.instances import InstanceId, LlamaRpcInstance
+from skulk.shared.types.worker.instances import (
+    InstanceFailureCode,
+    InstanceId,
+    LlamaRpcInstance,
+)
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerStatus
 from skulk.shared.types.worker.shards import ShardMetadata, TensorShardMetadata
 from skulk.store.config import StagingNodeConfig
@@ -197,6 +201,28 @@ pre-init coordination forever: ``_init_distributed_backend`` only plans
 ``ConnectToGroup`` once every rank has reported, and the crash breaker never
 trips because the process is alive. Generous enough to cover slow Python imports
 and weight mmaps, far under an indefinite hang."""
+
+_INSTANCE_FAILURE_MESSAGE_LIMIT = 2048
+
+
+def _instance_failure_message(reason: str) -> str:
+    """Return bounded classified failure text suitable for replicated state.
+
+    ``RunnerFailed.error_message`` is deliberately excluded: it originates in
+    raw exception text and may contain local paths, URLs, or payload-derived
+    details. Those diagnostics remain transient log evidence, while durable
+    operator truth retains only the worker-authored safe reason.
+    """
+    normalized = " ".join(reason.split())
+    return normalized[:_INSTANCE_FAILURE_MESSAGE_LIMIT]
+
+
+def _model_trust_instance_failure_message(model_id: ModelId) -> str:
+    """Return safe operator guidance for a terminal model-trust rejection."""
+    return _instance_failure_message(
+        f"runner for {model_id} was refused by immutable model trust policy; "
+        "not retrying until the card approval or installed artifact identity changes."
+    )
 
 
 def _wedged_live_instances(
@@ -851,23 +877,34 @@ class Worker:
             )
         return None
 
-    async def _give_up_on_instance(self, instance_id: InstanceId, reason: str) -> None:
+    async def _give_up_on_instance(
+        self,
+        instance_id: InstanceId,
+        reason: str,
+        *,
+        error_code: InstanceFailureCode,
+    ) -> None:
         """Tear down a repeatedly-failing instance instead of relaunching it.
 
-        Sends ``DeleteInstance`` to the master so the doomed instance stops
-        being reconciled into fresh runners - each relaunch risks another
-        leak-on-abort. The crash window is deliberately NOT cleared: the trip is
+        Sends ``FailInstance`` so the master records why the placement vanished
+        before deleting it; each relaunch risks another leak-on-abort. The crash
+        window is deliberately NOT cleared: the trip is
         edge-triggered, so leaving the failure history in place keeps the latch
-        set and suppresses re-tripping (and duplicate ``DeleteInstance``) while
+        set and suppresses re-tripping (and duplicate ``FailInstance``) while
         the instance lingers in replicated state before the deletion lands.
         ``InstanceId``s are unique, so the stale entry can never collide with a
         future instance.
         """
-        logger.error(f"Worker: giving up on instance {instance_id}: {reason}")
+        message = _instance_failure_message(reason)
+        logger.error(f"Worker: giving up on instance {instance_id}: {message}")
         await self.command_sender.send(
             ForwarderCommand(
                 origin=self._system_id,
-                command=DeleteInstance(instance_id=instance_id),
+                command=FailInstance(
+                    instance_id=instance_id,
+                    error_code=error_code,
+                    error_message=message,
+                ),
             )
         )
 
@@ -1916,7 +1953,7 @@ class Worker:
             await anyio.sleep(0.1)
             # Bound the crash breaker's memory: drop entries for instances that
             # no longer exist. We deliberately don't clear on give-up (that would
-            # let a lingering instance re-trip and re-send DeleteInstance), so
+            # let a lingering instance re-trip and re-send FailInstance), so
             # this is where dead-instance keys are reclaimed.
             self._crash_breaker.retain(self.state.instances)
             self._model_trust_failures_handled.intersection_update(
@@ -1928,11 +1965,14 @@ class Worker:
             ):
                 if trust_instance_id not in self._model_trust_failures_handled:
                     self._model_trust_failures_handled.add(trust_instance_id)
+                    logger.error(
+                        f"Worker: model trust rejection for instance "
+                        f"{trust_instance_id}: {trust_error}"
+                    )
                     await self._give_up_on_instance(
                         trust_instance_id,
-                        f"runner for {trust_model_id} was refused by immutable "
-                        f"model trust policy ({trust_error}); not retrying until "
-                        "the card approval or installed artifact identity changes.",
+                        _model_trust_instance_failure_message(trust_model_id),
+                        error_code="model_trust_rejected",
                     )
 
             # Wedge-marked LOCAL runner deaths give their instance up here, on
@@ -1949,6 +1989,7 @@ class Worker:
                         "wedge attempt leaks wired GPU memory. If this node's "
                         "available memory dropped, a reboot is the only way "
                         "to reclaim it.",
+                        error_code="runner_wedged",
                     )
 
             # First-report deadline (#272): a runner frozen between spawn and its
@@ -1970,6 +2011,7 @@ class Worker:
                         f"within {_RUNNER_FIRST_REPORT_DEADLINE_SECONDS:.0f}s of "
                         "spawn (suspected frozen process); giving up so it does "
                         "not stall pre-init coordination forever.",
+                        error_code="runner_unresponsive",
                     )
 
             task = await self._plan_next_task_with_staging_guard()
@@ -2075,6 +2117,7 @@ class Worker:
                                 "wedge attempt leaks wired GPU memory. If this "
                                 "node's available memory dropped, a reboot is "
                                 "the only way to reclaim it.",
+                                error_code="runner_wedged",
                             )
                         elif self._crash_breaker.record(task.instance_id):
                             # Runner keeps crashing (e.g. OOM on load). Give up
@@ -2086,6 +2129,7 @@ class Worker:
                                 f"{_RUNNER_CRASH_THRESHOLD}x within "
                                 f"{_RUNNER_CRASH_WINDOW_SECONDS:.0f}s "
                                 "(likely insufficient memory)",
+                                error_code="runner_crashed",
                             )
                         else:
                             # Runner crashed but instance still exists and the

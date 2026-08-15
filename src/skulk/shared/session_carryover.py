@@ -52,6 +52,9 @@ def seed_state_for_new_session(prior: State, now: datetime | None = None) -> Sta
       avoids re-downloading). Failed outcomes are session-scoped, while
       pending/ongoing entries can appear only in legacy snapshots; all three
       are dropped so the restarted coordinator can re-plan them.
+    - ``instance_failures`` — bounded terminal operator truth recorded before
+      teardown. A master election must not make a failed placement appear to
+      have never happened.
     - ``node_*`` info maps — memory/identity/network facts; carrying them
       avoids an artificial ``PlacementInfoPendingError`` window after
       failover. Gossip refreshes them within seconds either way.
@@ -110,6 +113,7 @@ def seed_state_for_new_session(prior: State, now: datetime | None = None) -> Sta
     last_seen = {node_id: stamp for node_id in carried_node_ids}
     return State(
         instances=prior.instances,
+        instance_failures=prior.instance_failures,
         downloads=_completed_downloads_only(prior.downloads),
         tracing_enabled=prior.tracing_enabled,
         last_seen=last_seen,

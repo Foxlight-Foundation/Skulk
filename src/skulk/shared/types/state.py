@@ -19,7 +19,7 @@ from skulk.shared.types.profiling import (
 )
 from skulk.shared.types.tasks import Task, TaskId
 from skulk.shared.types.worker.downloads import DownloadProgress
-from skulk.shared.types.worker.instances import Instance, InstanceId
+from skulk.shared.types.worker.instances import Instance, InstanceFailure, InstanceId
 from skulk.shared.types.worker.runners import RunnerId, RunnerStatus
 from skulk.utils.pydantic_ext import CamelCaseModel
 
@@ -41,6 +41,22 @@ class State(CamelCaseModel):
         arbitrary_types_allowed=True,
     )
     instances: Mapping[InstanceId, Instance] = {}
+    instance_failures: tuple[InstanceFailure, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Bounded newest-first history of terminal placement failures retained "
+            "after their instances are removed. Clean operator stops are excluded."
+        ),
+    )
+
+    @field_validator("instance_failures", mode="before")
+    @classmethod
+    def _coerce_instance_failures(cls, value: object) -> object:
+        """Restore immutable failure history from JSON array wire values."""
+        if isinstance(value, list):
+            return tuple(cast("list[object]", value))
+        return value
+
     runners: Mapping[RunnerId, RunnerStatus] = {}
     downloads: Mapping[NodeId, Sequence[DownloadProgress]] = Field(
         default={},

@@ -160,8 +160,9 @@ def steward_tool_definitions() -> list[dict[str, Any]]:
         (
             "get_cluster_state",
             "Fetch the cluster's authoritative state summary: nodes with "
-            "health reasons, model instances and their placement, and "
-            "download records. This is the first thing to look at.",
+            "health reasons, model instances and their placement, recent "
+            "terminal instance failures, and download records. This is the "
+            "first thing to look at.",
             no_args,
         ),
         (
@@ -489,6 +490,31 @@ def _instances_summary(state_payload: dict[str, object]) -> list[dict[str, objec
     return summary
 
 
+def _instance_failures_summary(
+    state_payload: dict[str, object],
+) -> list[dict[str, object]]:
+    """Compact retained failure truth so vanished placements remain explainable."""
+    summary: list[dict[str, object]] = []
+    for item in _as_object_list(state_payload.get("instanceFailures")):
+        failure = _as_object_dict(item)
+        summary.append(
+            {
+                key: failure.get(key)
+                for key in (
+                    "instanceId",
+                    "modelId",
+                    "systemRole",
+                    "errorCode",
+                    "errorMessage",
+                    "affectedNodeIds",
+                    "recordedAt",
+                )
+                if failure.get(key) is not None
+            }
+        )
+    return summary
+
+
 def _downloads_summary(state_payload: dict[str, object]) -> dict[str, object]:
     """Compact download listing keeping error and progress essentials."""
     summary: dict[str, object] = {}
@@ -756,6 +782,7 @@ class StewardHarness:
                 {
                     "nodeHealth": payload.get("nodeHealth", {}),
                     "instances": _instances_summary(payload),
+                    "recentInstanceFailures": _instance_failures_summary(payload),
                     "downloads": _downloads_summary(payload),
                     "nodeIdentities": payload.get("nodeIdentities", {}),
                     "nodeDisk": payload.get("nodeDisk", {}),

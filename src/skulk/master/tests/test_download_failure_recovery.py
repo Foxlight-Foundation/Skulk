@@ -204,6 +204,7 @@ async def test_recovery_consumes_the_terminal_failure_record() -> None:
     from skulk.shared.types.events import (
         Event,
         GlobalForwarderEvent,
+        InstanceFailureRecorded,
         LocalForwarderEvent,
         NodeDownloadProgress,
     )
@@ -242,20 +243,25 @@ async def test_recovery_consumes_the_terminal_failure_record() -> None:
 
     await master._recover_download_failed_instances()  # pyright: ignore[reportPrivateUsage]
 
-    resets: list[NodeDownloadProgress] = []
+    emitted: list[Event] = []
     while True:
         try:
-            event = ev_recv.receive_nowait()
+            emitted.append(ev_recv.receive_nowait())
         except WouldBlock:
             break
-        if isinstance(event, NodeDownloadProgress):
-            resets.append(event)
+    resets = [event for event in emitted if isinstance(event, NodeDownloadProgress)]
     assert any(
         isinstance(reset.download_progress, DownloadPending)
         and reset.download_progress.node_id == node_a
         and reset.download_progress.shard_metadata.model_card.model_id == _MODEL
         for reset in resets
     ), "recovery must emit a DownloadPending reset for the failed node"
+    failure = next(
+        event for event in emitted if isinstance(event, InstanceFailureRecorded)
+    )
+    assert failure.failure.error_code == "download_failed"
+    assert "No space left on device" not in failure.failure.error_message
+    assert "Inspect cluster logs" in failure.failure.error_message
 
 
 def test_stale_donor_download_failure_does_not_wedge_rpc_instance() -> None:

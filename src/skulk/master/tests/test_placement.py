@@ -163,6 +163,7 @@ def test_get_instance_placements_create_instance(
     # assert
     assert len(placements) == 1
     instance_id = list(placements.keys())[0]
+    assert instance_id == InstanceId(str(cic.command_id))
     instance = placements[instance_id]
     assert instance.shard_assignments.model_id == model_card.model_id
 

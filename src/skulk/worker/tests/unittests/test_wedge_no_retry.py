@@ -8,6 +8,7 @@ especially because wedges take ~300s each and would never trip the
 """
 
 from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
+from skulk.shared.types.common import ModelId
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerReady
 from skulk.worker.main import (
     _model_load_trust_failure_message,  # pyright: ignore[reportPrivateUsage] — unit under test
@@ -149,6 +150,20 @@ def test_model_trust_failure_is_terminal_for_live_instance() -> None:
         runners,
         cast("set[InstanceId]", {"inst-a", "inst-b"}),
     ) == [("inst-a", "org/model", f"{MODEL_TRUST_FAILURE_MARKER}: approval required")]
+
+
+def test_durable_model_trust_failure_excludes_raw_exception_detail() -> None:
+    """Only classified trust guidance is suitable for replicated failure truth."""
+    from skulk.worker.main import (
+        _model_trust_instance_failure_message,  # pyright: ignore[reportPrivateUsage] - durable boundary under test
+    )
+
+    message = _model_trust_instance_failure_message(ModelId("org/model"))
+
+    assert message == (
+        "runner for org/model was refused by immutable model trust policy; "
+        "not retrying until the card approval or installed artifact identity changes."
+    )
 
 
 def test_missing_model_path_is_a_terminal_trust_failure() -> None:

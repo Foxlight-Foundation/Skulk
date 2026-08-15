@@ -950,6 +950,11 @@ async def test_refuse_instance_placement_replaces_wider_once() -> None:
         assert len(replaced.shard_assignments.node_to_runner) == 3
         # exactly one replacement despite two refusals
         assert len(master.state.instances) == 1
+        assert len(master.state.instance_failures) == 1
+        refusal_failure = master.state.instance_failures[0]
+        assert refusal_failure.instance_id == instance_id
+        assert refusal_failure.error_code == "placement_failed"
+        assert "replaced this placement" in refusal_failure.error_message
 
         global_event_receiver.collect()
         tg.cancel_scope.cancel()

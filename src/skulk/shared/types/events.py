@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal, final
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.topology import Connection
@@ -22,7 +22,7 @@ from skulk.shared.types.worker.downloads import (
     DownloadPending,
     DownloadProgress,
 )
-from skulk.shared.types.worker.instances import Instance, InstanceId
+from skulk.shared.types.worker.instances import Instance, InstanceFailure, InstanceId
 from skulk.shared.types.worker.runners import RunnerId, RunnerStatus
 from skulk.utils.info_gatherer.info_gatherer import (
     GatheredInfo,
@@ -86,6 +86,14 @@ class InstanceCreated(BaseEvent):
 
 class InstanceDeleted(BaseEvent):
     instance_id: InstanceId
+
+
+class InstanceFailureRecorded(BaseEvent):
+    """Retain why a terminally failed placement vanished before deleting it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    failure: InstanceFailure
 
 
 class RunnerStatusUpdated(BaseEvent):
@@ -238,6 +246,7 @@ Event = (
     | TaskDeleted
     | TaskAcknowledged
     | InstanceCreated
+    | InstanceFailureRecorded
     | InstanceDeleted
     | RunnerStatusUpdated
     | NodeTimedOut
@@ -265,6 +274,7 @@ _PERSISTED_CONTROL_EVENT_TYPES: tuple[type[BaseEvent], ...] = (
     TaskDeleted,
     TaskAcknowledged,
     InstanceCreated,
+    InstanceFailureRecorded,
     InstanceDeleted,
     RunnerStatusUpdated,
     NodeTimedOut,
