@@ -3384,12 +3384,19 @@ class API:
         # generate_chat_stream advertises the id in its SSE comment before
         # it pulls the first chunk, so registering lazily inside the stream
         # would leave a cancel-by-id 404 window during long prefill.
+        # Deregistration wraps the OUTERMOST response iterator: an inner
+        # layer (the keepalive wrapper emits bytes before pulling its
+        # source) can be abandoned before ever starting, and an unstarted
+        # generator's finally never runs — only the iterator Starlette
+        # itself drives is guaranteed to start and therefore to clean up.
         self._steward_turn_harnesses[command_id] = harness
-        chunk_stream = self._release_steward_turn_after(command_id, chunk_stream)
         if payload.stream:
             return StreamingResponse(
-                with_sse_keepalive(
-                    generate_chat_stream(command_id, chunk_stream),
+                self._release_steward_turn_after(
+                    command_id,
+                    with_sse_keepalive(
+                        generate_chat_stream(command_id, chunk_stream),
+                    ),
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -3399,32 +3406,39 @@ class API:
                 },
             )
         return StreamingResponse(
-            collect_chat_response(command_id, chunk_stream),
+            self._release_steward_turn_after(
+                command_id,
+                collect_chat_response(command_id, chunk_stream),
+            ),
             media_type="application/json",
         )
 
     async def _release_steward_turn_after(
         self,
         command_id: CommandId,
-        chunk_stream: "AsyncGenerator[TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None]",
-    ) -> "AsyncGenerator[TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None]":
-        """Deregister a steward turn from cancel-by-id when its stream ends.
+        response_stream: "AsyncIterator[str]",
+    ) -> "AsyncGenerator[str, None]":
+        """Deregister a steward turn from cancel-by-id when its response ends.
 
         The caller registers the turn BEFORE constructing the response (the
         id is advertised to the client before the first chunk is pulled);
-        this wrapper owns only the removal, so normal completion, client
-        disconnect, and cancellation all clean up through one ``finally``.
+        this wrapper owns only the removal. It must wrap the OUTERMOST
+        response iterator — the one Starlette drives — because that is the
+        only generator guaranteed to be started (and thus finalized) even
+        when the client disconnects after the first keepalive byte; an
+        abandoned inner generator that never started never runs its
+        ``finally``.
 
         Args:
             command_id: The outer command id the caller registered.
-            chunk_stream: The turn's chunk stream to pass through.
+            response_stream: The fully assembled response body iterator.
 
         Yields:
-            The wrapped stream's chunks, unchanged.
+            The wrapped response's items, unchanged.
         """
         try:
-            async for chunk in chunk_stream:
-                yield chunk
+            async for item in response_stream:
+                yield item
         finally:
             self._steward_turn_harnesses.pop(command_id, None)
 

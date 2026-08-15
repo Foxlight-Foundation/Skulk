@@ -356,3 +356,43 @@ async def test_cancellation_racing_dispatch_still_cancels_the_step() -> None:
     final = chunks[-1]
     assert isinstance(final, TokenChunk)
     assert final.finish_reason == "stop"
+
+
+async def test_release_wrapper_deregisters_on_early_disconnect() -> None:
+    """An early disconnect must still deregister the turn (#833).
+
+    The keepalive layer emits its first byte before pulling its source, so
+    a client can vanish while every inner generator is still unstarted; an
+    unstarted generator's ``finally`` never runs. The release wrapper sits
+    outermost — the iterator Starlette itself drives — so it is always
+    started and its cleanup always fires, even when the wrapped source
+    never ran at all.
+    """
+    from skulk.api.main import API
+    from skulk.shared.types.common import CommandId
+
+    api = API.__new__(API)
+    outer_id = CommandId()
+    harness = _ScriptedHarness(turns=[("irrelevant", [])])
+    api._steward_turn_harnesses = {outer_id: harness}  # pyright: ignore[reportPrivateUsage]
+
+    source_started: list[bool] = []
+
+    async def _source():
+        source_started.append(True)
+        yield "never reached"
+
+    async def _keepalive_like(source):
+        yield ": keep-alive\n\n"
+        async for item in source:
+            yield item
+
+    stream = api._release_steward_turn_after(  # pyright: ignore[reportPrivateUsage]
+        outer_id, _keepalive_like(_source())
+    )
+    first = await stream.__anext__()
+    assert first == ": keep-alive\n\n"
+    await stream.aclose()
+
+    assert outer_id not in api._steward_turn_harnesses  # pyright: ignore[reportPrivateUsage]
+    assert source_started == [], "the inner source never started, by design"
