@@ -2225,6 +2225,16 @@ curl -X POST http://localhost:52415/onboarding
 
 Returns the cluster state as Skulk currently sees it.
 
+`instanceFailures` is a newest-first, event-sourced history of the 64 most
+recent terminal placement failures. Each entry includes the vanished
+`instanceId`, `modelId`, optional `systemRole`, stable `errorCode`, bounded
+operator-safe `errorMessage`, assigned `affectedNodeIds`, and UTC `recordedAt`.
+Skulk records the entry before removing the failed instance, so operators can
+distinguish a runner crash, unresponsive or wedged runner, trust rejection,
+unrecoverable placement, or lost node from a clean operator stop. Prompt and
+generated-response content never enters this history. Replacing the same model
+creates a new instance identity and does not erase the earlier failure.
+
 The response also carries a derived `nodeHealth` map (keyed by node id) so a
 problem on a node is visible rather than silent. Each entry is a `level`
 (`ok`, `warn`, or `error`) plus a list of `reasons`, where each reason has a
@@ -2997,7 +3007,7 @@ The operator panel at `/operator` is designed for mobile access and can also be 
 
 | Endpoint | Description |
 | --- | --- |
-| `GET /state` | Full cluster state: nodes, instances, runners, memory, GPU |
+| `GET /state` | Full cluster state: nodes, instances, recent terminal instance failures, runners, memory, GPU |
 | `GET /node_id` | Local node's ID |
 | `GET /node/identity` | Node ID, hostname, and preferred LAN IP |
 

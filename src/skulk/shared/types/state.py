@@ -19,7 +19,7 @@ from skulk.shared.types.profiling import (
 )
 from skulk.shared.types.tasks import Task, TaskId
 from skulk.shared.types.worker.downloads import DownloadProgress
-from skulk.shared.types.worker.instances import Instance, InstanceId
+from skulk.shared.types.worker.instances import Instance, InstanceFailure, InstanceId
 from skulk.shared.types.worker.runners import RunnerId, RunnerStatus
 from skulk.utils.pydantic_ext import CamelCaseModel
 
@@ -41,6 +41,13 @@ class State(CamelCaseModel):
         arbitrary_types_allowed=True,
     )
     instances: Mapping[InstanceId, Instance] = {}
+    instance_failures: Sequence[InstanceFailure] = Field(
+        default=[],
+        description=(
+            "Bounded newest-first history of terminal placement failures retained "
+            "after their instances are removed. Clean operator stops are excluded."
+        ),
+    )
     runners: Mapping[RunnerId, RunnerStatus] = {}
     downloads: Mapping[NodeId, Sequence[DownloadProgress]] = Field(
         default={},

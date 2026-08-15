@@ -14,6 +14,7 @@ from skulk.shared.types.events import (
     InputChunkReceived,
     InstanceCreated,
     InstanceDeleted,
+    InstanceFailureRecorded,
     NodeDownloadProgress,
     NodeGatheredInfo,
     NodeTimedOut,
@@ -48,7 +49,11 @@ from skulk.shared.types.worker.downloads import (
     DownloadPending,
     DownloadProgress,
 )
-from skulk.shared.types.worker.instances import Instance, InstanceId
+from skulk.shared.types.worker.instances import (
+    INSTANCE_FAILURE_HISTORY_LIMIT,
+    Instance,
+    InstanceId,
+)
 from skulk.shared.types.worker.runners import RunnerId, RunnerShutdown, RunnerStatus
 from skulk.utils.info_gatherer.info_gatherer import (
     LinuxGpuMetrics,
@@ -85,6 +90,8 @@ def event_apply(event: Event, state: State) -> State:
             return state
         case InstanceCreated():
             return apply_instance_created(event, state)
+        case InstanceFailureRecorded():
+            return apply_instance_failure_recorded(event, state)
         case InstanceDeleted():
             return apply_instance_deleted(event, state)
         case NodeTimedOut():
@@ -130,6 +137,24 @@ def _sanitize_snapshot_downloads(snapshot: State) -> State:
         node_id: progresses for node_id, progresses in downloads.items() if progresses
     }
     return snapshot.model_copy(update={"downloads": downloads})
+
+
+def apply_instance_failure_recorded(
+    event: InstanceFailureRecorded, state: State
+) -> State:
+    """Retain one newest-first failure per instance within a fixed history bound."""
+    retained = [
+        failure
+        for failure in state.instance_failures
+        if failure.instance_id != event.failure.instance_id
+    ]
+    return state.model_copy(
+        update={
+            "instance_failures": [event.failure, *retained][
+                :INSTANCE_FAILURE_HISTORY_LIMIT
+            ]
+        }
+    )
 
 
 def apply(state: State, event: IndexedEvent) -> State:

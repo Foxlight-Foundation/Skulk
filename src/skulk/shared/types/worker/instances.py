@@ -1,20 +1,87 @@
+from datetime import datetime
 from enum import Enum
-from typing import Literal
+from typing import Literal, cast
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from skulk.shared.models.memory_estimate import (
     KV_CONTEXT_BUDGET_TOKENS,
     shard_preallocates_kv_upfront,
 )
 from skulk.shared.models.model_cards import ModelTask
-from skulk.shared.types.common import Host, Id, NodeId
+from skulk.shared.types.common import Host, Id, ModelId, NodeId
 from skulk.shared.types.worker.runners import RunnerId, ShardAssignments, ShardMetadata
-from skulk.utils.pydantic_ext import CamelCaseModel, TaggedModel
+from skulk.utils.pydantic_ext import CamelCaseModel, FrozenModel, TaggedModel
+
+INSTANCE_FAILURE_HISTORY_LIMIT = 64
+"""Maximum recent instance failures retained in replicated cluster state."""
+
+InstanceFailureCode = Literal[
+    "model_trust_rejected",
+    "runner_crashed",
+    "runner_unresponsive",
+    "runner_wedged",
+    "node_unavailable",
+    "placement_failed",
+    "download_failed",
+]
+"""Stable operator-facing categories for terminal instance failures."""
 
 
 class InstanceId(Id):
     pass
+
+
+class InstanceFailure(FrozenModel):
+    """Bounded operator truth retained after a failed instance is torn down."""
+
+    instance_id: InstanceId = Field(
+        description="The failed placement identity, unique for its lifetime."
+    )
+    model_id: ModelId = Field(description="Model served by the failed placement.")
+    system_role: Literal["steward"] | None = Field(
+        default=None,
+        description="Fabric-maintained role when the failed placement was systemic.",
+    )
+    error_code: InstanceFailureCode = Field(
+        description="Stable machine-readable terminal failure category."
+    )
+    error_message: str = Field(
+        min_length=1,
+        max_length=2048,
+        description=(
+            "Bounded operator-safe explanation captured before teardown; never "
+            "contains prompts or generated content."
+        ),
+    )
+    affected_node_ids: list[NodeId] = Field(
+        default_factory=list,
+        max_length=64,
+        description="Nodes assigned to the placement when failure was recorded.",
+    )
+    recorded_at: datetime = Field(
+        description="UTC time at which the master accepted the terminal failure."
+    )
+
+    @field_validator("recorded_at", mode="before")
+    @classmethod
+    def _coerce_recorded_at(cls, value: object) -> object:
+        """Restore ISO timestamps when a strict state snapshot is replayed."""
+        if isinstance(value, str):
+            return datetime.fromisoformat(value)
+        return value
+
+    @field_validator("affected_node_ids", mode="before")
+    @classmethod
+    def _sort_affected_nodes(cls, value: object) -> object:
+        """Canonicalize node order so every replica serializes identical truth."""
+        if isinstance(value, (list, tuple, set, frozenset)):
+            nodes = cast(
+                "list[NodeId] | tuple[NodeId, ...] | set[NodeId] | frozenset[NodeId]",
+                value,
+            )
+            return sorted(nodes)
+        return value
 
 
 class InstanceMeta(str, Enum):

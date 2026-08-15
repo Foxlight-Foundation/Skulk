@@ -225,6 +225,21 @@ discarding its queue maps. Together these guarantee an open request is
 terminated within seconds of any node death rather than dangling until the
 client's own timeout.
 
+Instance failure is retained separately from the request that happened to
+expose it. A worker that gives up after repeated runner crashes, a wedge, an
+unresponsive spawn, or a model-trust rejection sends `FailInstance` instead of
+an ordinary delete. The master emits `InstanceFailureRecorded` while the
+placement still exists and only then emits `InstanceDeleted`. Node-loss and
+terminal placement-recovery paths do the same. `State.instance_failures` keeps
+the newest 64 records, replacing duplicate reports for one instance, so
+`GET /state` API consumers and Skulk's own fabric cognition can explain why a
+model vanished after its live instance and short-lived task records are gone.
+Clean operator stops use `DeleteInstance` and intentionally
+do not create failure history. The record contains stable categories, bounded
+operator-safe runner detail, model and instance identities, assigned nodes, and
+the master's UTC acceptance time; it never contains prompts or generated
+content.
+
 A snapshot-bootstrap rollout has one operational rule: once a master starts compacting old replay history after writing snapshots, older nodes that only know how to "replay from event 0" should be considered temporary guests during the rollout window. Upgrade all nodes before relying on bounded retention as the steady state.
 
 ### Heterogeneous nodes and capability-aware placement

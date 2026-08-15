@@ -16,7 +16,12 @@ from skulk.shared.types.chunks import InputChunk
 from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
 from skulk.shared.types.text_generation import TextGenerationTaskParams
-from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
+from skulk.shared.types.worker.instances import (
+    Instance,
+    InstanceFailureCode,
+    InstanceId,
+    InstanceMeta,
+)
 from skulk.shared.types.worker.shards import Sharding, ShardMetadata
 from skulk.utils.pydantic_ext import CamelCaseModel, TaggedModel
 
@@ -112,6 +117,14 @@ class CreateInstance(BaseCommand):
 
 class DeleteInstance(BaseCommand):
     instance_id: InstanceId
+
+
+class FailInstance(BaseCommand):
+    """Worker report that an instance must be torn down after terminal failure."""
+
+    instance_id: InstanceId
+    error_code: InstanceFailureCode
+    error_message: str = Field(min_length=1, max_length=2048)
 
 
 class RefuseInstancePlacement(BaseCommand):
@@ -233,6 +246,7 @@ Command = (
     | PlaceInstance
     | CreateInstance
     | DeleteInstance
+    | FailInstance
     | RefuseInstancePlacement
     | TaskCancelled
     | TaskFinished
