@@ -200,3 +200,40 @@ def test_steward_candidates_require_text_and_tool_capability() -> None:
     assert not steward_candidate_is_servable(
         _card([ModelTask.TextGeneration], tools=False)
     )
+
+
+def test_vllm_only_steward_candidates_require_a_pinned_parser() -> None:
+    """Backend truth joins model truth in the servability gate (#833).
+
+    A tool-declaring card whose only platform-servable engine is vllm still
+    fails every steward turn unless the card pins
+    ``runtime.vllm_tool_call_parser``: the launched server rejects
+    tools-bearing requests loudly, so such a candidate must be skipped.
+    """
+    from skulk.master.main import steward_candidate_is_servable
+    from skulk.shared.models.model_cards import (
+        RuntimeCapabilityCardConfig,
+        ToolingCardConfig,
+    )
+
+    def _vllm_card(parser: str | None) -> ModelCard:
+        return ModelCard(
+            model_id=ModelId("vllm-only-model"),
+            storage_size=Memory.from_gb(3),
+            n_layers=12,
+            hidden_size=30,
+            supports_tensor=True,
+            tasks=[ModelTask.TextGeneration],
+            tooling=ToolingCardConfig(supports_tool_calling=True),
+            runtime=(
+                RuntimeCapabilityCardConfig(vllm_tool_call_parser=parser)
+                if parser is not None
+                else None
+            ),
+            placement=PlacementCardConfig(
+                compatible_backends=frozenset({"vllm-cuda"}),
+            ),
+        )
+
+    assert not steward_candidate_is_servable(_vllm_card(None))
+    assert steward_candidate_is_servable(_vllm_card("hermes"))

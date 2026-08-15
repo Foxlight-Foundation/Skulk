@@ -1159,6 +1159,16 @@ class StewardHarness:
             task_params, target_instance_id=instance_id
         )
         self._active_command_id = command.command_id
+        if self._turn_cancelled:
+            # cancel_turn ran while this dispatch was in flight: the latch
+            # was set before this inner id existed, so cancel_turn had
+            # nothing to stop. Honor it here rather than letting an
+            # accepted cancellation stream one more full generation. The
+            # step ends without a result event, which the loop reads as an
+            # empty final answer.
+            self._active_command_id = None
+            await api.send_task_cancellation(command.command_id)
+            return
         # No extension tap: this is one investigation step, not the turn.
         # The turn's single tap is applied by the caller of
         # run_turn_chunks (API._steward_chat_completions), so observers see

@@ -28,6 +28,7 @@ from skulk.master.placement_utils import (
     usable_vram_by_node,
 )
 from skulk.shared.apply import apply
+from skulk.shared.backends import engine_of, platform_compatible_backends
 from skulk.shared.constants import SKULK_EVENT_LOG_DIR, SKULK_TRACING_ENABLED
 from skulk.shared.log_summaries import summarize_command_for_log
 from skulk.shared.models.capabilities import resolve_model_capability_profile
@@ -262,7 +263,25 @@ def steward_candidate_is_servable(card: "ModelCard") -> bool:
     if ModelTask.TextGeneration not in card.tasks:
         return False
     profile = resolve_model_capability_profile(card.model_id, model_card=card)
-    return profile.supports_tool_calling
+    if not profile.supports_tool_calling:
+        return False
+    # Backend truth, not just model truth: a card whose only platform-
+    # servable engine is vllm needs an explicit tool-call parser pin, or
+    # the launched server rejects every tools-bearing request and the
+    # steward would place but fail every turn.
+    servable_engines = {
+        engine
+        for tag in platform_compatible_backends(
+            card.placement.compatible_backends,
+            card_serves_vision=card.vision is not None,
+            card_serves_speech=False,
+        )
+        if (engine := engine_of(tag)) is not None
+    }
+    return not (
+        servable_engines == {"vllm"}
+        and (card.runtime is None or card.runtime.vllm_tool_call_parser is None)
+    )
 
 
 def _aware_timestamp(when: datetime) -> datetime:

@@ -3378,10 +3378,14 @@ class API:
             )
         # The advertised command id must honor the generic cancel-by-id
         # contract (POST /v1/cancel/{command_id}). The harness's inner
-        # generation ids are never shown to the caller, so the outer id is
-        # registered for the turn's lifetime and cancel_command routes it to
-        # the harness.
-        chunk_stream = self._register_steward_turn(command_id, harness, chunk_stream)
+        # generation ids are never shown to the caller, so the outer id maps
+        # to the harness for the turn's lifetime and cancel_command routes
+        # it there. Registration happens HERE, before the response exists:
+        # generate_chat_stream advertises the id in its SSE comment before
+        # it pulls the first chunk, so registering lazily inside the stream
+        # would leave a cancel-by-id 404 window during long prefill.
+        self._steward_turn_harnesses[command_id] = harness
+        chunk_stream = self._release_steward_turn_after(command_id, chunk_stream)
         if payload.stream:
             return StreamingResponse(
                 with_sse_keepalive(
@@ -3399,27 +3403,25 @@ class API:
             media_type="application/json",
         )
 
-    async def _register_steward_turn(
+    async def _release_steward_turn_after(
         self,
         command_id: CommandId,
-        harness: StewardHarness,
         chunk_stream: "AsyncGenerator[TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None]",
     ) -> "AsyncGenerator[TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk, None]":
-        """Expose a steward turn to cancel-by-id for the stream's lifetime.
+        """Deregister a steward turn from cancel-by-id when its stream ends.
 
-        Registration and removal bracket the passthrough stream itself, so
-        the mapping can never outlive its turn: normal completion, client
-        disconnect, and cancellation all pass through the ``finally``.
+        The caller registers the turn BEFORE constructing the response (the
+        id is advertised to the client before the first chunk is pulled);
+        this wrapper owns only the removal, so normal completion, client
+        disconnect, and cancellation all clean up through one ``finally``.
 
         Args:
-            command_id: The outer command id advertised to the caller.
-            harness: The harness serving this turn.
+            command_id: The outer command id the caller registered.
             chunk_stream: The turn's chunk stream to pass through.
 
         Yields:
             The wrapped stream's chunks, unchanged.
         """
-        self._steward_turn_harnesses[command_id] = harness
         try:
             async for chunk in chunk_stream:
                 yield chunk

@@ -271,3 +271,65 @@ async def test_cancel_command_routes_a_registered_steward_turn() -> None:
 
     assert response.command_id == outer_id
     assert cancelled == ["cmd-inner-9"]
+
+
+async def test_cancellation_racing_dispatch_still_cancels_the_step() -> None:
+    """A latch set while dispatch is in flight cancels the fresh command.
+
+    cancel_turn can run between step start and dispatch completion, when no
+    inner id exists yet to cancel. The step must then cancel the command it
+    just obtained and end the turn instead of streaming one more full
+    generation behind an accepted cancellation (#833).
+    """
+    from types import SimpleNamespace
+
+    from skulk.shared.models.model_cards import ModelCard, ModelTask
+    from skulk.shared.types.memory import Memory
+
+    cancelled: list[object] = []
+    stream_requests: list[object] = []
+    harness_holder: list[StewardHarness] = []
+
+    class _RacingApi:
+        async def running_model_card(self, model_id: ModelId) -> ModelCard:
+            return ModelCard(
+                model_id=ModelId("steward-brain"),
+                storage_size=Memory.from_gb(3),
+                n_layers=12,
+                hidden_size=30,
+                supports_tensor=True,
+                tasks=[ModelTask.TextGeneration],
+            )
+
+        async def dispatch_text_generation(
+            self, task_params: object, target_instance_id: object = None
+        ) -> object:
+            # The race: cancellation lands while dispatch is in flight.
+            await harness_holder[0].cancel_turn()
+            return SimpleNamespace(command_id="cmd-fresh-inner")
+
+        def text_generation_chunk_stream(
+            self, command: object, task_params: object, *, extension_tap: bool = True
+        ) -> object:
+            stream_requests.append(command)
+            raise AssertionError("a cancelled step must not open a stream")
+
+        async def send_task_cancellation(self, command_id: object) -> None:
+            cancelled.append(command_id)
+
+    harness = StewardHarness(cast("API", cast(object, _RacingApi())))
+    harness_holder.append(harness)
+    harness.steward_instance = lambda: (InstanceId(), "steward-brain")
+
+    chunks = [
+        chunk
+        async for chunk in harness.run_turn_chunks(
+            [StewardChatMessage(role="user", content="hi")]
+        )
+    ]
+
+    assert cancelled == ["cmd-fresh-inner"]
+    assert stream_requests == []
+    final = chunks[-1]
+    assert isinstance(final, TokenChunk)
+    assert final.finish_reason == "stop"
