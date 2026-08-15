@@ -11,7 +11,7 @@ llama-server-cuda --list-devices
 
 Skulk's engine provisioning discovers the installed wheel automatically and wires it as the node's served engine; no configuration is needed. A machine additionally needs the NVIDIA driver (anything where `nvidia-smi` works), which only NVIDIA can ship.
 
-Version scheme: `0.<llama.cpp build>.<packaging revision>`; `0.10068.0` is the first packaging of upstream `b10068`. Built and published by the `engine-wheel` workflow in the Skulk repository via PyPI trusted publishing.
+Version scheme: `0.<llama.cpp build>.<packaging revision>`; `0.10068.0` is the first packaging of upstream `b10068`. Built and published by the `engine-wheel` workflow to Foxlight's package index with build-provenance attestations.
 
 How this wheel fits into Skulk's install and provisioning flow is documented in the [Build & Runtime Paths guide](https://foxlight-foundation.github.io/Skulk/build-and-runtime/).
 

@@ -13,13 +13,12 @@
 # the first packaging of upstream b10068. Advancing the engine pin bumps the
 # minor; packaging-only fixes bump the patch.
 #
-# Built and published by .github/workflows/engine-wheel.yml (PyPI trusted
-# publishing; no tokens). The binary is compiled in that workflow, not
-# committed here.
+# Built and published by .github/workflows/engine-wheel.yml to Foxlight's
+# package index. The binary is compiled in that workflow, not committed here.
 
 [project]
 name = "skulk-llama-server-cuda"
-version = "0.10092.0"
+version = "0.10434.0"
 description = "Pinned CUDA llama-server build for Skulk's served GGUF engine (Linux x86_64)"
 readme = "README.md"
 requires-python = ">=3.10"

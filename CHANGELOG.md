@@ -9,6 +9,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- The managed llama.cpp served engine advances to b10434 across the CUDA and
+  Vulkan wheels, verified Linux archives, and the prebaked CUDA pod image. The
+  release adds the RPC tensor operation required for DeepSeek V4 multi-node
+  execution, Qwen 3.8 text and native long-context support, recurrent-state
+  rollback, and served reasoning-effort plumbing. Every bundled
+  `ggml-rpc-server` advances with `llama-server` because the intervening RPC
+  protocol changed; AMD continues through the fleet-qualified Vulkan lane
+  because upstream b10434 publishes no Linux ROCm archive. DeepSeek V4 may now
+  use served CUDA, while its independently versioned in-process CUDA backend
+  remains excluded.
+
 - Intelligent Fabric now speaks and identifies as Skulk rather than presenting
   a separate Steward character. The dashboard streams answer prose through a
   ready TTS model only when its voice catalog contains the signature `skulk`

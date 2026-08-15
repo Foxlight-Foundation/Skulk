@@ -11,15 +11,15 @@
 # CUDA_ARCHS pins the compiled GPU architectures. Default covers the rental
 # tiers in actual use: 80 (A100 - learned the hard way when an sm_86-only
 # image crashed kernel launches on the first A100 pod), 86 (A40/A5000/3090),
-# and 89 (4090/L40S). Add 90 (H100) when renting that tier; every extra arch
-# lengthens the build.
+# 89 (4090/L40S), and 90 (H100). Every extra architecture lengthens the build,
+# but one published image must be usable across the qualified rental fleet.
 
 ARG CUDA_VERSION=12.4.1
 ARG UBUNTU_VERSION=22.04
 
 # ---- build stage: the two expensive CUDA compiles ---------------------------
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS build
-ARG CUDA_ARCHS="80;86;89"
+ARG CUDA_ARCHS="80;86;89;90"
 # pipefail: a curl|sh installer whose download dies must fail the build, not
 # publish an image that is missing its toolchain.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -42,7 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #   (cuMemMap, ...) that only the driver's libcuda.so provides, and a GPU-less
 #   runner has no driver. Upstream's own CI images defer resolution to runtime
 #   this way (.devops/cuda.Dockerfile); the pod's real driver satisfies them.
-ARG LLAMA_CPP_REF=b9969
+ARG LLAMA_CPP_REF=b10434
 RUN git clone --branch "${LLAMA_CPP_REF}" --depth 1 \
          https://github.com/ggml-org/llama.cpp /opt/llama.cpp \
     && cmake -S /opt/llama.cpp -B /opt/llama.cpp/build \
