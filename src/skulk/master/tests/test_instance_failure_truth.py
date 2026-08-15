@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import cast
 
 import anyio
 import pytest
@@ -76,7 +77,7 @@ def test_instance_failure_event_captures_truth_before_teardown() -> None:
 
     assert event.failure.instance_id == InstanceId("failed-instance")
     assert event.failure.model_id == ModelId("org/model")
-    assert event.failure.affected_node_ids == [NodeId("node-a")]
+    assert event.failure.affected_node_ids == (NodeId("node-a"),)
     assert event.failure.recorded_at == recorded_at
     assert event.failure.error_code == "runner_crashed"
 
@@ -167,6 +168,10 @@ def test_terminal_failure_command_and_event_are_immutable() -> None:
         command.error_message = "rewritten"
     with pytest.raises(ValidationError):
         event.failure = event.failure.model_copy()
+    with pytest.raises(AttributeError):
+        cast("list[NodeId]", cast(object, event.failure.affected_node_ids)).append(
+            NodeId("node-b")
+        )
 
 
 @pytest.mark.asyncio

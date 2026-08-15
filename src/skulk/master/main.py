@@ -281,7 +281,7 @@ def instance_failure_event(
             system_role=instance.system_role,
             error_code=error_code,
             error_message=error_message,
-            affected_node_ids=list(instance.shard_assignments.node_to_runner),
+            affected_node_ids=tuple(instance.shard_assignments.node_to_runner),
             recorded_at=recorded_at or datetime.now(tz=timezone.utc),
         )
     )

@@ -19,7 +19,7 @@ def _failure(index: int) -> InstanceFailure:
         model_id=ModelId(f"org/model-{index}"),
         error_code="runner_crashed",
         error_message=f"runner failed {index}",
-        affected_node_ids=[NodeId("node-b"), NodeId("node-a")],
+        affected_node_ids=(NodeId("node-b"), NodeId("node-a")),
         recorded_at=datetime(2026, 8, 15, 12, index % 60, tzinfo=timezone.utc),
     )
 
@@ -46,10 +46,10 @@ def test_failure_history_is_newest_first_deduplicated_and_bounded() -> None:
     )
     assert len(state.instance_failures) == INSTANCE_FAILURE_HISTORY_LIMIT
     assert state.instance_failures[0].error_message == "newer detail"
-    assert state.instance_failures[0].affected_node_ids == [
+    assert state.instance_failures[0].affected_node_ids == (
         NodeId("node-a"),
         NodeId("node-b"),
-    ]
+    )
 
 
 def test_failure_event_round_trips_through_persisted_wire_shape() -> None:

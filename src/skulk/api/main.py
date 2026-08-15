@@ -377,6 +377,7 @@ from skulk.shared.types.commands import (
     DeleteInstance,
     DownloadCommand,
     EvictStagedModel,
+    FailInstance,
     ForwarderCommand,
     ForwarderDownloadCommand,
     ImageEdits,
@@ -1394,6 +1395,18 @@ def _audio_speech_request_body() -> dict[str, object]:
             },
         }
     }
+
+
+def _steward_canary_failure_command(instance_id: InstanceId) -> FailInstance:
+    """Return safe terminal truth after repeated steward canary failures."""
+    return FailInstance(
+        instance_id=instance_id,
+        error_code="runner_unresponsive",
+        error_message=(
+            "The fabric steward failed three consecutive health probes, so "
+            "Skulk tore down the placement for automatic recovery."
+        ),
+    )
 
 
 class API:
@@ -3537,7 +3550,7 @@ class API:
                         f"{CANARY_FAILURE_THRESHOLD} consecutive canary "
                         "probes; tearing it down for re-placement"
                     )
-                    await self._send(DeleteInstance(instance_id=target))
+                    await self._send(_steward_canary_failure_command(target))
                     canary.clear_failures()
             except Exception:
                 # The canary must never take the API down; a broken probe

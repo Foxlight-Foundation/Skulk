@@ -6,7 +6,10 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from fastapi import HTTPException
 
-from skulk.api.main import API
+from skulk.api.main import (
+    API,
+    _steward_canary_failure_command,  # pyright: ignore[reportPrivateUsage] - terminal command boundary under test
+)
 from skulk.api.steward import (
     STEWARD_NOT_READY_MESSAGES,
     STEWARD_RETRY_AFTER_SECONDS,
@@ -135,6 +138,17 @@ def test_tracking_a_new_instance_drops_the_previous_failure_run() -> None:
     second = InstanceId()
     canary.track(second)
     assert canary.consecutive_failures_for(second) == 0
+
+
+def test_canary_teardown_records_terminal_steward_failure() -> None:
+    """Automatic canary recovery must not look like a clean operator stop."""
+    instance_id = InstanceId("steward-instance")
+
+    command = _steward_canary_failure_command(instance_id)
+
+    assert command.instance_id == instance_id
+    assert command.error_code == "runner_unresponsive"
+    assert "three consecutive health probes" in command.error_message
 
 
 def _request() -> ChatCompletionRequest:

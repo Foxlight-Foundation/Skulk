@@ -54,8 +54,8 @@ class InstanceFailure(FrozenModel):
             "contains prompts or generated content."
         ),
     )
-    affected_node_ids: list[NodeId] = Field(
-        default_factory=list,
+    affected_node_ids: tuple[NodeId, ...] = Field(
+        default_factory=tuple,
         max_length=64,
         description=(
             "Up to 64 canonically ordered nodes assigned to the placement when "
@@ -84,7 +84,7 @@ class InstanceFailure(FrozenModel):
                 "list[NodeId] | tuple[NodeId, ...] | set[NodeId] | frozenset[NodeId]",
                 value,
             )
-            return sorted(nodes)[:64]
+            return tuple(sorted(nodes)[:64])
         return value
 
 

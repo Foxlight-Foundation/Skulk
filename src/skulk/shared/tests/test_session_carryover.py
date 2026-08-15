@@ -62,7 +62,7 @@ def test_carries_bounded_instance_failure_truth() -> None:
         model_id=ModelId("org/model"),
         error_code="runner_crashed",
         error_message="Runner crashed repeatedly while loading the model.",
-        affected_node_ids=[NodeId("node-a")],
+        affected_node_ids=(NodeId("node-a"),),
         recorded_at=datetime(2026, 8, 15, 16, 0, tzinfo=timezone.utc),
     )
     prior = State(instance_failures=[failure])

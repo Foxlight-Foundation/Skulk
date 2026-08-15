@@ -1650,9 +1650,9 @@ instance shape before launch, including the hardware-aware
 **POST** `/instance`
 
 Use this when you already have an `instance` object and want exact control. A
-successful response returns the accepted `commandId`, the submitted
-`instanceId`, and its `modelCard`; clients can use that exact instance identity
-to correlate the acknowledgement with later runtime and failure truth.
+successful response returns the accepted `command_id`, the submitted
+`instance_id`, and its `model_card`; clients can use that exact instance
+identity to correlate the acknowledgement with later runtime and failure truth.
 
 ### Inspect one instance
 
