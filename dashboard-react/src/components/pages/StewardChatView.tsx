@@ -249,7 +249,8 @@ export function StewardChatView({ readyInstances = [] }: StewardChatViewProps) {
         );
       },
       () => {
-        if (speechQueueRef.current === queue) speechQueueRef.current = null;
+        if (speechQueueRef.current !== queue) return;
+        speechQueueRef.current = null;
         if (speechPlaybackRef.current === playback) speechPlaybackRef.current = null;
         setIsSpeaking(false);
       },
