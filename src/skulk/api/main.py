@@ -3695,8 +3695,27 @@ class API:
             instance_id=instance_id,
         )
 
-    async def cancel_command(self, command_id: CommandId) -> CancelCommandResponse:
-        """Cancel an active command by closing its stream and notifying workers."""
+    async def cancel_local_command(self, command_id: CommandId) -> bool:
+        """Cancel one locally registered command stream, if it exists.
+
+        The single cancellation implementation shared by the public
+        cancel-by-id endpoint and the steward harness's turn cancellation:
+        closes the local response queue immediately (so the caller's stream
+        ends now, not when worker-side cancellation lands — a served engine
+        mid-generation may only observe it at completion) and notifies
+        workers through ``TaskCancelled``.
+
+        Args:
+            command_id: The command whose local stream should be cancelled.
+
+        Returns:
+            True when a local queue existed and was cancelled; False when the
+            command is unknown here or already completed.
+
+        Side effects:
+            Sends ``TaskCancelled``, records the id so local stream cleanup
+            suppresses its ``TaskFinished``, and closes the queue.
+        """
         sender = (
             self._text_generation_queues.get(command_id)
             or self._image_generation_queues.get(command_id)
@@ -3705,31 +3724,35 @@ class API:
             or self._audio_transcription_queues.get(command_id)
         )
         if sender is None:
-            # A steward turn advertises one outer command id while its inner
-            # generations run under private ids; route the outer id to the
-            # harness so the generic cancel contract holds there too.
-            steward_turn = self._steward_turn_harnesses.get(command_id)
-            if steward_turn is not None:
-                await steward_turn.cancel_turn()
-                return CancelCommandResponse(
-                    message="Steward turn cancelled.",
-                    command_id=command_id,
-                )
-            raise HTTPException(
-                status_code=404,
-                detail="Command not found or already completed",
-            )
-
+            return False
         await self._send(TaskCancelled(cancelled_command_id=command_id))
         # Suppress the final TaskFinished emitted by local stream cleanup so the
         # worker can observe the Cancelled task and deliver runner-local cancel
         # before event-sourced task deletion happens.
         self._cancelled_command_ids.add(command_id)
         sender.close()
+        return True
 
-        return CancelCommandResponse(
-            message="Command cancelled.",
-            command_id=command_id,
+    async def cancel_command(self, command_id: CommandId) -> CancelCommandResponse:
+        """Cancel an active command by closing its stream and notifying workers."""
+        if await self.cancel_local_command(command_id):
+            return CancelCommandResponse(
+                message="Command cancelled.",
+                command_id=command_id,
+            )
+        # A steward turn advertises one outer command id while its inner
+        # generations run under private ids; route the outer id to the
+        # harness so the generic cancel contract holds there too.
+        steward_turn = self._steward_turn_harnesses.get(command_id)
+        if steward_turn is not None:
+            await steward_turn.cancel_turn()
+            return CancelCommandResponse(
+                message="Steward turn cancelled.",
+                command_id=command_id,
+            )
+        raise HTTPException(
+            status_code=404,
+            detail="Command not found or already completed",
         )
 
     def _command_task_is_terminal(self, command_id: CommandId) -> bool:

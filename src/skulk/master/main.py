@@ -284,32 +284,48 @@ def steward_candidate_is_servable(card: "ModelCard") -> bool:
     )
 
 
-def placement_resolves_parserless_vllm(
+def placement_may_select_parserless_vllm(
     card: "ModelCard", placements: "Mapping[InstanceId, Instance]"
 ) -> bool:
-    """Whether a minted placement stamped vllm for a card with no parser pin.
+    """Whether a minted placement could serve vllm for a card with no parser.
 
     The pre-placement servability gate can only reject a card whose EVERY
     servable engine needs the parser; a multi-engine card passes it and may
-    still resolve to vllm on the fleet at hand (backend preference, hardware
-    mix). This checks the backends placement actually stamped, so the walk
-    can skip the candidate instead of committing a steward whose server
-    rejects every tools-bearing request.
+    still end up on vllm on the fleet at hand. This checks the backends
+    placement actually stamped, so the walk can skip the candidate instead
+    of committing a steward whose server rejects every tools-bearing
+    request. An UNSTAMPED shard (``resolved_backend=None``, the telemetry
+    warm-up window) counts as selectable too: the worker then falls back to
+    its local probe, which is free to pick vllm, so the only safe answer
+    while vllm is among the card's servable engines is "not yet" — the
+    invariant simply retries on a later tick once resources have arrived.
 
     Args:
         card: The candidate's model card.
         placements: The instances ``place_instance`` minted for it.
 
     Returns:
-        True when any stamped shard resolved to the vllm engine while the
-        card pins no ``runtime.vllm_tool_call_parser``.
+        True when the card pins no ``runtime.vllm_tool_call_parser``, vllm
+        is among its platform-servable engines, and any shard either
+        resolved to vllm or carries no stamped backend.
     """
     if card.runtime is not None and card.runtime.vllm_tool_call_parser is not None:
+        return False
+    servable_engines = {
+        engine
+        for tag in platform_compatible_backends(
+            card.placement.compatible_backends,
+            card_serves_vision=card.vision is not None,
+            card_serves_speech=False,
+        )
+        if (engine := engine_of(tag)) is not None
+    }
+    if "vllm" not in servable_engines:
         return False
     for instance in placements.values():
         for shard in instance.shard_assignments.runner_to_shard.values():
             backend: str | None = getattr(shard, "resolved_backend", None)
-            if backend is not None and engine_of(backend) == "vllm":
+            if backend is None or engine_of(backend) == "vllm":
                 return True
     return False
 
@@ -2143,10 +2159,11 @@ class Master:
                     f"Steward placement with {model_ref} not possible yet: {err}"
                 )
                 continue
-            if placement_resolves_parserless_vllm(card, final_placement):
+            if placement_may_select_parserless_vllm(card, final_placement):
                 logger.warning(
-                    f"Steward model {model_ref} resolved to the vllm engine "
-                    "without a pinned tool-call parser; skipping"
+                    f"Steward model {model_ref} resolved (or may fall back) to "
+                    "the vllm engine without a pinned tool-call parser; "
+                    "skipping"
                 )
                 continue
             logger.info(

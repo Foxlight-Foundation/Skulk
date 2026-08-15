@@ -972,14 +972,22 @@ class StewardHarness:
         the investigation loop does not simply dispatch its next step.
 
         Side effects:
-            Sends a task cancellation for the active inner command, if any.
+            Cancels the active inner command through the API's shared local
+            cancellation path (closing its local queue so this turn's stream
+            ends immediately), falling back to a bare worker notification
+            when the queue is already gone.
         """
         self._turn_cancelled = True
         active = self._active_command_id
         if active is None:
             return
         self._active_command_id = None
-        await self._api.send_task_cancellation(active)
+        # Close the inner command's LOCAL queue, not just notify workers: a
+        # served engine mid-generation may observe worker-side cancellation
+        # only at completion, and the accepted cancel must end this response
+        # now, not then.
+        if not await self._api.cancel_local_command(active):
+            await self._api.send_task_cancellation(active)
 
     async def _run_investigation(
         self,

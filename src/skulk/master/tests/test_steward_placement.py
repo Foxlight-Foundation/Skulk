@@ -247,7 +247,7 @@ def test_stamped_vllm_placement_without_parser_is_rejected() -> None:
     vllm still needs the parser pin; the walk must skip the candidate when
     the minted shards resolved to vllm without one (#833).
     """
-    from skulk.master.main import placement_resolves_parserless_vllm
+    from skulk.master.main import placement_may_select_parserless_vllm
     from skulk.shared.models.model_cards import (
         RuntimeCapabilityCardConfig,
         ToolingCardConfig,
@@ -307,5 +307,28 @@ def test_stamped_vllm_placement_without_parser_is_rejected() -> None:
         for shard in instance.shard_assignments.runner_to_shard.values()
     }
     assert stamped == {"vllm-cuda"}, "test premise: placement resolves vllm"
-    assert placement_resolves_parserless_vllm(_card(None), parserless)
-    assert not placement_resolves_parserless_vllm(_card("hermes"), _place(_card("hermes")))
+    assert placement_may_select_parserless_vllm(_card(None), parserless)
+    assert not placement_may_select_parserless_vllm(
+        _card("hermes"), _place(_card("hermes"))
+    )
+
+    # Telemetry warm-up: no NodeResources means placement stamps no
+    # backend, and the worker's local fallback could still pick vllm, so
+    # an unstamped parserless placement must read as unsafe too.
+    unstamped_command = PlaceInstance(
+        model_card=_card(None),
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=1,
+        system_role="steward",
+    )
+    unstamped = place_instance(
+        unstamped_command, topology, {}, node_memory, node_network
+    )
+    stamped_backends = {
+        shard.resolved_backend
+        for instance in unstamped.values()
+        for shard in instance.shard_assignments.runner_to_shard.values()
+    }
+    assert stamped_backends == {None}, "test premise: warm-up leaves no stamp"
+    assert placement_may_select_parserless_vllm(_card(None), unstamped)

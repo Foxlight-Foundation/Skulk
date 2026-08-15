@@ -219,8 +219,16 @@ async def test_cancel_turn_stops_the_generation_and_the_loop() -> None:
     cancelled: list[object] = []
 
     class _Api:
-        async def send_task_cancellation(self, command_id: object) -> None:
+        async def cancel_local_command(self, command_id: object) -> bool:
+            # The shared path closes the local queue; recording it here is
+            # the test's proof the turn cancelled through that path.
             cancelled.append(command_id)
+            return True
+
+        async def send_task_cancellation(self, command_id: object) -> None:
+            raise AssertionError(
+                "the fallback must not fire when the local cancel succeeded"
+            )
 
     # A script that would otherwise tool-loop for the full step budget.
     harness = _ScriptedHarness(turns=[("", [_call("get_cluster_state")])])
@@ -251,6 +259,11 @@ async def test_cancel_command_routes_a_registered_steward_turn() -> None:
     cancelled: list[object] = []
 
     class _Api:
+        async def cancel_local_command(self, command_id: object) -> bool:
+            # The inner queue is already gone in this scenario; the harness
+            # must fall back to the bare worker notification.
+            return False
+
         async def send_task_cancellation(self, command_id: object) -> None:
             cancelled.append(command_id)
 
