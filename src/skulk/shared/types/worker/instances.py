@@ -17,8 +17,8 @@ from skulk.utils.pydantic_ext import CamelCaseModel, FrozenModel, TaggedModel
 INSTANCE_FAILURE_HISTORY_LIMIT = 64
 """Maximum recent instance failures retained in replicated cluster state."""
 
-INSTANCE_FAILURE_NODE_ID_MAX_BYTES: Final = 256
-"""Maximum raw node-identifier size retained in terminal failure history."""
+INSTANCE_FAILURE_ID_MAX_BYTES: Final = 256
+"""Maximum raw identifier size retained in terminal failure history."""
 
 InstanceFailureCode = Literal[
     "model_trust_rejected",
@@ -32,12 +32,12 @@ InstanceFailureCode = Literal[
 """Stable operator-facing categories for terminal instance failures."""
 
 
-def _bounded_failure_node_id(node_id: NodeId) -> NodeId:
-    """Retain a node id or replace oversized input with a stable safe reference."""
-    encoded = node_id.encode("utf-8")
-    if len(encoded) <= INSTANCE_FAILURE_NODE_ID_MAX_BYTES:
-        return node_id
-    return NodeId(f"sha256:{sha256(encoded).hexdigest()}")
+def _bounded_failure_reference(identifier: str) -> str:
+    """Retain an identifier or replace oversized input with a stable reference."""
+    encoded = identifier.encode("utf-8")
+    if len(encoded) <= INSTANCE_FAILURE_ID_MAX_BYTES:
+        return identifier
+    return f"sha256:{sha256(encoded).hexdigest()}"
 
 
 class InstanceId(Id):
@@ -48,9 +48,17 @@ class InstanceFailure(FrozenModel):
     """Bounded operator truth retained after a failed instance is torn down."""
 
     instance_id: InstanceId = Field(
-        description="The failed placement identity, unique for its lifetime."
+        description=(
+            "The failed placement identity, unique for its lifetime. An identity "
+            "over 256 UTF-8 bytes is retained as a stable sha256 reference."
+        )
     )
-    model_id: ModelId = Field(description="Model served by the failed placement.")
+    model_id: ModelId = Field(
+        description=(
+            "Model served by the failed placement. An identifier over 256 UTF-8 "
+            "bytes is retained as a stable sha256 reference."
+        )
+    )
     system_role: Literal["steward"] | None = Field(
         default=None,
         description="Fabric-maintained role when the failed placement was systemic.",
@@ -88,6 +96,22 @@ class InstanceFailure(FrozenModel):
             return datetime.fromisoformat(value)
         return value
 
+    @field_validator("instance_id", mode="before")
+    @classmethod
+    def _bound_instance_id(cls, value: object) -> object:
+        """Bound a valid string identity before it enters replicated history."""
+        if isinstance(value, str):
+            return InstanceId(_bounded_failure_reference(value))
+        return value
+
+    @field_validator("model_id", mode="before")
+    @classmethod
+    def _bound_model_id(cls, value: object) -> object:
+        """Bound a valid string model identity before it enters replicated history."""
+        if isinstance(value, str):
+            return ModelId(_bounded_failure_reference(value))
+        return value
+
     @field_validator("affected_node_ids", mode="before")
     @classmethod
     def _sort_affected_nodes(cls, value: object) -> object:
@@ -97,8 +121,15 @@ class InstanceFailure(FrozenModel):
                 "list[object] | tuple[object, ...] | set[object] | frozenset[object]",
                 value,
             )
+            if not all(isinstance(node_id, str) for node_id in raw_nodes):
+                raise ValueError("affected_node_ids entries must be strings")
+            node_identifiers = cast(
+                "list[str] | tuple[str, ...] | set[str] | frozenset[str]",
+                raw_nodes,
+            )
             nodes = {
-                _bounded_failure_node_id(NodeId(str(node_id))) for node_id in raw_nodes
+                NodeId(_bounded_failure_reference(node_id))
+                for node_id in node_identifiers
             }
             return tuple(sorted(nodes)[:64])
         return value

@@ -28,7 +28,11 @@ from skulk.shared.types.events import (
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSyncMessage
-from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
+from skulk.shared.types.worker.instances import (
+    InstanceFailure,
+    InstanceId,
+    MlxRingInstance,
+)
 from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.channels import channel
@@ -155,6 +159,42 @@ def test_unavailable_node_identifier_cannot_overflow_failure_truth() -> None:
         ),
     )
     assert len(events[0].model_dump_json()) < 4096
+
+
+def test_retained_failure_bounds_all_operator_controlled_identities() -> None:
+    """Oversized explicit placement identities cannot inflate replicated state."""
+    failure = InstanceFailure(
+        instance_id=InstanceId("instance-" + "i" * 4096),
+        model_id=ModelId("model-" + "m" * 4096),
+        error_code="placement_failed",
+        error_message="placement failed",
+        affected_node_ids=(NodeId("node-a"),),
+        recorded_at=datetime(2026, 8, 15, 14, 0, tzinfo=timezone.utc),
+    )
+
+    assert str(failure.instance_id).startswith("sha256:")
+    assert str(failure.model_id).startswith("sha256:")
+    assert len(str(failure.instance_id)) == 71
+    assert len(str(failure.model_id)) == 71
+    assert failure.affected_node_ids == (NodeId("node-a"),)
+    assert len(failure.model_dump_json()) < 1024
+
+
+def test_retained_failure_rejects_non_string_node_identities() -> None:
+    """Corrupt replicated values must fail instead of becoming invented node ids."""
+    with pytest.raises(
+        ValidationError, match="affected_node_ids entries must be strings"
+    ):
+        InstanceFailure.model_validate(
+            {
+                "instanceId": "instance-a",
+                "modelId": "org/model",
+                "errorCode": "placement_failed",
+                "errorMessage": "placement failed",
+                "affectedNodeIds": [42],
+                "recordedAt": "2026-08-15T14:00:00+00:00",
+            }
+        )
 
 
 def test_terminal_failure_command_and_event_are_immutable() -> None:

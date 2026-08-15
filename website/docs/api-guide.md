@@ -2238,10 +2238,12 @@ Returns the cluster state as Skulk currently sees it.
 recent terminal placement failures. Each entry includes the vanished
 `instanceId`, `modelId`, optional `systemRole`, stable `errorCode`, bounded
 operator-safe `errorMessage`, assigned `affectedNodeIds`, and UTC `recordedAt`.
-The assigned-node list retains at most 64 entries. Ordinary node identifiers
-remain unchanged; an identifier exceeding 256 UTF-8 bytes is represented as a
-stable `sha256:<digest>` reference so hostile or malformed explicit placement
-input cannot inflate replicated state.
+Ordinary instance, model, and assigned-node identifiers remain unchanged; an
+identifier exceeding 256 UTF-8 bytes is represented as a stable
+`sha256:<digest>` reference. The assigned-node list retains at most 64 entries
+and rejects non-string values during strict replay, so hostile explicit
+placement input cannot inflate replicated state and corrupted snapshots cannot
+invent authoritative identities.
 Skulk records the entry before removing the failed instance, so operators can
 distinguish a runner crash, unresponsive or wedged runner, trust rejection,
 unrecoverable placement, or lost node from a clean operator stop. Prompt and

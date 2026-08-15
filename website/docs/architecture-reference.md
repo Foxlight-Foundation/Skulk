@@ -466,7 +466,7 @@ Discriminated union at `src/skulk/shared/types/events.py`. Selected events:
 | Event | Emitted when | Applied by |
 |---|---|---|
 | `InstanceCreated` | Master places a model | All nodes (update `State.instances`) |
-| `InstanceFailureRecorded` | A runner, placement, or node failure makes a placement terminal. Emitted before deletion while model, instance, role, and assigned-node truth still exists; `apply` deduplicates by instance and retains the newest 64 records in `State.instance_failures`. Each record retains at most 64 assigned nodes, replacing an identifier over 256 UTF-8 bytes with a stable SHA-256 reference. Clean operator stops do not emit it. | All nodes |
+| `InstanceFailureRecorded` | A runner, placement, or node failure makes a placement terminal. Emitted before deletion while model, instance, role, and assigned-node truth still exists; `apply` deduplicates by instance and retains the newest 64 records in `State.instance_failures`. Each record retains at most 64 assigned nodes; instance, model, and node identifiers over 256 UTF-8 bytes become stable SHA-256 references, while non-string node identities fail strict replay. Clean operator stops do not emit it. | All nodes |
 | `InstanceDeleted` | Master deletes a placement | All nodes |
 | `RunnerStatusUpdated` | Runner subprocess transitions state | All nodes |
 | `RunnerFailed` | Runner crashes or exits unexpectedly | All nodes |
