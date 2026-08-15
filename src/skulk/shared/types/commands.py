@@ -120,11 +120,28 @@ class DeleteInstance(BaseCommand):
 
 
 class FailInstance(BaseCommand):
-    """Worker report that an instance must be torn down after terminal failure."""
+    """Report a terminal runtime failure to the authoritative master.
 
-    instance_id: InstanceId
-    error_code: InstanceFailureCode
-    error_message: str = Field(min_length=1, max_length=2048)
+    The master records bounded operator failure truth before applying the
+    ordinary instance teardown path. The command therefore carries only a
+    stable category and payload-safe explanation; prompts, responses,
+    credentials, and raw diagnostic output must never be included.
+    """
+
+    instance_id: InstanceId = Field(
+        description="Exact placement identity that must be retained and torn down."
+    )
+    error_code: InstanceFailureCode = Field(
+        description="Stable operator-facing category for the terminal failure."
+    )
+    error_message: str = Field(
+        min_length=1,
+        max_length=2048,
+        description=(
+            "Bounded payload-safe operator explanation retained after teardown; "
+            "never contains prompts, responses, credentials, or raw diagnostics."
+        ),
+    )
 
 
 class RefuseInstancePlacement(BaseCommand):
