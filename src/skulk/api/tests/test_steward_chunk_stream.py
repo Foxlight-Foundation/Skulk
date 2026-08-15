@@ -4,6 +4,7 @@ StewardHarness is deliberately not @final: overriding its generation and
 tool collaborators is the loop's unit-test seam.
 """
 
+from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
@@ -378,11 +379,13 @@ async def test_release_wrapper_deregisters_on_early_disconnect() -> None:
 
     source_started: list[bool] = []
 
-    async def _source():
+    async def _source() -> "AsyncGenerator[str, None]":
         source_started.append(True)
         yield "never reached"
 
-    async def _keepalive_like(source):
+    async def _keepalive_like(
+        source: "AsyncGenerator[str, None]",
+    ) -> "AsyncGenerator[str, None]":
         yield ": keep-alive\n\n"
         async for item in source:
             yield item
