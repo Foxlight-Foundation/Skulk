@@ -985,9 +985,13 @@ class StewardHarness:
         # Close the inner command's LOCAL queue, not just notify workers: a
         # served engine mid-generation may observe worker-side cancellation
         # only at completion, and the accepted cancel must end this response
-        # now, not then.
+        # now, not then. When the queue is already gone there is no stream
+        # left to finalize, so the fallback must not retain the local-finish
+        # marker (nothing would ever discard it).
         if not await self._api.cancel_local_command(active):
-            await self._api.send_task_cancellation(active)
+            await self._api.send_task_cancellation(
+                active, suppress_local_finish=False
+            )
 
     async def _run_investigation(
         self,
@@ -1173,9 +1177,12 @@ class StewardHarness:
             # nothing to stop. Honor it here rather than letting an
             # accepted cancellation stream one more full generation. The
             # step ends without a result event, which the loop reads as an
-            # empty final answer.
+            # empty final answer. No chunk stream ever opens for this
+            # command, so the local-finish marker must not be retained.
             self._active_command_id = None
-            await api.send_task_cancellation(command.command_id)
+            await api.send_task_cancellation(
+                command.command_id, suppress_local_finish=False
+            )
             return
         # No extension tap: this is one investigation step, not the turn.
         # The turn's single tap is applied by the caller of

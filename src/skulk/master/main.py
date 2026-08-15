@@ -40,6 +40,7 @@ from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
     ModelTask,
+    card_serves_speech,
     get_card,
     get_model_cards,
 )
@@ -262,6 +263,17 @@ def steward_candidate_is_servable(card: "ModelCard") -> bool:
     """
     if ModelTask.TextGeneration not in card.tasks:
         return False
+    # Routing truth: worker bootstrap dispatches image, embedding, and speech
+    # cards to their specialized runners BEFORE text-engine selection, so a
+    # multi-task card carrying any of those never reaches a text runner no
+    # matter what else it declares.
+    if (
+        ModelTask.TextToImage in card.tasks
+        or ModelTask.ImageToImage in card.tasks
+        or ModelTask.TextEmbedding in card.tasks
+        or card_serves_speech(card)
+    ):
+        return False
     profile = resolve_model_capability_profile(card.model_id, model_card=card)
     if not profile.supports_tool_calling:
         return False
@@ -302,7 +314,10 @@ def placement_may_select_parserless_vllm(
 
     Args:
         card: The candidate's model card.
-        placements: The instances ``place_instance`` minted for it.
+        placements: ONLY the instances minted by this placement. The caller
+            must filter out pre-existing state (``place_instance`` returns
+            existing instances plus the new one), or an unrelated vllm or
+            unstamped shard would falsely condemn the candidate.
 
     Returns:
         True when the card pins no ``runtime.vllm_tool_call_parser``, vllm
@@ -2104,6 +2119,11 @@ class Master:
                         "steward_models; replacing the placement"
                     )
                     await self._teardown_steward_instances(stewards)
+                    # This teardown is an intentional replacement: open the
+                    # pacing window so the invariant really can re-place on
+                    # the next tick, as promised above, instead of waiting
+                    # out a window started by the previous placement.
+                    self._steward_last_attempt_monotonic = time.monotonic() - 60.0
             return
 
         now = time.monotonic()
@@ -2159,7 +2179,12 @@ class Master:
                     f"Steward placement with {model_ref} not possible yet: {err}"
                 )
                 continue
-            if placement_may_select_parserless_vllm(card, final_placement):
+            minted_instances = {
+                instance_id: instance
+                for instance_id, instance in final_placement.items()
+                if instance_id not in self.state.instances
+            }
+            if placement_may_select_parserless_vllm(card, minted_instances):
                 logger.warning(
                     f"Steward model {model_ref} resolved (or may fall back) to "
                     "the vllm engine without a pinned tool-call parser; "

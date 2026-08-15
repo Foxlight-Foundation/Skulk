@@ -4719,15 +4719,27 @@ class API:
                     "Vision media timed out waiting for worker verification",
                 )
 
-    async def send_task_cancellation(self, command_id: CommandId) -> None:
+    async def send_task_cancellation(
+        self, command_id: CommandId, *, suppress_local_finish: bool = True
+    ) -> None:
         """Public cancellation seam for internal callers (the steward harness).
 
         Sends the same TaskCancelled command the HTTP cancel endpoint sends,
-        suppressing the final TaskFinished so the worker can observe the
-        cancelled task and stop the runner promptly.
+        by default suppressing the final TaskFinished so the worker can
+        observe the cancelled task and stop the runner promptly.
+
+        Args:
+            command_id: The command to cancel on the workers.
+            suppress_local_finish: Record the id so local stream cleanup
+                skips its TaskFinished. Pass False when NO local stream will
+                ever open for this command (e.g. a cancellation accepted
+                before its chunk stream was created): the marker is only
+                discarded by stream finalization, so retaining it with no
+                stream would leak one set entry per cancellation.
         """
         await self._send(TaskCancelled(cancelled_command_id=command_id))
-        self._cancelled_command_ids.add(command_id)
+        if suppress_local_finish:
+            self._cancelled_command_ids.add(command_id)
 
     async def dispatch_text_generation(
         self,

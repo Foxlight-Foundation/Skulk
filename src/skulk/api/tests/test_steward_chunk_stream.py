@@ -264,7 +264,12 @@ async def test_cancel_command_routes_a_registered_steward_turn() -> None:
             # must fall back to the bare worker notification.
             return False
 
-        async def send_task_cancellation(self, command_id: object) -> None:
+        async def send_task_cancellation(
+            self, command_id: object, *, suppress_local_finish: bool = True
+        ) -> None:
+            # The queue is already gone, so nothing would ever discard a
+            # retained local-finish marker (#833).
+            assert suppress_local_finish is False
             cancelled.append(command_id)
 
     harness = _ScriptedHarness(turns=[("irrelevant", [])])
@@ -327,7 +332,12 @@ async def test_cancellation_racing_dispatch_still_cancels_the_step() -> None:
             stream_requests.append(command)
             raise AssertionError("a cancelled step must not open a stream")
 
-        async def send_task_cancellation(self, command_id: object) -> None:
+        async def send_task_cancellation(
+            self, command_id: object, *, suppress_local_finish: bool = True
+        ) -> None:
+            # The race path must not retain a local-finish marker: no chunk
+            # stream ever opens for this command (#833).
+            assert suppress_local_finish is False
             cancelled.append(command_id)
 
     harness = StewardHarness(cast("API", cast(object, _RacingApi())))

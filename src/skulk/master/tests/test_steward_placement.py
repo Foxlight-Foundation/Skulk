@@ -200,6 +200,18 @@ def test_steward_candidates_require_text_and_tool_capability() -> None:
     assert not steward_candidate_is_servable(
         _card([ModelTask.TextGeneration], tools=False)
     )
+    # Routing truth: bootstrap sends image/embedding/speech cards to their
+    # specialized runners before text-engine dispatch, so a multi-task card
+    # carrying any of those tasks never reaches a text runner.
+    assert not steward_candidate_is_servable(
+        _card([ModelTask.TextGeneration, ModelTask.TextToSpeech], tools=True)
+    )
+    assert not steward_candidate_is_servable(
+        _card([ModelTask.TextGeneration, ModelTask.TextEmbedding], tools=True)
+    )
+    assert not steward_candidate_is_servable(
+        _card([ModelTask.TextGeneration, ModelTask.TextToImage], tools=True)
+    )
 
 
 def test_vllm_only_steward_candidates_require_a_pinned_parser() -> None:

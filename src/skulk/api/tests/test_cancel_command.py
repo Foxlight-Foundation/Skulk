@@ -189,3 +189,22 @@ async def test_finalize_command_stream_reports_natural_completion() -> None:
     task_finished = api._send.call_args[0][0]
     assert task_finished.finished_command_id == cid
     assert cid not in queue
+
+
+@pytest.mark.asyncio
+async def test_send_task_cancellation_without_stream_retains_no_marker() -> None:
+    """A no-stream cancellation must not leak a local-finish marker.
+
+    The marker is discarded only by stream finalization; a cancellation for
+    a command whose chunk stream never opens (the steward dispatch race)
+    would otherwise grow `_cancelled_command_ids` forever (#833).
+    """
+    api = _make_api()
+    cid = CommandId("no-stream-cmd")
+
+    await api.send_task_cancellation(cid, suppress_local_finish=False)
+    assert cid not in api._cancelled_command_ids
+    api._send.assert_called_once()
+
+    await api.send_task_cancellation(cid)
+    assert cid in api._cancelled_command_ids
