@@ -149,6 +149,12 @@ def test_unavailable_node_identifier_cannot_overflow_failure_truth() -> None:
     assert len(events) == 1
     assert len(events[0].failure.error_message) == 2048
     assert events[0].failure.error_message.endswith(" left the live topology.")
+    assert events[0].failure.affected_node_ids == (
+        NodeId(
+            "sha256:8fce4af2210bc59978059c60615ce8cbf07b835621d93ab544c6f7e01eb0867a"
+        ),
+    )
+    assert len(events[0].model_dump_json()) < 4096
 
 
 def test_terminal_failure_command_and_event_are_immutable() -> None:

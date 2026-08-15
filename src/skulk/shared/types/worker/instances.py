@@ -1,6 +1,7 @@
 from datetime import datetime
 from enum import Enum
-from typing import Literal, cast
+from hashlib import sha256
+from typing import Final, Literal, cast
 
 from pydantic import Field, field_validator, model_validator
 
@@ -16,6 +17,9 @@ from skulk.utils.pydantic_ext import CamelCaseModel, FrozenModel, TaggedModel
 INSTANCE_FAILURE_HISTORY_LIMIT = 64
 """Maximum recent instance failures retained in replicated cluster state."""
 
+INSTANCE_FAILURE_NODE_ID_MAX_BYTES: Final = 256
+"""Maximum raw node-identifier size retained in terminal failure history."""
+
 InstanceFailureCode = Literal[
     "model_trust_rejected",
     "runner_crashed",
@@ -26,6 +30,14 @@ InstanceFailureCode = Literal[
     "download_failed",
 ]
 """Stable operator-facing categories for terminal instance failures."""
+
+
+def _bounded_failure_node_id(node_id: NodeId) -> NodeId:
+    """Retain a node id or replace oversized input with a stable safe reference."""
+    encoded = node_id.encode("utf-8")
+    if len(encoded) <= INSTANCE_FAILURE_NODE_ID_MAX_BYTES:
+        return node_id
+    return NodeId(f"sha256:{sha256(encoded).hexdigest()}")
 
 
 class InstanceId(Id):
@@ -59,8 +71,9 @@ class InstanceFailure(FrozenModel):
         max_length=64,
         description=(
             "Up to 64 canonically ordered nodes assigned to the placement when "
-            "failure was recorded. Larger placements are truncated so failure "
-            "retention can never prevent teardown."
+            "failure was recorded. Larger placements are truncated; individual "
+            "identifiers over 256 UTF-8 bytes are represented by a sha256 digest "
+            "so failure retention can never prevent teardown or state sync."
         ),
     )
     recorded_at: datetime = Field(
@@ -80,10 +93,13 @@ class InstanceFailure(FrozenModel):
     def _sort_affected_nodes(cls, value: object) -> object:
         """Canonicalize and bound nodes so failure capture cannot block teardown."""
         if isinstance(value, (list, tuple, set, frozenset)):
-            nodes = cast(
-                "list[NodeId] | tuple[NodeId, ...] | set[NodeId] | frozenset[NodeId]",
+            raw_nodes = cast(
+                "list[object] | tuple[object, ...] | set[object] | frozenset[object]",
                 value,
             )
+            nodes = {
+                _bounded_failure_node_id(NodeId(str(node_id))) for node_id in raw_nodes
+            }
             return tuple(sorted(nodes)[:64])
         return value
 

@@ -244,7 +244,9 @@ Clean operator stops use `DeleteInstance` and intentionally
 do not create failure history. The record contains stable categories, bounded
 operator-safe runner detail, model and instance identities, assigned nodes, and
 the master's UTC acceptance time; it never contains prompts or generated
-content.
+content. Assigned-node history is limited to 64 entries, and an individual
+identifier over 256 UTF-8 bytes is retained only as a stable SHA-256 reference,
+keeping repeated failures and replicated snapshots strictly bounded.
 
 A snapshot-bootstrap rollout has one operational rule: once a master starts compacting old replay history after writing snapshots, older nodes that only know how to "replay from event 0" should be considered temporary guests during the rollout window. Upgrade all nodes before relying on bounded retention as the steady state.
 
