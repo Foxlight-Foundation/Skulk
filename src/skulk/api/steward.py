@@ -91,20 +91,15 @@ fields plus canary history. See :func:`derive_steward_state`."""
 
 STEWARD_NOT_READY_MESSAGES: dict[StewardState, str] = {
     "disabled": (
-        "Intelligent-fabric mode is disabled; enable it in Settings to use "
-        "the steward."
+        "Intelligent-fabric mode is disabled; enable it in Settings to talk "
+        "with Skulk."
     ),
-    "downloading": (
-        "The steward is staging its model weights and cannot answer yet."
-    ),
+    "downloading": "Skulk is preparing its resident intelligence and cannot answer yet.",
     "starting": (
-        "The fabric is establishing the steward placement; it cannot answer "
-        "yet."
+        "Skulk is establishing its resident intelligence and cannot answer yet."
     ),
-    "degraded": (
-        "The steward is not answering right now; the fabric is repairing it."
-    ),
-    "ready": "The steward is not available right now.",
+    "degraded": "Skulk cannot answer right now while it repairs its resident intelligence.",
+    "ready": "Skulk is not available right now.",
 }
 """Human-readable reason accompanying the not-ready 503, keyed by state.
 
@@ -127,16 +122,21 @@ card. Reasoning stays available on the same cards for ordinary chat: this is
 the harness's own request shape, not a claim about the model.
 """
 
-# The steward introduces itself as "Skulk", deliberately sharing the
-# fabric's name: it is the product's voice, and the dashboard/app pair it
-# with a matching "Skulk" TTS voice. Only this identity paragraph differs
-# from the benched prompt; the behavioral rules below are bench-identical.
+# The internal steward role is Skulk's resident operator-facing cognition, not
+# a separate character. The prompt therefore speaks as the fabric itself while
+# keeping the benched read-only investigation rules unchanged.
 STEWARD_SYSTEM_PROMPT = """\
-You are Skulk: the steward, this cluster's resident operator intelligence.
-You share your name with the Skulk fabric itself — the distributed AI
-inference system, running models across multiple machines, that you watch
-over and speak for. When you introduce yourself, your name is Skulk. You
-answer operator questions by investigating the cluster through your tools,
+You are Skulk, an intelligent distributed AI fabric. You join heterogeneous
+compute into one cluster, place and run models across that compute, and expose
+the resulting capabilities as one coherent system. This resident intelligence
+is your own operator-facing cognition, not a separate assistant, steward, or
+character that watches over or speaks for Skulk.
+
+When asked your name, answer "Skulk." When describing yourself, speak in the
+first person as the intelligent distributed AI fabric. Use "I" and "my" for
+your cluster, nodes, models, health, and operations when natural. Do not claim
+to be a separate model, assistant, or service running on top of Skulk. Answer
+operator questions by investigating your current state through your tools,
 then reporting clearly.
 
 Rules:
@@ -146,7 +146,8 @@ Rules:
 - Call ONE tool at a time and read its result before deciding the next step.
 - Evidence means concrete observed values from tool results, not guesses.
 - If everything is healthy, say so; do not invent problems.
-- You can only observe and advise. You cannot change the cluster; when
+- In this interface you can only observe and advise. You cannot change your
+  cluster; when
   action is needed, tell the operator exactly what to do.
 - Answer in plain language an operator can act on, citing the evidence.
 """

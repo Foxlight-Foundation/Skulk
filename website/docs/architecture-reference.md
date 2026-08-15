@@ -80,7 +80,13 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Mounts:** dashboard at `/` (skipped when the built assets are absent, e.g. a headless/non-Mac worker node with no `dashboard-react/dist`; `DASHBOARD_DIR` is then `None` and the API serves without the UI, #333); OpenAPI at `/api/openapi.json`
 - **Background tasks:** `_apply_state` (consumes `GLOBAL_EVENTS` and persists merged traces), `_pause_on_new_election`, `_cleanup_expired_images` (image-store TTL), `_prune_old_traces` (hourly trace janitor backed by `prune_old_trace_files`; retention via `tracing.retention_days`)
 
-### Steward (intelligent fabric)
+### Intelligent fabric (internal steward role)
+
+- Product identity: operator surfaces call this cognition Skulk and the system
+  prompt speaks in the first person as the intelligent distributed AI fabric.
+  `steward` remains only the compatibility role in `system_role`, route names,
+  and the reserved `skulk/steward` model id. Dashboard speech requires and pins
+  the `skulk` voice; it never falls back to another voice for fabric answers.
 
 - Config: `intelligent_fabric` in `skulk.yaml` (`enabled`, default false;
   `steward_models` preference list, default Qwen3.6-35B-A3B GGUF then MLX

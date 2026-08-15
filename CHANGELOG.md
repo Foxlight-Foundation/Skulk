@@ -9,6 +9,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Intelligent Fabric now speaks and identifies as Skulk rather than presenting
+  a separate Steward character. The dashboard streams answer prose through a
+  ready TTS model only when its voice catalog contains the signature `skulk`
+  voice, pins that voice on every sentence, and keeps speech failure isolated
+  from authoritative text generation. Internal steward route, role, and model
+  identifiers remain compatible for existing clients.
+
 - Skulk now ships its signature voice: a new bundled reference profile named
   Skulk, constructed synthetically like the existing ten and paired with the
   same shared conditioning transcript. It appears in the voice catalog of
@@ -58,7 +65,7 @@ This project records release notes here and mirrors public-facing notes in
   `skulk/steward` (streaming included, no steward-specific client code), poll
   readiness at `GET /v1/steward`, and see it flagged with
   `system_role: "steward"` in `GET /v1/models` so pickers can badge or
-  separate it. The dashboard gains a Steward page, chat-middleware extensions
+  separate it. The dashboard gains a Skulk fabric-chat page, chat-middleware extensions
   run on steward turns exactly as on ordinary completions, and a steward that
   is still being placed answers with a clean 503 status payload instead of
   failing mid-answer.

@@ -4,6 +4,15 @@ title: Next release
 sidebar_position: 0
 ---
 
+## Skulk fabric identity and spoken answers
+
+Intelligent Fabric now appears as Skulk itself rather than as a separate
+Steward character. It answers in the first person as the intelligent
+distributed AI fabric. When a ready streaming TTS model exposes Skulk's
+signature voice, the dashboard can speak fabric answers as they stream and
+pins that voice for every sentence without changing ordinary chat voice
+selection.
+
 ## Durable local model cards and cache reconciliation
 
 Every complete model artifact now retains its full effective card and a hashed

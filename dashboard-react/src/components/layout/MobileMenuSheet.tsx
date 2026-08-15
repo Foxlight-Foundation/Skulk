@@ -136,7 +136,7 @@ export function MobileMenuSheet({ open, activeRoute, onNavigate, onOpenSettings,
         </MenuRow>
         {stewardEnabled && (
           <MenuRow $active={activeRoute === 'steward'} onClick={() => go('steward')} tabIndex={open ? 0 : -1}>
-            <MdAutoAwesome size={18} /> {t('header.nav.steward', 'Steward')}
+            <MdAutoAwesome size={18} /> {t('header.nav.steward', 'Skulk')}
           </MenuRow>
         )}
         <Divider />

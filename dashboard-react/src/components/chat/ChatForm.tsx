@@ -54,6 +54,8 @@ export interface ChatFormProps {
   selectedVoice?: string | null;
   /** Discovered model-native or bundled-reference voices for the TTS model. */
   voiceOptions?: ChatVoiceOption[];
+  /** Fixed product voice label when this conversation must not expose a voice picker. */
+  fixedSpeechVoiceLabel?: string;
   /** Whether the selected model's voice catalog is still loading. */
   isVoiceCatalogLoading?: boolean;
   /** Request-scoped reference clip used to condition dashboard TTS playback. */
@@ -431,6 +433,7 @@ export function ChatForm({
   selectedSpeechModelId = null,
   selectedVoice = null,
   voiceOptions = [],
+  fixedSpeechVoiceLabel,
   isVoiceCatalogLoading = false,
   referenceAudioFile = null,
   referenceAudioText = '',
@@ -1228,23 +1231,29 @@ export function ChatForm({
 
           <VoiceGroup>
             <VoiceLabel>{t('chat.form.ttsLabel', 'TTS')}</VoiceLabel>
-            <VoiceSelect
-              value={selectedSpeechId ?? ''}
-              disabled={speechModels.length === 0}
-              onChange={(event) => onSelectSpeechModel?.(event.target.value || null)}
-              aria-label={t('chat.form.selectSpeechModel', 'Select speech model')}
-            >
-              {speechModels.length === 0 ? (
-                <option value="">{t('chat.form.noSpeechModels', 'No TTS')}</option>
-              ) : (
-                speechModels.map((model) => (
-                  <option key={model.modelId} value={model.modelId}>
-                    {model.label}
-                  </option>
-                ))
-              )}
-            </VoiceSelect>
-            {speechModels.length > 0 && selectedSpeechModel?.supportsVoiceListing && (
+            {fixedSpeechVoiceLabel ? (
+              <VoiceStatus>{fixedSpeechVoiceLabel}</VoiceStatus>
+            ) : (
+              <VoiceSelect
+                value={selectedSpeechId ?? ''}
+                disabled={speechModels.length === 0}
+                onChange={(event) => onSelectSpeechModel?.(event.target.value || null)}
+                aria-label={t('chat.form.selectSpeechModel', 'Select speech model')}
+              >
+                {speechModels.length === 0 ? (
+                  <option value="">{t('chat.form.noSpeechModels', 'No TTS')}</option>
+                ) : (
+                  speechModels.map((model) => (
+                    <option key={model.modelId} value={model.modelId}>
+                      {model.label}
+                    </option>
+                  ))
+                )}
+              </VoiceSelect>
+            )}
+            {!fixedSpeechVoiceLabel
+              && speechModels.length > 0
+              && selectedSpeechModel?.supportsVoiceListing && (
                 <VoiceSelect
                   value={voiceOptions.some((voice) => voice.id === selectedVoice) ? selectedVoice ?? '' : ''}
                   disabled={isVoiceCatalogLoading}
@@ -1264,7 +1273,7 @@ export function ChatForm({
                     </option>
                   ))}
                 </VoiceSelect>
-            )}
+              )}
             <VoiceToggle
               type="button"
               disabled={!speechReady}

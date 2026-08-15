@@ -657,7 +657,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
             )}
           </Fieldset>
 
-          {/* Intelligent fabric: the resident steward. The toggle is the
+          {/* Intelligent fabric: Skulk's resident operator cognition. The toggle is the
               whole surface; model preference stays config-file-only until
               the cards-DB arc gives model pickers a proper home. */}
           <Fieldset>
@@ -669,7 +669,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                   filled
                   content={t(
                     'settings.intelligentFabric.enabledTooltip',
-                    'Keeps a small resident assistant (the steward) placed on the cluster. Ask it about cluster health, models, and diagnostics from the Steward page. It observes and advises; it cannot change the cluster.',
+                    'Keeps Skulk available as the fabric itself: ask about cluster health, models, and diagnostics from the Skulk page. This interface observes and advises; it cannot change the cluster.',
                   )}
                 />
               </FieldLabel>
@@ -679,7 +679,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               <HintText>
                 {t(
                   'settings.intelligentFabric.syncHint',
-                  'The fabric places the steward automatically after saving; the first start downloads its model. Turning it off removes the placement.',
+                  'Skulk prepares its resident intelligence automatically after saving; the first start downloads its model. Turning it off removes that system placement.',
                 )}
               </HintText>
             )}

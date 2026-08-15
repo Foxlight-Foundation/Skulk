@@ -2542,8 +2542,8 @@ class API:
         )(self.get_cluster_performance_envelopes)
         self.app.get(
             "/v1/steward",
-            tags=["Steward"],
-            summary="Get intelligent-fabric steward status",
+            tags=["Intelligent Fabric"],
+            summary="Get intelligent-fabric cognition status",
             description=(
                 "Report whether intelligent-fabric mode is enabled and whether "
                 "a steward placement currently exists, with its model and "
@@ -8026,12 +8026,12 @@ class API:
             entries.append(
                 ModelListModel(
                     id=STEWARD_VIRTUAL_MODEL_ID,
-                    name="Steward",
+                    name="Skulk",
                     description=(
-                        "The cluster's resident assistant. Ask it about "
-                        "cluster health, models, and diagnostics; it "
-                        "investigates through read-only tools before "
-                        "answering and cannot change the cluster."
+                        "The intelligent distributed AI fabric's operator-facing "
+                        "cognition. Ask Skulk about its health, models, and "
+                        "diagnostics; it investigates through read-only tools "
+                        "before answering and cannot change the cluster."
                     ),
                     tags=["system", "steward"],
                     tasks=["TextGeneration"],

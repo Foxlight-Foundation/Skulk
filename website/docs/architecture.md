@@ -642,7 +642,7 @@ input chunks into exact classifier windows, and emits typed
 minimum-speech, silence-hangover, preroll, and maximum-utterance state. Media
 is processed per call and never retained.
 
-### Intelligent fabric (the steward)
+### Intelligent fabric (internal steward role)
 
 Skulk can keep a small resident model, the steward, always available to
 answer operator questions about the cluster. The mode is configured by the
@@ -697,6 +697,16 @@ probe already shows up in the status as a degraded steward, well before the
 third one triggers the replacement. In this release
 the steward observes and advises only: no tool can change the cluster, and
 anything action-shaped is returned to the operator as a recommendation.
+
+The role name remains internal plumbing (`system_role: "steward"`,
+`skulk/steward`, and `GET /v1/steward`). Product surfaces instead let an
+operator talk to Skulk itself. The system prompt makes that identity explicit:
+the cognition answers as Skulk in the first person and describes itself as an
+intelligent distributed AI fabric, never as a separate assistant layered on
+top of the cluster. When a ready streaming speech model advertises the bundled
+`skulk` voice, the dashboard can speak these answers sentence-by-sentence with
+that voice pinned on every synthesis request; it never substitutes a different
+speaker for fabric chat.
 
 ## The dashboard voice loop
 

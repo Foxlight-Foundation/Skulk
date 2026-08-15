@@ -709,7 +709,7 @@ export function App() {
                 realtimeTranscriptionAvailable={realtimeTranscriptionAvailable}
               />
             ) : activeRoute === 'steward' ? (
-              <StewardChatView />
+              <StewardChatView readyInstances={instanceCards} />
             ) : activeRoute === 'operator' ? (
               <OperatorPage />
             ) : topology ? (
