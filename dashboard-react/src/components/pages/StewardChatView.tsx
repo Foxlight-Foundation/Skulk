@@ -371,7 +371,7 @@ export function StewardChatView({ readyInstances = [] }: StewardChatViewProps) {
           speechQueue.finish();
         }
       } catch (error: unknown) {
-        speechQueue?.stop();
+        stopSpeechPlayback();
         if (!(error instanceof DOMException && error.name === 'AbortError')) {
           const message =
             error instanceof Error
@@ -387,7 +387,15 @@ export function StewardChatView({ readyInstances = [] }: StewardChatViewProps) {
         abortRef.current = null;
       }
     },
-    [autoSpeakAssistant, createSpeechQueue, messages, isLoading, refetch, t],
+    [
+      autoSpeakAssistant,
+      createSpeechQueue,
+      messages,
+      isLoading,
+      refetch,
+      stopSpeechPlayback,
+      t,
+    ],
   );
 
   const speakDraft = useCallback((text: string) => {

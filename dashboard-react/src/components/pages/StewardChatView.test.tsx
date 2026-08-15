@@ -9,11 +9,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { store } from '../../store';
 import { apiSlice } from '../../store/api';
+import { chatActions } from '../../store/slices/chatSlice';
 import type { StewardState } from '../../store/endpoints/steward';
 import { darkTheme } from '../../theme/theme';
 import type { ModelInfo } from '../../types/models';
 import { discoverSkulkSpeechSelection } from '../../audio/fabricSpeechDiscovery';
 import { buildSkulkSpeechSynthesisRequest } from '../../audio/fabricSpeechRequest';
+import type { InstanceCardData } from '../layout/InstancePanel';
 import { StewardChatView } from './StewardChatView';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -73,6 +75,8 @@ function delta(delta: Record<string, string>): string {
 function stubFetch(options: {
   status: StewardStatusFixture;
   sseEvents?: string[];
+  chatStatus?: number;
+  models?: ModelInfo[];
   onChat?: (init: RequestInit | undefined) => void;
 }): void {
   const fetchStub = async (
@@ -83,6 +87,9 @@ function stubFetch(options: {
       typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (url.includes('/v1/chat/completions')) {
       options.onChat?.(init);
+      if (options.chatStatus && options.chatStatus !== 200) {
+        return new Response('chat unavailable', { status: options.chatStatus });
+      }
       return new Response(sseBody(options.sseEvents ?? []), {
         status: 200,
         headers: { 'Content-Type': 'text/event-stream' },
@@ -95,7 +102,15 @@ function stubFetch(options: {
       });
     }
     if (url.endsWith('/models')) {
-      return new Response(JSON.stringify({ data: [] }), {
+      return new Response(JSON.stringify({ data: options.models ?? [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (url.includes('/v1/audio/voices')) {
+      return new Response(JSON.stringify({
+        data: [{ id: 'skulk', name: 'Skulk', preferred_languages: ['en'] }],
+      }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       });
@@ -105,7 +120,7 @@ function stubFetch(options: {
   vi.stubGlobal('fetch', fetchStub);
 }
 
-async function renderPage(): Promise<void> {
+async function renderPage(readyInstances: InstanceCardData[] = []): Promise<void> {
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
@@ -113,7 +128,7 @@ async function renderPage(): Promise<void> {
     root?.render(
       <Provider store={store}>
         <ThemeProvider theme={darkTheme}>
-          <StewardChatView />
+          <StewardChatView readyInstances={readyInstances} />
         </ThemeProvider>
       </Provider>,
     );
@@ -135,6 +150,7 @@ afterEach(async () => {
   container?.remove();
   root = null;
   container = null;
+  store.dispatch(chatActions.setAutoSpeakAssistant(false));
   store.dispatch(apiSlice.util.resetApiState());
   vi.unstubAllGlobals();
 });
@@ -258,6 +274,47 @@ describe('StewardChatView', () => {
 });
 
 describe('StewardChatView stream errors', () => {
+  it('clears speaking state when chat fails before the first content delta', async () => {
+    const speechModel: ModelInfo = {
+      id: 'org/tts',
+      audio: {
+        supports_streaming: true,
+        supports_voice_listing: true,
+        response_formats: ['pcm'],
+      },
+      resolved_capabilities: {
+        supports_speech_synthesis: true,
+        audio_response_formats: ['pcm'],
+      } as ModelInfo['resolved_capabilities'],
+    };
+    vi.stubGlobal('AudioContext', class AudioContext {});
+    store.dispatch(chatActions.setAutoSpeakAssistant(true));
+    stubFetch({ status: READY, chatStatus: 503, models: [speechModel] });
+    await renderPage([{
+      instanceId: 'tts-1',
+      modelId: 'org/tts',
+      sharding: 'Pipeline',
+      instanceType: 'MlxRing',
+      engine: 'mlx',
+      nodeStatuses: [],
+      status: 'ready',
+    }]);
+    await waitFor(
+      () => container?.querySelector('[aria-label="Speak draft"]') !== null,
+      'speech discovery never completed',
+    );
+    const textarea = container?.querySelector('textarea');
+    await userEvent.fill(textarea as HTMLTextAreaElement, 'hello?');
+    await userEvent.keyboard('{Enter}');
+    await waitFor(
+      () => addToastSpy.mock.calls.length > 0,
+      'chat failure never surfaced as a toast',
+    );
+
+    expect(container?.querySelector('[aria-label="Stop speech"]')).toBeNull();
+    expect(container?.querySelector('[aria-label="Speak draft"]')).not.toBeNull();
+  });
+
   it('surfaces a mid-stream error envelope instead of ending silently', async () => {
     stubFetch({
       status: READY,
