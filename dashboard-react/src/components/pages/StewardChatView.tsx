@@ -24,11 +24,8 @@ import { fetchSpeechVoiceCatalog } from '../../audio/speechVoiceSelection';
 import {
   speechLanguageForDashboardLocale,
 } from '../../audio/speechSynthesisRequest';
-import { speechModelOption } from '../../audio/speechModelOption';
-import {
-  buildSkulkSpeechSynthesisRequest,
-  SKULK_VOICE_ID,
-} from '../../audio/fabricSpeechRequest';
+import { buildSkulkSpeechSynthesisRequest } from '../../audio/fabricSpeechRequest';
+import { discoverSkulkSpeechSelection } from '../../audio/fabricSpeechDiscovery';
 
 /**
  * Skulk's fabric chat surface: talk to the intelligent fabric itself.
@@ -161,11 +158,6 @@ export function StewardChatView({ readyInstances = [] }: StewardChatViewProps) {
     pollingInterval: 15000,
   });
 
-  const handleCancel = useCallback(() => {
-    abortRef.current?.abort();
-    speechQueueRef.current?.stop();
-  }, []);
-
   const stopSpeechPlayback = useCallback(() => {
     speechQueueRef.current?.stop();
     speechQueueRef.current = null;
@@ -174,8 +166,14 @@ export function StewardChatView({ readyInstances = [] }: StewardChatViewProps) {
     setIsSpeaking(false);
   }, []);
 
+  const handleCancel = useCallback(() => {
+    abortRef.current?.abort();
+    stopSpeechPlayback();
+  }, [stopSpeechPlayback]);
+
   useEffect(() => {
     const controller = new AbortController();
+    setSpeechError(null);
     const readyModelIds = new Set(
       readyInstances
         .filter((instance) => instance.status === 'ready' || instance.status === 'running')
@@ -187,22 +185,16 @@ export function StewardChatView({ readyInstances = [] }: StewardChatViewProps) {
         return await response.json() as { data?: ModelInfo[] };
       })
       .then(async ({ data = [] }) => {
-        for (const model of data) {
-          if (
-            !readyModelIds.has(model.id)
-            || model.resolved_capabilities?.supports_speech_synthesis !== true
-          ) continue;
-          const option = speechModelOption(model.id, model);
-          if (
-            !option.supportsStreaming
-            || !option.responseFormats.includes('pcm')
-            || !canUseStreamingSpeechPlayback()
-          ) continue;
-          const voices = await fetchSpeechVoiceCatalog(model.id, controller.signal);
-          const skulkVoice = voices.find((voice) => voice.id === SKULK_VOICE_ID);
-          if (!skulkVoice) continue;
-          setSpeechModel(option);
-          setSpeechVoice(skulkVoice);
+        const selection = await discoverSkulkSpeechSelection(
+          data,
+          readyModelIds,
+          (modelId) => fetchSpeechVoiceCatalog(modelId, controller.signal),
+          canUseStreamingSpeechPlayback(),
+        );
+        if (controller.signal.aborted) return;
+        if (selection) {
+          setSpeechModel(selection.model);
+          setSpeechVoice(selection.voice);
           return;
         }
         setSpeechModel(null);

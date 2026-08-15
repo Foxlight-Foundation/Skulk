@@ -11,6 +11,8 @@ import { store } from '../../store';
 import { apiSlice } from '../../store/api';
 import type { StewardState } from '../../store/endpoints/steward';
 import { darkTheme } from '../../theme/theme';
+import type { ModelInfo } from '../../types/models';
+import { discoverSkulkSpeechSelection } from '../../audio/fabricSpeechDiscovery';
 import { buildSkulkSpeechSynthesisRequest } from '../../audio/fabricSpeechRequest';
 import { StewardChatView } from './StewardChatView';
 
@@ -147,6 +149,36 @@ const READY: StewardStatusFixture = {
 };
 
 describe('StewardChatView', () => {
+  it('continues Skulk voice discovery after an unusable speech model', async () => {
+    const model = (id: string): ModelInfo => ({
+      id,
+      audio: {
+        supports_streaming: true,
+        supports_voice_listing: true,
+        response_formats: ['pcm'],
+      },
+      resolved_capabilities: {
+        supports_speech_synthesis: true,
+        audio_response_formats: ['pcm'],
+      } as ModelInfo['resolved_capabilities'],
+    });
+    const loadVoices = vi.fn(async (modelId: string) => {
+      if (modelId === 'org/broken-tts') throw new Error('catalog unavailable');
+      return [{ id: 'skulk', name: 'Skulk', preferredLanguages: ['en'] }];
+    });
+
+    const selection = await discoverSkulkSpeechSelection(
+      [model('org/broken-tts'), model('org/working-tts')],
+      new Set(['org/broken-tts', 'org/working-tts']),
+      loadVoices,
+      true,
+    );
+
+    expect(loadVoices).toHaveBeenCalledTimes(2);
+    expect(selection?.model.modelId).toBe('org/working-tts');
+    expect(selection?.voice.id).toBe('skulk');
+  });
+
   it('pins the Skulk voice and deterministic seed on every fabric sentence', () => {
     const request = buildSkulkSpeechSynthesisRequest(
       'org/tts',

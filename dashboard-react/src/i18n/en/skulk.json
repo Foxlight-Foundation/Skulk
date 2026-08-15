@@ -716,7 +716,7 @@
   "settings.inference.turboquantOption": "TurboQuant",
   "settings.intelligentFabric.enabledTooltip": "Keeps Skulk's operator-facing cognition available on the cluster. Ask the fabric about its health, models, and diagnostics from the Skulk page. It observes and advises; it cannot change the cluster.",
   "settings.intelligentFabric.legend": "Intelligent Fabric",
-  "settings.intelligentFabric.syncHint": "The fabric places the steward automatically after saving; the first start downloads its model. Turning it off removes the placement.",
+  "settings.intelligentFabric.syncHint": "The fabric prepares its resident intelligence automatically after saving; the first start downloads its model. Turning it off removes the placement.",
   "settings.loadingConfig": "Loading config...",
   "settings.logging.enabledTooltip": "When enabled, nodes emit structured JSON logs on stdout for collection by Vector. Requires an ingest URL to be set.",
   "settings.logging.ingestUrl": "Ingest URL",
