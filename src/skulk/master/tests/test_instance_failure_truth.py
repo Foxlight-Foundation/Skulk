@@ -80,6 +80,35 @@ def test_instance_failure_event_captures_truth_before_teardown() -> None:
     assert event.failure.error_code == "runner_crashed"
 
 
+def test_instance_failure_event_bounds_large_placement_node_truth() -> None:
+    """Diagnostic bounds must never make a valid large placement impossible to tear down."""
+    instance = _instance()
+    shard = next(iter(instance.shard_assignments.runner_to_shard.values()))
+    node_to_runner = {
+        NodeId(f"node-{index:03d}"): RunnerId(f"runner-{index:03d}")
+        for index in range(70)
+    }
+    large_instance = instance.model_copy(
+        update={
+            "shard_assignments": ShardAssignments(
+                model_id=instance.shard_assignments.model_id,
+                node_to_runner=node_to_runner,
+                runner_to_shard={runner_id: shard for runner_id in node_to_runner.values()},
+            )
+        }
+    )
+
+    event = instance_failure_event(
+        large_instance,
+        error_code="runner_crashed",
+        error_message="runner exited while serving the model",
+    )
+
+    assert len(event.failure.affected_node_ids) == 64
+    assert event.failure.affected_node_ids[0] == NodeId("node-000")
+    assert event.failure.affected_node_ids[-1] == NodeId("node-063")
+
+
 def test_timed_out_node_records_failure_while_still_in_topology() -> None:
     """Timeout truth must not depend on the stale topology edge disappearing."""
     instance = _instance()

@@ -57,7 +57,11 @@ class InstanceFailure(FrozenModel):
     affected_node_ids: list[NodeId] = Field(
         default_factory=list,
         max_length=64,
-        description="Nodes assigned to the placement when failure was recorded.",
+        description=(
+            "Up to 64 canonically ordered nodes assigned to the placement when "
+            "failure was recorded. Larger placements are truncated so failure "
+            "retention can never prevent teardown."
+        ),
     )
     recorded_at: datetime = Field(
         description="UTC time at which the master accepted the terminal failure."
@@ -74,13 +78,13 @@ class InstanceFailure(FrozenModel):
     @field_validator("affected_node_ids", mode="before")
     @classmethod
     def _sort_affected_nodes(cls, value: object) -> object:
-        """Canonicalize node order so every replica serializes identical truth."""
+        """Canonicalize and bound nodes so failure capture cannot block teardown."""
         if isinstance(value, (list, tuple, set, frozenset)):
             nodes = cast(
                 "list[NodeId] | tuple[NodeId, ...] | set[NodeId] | frozenset[NodeId]",
                 value,
             )
-            return sorted(nodes)
+            return sorted(nodes)[:64]
         return value
 
 
