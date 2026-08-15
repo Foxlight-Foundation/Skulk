@@ -284,6 +284,36 @@ def steward_candidate_is_servable(card: "ModelCard") -> bool:
     )
 
 
+def placement_resolves_parserless_vllm(
+    card: "ModelCard", placements: "Mapping[InstanceId, Instance]"
+) -> bool:
+    """Whether a minted placement stamped vllm for a card with no parser pin.
+
+    The pre-placement servability gate can only reject a card whose EVERY
+    servable engine needs the parser; a multi-engine card passes it and may
+    still resolve to vllm on the fleet at hand (backend preference, hardware
+    mix). This checks the backends placement actually stamped, so the walk
+    can skip the candidate instead of committing a steward whose server
+    rejects every tools-bearing request.
+
+    Args:
+        card: The candidate's model card.
+        placements: The instances ``place_instance`` minted for it.
+
+    Returns:
+        True when any stamped shard resolved to the vllm engine while the
+        card pins no ``runtime.vllm_tool_call_parser``.
+    """
+    if card.runtime is not None and card.runtime.vllm_tool_call_parser is not None:
+        return False
+    for instance in placements.values():
+        for shard in instance.shard_assignments.runner_to_shard.values():
+            backend: str | None = getattr(shard, "resolved_backend", None)
+            if backend is not None and engine_of(backend) == "vllm":
+                return True
+    return False
+
+
 def _aware_timestamp(when: datetime) -> datetime:
     """Return a timestamp that is safe to compare with UTC receipt times."""
     return when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
@@ -2111,6 +2141,12 @@ class Master:
             except (PlacementError, PlacementInfoPendingError) as err:
                 logger.warning(
                     f"Steward placement with {model_ref} not possible yet: {err}"
+                )
+                continue
+            if placement_resolves_parserless_vllm(card, final_placement):
+                logger.warning(
+                    f"Steward model {model_ref} resolved to the vllm engine "
+                    "without a pinned tool-call parser; skipping"
                 )
                 continue
             logger.info(

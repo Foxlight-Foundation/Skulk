@@ -237,3 +237,75 @@ def test_vllm_only_steward_candidates_require_a_pinned_parser() -> None:
 
     assert not steward_candidate_is_servable(_vllm_card(None))
     assert steward_candidate_is_servable(_vllm_card("hermes"))
+
+
+def test_stamped_vllm_placement_without_parser_is_rejected() -> None:
+    """The post-placement gate catches multi-engine cards that resolve to vllm.
+
+    A card listing vllm alongside another engine passes the card-level
+    servability gate, but a fleet whose hardware makes placement stamp
+    vllm still needs the parser pin; the walk must skip the candidate when
+    the minted shards resolved to vllm without one (#833).
+    """
+    from skulk.master.main import placement_resolves_parserless_vllm
+    from skulk.shared.models.model_cards import (
+        RuntimeCapabilityCardConfig,
+        ToolingCardConfig,
+    )
+    from skulk.shared.types.worker.instances import Instance, InstanceId
+
+    def _card(parser: str | None) -> ModelCard:
+        return ModelCard(
+            model_id=ModelId("multi-engine-model"),
+            storage_size=Memory.from_gb(3),
+            n_layers=12,
+            hidden_size=30,
+            supports_tensor=True,
+            tasks=[ModelTask.TextGeneration],
+            tooling=ToolingCardConfig(supports_tool_calling=True),
+            runtime=(
+                RuntimeCapabilityCardConfig(vllm_tool_call_parser=parser)
+                if parser is not None
+                else None
+            ),
+            placement=PlacementCardConfig(
+                compatible_backends=frozenset({"vllm-cuda", "llama_server-cuda"}),
+                backend_preference=("vllm-cuda", "llama_server-cuda"),
+            ),
+        )
+
+    topology, node_memory, node_network, node_ids = fully_connected_three_nodes(
+        (10.0, 10.0, 10.0)
+    )
+
+    def _place(card: ModelCard) -> "dict[InstanceId, Instance]":
+        command = PlaceInstance(
+            model_card=card,
+            sharding=Sharding.Pipeline,
+            instance_meta=InstanceMeta.MlxRing,
+            min_nodes=1,
+            system_role="steward",
+        )
+        return place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={
+                node_id: NodeResources(
+                    backends=frozenset({"vllm-cuda", "llama_server-cuda"})
+                )
+                for node_id in node_ids
+            },
+        )
+
+    parserless = _place(_card(None))
+    stamped = {
+        shard.resolved_backend
+        for instance in parserless.values()
+        for shard in instance.shard_assignments.runner_to_shard.values()
+    }
+    assert stamped == {"vllm-cuda"}, "test premise: placement resolves vllm"
+    assert placement_resolves_parserless_vllm(_card(None), parserless)
+    assert not placement_resolves_parserless_vllm(_card("hermes"), _place(_card("hermes")))
