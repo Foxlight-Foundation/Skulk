@@ -1653,17 +1653,19 @@ Use this when you already have an `instance` object and want exact control.
 
 **DELETE** `/instance/{instance_id}`
 
-## Intelligent Fabric (Steward)
+## Intelligent Fabric
 
 When intelligent-fabric mode is enabled in the cluster configuration
 (`intelligent_fabric.enabled`), the fabric keeps a small resident model (the
 steward) placed as a hidden system instance. The steward investigates the
 cluster through a bounded read-only tool surface and answers operator
-questions; it cannot change the cluster.
+questions; it cannot change the cluster. `steward` remains the internal role
+and compatibility identifier, but operator surfaces present this cognition as
+Skulk itself rather than as a separate assistant or character.
 
-### Talking to the steward: the virtual model
+### Talking to Skulk: the virtual model
 
-Clients consume the steward through the standard OpenAI-compatible
+Clients talk to Skulk through the standard OpenAI-compatible
 `POST /v1/chat/completions` endpoint using the reserved model id
 `skulk/steward`. Any OpenAI-compatible client works, streaming included; no
 steward-specific client code is required beyond the model id.
@@ -1707,7 +1709,9 @@ Semantics of the reserved id:
 
 The steward appears in `GET /v1/models` as an entry flagged with
 `system_role: "steward"` while the mode is enabled, so model pickers can
-badge or separate it rather than listing it as an ordinary model.
+recognize the fabric cognition without listing it as an ordinary model. Its
+operator-facing `name` is `Skulk`; clients should retain the `system_role`
+value only for discovery and compatibility.
 
 #### Extensions on a steward turn
 

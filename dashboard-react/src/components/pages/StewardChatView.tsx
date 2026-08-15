@@ -3,13 +3,35 @@ import styled from 'styled-components';
 import { MdAutoAwesome } from 'react-icons/md';
 import { ChatMessages } from '../chat/ChatMessages';
 import { ChatForm } from '../chat/ChatForm';
+import type { InstanceCardData } from '../layout/InstancePanel';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import { tolgee } from '../../i18n/tolgee';
 import { addToast } from '../../hooks/useToast';
 import { useGetStewardStatusQuery } from '../../store/endpoints/steward';
-import type { ChatMessage } from '../../types/chat';
+import { useAppDispatch, useAppSelector } from '../../store/hooks';
+import { chatActions } from '../../store/slices/chatSlice';
+import type { ChatMessage, ChatSpeechModelOption, ChatVoiceOption } from '../../types/chat';
+import type { ModelInfo } from '../../types/models';
+import {
+  canUseStreamingSpeechPlayback,
+  SPEECH_PAUSE_MARKER,
+  SPEECH_PAUSE_SECONDS,
+  SpeechSentenceQueue,
+  splitCompleteSpeechSentences,
+  StreamingSpeechPlayback,
+} from '../../audio/streamingSpeechPlayback';
+import { fetchSpeechVoiceCatalog } from '../../audio/speechVoiceSelection';
+import {
+  speechLanguageForDashboardLocale,
+} from '../../audio/speechSynthesisRequest';
+import { speechModelOption } from '../../audio/speechModelOption';
+import {
+  buildSkulkSpeechSynthesisRequest,
+  SKULK_VOICE_ID,
+} from '../../audio/fabricSpeechRequest';
 
 /**
- * The steward chat surface: talk to the cluster's resident assistant.
+ * Skulk's fabric chat surface: talk to the intelligent fabric itself.
  *
  * Conversation rides the standard streaming chat-completions endpoint with
  * the reserved virtual model id: tool steps arrive live as
@@ -21,6 +43,10 @@ import type { ChatMessage } from '../../types/chat';
 
 /** Reserved chat-completions model id selecting model-plus-harness. */
 export const STEWARD_MODEL_ID = 'skulk/steward';
+/** Inputs from current runtime truth needed to expose fabric speech safely. */
+export interface StewardChatViewProps {
+  readyInstances?: InstanceCardData[];
+}
 
 const Container = styled.div`
   display: flex;
@@ -115,24 +141,143 @@ function parseDelta(payload: string): StreamDelta | null {
   }
 }
 
-export function StewardChatView() {
+export function StewardChatView({ readyInstances = [] }: StewardChatViewProps) {
   const { t } = useSkulkTranslation();
+  const dispatch = useAppDispatch();
+  const autoSpeakAssistant = useAppSelector((state) => state.chat.autoSpeakAssistant);
+  const speechLanguage = speechLanguageForDashboardLocale(tolgee.getLanguage());
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
   const [streamingThinking, setStreamingThinking] = useState<string | null>(null);
+  const [speechModel, setSpeechModel] = useState<ChatSpeechModelOption | null>(null);
+  const [speechVoice, setSpeechVoice] = useState<ChatVoiceOption | null>(null);
+  const [speechError, setSpeechError] = useState<string | null>(null);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const speechQueueRef = useRef<SpeechSentenceQueue | null>(null);
+  const speechPlaybackRef = useRef<StreamingSpeechPlayback | null>(null);
   const { data: status, refetch } = useGetStewardStatusQuery(undefined, {
     pollingInterval: 15000,
   });
 
   const handleCancel = useCallback(() => {
     abortRef.current?.abort();
+    speechQueueRef.current?.stop();
   }, []);
+
+  const stopSpeechPlayback = useCallback(() => {
+    speechQueueRef.current?.stop();
+    speechQueueRef.current = null;
+    speechPlaybackRef.current?.stop();
+    speechPlaybackRef.current = null;
+    setIsSpeaking(false);
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const readyModelIds = new Set(
+      readyInstances
+        .filter((instance) => instance.status === 'ready' || instance.status === 'running')
+        .map((instance) => instance.modelId),
+    );
+    void fetch('/models', { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Model discovery failed with HTTP ${response.status}.`);
+        return await response.json() as { data?: ModelInfo[] };
+      })
+      .then(async ({ data = [] }) => {
+        for (const model of data) {
+          if (
+            !readyModelIds.has(model.id)
+            || model.resolved_capabilities?.supports_speech_synthesis !== true
+          ) continue;
+          const option = speechModelOption(model.id, model);
+          if (
+            !option.supportsStreaming
+            || !option.responseFormats.includes('pcm')
+            || !canUseStreamingSpeechPlayback()
+          ) continue;
+          const voices = await fetchSpeechVoiceCatalog(model.id, controller.signal);
+          const skulkVoice = voices.find((voice) => voice.id === SKULK_VOICE_ID);
+          if (!skulkVoice) continue;
+          setSpeechModel(option);
+          setSpeechVoice(skulkVoice);
+          return;
+        }
+        setSpeechModel(null);
+        setSpeechVoice(null);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setSpeechModel(null);
+        setSpeechVoice(null);
+        setSpeechError(
+          error instanceof Error
+            ? error.message
+            : t('stewardChat.errors.voiceDiscoveryFailed', 'Skulk voice discovery failed.'),
+        );
+      });
+    return () => controller.abort();
+  }, [readyInstances, t]);
+
+  const createSpeechQueue = useCallback((): SpeechSentenceQueue | null => {
+    if (!speechModel || !speechVoice) return null;
+    stopSpeechPlayback();
+    setSpeechError(null);
+    setIsSpeaking(true);
+    const playback = new StreamingSpeechPlayback();
+    speechPlaybackRef.current = playback;
+    const queue = new SpeechSentenceQueue(
+      async (text, signal) => {
+        if (text === SPEECH_PAUSE_MARKER) {
+          await playback.appendSilence(SPEECH_PAUSE_SECONDS, signal);
+          return;
+        }
+        const response = await fetch(
+          '/v1/audio/speech',
+          buildSkulkSpeechSynthesisRequest(
+            speechModel.modelId,
+            text,
+            speechLanguage,
+            signal,
+          ),
+        );
+        if (!response.ok) {
+          const detail = await response.text().catch(() => '');
+          throw new Error(detail || `Speech synthesis failed with HTTP ${response.status}.`);
+        }
+        await playback.append(response, signal);
+      },
+      (error) => {
+        setSpeechError(
+          error instanceof Error
+            ? error.message
+            : t('stewardChat.errors.speechFailed', 'Skulk speech playback failed.'),
+        );
+      },
+      () => {
+        if (speechQueueRef.current === queue) speechQueueRef.current = null;
+        if (speechPlaybackRef.current === playback) speechPlaybackRef.current = null;
+        setIsSpeaking(false);
+      },
+      () => playback.finish(),
+      () => playback.stop(),
+    );
+    speechQueueRef.current = queue;
+    return queue;
+  }, [speechLanguage, speechModel, speechVoice, stopSpeechPlayback, t]);
 
   // Navigating away must not leave the steward generating for a stream
   // nobody is reading; the server cancels the turn on disconnect.
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(() => () => {
+    abortRef.current?.abort();
+    stopSpeechPlayback();
+  }, [stopSpeechPlayback]);
+
+  useEffect(() => {
+    if (!autoSpeakAssistant) stopSpeechPlayback();
+  }, [autoSpeakAssistant, stopSpeechPlayback]);
 
   const handleSend = useCallback(
     async (content: string) => {
@@ -153,6 +298,8 @@ export function StewardChatView() {
       abortRef.current = controller;
       let reply = '';
       let thinking = '';
+      let speechTail = '';
+      const speechQueue = autoSpeakAssistant ? createSpeechQueue() : null;
       try {
         const res = await fetch('/v1/chat/completions', {
           method: 'POST',
@@ -165,7 +312,7 @@ export function StewardChatView() {
           }),
         });
         if (!res.ok || !res.body) {
-          let detail = t('stewardChat.errors.requestFailed', 'The steward request failed');
+          let detail = t('stewardChat.errors.requestFailed', 'Skulk could not answer');
           try {
             const body: unknown = await res.json();
             const parsed = (body as { detail?: unknown }).detail;
@@ -207,6 +354,11 @@ export function StewardChatView() {
             if (delta.content) {
               reply += delta.content;
               setStreamingContent(reply);
+              if (speechQueue) {
+                const split = splitCompleteSpeechSentences(speechTail + delta.content);
+                speechQueue.enqueue(split.sentences);
+                speechTail = split.remainder;
+              }
             }
           }
         }
@@ -222,12 +374,17 @@ export function StewardChatView() {
             },
           ]);
         }
+        if (speechQueue) {
+          if (speechTail.trim()) speechQueue.enqueue([speechTail.trim()]);
+          speechQueue.finish();
+        }
       } catch (error: unknown) {
+        speechQueue?.stop();
         if (!(error instanceof DOMException && error.name === 'AbortError')) {
           const message =
             error instanceof Error
               ? error.message
-              : t('stewardChat.errors.requestFailed', 'The steward request failed');
+              : t('stewardChat.errors.requestFailed', 'Skulk could not answer');
           addToast({ type: 'error', message });
           void refetch();
         }
@@ -238,8 +395,16 @@ export function StewardChatView() {
         abortRef.current = null;
       }
     },
-    [messages, isLoading, refetch, t],
+    [autoSpeakAssistant, createSpeechQueue, messages, isLoading, refetch, t],
   );
+
+  const speakDraft = useCallback((text: string) => {
+    const queue = createSpeechQueue();
+    if (!queue) return;
+    const split = splitCompleteSpeechSentences(text);
+    queue.enqueue([...split.sentences, ...(split.remainder.trim() ? [split.remainder.trim()] : [])]);
+    queue.finish();
+  }, [createSpeechQueue]);
 
   if (!status) {
     // Gate on the first status response so the chat surface cannot render
@@ -248,7 +413,7 @@ export function StewardChatView() {
       <CenterState>
         <CenterTitle>
           <MdAutoAwesome size={16} />
-          {t('stewardChat.loading.title', 'Checking steward status')}
+          {t('stewardChat.loading.title', 'Connecting to Skulk')}
         </CenterTitle>
       </CenterState>
     );
@@ -264,7 +429,7 @@ export function StewardChatView() {
         <CenterBody>
           {t(
             'stewardChat.disabled.body',
-            'Enable Intelligent Fabric in Settings and the cluster will place its resident steward. You can then ask it about cluster health, models, and diagnostics right here.',
+            'Enable Intelligent Fabric in Settings to make Skulk available here. You can then ask the fabric about its health, models, and diagnostics.',
           )}
         </CenterBody>
       </CenterState>
@@ -276,12 +441,12 @@ export function StewardChatView() {
       <CenterState>
         <CenterTitle>
           <MdAutoAwesome size={16} />
-          {t('stewardChat.placing.title', 'Steward is being placed')}
+          {t('stewardChat.placing.title', 'Skulk is getting ready')}
         </CenterTitle>
         <CenterBody>
           {t(
             'stewardChat.placing.body',
-            'The fabric is placing the steward and preparing its model. This page will become available automatically; the first start may take a few minutes while the model downloads.',
+            'The fabric is preparing its resident intelligence. This page will become available automatically; the first start may take a few minutes while the model downloads.',
           )}
         </CenterBody>
         <CenterBody>
@@ -295,7 +460,7 @@ export function StewardChatView() {
     <Container>
       {status.steward_model && (
         <ModelTag>
-          {t('stewardChat.servedBy', 'steward: {model}', {
+          {t('stewardChat.servedBy', 'fabric cognition: {model}', {
             model: status.steward_model,
           })}
         </ModelTag>
@@ -310,7 +475,7 @@ export function StewardChatView() {
             <CenterBody>
               {t(
                 'stewardChat.empty.body',
-                'The steward investigates before answering: cluster health, why a download failed, what a node is doing, whether things look slow. It observes and advises; it cannot change the cluster.',
+                'Ask Skulk about its health, why a download failed, what a node is doing, or whether something looks slow. I investigate before answering; this interface observes and advises but cannot change the cluster.',
               )}
             </CenterBody>
           </CenterState>
@@ -329,6 +494,20 @@ export function StewardChatView() {
           onCancel={handleCancel}
           isLoading={isLoading}
           canSendMessages
+          speechModels={speechModel ? [speechModel] : []}
+          selectedSpeechModelId={speechModel?.modelId ?? null}
+          selectedVoice={speechVoice?.id ?? null}
+          voiceOptions={speechVoice ? [speechVoice] : []}
+          fixedSpeechVoiceLabel="Skulk"
+          autoSpeakAssistant={autoSpeakAssistant}
+          onAutoSpeakAssistantChange={(enabled) => {
+            dispatch(chatActions.setAutoSpeakAssistant(enabled));
+            if (!enabled) stopSpeechPlayback();
+          }}
+          onSpeakText={speakDraft}
+          onStopSpeaking={stopSpeechPlayback}
+          isSpeaking={isSpeaking}
+          voiceError={speechError}
           placeholder={t('stewardChat.placeholder', 'Ask about the cluster...')}
         />
       </InputArea>

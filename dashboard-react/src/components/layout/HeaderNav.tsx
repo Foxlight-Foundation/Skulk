@@ -449,7 +449,7 @@ export function HeaderNav({
 
         {stewardEnabled && (
           <NavLink $active={activeRoute === 'steward'} onClick={() => navigate('steward')}>
-            <StewardIcon /> {t('header.nav.steward', 'Steward')}
+            <StewardIcon /> {t('header.nav.steward', 'Skulk')}
           </NavLink>
         )}
         </>)}

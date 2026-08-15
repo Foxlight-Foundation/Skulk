@@ -38,6 +38,7 @@ import {
   DASHBOARD_SPEECH_SEED,
   speechLanguageForDashboardLocale,
 } from '../../audio/speechSynthesisRequest';
+import { speechModelOption } from '../../audio/speechModelOption';
 import { buildApiMessages, type ApiMessagePayload } from './chatApiPayload';
 
 /* ── Types ────────────────────────────────────────────── */
@@ -121,15 +122,6 @@ const HARMONY_CONTROL_TOKENS = [
   '<|constrain|>',
 ];
 const MAX_TOOL_ROUNDS = 4;
-const AUDIO_RESPONSE_FORMATS: readonly AudioResponseFormat[] = [
-  'mp3',
-  'wav',
-  'flac',
-  'ogg',
-  'opus',
-  'pcm',
-];
-
 type StreamingSpeechResponseSession = {
   playback: StreamingSpeechPlayback;
   useEncodedFallback: boolean;
@@ -204,47 +196,6 @@ const GPT_OSS_BROWSER_TOOLS = {
 } as const;
 
 type BuiltinBrowserToolName = keyof typeof GPT_OSS_BROWSER_TOOLS;
-
-function isAudioResponseFormat(value: string | null | undefined): value is AudioResponseFormat {
-  return AUDIO_RESPONSE_FORMATS.includes(value as AudioResponseFormat);
-}
-
-function shortModelLabel(modelId: string): string {
-  const parts = modelId.split('/');
-  return parts[parts.length - 1] || modelId;
-}
-
-function speechModelOption(modelId: string, model: ModelInfo | undefined): ChatSpeechModelOption {
-  const resolved = model?.resolved_capabilities;
-  const responseFormats = (
-    resolved?.audio_response_formats
-      ?? model?.audio?.response_formats
-      ?? []
-  ).filter(isAudioResponseFormat);
-  const resolvedDefault = resolved?.default_audio_response_format ?? null;
-  const cardDefault = model?.audio?.default_response_format ?? null;
-  const defaultResponseFormat: AudioResponseFormat = isAudioResponseFormat(resolvedDefault)
-    ? resolvedDefault
-    : isAudioResponseFormat(cardDefault)
-      ? cardDefault
-      : responseFormats[0] ?? 'mp3';
-  const formats = responseFormats.length > 0 ? responseFormats : [defaultResponseFormat];
-  return {
-    modelId,
-    label: shortModelLabel(modelId),
-    defaultResponseFormat,
-    responseFormats: formats,
-    supportsVoiceListing: model?.audio?.supports_voice_listing ?? false,
-    defaultVoice: model?.audio?.default_voice ?? null,
-    supportsStreaming: model?.audio?.supports_streaming ?? false,
-    supportsReferenceAudio: model?.audio?.supports_reference_audio ?? false,
-    supportsRealtime: Boolean(
-      resolved?.supports_realtime_audio
-        && model?.audio?.supports_streaming
-        && model.audio.supports_realtime,
-    ),
-  };
-}
 
 async function responseErrorMessage(response: Response): Promise<string> {
   const body = await response.text().catch(() => '');

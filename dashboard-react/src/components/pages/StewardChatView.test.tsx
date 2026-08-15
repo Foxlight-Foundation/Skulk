@@ -11,6 +11,7 @@ import { store } from '../../store';
 import { apiSlice } from '../../store/api';
 import type { StewardState } from '../../store/endpoints/steward';
 import { darkTheme } from '../../theme/theme';
+import { buildSkulkSpeechSynthesisRequest } from '../../audio/fabricSpeechRequest';
 import { StewardChatView } from './StewardChatView';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -33,6 +34,7 @@ vi.mock('../../i18n/tolgee', () => {
     );
   };
   return {
+    tolgee: { getLanguage: () => 'en' },
     useSkulkTranslation: () => ({ t: translate }),
   };
 });
@@ -90,6 +92,12 @@ function stubFetch(options: {
         headers: { 'Content-Type': 'application/json' },
       });
     }
+    if (url.endsWith('/models')) {
+      return new Response(JSON.stringify({ data: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
     return new Response('{}', { status: 404 });
   };
   vi.stubGlobal('fetch', fetchStub);
@@ -139,6 +147,25 @@ const READY: StewardStatusFixture = {
 };
 
 describe('StewardChatView', () => {
+  it('pins the Skulk voice and deterministic seed on every fabric sentence', () => {
+    const request = buildSkulkSpeechSynthesisRequest(
+      'org/tts',
+      'I am Skulk.',
+      'English',
+      new AbortController().signal,
+    );
+    const body: unknown = JSON.parse(String(request.body));
+
+    expect(body).toMatchObject({
+      model: 'org/tts',
+      input: 'I am Skulk.',
+      voice: 'skulk',
+      seed: 42,
+      stream: true,
+      response_format: 'pcm',
+    });
+  });
+
   it('shows the disabled state when intelligent fabric is off', async () => {
     stubFetch({
       status: { ...READY, enabled: false, present: false, ready: false, state: 'disabled' },
@@ -154,7 +181,7 @@ describe('StewardChatView', () => {
     stubFetch({ status: { ...READY, ready: false, state: 'downloading' } });
     await renderPage();
     await waitFor(
-      () => container?.textContent?.includes('Steward is being placed') ?? false,
+      () => container?.textContent?.includes('Skulk is getting ready') ?? false,
       'placing state never rendered',
     );
     // The lifecycle word distinguishes "still staging weights" from "placing",
