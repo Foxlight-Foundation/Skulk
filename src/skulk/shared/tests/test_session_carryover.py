@@ -65,11 +65,11 @@ def test_carries_bounded_instance_failure_truth() -> None:
         affected_node_ids=(NodeId("node-a"),),
         recorded_at=datetime(2026, 8, 15, 16, 0, tzinfo=timezone.utc),
     )
-    prior = State(instance_failures=[failure])
+    prior = State(instance_failures=(failure,))
 
     seed = seed_state_for_new_session(prior)
 
-    assert seed.instance_failures == [failure]
+    assert seed.instance_failures == (failure,)
 
 
 def test_carries_only_completed_downloads():

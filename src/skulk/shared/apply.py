@@ -152,16 +152,16 @@ def apply_instance_failure_recorded(
         A copied state with the failure first, any older record for the same
         instance removed, and the history constrained to its fixed bound.
     """
-    retained = [
+    retained = (
         failure
         for failure in state.instance_failures
         if failure.instance_id != event.failure.instance_id
-    ]
+    )
     return state.model_copy(
         update={
-            "instance_failures": [event.failure, *retained][
+            "instance_failures": (event.failure, *retained)[
                 :INSTANCE_FAILURE_HISTORY_LIMIT
-            ]
+            ],
         }
     )
 

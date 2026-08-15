@@ -1,10 +1,16 @@
 from datetime import datetime, timezone
+from typing import cast
 
+import pytest
 from pydantic import TypeAdapter
 
 from skulk.shared.apply import apply_instance_failure_recorded
 from skulk.shared.types.common import ModelId, NodeId
-from skulk.shared.types.events import Event, InstanceFailureRecorded
+from skulk.shared.types.events import (
+    Event,
+    InstanceFailureRecorded,
+    StateSnapshotHydrated,
+)
 from skulk.shared.types.state import State
 from skulk.shared.types.worker.instances import (
     INSTANCE_FAILURE_HISTORY_LIMIT,
@@ -50,6 +56,10 @@ def test_failure_history_is_newest_first_deduplicated_and_bounded() -> None:
         NodeId("node-a"),
         NodeId("node-b"),
     )
+    with pytest.raises(AttributeError):
+        cast("list[InstanceFailure]", cast(object, state.instance_failures)).append(
+            _failure(99)
+        )
 
 
 def test_failure_event_round_trips_through_persisted_wire_shape() -> None:
@@ -61,3 +71,15 @@ def test_failure_event_round_trips_through_persisted_wire_shape() -> None:
 
     assert isinstance(restored, InstanceFailureRecorded)
     assert restored.failure == event.failure
+
+
+def test_failure_history_round_trips_through_snapshot_wire_shape() -> None:
+    """JSON array snapshots restore failure history as an immutable tuple."""
+    event = StateSnapshotHydrated(state=State(instance_failures=(_failure(1),)))
+    adapter: TypeAdapter[Event] = TypeAdapter(Event)
+
+    restored = adapter.validate_json(adapter.dump_json(event))
+
+    assert isinstance(restored, StateSnapshotHydrated)
+    assert restored.state.instance_failures == (_failure(1),)
+    assert isinstance(restored.state.instance_failures, tuple)
