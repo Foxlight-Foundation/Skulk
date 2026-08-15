@@ -250,7 +250,19 @@ def instance_failure_event(
     error_message: str,
     recorded_at: datetime | None = None,
 ) -> InstanceFailureRecorded:
-    """Build durable operator truth while the failed placement still exists."""
+    """Build durable operator truth while the failed placement still exists.
+
+    Args:
+        instance: Placement whose terminal failure is being retained.
+        error_code: Stable operator-facing category for the failure.
+        error_message: Bounded, payload-safe explanation shown to operators.
+        recorded_at: Optional authoritative occurrence time. Defaults to the
+            current UTC time when omitted.
+
+    Returns:
+        A new failure event containing the placement identity and assigned
+        nodes. Constructing the event does not mutate cluster state or emit it.
+    """
     return InstanceFailureRecorded(
         failure=InstanceFailure(
             instance_id=instance.instance_id,
@@ -262,6 +274,52 @@ def instance_failure_event(
             recorded_at=recorded_at or datetime.now(tz=timezone.utc),
         )
     )
+
+
+def dead_node_instance_failure_events(
+    state: State,
+    connected_node_ids: AbstractSet[NodeId],
+    timed_out_node_ids: AbstractSet[NodeId],
+) -> list[InstanceFailureRecorded]:
+    """Return one retained failure for every placement affected by node loss.
+
+    A timed-out node can remain in the replicated topology until
+    :class:`NodeTimedOut` applies, so topology absence alone is insufficient.
+    This helper intentionally considers both signals and leaves event emission
+    and subsequent teardown to the planning loop.
+
+    Args:
+        state: Current immutable cluster state containing live placements.
+        connected_node_ids: Nodes currently present in topology.
+        timed_out_node_ids: Nodes whose liveness evidence has expired, even if
+            their topology entry has not yet been removed.
+
+    Returns:
+        One payload-safe failure event per affected placement. The helper does
+        not mutate state, emit events, or tear down placements.
+    """
+    failures: list[InstanceFailureRecorded] = []
+    for instance in state.instances.values():
+        unavailable_nodes = sorted(
+            node_id
+            for node_id in instance.shard_assignments.node_to_runner
+            if node_id not in connected_node_ids or node_id in timed_out_node_ids
+        )
+        if not unavailable_nodes:
+            continue
+        node_id = unavailable_nodes[0]
+        reason = "timed out" if node_id in timed_out_node_ids else "left the live topology"
+        failures.append(
+            instance_failure_event(
+                instance,
+                error_code="node_unavailable",
+                error_message=(
+                    "The placement was torn down because assigned node "
+                    f"{node_id} {reason}."
+                ),
+            )
+        )
+    return failures
 
 
 def _aware_timestamp(when: datetime) -> datetime:
@@ -1863,22 +1921,23 @@ class Master:
                     )
                     await self.event_sender.send(task_failed)
 
-            # kill broken instances (suppressed during the topology-settle
-            # grace, same rationale as dying_instance_ids above)
+            # Retain the failure before either InstanceDeleted or NodeTimedOut
+            # removes the placement. Timed-out nodes may still be present in
+            # topology, so this must use the same combined liveness truth as
+            # dying_instance_ids rather than topology absence alone.
+            if topology_settled:
+                for failure_event in dead_node_instance_failure_events(
+                    self.state, connected_node_ids, timed_out_node_ids
+                ):
+                    await self.event_sender.send(failure_event)
+
+            # Kill instances whose assigned node has already left topology.
+            # NodeTimedOut below owns teardown for timed-out-but-still-present
+            # nodes, preventing duplicate deletion events.
             if topology_settled:
                 for instance_id, instance in self.state.instances.items():
                     for node_id in instance.shard_assignments.node_to_runner:
                         if node_id not in connected_node_ids:
-                            await self.event_sender.send(
-                                instance_failure_event(
-                                    instance,
-                                    error_code="node_unavailable",
-                                    error_message=(
-                                        "The placement was torn down because assigned "
-                                        f"node {node_id} left the live topology."
-                                    ),
-                                )
-                            )
                             await self.event_sender.send(
                                 InstanceDeleted(instance_id=instance_id)
                             )

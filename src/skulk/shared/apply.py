@@ -142,7 +142,16 @@ def _sanitize_snapshot_downloads(snapshot: State) -> State:
 def apply_instance_failure_recorded(
     event: InstanceFailureRecorded, state: State
 ) -> State:
-    """Retain one newest-first failure per instance within a fixed history bound."""
+    """Apply one retained instance failure without mutating existing state.
+
+    Args:
+        event: Persisted terminal failure to add to recent operator history.
+        state: Immutable cluster state to copy.
+
+    Returns:
+        A copied state with the failure first, any older record for the same
+        instance removed, and the history constrained to its fixed bound.
+    """
     retained = [
         failure
         for failure in state.instance_failures

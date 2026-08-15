@@ -1326,8 +1326,8 @@ Finding the command ID:
   value
 - non-streaming chat responses use the command ID as the response `id`
 - Skulk control responses such as `POST /place_instance` return an explicit
-  `command_id` field (those placement commands complete immediately and are
-  not cancellable here)
+  `command_id` field plus the exact resulting `instance_id` (those placement
+  commands complete immediately and are not cancellable here)
 
 ```bash
 curl -X POST http://localhost:52415/v1/cancel/<command_id>
@@ -1579,6 +1579,12 @@ silently failing on the master:
   formed): connection edges lag node identities by a few gossip rounds, and
   per-node memory info lags the edges. The request internally waits up to
   15 seconds for the info to arrive before giving up, so retry shortly on 503.
+
+A successful response includes both `command_id` and `instance_id`. For
+`POST /place_instance` they contain the same stable value: the accepted command
+owns exactly that resulting placement identity. Clients should retain
+`instance_id` and correlate progress against that runtime rather than guessing
+from model name or observation order. The field is additive for older clients.
 
 Memory fitting is checked **per node, not summed across the cycle**: Tensor
 sharding splits weights evenly, Pipeline allocates layers proportionally to

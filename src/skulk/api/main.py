@@ -2917,6 +2917,7 @@ class API:
         return CreateInstanceResponse(
             message="Command received.",
             command_id=command.command_id,
+            instance_id=InstanceId(str(command.command_id)),
             model_card=command.model_card,
         )
 
@@ -2954,6 +2955,7 @@ class API:
         return CreateInstanceResponse(
             message="Command received.",
             command_id=command.command_id,
+            instance_id=instance.instance_id,
             model_card=model_card,
         )
 

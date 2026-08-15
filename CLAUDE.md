@@ -364,6 +364,9 @@ The system uses event sourcing for state management:
   `State.instance_failures` retains the newest 64 operator-safe records.
   Ordinary `DeleteInstance` stops never create a false failure. The existing
   `/state` response and Skulk fabric cognition consume the same field.
+- `PlaceInstance` deterministically uses its command ID as the resulting
+  instance ID. `POST /place_instance` returns both fields so clients correlate
+  concurrent same-model placements with exact runtime truth.
 - `apply()` (src/skulk/shared/apply.py): Pure function that applies events to state
 - Master admits only the explicit durable control-event allowlist, indexes and
   broadcasts those events, and payload-free skips any decodable non-control

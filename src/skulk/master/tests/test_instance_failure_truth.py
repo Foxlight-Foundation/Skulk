@@ -3,7 +3,11 @@ from datetime import datetime, timezone
 import anyio
 import pytest
 
-from skulk.master.main import Master, instance_failure_event
+from skulk.master.main import (
+    Master,
+    dead_node_instance_failure_events,
+    instance_failure_event,
+)
 from skulk.routing.router import get_node_id_keypair
 from skulk.shared.models.model_cards import ModelCard, ModelTask
 from skulk.shared.types.commands import (
@@ -74,6 +78,22 @@ def test_instance_failure_event_captures_truth_before_teardown() -> None:
     assert event.failure.affected_node_ids == [NodeId("node-a")]
     assert event.failure.recorded_at == recorded_at
     assert event.failure.error_code == "runner_crashed"
+
+
+def test_timed_out_node_records_failure_while_still_in_topology() -> None:
+    """Timeout truth must not depend on the stale topology edge disappearing."""
+    instance = _instance()
+
+    events = dead_node_instance_failure_events(
+        State(instances={instance.instance_id: instance}),
+        connected_node_ids={NodeId("node-a")},
+        timed_out_node_ids={NodeId("node-a")},
+    )
+
+    assert len(events) == 1
+    assert events[0].failure.instance_id == instance.instance_id
+    assert events[0].failure.error_code == "node_unavailable"
+    assert "timed out" in events[0].failure.error_message
 
 
 @pytest.mark.asyncio

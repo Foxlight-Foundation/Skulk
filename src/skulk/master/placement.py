@@ -783,7 +783,12 @@ def place_instance(
 
     cycle_digraph: Topology = topology.get_subgraph_from_nodes(selected_cycle.node_ids)
 
-    instance_id = InstanceId()
+    # The accepted command identity is also the resulting placement identity.
+    # This lets API clients correlate an acknowledgement with exactly one
+    # runtime without guessing from model name or observation order. Repair
+    # commands receive fresh command IDs, so replacement placements remain
+    # independently identifiable.
+    instance_id = InstanceId(str(command.command_id))
     # Persist the CALLER'S per-placement exclusions on the instance (#658):
     # repair re-placements reconstruct intent from the instance, and without
     # this record they widened eligibility back to the full topology. Repair
