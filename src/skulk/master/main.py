@@ -241,6 +241,17 @@ _COMMAND_TASK_TYPES = (
 
 
 NODE_HEARTBEAT_GAP_WARNING = timedelta(seconds=10)
+_INSTANCE_FAILURE_MESSAGE_LIMIT = 2048
+
+
+def _node_unavailable_failure_message(node_id: NodeId, reason: str) -> str:
+    """Return a bounded liveness explanation for an unconstrained node id."""
+    prefix = "The placement was torn down because assigned node "
+    suffix = f" {reason}."
+    available_node_characters = max(
+        0, _INSTANCE_FAILURE_MESSAGE_LIMIT - len(prefix) - len(suffix)
+    )
+    return f"{prefix}{str(node_id)[:available_node_characters]}{suffix}"
 
 
 def instance_failure_event(
@@ -313,10 +324,7 @@ def dead_node_instance_failure_events(
             instance_failure_event(
                 instance,
                 error_code="node_unavailable",
-                error_message=(
-                    "The placement was torn down because assigned node "
-                    f"{node_id} {reason}."
-                ),
+                error_message=_node_unavailable_failure_message(node_id, reason),
             )
         )
     return failures

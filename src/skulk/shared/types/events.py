@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal, final
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.topology import Connection
@@ -90,6 +90,8 @@ class InstanceDeleted(BaseEvent):
 
 class InstanceFailureRecorded(BaseEvent):
     """Retain why a terminally failed placement vanished before deleting it."""
+
+    model_config = ConfigDict(frozen=True)
 
     failure: InstanceFailure
 

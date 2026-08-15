@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from skulk.api.types import (
     ImageEditsTaskParams,
@@ -127,6 +127,8 @@ class FailInstance(BaseCommand):
     stable category and payload-safe explanation; prompts, responses,
     credentials, and raw diagnostic output must never be included.
     """
+
+    model_config = ConfigDict(frozen=True)
 
     instance_id: InstanceId = Field(
         description="Exact placement identity that must be retained and torn down."

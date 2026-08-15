@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 import anyio
 import pytest
+from pydantic import ValidationError
 
 from skulk.master.main import (
     Master,
@@ -123,6 +124,49 @@ def test_timed_out_node_records_failure_while_still_in_topology() -> None:
     assert events[0].failure.instance_id == instance.instance_id
     assert events[0].failure.error_code == "node_unavailable"
     assert "timed out" in events[0].failure.error_message
+
+
+def test_unavailable_node_identifier_cannot_overflow_failure_truth() -> None:
+    """Untrusted explicit placement ids must not crash terminal teardown."""
+    instance = _instance()
+    oversized_node_id = NodeId("node-" + "x" * 4096)
+    runner_id = next(iter(instance.shard_assignments.runner_to_shard))
+    instance = instance.model_copy(
+        update={
+            "shard_assignments": instance.shard_assignments.model_copy(
+                update={"node_to_runner": {oversized_node_id: runner_id}}
+            )
+        }
+    )
+
+    events = dead_node_instance_failure_events(
+        State(instances={instance.instance_id: instance}),
+        connected_node_ids=set(),
+        timed_out_node_ids=set(),
+    )
+
+    assert len(events) == 1
+    assert len(events[0].failure.error_message) == 2048
+    assert events[0].failure.error_message.endswith(" left the live topology.")
+
+
+def test_terminal_failure_command_and_event_are_immutable() -> None:
+    """Authoritative failure identity cannot change after queue admission."""
+    command = FailInstance(
+        instance_id=InstanceId("failed-instance"),
+        error_code="runner_crashed",
+        error_message="runner crashed repeatedly",
+    )
+    event = instance_failure_event(
+        _instance(),
+        error_code="runner_crashed",
+        error_message="runner crashed repeatedly",
+    )
+
+    with pytest.raises(ValidationError):
+        command.error_message = "rewritten"
+    with pytest.raises(ValidationError):
+        event.failure = event.failure.model_copy()
 
 
 @pytest.mark.asyncio

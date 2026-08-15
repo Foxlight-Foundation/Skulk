@@ -158,11 +158,12 @@ def test_durable_model_trust_failure_excludes_raw_exception_detail() -> None:
         _model_trust_instance_failure_message,  # pyright: ignore[reportPrivateUsage] - durable boundary under test
     )
 
-    raw_error = "/private/models/model.safetensors failed verification"
     message = _model_trust_instance_failure_message(ModelId("org/model"))
 
-    assert raw_error not in message
-    assert "immutable model trust policy" in message
+    assert message == (
+        "runner for org/model was refused by immutable model trust policy; "
+        "not retrying until the card approval or installed artifact identity changes."
+    )
 
 
 def test_missing_model_path_is_a_terminal_trust_failure() -> None:
