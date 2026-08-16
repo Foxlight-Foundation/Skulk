@@ -700,7 +700,6 @@ class Master:
         # hydrating) passes None and starts empty exactly as before — a
         # stale-boot winner cannot resurrect a cluster view it does not
         # have.
-        self._seed_state = initial_state
         initial_trust_identities = (
             initial_state.model_trust_approved_remote_code_identities
             if initial_state is not None
@@ -716,6 +715,18 @@ class Master:
             model_trust_approved_remote_code_identities=tuple(
                 sorted(self._model_trust_approvals)
             ),
+        )
+        # A cold-start trust baseline needs the same indexed delivery path as
+        # failover state. Leaving non-empty approvals only in this idx=-1 State
+        # makes state-sync followers treat it as a fresh empty snapshot; their
+        # first unrelated event then replaces the config fallback with an empty
+        # replicated set. Index the baseline as event 0 before serving sync.
+        self._seed_state = (
+            initial_state
+            if initial_state is not None
+            else self.state
+            if self._model_trust_approvals
+            else None
         )
         self._started_monotonic = time.monotonic()
         self._tg: TaskGroup = TaskGroup()
@@ -925,7 +936,7 @@ class Master:
         return memory, vram
 
     async def _index_seed_event(self) -> None:
-        """Index the failover seed as the first event of this session (#273).
+        """Index failover or cold-start trust seed as this session's first event.
 
         Making the carried state an ordinary logged ``StateSnapshotHydrated``
         event gives every consumer exactly one delivery path: followers that
@@ -950,8 +961,10 @@ class Master:
         self._append_event_log(indexed.event)
         await self._send_event(indexed)
         logger.info(
-            f"Indexed failover seed as event {idx}: "
-            f"{len(seed.instances)} carried instance(s)"
+            f"Indexed startup seed as event {idx}: "
+            f"{len(seed.instances)} carried instance(s), "
+            f"{len(seed.model_trust_approved_remote_code_identities)} "
+            "model trust decision(s)"
         )
 
     async def run(self):
