@@ -133,6 +133,11 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
             raise ValueError(
                 f"registry envelope file disagrees with card {envelope.card_id}"
             )
+        if payload.get("quantization") != envelope.artifact.quantization:
+            raise ValueError(
+                "registry envelope quantization disagrees with card "
+                f"{envelope.card_id}"
+            )
         metadata = catalog.card_metadata.get(envelope.card_id)
         if metadata is None:
             raise ValueError(

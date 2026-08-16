@@ -360,6 +360,18 @@ def test_registry_forces_signed_cards_to_non_custom() -> None:
     assert not registry_model_cards(catalog)[0].is_custom
 
 
+def test_registry_rejects_envelope_card_quantization_mismatch() -> None:
+    """Support evidence cannot join a card to a different artifact quantization."""
+    payload = cast("dict[str, object]", json.loads(_catalog_payload()))
+    cards = cast("list[dict[str, object]]", payload["cards"])
+    artifact = cast("dict[str, object]", cards[0]["artifact"])
+    artifact["quantization"] = "Q8_0"
+    catalog = RegistryCatalog.model_validate(payload, strict=False)
+
+    with pytest.raises(ValueError, match="envelope quantization disagrees"):
+        registry_model_cards(catalog)
+
+
 def test_registry_rejects_unpinned_separate_processor_repository() -> None:
     """A signed card cannot approve code that remains mutable upstream."""
     payload = cast("dict[str, object]", json.loads(_catalog_payload()))
