@@ -1388,16 +1388,18 @@ into placement permission.
 Lists immutable model-card trust identities the operator has approved to
 execute repository-supplied Python across the cluster. Signed cards use
 `card_...` IDs; custom and unsigned cards use content-derived `local_...`
-identities. The list is persisted under `model_trust` in cluster Settings and
-converges through the same `skulk.yaml` synchronization path as other fabric
-configuration.
+identities. The elected master serializes each decision into the indexed event
+log and replicated `State`. Every API and worker persists that authoritative
+set under `model_trust` for runner startup and offline recovery; ordinary
+`skulk.yaml` snapshot synchronization never transports or replaces it.
 
 Trust is a model decision, not a node-placement attribute. Placement previews
 expose the exact identity in `trust_requirement` while the model is unapproved;
 after approval every otherwise-compatible node may participate normally.
 Foxlight-provenance cards with automatic signed trust return no such
 requirement. The canonical store and each runner independently re-read the
-converged decision before downloading or loading the exact artifact.
+converged decision before downloading or loading the exact artifact. Master
+failover carries the decision set into the next session.
 
 **POST** `/models/remote-code-approvals/{card_id}`
 
@@ -2221,15 +2223,17 @@ Updates cluster-wide config. Important behavior:
 - if you omit `experiments`, Skulk preserves the existing experiment toggles
 - if you omit `model_trust`, Skulk preserves existing exact-card decisions so
   older operator clients cannot silently revoke them
-- writes that include `model_trust` require direct loopback access or an
-  authenticated operator-gateway credential with `operations:write`
+- `model_trust` cannot be replaced through `PUT /config`; even authenticated
+  operators receive `409` and must use the dedicated `POST`/`DELETE`
+  `/models/remote-code-approvals/{card_id}` operations
 - `hf_token` is not broadcast over gossipsub; each receiving node merges its
   existing local token into the synchronized config before an atomic
   owner-only write
 - logging changes (enable/disable) take effect immediately on all nodes
 - inference changes affect future launches
-- model-trust changes converge to the canonical store and every serving node;
-  a changed card identity or revision requires a separate operator decision
+- model-trust changes are ordered by the elected master, replicated in `State`,
+  and persisted by the canonical store and every serving node; a changed card
+  identity or revision requires a separate operator decision
 - model-store location changes generally require restart
 
 ### Filesystem browse

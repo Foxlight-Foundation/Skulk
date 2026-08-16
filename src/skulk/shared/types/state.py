@@ -76,6 +76,25 @@ class State(CamelCaseModel):
     )
     topology: Topology = Field(default_factory=Topology)
     tracing_enabled: bool = False
+    model_trust_approved_remote_code_identities: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Master-ordered immutable model-card identities approved to execute "
+            "repository code across the cluster."
+        ),
+    )
+
+    @field_validator(
+        "model_trust_approved_remote_code_identities",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_model_trust_identities(cls, value: object) -> object:
+        """Restore the immutable trust set from JSON array wire values."""
+        if isinstance(value, list):
+            return tuple(cast("list[object]", value))
+        return value
+
     last_event_applied_idx: int = Field(default=-1, ge=-1)
 
     # Connectivity mappings stay on the control plane: apply() builds the

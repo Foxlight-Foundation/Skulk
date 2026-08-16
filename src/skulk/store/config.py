@@ -72,8 +72,10 @@ import os
 import re
 import socket
 import tempfile
+import threading
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import Final, Literal, final
+from typing import Final, Literal, cast, final
 
 import yaml
 from pydantic import Field, field_validator
@@ -85,6 +87,7 @@ from skulk.utils.pydantic_ext import FrozenModel
 # to restart when mDNSResponder legitimately acquired the old 58080 default as
 # an outbound source port before Skulk could bind it.
 DEFAULT_MODEL_STORE_PORT: Final = 12415
+_CONFIG_UPDATE_LOCK: Final = threading.RLock()
 
 
 def _normalize_hostname(hostname: str) -> str:
@@ -587,6 +590,82 @@ def write_skulk_config_atomic(path: Path, config_yaml: str) -> None:
         atomically replaces the destination. The resulting file is always
         mode ``0o600`` because it may contain local credentials.
     """
+    with _CONFIG_UPDATE_LOCK:
+        _write_skulk_config_atomic_unlocked(path, config_yaml)
+
+
+def update_skulk_config_atomic(
+    path: Path,
+    update: Callable[[dict[str, object]], dict[str, object]],
+) -> dict[str, object]:
+    """Read, transform, and atomically replace cluster config under one lock.
+
+    Args:
+        path: Destination ``skulk.yaml`` path.
+        update: Pure transformation receiving the current YAML object.
+
+    Returns:
+        The complete object written to disk.
+
+    Side effects:
+        Serializes in-process config read-modify-write operations and writes an
+        owner-only atomic replacement.
+    """
+    with _CONFIG_UPDATE_LOCK:
+        current: dict[str, object] = {}
+        if path.exists():
+            decoded = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if decoded is not None:
+                if not isinstance(decoded, dict):
+                    raise ValueError("Skulk config must be a YAML object")
+                decoded_mapping = cast("Mapping[object, object]", decoded)
+                current = {
+                    str(key): value
+                    for key, value in decoded_mapping.items()
+                }
+        updated = update(current)
+        config_yaml = yaml.safe_dump(
+            updated,
+            default_flow_style=False,
+            sort_keys=False,
+        )
+        _write_skulk_config_atomic_unlocked(path, config_yaml)
+        return updated
+
+
+def persist_model_trust_config(
+    path: Path,
+    approved_identities: Iterable[str],
+) -> SkulkConfig:
+    """Persist master-ordered trust while preserving every other local setting.
+
+    Args:
+        path: Destination ``skulk.yaml`` path.
+        approved_identities: Complete authoritative set from replicated State.
+
+    Returns:
+        The validated complete configuration written to disk.
+
+    Side effects:
+        Atomically updates only ``model_trust`` under the process-wide config
+        transaction lock.
+    """
+    model_trust = ModelTrustConfig(
+        approved_remote_code_identities=sorted(set(approved_identities))
+    )
+
+    def apply_trust(current: dict[str, object]) -> dict[str, object]:
+        updated = dict(current)
+        updated["model_trust"] = model_trust.model_dump(mode="python")
+        SkulkConfig.model_validate(updated)
+        return updated
+
+    written = update_skulk_config_atomic(path, apply_trust)
+    return SkulkConfig.model_validate(written)
+
+
+def _write_skulk_config_atomic_unlocked(path: Path, config_yaml: str) -> None:
+    """Replace one config while the caller holds ``_CONFIG_UPDATE_LOCK``."""
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         dir=path.parent,

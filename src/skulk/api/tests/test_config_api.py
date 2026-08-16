@@ -13,7 +13,7 @@ from skulk.shared.election import ElectionMessage
 from skulk.shared.types.commands import (
     ForwarderCommand,
     ForwarderDownloadCommand,
-    SyncConfig,
+    SetModelTrustApproval,
 )
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import IndexedEvent
@@ -193,6 +193,24 @@ def test_update_config_preserves_existing_model_trust_when_omitted(
     assert config.model_trust.approved_remote_code_identities == [card_id]
 
 
+def test_update_config_rejects_model_trust_snapshot_on_loopback(
+    tmp_path: Path,
+) -> None:
+    """Even an operator must use the master-ordered trust endpoints."""
+
+    api = _build_api()
+    object.__setattr__(api, "_config_path", tmp_path / "skulk.yaml")
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
+
+    response = client.put(
+        "/config",
+        json={"config": {"model_trust": {"approved_remote_code_identities": []}}},
+    )
+
+    assert response.status_code == 409
+    assert "master-ordered" in response.json()["error"]["message"]
+
+
 @pytest.mark.parametrize(
     ("method", "path", "payload"),
     [
@@ -233,10 +251,10 @@ def test_sensitive_model_mutations_reject_unauthenticated_network_client(
 
 
 @pytest.mark.asyncio
-async def test_model_trust_decision_persists_in_cluster_config(
+async def test_model_trust_decision_is_submitted_to_master(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One model approval updates the synchronized cluster settings."""
+    """One model approval becomes a master-serialized command."""
     config_path = tmp_path / "skulk.yaml"
     config_path.write_text(
         "hf_token: keep-secret\n",
@@ -244,20 +262,15 @@ async def test_model_trust_decision_persists_in_cluster_config(
     )
     api = _build_api()
     object.__setattr__(api, "_config_path", config_path)
-    send_download = AsyncMock()
-    monkeypatch.setattr(api, "_send_download", send_download)
+    send = AsyncMock()
+    monkeypatch.setattr(api, "_send", send)
     card_id = f"card_{'a' * 52}"
 
     await api.set_cluster_remote_code_approval(card_id, approved=True)
 
-    config = load_skulk_config(config_path)
-    assert config is not None
-    assert config.model_trust is not None
-    assert config.model_trust.approved_remote_code_identities == [card_id]
-    assert config.hf_token == "keep-secret"
-    assert config_path.stat().st_mode & 0o777 == 0o600
-    send_download.assert_awaited_once()
-    assert send_download.await_args is not None
-    sent = cast(SyncConfig, cast(object, send_download.await_args.args[0]))
-    assert "keep-secret" not in sent.config_yaml
-    assert card_id in sent.config_yaml
+    send.assert_awaited_once()
+    assert send.await_args is not None
+    command = cast(SetModelTrustApproval, cast(object, send.await_args.args[0]))
+    assert command.trust_identity == card_id
+    assert command.approved is True
+    assert config_path.read_text() == "hf_token: keep-secret\n"

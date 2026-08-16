@@ -388,6 +388,7 @@ from skulk.shared.types.commands import (
     ImageGeneration,
     PlaceInstance,
     RealtimeAudioTranscription,
+    SetModelTrustApproval,
     SetTracingEnabled,
     SpeechSynthesis,
     StartDownload,
@@ -431,6 +432,7 @@ from skulk.shared.types.events import (
     IndexedEvent,
     InstanceCreated,
     InstanceDeleted,
+    ModelTrustApprovalChanged,
     NodeTimedOut,
     RunnerStatusUpdated,
     StateSnapshotHydrated,
@@ -471,6 +473,7 @@ from skulk.store.config import (
     SkulkConfig,
     TelemetryConfig,
     load_skulk_config,
+    persist_model_trust_config,
     resolve_config_path,
     resolve_node_staging,
     write_skulk_config_atomic,
@@ -2100,8 +2103,9 @@ class API:
             summary="Approve model repository code for the cluster",
             description=(
                 "Approves one exact signed-registry or content-derived custom-card "
-                "identity for download and execution across the cluster. The decision "
-                "is persisted in cluster Settings and synchronized to every node. "
+                "identity for download and execution across the cluster. The elected "
+                "master serializes the decision into replicated State; every node "
+                "then persists its local runner-facing copy. "
                 "The mutation requires direct loopback access or an authenticated "
                 "operator-gateway credential."
             ),
@@ -2113,7 +2117,8 @@ class API:
             description=(
                 "Revokes the operator's cluster-wide approval for one immutable "
                 "model-card identity. Existing processes are not killed, but future "
-                "downloads and runner starts fail closed. The mutation requires direct "
+                "downloads and runner starts fail closed after the master-indexed "
+                "decision converges. The mutation requires direct "
                 "loopback access or an authenticated operator-gateway credential."
             ),
         )(self.revoke_remote_code)
@@ -2730,9 +2735,9 @@ class API:
             summary="Update cluster config",
             description=(
                 "Update cluster-wide config. Some changes apply to future launches immediately, "
-                "while model-store location changes still require a restart. Writes that include "
-                "model_trust require direct loopback access or an authenticated operator-gateway "
-                "credential."
+                "while model-store location changes still require a restart. model_trust is not "
+                "replaceable through this snapshot endpoint; authenticated operators must use "
+                "the dedicated master-ordered remote-code approval endpoints."
             ),
         )(self.update_config)
         self.app.get(
@@ -8226,7 +8231,11 @@ class API:
         ]
 
     def _cluster_remote_code_approvals(self) -> frozenset[str]:
-        """Read cluster-wide model trust from this API node's config copy."""
+        """Read master-ordered cluster trust with a pre-bootstrap fallback."""
+        if self.state.last_event_applied_idx >= 0:
+            return frozenset(
+                self.state.model_trust_approved_remote_code_identities
+            )
         try:
             config = load_skulk_config(self._config_path)
         except Exception:
@@ -8238,46 +8247,22 @@ class API:
     async def set_cluster_remote_code_approval(
         self, card_id: str, *, approved: bool
     ) -> None:
-        """Persist and broadcast one cluster-wide model trust decision.
+        """Submit one cluster-wide model trust decision to the elected master.
 
         Args:
             card_id: Exact immutable model-card trust identity.
             approved: Whether repository-code execution is allowed.
 
         Side effects:
-            Atomically replaces this node's cluster config, updates the live API
-            view, and broadcasts the secret-stripped config to every node.
+            Sends a command that the elected master serializes into the indexed
+            event log. Every node persists the resulting replicated State.
         """
-        config_data: dict[str, object] = {}
-        if self._config_path.exists():
-            config_data = _load_yaml_object(self._config_path)
-        current = set(self._cluster_remote_code_approvals())
-        if approved:
-            current.add(card_id)
-        else:
-            current.discard(card_id)
-        config_data["model_trust"] = {
-            "approved_remote_code_identities": sorted(current)
-        }
-        try:
-            parsed_config = SkulkConfig.model_validate(config_data)
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-        config_yaml = yaml.safe_dump(
-            config_data, default_flow_style=False, sort_keys=False
+        await self._send(
+            SetModelTrustApproval(
+                trust_identity=card_id,
+                approved=approved,
+            )
         )
-        write_skulk_config_atomic(self._config_path, config_yaml)
-        self._skulk_config = parsed_config
-
-        from skulk.shared.types.commands import SyncConfig
-
-        broadcast_data = copy.deepcopy(config_data)
-        broadcast_data.pop("hf_token", None)
-        broadcast_yaml = yaml.safe_dump(
-            broadcast_data, default_flow_style=False, sort_keys=False
-        )
-        await self._send_download(SyncConfig(config_yaml=broadcast_yaml))
 
     async def approve_remote_code(
         self, card_id: str, request: Request
@@ -8296,7 +8281,7 @@ class API:
                 malformed or unknown, or the card needs no repository-code approval.
 
         Side effects:
-            Persists and broadcasts the updated cluster model-trust settings.
+            Submits the decision for serialization in the master's event log.
         """
         self._require_operator_mutation(request)
         if not re.fullmatch(r"(?:card|local)_[a-z2-7]{52}", card_id):
@@ -8340,8 +8325,8 @@ class API:
                 malformed.
 
         Side effects:
-            Persists and broadcasts the updated cluster model-trust settings,
-            preventing future downloads and runner starts.
+            Submits the revocation for serialization in the master's event log,
+            preventing future downloads and runner starts after convergence.
         """
         self._require_operator_mutation(request)
         if not re.fullmatch(r"(?:card|local)_[a-z2-7]{52}", card_id):
@@ -8674,6 +8659,18 @@ class API:
                     self._event_log.append(event)
                     self._maybe_compact_event_log()
                 self.state = apply(self.state, i_event)
+
+                if isinstance(event, (ModelTrustApprovalChanged, StateSnapshotHydrated)):
+                    try:
+                        self._skulk_config = persist_model_trust_config(
+                            self._config_path,
+                            self.state.model_trust_approved_remote_code_identities,
+                        )
+                    except (OSError, ValueError, ValidationError):
+                        logger.exception(
+                            "Failed to persist master-ordered model trust; "
+                            "new repository-code launches remain fail-closed"
+                        )
 
                 released_task: task_types.Task | None = None
                 if isinstance(event, TaskDeleted):
@@ -11668,6 +11665,13 @@ class API:
             config_data = dict(body)
         if "model_trust" in config_data:
             self._require_operator_mutation(request)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Model trust is master-ordered; use the dedicated "
+                    "/models/remote-code-approvals endpoints"
+                ),
+            )
         # Preserve existing secrets if not provided in this update
         # (GET /config strips them for security, so saves won't have them)
         existing_config_object: dict[str, object] | None = None
@@ -11718,6 +11722,7 @@ class API:
 
         broadcast_data = copy.deepcopy(config_data)
         broadcast_data.pop("hf_token", None)
+        broadcast_data.pop("model_trust", None)
         broadcast_yaml = yaml.safe_dump(
             broadcast_data, default_flow_style=False, sort_keys=False
         )

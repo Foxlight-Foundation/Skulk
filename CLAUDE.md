@@ -491,12 +491,18 @@ store host independently applies the same provenance-aware remote-code trust
 policy before downloading. A pinned Foxlight-provenance card authorizes its
 exact artifact. For agent/community registry cards and custom or unsigned cards,
 the operator approves one exact immutable model-card identity in cluster
-`model_trust` Settings. Config convergence carries that decision to the store
-host and every serving node; trust is never a placement axis. Placement still
+`model_trust` Settings. The elected master serializes `SetModelTrustApproval`
+commands as indexed `ModelTrustApprovalChanged` events; the complete set lives
+in replicated `State`, survives master failover, and is persisted locally by
+API and worker consumers. Generic config convergence omits model trust so an
+unrelated Settings save cannot replace a newer decision. Trust is never a
+placement axis. Placement still
 applies open backend preferences, locality, and capacity ranking adaptively, and
 the store plus runner remain final enforcement boundaries.
-Trust mutations, custom-card creation, and config writes carrying model trust
-require direct loopback or the authenticated operator gateway's write scope.
+Trust mutations and custom-card creation require direct loopback or the
+authenticated operator gateway's write scope. `PUT /config` rejects
+`model_trust` snapshots and directs authenticated callers to the dedicated
+master-ordered endpoints.
 The gateway records successful bearer validation in the internal ASGI scope,
 not a caller-provided header. Secret-stripped convergence preserves each node's
 local Hugging Face token and atomically writes `skulk.yaml` mode `0o600`.
@@ -527,8 +533,9 @@ registry cards automatically authorize repository code for their exact
 immutable card. Agent/community registry cards and custom or unsigned cards
 require one exact cluster operator approval; registry vision cards follow the
 same rule while the MLX processor path can enable repository code internally.
-The model-by-model decision is exposed in dashboard Settings and synchronized
-through `skulk.yaml`. The gate runs before download and runner load, which also
+The model-by-model decision is exposed in dashboard Settings, ordered in the
+master event log, replicated through `State`, and retained in local
+`skulk.yaml` for offline enforcement. The gate runs before download and runner load, which also
 verifies the installed sidecar and artifact identity; deterministic trust denial
 is terminal for the unchanged instance. Every separately hosted companion artifact (vision weights or
 processor, MTP sidecar, assistant model, served GGUF draft, or vLLM drafter)

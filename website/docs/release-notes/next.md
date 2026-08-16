@@ -65,4 +65,6 @@ loadable after explicit approval, and any changed card identity must be
 evaluated again. Trust and custom-card mutations require the direct-local
 dashboard or an authenticated operator-gateway credential. Config convergence
 also preserves each node's private Hugging Face token and owner-only config
-permissions.
+permissions. Approval and revocation are serialized by the elected master and
+replicated as durable cluster state, so concurrent operator actions and
+unrelated Settings saves cannot overwrite or resurrect trust decisions.

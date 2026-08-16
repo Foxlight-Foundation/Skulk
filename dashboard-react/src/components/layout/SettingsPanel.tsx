@@ -357,9 +357,10 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     // Include logging config
     updated.logging = { ...loggingDraft };
     updated.intelligent_fabric = { ...fabricDraft };
-    updated.model_trust = {
-      approved_remote_code_identities: [...trustApprovals].sort(),
-    };
+    // Trust decisions are master-ordered operations, not replaceable config
+    // snapshots. Keeping them off PUT /config prevents an unrelated Settings
+    // save from racing a revocation issued through another API node.
+    delete updated.model_trust;
     // Persist only once the operator has interacted (an untouched unasked
     // draft must not overwrite the "never asked" state that gates the modal).
     if (telemetryDraft && (telemetryDraft.consent !== 'unasked' || telemetryDraft.diagnostics_consent !== 'unasked')) {
@@ -373,8 +374,42 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     }
     // Only send hf_token when user entered a new one
     if (hfToken && hfToken !== '') updated.hf_token = hfToken;
-    const ok = await saveFullConfig(updated);
-    if (ok) {
+    const configSaved = await saveFullConfig(updated);
+    if (configSaved) {
+      const initialTrust = new Set(
+        fullConfig?.model_trust?.approved_remote_code_identities ?? [],
+      );
+      const trustMutations = [
+        ...[...trustApprovals]
+          .filter((identity) => !initialTrust.has(identity))
+          .map((identity) => ({ identity, method: 'POST' })),
+        ...[...initialTrust]
+          .filter((identity) => !trustApprovals.has(identity))
+          .map((identity) => ({ identity, method: 'DELETE' })),
+      ];
+      const trustSaved = await Promise.all(
+        trustMutations.map(async ({ identity, method }) => {
+          try {
+            const response = await fetch(
+              `/models/remote-code-approvals/${encodeURIComponent(identity)}`,
+              { method },
+            );
+            return response.ok;
+          } catch {
+            return false;
+          }
+        }),
+      );
+      if (trustSaved.some((saved) => !saved)) {
+        addToast({
+          type: 'error',
+          message: t(
+            'settings.toasts.modelTrustSaveFailed',
+            'Settings saved, but one or more model trust decisions were rejected',
+          ),
+        });
+        return;
+      }
       addToast({
         type: 'success',
         message: t(

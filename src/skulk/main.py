@@ -840,6 +840,11 @@ class Node:
                 node_id,
                 skulk_config,
             ),
+            initial_model_trust_identities=(
+                tuple(skulk_config.model_trust.approved_remote_code_identities)
+                if skulk_config is not None and skulk_config.model_trust is not None
+                else ()
+            ),
         )
 
         er_send, er_recv = channel[ElectionResult]()
@@ -1282,6 +1287,7 @@ class Node:
         broadcast_dict = copy.deepcopy(self.skulk_config.model_dump())
         broadcast_dict["model_store"]["store_http_host"] = reachable_host
         broadcast_dict.pop("hf_token", None)
+        broadcast_dict.pop("model_trust", None)
         broadcast_yaml = yaml.safe_dump(
             broadcast_dict, default_flow_style=False, sort_keys=False
         )
@@ -1385,6 +1391,14 @@ class Node:
                         state_sync_store_http_host=_state_sync_store_http_host(
                             self.node_id,
                             self.skulk_config,
+                        ),
+                        initial_model_trust_identities=(
+                            tuple(
+                                self.skulk_config.model_trust.approved_remote_code_identities
+                            )
+                            if self.skulk_config is not None
+                            and self.skulk_config.model_trust is not None
+                            else ()
                         ),
                     )
                     self._tg.start_soon(self.master.run)

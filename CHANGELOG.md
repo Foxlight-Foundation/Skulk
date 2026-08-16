@@ -19,7 +19,10 @@ This project records release notes here and mirrors public-facing notes in
   without replacing their readable error message. Trust and custom-card writes
   require direct loopback or authenticated operator-gateway access; synchronized
   settings preserve node-local Hugging Face credentials and atomically retain
-  owner-only config permissions.
+  owner-only config permissions. Trust changes are serialized by the elected
+  master and replicated as durable state rather than competing replaceable
+  config snapshots, so concurrent approvals and revocations cannot overwrite
+  one another or be resurrected by an unrelated Settings save.
 
 - The managed llama.cpp served engine advances to b10434 across the CUDA and
   Vulkan wheels, verified Linux archives, and the prebaked CUDA pod image. The

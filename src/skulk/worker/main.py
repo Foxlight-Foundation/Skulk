@@ -66,6 +66,7 @@ from skulk.shared.types.events import (
     CustomModelCardDeleted,
     Event,
     IndexedEvent,
+    ModelTrustApprovalChanged,
     NodeDownloadProgress,
     NodeGatheredInfo,
     NodeTimedOut,
@@ -119,7 +120,11 @@ from skulk.shared.types.worker.instances import (
 )
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerStatus
 from skulk.shared.types.worker.shards import ShardMetadata, TensorShardMetadata
-from skulk.store.config import StagingNodeConfig
+from skulk.store.config import (
+    StagingNodeConfig,
+    persist_model_trust_config,
+    resolve_config_path,
+)
 from skulk.store.installed_cards import require_registry_installed_artifact
 from skulk.store.model_store_client import ModelStoreClient
 from skulk.store.staging_eviction import (
@@ -1836,6 +1841,18 @@ class Worker:
                 previous_tasks = self.state.tasks
                 self.state = apply(self.state, event=event)
                 event = event.event
+
+                if isinstance(event, (ModelTrustApprovalChanged, StateSnapshotHydrated)):
+                    try:
+                        persist_model_trust_config(
+                            resolve_config_path(),
+                            self.state.model_trust_approved_remote_code_identities,
+                        )
+                    except (OSError, ValueError):
+                        logger.exception(
+                            "Worker failed to persist master-ordered model trust; "
+                            "repository-code runner starts may fail closed"
+                        )
 
                 # A confirmation is scoped to the event-log state that echoed
                 # it. Election bootstrap can briefly let this worker confirm a

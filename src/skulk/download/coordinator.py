@@ -337,12 +337,14 @@ class DownloadCoordinator:
         config_path = resolve_config_path()
         try:
             raw = _coerce_json_object(cast(object, yaml.safe_load(config_yaml)))
-            if "hf_token" not in raw and config_path.exists():
+            if config_path.exists():
                 existing = _coerce_json_object(
                     cast(object, yaml.safe_load(config_path.read_text()))
                 )
-                if "hf_token" in existing:
+                if "hf_token" not in raw and "hf_token" in existing:
                     raw["hf_token"] = existing["hf_token"]
+                if "model_trust" not in raw and "model_trust" in existing:
+                    raw["model_trust"] = existing["model_trust"]
             local_config_yaml = yaml.safe_dump(
                 raw,
                 default_flow_style=False,

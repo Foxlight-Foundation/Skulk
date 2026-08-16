@@ -142,26 +142,27 @@ describe('SettingsPanel persisted config handling', () => {
   it('persists one exact model trust decision in cluster settings', async () => {
     const cardId = `card_${'a'.repeat(52)}`;
     const saveFullConfig = vi.fn(async () => true);
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            id: 'community/example-model',
+            name: 'Example model',
+            description: '',
+            tags: [],
+            tasks: ['TextGeneration'],
+            remote_code_approval_required: true,
+            remote_code_trust_identity: cardId,
+            remote_code_approved_for_cluster: false,
+            registry_provenance: 'community',
+          },
+        ],
+      }),
+    }));
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => ({
-        ok: true,
-        json: async () => ({
-          data: [
-            {
-              id: 'community/example-model',
-              name: 'Example model',
-              description: '',
-              tags: [],
-              tasks: ['TextGeneration'],
-              remote_code_approval_required: true,
-              remote_code_trust_identity: cardId,
-              remote_code_approved_for_cluster: false,
-              registry_provenance: 'community',
-            },
-          ],
-        }),
-      })),
+      fetchMock,
     );
     useConfigMock.mockReturnValue({
       fullConfig: {
@@ -206,10 +207,11 @@ describe('SettingsPanel persisted config handling', () => {
       saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    expect(saveFullConfig).toHaveBeenCalledWith(
-      expect.objectContaining({
-        model_trust: { approved_remote_code_identities: [cardId] },
-      }),
+    expect(saveFullConfig).toHaveBeenCalledOnce();
+    expect(saveFullConfig.mock.calls[0]?.[0]).not.toHaveProperty('model_trust');
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/models/remote-code-approvals/${cardId}`,
+      { method: 'POST' },
     );
   });
 });

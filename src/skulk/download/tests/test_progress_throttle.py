@@ -81,15 +81,22 @@ async def test_synced_config_preserves_node_local_hugging_face_token(
     """Secret-stripped cluster sync cannot erase a node's local credential."""
 
     config_path = tmp_path / "skulk.yaml"
-    config_path.write_text("hf_token: local-secret\n")
+    card_id = f"card_{'a' * 52}"
+    config_path.write_text(
+        "hf_token: local-secret\n"
+        "model_trust:\n"
+        "  approved_remote_code_identities:\n"
+        f"    - {card_id}\n"
+    )
     coordinator = _make_coordinator()
     monkeypatch.setattr(coordinator_mod, "resolve_config_path", lambda: config_path)
 
-    await coordinator._sync_config("model_trust:\n  approved_remote_code_identities: []\n")
+    await coordinator._sync_config("logging:\n  enabled: false\n")
 
     synchronized = config_path.read_text()
     assert "hf_token: local-secret" in synchronized
     assert "model_trust:" in synchronized
+    assert card_id in synchronized
     assert config_path.stat().st_mode & 0o777 == 0o600
 
 

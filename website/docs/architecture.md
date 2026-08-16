@@ -464,16 +464,21 @@ Model trust is resolved before that admission pass. A revision-pinned
 Foxlight-provenance registry card is already Foxlight's exact trust decision.
 Agent/community registry cards and custom or unsigned cards that can execute
 repository code require one operator approval for their immutable card identity
-in cluster Settings. The synchronized `model_trust` configuration reaches the
-canonical store and every serving node, so trust never biases placement toward
-one machine. After approval, the planner applies backend preference, locality,
-and capacity normally and may fall through among any admissible candidates.
+in cluster Settings. Approval and revocation are commands serialized by the
+elected master into indexed `ModelTrustApprovalChanged` events and replicated
+`State`; API and worker consumers persist the resulting complete set locally
+for runner startup and offline recovery. Generic config snapshots deliberately
+omit `model_trust`, preventing concurrent API nodes or unrelated Settings saves
+from replacing newer decisions. The same decision therefore reaches the
+canonical store and every serving node without making trust a placement axis.
+After approval, the planner applies backend preference, locality, and capacity
+normally and may fall through among any admissible candidates.
 Trust mutations and custom-card creation accept only a direct loopback request
 or an authenticated operator-gateway request with write scope; successful
 gateway validation is carried to the canonical route in the ASGI scope rather
 than through a caller-spoofable header. Secret-stripped config convergence
-merges each recipient's local Hugging Face token before atomically replacing
-its owner-only config file.
+merges each recipient's local Hugging Face token and retains its state-derived
+model-trust copy before atomically replacing its owner-only config file.
 `GET /instance/previews` explains a missing model decision without reserving a
 placement; `POST /place_instance` re-evaluates current facts at launch.
 
@@ -1292,7 +1297,10 @@ identity appears in cluster `model_trust` Settings. Signed cards use
 card, so a changed revision or card definition must be approved again. Registry
 vision cards follow the same policy while the MLX processor path contains
 loaders that enable repository code internally; that is platform truth and does
-not rewrite the artifact card.
+not rewrite the artifact card. These explicit decisions flow through the
+master's command/event log rather than replaceable config synchronization;
+failover state seeding carries them into the next master session and each node
+atomically persists the replicated set.
 When a card names any separately hosted companion—vision weights or processor,
 an MTP sidecar, an assistant model, or a served-engine/vLLM draft—its signed
 content must also name that repository's full immutable revision. Every download

@@ -94,6 +94,18 @@ class SetTracingEnabled(BaseCommand):
     enabled: bool
 
 
+class SetModelTrustApproval(BaseCommand):
+    """Ask the elected master to serialize one exact model trust decision."""
+
+    trust_identity: str = Field(
+        pattern=r"^(?:card|local)_[a-z2-7]{52}$",
+        description="Immutable signed-card or content-derived model trust identity.",
+    )
+    approved: bool = Field(
+        description="Whether repository code for the exact identity is authorized."
+    )
+
+
 class PlaceInstance(BaseCommand):
     model_card: ModelCard
     sharding: Sharding
@@ -262,6 +274,7 @@ Command = (
     | AudioTranscription
     | RealtimeAudioTranscription
     | SetTracingEnabled
+    | SetModelTrustApproval
     | PlaceInstance
     | CreateInstance
     | DeleteInstance

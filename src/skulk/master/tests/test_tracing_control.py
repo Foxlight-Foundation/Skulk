@@ -1,5 +1,7 @@
 """Tests for master-side tracing control and task inheritance."""
 
+from pathlib import Path
+
 import anyio
 import pytest
 
@@ -23,6 +25,7 @@ from skulk.shared.types.commands import (
     ForwarderCommand,
     ForwarderDownloadCommand,
     RealtimeAudioTranscription,
+    SetModelTrustApproval,
     SetTracingEnabled,
     SpeechSynthesis,
     TaskCancelled,
@@ -34,6 +37,7 @@ from skulk.shared.types.events import (
     Event,
     GlobalForwarderEvent,
     LocalForwarderEvent,
+    ModelTrustApprovalChanged,
     TaskCreated,
     TaskDeleted,
     TaskFailed,
@@ -57,6 +61,7 @@ from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskP
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
 from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import PipelineShardMetadata
+from skulk.store.config import load_skulk_config
 from skulk.utils.channels import Receiver, Sender, channel
 
 
@@ -211,6 +216,55 @@ async def test_master_emits_tracing_state_changed_for_toggle_command() -> None:
 
     assert isinstance(event, TracingStateChanged)
     assert event.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_master_serializes_back_to_back_model_trust_mutations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Queued trust commands must not race their delayed indexed echoes."""
+
+    config_path = tmp_path / "skulk.yaml"
+    monkeypatch.setattr(
+        "skulk.master.main.resolve_config_path",
+        lambda: config_path,
+    )
+    master, _node_id, command_sender, event_receiver = _build_master()
+    identity_a = f"card_{'a' * 52}"
+    identity_b = f"card_{'b' * 52}"
+    received: list[ModelTrustApprovalChanged] = []
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(master._command_processor)  # pyright: ignore[reportPrivateUsage]
+        for identity, approved in (
+            (identity_a, True),
+            (identity_b, True),
+            (identity_a, False),
+        ):
+            await command_sender.send(
+                ForwarderCommand(
+                    origin=SystemId("API"),
+                    command=SetModelTrustApproval(
+                        trust_identity=identity,
+                        approved=approved,
+                    ),
+                )
+            )
+            event = await event_receiver.receive()
+            assert isinstance(event, ModelTrustApprovalChanged)
+            received.append(event)
+        task_group.cancel_scope.cancel()
+
+    assert [(event.trust_identity, event.approved) for event in received] == [
+        (identity_a, True),
+        (identity_b, True),
+        (identity_a, False),
+    ]
+    config = load_skulk_config(config_path)
+    assert config is not None
+    assert config.model_trust is not None
+    assert config.model_trust.approved_remote_code_identities == [identity_b]
 
 
 @pytest.mark.asyncio
