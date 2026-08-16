@@ -119,14 +119,19 @@ def test_common_engine_intersection_across_cycle() -> None:
     cycle = Cycle(node_ids=[NodeId("mac"), NodeId("amd")])
     resources = {NodeId("mac"): _mac_resources(), NodeId("amd"): _amd_resources()}
     hybrid_backends = frozenset({"mlx", "llama_cpp-vulkan", "llama_server-vulkan"})
-    assert (
-        _cycle_common_multi_node_engines(cycle, hybrid_backends, resources) == set()
+    hybrid_card = _gguf_card().model_copy(
+        update={
+            "placement": PlacementCardConfig(
+                compatible_backends=hybrid_backends
+            )
+        }
     )
+    assert _cycle_common_multi_node_engines(cycle, hybrid_card, resources) == set()
     # Two AMD nodes share llama_server (multi-node) and llama_cpp (not).
     amd_cycle = Cycle(node_ids=[NodeId("a"), NodeId("b")])
     amd_resources = {NodeId("a"): _amd_resources(), NodeId("b"): _amd_resources()}
     assert _cycle_common_multi_node_engines(
-        amd_cycle, hybrid_backends, amd_resources
+        amd_cycle, hybrid_card, amd_resources
     ) == {"llama_server"}
 
 

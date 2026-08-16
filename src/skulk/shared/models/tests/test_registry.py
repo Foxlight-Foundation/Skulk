@@ -14,9 +14,15 @@ import skulk.download.download_utils as download_utils
 import skulk.shared.constants as constants_module
 import skulk.shared.models.model_cards as model_cards_module
 import skulk.shared.models.registry as registry_module
-from skulk.shared.models.model_cards import ModelCard, ModelTask, registry_model_cards
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelTask,
+    registry_model_cards,
+    registry_supported_backends_for_node,
+)
 from skulk.shared.models.registry import (
     RegistryCatalog,
+    RegistryEngineSupport,
     RegistryUnavailableError,
     TufRegistryClient,
 )
@@ -38,7 +44,37 @@ def _catalog_payload() -> bytes:
             "generated_at": "2026-08-08T12:00:00Z",
             "published_by": "validator@example.com",
             "note": "test",
-            "card_metadata": {f"card_{'a' * 52}": {"provenance": "foxlight"}},
+            "card_metadata": {
+                f"card_{'a' * 52}": {
+                    "provenance": "foxlight",
+                    "architecture": "future_architecture_v1",
+                    "capability_claims": [
+                        {
+                            "capability_id": "text.generate",
+                            "scope": "model",
+                            "status": "observed",
+                            "source": "upstream_structured",
+                            "confidence": 1,
+                            "evidence_urls": [],
+                            "reviewer_model": None,
+                            "input_modalities": ["text"],
+                            "output_modalities": ["text"],
+                            "details": {"pipeline_tag": "text-generation"},
+                        }
+                    ],
+                    "source_links": {
+                        "repository_url": "https://huggingface.co/org/multi-gguf",
+                        "revision_url": "https://huggingface.co/org/multi-gguf/tree/"
+                        + "b" * 40,
+                        "artifact_url": "https://huggingface.co/org/multi-gguf/blob/"
+                        + "b" * 40
+                        + "/model-Q4_K_M.gguf",
+                        "download_url": "https://huggingface.co/org/multi-gguf/resolve/"
+                        + "b" * 40
+                        + "/model-Q4_K_M.gguf",
+                    },
+                }
+            },
             "cards": [
                 {
                     "schema_version": 1,
@@ -97,6 +133,48 @@ def _advisories_payload() -> bytes:
     ).encode()
 
 
+def _engine_support_payload() -> bytes:
+    """Build signed support history with one active exact-build decision."""
+    base: dict[str, object] = {
+        "engine": "llama_server",
+        "engine_build": "llama.cpp@sha256:" + "1" * 64,
+        "architecture": "future_architecture_v1",
+        "artifact_format": "gguf",
+        "quantization": "Q4_K_M",
+        "capability_id": "text.generate",
+        "evidence_kind": "feature_qualification",
+        "evidence_trust": "foxlight_observed",
+        "source_url": "https://evidence.example/test",
+        "rationale": "Qualified exact artifact and engine build.",
+        "hardware_classes": list[str](),
+        "recorded_by": "operator@example.com",
+        "created_at": "2026-08-16T12:00:00Z",
+    }
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "matrix_version": 7,
+            "generated_at": "2026-08-16T12:00:00Z",
+            "claims": [
+                {
+                    **base,
+                    "claim_id": "support_" + "a" * 52,
+                    "status": "experimental",
+                    "source_sha256": "2" * 64,
+                    "supersedes_claim_id": None,
+                },
+                {
+                    **base,
+                    "claim_id": "support_" + "b" * 52,
+                    "status": "supported",
+                    "source_sha256": "3" * 64,
+                    "supersedes_claim_id": "support_" + "a" * 52,
+                },
+            ],
+        }
+    ).encode()
+
+
 def test_registry_alias_is_separate_from_artifact_repository() -> None:
     """Two quants can use distinct runtime ids while sharing one Hub repo."""
     catalog = RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
@@ -108,6 +186,63 @@ def test_registry_alias_is_separate_from_artifact_repository() -> None:
     assert card.gguf_file == "model-Q4_K_M.gguf"
     assert card.registry_snapshot_id == "snapshot_1_test"
     assert card.registry_provenance == "foxlight"
+    assert card.registry_architecture == "future_architecture_v1"
+    assert card.registry_artifact_format == "gguf"
+    assert card.registry_capability_claims[0].capability_id == "text.generate"
+
+
+def test_signed_support_expands_only_exact_node_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A positive active claim adds a backend without rewriting card identity."""
+    card = registry_model_cards(
+        RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    )[0]
+    support = RegistryEngineSupport.model_validate_json(
+        _engine_support_payload(), strict=False
+    )
+    monkeypatch.setattr(
+        model_cards_module, "_registry_engine_support", support.active_claims()
+    )
+
+    exact = registry_supported_backends_for_node(
+        card,
+        node_backends=frozenset({"llama_server", "llama_server-vulkan"}),
+        engine_builds={
+            "llama_server": "llama.cpp@sha256:" + "1" * 64,
+            "llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64,
+        },
+        hardware_classes=frozenset({"amd"}),
+    )
+    stale = registry_supported_backends_for_node(
+        card,
+        node_backends=frozenset({"llama_server-vulkan"}),
+        engine_builds={"llama_server-vulkan": "llama.cpp@sha256:" + "9" * 64},
+        hardware_classes=frozenset({"amd"}),
+    )
+
+    assert exact == frozenset({"llama_server", "llama_server-vulkan"})
+    assert stale == frozenset()
+
+
+def test_engine_support_rejects_cross_key_supersession() -> None:
+    """A signed target cannot hide one compatibility key with another."""
+    payload = cast("dict[str, object]", json.loads(_engine_support_payload()))
+    claims = cast("list[dict[str, object]]", payload["claims"])
+    claims[1]["architecture"] = "different_architecture"
+
+    with pytest.raises(ValueError, match="supersedes a different key"):
+        RegistryEngineSupport.model_validate(payload, strict=False)
+
+
+def test_engine_support_rejects_supersession_cycles() -> None:
+    """A signed replacement history cannot erase every active decision."""
+    payload = cast("dict[str, object]", json.loads(_engine_support_payload()))
+    claims = cast("list[dict[str, object]]", payload["claims"])
+    claims[0]["supersedes_claim_id"] = claims[1]["claim_id"]
+
+    with pytest.raises(ValueError, match="supersession cycle"):
+        RegistryEngineSupport.model_validate(payload, strict=False)
 
 
 @pytest.mark.parametrize("location", ["catalog", "card"])
@@ -510,6 +645,59 @@ def test_client_uses_hash_bound_last_known_good_advisories(
     (tmp_path / "cache/last-known-good-advisories.json").write_bytes(b"tampered")
     with pytest.raises(RegistryUnavailableError):
         client.load_advisories()
+
+
+def test_client_retains_hash_bound_engine_support_for_offline_clusters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verified support survives offline indefinitely but cache tampering fails."""
+    payload_path = tmp_path / "engine-support.json"
+    payload_path.write_bytes(_engine_support_payload())
+    embedded_root = tmp_path / "embedded-root.json"
+    embedded_root.write_text("{}")
+
+    class WorkingUpdater:
+        def __init__(self, **kwargs: object) -> None:
+            self.metadata_dir = Path(cast("str", kwargs["metadata_dir"]))
+
+        def refresh(self) -> None:
+            self.metadata_dir.mkdir(parents=True, exist_ok=True)
+            (self.metadata_dir / "targets.json").write_text(
+                json.dumps(
+                    {
+                        "signatures": [],
+                        "signed": {
+                            "_type": "targets",
+                            "spec_version": "1.0.31",
+                            "version": 7,
+                            "expires": "2030-01-01T00:00:00Z",
+                            "targets": {},
+                        },
+                    }
+                )
+            )
+
+        def get_targetinfo(self, target_path: str) -> object:
+            assert target_path == "v1/engine-support.json"
+            return object()
+
+        def download_target(self, _target: object) -> str:
+            return str(payload_path)
+
+    monkeypatch.setattr(registry_module, "Updater", WorkingUpdater)
+    client = TufRegistryClient(
+        base_url="https://registry.example/",
+        cache_dir=tmp_path / "cache",
+        embedded_root=embedded_root,
+        timeout_seconds=1,
+        max_stale_days=0,
+    )
+    assert client.load_engine_support().matrix_version == 7
+    assert client.load_cached_engine_support().active_claims()[0].status == "supported"
+
+    (tmp_path / "cache/last-known-good-engine-support.json").write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        client.load_cached_engine_support()
 
 
 def test_embedded_roots_match_release_resources() -> None:

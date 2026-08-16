@@ -7,7 +7,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from skulk.shared.models.capabilities import ResolvedCapabilityProfile
 from skulk.shared.models.model_cards import AudioResponseFormat, ModelCard, ModelId
-from skulk.shared.models.registry import RegistryAdvisory
+from skulk.shared.models.registry import (
+    RegistryAdvisory,
+    RegistryCapabilityClaim,
+    RegistryEngineSupportClaim,
+)
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import ReasoningEffort
@@ -158,6 +162,18 @@ class ModelListModel(BaseModel):
         description=(
             "Audited signed-registry origin, or null for bundled and custom cards."
         ),
+    )
+    registry_architecture: str | None = Field(
+        default=None,
+        description="Trusted open architecture identity from signed metadata.",
+    )
+    capability_claims: list[RegistryCapabilityClaim] = Field(
+        default_factory=list,
+        description="Open signed model/artifact capabilities independent of engines.",
+    )
+    engine_support: list[RegistryEngineSupportClaim] = Field(
+        default_factory=list,
+        description="Active signed engine/build claims matching this exact artifact.",
     )
     installed: bool = Field(
         default=False,
@@ -1501,6 +1517,18 @@ class PlacementPreview(BaseModel):
             "Actionable immutable-card approval requirement that must hold on "
             "each selected serving node, or null when card trust is automatic."
         ),
+    )
+    compatibility_source: Literal["card", "signed_engine_support"] | None = Field(
+        default=None,
+        description="Truth source that admitted the selected backend, or null on error.",
+    )
+    support_claim_ids: list[str] = Field(
+        default_factory=list,
+        description="Active signed support claims applicable to this placement.",
+    )
+    compatibility_detail: str | None = Field(
+        default=None,
+        description="Operator-readable model, artifact, engine/build, or platform gap.",
     )
     alternative: bool = Field(
         default=False,

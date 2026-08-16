@@ -67,6 +67,39 @@ export interface ResolvedModelCapabilities {
   supports_native_multimodal: boolean;
 }
 
+/** Open signed model/artifact capability independent of engine availability. */
+export interface RegistryCapabilityClaim {
+  capability_id: string;
+  scope: 'model' | 'artifact';
+  status: 'claimed' | 'observed' | 'complete' | 'incomplete' | 'unknown';
+  source: 'upstream_structured' | 'artifact_manifest' | 'agent_analysis';
+  confidence: number;
+  evidence_urls: string[];
+  reviewer_model?: string | null;
+  input_modalities: string[];
+  output_modalities: string[];
+  details: Record<string, unknown>;
+}
+
+/** Active signed engine/build compatibility decision for an exact artifact. */
+export interface RegistryEngineSupportClaim {
+  claim_id: string;
+  engine: string;
+  engine_build: string;
+  architecture: string;
+  artifact_format: string;
+  quantization?: string | null;
+  capability_id: string;
+  status: 'supported' | 'experimental' | 'unsupported';
+  evidence_kind: 'upstream_compatibility' | 'load_qualification' | 'feature_qualification';
+  evidence_trust: string;
+  source_url: string;
+  source_sha256: string;
+  rationale: string;
+  hardware_classes: string[];
+  supersedes_claim_id?: string | null;
+}
+
 /** Complete dashboard-facing model metadata entry returned by the model catalog. */
 export interface ModelInfo {
   id: string;
@@ -80,6 +113,9 @@ export interface ModelInfo {
   registry_card_id?: string | null;
   registry_snapshot_id?: string | null;
   registry_provenance?: 'foxlight' | 'agent' | 'community' | null;
+  registry_architecture?: string | null;
+  capability_claims?: RegistryCapabilityClaim[];
+  engine_support?: RegistryEngineSupportClaim[];
   catalog_source?: 'registry' | 'bundled' | 'custom';
   remote_code_approval_required?: boolean;
   remote_code_approved_on_this_node?: boolean;
@@ -248,6 +284,12 @@ export interface PlacementPreview {
   error: string | null;
   /** Exact card approval requirement for every selected serving node. */
   trust_requirement?: string | null;
+  /** Whether card compatibility or the signed engine matrix admitted the backend. */
+  compatibility_source?: 'card' | 'signed_engine_support' | null;
+  /** Signed claims applicable when the matrix admitted the placement. */
+  support_claim_ids?: string[];
+  /** Operator-readable missing artifact, engine/build, or platform detail. */
+  compatibility_detail?: string | null;
   /** Per-host alternative to the ranked pick: a single-node placement on a
    * host that passes admission but lost the planner ranking (#557). */
   alternative?: boolean;

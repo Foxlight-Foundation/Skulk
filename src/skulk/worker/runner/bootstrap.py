@@ -402,25 +402,42 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
     backends, ordered by ``backend_preference``. Returns the engine, or ``None``
     to fall through to the default MLX runner.
     """
+    from skulk.facts import (
+        current_backend_derivation,
+        current_node_facts,
+        engine_build_inventory,
+        hardware_class_inventory,
+    )
     from skulk.shared.backends import (
         engine_of,
         platform_compatible_backends,
         probe_node_backends,
         resolve_node_engine,
     )
+    from skulk.shared.models.model_cards import registry_supported_backends_for_node
     shard = bound_instance.bound_shard
     require_remote_code_approval(shard.model_card)
     if shard.resolved_backend is not None:
         return engine_of(shard.resolved_backend)
 
     placement = shard.model_card.placement
+    derivation = current_backend_derivation()
+    facts = current_node_facts()
+    compatible_backends = placement.compatible_backends | (
+        registry_supported_backends_for_node(
+            shard.model_card,
+            node_backends=derivation.backends,
+            engine_builds=engine_build_inventory(derivation.backends, facts),
+            hardware_classes=hardware_class_inventory(facts),
+        )
+    )
     # Same platform-capability filter the master applies at placement: the
     # card declares MODEL truth, and engines whose runner cannot serve one of
     # the card's declared capabilities (e.g. vision without served mmproj
     # support) are subtracted in code so the fallback probe cannot pick one.
     return resolve_node_engine(
         platform_compatible_backends(
-            placement.compatible_backends,
+            compatible_backends,
             card_serves_vision=shard.model_card.vision is not None,
             card_serves_speech=card_serves_speech(shard.model_card),
         ),

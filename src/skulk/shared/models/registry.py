@@ -5,10 +5,10 @@ import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self, cast
 
 from filelock import FileLock
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from tuf.ngclient.updater import Updater
 from tuf.ngclient.urllib3_fetcher import Urllib3Fetcher
 
@@ -71,6 +71,76 @@ class RegistryCardMetadata(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     provenance: Literal["foxlight", "agent", "community"]
+    architecture: str | None = Field(default=None, min_length=1, max_length=300)
+    capability_claims: tuple["RegistryCapabilityClaim", ...] = ()
+    source_links: "RegistrySourceLinks | None" = None
+
+
+class RegistrySourceLinks(BaseModel):
+    """Signed navigation links derived from immutable artifact identity."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    repository_url: str = Field(
+        min_length=8, max_length=2048, description="Upstream repository page."
+    )
+    revision_url: str = Field(
+        min_length=8, max_length=2048, description="Pinned revision page."
+    )
+    artifact_url: str = Field(
+        min_length=8, max_length=2048, description="Pinned selected-artifact page."
+    )
+    download_url: str | None = Field(
+        default=None, max_length=2048, description="Optional pinned download URL."
+    )
+
+
+class RegistryCapabilityClaim(BaseModel):
+    """Open signed model or artifact capability independent of runtime support."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    capability_id: str = Field(
+        pattern=r"^[a-z0-9][a-z0-9._:-]{0,199}$",
+        description="Open namespaced intrinsic capability identifier.",
+    )
+    scope: Literal["model", "artifact"] = Field(
+        description="Whether the claim describes the model or selected artifact."
+    )
+    status: Literal[
+        "claimed", "observed", "complete", "incomplete", "unknown"
+    ] = Field(description="Evidence state without an engine-support implication.")
+    source: Literal[
+        "upstream_structured", "artifact_manifest", "agent_analysis"
+    ] = Field(description="Evidence channel that produced the claim.")
+    confidence: float = Field(
+        ge=0, le=1, description="Source confidence from zero through one."
+    )
+    evidence_urls: tuple[str, ...] = Field(
+        default=(), max_length=20, description="Bounded evidence references."
+    )
+    reviewer_model: str | None = Field(
+        default=None, max_length=300, description="Agent reviewer identity, if any."
+    )
+    input_modalities: tuple[str, ...] = Field(
+        default=(), max_length=20, description="Declared input modalities."
+    )
+    output_modalities: tuple[str, ...] = Field(
+        default=(), max_length=20, description="Declared output modalities."
+    )
+    details: dict[str, Any] = Field(
+        default_factory=dict, description="Open capability-specific evidence details."
+    )
+
+    @field_validator(
+        "evidence_urls", "input_modalities", "output_modalities", mode="before"
+    )
+    @classmethod
+    def coerce_string_tuples(cls, value: object) -> object:
+        """Coerce JSON and TOML arrays into immutable string tuples."""
+        if isinstance(value, list):
+            return tuple(cast("list[object]", value))
+        return value
 
 
 class RegistryCatalog(BaseModel):
@@ -117,6 +187,154 @@ class RegistryAdvisories(BaseModel):
     advisories: tuple[RegistryAdvisory, ...]
 
 
+class RegistryEngineSupportClaim(BaseModel):
+    """One append-only signed engine/build compatibility decision."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    engine: str = Field(
+        pattern=r"^[a-z0-9][a-z0-9._:-]{0,119}$",
+        description="Open inference-engine identifier.",
+    )
+    engine_build: str = Field(
+        min_length=1,
+        max_length=300,
+        description="Exact engine build qualified by this decision.",
+    )
+    architecture: str = Field(
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,299}$",
+        description="Trusted open architecture identifier.",
+    )
+    artifact_format: str = Field(
+        pattern=r"^[a-z0-9][a-z0-9._+-]{0,79}$",
+        description="Exact selected artifact format.",
+    )
+    quantization: str | None = Field(
+        default=None,
+        max_length=120,
+        description="Exact quantization or null as a format-wide wildcard.",
+    )
+    capability_id: str = Field(
+        pattern=r"^[a-z0-9][a-z0-9._:-]{0,199}$",
+        description="Intrinsic capability this engine decision covers.",
+    )
+    status: Literal["supported", "experimental", "unsupported"] = Field(
+        description="Decision status; only supported can expand placement."
+    )
+    evidence_kind: Literal[
+        "upstream_compatibility", "load_qualification", "feature_qualification"
+    ] = Field(description="Kind of compatibility evidence reviewed.")
+    evidence_trust: Literal[
+        "self_attested",
+        "third_party_reported",
+        "reproducible",
+        "independently_reproduced",
+        "foxlight_observed",
+    ] = Field(description="Trust tier assigned to the evidence.")
+    source_url: str = Field(
+        min_length=8, max_length=2048, description="Stable evidence location."
+    )
+    source_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$", description="Evidence bundle SHA-256 digest."
+    )
+    rationale: str = Field(
+        min_length=3, max_length=4000, description="Auditable decision rationale."
+    )
+    hardware_classes: tuple[str, ...] = Field(
+        default=(),
+        max_length=50,
+        description="Optional open hardware constraints; empty is neutral.",
+    )
+    supersedes_claim_id: str | None = Field(
+        default=None,
+        pattern=r"^support_[a-z2-7]{52}$",
+        description="Prior active claim for the same exact key being replaced.",
+    )
+    claim_id: str = Field(
+        pattern=r"^support_[a-z2-7]{52}$",
+        description="Content-derived immutable support-claim identity.",
+    )
+    recorded_by: str = Field(
+        min_length=1, max_length=320, description="Audited publishing actor."
+    )
+    created_at: datetime = Field(description="UTC claim publication time.")
+
+
+class RegistryEngineSupport(BaseModel):
+    """Versioned signed engine-support matrix target."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    schema_version: Literal[1]
+    matrix_version: int = Field(ge=1)
+    generated_at: datetime
+    claims: tuple[RegistryEngineSupportClaim, ...]
+
+    @model_validator(mode="after")
+    def validate_supersession_history(self) -> Self:
+        """Reject ambiguous or cross-key replacement history."""
+        claims_by_id = {claim.claim_id: claim for claim in self.claims}
+        if len(claims_by_id) != len(self.claims):
+            raise ValueError("engine-support claim ids must be unique")
+        superseded_ids: set[str] = set()
+        for claim in self.claims:
+            replaced_id = claim.supersedes_claim_id
+            if replaced_id is None:
+                continue
+            replaced = claims_by_id.get(replaced_id)
+            if replaced is None:
+                raise ValueError("superseded engine-support claim does not exist")
+            if replaced_id in superseded_ids:
+                raise ValueError("engine-support claim is superseded more than once")
+            if self._support_key(claim) != self._support_key(replaced):
+                raise ValueError("engine-support claim supersedes a different key")
+            superseded_ids.add(replaced_id)
+            seen = {claim.claim_id}
+            cursor = replaced
+            while cursor.supersedes_claim_id is not None:
+                if cursor.claim_id in seen:
+                    raise ValueError("engine-support supersession cycle detected")
+                seen.add(cursor.claim_id)
+                next_claim = claims_by_id.get(cursor.supersedes_claim_id)
+                if next_claim is None:
+                    raise ValueError(
+                        "superseded engine-support claim does not exist"
+                    )
+                cursor = next_claim
+        active_keys = [
+            self._support_key(claim)
+            for claim in self.claims
+            if claim.claim_id not in superseded_ids
+        ]
+        if len(active_keys) != len(set(active_keys)):
+            raise ValueError("multiple active engine-support claims share one key")
+        return self
+
+    @staticmethod
+    def _support_key(
+        claim: RegistryEngineSupportClaim,
+    ) -> tuple[str, str, str, str, str | None, str, tuple[str, ...]]:
+        """Return the fields defining one replaceable compatibility decision."""
+        return (
+            claim.engine,
+            claim.engine_build,
+            claim.architecture,
+            claim.artifact_format,
+            claim.quantization,
+            claim.capability_id,
+            claim.hardware_classes,
+        )
+
+    def active_claims(self) -> tuple[RegistryEngineSupportClaim, ...]:
+        """Return claims not explicitly replaced by a later history entry."""
+        superseded = {
+            claim.supersedes_claim_id
+            for claim in self.claims
+            if claim.supersedes_claim_id is not None
+        }
+        return tuple(claim for claim in self.claims if claim.claim_id not in superseded)
+
+
 class _VerifiedCacheRecord(BaseModel):
     """Local proof that the last-known-good bytes passed TUF verification."""
 
@@ -134,6 +352,32 @@ class _VerifiedAdvisoryCacheRecord(BaseModel):
 
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     verified_at: datetime
+
+
+class _VerifiedEngineSupportCacheRecord(BaseModel):
+    """Local proof that cached engine-support bytes passed TUF verification."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    verified_at: datetime
+    matrix_version: int = Field(ge=1)
+
+
+class _TrustedTargetsSignedVersion(BaseModel):
+    """Minimal version view over updater-verified targets metadata."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="ignore")
+
+    version: int = Field(ge=1)
+
+
+class _TrustedTargetsMetadataVersion(BaseModel):
+    """Minimal envelope for comparing a target payload with its signed role."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="ignore")
+
+    signed: _TrustedTargetsSignedVersion
 
 
 class TufRegistryClient:
@@ -163,6 +407,12 @@ class TufRegistryClient:
         )
         self._advisory_cache_record_path = (
             cache_dir / "last-known-good-advisories-metadata.json"
+        )
+        self._last_known_good_engine_support_path = (
+            cache_dir / "last-known-good-engine-support.json"
+        )
+        self._engine_support_cache_record_path = (
+            cache_dir / "last-known-good-engine-support-metadata.json"
         )
         self._lock = FileLock(str(cache_dir / "refresh.lock"))
 
@@ -216,6 +466,58 @@ class TufRegistryClient:
                         "signed model advisories are unavailable and no acceptable "
                         "last-known-good advisory target exists"
                     ) from error
+
+    def load_engine_support(self) -> RegistryEngineSupport:
+        """Refresh the signed support matrix or recover its verified cache."""
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            try:
+                return self._refresh_engine_support()
+            except Exception as error:  # noqa: BLE001 - security fallback boundary
+                try:
+                    return self._load_last_known_good_engine_support()
+                except (OSError, ValueError):
+                    raise RegistryUnavailableError(
+                        "signed engine support is unavailable and no acceptable "
+                        "last-known-good matrix exists"
+                    ) from error
+
+    def load_cached_engine_support(self) -> RegistryEngineSupport:
+        """Load hash-bound support data without network or freshness expiry."""
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            return self._load_last_known_good_engine_support(enforce_freshness=False)
+
+    def _refresh_engine_support(self) -> RegistryEngineSupport:
+        """Perform a TUF refresh and retain the verified support matrix."""
+        self._metadata_dir.mkdir(parents=True, exist_ok=True)
+        self._targets_dir.mkdir(parents=True, exist_ok=True)
+        updater = Updater(
+            metadata_dir=str(self._metadata_dir),
+            metadata_base_url=f"{self._base_url}metadata/",
+            target_dir=str(self._targets_dir),
+            target_base_url=f"{self._base_url}targets/",
+            fetcher=Urllib3Fetcher(
+                socket_timeout=self._timeout_seconds,
+                app_user_agent="Skulk model-registry client",
+            ),
+            bootstrap=self._embedded_root.read_bytes(),
+        )
+        updater.refresh()
+        target = updater.get_targetinfo("v1/engine-support.json")
+        if target is None:
+            raise ValueError("signed repository has no v1/engine-support.json target")
+        payload = Path(updater.download_target(target)).read_bytes()
+        support = RegistryEngineSupport.model_validate_json(payload, strict=False)
+        trusted_targets = _TrustedTargetsMetadataVersion.model_validate_json(
+            (self._metadata_dir / "targets.json").read_bytes(), strict=False
+        )
+        if support.matrix_version != trusted_targets.signed.version:
+            raise ValueError(
+                "engine-support matrix version does not match signed targets metadata"
+            )
+        self._write_verified_engine_support_cache(payload, support)
+        return support
 
     def _refresh_advisories(self) -> RegistryAdvisories:
         """Perform a TUF refresh and retain the verified advisory target."""
@@ -311,6 +613,21 @@ class TufRegistryClient:
             record.model_dump_json().encode(),
         )
 
+    def _write_verified_engine_support_cache(
+        self, payload: bytes, support: RegistryEngineSupport
+    ) -> None:
+        """Atomically retain matrix bytes that TUF just verified."""
+        record = _VerifiedEngineSupportCacheRecord(
+            sha256=hashlib.sha256(payload).hexdigest(),
+            verified_at=datetime.now(UTC),
+            matrix_version=support.matrix_version,
+        )
+        self._atomic_write(self._last_known_good_engine_support_path, payload)
+        self._atomic_write(
+            self._engine_support_cache_record_path,
+            record.model_dump_json().encode(),
+        )
+
     def _load_last_known_good(
         self,
         catalog_validator: Callable[[RegistryCatalog], object] | None,
@@ -351,6 +668,28 @@ class TufRegistryClient:
         if hashlib.sha256(payload).hexdigest() != record.sha256:
             raise ValueError("last-known-good model advisories hash mismatch")
         return RegistryAdvisories.model_validate_json(payload, strict=False)
+
+    def _load_last_known_good_engine_support(
+        self, *, enforce_freshness: bool = True
+    ) -> RegistryEngineSupport:
+        """Load only hash-bound, previously verified support-matrix bytes."""
+        if enforce_freshness and self._max_stale_days == 0:
+            raise ValueError("last-known-good engine support fallback is disabled")
+        record = _VerifiedEngineSupportCacheRecord.model_validate_json(
+            self._engine_support_cache_record_path.read_bytes(), strict=False
+        )
+        if enforce_freshness:
+            now = datetime.now(UTC)
+            verified_at = record.verified_at.astimezone(UTC)
+            if now - verified_at > timedelta(days=self._max_stale_days):
+                raise ValueError("last-known-good engine support is too old")
+        payload = self._last_known_good_engine_support_path.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != record.sha256:
+            raise ValueError("last-known-good engine support hash mismatch")
+        support = RegistryEngineSupport.model_validate_json(payload, strict=False)
+        if support.matrix_version != record.matrix_version:
+            raise ValueError("last-known-good engine support version mismatch")
+        return support
 
     @staticmethod
     def _atomic_write(path: Path, payload: bytes) -> None:

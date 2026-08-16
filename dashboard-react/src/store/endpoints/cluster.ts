@@ -89,6 +89,8 @@ export interface RawRdmaCtl {
 /** Resolved node policy and placement capability advertised over telemetry. */
 export interface RawNodeResources {
   backends?: string[];
+  engineBuilds?: Record<string, string>;
+  hardwareClasses?: string[];
   participation?: 'full' | 'management' | 'ffn_only';
   dataTransport?: 'gossipsub' | 'zenoh';
 }

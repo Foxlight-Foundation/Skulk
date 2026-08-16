@@ -417,6 +417,14 @@ export function ModelCard({
       {/* Engine badges: MLX shows its sharding + transport; a GGUF model runs on
           the single-node llama.cpp engine, so it shows one llama.cpp badge. */}
       <BadgeRow>
+        {apiPreview?.compatibility_source === 'signed_engine_support' && (
+          <Badge title={t(
+            'modelCard.runtime.signedEngineSupportTooltip',
+            'This backend was admitted by an exact signed engine-build support claim.',
+          )}>
+            {t('modelCard.runtime.signedEngineSupport', 'Signed engine support')}
+          </Badge>
+        )}
         {isGguf ? (
           <Badge title={t('modelCard.runtime.llamaCppTooltip', 'Runs on the llama.cpp engine (GPU-offload GGUF), single node.')}>
             {t('placement.llamaCpp', 'llama.cpp')}
@@ -436,6 +444,12 @@ export function ModelCard({
           </>
         )}
       </BadgeRow>
+
+      {apiPreview?.compatibility_detail && (
+        <div style={{ color: theme.colors.textMuted, fontSize: 11, lineHeight: 1.4, marginBottom: 8 }}>
+          {apiPreview.compatibility_detail}
+        </div>
+      )}
 
       {/* Per-node download progress */}
       {perNode.length > 0 && (

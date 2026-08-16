@@ -24,7 +24,12 @@ from skulk.shared.backends import (
 )
 from skulk.shared.data_plane_health import zenoh_isolated_nodes
 from skulk.shared.models.memory_estimate import instance_context_token_limit
-from skulk.shared.models.model_cards import ModelCard, ModelId, card_serves_speech
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    card_serves_speech,
+    registry_supported_backends_for_node,
+)
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import (
     CancelDownload,
@@ -237,7 +242,10 @@ def _cycle_backend_preference_score(
     return 0
 
 
-def _card_platform_backends(card: ModelCard) -> frozenset[str]:
+def _card_platform_backends(
+    card: ModelCard,
+    node_resources: NodeResources | None = None,
+) -> frozenset[str]:
     """The card's compatible backends minus current platform limitations.
 
     Cards declare MODEL truth (what the model and its artifacts can do); which
@@ -247,8 +255,18 @@ def _card_platform_backends(card: ModelCard) -> frozenset[str]:
     ``compatible_backends`` goes through this helper so eligibility, the
     common-engine cycle rule, and backend stamping all agree.
     """
+    compatible = set(card.placement.compatible_backends)
+    if node_resources is not None:
+        compatible.update(
+            registry_supported_backends_for_node(
+                card,
+                node_backends=node_resources.backends,
+                engine_builds=node_resources.engine_builds,
+                hardware_classes=node_resources.hardware_classes,
+            )
+        )
     return platform_compatible_backends(
-        card.placement.compatible_backends,
+        frozenset(compatible),
         card_serves_vision=card.vision is not None,
         card_serves_speech=card_serves_speech(card),
     )
@@ -256,7 +274,7 @@ def _card_platform_backends(card: ModelCard) -> frozenset[str]:
 
 def _cycle_common_multi_node_engines(
     cycle: Cycle,
-    card_backends: AbstractSet[str],
+    card: ModelCard,
     node_resources: Mapping[NodeId, NodeResources],
 ) -> set[EngineType]:
     """Multi-node-capable engines advertised by EVERY node in the cycle.
@@ -281,6 +299,7 @@ def _cycle_common_multi_node_engines(
         backends = (
             resources.backends if resources is not None else frozenset({"mlx"})
         )
+        card_backends = _card_platform_backends(card, resources)
         node_engines: set[EngineType] = {
             engine
             for tag in backends & card_backends
@@ -296,7 +315,7 @@ def _cycle_common_multi_node_engines(
 
 def _is_llama_rpc_cycle(
     cycle: Cycle,
-    card_backends: AbstractSet[str],
+    card: ModelCard,
     node_resources: Mapping[NodeId, NodeResources],
 ) -> bool:
     """Whether a multi-node cycle would serve this card via the RPC shape (#328).
@@ -308,7 +327,7 @@ def _is_llama_rpc_cycle(
     """
     if len(cycle) <= 1:
         return False
-    engines = _cycle_common_multi_node_engines(cycle, card_backends, node_resources)
+    engines = _cycle_common_multi_node_engines(cycle, card, node_resources)
     return "llama_server" in engines and "mlx" not in engines
 
 
@@ -419,30 +438,46 @@ def place_instance(
     # declares a non-``full`` participation role (e.g. a ``management`` /
     # edge node that serves the API but never joins a ring), or when its
     # advertised backends do not intersect the card's compatible_backends.
-    # Nodes with no resources entry yet (gossip still warming up) are treated
-    # as eligible so behavior matches the pre-#149 default of full/mlx.
-    if node_resources:
-        compatible_backends = _card_platform_backends(command.model_card)
-        ineligible_nodes = {
-            node_id
-            for node_id, resources in node_resources.items()
-            if resources.participation != "full"
-            or not (resources.backends & compatible_backends)
-        }
-        if ineligible_nodes:
-            candidate_cycles = [
-                cycle
-                for cycle in candidate_cycles
-                if not (set(cycle.node_ids) & ineligible_nodes)
-            ]
-            if not candidate_cycles:
-                raise PlacementError(
-                    f"All cycles of at least {command.min_nodes} node(s) touch a "
-                    f"node ineligible for this model: either a non-participating "
-                    f"(management/edge) node or one whose backends do not match "
-                    f"the model's compatible_backends "
-                    f"({sorted(compatible_backends)})."
+    # Nodes with no resources entry yet (gossip still warming up) retain the
+    # legacy optimistic behavior only when the card has a static projection.
+    # A matrix-only card needs exact build/hardware evidence and therefore waits
+    # rather than falling through to an unproven default engine.
+    resolved_node_resources = node_resources or {}
+    matrix_only = not command.model_card.placement.compatible_backends
+    pending_matrix_nodes: set[NodeId] = set()
+    ineligible_nodes: set[NodeId] = set()
+    compatible_backend_summary: set[str] = set()
+    for node_id in topology.list_nodes():
+        resources = resolved_node_resources.get(node_id)
+        if resources is None:
+            if matrix_only:
+                pending_matrix_nodes.add(node_id)
+            continue
+        compatible_backends = _card_platform_backends(command.model_card, resources)
+        compatible_backend_summary.update(compatible_backends)
+        if resources.participation != "full" or not (
+            resources.backends & compatible_backends
+        ):
+            ineligible_nodes.add(node_id)
+    excluded_for_compatibility = ineligible_nodes | pending_matrix_nodes
+    if excluded_for_compatibility:
+        candidate_cycles = [
+            cycle
+            for cycle in candidate_cycles
+            if not (set(cycle.node_ids) & excluded_for_compatibility)
+        ]
+        if not candidate_cycles:
+            if pending_matrix_nodes:
+                raise PlacementInfoPendingError(
+                    "Exact engine-build and hardware info has not been gossiped "
+                    "for a matrix-only model. Retry shortly."
                 )
+            raise PlacementError(
+                f"All cycles of at least {command.min_nodes} node(s) touch a "
+                f"node ineligible for this model: either a non-participating "
+                f"(management/edge) node or one whose exact backend support does "
+                f"not match ({sorted(compatible_backend_summary)})."
+            )
 
     # Common-engine cycle rule. A multi-node placement runs ONE engine across
     # the whole cycle, so a multi-node cycle is admissible only when some
@@ -457,9 +492,10 @@ def place_instance(
     # node, which the per-node any() check used to allow). Single-node cycles
     # are untouched -- the per-node participation/backend filter above already
     # covers them. Cards with no declared backends (legacy) skip the rule.
-    resolved_node_resources = node_resources or {}
-    card_backends = _card_platform_backends(command.model_card)
-    if card_backends:
+    backend_constrained = bool(command.model_card.placement.compatible_backends) or (
+        command.model_card.registry_card_id is not None
+    )
+    if backend_constrained:
         multi_node_candidate_cycles = [
             cycle for cycle in candidate_cycles if len(cycle) > 1
         ]
@@ -468,7 +504,7 @@ def place_instance(
             for cycle in candidate_cycles
             if len(cycle) == 1
             or _cycle_common_multi_node_engines(
-                cycle, card_backends, resolved_node_resources
+                cycle, command.model_card, resolved_node_resources
             )
         ]
         if not candidate_cycles:
@@ -509,7 +545,7 @@ def place_instance(
             cycle
             for cycle in candidate_cycles
             if not _is_llama_rpc_cycle(
-                cycle, card_backends, resolved_node_resources
+                cycle, command.model_card, resolved_node_resources
             )
         ]
         if not candidate_cycles:
@@ -543,12 +579,14 @@ def place_instance(
     standard_candidates = [
         cycle
         for cycle in candidate_cycles
-        if not _is_llama_rpc_cycle(cycle, card_backends, resolved_node_resources)
+        if not _is_llama_rpc_cycle(
+            cycle, command.model_card, resolved_node_resources
+        )
     ]
     rpc_candidates = [
         cycle
         for cycle in candidate_cycles
-        if _is_llama_rpc_cycle(cycle, card_backends, resolved_node_resources)
+        if _is_llama_rpc_cycle(cycle, command.model_card, resolved_node_resources)
     ]
     cycles_with_sufficient_memory, memory_diagnostics = filter_cycles_by_memory(
         standard_candidates,
@@ -695,7 +733,7 @@ def place_instance(
     # mirroring the single-node coercion above: instance_meta is an MLX-shape
     # vocabulary and the served engine has exactly one multi-node form.
     selected_is_rpc = _is_llama_rpc_cycle(
-        selected_cycle, card_backends, resolved_node_resources
+        selected_cycle, command.model_card, resolved_node_resources
     )
     if command.instance_meta == InstanceMeta.LlamaRpc and not selected_is_rpc:
         raise PlacementError(
@@ -739,16 +777,16 @@ def place_instance(
     # allows in-process llama_cpp (with it earlier in preference or alphabetical
     # order) must not stamp the driver with a tag that would dispatch the
     # single-node in-process runner.
-    compatible_backends = _card_platform_backends(command.model_card)
-    if selected_is_rpc:
-        compatible_backends = frozenset(
-            tag
-            for tag in compatible_backends
-            if engine_of(tag) == "llama_server"
-        )
     stamped_runner_to_shard = dict(shard_assignments.runner_to_shard)
     for node_id, runner_id in shard_assignments.node_to_runner.items():
         resources = resolved_node_resources.get(node_id)
+        compatible_backends = _card_platform_backends(command.model_card, resources)
+        if selected_is_rpc:
+            compatible_backends = frozenset(
+                tag
+                for tag in compatible_backends
+                if engine_of(tag) == "llama_server"
+            )
         resolved_backend = (
             resolve_node_backend(
                 compatible_backends, backend_preference, resources.backends
