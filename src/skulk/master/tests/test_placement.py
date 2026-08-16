@@ -1,9 +1,11 @@
 import pytest
 
+import skulk.master.placement as placement_module
 import skulk.shared.models.model_cards as model_cards_module
 from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
+    PlacementModelCodeApprovalError,
     add_instance_to_placements,
     fallback_command_for_refused_instance,
     get_transition_events,
@@ -28,6 +30,7 @@ from skulk.shared.models.registry import (
     RegistryCapabilityClaim,
     RegistryEngineSupportClaim,
 )
+from skulk.shared.models.remote_code_approval import remote_code_trust_identity
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import CreateInstance, PlaceInstance
 from skulk.shared.types.common import CommandId, NodeId
@@ -1344,6 +1347,103 @@ def test_missing_node_resources_is_treated_as_eligible() -> None:
         node_memory,
         node_network,
         node_resources={},  # nothing gossiped yet
+    )
+
+    assert len(placements) == 1
+
+
+def test_cluster_approved_card_remains_adaptively_placeable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Trust is settled once and does not constrain planner node choice."""
+    topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
+    card = _small_model_card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "a" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "agent",
+        }
+    )
+    trust_identity = remote_code_trust_identity(card)
+
+    def approval_required(candidate: ModelCard) -> bool:
+        return remote_code_trust_identity(candidate) != trust_identity
+
+    monkeypatch.setattr(
+        placement_module,
+        "remote_code_approval_required",
+        approval_required,
+    )
+
+    placements = place_instance(
+        place_instance_command(card),
+        topology,
+        {},
+        node_memory,
+        node_network,
+    )
+
+    assert len(placements) == 1
+
+
+def test_placement_fails_actionably_without_cluster_model_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unapproved exact registry card is a model-level launch blocker."""
+    topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
+    card = _small_model_card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "a" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "agent",
+        }
+    )
+    trust_identity = remote_code_trust_identity(card)
+
+    def approval_required(_card: ModelCard) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        placement_module,
+        "remote_code_approval_required",
+        approval_required,
+    )
+
+    with pytest.raises(
+        PlacementModelCodeApprovalError,
+        match=trust_identity,
+    ) as failure:
+        place_instance(
+            place_instance_command(card),
+            topology,
+            {},
+            node_memory,
+            node_network,
+        )
+
+    assert failure.value.code == "model_code_approval_required"
+
+
+def test_foxlight_signed_card_needs_no_separate_operator_approval() -> None:
+    """The signed pinned card remains the complete Foxlight trust decision."""
+    topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
+    card = _small_model_card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "a" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "foxlight",
+        }
+    )
+
+    placements = place_instance(
+        place_instance_command(card),
+        topology,
+        {},
+        node_memory,
+        node_network,
     )
 
     assert len(placements) == 1

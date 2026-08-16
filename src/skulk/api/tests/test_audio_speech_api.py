@@ -130,11 +130,12 @@ def test_audio_speech_exposes_pcm_framing_headers_to_cors_clients() -> None:
         value.strip().casefold()
         for value in response.headers["access-control-expose-headers"].split(",")
     }
-    assert exposed == {
+    assert {
         "x-audio-sample-rate",
         "x-audio-channels",
         "x-audio-sample-format",
-    }
+        "x-skulk-placement-failure",
+    }.issubset(exposed)
 
 
 def _tts_card(

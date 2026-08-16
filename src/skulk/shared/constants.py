@@ -189,12 +189,6 @@ if SKULK_MODEL_REGISTRY_TIMEOUT_SECONDS <= 0:
     raise ValueError("SKULK_MODEL_REGISTRY_TIMEOUT_SECONDS must be greater than 0")
 if SKULK_MODEL_REGISTRY_MAX_STALE_DAYS < 0:
     raise ValueError("SKULK_MODEL_REGISTRY_MAX_STALE_DAYS cannot be negative")
-_MODEL_REMOTE_CODE_APPROVALS_PATH_ENV = _env("SKULK_MODEL_REMOTE_CODE_APPROVALS_PATH")
-SKULK_MODEL_REMOTE_CODE_APPROVALS_PATH = (
-    SKULK_CONFIG_HOME / "model_remote_code_approvals.json"
-    if _MODEL_REMOTE_CODE_APPROVALS_PATH_ENV is None
-    else Path(_MODEL_REMOTE_CODE_APPROVALS_PATH_ENV).expanduser()
-)
 
 # Managed engine binaries (#614 Phase 3): pinned prebuilt inference-engine
 # builds provisioned by skulk.provisioning live here, keyed by engine and

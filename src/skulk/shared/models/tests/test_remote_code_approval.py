@@ -1,6 +1,5 @@
-"""Tests for node-local remote-code approval enforcement."""
+"""Tests for cluster-wide model repository-code trust enforcement."""
 
-import stat
 from pathlib import Path
 from typing import cast
 
@@ -12,8 +11,8 @@ from skulk.download.download_utils import download_shard
 from skulk.download.shard_downloader import NoopShardDownloader
 from skulk.shared.models.model_cards import ModelCard, ModelTask, VisionCardConfig
 from skulk.shared.models.remote_code_approval import (
-    RemoteCodeApprovalStore,
-    remote_code_approval_mutation_allowed,
+    approved_remote_code_identities,
+    loopback_mutation_allowed,
     remote_code_execution_requires_approval,
     remote_code_is_automatically_trusted,
     remote_code_trust_identity,
@@ -23,7 +22,7 @@ from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.downloads import RepoDownloadProgress
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
-from skulk.store.config import StagingNodeConfig
+from skulk.store.config import ModelTrustConfig, SkulkConfig, StagingNodeConfig
 from skulk.store.model_store_client import ModelStoreClient, ModelStoreDownloader
 
 
@@ -43,34 +42,38 @@ def _registry_card() -> ModelCard:
     )
 
 
-def test_approval_is_immutable_card_scoped_and_private(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Approval persists by card hash and the local file is owner-only."""
-    path = tmp_path / "approvals.json"
-    store = RemoteCodeApprovalStore(path)
-    monkeypatch.setattr(approval_module, "REMOTE_CODE_APPROVALS", store)
+def _no_cluster_approvals(_config: SkulkConfig | None = None) -> frozenset[str]:
+    """Return an explicitly empty injected cluster trust set."""
+    return frozenset()
+
+
+def test_cluster_config_exposes_approved_exact_identities() -> None:
+    """Every node derives the same decisions from converged cluster config."""
+    identity = f"card_{'a' * 52}"
+    config = SkulkConfig(
+        model_trust=ModelTrustConfig(
+            approved_remote_code_identities=[identity, identity]
+        )
+    )
+
+    assert approved_remote_code_identities(config) == frozenset({identity})
+    assert config.model_trust is not None
+    assert config.model_trust.approved_remote_code_identities == [identity]
+
+
+def test_approval_is_immutable_card_scoped_for_the_cluster() -> None:
+    """One exact card identity permits execution throughout the cluster."""
     card = _registry_card()
+    trust_identity = remote_code_trust_identity(card)
 
-    with pytest.raises(PermissionError, match=card.registry_card_id or ""):
-        require_remote_code_approval(card)
+    with pytest.raises(PermissionError, match=trust_identity):
+        require_remote_code_approval(card, frozenset())
 
-    assert card.registry_card_id is not None
-    store.approve(card.registry_card_id)
-    require_remote_code_approval(card)
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
-
-    store.revoke(card.registry_card_id)
-    with pytest.raises(PermissionError):
-        require_remote_code_approval(card)
+    require_remote_code_approval(card, frozenset({trust_identity}))
 
 
-def test_unsigned_cards_require_content_scoped_local_approval(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Unsigned repository code cannot bypass the explicit local boundary."""
-    store = RemoteCodeApprovalStore(tmp_path / "approvals.json")
-    monkeypatch.setattr(approval_module, "REMOTE_CODE_APPROVALS", store)
+def test_unsigned_cards_require_content_scoped_cluster_approval() -> None:
+    """Unsigned repository code cannot bypass the operator decision."""
     card = _registry_card().model_copy(
         update={
             "registry_card_id": None,
@@ -82,31 +85,33 @@ def test_unsigned_cards_require_content_scoped_local_approval(
     trust_identity = remote_code_trust_identity(card)
     assert trust_identity.startswith("local_")
     with pytest.raises(PermissionError, match=trust_identity):
-        require_remote_code_approval(card)
+        require_remote_code_approval(card, frozenset())
 
-    store.approve(trust_identity)
-    require_remote_code_approval(card)
+    require_remote_code_approval(card, frozenset({trust_identity}))
 
     changed = card.model_copy(update={"source_revision": "c" * 40})
     assert remote_code_trust_identity(changed) != trust_identity
     with pytest.raises(PermissionError):
-        require_remote_code_approval(changed)
+        require_remote_code_approval(changed, frozenset({trust_identity}))
 
 
-def test_foxlight_signed_pinned_card_is_the_remote_code_trust_decision(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Curated signed provenance needs no redundant node-local approval."""
-    monkeypatch.setattr(
-        approval_module,
-        "REMOTE_CODE_APPROVALS",
-        RemoteCodeApprovalStore(tmp_path / "approvals.json"),
-    )
+def test_foxlight_signed_pinned_card_is_the_remote_code_trust_decision() -> None:
+    """Curated signed provenance needs no redundant operator approval."""
     card = _registry_card().model_copy(update={"registry_provenance": "foxlight"})
 
     assert remote_code_is_automatically_trusted(card)
     assert not remote_code_execution_requires_approval(card)
-    require_remote_code_approval(card)
+    require_remote_code_approval(card, frozenset())
+
+
+def test_custom_card_cannot_copy_foxlight_metadata_to_gain_automatic_trust() -> None:
+    """Only cards actually installed from signed registry truth are automatic."""
+    card = _registry_card().model_copy(
+        update={"registry_provenance": "foxlight", "is_custom": True}
+    )
+
+    assert not remote_code_is_automatically_trusted(card)
+    assert remote_code_execution_requires_approval(card)
 
 
 @pytest.mark.parametrize(
@@ -129,41 +134,31 @@ def test_incomplete_or_non_foxlight_registry_evidence_requires_approval(
     assert remote_code_execution_requires_approval(card)
 
 
-def test_registry_vision_card_requires_approval_for_platform_loader(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_registry_vision_card_requires_approval_for_platform_loader() -> None:
     """A vision loader that enables remote code cannot bypass card approval."""
-    monkeypatch.setattr(
-        approval_module,
-        "REMOTE_CODE_APPROVALS",
-        RemoteCodeApprovalStore(tmp_path / "approvals.json"),
-    )
     card = _registry_card().model_copy(
         update={"trust_remote_code": False, "vision": VisionCardConfig()}
     )
 
     assert remote_code_execution_requires_approval(card)
     with pytest.raises(PermissionError, match=card.registry_card_id or ""):
-        require_remote_code_approval(card)
+        require_remote_code_approval(card, frozenset())
 
 
-def test_approval_cannot_authorize_unpinned_processor_repository(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Approval of a card id cannot make mutable external processor code safe."""
-    store = RemoteCodeApprovalStore(tmp_path / "approvals.json")
-    monkeypatch.setattr(approval_module, "REMOTE_CODE_APPROVALS", store)
+def test_approval_cannot_authorize_unpinned_processor_repository() -> None:
+    """Approval cannot make mutable external processor code safe."""
     card = _registry_card().model_copy(
         update={
             "trust_remote_code": False,
             "vision": VisionCardConfig(processor_repo="org/processor"),
         }
     )
-    assert card.registry_card_id is not None
-    store.approve(card.registry_card_id)
 
     with pytest.raises(PermissionError, match="unpinned vision processor"):
-        require_remote_code_approval(card)
+        require_remote_code_approval(
+            card,
+            frozenset({remote_code_trust_identity(card)}),
+        )
 
 
 @pytest.mark.parametrize(
@@ -177,19 +172,19 @@ def test_approval_cannot_authorize_unpinned_processor_repository(
         ("127.0.0.1", "null", False),
     ],
 )
-def test_approval_mutations_require_loopback_peer_and_browser_origin(
+def test_operator_mutations_require_loopback_peer_and_browser_origin(
     client_host: str, origin: str | None, allowed: bool
 ) -> None:
-    """Network peers and cross-origin webpages cannot mutate approvals."""
-    assert remote_code_approval_mutation_allowed(client_host, origin) is allowed
+    """Network peers and cross-origin pages cannot invoke loopback operations."""
+    assert loopback_mutation_allowed(client_host, origin) is allowed
 
 
 @pytest.mark.parametrize("client_host", ["127.0.0.1", "::1", "localhost"])
-def test_approval_mutations_reject_forwarded_loopback_requests(
+def test_operator_mutations_reject_forwarded_loopback_requests(
     client_host: str,
 ) -> None:
-    """A reverse proxy's loopback socket cannot become approval authority."""
-    assert not remote_code_approval_mutation_allowed(
+    """A reverse proxy's loopback socket cannot become local authority."""
+    assert not loopback_mutation_allowed(
         client_host,
         None,
         forwarding_headers_present=True,
@@ -208,8 +203,8 @@ async def test_store_backed_download_fails_before_any_store_access(
 
     monkeypatch.setattr(
         approval_module,
-        "REMOTE_CODE_APPROVALS",
-        RemoteCodeApprovalStore(tmp_path / "approvals.json"),
+        "approved_remote_code_identities",
+        _no_cluster_approvals,
     )
     card = _registry_card()
     shard = PipelineShardMetadata(
@@ -238,16 +233,12 @@ async def test_status_only_probe_does_not_raise_for_unapproved_card(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Approval gates transfers, not the coordinator's read-only status probe."""
+
     async def ignore_progress(
         _shard: ShardMetadata, _progress: RepoDownloadProgress
     ) -> None:
         return None
 
-    monkeypatch.setattr(
-        approval_module,
-        "REMOTE_CODE_APPROVALS",
-        RemoteCodeApprovalStore(tmp_path / "approvals.json"),
-    )
     monkeypatch.setattr(download_utils_module, "SKULK_MODELS_DIR", tmp_path)
     card = _registry_card()
     shard = PipelineShardMetadata(

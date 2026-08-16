@@ -68,12 +68,13 @@ Example ``skulk.yaml``::
 
 from __future__ import annotations
 
+import re
 import socket
 from pathlib import Path
 from typing import Final, Literal, final
 
 import yaml
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from skulk.utils.pydantic_ext import FrozenModel
 
@@ -378,6 +379,8 @@ class SkulkConfig(FrozenModel):
             operator has never been asked (nothing is queued or sent).
         intelligent_fabric: Intelligent-fabric (resident steward) settings.
             ``None`` means the mode is off.
+        model_trust: Cluster-wide operator decisions authorizing exact model
+            card identities to execute repository-supplied Python.
         hf_token: HuggingFace API token.  Stripped from ``GET /config``
             responses for security.
     """
@@ -390,7 +393,36 @@ class SkulkConfig(FrozenModel):
     experiments: ExperimentsConfig | None = None
     telemetry: "TelemetryConfig | None" = None
     intelligent_fabric: "IntelligentFabricConfig | None" = None
+    model_trust: "ModelTrustConfig | None" = None
     hf_token: str | None = None
+
+
+@final
+class ModelTrustConfig(FrozenModel):
+    """Cluster-wide trust decisions for repository-supplied model code.
+
+    The operator approves an immutable model-card identity once for the whole
+    fabric. Cluster configuration convergence persists the same decision on
+    every serving node and the canonical store host, so placement never treats
+    trust as a node-selection axis. A changed card or source revision produces
+    a different identity and therefore requires a new decision.
+
+    Attributes:
+        approved_remote_code_identities: Exact signed ``card_...`` or
+            content-derived ``local_...`` identities approved by the operator.
+    """
+
+    approved_remote_code_identities: list[str] = Field(default_factory=list)
+
+    @field_validator("approved_remote_code_identities")
+    @classmethod
+    def validate_approved_remote_code_identities(cls, values: list[str]) -> list[str]:
+        """Validate, deduplicate, and deterministically order trust identities."""
+        identity_pattern = re.compile(r"^(?:card|local)_[a-z2-7]{52}$")
+        invalid = [value for value in values if identity_pattern.fullmatch(value) is None]
+        if invalid:
+            raise ValueError("model trust identities must be immutable card_ or local_ ids")
+        return sorted(set(values))
 
 
 @final

@@ -22,6 +22,7 @@ import { uiActions } from '../../store/slices/uiSlice';
 import type { ThemeName } from '../../theme';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { PairingSettings } from './PairingSettings';
+import type { ModelInfo } from '../../types/models';
 
 export interface SettingsPanelProps {
   open: boolean;
@@ -214,6 +215,21 @@ const HintText = styled.div`
   font-style: italic;
 `;
 
+const TrustModelName = styled.span`
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  font-family: ${({ theme }) => theme.fonts.body};
+  color: ${({ theme }) => theme.colors.text};
+`;
+
+const TrustModelMeta = styled.span`
+  display: block;
+  margin-top: 2px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textMuted};
+`;
+
 const ConfigPath = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
@@ -253,6 +269,8 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const [draft, setDraft] = useState<StoreConfig | null>(null);
   const [kvBackend, setKvBackend] = useState('default');
   const [hfToken, setHfToken] = useState('');
+  const [trustModels, setTrustModels] = useState<ModelInfo[]>([]);
+  const [trustApprovals, setTrustApprovals] = useState<Set<string>>(new Set());
   const [telemetryDraft, setTelemetryDraft] = useState<TelemetryConfig | null>(null);
   const [fabricDraft, setFabricDraft] = useState<IntelligentFabricConfig>({
     enabled: false,
@@ -262,7 +280,20 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   });
   // Fetch config when panel opens
   useEffect(() => {
-    if (open) fetchConfig();
+    if (!open) return;
+    fetchConfig();
+    let cancelled = false;
+    void fetch('/models')
+      .then(async (response) => (response.ok ? response.json() as Promise<{ data?: ModelInfo[] }> : { data: [] }))
+      .then((payload) => {
+        if (!cancelled) {
+          setTrustModels((payload.data ?? []).filter((model) => model.remote_code_approval_required));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTrustModels([]);
+      });
+    return () => { cancelled = true; };
   }, [open, fetchConfig]);
 
   // Seed draft from fetched config — use effective value for KV backend
@@ -277,6 +308,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     );
     setKvBackend(effective?.kv_cache_backend ?? fullConfig?.inference?.kv_cache_backend ?? 'default');
     setHfToken(fullConfig?.hf_token ?? '');
+    setTrustApprovals(new Set(fullConfig?.model_trust?.approved_remote_code_identities ?? []));
     setFabricDraft({
       enabled: fullConfig?.intelligent_fabric?.enabled ?? false,
       steward_models: fullConfig?.intelligent_fabric?.steward_models,
@@ -325,6 +357,9 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     // Include logging config
     updated.logging = { ...loggingDraft };
     updated.intelligent_fabric = { ...fabricDraft };
+    updated.model_trust = {
+      approved_remote_code_identities: [...trustApprovals].sort(),
+    };
     // Persist only once the operator has interacted (an untouched unasked
     // draft must not overwrite the "never asked" state that gates the modal).
     if (telemetryDraft && (telemetryDraft.consent !== 'unasked' || telemetryDraft.diagnostics_consent !== 'unasked')) {
@@ -351,7 +386,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     } else {
       addToast({ type: 'error', message: t('settings.toasts.saveFailed', 'Failed to save settings') });
     }
-  }, [draft, fullConfig, hfToken, kvBackend, loggingDraft, fabricDraft, telemetryDraft, onClose, saveFullConfig, t]);
+  }, [draft, fullConfig, hfToken, kvBackend, loggingDraft, fabricDraft, telemetryDraft, trustApprovals, onClose, saveFullConfig, t]);
 
   // ESC to close
   useEffect(() => {
@@ -618,6 +653,48 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               {effective?.has_hf_token ? t('settings.huggingFace.tokenConfigured', 'Token is configured. ') : ''}
               {t('settings.huggingFace.syncHint', 'Synced to all nodes. Env var HF_TOKEN takes precedence if set.')}
             </HintText>
+          </Fieldset>
+
+          {/* Cluster model trust */}
+          <Fieldset>
+            <Legend>{t('settings.modelTrust.legend', 'Model trust')}</Legend>
+            <HintText>
+              {t(
+                'settings.modelTrust.hint',
+                'Approve repository-supplied code model by model. Each decision applies to the entire cluster and changes when the immutable card identity changes.',
+              )}
+            </HintText>
+            {trustModels.length === 0 ? (
+              <HintText>{t('settings.modelTrust.none', 'No models currently require operator approval.')}</HintText>
+            ) : trustModels.map((model) => {
+              const identity = model.remote_code_trust_identity;
+              const approved = identity != null && trustApprovals.has(identity);
+              return (
+                <Row as="div" key={model.id}>
+                  <TrustModelName>
+                    {model.id}
+                    <TrustModelMeta>{model.registry_provenance ?? model.catalog_source ?? 'custom'}</TrustModelMeta>
+                  </TrustModelName>
+                  <Toggle
+                    type="button"
+                    role="switch"
+                    aria-checked={approved}
+                    aria-label={t('settings.modelTrust.toggle', 'Allow repository code for {modelId}', { modelId: model.id })}
+                    disabled={identity == null}
+                    $on={approved}
+                    onClick={() => {
+                      if (identity == null) return;
+                      setTrustApprovals((current) => {
+                        const next = new Set(current);
+                        if (next.has(identity)) next.delete(identity);
+                        else next.add(identity);
+                        return next;
+                      });
+                    }}
+                  />
+                </Row>
+              );
+            })}
           </Fieldset>
 
           {/* Logging */}

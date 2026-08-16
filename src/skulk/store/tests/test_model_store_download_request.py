@@ -3,7 +3,7 @@
 
 from pathlib import Path
 from types import TracebackType
-from typing import Self
+from typing import Callable, Self
 
 import pytest
 from aiohttp import web
@@ -11,13 +11,29 @@ from aiohttp import web
 import skulk.shared.models.remote_code_approval as approval_module
 import skulk.store.model_store_server as model_store_server_module
 from skulk.shared.models.model_cards import ModelCard, ModelTask
-from skulk.shared.models.remote_code_approval import RemoteCodeApprovalStore
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.store import model_store_client
+from skulk.store.config import SkulkConfig
 from skulk.store.installed_cards import build_installed_card_record
 from skulk.store.model_store_client import ModelStoreClient
 from skulk.store.model_store_server import ModelStoreServer
+
+
+def _no_cluster_approvals(_config: SkulkConfig | None = None) -> frozenset[str]:
+    """Return an explicitly empty injected cluster trust set."""
+    return frozenset()
+
+
+def _cluster_approvals_for(
+    card_id: str,
+) -> Callable[[SkulkConfig | None], frozenset[str]]:
+    """Build a typed injected cluster-trust reader for one card identity."""
+
+    def approvals(_config: SkulkConfig | None = None) -> frozenset[str]:
+        return frozenset({card_id})
+
+    return approvals
 
 
 class _Response:
@@ -80,18 +96,21 @@ def _registry_card() -> ModelCard:
 
 
 @pytest.mark.anyio
-async def test_store_host_requires_its_own_remote_code_approval(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_store_host_requires_cluster_remote_code_approval(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A worker approval cannot authorize download on the canonical host."""
+    """The canonical store enforces the converged cluster trust decision."""
     card = _registry_card()
 
     async def cards() -> list[ModelCard]:
         return [card]
 
-    approvals = RemoteCodeApprovalStore(tmp_path / "approvals.json")
     monkeypatch.setattr(model_store_server_module, "get_all_model_cards", cards)
-    monkeypatch.setattr(approval_module, "REMOTE_CODE_APPROVALS", approvals)
+    monkeypatch.setattr(
+        approval_module,
+        "approved_remote_code_identities",
+        _no_cluster_approvals,
+    )
 
     with pytest.raises(web.HTTPForbidden, match=card.registry_card_id or ""):
         await ModelStoreServer._require_remote_code_download_approval(
@@ -103,7 +122,11 @@ async def test_store_host_requires_its_own_remote_code_approval(
         )
 
     assert card.registry_card_id is not None
-    approvals.approve(card.registry_card_id)
+    monkeypatch.setattr(
+        approval_module,
+        "approved_remote_code_identities",
+        _cluster_approvals_for(card.registry_card_id),
+    )
     await ModelStoreServer._require_remote_code_download_approval(
         str(card.model_id),
         card.registry_card_id,
@@ -115,7 +138,6 @@ async def test_store_host_requires_its_own_remote_code_approval(
 
 @pytest.mark.anyio
 async def test_store_host_omitted_card_id_selects_current_signed_card(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Legacy callers may omit the immutable ID and still select current."""
@@ -134,15 +156,17 @@ async def test_store_host_omitted_card_id_selects_current_signed_card(
     def current_card(_model_id: ModelId) -> ModelCard:
         return card
 
-    approvals = RemoteCodeApprovalStore(tmp_path / "approvals.json")
-    approvals.approve(card.registry_card_id or "")
     monkeypatch.setattr(model_store_server_module, "get_all_model_cards", cards)
     monkeypatch.setattr(
         model_store_server_module,
         "get_current_registry_card",
         current_card,
     )
-    monkeypatch.setattr(approval_module, "REMOTE_CODE_APPROVALS", approvals)
+    monkeypatch.setattr(
+        approval_module,
+        "approved_remote_code_identities",
+        _cluster_approvals_for(card.registry_card_id or ""),
+    )
 
     retained = await ModelStoreServer._require_remote_code_download_approval(
         str(card.model_id),

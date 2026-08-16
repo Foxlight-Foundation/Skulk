@@ -119,6 +119,9 @@ export interface ModelInfo {
   engine_support?: RegistryEngineSupportClaim[];
   catalog_source?: 'registry' | 'bundled' | 'custom';
   remote_code_approval_required?: boolean;
+  remote_code_trust_identity?: string | null;
+  remote_code_approved_for_cluster?: boolean;
+  /** @deprecated Use remote_code_approved_for_cluster. */
   remote_code_approved_on_this_node?: boolean;
   remote_code_automatically_trusted?: boolean;
   quantization?: string;
@@ -283,7 +286,13 @@ export interface PlacementPreview {
   instance: unknown | null;
   memory_delta_by_node: Record<string, number> | null;
   error: string | null;
-  /** Exact card approval requirement for every selected serving node. */
+  /** Stable failure category for an unavailable preview. */
+  error_code?:
+    | 'no_valid_placement'
+    | 'placement_info_pending'
+    | 'model_code_approval_required'
+    | null;
+  /** Exact cluster model-trust decision required before placement. */
   trust_requirement?: string | null;
   /** Whether card compatibility or the signed engine matrix admitted the backend. */
   compatibility_source?: 'card' | 'signed_engine_support' | null;

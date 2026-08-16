@@ -432,7 +432,9 @@ deliberately separate from the memory/topology axes above:
   and a TTS/STT model off a text-only MLX runner.
 - `backend_preference` is a **soft score**: when several compatible nodes
   qualify, the planner prefers the node whose backend ranks earliest in the
-  card's preference list (for example preferring a GPU backend over CPU).
+  card's preference list (for example preferring a GPU backend over CPU). The
+  list is fallback order, not a client selection: if an earlier backend or host
+  is not currently admissible, placement continues with the next candidate.
 - `max_pipeline_split_layer` is a **hard sharding constraint** for architectures
   whose tail layers reuse KV from earlier concrete layers. Proportional layer
   allocation may move boundaries left, but never beyond this limit; the usual
@@ -457,6 +459,17 @@ node. The worker trusts that stamped choice and repeats the exact signed-matrix
 check when it must use its node-local fallback. See the
 [AMD Strix Halo nodes](./amd-strix-halo-nodes.md) guide for bringing up a
 non-Mac node.
+
+Model trust is resolved before that admission pass. A revision-pinned
+Foxlight-provenance registry card is already Foxlight's exact trust decision.
+Agent/community registry cards and custom or unsigned cards that can execute
+repository code require one operator approval for their immutable card identity
+in cluster Settings. The synchronized `model_trust` configuration reaches the
+canonical store and every serving node, so trust never biases placement toward
+one machine. After approval, the planner applies backend preference, locality,
+and capacity normally and may fall through among any admissible candidates.
+`GET /instance/previews` explains a missing model decision without reserving a
+placement; `POST /place_instance` re-evaluates current facts at launch.
 
 For GGUF text models the bundled cards use that preference order deliberately:
 they list both llama.cpp engines as compatible but rank the served
@@ -1265,10 +1278,10 @@ does not participate in the content-derived `registry_card_id`.
 
 Repository-code trust follows the card's provenance. A TUF-verified, immutable,
 full-revision-pinned card with `registry_provenance=foxlight` is Foxlight's trust
-decision for that exact artifact and runs without a redundant node-local
+decision for that exact artifact and runs without a redundant operator
 approval. Agent/community registry cards and unsigned or custom cards remain
 blocked before download and runner load until their exact immutable trust
-identity appears in that node's owner-only approval file. Signed cards use
+identity appears in cluster `model_trust` Settings. Signed cards use
 `registry_card_id`; unsigned/custom cards use a digest of the complete effective
 card, so a changed revision or card definition must be approved again. Registry
 vision cards follow the same policy while the MLX processor path contains
@@ -1285,14 +1298,12 @@ rechecks that a signed card's installed sidecar, repository, revision marker,
 selected file, and manifest all identify that card. A deterministic trust
 denial reports `RunnerFailed` and tears down the instance without retrying the
 unchanged generation.
-Approval mutations accept only a direct loopback socket peer with no proxy or
-forwarding headers and, for browser calls, a loopback origin, so the inference
-API's permissive CORS policy and a co-located reverse proxy cannot grant
-approval. A worker requesting a canonical-store download forwards the immutable
-card ID; the store host verifies it against its own signed catalog and applies
-the same provenance-aware trust policy before fetching bytes. Only immutable
-Foxlight provenance grants automatic trust; registry publication with agent or
-community provenance cannot do so.
+The model-by-model decision is editable in dashboard Settings and travels over
+the existing cluster-config synchronization path. A worker requesting a
+canonical-store download forwards the immutable card ID; the store host verifies
+it against its own signed catalog and applies the same converged trust policy
+before fetching bytes. Only immutable Foxlight provenance grants automatic
+trust; registry publication with agent or community provenance cannot do so.
 
 Model discovery feeds this card system. `GET /models/search` searches Hugging Face repositories, and `POST /models/add` builds a custom card from repository metadata, detecting GGUF repositories (which `mlx-lm` cannot load) and giving them a llama.cpp card instead of the MLX default. Hugging Face's search indexes repository metadata, not file manifests, so a pasted GGUF filename can come back empty even when the file exists somewhere on the Hub. Filename-shaped queries therefore get a bounded fallback: Skulk progressively broadens the model-name prefix, inspects a capped set of candidate repositories' file manifests, keeps only repositories containing the exact basename, and returns the matched repo-relative path alongside each result. Adding such a result pins that exact quant file on the generated card instead of applying the default quant preference, and the pin is honored end to end: the store download request names the pinned file, a staged directory that lacks the pinned quant (or its complete shard group) is not treated as a cache hit, and the store recovers a missing selected file before staging.
 

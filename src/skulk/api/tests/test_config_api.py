@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,7 +10,11 @@ from httpx2 import Response
 
 from skulk.api.main import API
 from skulk.shared.election import ElectionMessage
-from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
+from skulk.shared.types.commands import (
+    ForwarderCommand,
+    ForwarderDownloadCommand,
+    SyncConfig,
+)
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import IndexedEvent
 from skulk.store.config import load_skulk_config
@@ -158,3 +163,61 @@ def test_update_config_preserves_existing_experiments_when_omitted(
     assert config.experiments is not None
     assert config.experiments.tts_streaming is True
     assert config.experiments.stt_realtime is True
+
+
+def test_update_config_preserves_existing_model_trust_when_omitted(
+    tmp_path: Path,
+) -> None:
+    """An older Settings client cannot silently revoke model approvals."""
+    card_id = f"card_{'a' * 52}"
+    config_path = tmp_path / "skulk.yaml"
+    config_path.write_text(
+        "model_trust:\n"
+        "  approved_remote_code_identities:\n"
+        f"    - {card_id}\n",
+        encoding="utf-8",
+    )
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    client = TestClient(api.app)
+
+    response = client.put(
+        "/config",
+        json={"config": {"inference": {"kv_cache_backend": "default"}}},
+    )
+
+    assert response.status_code == 200
+    config = load_skulk_config(config_path)
+    assert config is not None
+    assert config.model_trust is not None
+    assert config.model_trust.approved_remote_code_identities == [card_id]
+
+
+@pytest.mark.asyncio
+async def test_model_trust_decision_persists_in_cluster_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One model approval updates the synchronized cluster settings."""
+    config_path = tmp_path / "skulk.yaml"
+    config_path.write_text(
+        "hf_token: keep-secret\n",
+        encoding="utf-8",
+    )
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    send_download = AsyncMock()
+    monkeypatch.setattr(api, "_send_download", send_download)
+    card_id = f"card_{'a' * 52}"
+
+    await api.set_cluster_remote_code_approval(card_id, approved=True)
+
+    config = load_skulk_config(config_path)
+    assert config is not None
+    assert config.model_trust is not None
+    assert config.model_trust.approved_remote_code_identities == [card_id]
+    assert config.hf_token == "keep-secret"
+    send_download.assert_awaited_once()
+    assert send_download.await_args is not None
+    sent = cast(SyncConfig, cast(object, send_download.await_args.args[0]))
+    assert "keep-secret" not in sent.config_yaml
+    assert card_id in sent.config_yaml

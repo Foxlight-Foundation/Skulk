@@ -422,10 +422,24 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
           message: t('downloads.toasts.launchingModel', 'Launching {modelId}', { modelId: params.modelId }),
         });
       } else {
-        const err = await res.json().catch(() => ({}));
+        const err: unknown = await res.json().catch(() => ({}));
+        const errorRecord =
+          typeof err === 'object' && err !== null
+            ? (err as Record<string, unknown>)
+            : {};
+        const nestedError =
+          typeof errorRecord.error === 'object' && errorRecord.error !== null
+            ? (errorRecord.error as Record<string, unknown>)
+            : {};
+        const serverMessage =
+          typeof errorRecord.detail === 'string'
+            ? errorRecord.detail
+            : typeof nestedError.message === 'string'
+              ? nestedError.message
+              : null;
         addToast({
           type: 'error',
-          message: (err as Record<string, string>).detail
+          message: serverMessage
             ?? t('downloads.toasts.launchFailedForModel', 'Failed to launch {modelId}', { modelId: params.modelId }),
         });
       }

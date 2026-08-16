@@ -2,7 +2,7 @@ import random
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from copy import deepcopy
-from typing import Final, Sequence
+from typing import ClassVar, Final, Literal, Sequence, TypeAlias
 
 from skulk.master.placement_utils import (
     Cycle,
@@ -29,6 +29,10 @@ from skulk.shared.models.model_cards import (
     ModelId,
     card_serves_speech,
     registry_supported_backends_for_node,
+)
+from skulk.shared.models.remote_code_approval import (
+    remote_code_approval_required,
+    remote_code_trust_identity,
 )
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import (
@@ -331,12 +335,21 @@ def _is_llama_rpc_cycle(
     return "llama_server" in engines and "mlx" not in engines
 
 
+PlacementFailureCode: TypeAlias = Literal[
+    "no_valid_placement",
+    "placement_info_pending",
+    "model_code_approval_required",
+]
+
+
 class PlacementError(ValueError):
     """Placement is impossible for the requested command and current state.
 
     Subclasses ``ValueError`` so existing callers that catch ``ValueError``
     (the API preview endpoint, the master command processor) keep working.
     """
+
+    code: ClassVar[PlacementFailureCode] = "no_valid_placement"
 
 
 class PlacementInfoPendingError(PlacementError):
@@ -350,6 +363,14 @@ class PlacementInfoPendingError(PlacementError):
     topology gap or memory shortfall so callers can wait instead of
     reporting a false error.
     """
+
+    code: ClassVar[PlacementFailureCode] = "placement_info_pending"
+
+
+class PlacementModelCodeApprovalError(PlacementError):
+    """The operator has not approved repository code for this exact card."""
+
+    code: ClassVar[PlacementFailureCode] = "model_code_approval_required"
 
 
 def place_instance(
@@ -366,6 +387,14 @@ def place_instance(
     unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
     stamped_exclusions: set[NodeId] | None = None,
 ) -> dict[InstanceId, Instance]:
+    if remote_code_approval_required(command.model_card):
+        trust_identity = remote_code_trust_identity(command.model_card)
+        raise PlacementModelCodeApprovalError(
+            "The cluster operator has not approved repository code for immutable "
+            f"model-card identity {trust_identity}. Approve this model in Settings "
+            "before placing it."
+        )
+
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
     if not candidate_cycles:
@@ -433,7 +462,9 @@ def place_instance(
                     "node before placing the model."
                 )
 
-    # Hard-filter on node participation and backend compatibility (#149).
+    # Hard-filter on node participation and backend compatibility (#149/#845).
+    # Repository-code trust is an operator decision for the exact model-card
+    # identity and was checked once above; it is deliberately not a node axis.
     # A node is ineligible for an inference shard of THIS model when it
     # declares a non-``full`` participation role (e.g. a ``management`` /
     # edge node that serves the API but never joins a ring), or when its
