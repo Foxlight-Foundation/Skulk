@@ -167,15 +167,17 @@ upstream llama-server build on demand (Vulkan for visible GPUs, CPU
 otherwise; no upstream Linux CUDA prebuilt exists; the CUDA lane is the
 Foxlight wheel, auto-installed on demand for NVIDIA nodes, #661);
 `SKULK_LLAMA_SERVER_BIN` overrides, `SKULK_NO_ENGINE_AUTOPROVISION=1` opts
-out. The CUDA engine also ships as the pip wheel `skulk-llama-server-cuda`
-(packaging/, built by `.github/workflows/engine-wheel.yml`), which outranks
+out. The CUDA engine also ships as x86_64 and aarch64 variants of the pip wheel
+`skulk-llama-server-cuda` (packaging/, built by
+`.github/workflows/engine-wheel.yml`), which outranks
 tarball provisioning on NVIDIA nodes. Engine wheels publish to the Foxlight
 PEP 503 index on Cloudflare R2 (`wheels.foxlight.ai`, source of
 truth; `scripts/publish_wheel_index.py`; CUDA wheel exceeds PyPI's size
 limit) with the Vulkan wheel mirrored to PyPI. The CUDA wheel builds with
 `GGML_CUDA_NO_VMM=ON`: GPU-less CI cannot satisfy the driver API's transitive
 libcuda.so.1 link (stubs ship only libcuda.so), so never reintroduce
-driver-API-dependent flags to that build. ADVANCING THE ENGINE PIN IS A
+driver-API-dependent flags to that build. The aarch64 lane uses CUDA 12.9 and
+targets compute capability 12.1 for Grace Blackwell/GB10. ADVANCING THE ENGINE PIN IS A
 CHECKLIST (architecture-reference.md "Engine pin advancement"): bump pin +
 re-record checksums + bump wheel version + republish + fresh-box gauntlet;
 never advance casually. `install.sh` is the one-command fresh-box installer

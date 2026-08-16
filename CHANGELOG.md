@@ -20,6 +20,11 @@ This project records release notes here and mirrors public-facing notes in
   use served CUDA, while its independently versioned in-process CUDA backend
   remains excluded.
 
+- The managed CUDA llama-server wheel now ships for Linux aarch64 as well as
+  x86_64. The aarch64 lane is built natively with CUDA 12.9 for compute
+  capability 12.1, allowing Grace Blackwell and GB10 nodes to use the CUDA
+  served engine instead of falling back to Vulkan.
+
 - Intelligent Fabric now speaks and identifies as Skulk rather than presenting
   a separate Steward character. The dashboard streams answer prose through a
   ready TTS model only when its voice catalog contains the signature `skulk`

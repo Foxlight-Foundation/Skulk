@@ -4,6 +4,13 @@ title: Next release
 sidebar_position: 0
 ---
 
+## Native CUDA serving on Linux ARM64
+
+The managed CUDA llama-server wheel now ships for Linux aarch64 as well as
+x86_64. The ARM64 lane is built natively with CUDA 12.9 for compute capability
+12.1, allowing Grace Blackwell and GB10 nodes to use the CUDA served engine
+instead of falling back to Vulkan.
+
 ## Skulk fabric identity and spoken answers
 
 Intelligent Fabric now appears as Skulk itself rather than as a separate

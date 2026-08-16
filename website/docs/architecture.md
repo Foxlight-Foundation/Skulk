@@ -825,9 +825,13 @@ nodes the preferred managed source is a pip-installable engine wheel,
 built from the pinned upstream source in Skulk's own CI, published on
 Foxlight's own package index at `wheels.foxlight.ai`, and installed
 through the same standard tooling as every other dependency:
-`skulk-llama-server-cuda` on NVIDIA (CUDA runtime resolved from NVIDIA's
-official PyPI packages) and `skulk-llama-server-vulkan` on AMD (Khronos
+`skulk-llama-server-cuda` on NVIDIA (Linux x86_64 and aarch64 wheels; CUDA
+runtime resolved from NVIDIA's official PyPI packages) and
+`skulk-llama-server-vulkan` on AMD (Khronos
 Vulkan loader bundled; the driver's ICD remains the one OS prerequisite).
+The aarch64 CUDA wheel is built natively with CUDA 12.9 for compute capability
+12.1, covering Grace Blackwell systems such as GB10; Python wheel tags keep it
+distinct from the x86_64 payload while both share the pinned engine version.
 An installed wheel is wired automatically, including its bundled
 `ggml-rpc-server` donor binary for multi-node GGUF. On an NVIDIA node with
 no usable CUDA wheel installed (a bare checkout or a GPU-cloud container
