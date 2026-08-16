@@ -209,6 +209,14 @@ class RegistryEngineSupportClaim(BaseModel):
         pattern=r"^[a-z0-9][a-z0-9._+-]{0,79}$",
         description="Exact selected artifact format.",
     )
+    artifact_card_id: str | None = Field(
+        default=None,
+        pattern=r"^card_[a-z2-7]{52}$",
+        description=(
+            "Exact card qualified by load or feature evidence; null is permitted "
+            "only for architecture-level upstream compatibility."
+        ),
+    )
     quantization: str | None = Field(
         default=None,
         max_length=120,
@@ -258,6 +266,18 @@ class RegistryEngineSupportClaim(BaseModel):
         min_length=1, max_length=320, description="Audited publishing actor."
     )
     created_at: datetime = Field(description="UTC claim publication time.")
+
+    @model_validator(mode="after")
+    def require_artifact_binding_for_qualification(self) -> Self:
+        """Reject empirical qualification not bound to tested card bytes."""
+        if (
+            self.evidence_kind in {"load_qualification", "feature_qualification"}
+            and self.artifact_card_id is None
+        ):
+            raise ValueError(
+                "load and feature qualification require an exact artifact_card_id"
+            )
+        return self
 
 
 class RegistryEngineSupport(BaseModel):
@@ -313,7 +333,7 @@ class RegistryEngineSupport(BaseModel):
     @staticmethod
     def _support_key(
         claim: RegistryEngineSupportClaim,
-    ) -> tuple[str, str, str, str, str | None, str, tuple[str, ...]]:
+    ) -> tuple[str, str, str, str, str | None, str | None, str, tuple[str, ...]]:
         """Return the fields defining one replaceable compatibility decision."""
         return (
             claim.engine,
@@ -321,6 +341,7 @@ class RegistryEngineSupport(BaseModel):
             claim.architecture,
             claim.artifact_format,
             claim.quantization,
+            claim.artifact_card_id,
             claim.capability_id,
             claim.hardware_classes,
         )

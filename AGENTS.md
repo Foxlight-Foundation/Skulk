@@ -221,6 +221,8 @@ support claims establish compatibility for one exact architecture, artifact,
 quantization, capability, engine build, and optional hardware class;
 `NodeResources.engine_builds` / `hardware_classes` prove the live node match;
 and `platform_compatible_backends` applies Skulk runner limitations last.
+Empirical load/feature claims also bind the immutable card tested, and an
+artifact-scoped `incomplete` capability claim blocks matrix admission.
 Legacy card `compatible_backends` remain valid and are unioned with exact active
 `supported` matrix matches. Experimental, unsupported, stale-build, and
 hardware-mismatched claims never expand placement. The master stamps the

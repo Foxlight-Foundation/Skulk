@@ -444,9 +444,12 @@ separate signed engine-support matrix records whether one exact engine build can
 serve one architecture, artifact format, quantization, and capability, with
 optional hardware constraints and auditable evidence. Placement unions active
 `supported` matches with the card's legacy `compatible_backends`; experimental,
-unsupported, stale-build, and hardware-mismatched claims add nothing. Existing
-cards therefore keep working while a new architecture can become placeable as
-soon as independently signed support evidence exists.
+unsupported, stale-build, hardware-mismatched, other-artifact, and explicitly
+incomplete claims add nothing. Empirical load and feature qualification is
+bound to the immutable card tested; cited upstream engine compatibility may be
+architecture-scoped. Existing cards therefore keep working while a new
+architecture can become placeable as soon as independently signed support
+evidence exists.
 
 The engine axis (which runtime) remains orthogonal to the node axis (which
 machine). The master resolves and stamps the concrete backend selected for each

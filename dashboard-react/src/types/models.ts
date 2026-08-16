@@ -88,6 +88,7 @@ export interface RegistryEngineSupportClaim {
   engine_build: string;
   architecture: string;
   artifact_format: string;
+  artifact_card_id?: string | null;
   quantization?: string | null;
   capability_id: string;
   status: 'supported' | 'experimental' | 'unsupported';

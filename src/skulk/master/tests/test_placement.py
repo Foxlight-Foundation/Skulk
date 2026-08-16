@@ -1257,6 +1257,7 @@ def test_signed_engine_support_adds_backend_without_card_replacement(
             "engine_build": "vllm@9.9.9",
             "architecture": "future_architecture_v1",
             "artifact_format": "safetensors",
+            "artifact_card_id": "card_" + "a" * 52,
             "quantization": "",
             "capability_id": "text.generate",
             "status": "supported",

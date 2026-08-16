@@ -519,8 +519,15 @@ def get_model_engine_support(
     """Return active signed support claims matching one exact card artifact."""
     architecture = model_card.registry_architecture
     artifact_format = model_card.registry_artifact_format
+    incomplete_artifact_capabilities = {
+        claim.capability_id
+        for claim in model_card.registry_capability_claims
+        if claim.scope == "artifact" and claim.status == "incomplete"
+    }
     capability_ids = {
-        claim.capability_id for claim in model_card.registry_capability_claims
+        claim.capability_id
+        for claim in model_card.registry_capability_claims
+        if claim.capability_id not in incomplete_artifact_capabilities
     }
     if (
         model_card.registry_card_id is None
@@ -535,6 +542,10 @@ def get_model_engine_support(
         for claim in _registry_engine_support
         if claim.architecture == architecture
         and claim.artifact_format == artifact_format
+        and (
+            claim.artifact_card_id is None
+            or claim.artifact_card_id == model_card.registry_card_id
+        )
         and (claim.quantization is None or claim.quantization == model_card.quantization)
         and claim.capability_id in capability_ids
     )

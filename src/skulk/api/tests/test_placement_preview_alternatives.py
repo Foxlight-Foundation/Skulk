@@ -130,6 +130,7 @@ async def test_preview_exposes_exact_signed_engine_support(
             "engine_build": "vllm@9.9.9",
             "architecture": "future_architecture_v1",
             "artifact_format": "safetensors",
+            "artifact_card_id": "card_" + "a" * 52,
             "capability_id": "text.generate",
             "status": "supported",
             "evidence_kind": "load_qualification",

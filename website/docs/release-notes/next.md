@@ -44,6 +44,7 @@ matrix can make a newly discovered architecture placeable without replacing its
 card, but only when an active positive claim matches the exact engine build,
 artifact format, quantization, capability, and hardware class advertised by a
 node. Existing card backend declarations remain compatible, while stale,
-experimental, unsupported, or incomplete evidence fails closed. Model APIs,
-placement previews, and the dashboard expose the evidence source and actionable
-compatibility gaps.
+experimental, unsupported, other-artifact, or incomplete evidence fails closed.
+Empirical load and feature claims are pinned to the exact card tested. Model
+APIs, placement previews, and the dashboard expose the evidence source and
+actionable compatibility gaps.

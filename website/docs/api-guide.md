@@ -1369,9 +1369,12 @@ Each entry also separates discovery truth from runtime truth:
 - `capability_claims` reports signed model/artifact capabilities even when no
   current Skulk engine can serve them.
 - `engine_support` reports the active signed engine/build decisions matching
-  that exact architecture, artifact format, quantization, and capability. These
-  may include experimental or unsupported history; placement expands only from
-  exact `supported` claims whose build and hardware constraints match a node.
+  that exact architecture, artifact format, quantization, capability, and any
+  required immutable card identity. These may include experimental or
+  unsupported history; placement expands only from exact `supported` claims
+  whose build and hardware constraints match a node. Load and feature
+  qualification always names the exact card tested, and known-incomplete
+  artifact capability evidence blocks expansion.
 
 Installed sidecars retain the intrinsic architecture and capability claims for
 air-gapped use. A hash-bound support matrix that was previously TUF-verified is

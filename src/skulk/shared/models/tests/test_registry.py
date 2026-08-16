@@ -140,6 +140,7 @@ def _engine_support_payload() -> bytes:
         "engine_build": "llama.cpp@sha256:" + "1" * 64,
         "architecture": "future_architecture_v1",
         "artifact_format": "gguf",
+        "artifact_card_id": "card_" + "a" * 52,
         "quantization": "Q4_K_M",
         "capability_id": "text.generate",
         "evidence_kind": "feature_qualification",
@@ -223,6 +224,55 @@ def test_signed_support_expands_only_exact_node_build(
 
     assert exact == frozenset({"llama_server", "llama_server-vulkan"})
     assert stale == frozenset()
+
+
+def test_signed_support_rejects_other_artifact_and_incomplete_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact qualification never leaks to other or known-incomplete artifacts."""
+    card = registry_model_cards(
+        RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    )[0]
+    support = RegistryEngineSupport.model_validate_json(
+        _engine_support_payload(), strict=False
+    )
+    monkeypatch.setattr(
+        model_cards_module, "_registry_engine_support", support.active_claims()
+    )
+    other_artifact = card.model_copy(
+        update={"registry_card_id": "card_" + "c" * 52}
+    )
+    incomplete_claims = card.registry_capability_claims + (
+        card.registry_capability_claims[0].model_copy(
+            update={"scope": "artifact", "status": "incomplete"}
+        ),
+    )
+    incomplete_artifact = card.model_copy(
+        update={"registry_capability_claims": incomplete_claims}
+    )
+
+    assert (
+        registry_supported_backends_for_node(
+            other_artifact,
+            node_backends=frozenset({"llama_server-vulkan"}),
+            engine_builds={
+                "llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64
+            },
+            hardware_classes=frozenset({"amd"}),
+        )
+        == frozenset()
+    )
+    assert (
+        registry_supported_backends_for_node(
+            incomplete_artifact,
+            node_backends=frozenset({"llama_server-vulkan"}),
+            engine_builds={
+                "llama_server-vulkan": "llama.cpp@sha256:" + "1" * 64
+            },
+            hardware_classes=frozenset({"amd"}),
+        )
+        == frozenset()
+    )
 
 
 def test_engine_support_rejects_cross_key_supersession() -> None:

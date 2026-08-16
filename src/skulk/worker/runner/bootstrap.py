@@ -423,11 +423,14 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
     placement = shard.model_card.placement
     derivation = current_backend_derivation()
     facts = current_node_facts()
+    engine_builds = safe_engine_build_inventory(
+        lambda: engine_build_inventory(derivation.backends, facts)
+    )
     compatible_backends = placement.compatible_backends | (
         registry_supported_backends_for_node(
             shard.model_card,
             node_backends=derivation.backends,
-            engine_builds=engine_build_inventory(derivation.backends, facts),
+            engine_builds=engine_builds,
             hardware_classes=hardware_class_inventory(facts),
         )
     )
@@ -444,6 +447,20 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
         placement.backend_preference,
         probe_node_backends(),
     )
+
+
+def safe_engine_build_inventory(
+    inventory_provider: Callable[[], dict[str, str]],
+) -> dict[str, str]:
+    """Fail signed matrix fallback closed without breaking legacy placement."""
+    try:
+        return inventory_provider()
+    except ValueError as error:
+        logger.error(
+            "Invalid local engine-build inventory; disabling signed engine-support "
+            f"fallback while preserving legacy card compatibility: {error}"
+        )
+        return {}
 
 
 def entrypoint(

@@ -41,7 +41,10 @@ metadata beside the immutable card. Claims describe intrinsic model behavior
 and selected-artifact completeness without asserting that Skulk can serve the
 capability today. A separately signed engine-support matrix records exact
 engine-build compatibility; neither discovery agents nor mutable card fields
-can turn a claim into placement permission.
+can turn a claim into placement permission. Empirical load and feature
+qualification is bound to the exact immutable card it tested. An explicit
+artifact-scoped `incomplete` claim blocks matrix-derived placement for that
+capability even when the base model advertises it.
 
 Complete canonical and staged artifacts retain their full effective card and
 hashed manifest beside the bytes in `.skulk/installed-card.json`. These
